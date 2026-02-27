@@ -10,17 +10,17 @@ from pywp.planner import PlanningError
 from pywp.visualization import dls_figure, plan_view_figure, section_view_figure, trajectory_3d_figure
 
 SCENARIOS = {
-    "Vertical -> soft landing -> horizontal": {
+    "J-profile short reach": {
         "surface": Point3D(0.0, 0.0, 0.0),
         "t1": Point3D(300.0, 0.0, 2500.0),
         "t3": Point3D(1500.0, 0.0, 2600.0),
     },
-    "J-profile with hold": {
+    "J-profile medium reach": {
         "surface": Point3D(0.0, 0.0, 0.0),
         "t1": Point3D(600.0, 0.0, 2400.0),
         "t3": Point3D(2600.0, 0.0, 2600.0),
     },
-    "Boundary entry ~86 deg": {
+    "J-profile long reach": {
         "surface": Point3D(0.0, 0.0, 0.0),
         "t1": Point3D(800.0, 0.0, 2500.0),
         "t3": Point3D(2800.0, 0.0, 2650.0),
@@ -88,10 +88,10 @@ def _init_state() -> None:
     st.session_state.setdefault("md_step", 10.0)
     st.session_state.setdefault("md_control", 2.0)
     st.session_state.setdefault("pos_tol", 2.0)
-    st.session_state.setdefault("inc_min", 60.0)
-    st.session_state.setdefault("inc_max", 86.0)
-    st.session_state.setdefault("dls_build1_max", 8.0)
-    st.session_state.setdefault("dls_build2_max", 10.0)
+    st.session_state.setdefault("entry_inc_target", 86.0)
+    st.session_state.setdefault("entry_inc_tol", 2.0)
+    st.session_state.setdefault("dls_build_min", 0.5)
+    st.session_state.setdefault("dls_build_max", 10.0)
 
     st.session_state.setdefault("last_result", None)
     st.session_state.setdefault("last_error", "")
@@ -113,10 +113,10 @@ def _current_input_signature() -> tuple[float, ...]:
         "md_step",
         "md_control",
         "pos_tol",
-        "inc_min",
-        "inc_max",
-        "dls_build1_max",
-        "dls_build2_max",
+        "entry_inc_target",
+        "entry_inc_tol",
+        "dls_build_min",
+        "dls_build_max",
     )
     return tuple(float(st.session_state[key]) for key in keys)
 
@@ -141,28 +141,21 @@ def _build_points_from_state() -> tuple[Point3D, Point3D, Point3D]:
 
 
 def _build_config_from_state() -> TrajectoryConfig:
-    dls_build1_max = float(st.session_state["dls_build1_max"])
-    dls_build2_max = float(st.session_state["dls_build2_max"])
-    dls_build1_min = min(2.0, dls_build1_max)
-    dls_build2_min = min(2.0, dls_build2_max)
+    dls_build_min = float(st.session_state["dls_build_min"])
+    dls_build_max = float(st.session_state["dls_build_max"])
 
     return TrajectoryConfig(
         md_step_m=float(st.session_state["md_step"]),
         md_step_control_m=float(st.session_state["md_control"]),
         pos_tolerance_m=float(st.session_state["pos_tol"]),
-        inc_entry_min_deg=min(float(st.session_state["inc_min"]), float(st.session_state["inc_max"])),
-        inc_entry_max_deg=max(float(st.session_state["inc_min"]), float(st.session_state["inc_max"])),
-        dls_build1_min_deg_per_30m=dls_build1_min,
-        dls_build1_max_deg_per_30m=dls_build1_max,
-        dls_build2_min_deg_per_30m=dls_build2_min,
-        dls_build2_max_deg_per_30m=dls_build2_max,
+        entry_inc_target_deg=float(st.session_state["entry_inc_target"]),
+        entry_inc_tolerance_deg=float(st.session_state["entry_inc_tol"]),
+        dls_build_min_deg_per_30m=min(dls_build_min, dls_build_max),
+        dls_build_max_deg_per_30m=max(dls_build_min, dls_build_max),
         dls_limits_deg_per_30m={
             "VERTICAL": 1.0,
-            "BUILD1": dls_build1_max,
-            "HOLD1": 2.0,
-            "HOLD2": 2.0,
-            "BUILD2": dls_build2_max,
-            "HORIZONTAL": 2.0,
+            "BUILD": max(dls_build_min, dls_build_max),
+            "HOLD": 2.0,
         },
     )
 
@@ -190,7 +183,7 @@ def _run_planner() -> None:
 
 
 def run_app() -> None:
-    st.set_page_config(page_title="Well Path Planner", layout="wide")
+    st.set_page_config(page_title="J-profile Well Planner", layout="wide")
 
     _init_state()
     _inject_styles()
@@ -198,8 +191,8 @@ def run_app() -> None:
     st.markdown(
         """
         <div class="hero">
-          <h2>Directional Well Planner</h2>
-          <p>Interactive planning by three control points with DLS and entry-angle constraints. Build once, keep results on screen while editing.</p>
+          <h2>J-profile Well Planner</h2>
+          <p>Only J-profile is used: VERTICAL -> BUILD -> HOLD. Segment t1->t3 follows the literal target line in section, and INC at t1 must satisfy target angle (default 86±2 deg).</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -221,8 +214,8 @@ def run_app() -> None:
             st.rerun()
     with top_right:
         st.markdown(
-            "<div class='small-note'>Tip: edit parameters inside the form and click Build."
-            " The previous trajectory stays visible until a new successful build.</div>",
+            "<div class='small-note'>Tip: edit parameters in the form and click Build. "
+            "The last successful trajectory stays visible until you rebuild.</div>",
             unsafe_allow_html=True,
         )
 
@@ -266,19 +259,19 @@ def run_app() -> None:
                 st.number_input("t3 Z (TVD), m", key="t3_z", step=10.0)
 
             with c4:
-                st.markdown("**Constraints**")
+                st.markdown("**J-profile constraints**")
                 r1, r2, r3 = st.columns(3, gap="small")
                 r1.number_input("MD step", key="md_step", min_value=1.0, step=1.0)
                 r2.number_input("Control MD", key="md_control", min_value=0.5, step=0.5)
                 r3.number_input("Pos tol", key="pos_tol", min_value=0.1, step=0.1)
 
                 rr1, rr2 = st.columns(2, gap="small")
-                rr1.number_input("Entry INC min", key="inc_min", min_value=20.0, max_value=89.0, step=1.0)
-                rr2.number_input("Entry INC max", key="inc_max", min_value=20.0, max_value=89.0, step=1.0)
+                rr1.number_input("Entry INC target", key="entry_inc_target", min_value=70.0, max_value=89.0, step=0.5)
+                rr2.number_input("Entry INC tolerance", key="entry_inc_tol", min_value=0.1, max_value=5.0, step=0.1)
 
                 rd1, rd2 = st.columns(2, gap="small")
-                rd1.number_input("DLS BUILD1 max", key="dls_build1_max", min_value=0.5, step=0.5, help="deg/30m")
-                rd2.number_input("DLS BUILD2 max", key="dls_build2_max", min_value=0.5, step=0.5, help="deg/30m")
+                rd1.number_input("DLS BUILD min", key="dls_build_min", min_value=0.1, step=0.1, help="deg/30m")
+                rd2.number_input("DLS BUILD max", key="dls_build_max", min_value=0.1, step=0.1, help="deg/30m")
 
     if build_clicked:
         try:
@@ -291,12 +284,12 @@ def run_app() -> None:
 
     last_result = st.session_state.get("last_result")
     if last_result is None:
-        st.info("Set inputs and click Build trajectory to generate the well path.")
+        st.info("Set inputs and click Build trajectory to generate the J-profile.")
         return
 
     is_stale = st.session_state.get("last_input_signature") != _current_input_signature()
     if is_stale:
-        st.warning("Inputs changed after the last build. Showing the previous trajectory. Press Build to refresh.")
+        st.warning("Inputs changed after the last build. Showing previous trajectory. Press Build to refresh.")
 
     summary = last_result["summary"]
     stations = last_result["stations"]
@@ -310,8 +303,8 @@ def run_app() -> None:
     m1.metric("Distance to t1", f"{summary['distance_t1_m']:.2f} m")
     m2.metric("Distance to t3", f"{summary['distance_t3_m']:.2f} m")
     m3.metric("INC at t1", f"{summary['entry_inc_deg']:.2f} deg")
-    m4.metric("Max DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
-    m5.metric("Total MD", f"{summary['md_total_m']:.1f} m")
+    m4.metric("INC target", f"{config.entry_inc_target_deg:.1f}±{config.entry_inc_tolerance_deg:.1f}")
+    m5.metric("Max DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
 
     with st.container(border=True):
         st.markdown("### 3D trajectory and DLS")

@@ -18,26 +18,19 @@ class TrajectoryConfig:
     md_step_m: float = 10.0
     md_step_control_m: float = 2.0
     pos_tolerance_m: float = 2.0
-    angle_tolerance_deg: float = 1.0
+    entry_inc_target_deg: float = 86.0
+    entry_inc_tolerance_deg: float = 2.0
 
-    inc_entry_min_deg: float = 60.0
-    inc_entry_max_deg: float = 86.0
-
-    dls_build1_min_deg_per_30m: float = 2.0
-    dls_build1_max_deg_per_30m: float = 8.0
-    dls_build2_min_deg_per_30m: float = 2.0
-    dls_build2_max_deg_per_30m: float = 10.0
+    dls_build_min_deg_per_30m: float = 0.5
+    dls_build_max_deg_per_30m: float = 10.0
 
     max_total_md_m: float = 12000.0
 
     dls_limits_deg_per_30m: Dict[str, float] = field(
         default_factory=lambda: {
             "VERTICAL": 1.0,
-            "BUILD1": 8.0,
-            "HOLD1": 2.0,
-            "HOLD2": 2.0,
-            "BUILD2": 10.0,
-            "HORIZONTAL": 2.0,
+            "BUILD": 10.0,
+            "HOLD": 2.0,
         }
     )
 
