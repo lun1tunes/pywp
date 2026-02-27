@@ -46,6 +46,7 @@ class TrajectoryPlanner:
         t3: Point3D,
         config: TrajectoryConfig,
     ) -> PlannerResult:
+        _validate_config(config)
         azimuth_deg = _azimuth_deg_from_points(t1=t1, t3=t3)
 
         s1, c1, z1 = _project_to_section_axis(surface=surface, point=t1, azimuth_deg=azimuth_deg)
@@ -146,7 +147,10 @@ class TrajectoryPlanner:
             ]
             return np.asarray(residuals, dtype=float)
 
-        result = least_squares(objective, x0=x0, bounds=(lower, upper), method="trf")
+        try:
+            result = least_squares(objective, x0=x0, bounds=(lower, upper), method="trf")
+        except ValueError as exc:
+            raise PlanningError(f"Некорректные параметры оптимизации: {exc}") from exc
         if not result.success:
             raise PlanningError(f"Оптимизатор не сошёлся: {result.message}")
 
@@ -330,3 +334,24 @@ def _radius_from_dls(dls_deg_per_30m: float) -> float:
 
 def _distance_3d(x1: float, y1: float, z1: float, x2: float, y2: float, z2: float) -> float:
     return float(np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2))
+
+
+def _validate_config(config: TrajectoryConfig) -> None:
+    if config.md_step_m <= 0.0 or config.md_step_control_m <= 0.0:
+        raise PlanningError("Шаги MD должны быть положительными.")
+
+    if config.pos_tolerance_m <= 0.0:
+        raise PlanningError("Допуск по позиции должен быть положительным.")
+
+    if config.inc_entry_min_deg > config.inc_entry_max_deg:
+        raise PlanningError("inc_entry_min_deg не может быть больше inc_entry_max_deg.")
+
+    if config.dls_build1_min_deg_per_30m > config.dls_build1_max_deg_per_30m:
+        raise PlanningError("dls_build1_min_deg_per_30m не может быть больше dls_build1_max_deg_per_30m.")
+
+    if config.dls_build2_min_deg_per_30m > config.dls_build2_max_deg_per_30m:
+        raise PlanningError("dls_build2_min_deg_per_30m не может быть больше dls_build2_max_deg_per_30m.")
+
+    for segment, limit in config.dls_limits_deg_per_30m.items():
+        if limit < 0.0:
+            raise PlanningError(f"DLS limit для участка {segment} не может быть отрицательным.")

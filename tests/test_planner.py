@@ -58,3 +58,19 @@ def test_planner_raises_for_non_planar_geometry_without_turn() -> None:
             t3=Point3D(1500.0, 0.0, 2600.0),
             config=config,
         )
+
+
+def test_planner_validates_invalid_dls_bounds() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        dls_build1_min_deg_per_30m=3.0,
+        dls_build1_max_deg_per_30m=2.0,
+    )
+
+    with pytest.raises(PlanningError):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(300.0, 0.0, 2500.0),
+            t3=Point3D(1500.0, 0.0, 2600.0),
+            config=config,
+        )

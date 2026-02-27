@@ -14,7 +14,7 @@ dependencies = [
   "pandas>=2.0",
   "scipy>=1.10",
   "plotly>=5.18",
-  "streamlit>=1.31"
+  "streamlit==1.54.0"
 ]
 
 [project.optional-dependencies]
@@ -25,7 +25,3 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pywp*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]

@@ -16,7 +16,9 @@ def _section_coordinate(df: pd.DataFrame, surface: Point3D, azimuth_deg: float) 
     return dn * np.cos(az) + de * np.sin(az)
 
 
-def trajectory_3d_figure(df: pd.DataFrame, surface: Point3D, t1: Point3D, t3: Point3D) -> go.Figure:
+def trajectory_3d_figure(
+    df: pd.DataFrame, surface: Point3D, t1: Point3D, t3: Point3D, height: int = 560
+) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
         go.Scatter3d(
@@ -51,12 +53,14 @@ def trajectory_3d_figure(df: pd.DataFrame, surface: Point3D, t1: Point3D, t3: Po
             "zaxis": {"autorange": "reversed"},
         },
         margin={"l": 0, "r": 0, "t": 40, "b": 0},
-        height=580,
+        height=height,
     )
     return fig
 
 
-def plan_view_figure(df: pd.DataFrame, surface: Point3D, t1: Point3D, t3: Point3D) -> go.Figure:
+def plan_view_figure(
+    df: pd.DataFrame, surface: Point3D, t1: Point3D, t3: Point3D, height: int = 460
+) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -84,7 +88,7 @@ def plan_view_figure(df: pd.DataFrame, surface: Point3D, t1: Point3D, t3: Point3
         xaxis_title="East (m)",
         yaxis_title="North (m)",
         yaxis={"scaleanchor": "x", "scaleratio": 1},
-        height=420,
+        height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
     )
     return fig
@@ -96,6 +100,7 @@ def section_view_figure(
     azimuth_deg: float,
     t1: Point3D,
     t3: Point3D,
+    height: int = 460,
 ) -> go.Figure:
     vs = _section_coordinate(df=df, surface=surface, azimuth_deg=azimuth_deg)
 
@@ -136,13 +141,13 @@ def section_view_figure(
         xaxis_title="Section coordinate (m)",
         yaxis_title="TVD (m)",
         yaxis={"autorange": "reversed"},
-        height=420,
+        height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
     )
     return fig
 
 
-def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float]) -> go.Figure:
+def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -168,7 +173,7 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float]) -> go.Figure:
         title="DLS vs MD",
         xaxis_title="MD (m)",
         yaxis_title="DLS (deg/30m)",
-        height=420,
+        height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
         showlegend=True,
     )
