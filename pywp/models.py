@@ -36,6 +36,8 @@ class TrajectoryConfig:
 
     max_total_md_m: float = 12000.0
     objective_mode: ObjectiveMode = OBJECTIVE_MAXIMIZE_HOLD
+    # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
+    min_structural_segment_m: float = 30.0
 
     dls_limits_deg_per_30m: Dict[str, float] = field(
         default_factory=lambda: {

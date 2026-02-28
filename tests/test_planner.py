@@ -382,3 +382,83 @@ def test_planner_raises_when_build_segment_limits_conflict_with_global_min() -> 
             t3=Point3D(1500.0, 2000.0, 2500.0),
             config=config,
         )
+
+
+def test_reverse_profile_changes_smoothly_around_dls_3_4_to_3_5_for_typical_case() -> None:
+    planner = TrajectoryPlanner()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(210.0, 280.0, 2000.0)
+    t3 = Point3D(810.0, 1080.0, 2069.9268)
+
+    hold_values: list[float] = []
+    for dmax in (3.4, 3.5):
+        config = TrajectoryConfig(
+            dls_build_min_deg_per_30m=0.5,
+            dls_build_max_deg_per_30m=dmax,
+            dls_limits_deg_per_30m={
+                "VERTICAL": 1.0,
+                "BUILD_REV": dmax,
+                "HOLD_REV": 2.0,
+                "DROP_REV": dmax,
+                "BUILD1": dmax,
+                "HOLD": 2.0,
+                "BUILD2": dmax,
+                "HORIZONTAL": 2.0,
+            },
+        )
+        result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
+        hold_values.append(float(result.summary["hold_inc_deg"]))
+
+    assert abs(hold_values[1] - hold_values[0]) < 8.0
+
+
+def test_reverse_profile_keeps_non_degenerate_forward_structure() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=3.5,
+        min_structural_segment_m=30.0,
+        dls_limits_deg_per_30m={
+            "VERTICAL": 1.0,
+            "BUILD_REV": 3.5,
+            "HOLD_REV": 2.0,
+            "DROP_REV": 3.5,
+            "BUILD1": 3.5,
+            "HOLD": 2.0,
+            "BUILD2": 3.5,
+            "HORIZONTAL": 2.0,
+        },
+    )
+
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(210.0, 280.0, 2000.0),
+        t3=Point3D(810.0, 1080.0, 2069.9268),
+        config=config,
+    )
+    stations = result.stations
+
+    for segment in ("BUILD1", "HOLD", "BUILD2"):
+        block = stations.loc[stations["segment"] == segment, "MD_m"]
+        assert not block.empty
+        assert float(block.max() - block.min()) >= config.min_structural_segment_m - 1e-6
+
+
+def test_planner_validates_structural_segment_resolution_config() -> None:
+    planner = TrajectoryPlanner()
+
+    with pytest.raises(PlanningError, match="min_structural_segment_m must be positive"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(300.0, 0.0, 2500.0),
+            t3=Point3D(1500.0, 0.0, 2600.0),
+            config=TrajectoryConfig(min_structural_segment_m=0.0),
+        )
+
+    with pytest.raises(PlanningError, match="min_structural_segment_m must be >= md_step_control_m"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(300.0, 0.0, 2500.0),
+            t3=Point3D(1500.0, 0.0, 2600.0),
+            config=TrajectoryConfig(min_structural_segment_m=1.0, md_step_control_m=2.0),
+        )

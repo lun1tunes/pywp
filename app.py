@@ -6,9 +6,9 @@ import pandas as pd
 import streamlit as st
 
 from pywp import Point3D, TrajectoryConfig, TrajectoryPlanner
-from pywp.classification import interpolate_limits, reference_table_rows
 from pywp.models import OBJECTIVE_MAXIMIZE_HOLD, OBJECTIVE_MINIMIZE_BUILD_DLS
 from pywp.planner import PlanningError
+from pywp.ui_utils import arrow_safe_text_dataframe, format_distance
 from pywp.visualization import dls_figure, plan_view_figure, section_view_figure, trajectory_3d_figure
 
 SCENARIOS = {
@@ -47,16 +47,6 @@ OBJECTIVE_OPTIONS = {
     OBJECTIVE_MAXIMIZE_HOLD: "Максимизировать длину HOLD",
     OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать DLS на BUILD",
 }
-
-
-def _format_distance(value_m: float) -> str:
-    if value_m < 1e-6:
-        return "< 1e-6 m"
-    if value_m < 1e-3:
-        return f"{value_m:.2e} m"
-    if value_m < 1.0:
-        return f"{value_m:.4f} m"
-    return f"{value_m:.2f} m"
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
@@ -104,45 +94,6 @@ def _inject_styles() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def _classification_reference_frame() -> pd.DataFrame:
-    return pd.DataFrame(reference_table_rows())
-
-
-def _classification_interpolated_frame(gv_m: float) -> pd.DataFrame:
-    limits = interpolate_limits(gv_m=gv_m)
-    return pd.DataFrame(
-        [
-            {"Параметр": "ГВ (интерполированная), м", "Значение": round(float(limits.gv_m), 2)},
-            {
-                "Параметр": "Окно обратного направления, м",
-                "Значение": f"{limits.reverse_min_m:.1f} - {limits.reverse_max_m:.1f}",
-            },
-            {"Параметр": "Отход t1: Обычная (до), м", "Значение": round(float(limits.ordinary_offset_max_m), 2)},
-            {"Параметр": "Отход t1: Сложная (до), м", "Значение": round(float(limits.complex_offset_max_m), 2)},
-            {"Параметр": "ЗУ HOLD: Обычная (до), deg", "Значение": round(float(limits.hold_ordinary_max_deg), 2)},
-            {"Параметр": "ЗУ HOLD: Сложная (до), deg", "Значение": round(float(limits.hold_complex_max_deg), 2)},
-        ]
-    )
-
-
-def _render_classification_block(gv_m: float, summary: dict[str, float | str] | None = None) -> None:
-    st.markdown("### Классификация сложности скважин")
-    st.caption("Базовые пороги по ГВ и линейная интерполяция для фактической ГВ t1.")
-    st.dataframe(_classification_reference_frame(), width="stretch", hide_index=True)
-    st.dataframe(_classification_interpolated_frame(gv_m=gv_m), width="stretch", hide_index=True)
-    if summary is not None:
-        st.markdown("#### Результат классификации для текущего расчета")
-        result_df = pd.DataFrame(
-            [
-                {"Параметр": "Тип траектории", "Значение": summary.get("trajectory_type", "—")},
-                {"Параметр": "Сложность скважины", "Значение": summary.get("well_complexity", "—")},
-                {"Параметр": "Сложность по отходу t1", "Значение": summary.get("well_complexity_by_offset", "—")},
-                {"Параметр": "Сложность по ЗУ HOLD", "Значение": summary.get("well_complexity_by_hold", "—")},
-            ]
-        )
-        st.dataframe(result_df, width="stretch", hide_index=True)
 
 
 def _apply_scenario(name: str) -> None:
@@ -393,9 +344,6 @@ def run_app() -> None:
     last_result = st.session_state.get("last_result")
     if last_result is None:
         st.info("Задайте параметры и нажмите «Построить траекторию».")
-        surface, t1, _ = _build_points_from_state()
-        gv_m = float(t1.z - surface.z)
-        _render_classification_block(gv_m=gv_m, summary=None)
         return
 
     is_stale = st.session_state.get("last_input_signature") != _current_input_signature()
@@ -413,14 +361,14 @@ def run_app() -> None:
     t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
 
     m1, m2, m3, m4 = st.columns(4, gap="small")
-    m1.metric("Горизонтальный отход t1", _format_distance(t1_horizontal_offset_m))
+    m1.metric("Горизонтальный отход t1", format_distance(t1_horizontal_offset_m))
     m2.metric("Угол входа в пласт", f"{summary['entry_inc_deg']:.2f} deg")
     m3.metric("ЗУ секции HOLD", f"{float(summary['hold_inc_deg']):.2f} deg")
     m4.metric("Сложность", str(summary["well_complexity"]))
 
     m5, m6, m7 = st.columns(3, gap="small")
     m5.metric("Тип траектории", str(summary["trajectory_type"]))
-    m6.metric("KOP MD", _format_distance(float(summary["kop_md_m"])))
+    m6.metric("KOP MD", format_distance(float(summary["kop_md_m"])))
     m7.metric("Макс DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
 
     with st.container(border=True):
@@ -447,15 +395,13 @@ def run_app() -> None:
             width="stretch",
         )
 
-    tab_summary, tab_survey, tab_classification = st.tabs(
-        ["Сводка", "Инклинометрия", "Классификация сложности скважин"]
-    )
+    tab_summary, tab_survey = st.tabs(["Сводка", "Инклинометрия"])
     with tab_summary:
         hidden_metrics = {"distance_t1_m", "distance_t3_m"}
         summary_visible = {key: value for key, value in summary.items() if key not in hidden_metrics}
         summary_visible["t1_horizontal_offset_m"] = t1_horizontal_offset_m
         summary_df = pd.DataFrame({"metric": list(summary_visible.keys()), "value": list(summary_visible.values())})
-        st.dataframe(summary_df, width="stretch", hide_index=True)
+        st.dataframe(arrow_safe_text_dataframe(summary_df), width="stretch", hide_index=True)
 
     with tab_survey:
         st.dataframe(stations, width="stretch")
@@ -467,10 +413,6 @@ def run_app() -> None:
             icon=":material/download:",
             width="content",
         )
-
-    with tab_classification:
-        gv_m = float(t1.z - surface.z)
-        _render_classification_block(gv_m=gv_m, summary=summary)
 
 
 if __name__ == "__main__":

@@ -216,6 +216,7 @@ def _solve_same_direction_profile(
                 geometry=geometry,
                 dls_build_deg_per_30m=dls,
                 kop_vertical_m=kop_vertical_m,
+                min_structural_segment_m=config.min_structural_segment_m,
             ),
             objective_mode=config.objective_mode,
             config=config,
@@ -269,6 +270,7 @@ def _solve_reverse_direction_profile(
                     dls_build_deg_per_30m=dls,
                     kop_vertical_m=kop_vertical_m,
                     reverse_inc_deg=reverse_inc_deg,
+                    min_structural_segment_m=config.min_structural_segment_m,
                 ),
                 objective_mode=config.objective_mode,
                 config=config,
@@ -291,6 +293,7 @@ def _profile_same_direction(
     geometry: SectionGeometry,
     dls_build_deg_per_30m: float,
     kop_vertical_m: float,
+    min_structural_segment_m: float,
 ) -> ProfileParameters | None:
     if dls_build_deg_per_30m <= 0.0 or kop_vertical_m < 0.0:
         return None
@@ -309,6 +312,7 @@ def _profile_same_direction(
         reverse_inc_deg=0.0,
         reverse_hold_length_m=0.0,
         reverse_dls_deg_per_30m=0.0,
+        min_structural_segment_m=min_structural_segment_m,
     )
 
 
@@ -317,6 +321,7 @@ def _profile_reverse_direction(
     dls_build_deg_per_30m: float,
     kop_vertical_m: float,
     reverse_inc_deg: float,
+    min_structural_segment_m: float,
 ) -> ProfileParameters | None:
     if dls_build_deg_per_30m <= 0.0 or kop_vertical_m < 0.0:
         return None
@@ -360,6 +365,7 @@ def _profile_reverse_direction(
         reverse_inc_deg=reverse_inc_deg,
         reverse_hold_length_m=reverse_hold_length_m,
         reverse_dls_deg_per_30m=dls_build_deg_per_30m,
+        min_structural_segment_m=min_structural_segment_m,
     )
     if candidate is None:
         return None
@@ -380,6 +386,7 @@ def _build_profile_from_effective_targets(
     reverse_inc_deg: float,
     reverse_hold_length_m: float,
     reverse_dls_deg_per_30m: float,
+    min_structural_segment_m: float,
 ) -> ProfileParameters | None:
     horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
     if horizontal_length_m <= SMALL:
@@ -401,11 +408,19 @@ def _build_profile_from_effective_targets(
     inc_hold_rad = float(np.arctan2(a_m, b_m))
     if inc_hold_rad <= SMALL or inc_hold_rad >= inc_entry_rad - SMALL:
         return None
+    inc_hold_deg = float(inc_hold_rad * RAD2DEG)
 
     hold_length_m = float(np.hypot(a_m, b_m))
     build1_length_m = float(radius_m * inc_hold_rad)
     build2_length_m = float(radius_m * (inc_entry_rad - inc_hold_rad))
     if hold_length_m <= SMALL or build1_length_m <= SMALL or build2_length_m <= SMALL:
+        return None
+    min_segment = max(float(min_structural_segment_m), SMALL)
+    if (
+        hold_length_m < min_segment - SMALL
+        or build1_length_m < min_segment - SMALL
+        or build2_length_m < min_segment - SMALL
+    ):
         return None
 
     return ProfileParameters(
@@ -415,7 +430,7 @@ def _build_profile_from_effective_targets(
         reverse_hold_length_m=float(max(reverse_hold_length_m, 0.0)),
         reverse_dls_deg_per_30m=float(max(reverse_dls_deg_per_30m, 0.0)),
         inc_entry_deg=float(geometry.inc_entry_deg),
-        inc_hold_deg=float(inc_hold_rad * RAD2DEG),
+        inc_hold_deg=inc_hold_deg,
         dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
         dls_build2_deg_per_30m=float(dls_build_deg_per_30m),
         build1_length_m=build1_length_m,
@@ -766,6 +781,10 @@ def _validate_config(config: TrajectoryConfig) -> None:
         raise PlanningError("dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m.")
     if config.max_total_md_m <= 0.0:
         raise PlanningError("max_total_md_m must be positive.")
+    if config.min_structural_segment_m <= 0.0:
+        raise PlanningError("min_structural_segment_m must be positive.")
+    if config.min_structural_segment_m < config.md_step_control_m:
+        raise PlanningError("min_structural_segment_m must be >= md_step_control_m.")
     if config.objective_mode not in ALLOWED_OBJECTIVE_MODES:
         allowed = ", ".join(ALLOWED_OBJECTIVE_MODES)
         raise PlanningError(f"objective_mode must be one of: {allowed}.")
