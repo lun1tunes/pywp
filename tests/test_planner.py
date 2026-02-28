@@ -43,7 +43,7 @@ def test_planner_finds_solution_for_reference_scenarios(
     assert result.summary["max_dls_build2_deg_per_30m"] <= config.dls_limits_deg_per_30m["BUILD2"] + 1e-6
     assert result.summary["max_dls_horizontal_deg_per_30m"] <= config.dls_limits_deg_per_30m["HORIZONTAL"] + 1e-6
     assert len(result.stations) > 2
-    assert set(result.stations["segment"]) == {"BUILD1", "HOLD", "BUILD2", "HORIZONTAL"}
+    assert set(result.stations["segment"]) == {"VERTICAL", "BUILD1", "HOLD", "BUILD2", "HORIZONTAL"}
 
 
 def test_planner_raises_for_non_planar_geometry_without_turn() -> None:
@@ -72,6 +72,26 @@ def test_planner_validates_invalid_dls_bounds() -> None:
             t1=Point3D(300.0, 0.0, 2500.0),
             t3=Point3D(1500.0, 0.0, 2600.0),
             config=config,
+        )
+
+
+def test_planner_validates_invalid_kop_config() -> None:
+    planner = TrajectoryPlanner()
+
+    with pytest.raises(PlanningError, match="kop_min_vertical_m must be non-negative"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(300.0, 0.0, 2500.0),
+            t3=Point3D(1500.0, 0.0, 2600.0),
+            config=TrajectoryConfig(kop_min_vertical_m=-1.0),
+        )
+
+    with pytest.raises(PlanningError, match="kop_search_grid_size must be >= 2"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(300.0, 0.0, 2500.0),
+            t3=Point3D(1500.0, 0.0, 2600.0),
+            config=TrajectoryConfig(kop_search_grid_size=1),
         )
 
 
@@ -179,7 +199,7 @@ def test_profile_has_all_segments_in_expected_order() -> None:
     )
 
     sequence = result.stations["segment"].drop_duplicates().tolist()
-    assert sequence == ["BUILD1", "HOLD", "BUILD2", "HORIZONTAL"]
+    assert sequence == ["VERTICAL", "BUILD1", "HOLD", "BUILD2", "HORIZONTAL"]
 
 
 def test_planner_raises_when_build_dls_limit_is_too_low_for_geometry() -> None:
@@ -256,3 +276,30 @@ def test_md_t1_is_boundary_between_build2_and_horizontal() -> None:
     md_horizontal_min = float(stations.loc[stations["segment"] == "HORIZONTAL", "MD_m"].min())
     assert md_build2_max <= result.md_t1_m + config.md_step_m + 1e-6
     assert md_horizontal_min >= result.md_t1_m - config.md_step_m - 1e-6
+
+
+def test_default_min_vertical_before_kop_is_present() -> None:
+    planner = TrajectoryPlanner()
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=TrajectoryConfig(),
+    )
+
+    vertical = result.stations[result.stations["segment"] == "VERTICAL"]
+    assert not vertical.empty
+    assert float(vertical["MD_m"].max()) >= 300.0 - 1e-6
+    assert result.summary["kop_md_m"] >= 300.0 - 1e-6
+
+
+def test_planner_raises_when_kop_min_vertical_exceeds_t1_depth() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(kop_min_vertical_m=2500.0)
+    with pytest.raises(PlanningError, match="minimum vertical before KOP is too deep"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=config,
+        )

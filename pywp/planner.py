@@ -15,7 +15,7 @@ from pywp.models import (
     Point3D,
     TrajectoryConfig,
 )
-from pywp.segments import BuildSegment, HoldSegment, HorizontalSegment
+from pywp.segments import BuildSegment, HoldSegment, HorizontalSegment, VerticalSegment
 from pywp.trajectory import WellTrajectory
 
 # Directional-planning formulas use the standard circular-arc relations:
@@ -45,6 +45,7 @@ class SectionGeometry:
 
 @dataclass(frozen=True)
 class ProfileParameters:
+    kop_vertical_m: float
     inc_entry_deg: float
     inc_hold_deg: float
     dls_build1_deg_per_30m: float
@@ -57,7 +58,7 @@ class ProfileParameters:
 
     @property
     def md_t1_m(self) -> float:
-        return float(self.build1_length_m + self.hold_length_m + self.build2_length_m)
+        return float(self.kop_vertical_m + self.build1_length_m + self.hold_length_m + self.build2_length_m)
 
     @property
     def md_total_m(self) -> float:
@@ -84,7 +85,14 @@ class TrajectoryPlanner:
         )
         control = add_dls(control)
 
-        summary = _build_summary(df=control, t1=t1, t3=t3, md_t1_m=params.md_t1_m, config=config)
+        summary = _build_summary(
+            df=control,
+            t1=t1,
+            t3=t3,
+            md_t1_m=params.md_t1_m,
+            kop_vertical_m=params.kop_vertical_m,
+            config=config,
+        )
         _assert_solution_is_valid(summary=summary, config=config)
 
         output = compute_positions_min_curv(trajectory.stations(md_step_m=config.md_step_m), start=surface)
@@ -151,32 +159,50 @@ def _solve_build_hold_build_horizontal_profile(
     lower = float(config.dls_build_min_deg_per_30m)
     upper = float(config.dls_build_max_deg_per_30m)
 
-    best = _optimize_profile_for_objective(
-        lower_dls=lower,
-        upper_dls=upper,
-        geometry=geometry,
-        config=config,
-    )
+    kop_candidates = _iter_kop_candidates(geometry=geometry, config=config)
+    best: ProfileParameters | None = None
+    for kop_vertical_m in kop_candidates:
+        candidate = _optimize_profile_for_objective(
+            lower_dls=lower,
+            upper_dls=upper,
+            geometry=geometry,
+            kop_vertical_m=kop_vertical_m,
+            config=config,
+        )
+        if candidate is None:
+            continue
+        best = _select_better_candidate(current=best, candidate=candidate, objective_mode=config.objective_mode)
 
     if best is not None:
         return best
 
+    available_z_for_builds = geometry.z1_m - float(config.kop_min_vertical_m)
+    if available_z_for_builds <= SMALL:
+        raise PlanningError(
+            "No valid profile: minimum vertical before KOP is too deep for t1 TVD. "
+            f"t1 TVD is {geometry.z1_m:.2f} m, requested minimum vertical is {config.kop_min_vertical_m:.2f} m."
+        )
+
     required_dls = _required_dls_for_t1_reach(
         s1_m=geometry.s1_m,
-        z1_m=geometry.z1_m,
+        z1_m=available_z_for_builds,
         inc_entry_deg=geometry.inc_entry_deg,
     )
     raise PlanningError(
-        "No valid BUILD1->HOLD->BUILD2->HORIZONTAL solution found within configured limits. "
-        f"Try increasing BUILD max DLS above {required_dls:.2f} deg/30m or relaxing constraints."
+        "No valid VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL solution found within configured limits. "
+        f"Try increasing BUILD max DLS above {required_dls:.2f} deg/30m, reducing minimum vertical before KOP, "
+        "or relaxing constraints."
     )
 
 
 def _profile_for_dls(
     geometry: SectionGeometry,
     dls_build_deg_per_30m: float,
+    kop_vertical_m: float,
 ) -> ProfileParameters | None:
     if dls_build_deg_per_30m <= 0.0:
+        return None
+    if kop_vertical_m < 0.0:
         return None
 
     horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
@@ -188,11 +214,14 @@ def _profile_for_dls(
         return None
 
     radius_m = _radius_from_dls(dls_build_deg_per_30m)
+    z1_after_kop_m = geometry.z1_m - kop_vertical_m
+    if z1_after_kop_m <= SMALL:
+        return None
 
     # Aggregate build displacement to t1 for BUILD1 (0->Ih) + BUILD2 (Ih->Ientry):
     # ds_build_total = R*(1-cos(Ientry)), dz_build_total = R*sin(Ientry)
     a_m = geometry.s1_m - radius_m * (1.0 - np.cos(inc_entry_rad))
-    b_m = geometry.z1_m - radius_m * np.sin(inc_entry_rad)
+    b_m = z1_after_kop_m - radius_m * np.sin(inc_entry_rad)
     if a_m <= SMALL or b_m <= SMALL:
         return None
 
@@ -207,6 +236,7 @@ def _profile_for_dls(
         return None
 
     return ProfileParameters(
+        kop_vertical_m=float(kop_vertical_m),
         inc_entry_deg=float(geometry.inc_entry_deg),
         inc_hold_deg=float(inc_hold_rad * RAD2DEG),
         dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
@@ -219,10 +249,50 @@ def _profile_for_dls(
     )
 
 
+def _iter_kop_candidates(geometry: SectionGeometry, config: TrajectoryConfig) -> np.ndarray:
+    kop_min = float(max(config.kop_min_vertical_m, 0.0))
+    kop_max = float(geometry.z1_m - SMALL)
+    if kop_min >= kop_max:
+        return np.array([], dtype=float)
+
+    grid_size = int(max(config.kop_search_grid_size, 2))
+    if grid_size == 2:
+        return np.array([kop_min, kop_max], dtype=float)
+    return np.linspace(kop_min, kop_max, grid_size, dtype=float)
+
+
+def _candidate_rank(candidate: ProfileParameters, objective_mode: str) -> tuple[float, float, float]:
+    if objective_mode == OBJECTIVE_MINIMIZE_BUILD_DLS:
+        return (
+            candidate.dls_build1_deg_per_30m,
+            -candidate.hold_length_m,
+            -candidate.kop_vertical_m,
+        )
+
+    return (
+        -candidate.hold_length_m,
+        candidate.dls_build1_deg_per_30m,
+        -candidate.kop_vertical_m,
+    )
+
+
+def _select_better_candidate(
+    current: ProfileParameters | None,
+    candidate: ProfileParameters,
+    objective_mode: str,
+) -> ProfileParameters:
+    if current is None:
+        return candidate
+    if _candidate_rank(candidate, objective_mode) < _candidate_rank(current, objective_mode):
+        return candidate
+    return current
+
+
 def _optimize_profile_for_objective(
     lower_dls: float,
     upper_dls: float,
     geometry: SectionGeometry,
+    kop_vertical_m: float,
     config: TrajectoryConfig,
 ) -> ProfileParameters | None:
     if config.objective_mode == OBJECTIVE_MINIMIZE_BUILD_DLS:
@@ -230,6 +300,7 @@ def _optimize_profile_for_objective(
             lower_dls=lower_dls,
             upper_dls=upper_dls,
             geometry=geometry,
+            kop_vertical_m=kop_vertical_m,
             config=config,
         )
 
@@ -237,6 +308,7 @@ def _optimize_profile_for_objective(
         lower_dls=lower_dls,
         upper_dls=upper_dls,
         geometry=geometry,
+        kop_vertical_m=kop_vertical_m,
         config=config,
     )
 
@@ -245,10 +317,15 @@ def _optimize_maximize_hold(
     lower_dls: float,
     upper_dls: float,
     geometry: SectionGeometry,
+    kop_vertical_m: float,
     config: TrajectoryConfig,
 ) -> ProfileParameters | None:
     def objective(dls_build: float) -> float:
-        candidate = _profile_for_dls(geometry=geometry, dls_build_deg_per_30m=dls_build)
+        candidate = _profile_for_dls(
+            geometry=geometry,
+            dls_build_deg_per_30m=dls_build,
+            kop_vertical_m=kop_vertical_m,
+        )
         if not _is_candidate_feasible(candidate=candidate, config=config):
             return 1e12 + abs(dls_build - lower_dls)
         return -candidate.hold_length_m
@@ -260,7 +337,11 @@ def _optimize_maximize_hold(
     best_hold = -1.0
     for dls in probes:
         dls_clamped = float(np.clip(dls, lower_dls, upper_dls))
-        candidate = _profile_for_dls(geometry=geometry, dls_build_deg_per_30m=dls_clamped)
+        candidate = _profile_for_dls(
+            geometry=geometry,
+            dls_build_deg_per_30m=dls_clamped,
+            kop_vertical_m=kop_vertical_m,
+        )
         if not _is_candidate_feasible(candidate=candidate, config=config):
             continue
         if candidate.hold_length_m > best_hold:
@@ -273,15 +354,25 @@ def _optimize_minimize_build_dls(
     lower_dls: float,
     upper_dls: float,
     geometry: SectionGeometry,
+    kop_vertical_m: float,
     config: TrajectoryConfig,
 ) -> ProfileParameters | None:
-    lower_candidate = _profile_for_dls(geometry=geometry, dls_build_deg_per_30m=lower_dls)
+    lower_candidate = _profile_for_dls(
+        geometry=geometry,
+        dls_build_deg_per_30m=lower_dls,
+        kop_vertical_m=kop_vertical_m,
+    )
     if _is_candidate_feasible(candidate=lower_candidate, config=config):
         return lower_candidate
 
     grid = np.linspace(lower_dls, upper_dls, 400, dtype=float)
     candidates: list[ProfileParameters | None] = [
-        _profile_for_dls(geometry=geometry, dls_build_deg_per_30m=float(dls)) for dls in grid
+        _profile_for_dls(
+            geometry=geometry,
+            dls_build_deg_per_30m=float(dls),
+            kop_vertical_m=kop_vertical_m,
+        )
+        for dls in grid
     ]
     feasible_mask = [bool(_is_candidate_feasible(candidate=cand, config=config)) for cand in candidates]
     try:
@@ -297,13 +388,21 @@ def _optimize_minimize_build_dls(
     hi = float(grid[first_feasible_idx])
     for _ in range(40):
         mid = 0.5 * (lo + hi)
-        mid_candidate = _profile_for_dls(geometry=geometry, dls_build_deg_per_30m=mid)
+        mid_candidate = _profile_for_dls(
+            geometry=geometry,
+            dls_build_deg_per_30m=mid,
+            kop_vertical_m=kop_vertical_m,
+        )
         if _is_candidate_feasible(candidate=mid_candidate, config=config):
             hi = mid
         else:
             lo = mid
 
-    candidate = _profile_for_dls(geometry=geometry, dls_build_deg_per_30m=hi)
+    candidate = _profile_for_dls(
+        geometry=geometry,
+        dls_build_deg_per_30m=hi,
+        kop_vertical_m=kop_vertical_m,
+    )
     if _is_candidate_feasible(candidate=candidate, config=config):
         return candidate
     return None
@@ -325,6 +424,11 @@ def _required_dls_for_t1_reach(s1_m: float, z1_m: float, inc_entry_deg: float) -
 
 def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
     segments = [
+        VerticalSegment(
+            length_m=params.kop_vertical_m,
+            azi_deg=params.azimuth_deg,
+            name="VERTICAL",
+        ),
         BuildSegment(
             inc_from_deg=0.0,
             inc_to_deg=params.inc_hold_deg,
@@ -360,6 +464,7 @@ def _build_summary(
     t1: Point3D,
     t3: Point3D,
     md_t1_m: float,
+    kop_vertical_m: float,
     config: TrajectoryConfig,
 ) -> dict[str, float]:
     t1_idx = int((df["MD_m"] - md_t1_m).abs().idxmin())
@@ -373,6 +478,8 @@ def _build_summary(
     summary: dict[str, float] = {
         "distance_t1_m": float(distance_t1),
         "distance_t3_m": float(distance_t3),
+        "kop_vertical_m": float(kop_vertical_m),
+        "kop_md_m": float(kop_vertical_m),
         "entry_inc_deg": float(t1_row["INC_deg"]),
         "entry_inc_target_deg": float(config.entry_inc_target_deg),
         "entry_inc_tolerance_deg": float(config.entry_inc_tolerance_deg),
@@ -407,6 +514,10 @@ def _validate_config(config: TrajectoryConfig) -> None:
         raise PlanningError("MD steps must be positive.")
     if config.pos_tolerance_m <= 0.0:
         raise PlanningError("Position tolerance must be positive.")
+    if config.kop_min_vertical_m < 0.0:
+        raise PlanningError("kop_min_vertical_m must be non-negative.")
+    if config.kop_search_grid_size < 2:
+        raise PlanningError("kop_search_grid_size must be >= 2.")
     if config.entry_inc_tolerance_deg < 0.0:
         raise PlanningError("entry_inc_tolerance_deg must be non-negative.")
     if config.dls_build_min_deg_per_30m > config.dls_build_max_deg_per_30m:

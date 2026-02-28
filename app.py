@@ -113,6 +113,7 @@ def _init_state() -> None:
     st.session_state.setdefault("entry_inc_tol", 2.0)
     st.session_state.setdefault("dls_build_min", 0.5)
     st.session_state.setdefault("dls_build_max", 10.0)
+    st.session_state.setdefault("kop_min_vertical", 300.0)
     st.session_state.setdefault("objective_mode", OBJECTIVE_MAXIMIZE_HOLD)
 
     st.session_state.setdefault("last_result", None)
@@ -139,6 +140,7 @@ def _current_input_signature() -> tuple[object, ...]:
         "entry_inc_tol",
         "dls_build_min",
         "dls_build_max",
+        "kop_min_vertical",
     )
     signature = [float(st.session_state[key]) for key in keys]
     signature.append(str(st.session_state["objective_mode"]))
@@ -176,8 +178,10 @@ def _build_config_from_state() -> TrajectoryConfig:
         entry_inc_tolerance_deg=float(st.session_state["entry_inc_tol"]),
         dls_build_min_deg_per_30m=min(dls_build_min, dls_build_max),
         dls_build_max_deg_per_30m=max(dls_build_min, dls_build_max),
+        kop_min_vertical_m=float(st.session_state["kop_min_vertical"]),
         objective_mode=str(st.session_state["objective_mode"]),
         dls_limits_deg_per_30m={
+            "VERTICAL": 1.0,
             "BUILD1": max(dls_build_min, dls_build_max),
             "HOLD": 2.0,
             "BUILD2": max(dls_build_min, dls_build_max),
@@ -218,7 +222,7 @@ def run_app() -> None:
         """
         <div class="hero">
           <h2>Composite Well Planner</h2>
-          <p>Profile is fixed: BUILD1 -> HOLD -> BUILD2 -> HORIZONTAL. Point t1 is reached at the end of BUILD2 (start of HORIZONTAL). No TURN support: S, t1, t3 must share one azimuth in plan.</p>
+          <p>Profile is fixed: VERTICAL -> BUILD1 -> HOLD -> BUILD2 -> HORIZONTAL. Point t1 is reached at the end of BUILD2 (start of HORIZONTAL). No TURN support: S, t1, t3 must share one azimuth in plan.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -298,6 +302,13 @@ def run_app() -> None:
                 rd1, rd2 = st.columns(2, gap="small")
                 rd1.number_input("DLS BUILD min", key="dls_build_min", min_value=0.1, step=0.1, help="deg/30m")
                 rd2.number_input("DLS BUILD max", key="dls_build_max", min_value=0.1, step=0.1, help="applies to BUILD1 and BUILD2")
+                st.number_input(
+                    "Min vertical before KOP, m",
+                    key="kop_min_vertical",
+                    min_value=0.0,
+                    step=10.0,
+                    help="Minimum vertical segment from S before BUILD1 starts.",
+                )
                 st.selectbox(
                     "Objective",
                     options=list(OBJECTIVE_OPTIONS.keys()),
@@ -334,11 +345,12 @@ def run_app() -> None:
     md_t1_m = float(last_result["md_t1_m"])
     t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
 
-    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1, m2, m3, m4, m5 = st.columns(5, gap="small")
     m1.metric("t1 horizontal offset", _format_distance(t1_horizontal_offset_m))
     m2.metric("INC at t1", f"{summary['entry_inc_deg']:.2f} deg")
     m3.metric("INC target", f"{config.entry_inc_target_deg:.1f}±{config.entry_inc_tolerance_deg:.1f}")
-    m4.metric("Max DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
+    m4.metric("KOP MD", _format_distance(float(summary["kop_md_m"])))
+    m5.metric("Max DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
 
     with st.container(border=True):
         st.markdown("### 3D trajectory and DLS")
