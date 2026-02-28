@@ -17,7 +17,12 @@ from pywp.models import (
 from pywp.planner import PlanningError
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import arrow_safe_text_dataframe, format_distance
-from pywp.visualization import dls_figure, plan_view_figure, section_view_figure, trajectory_3d_figure
+from pywp.visualization import (
+    dls_figure,
+    plan_view_figure,
+    section_view_figure,
+    trajectory_3d_figure,
+)
 
 SCENARIOS = {
     "default": {
@@ -56,10 +61,11 @@ OBJECTIVE_OPTIONS = {
     OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать DLS на BUILD",
 }
 TURN_SOLVER_OPTIONS = {
-    TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF)",
-    TURN_SOLVER_DE_HYBRID: "DE Hybrid (global + local)",
+    TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF, рекомендуется)",
+    TURN_SOLVER_DE_HYBRID: "DE Hybrid (глобальный + локальный)",
 }
-UI_DEFAULTS_VERSION = 3
+CFG_DEFAULTS = TrajectoryConfig()
+UI_DEFAULTS_VERSION = 4
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
@@ -84,24 +90,55 @@ def _init_state() -> None:
     if "surface_x" not in st.session_state:
         _apply_scenario(st.session_state["scenario_name"])
 
-    st.session_state.setdefault("md_step", 10.0)
-    st.session_state.setdefault("md_control", 2.0)
-    st.session_state.setdefault("pos_tol", 2.0)
-    st.session_state.setdefault("entry_inc_target", 86.0)
-    st.session_state.setdefault("entry_inc_tol", 2.0)
-    st.session_state.setdefault("dls_build_min", 0.5)
-    st.session_state.setdefault("dls_build_max", 3.0)
-    st.session_state.setdefault("kop_min_vertical", 300.0)
-    st.session_state.setdefault("objective_mode", OBJECTIVE_MAXIMIZE_HOLD)
-    st.session_state.setdefault("turn_solver_mode", TURN_SOLVER_LEAST_SQUARES)
-    st.session_state.setdefault("turn_solver_qmc_samples", 24)
-    st.session_state.setdefault("turn_solver_local_starts", 12)
+    st.session_state.setdefault("md_step", float(CFG_DEFAULTS.md_step_m))
+    st.session_state.setdefault("md_control", float(CFG_DEFAULTS.md_step_control_m))
+    st.session_state.setdefault("pos_tol", float(CFG_DEFAULTS.pos_tolerance_m))
+    st.session_state.setdefault(
+        "entry_inc_target", float(CFG_DEFAULTS.entry_inc_target_deg)
+    )
+    st.session_state.setdefault(
+        "entry_inc_tol", float(CFG_DEFAULTS.entry_inc_tolerance_deg)
+    )
+    st.session_state.setdefault(
+        "dls_build_min", float(CFG_DEFAULTS.dls_build_min_deg_per_30m)
+    )
+    st.session_state.setdefault(
+        "dls_build_max", float(CFG_DEFAULTS.dls_build_max_deg_per_30m)
+    )
+    st.session_state.setdefault(
+        "kop_min_vertical", float(CFG_DEFAULTS.kop_min_vertical_m)
+    )
+    st.session_state.setdefault("objective_mode", str(CFG_DEFAULTS.objective_mode))
+    st.session_state.setdefault("turn_solver_mode", str(CFG_DEFAULTS.turn_solver_mode))
+    st.session_state.setdefault(
+        "turn_solver_qmc_samples", int(CFG_DEFAULTS.turn_solver_qmc_samples)
+    )
+    st.session_state.setdefault(
+        "turn_solver_local_starts", int(CFG_DEFAULTS.turn_solver_local_starts)
+    )
     st.session_state.setdefault("ui_defaults_version", 0)
 
     if int(st.session_state.get("ui_defaults_version", 0)) < UI_DEFAULTS_VERSION:
-        st.session_state["md_step"] = 10.0
-        st.session_state["entry_inc_target"] = 86.0
-        st.session_state["entry_inc_tol"] = 2.0
+        st.session_state["md_step"] = float(CFG_DEFAULTS.md_step_m)
+        st.session_state["md_control"] = float(CFG_DEFAULTS.md_step_control_m)
+        st.session_state["pos_tol"] = float(CFG_DEFAULTS.pos_tolerance_m)
+        st.session_state["entry_inc_target"] = float(CFG_DEFAULTS.entry_inc_target_deg)
+        st.session_state["entry_inc_tol"] = float(CFG_DEFAULTS.entry_inc_tolerance_deg)
+        st.session_state["dls_build_min"] = float(
+            CFG_DEFAULTS.dls_build_min_deg_per_30m
+        )
+        st.session_state["dls_build_max"] = float(
+            CFG_DEFAULTS.dls_build_max_deg_per_30m
+        )
+        st.session_state["kop_min_vertical"] = float(CFG_DEFAULTS.kop_min_vertical_m)
+        st.session_state["objective_mode"] = str(CFG_DEFAULTS.objective_mode)
+        st.session_state["turn_solver_mode"] = str(CFG_DEFAULTS.turn_solver_mode)
+        st.session_state["turn_solver_qmc_samples"] = int(
+            CFG_DEFAULTS.turn_solver_qmc_samples
+        )
+        st.session_state["turn_solver_local_starts"] = int(
+            CFG_DEFAULTS.turn_solver_local_starts
+        )
         st.session_state["ui_defaults_version"] = UI_DEFAULTS_VERSION
 
     st.session_state.setdefault("last_result", None)
@@ -198,7 +235,9 @@ def _build_config_from_state() -> TrajectoryConfig:
     )
 
 
-def _validate_input(surface: Point3D, t1: Point3D, t3: Point3D, config: TrajectoryConfig) -> list[str]:
+def _validate_input(
+    surface: Point3D, t1: Point3D, t3: Point3D, config: TrajectoryConfig
+) -> list[str]:
     errors: list[str] = []
     if t1.z <= surface.z:
         errors.append("t1 должен быть ниже устья S по TVD.")
@@ -211,7 +250,9 @@ def _validate_input(surface: Point3D, t1: Point3D, t3: Point3D, config: Trajecto
     return errors
 
 
-def _run_planner(surface: Point3D, t1: Point3D, t3: Point3D, config: TrajectoryConfig) -> None:
+def _run_planner(
+    surface: Point3D, t1: Point3D, t3: Point3D, config: TrajectoryConfig
+) -> None:
     planner = TrajectoryPlanner()
     result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
 
@@ -244,12 +285,16 @@ def _run_solver_profiling() -> None:
     total_items = len(run_items)
     progress = st.progress(0, text="Профилирование TURN-методов...")
     with st.status("Выполняется profiling TURN-решателей...", expanded=True) as status:
-        for index, (scenario_name, scenario_points, solver_mode) in enumerate(run_items, start=1):
+        for index, (scenario_name, scenario_points, solver_mode) in enumerate(
+            run_items, start=1
+        ):
             progress.progress(
                 int(((index - 1) / max(total_items, 1)) * 100),
                 text=f"{index}/{total_items}: {scenario_name}",
             )
-            status.write(f"[{index}/{total_items}] {scenario_name} · {TURN_SOLVER_OPTIONS[solver_mode]}")
+            status.write(
+                f"[{index}/{total_items}] {scenario_name} · {TURN_SOLVER_OPTIONS[solver_mode]}"
+            )
             surface = scenario_points["surface"]
             t1 = scenario_points["t1"]
             t3 = scenario_points["t3"]
@@ -267,7 +312,9 @@ def _run_solver_profiling() -> None:
                         "Промах t1, м": f"{float(result.summary['distance_t1_m']):.4f}",
                         "Промах t3, м": f"{float(result.summary['distance_t3_m']):.4f}",
                         "TURN, deg": f"{float(result.summary.get('azimuth_turn_deg', 0.0)):.2f}",
-                        "Тип траектории": str(result.summary.get("trajectory_type", "—")),
+                        "Тип траектории": str(
+                            result.summary.get("trajectory_type", "—")
+                        ),
                     }
                 )
             except PlanningError as exc:
@@ -288,7 +335,11 @@ def _run_solver_profiling() -> None:
 
         elapsed_total_s = perf_counter() - started_total
         progress.progress(100, text="Профилирование завершено.")
-        status.update(label=f"Профилирование завершено за {elapsed_total_s:.2f} с", state="complete", expanded=False)
+        status.update(
+            label=f"Профилирование завершено за {elapsed_total_s:.2f} с",
+            state="complete",
+            expanded=False,
+        )
     progress.empty()
     st.session_state["solver_profile_rows"] = rows
     st.session_state["solver_profile_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -318,64 +369,91 @@ def run_app() -> None:
             "Последний успешный расчет сохраняется до следующего запуска."
         )
 
-    with st.form("planner_form", clear_on_submit=False, enter_to_submit=False, border=False):
+    with st.form(
+        "planner_form", clear_on_submit=False, enter_to_submit=False, border=False
+    ):
         with st.container(border=True):
-            st.markdown("### Рабочая область ввода")
-            c0, c1, c2, c3, c4 = st.columns(
-                [1.0, 1.25, 1.25, 1.25, 2.35],
+            st.markdown("### Параметры расчёта")
+            c1, c2, c3, c4 = st.columns(
+                [1.25, 1.25, 1.25, 2.35],
                 gap="small",
                 border=True,
                 vertical_alignment="top",
             )
 
-            with c0:
-                st.markdown("**Расчет**")
-                build_clicked = st.form_submit_button(
-                    "Построить траекторию",
-                    type="primary",
-                    icon=":material/play_arrow:",
-                    width="stretch",
+            st.markdown("**Расчет траектории**")
+            build_clicked = st.form_submit_button(
+                "Построить траекторию",
+                type="primary",
+                icon=":material/play_arrow:",
+                width="stretch",
+            )
+            if st.session_state["last_built_at"]:
+                st.caption(f"Последний расчет: {st.session_state['last_built_at']}")
+            if st.session_state.get("last_runtime_s") is not None:
+                st.caption(
+                    f"Время расчета: {float(st.session_state['last_runtime_s']):.2f} с"
                 )
-                if st.session_state["last_built_at"]:
-                    st.caption(f"Последний расчет: {st.session_state['last_built_at']}")
-                if st.session_state.get("last_runtime_s") is not None:
-                    st.caption(f"Время расчета: {float(st.session_state['last_runtime_s']):.2f} с")
 
             with c1:
                 st.markdown("**Устье S**")
-                st.number_input("S X (E), m", key="surface_x", step=10.0)
-                st.number_input("S Y (N), m", key="surface_y", step=10.0)
-                st.number_input("S Z (TVD), m", key="surface_z", step=10.0)
+                st.number_input("S X (E), m", key="surface_x", step=50.0)
+                st.number_input("S Y (N), m", key="surface_y", step=50.0)
+                st.number_input("S Z (TVD), m", key="surface_z", step=50.0)
 
             with c2:
                 st.markdown("**Точка входа t1**")
-                st.number_input("t1 X (E), m", key="t1_x", step=10.0)
-                st.number_input("t1 Y (N), m", key="t1_y", step=10.0)
-                st.number_input("t1 Z (TVD), m", key="t1_z", step=10.0)
+                st.number_input("t1 X (E), m", key="t1_x", step=50.0)
+                st.number_input("t1 Y (N), m", key="t1_y", step=50.0)
+                st.number_input("t1 Z (TVD), m", key="t1_z", step=50.0)
 
             with c3:
                 st.markdown("**Концевая точка t3**")
-                st.number_input("t3 X (E), m", key="t3_x", step=10.0)
-                st.number_input("t3 Y (N), m", key="t3_y", step=10.0)
-                st.number_input("t3 Z (TVD), m", key="t3_z", step=10.0)
+                st.number_input("t3 X (E), m", key="t3_x", step=50.0)
+                st.number_input("t3 Y (N), m", key="t3_y", step=50.0)
+                st.number_input("t3 Z (TVD), m", key="t3_z", step=50.0)
 
             with c4:
                 st.markdown("**Ограничения профиля**")
                 r1, r2, r3 = st.columns(3, gap="small")
                 r1.number_input("Шаг MD", key="md_step", min_value=1.0, step=1.0)
-                r2.number_input("Контрольный шаг MD", key="md_control", min_value=0.5, step=0.5)
-                r3.number_input("Допуск по позиции", key="pos_tol", min_value=0.1, step=0.1)
+                r2.number_input(
+                    "Контрольный шаг MD", key="md_control", min_value=0.5, step=0.5
+                )
+                r3.number_input(
+                    "Допуск по позиции", key="pos_tol", min_value=0.1, step=0.1
+                )
 
                 rr1, rr2 = st.columns(2, gap="small")
-                rr1.number_input("Целевой INC входа", key="entry_inc_target", min_value=70.0, max_value=89.0, step=0.5)
-                rr2.number_input("Допуск INC входа", key="entry_inc_tol", min_value=0.1, max_value=5.0, step=0.1)
+                rr1.number_input(
+                    "Целевой INC входа",
+                    key="entry_inc_target",
+                    min_value=70.0,
+                    max_value=89.0,
+                    step=0.5,
+                )
+                rr2.number_input(
+                    "Допуск INC входа",
+                    key="entry_inc_tol",
+                    min_value=0.1,
+                    max_value=5.0,
+                    step=0.1,
+                )
 
                 rd1, rd2 = st.columns(2, gap="small")
-                rd1.number_input("Мин DLS BUILD", key="dls_build_min", min_value=0.1, step=0.1, help="deg/30m")
+                rd1.number_input(
+                    "Мин DLS BUILD",
+                    key="dls_build_min",
+                    min_value=0.1,
+                    value=0.5,
+                    step=0.1,
+                    help="deg/30m",
+                )
                 rd2.number_input(
                     "Макс DLS BUILD",
                     key="dls_build_max",
                     min_value=0.1,
+                    value=3.0,
                     step=0.1,
                     help="для BUILD1 и BUILD2",
                 )
@@ -383,43 +461,67 @@ def run_app() -> None:
                     "Мин VERTICAL до KOP, м",
                     key="kop_min_vertical",
                     min_value=0.0,
+                    value=300.0,
                     step=10.0,
                     help="Минимальный VERTICAL участок от S до начала BUILD1.",
                 )
-                with st.expander("TURN и оптимизация", expanded=False):
+                with st.expander("Параметры солвера", expanded=False):
                     st.selectbox(
                         "Целевая функция",
                         options=list(OBJECTIVE_OPTIONS.keys()),
                         key="objective_mode",
                         format_func=lambda value: OBJECTIVE_OPTIONS[str(value)],
+                        help=(
+                            "Определяет, что оптимизирует решатель среди допустимых решений. "
+                            "Рекомендуется оставить «Максимизировать длину HOLD»: обычно это дает "
+                            "более стабильную конструкцию и меньше ручной подстройки."
+                        ),
                     )
                     st.selectbox(
-                        "TURN solver",
+                        "Метод TURN-решателя",
                         options=list(TURN_SOLVER_OPTIONS.keys()),
                         key="turn_solver_mode",
                         format_func=lambda value: TURN_SOLVER_OPTIONS[str(value)],
+                        help=(
+                            "Least Squares (TRF) — быстрый и достаточно устойчивый метод для большинства кейсов "
+                            "(рекомендуемый дефолт). DE Hybrid — более медленный, но может помочь в особенно "
+                            "сложной геометрии."
+                        ),
                     )
                     rs1, rs2 = st.columns(2, gap="small")
                     rs1.number_input(
                         "TURN QMC samples",
                         key="turn_solver_qmc_samples",
                         min_value=0,
+                        value=24,
                         step=4,
-                        help="Дополнительные стартовые точки Latin Hypercube для TURN-решателя.",
+                        help=(
+                            "Количество дополнительных стартовых точек (Latin Hypercube). "
+                            "Больше значение — выше шанс найти решение в сложных случаях, но дольше расчет. "
+                            "Дефолт 24 — рабочий компромисс."
+                        ),
                     )
                     rs2.number_input(
                         "TURN local starts",
                         key="turn_solver_local_starts",
                         min_value=1,
+                        value=12,
                         step=1,
-                        help="Количество лучших стартов для локального решателя.",
+                        help=(
+                            "Сколько лучших стартовых точек запускать локальным решателем. "
+                            "Больше — стабильнее подбор, но медленнее. Дефолт 12 — обычно оптимальный."
+                        ),
                     )
 
     surface_input, t1_input, t3_input = _build_points_from_state()
     config_input = _build_config_from_state()
-    preflight_errors = _validate_input(surface=surface_input, t1=t1_input, t3=t3_input, config=config_input)
+    preflight_errors = _validate_input(
+        surface=surface_input, t1=t1_input, t3=t3_input, config=config_input
+    )
     if preflight_errors:
-        st.warning("Предварительная проверка параметров:\n- " + "\n- ".join(preflight_errors))
+        st.warning(
+            "Предварительная проверка параметров:\n- " + "\n- ".join(preflight_errors)
+        )
 
     with st.expander("Профилирование TURN-методов", expanded=False):
         st.caption("Сравнение методов на типовых шаблонах текущего проекта.")
@@ -430,7 +532,9 @@ def run_app() -> None:
             st.caption(f"Последний profiling: {st.session_state['solver_profile_at']}")
         if profile_rows:
             profile_df = pd.DataFrame(profile_rows)
-            st.dataframe(arrow_safe_text_dataframe(profile_df), width="stretch", hide_index=True)
+            st.dataframe(
+                arrow_safe_text_dataframe(profile_df), width="stretch", hide_index=True
+            )
 
     if build_clicked:
         progress = st.progress(0, text="Подготовка расчета...")
@@ -443,16 +547,24 @@ def run_app() -> None:
                 status.write("Запуск планировщика и решателя.")
                 progress.progress(55, text="Выполняется расчет траектории...")
                 started = perf_counter()
-                _run_planner(surface=surface_input, t1=t1_input, t3=t3_input, config=config_input)
+                _run_planner(
+                    surface=surface_input, t1=t1_input, t3=t3_input, config=config_input
+                )
                 elapsed_s = perf_counter() - started
                 st.session_state["last_runtime_s"] = float(elapsed_s)
                 progress.progress(100, text="Расчет завершен.")
-                status.update(label=f"Расчет завершен за {elapsed_s:.2f} с", state="complete", expanded=False)
+                status.update(
+                    label=f"Расчет завершен за {elapsed_s:.2f} с",
+                    state="complete",
+                    expanded=False,
+                )
             except PlanningError as exc:
                 st.session_state["last_error"] = str(exc)
                 st.session_state["last_runtime_s"] = None
                 status.write(str(exc))
-                status.update(label="Расчет завершился ошибкой", state="error", expanded=True)
+                status.update(
+                    label="Расчет завершился ошибкой", state="error", expanded=True
+                )
             finally:
                 progress.empty()
 
@@ -464,9 +576,13 @@ def run_app() -> None:
         st.info("Задайте параметры и нажмите «Построить траекторию».")
         return
 
-    is_stale = st.session_state.get("last_input_signature") != _current_input_signature()
+    is_stale = (
+        st.session_state.get("last_input_signature") != _current_input_signature()
+    )
     if is_stale:
-        st.warning("Параметры изменились после последнего расчета. Показан предыдущий результат. Нажмите «Построить траекторию» для обновления.")
+        st.warning(
+            "Параметры изменились после последнего расчета. Показан предыдущий результат. Нажмите «Построить траекторию» для обновления."
+        )
 
     summary = last_result["summary"]
     stations = last_result["stations"]
@@ -484,7 +600,9 @@ def run_app() -> None:
     m3.metric("ЗУ секции HOLD", f"{float(summary['hold_inc_deg']):.2f} deg")
     m4.metric("Сложность", str(summary["well_complexity"]))
     runtime_s = st.session_state.get("last_runtime_s")
-    m5.metric("Время расчета", "—" if runtime_s is None else f"{float(runtime_s):.2f} с")
+    m5.metric(
+        "Время расчета", "—" if runtime_s is None else f"{float(runtime_s):.2f} с"
+    )
 
     n1, n2, n3 = st.columns(3, gap="small")
     n1.metric("Тип траектории", str(summary["trajectory_type"]))
@@ -495,7 +613,9 @@ def run_app() -> None:
         st.markdown("### 3D траектория и DLS")
         row1_col1, row1_col2 = st.columns(2, gap="medium")
         row1_col1.plotly_chart(
-            trajectory_3d_figure(stations, surface=surface, t1=t1, t3=t3, md_t1_m=md_t1_m),
+            trajectory_3d_figure(
+                stations, surface=surface, t1=t1, t3=t3, md_t1_m=md_t1_m
+            ),
             width="stretch",
         )
         row1_col2.plotly_chart(
@@ -511,17 +631,28 @@ def run_app() -> None:
             width="stretch",
         )
         row2_col2.plotly_chart(
-            section_view_figure(stations, surface=surface, azimuth_deg=azimuth_deg, t1=t1, t3=t3),
+            section_view_figure(
+                stations, surface=surface, azimuth_deg=azimuth_deg, t1=t1, t3=t3
+            ),
             width="stretch",
         )
 
     tab_summary, tab_survey = st.tabs(["Сводка", "Инклинометрия"])
     with tab_summary:
         hidden_metrics = {"distance_t1_m", "distance_t3_m"}
-        summary_visible = {key: value for key, value in summary.items() if key not in hidden_metrics}
+        summary_visible = {
+            key: value for key, value in summary.items() if key not in hidden_metrics
+        }
         summary_visible["t1_horizontal_offset_m"] = t1_horizontal_offset_m
-        summary_df = pd.DataFrame({"metric": list(summary_visible.keys()), "value": list(summary_visible.values())})
-        st.dataframe(arrow_safe_text_dataframe(summary_df), width="stretch", hide_index=True)
+        summary_df = pd.DataFrame(
+            {
+                "metric": list(summary_visible.keys()),
+                "value": list(summary_visible.values()),
+            }
+        )
+        st.dataframe(
+            arrow_safe_text_dataframe(summary_df), width="stretch", hide_index=True
+        )
 
     with tab_survey:
         st.dataframe(stations, width="stretch")
