@@ -410,6 +410,7 @@ def section_view_figure(
 
 def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560) -> go.Figure:
     fig = go.Figure()
+    active_segments: set[str] | None = None
     if "segment" not in df.columns:
         fig.add_trace(
             go.Scatter(
@@ -425,6 +426,7 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
         )
     else:
         segments = df["segment"].fillna("UNKNOWN").astype(str).str.upper().to_numpy()
+        active_segments = set(segments.tolist())
         legend_shown: set[str] = set()
         start_idx = 0
         for idx in range(1, len(df) + 1):
@@ -480,8 +482,11 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
     # Avoid overlapping labels for equal DLS limits (e.g., BUILD1/BUILD2 or HOLD/HORIZONTAL).
     grouped_limits: dict[float, list[str]] = {}
     for segment, limit in dls_limits.items():
+        segment_name = str(segment).upper()
+        if active_segments is not None and segment_name not in active_segments:
+            continue
         key = round(float(limit), 6)
-        grouped_limits.setdefault(key, []).append(str(segment))
+        grouped_limits.setdefault(key, []).append(segment_name)
 
     for limit_value in sorted(grouped_limits.keys(), reverse=True):
         segment_label = "/".join(grouped_limits[limit_value])

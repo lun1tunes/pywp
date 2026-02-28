@@ -79,3 +79,25 @@ def test_plotly_figures_are_constructed() -> None:
         assert "DLS:" in hover
 
     assert list(trace_dls.y)[-1] == 0.0
+
+
+def test_dls_limit_annotations_hide_rev_for_same_direction_profile() -> None:
+    df = _sample_df()
+    fig_dls = dls_figure(
+        df,
+        dls_limits={
+            "VERTICAL": 1.0,
+            "BUILD_REV": 3.0,
+            "HOLD_REV": 2.0,
+            "DROP_REV": 3.0,
+            "BUILD1": 3.0,
+            "HOLD": 2.0,
+            "BUILD2": 3.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+
+    annotations = fig_dls.layout.annotations or ()
+    annotation_texts = [str(item.text) for item in annotations]
+    assert annotation_texts
+    assert all("REV" not in text for text in annotation_texts)
