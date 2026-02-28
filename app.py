@@ -6,26 +6,47 @@ import pandas as pd
 import streamlit as st
 
 from pywp import Point3D, TrajectoryConfig, TrajectoryPlanner
+from pywp.models import OBJECTIVE_MAXIMIZE_HOLD, OBJECTIVE_MINIMIZE_BUILD_DLS
 from pywp.planner import PlanningError
 from pywp.visualization import dls_figure, plan_view_figure, section_view_figure, trajectory_3d_figure
 
 SCENARIOS = {
-    "J-profile short reach": {
+    "Composite short reach": {
         "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(300.0, 0.0, 2500.0),
-        "t3": Point3D(1500.0, 0.0, 2600.0),
+        "t1": Point3D(600.0, 800.0, 2400.0),
+        "t3": Point3D(1500.0, 2000.0, 2500.0),
     },
-    "J-profile medium reach": {
+    "Composite medium reach": {
         "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(600.0, 0.0, 2400.0),
-        "t3": Point3D(2600.0, 0.0, 2600.0),
+        "t1": Point3D(800.0, 1066.6667, 2400.0),
+        "t3": Point3D(2600.0, 3466.6667, 2600.0),
     },
-    "J-profile long reach": {
+    "Composite long reach": {
         "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(800.0, 0.0, 2500.0),
-        "t3": Point3D(2800.0, 0.0, 2650.0),
+        "t1": Point3D(900.0, 1200.0, 2500.0),
+        "t3": Point3D(2800.0, 3733.3333, 2650.0),
     },
 }
+OBJECTIVE_OPTIONS = {
+    OBJECTIVE_MAXIMIZE_HOLD: "Maximize HOLD length",
+    OBJECTIVE_MINIMIZE_BUILD_DLS: "Minimize BUILD DLS",
+}
+
+
+def _format_distance(value_m: float) -> str:
+    if value_m < 1e-6:
+        return "< 1e-6 m"
+    if value_m < 1e-3:
+        return f"{value_m:.2e} m"
+    if value_m < 1.0:
+        return f"{value_m:.4f} m"
+    return f"{value_m:.2f} m"
+
+
+def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
+    dx = float(point.x - reference.x)
+    dy = float(point.y - reference.y)
+    return float((dx * dx + dy * dy) ** 0.5)
 
 
 def _inject_styles() -> None:
@@ -92,6 +113,7 @@ def _init_state() -> None:
     st.session_state.setdefault("entry_inc_tol", 2.0)
     st.session_state.setdefault("dls_build_min", 0.5)
     st.session_state.setdefault("dls_build_max", 10.0)
+    st.session_state.setdefault("objective_mode", OBJECTIVE_MAXIMIZE_HOLD)
 
     st.session_state.setdefault("last_result", None)
     st.session_state.setdefault("last_error", "")
@@ -99,7 +121,7 @@ def _init_state() -> None:
     st.session_state.setdefault("last_input_signature", None)
 
 
-def _current_input_signature() -> tuple[float, ...]:
+def _current_input_signature() -> tuple[object, ...]:
     keys = (
         "surface_x",
         "surface_y",
@@ -118,7 +140,9 @@ def _current_input_signature() -> tuple[float, ...]:
         "dls_build_min",
         "dls_build_max",
     )
-    return tuple(float(st.session_state[key]) for key in keys)
+    signature = [float(st.session_state[key]) for key in keys]
+    signature.append(str(st.session_state["objective_mode"]))
+    return tuple(signature)
 
 
 def _build_points_from_state() -> tuple[Point3D, Point3D, Point3D]:
@@ -152,10 +176,12 @@ def _build_config_from_state() -> TrajectoryConfig:
         entry_inc_tolerance_deg=float(st.session_state["entry_inc_tol"]),
         dls_build_min_deg_per_30m=min(dls_build_min, dls_build_max),
         dls_build_max_deg_per_30m=max(dls_build_min, dls_build_max),
+        objective_mode=str(st.session_state["objective_mode"]),
         dls_limits_deg_per_30m={
-            "VERTICAL": 1.0,
-            "BUILD": max(dls_build_min, dls_build_max),
+            "BUILD1": max(dls_build_min, dls_build_max),
             "HOLD": 2.0,
+            "BUILD2": max(dls_build_min, dls_build_max),
+            "HORIZONTAL": 2.0,
         },
     )
 
@@ -183,7 +209,7 @@ def _run_planner() -> None:
 
 
 def run_app() -> None:
-    st.set_page_config(page_title="J-profile Well Planner", layout="wide")
+    st.set_page_config(page_title="Composite Well Planner", layout="wide")
 
     _init_state()
     _inject_styles()
@@ -191,8 +217,8 @@ def run_app() -> None:
     st.markdown(
         """
         <div class="hero">
-          <h2>J-profile Well Planner</h2>
-          <p>Only J-profile is used: VERTICAL -> BUILD -> HOLD. Segment t1->t3 follows the literal target line in section, and INC at t1 must satisfy target angle (default 86±2 deg).</p>
+          <h2>Composite Well Planner</h2>
+          <p>Profile is fixed: BUILD1 -> HOLD -> BUILD2 -> HORIZONTAL. Point t1 is reached at the end of BUILD2 (start of HORIZONTAL). No TURN support: S, t1, t3 must share one azimuth in plan.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -259,7 +285,7 @@ def run_app() -> None:
                 st.number_input("t3 Z (TVD), m", key="t3_z", step=10.0)
 
             with c4:
-                st.markdown("**J-profile constraints**")
+                st.markdown("**Profile constraints**")
                 r1, r2, r3 = st.columns(3, gap="small")
                 r1.number_input("MD step", key="md_step", min_value=1.0, step=1.0)
                 r2.number_input("Control MD", key="md_control", min_value=0.5, step=0.5)
@@ -271,7 +297,14 @@ def run_app() -> None:
 
                 rd1, rd2 = st.columns(2, gap="small")
                 rd1.number_input("DLS BUILD min", key="dls_build_min", min_value=0.1, step=0.1, help="deg/30m")
-                rd2.number_input("DLS BUILD max", key="dls_build_max", min_value=0.1, step=0.1, help="deg/30m")
+                rd2.number_input("DLS BUILD max", key="dls_build_max", min_value=0.1, step=0.1, help="applies to BUILD1 and BUILD2")
+                st.selectbox(
+                    "Objective",
+                    options=list(OBJECTIVE_OPTIONS.keys()),
+                    index=list(OBJECTIVE_OPTIONS.keys()).index(str(st.session_state["objective_mode"])),
+                    key="objective_mode",
+                    format_func=lambda value: OBJECTIVE_OPTIONS[str(value)],
+                )
 
     if build_clicked:
         try:
@@ -284,7 +317,7 @@ def run_app() -> None:
 
     last_result = st.session_state.get("last_result")
     if last_result is None:
-        st.info("Set inputs and click Build trajectory to generate the J-profile.")
+        st.info("Set inputs and click Build trajectory to generate the profile.")
         return
 
     is_stale = st.session_state.get("last_input_signature") != _current_input_signature()
@@ -298,19 +331,20 @@ def run_app() -> None:
     t3 = last_result["t3"]
     config = last_result["config"]
     azimuth_deg = float(last_result["azimuth_deg"])
+    md_t1_m = float(last_result["md_t1_m"])
+    t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
 
-    m1, m2, m3, m4, m5 = st.columns(5, gap="small")
-    m1.metric("Distance to t1", f"{summary['distance_t1_m']:.2f} m")
-    m2.metric("Distance to t3", f"{summary['distance_t3_m']:.2f} m")
-    m3.metric("INC at t1", f"{summary['entry_inc_deg']:.2f} deg")
-    m4.metric("INC target", f"{config.entry_inc_target_deg:.1f}±{config.entry_inc_tolerance_deg:.1f}")
-    m5.metric("Max DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
+    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1.metric("t1 horizontal offset", _format_distance(t1_horizontal_offset_m))
+    m2.metric("INC at t1", f"{summary['entry_inc_deg']:.2f} deg")
+    m3.metric("INC target", f"{config.entry_inc_target_deg:.1f}±{config.entry_inc_tolerance_deg:.1f}")
+    m4.metric("Max DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
 
     with st.container(border=True):
         st.markdown("### 3D trajectory and DLS")
         row1_col1, row1_col2 = st.columns(2, gap="medium")
         row1_col1.plotly_chart(
-            trajectory_3d_figure(stations, surface=surface, t1=t1, t3=t3),
+            trajectory_3d_figure(stations, surface=surface, t1=t1, t3=t3, md_t1_m=md_t1_m),
             width="stretch",
         )
         row1_col2.plotly_chart(
@@ -332,7 +366,12 @@ def run_app() -> None:
 
     tab_summary, tab_survey = st.tabs(["Summary", "Survey"])
     with tab_summary:
-        summary_df = pd.DataFrame({"metric": list(summary.keys()), "value": [float(v) for v in summary.values()]})
+        hidden_metrics = {"distance_t1_m", "distance_t3_m"}
+        summary_visible = {key: value for key, value in summary.items() if key not in hidden_metrics}
+        summary_visible["t1_horizontal_offset_m"] = t1_horizontal_offset_m
+        summary_df = pd.DataFrame(
+            {"metric": list(summary_visible.keys()), "value": [float(v) for v in summary_visible.values()]}
+        )
         st.dataframe(summary_df, width="stretch", hide_index=True)
 
     with tab_survey:

@@ -115,5 +115,5 @@ class BuildSegment(Segment):
 
 
 class HorizontalSegment(HoldSegment):
-    def __init__(self, length_m: float, azi_deg: float, name: str = "HORIZONTAL"):
-        super().__init__(length_m=length_m, inc_deg=90.0, azi_deg=azi_deg, name=name)
+    def __init__(self, length_m: float, azi_deg: float, inc_deg: float = 90.0, name: str = "HORIZONTAL"):
+        super().__init__(length_m=length_m, inc_deg=inc_deg, azi_deg=azi_deg, name=name)
