@@ -40,8 +40,8 @@ def test_plotly_figures_are_constructed() -> None:
     segment_traces = {str(trace.name): str(trace.line.color) for trace in fig_dls.data}
     assert {"BUILD1", "BUILD2", "HOLD", "HORIZONTAL"}.issubset(segment_traces.keys())
     assert len({segment_traces["BUILD1"], segment_traces["BUILD2"], segment_traces["HOLD"], segment_traces["HORIZONTAL"]}) == 4
-    assert "Transition" in segment_traces
-    transition_traces = [trace for trace in fig_dls.data if str(trace.name) == "Transition"]
+    assert "Переход" in segment_traces
+    transition_traces = [trace for trace in fig_dls.data if str(trace.name) == "Переход"]
     assert transition_traces
     assert all(trace.showlegend is False for trace in transition_traces)
 
@@ -63,9 +63,9 @@ def test_plotly_figures_are_constructed() -> None:
     assert "X=0 axis" in names
     assert "Y=0 axis" in names
 
-    trace3d = next(trace for trace in fig3d.data if str(trace.name) == "Trajectory")
-    trace_plan = next(trace for trace in fig_plan.data if str(trace.name) == "Trajectory")
-    trace_section = next(trace for trace in fig_section.data if str(trace.name) == "Trajectory")
+    trace3d = next(trace for trace in fig3d.data if str(trace.name) == "Траектория")
+    trace_plan = next(trace for trace in fig_plan.data if str(trace.name) == "Траектория")
+    trace_section = next(trace for trace in fig_section.data if str(trace.name) == "Траектория")
     trace_dls = next(trace for trace in fig_dls.data if str(trace.name) == "HORIZONTAL")
 
     for trace in (trace3d, trace_plan, trace_section, trace_dls):

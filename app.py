@@ -11,25 +11,25 @@ from pywp.planner import PlanningError
 from pywp.visualization import dls_figure, plan_view_figure, section_view_figure, trajectory_3d_figure
 
 SCENARIOS = {
-    "Composite short reach": {
+    "Композитный: короткий вынос": {
         "surface": Point3D(0.0, 0.0, 0.0),
         "t1": Point3D(600.0, 800.0, 2400.0),
         "t3": Point3D(1500.0, 2000.0, 2500.0),
     },
-    "Composite medium reach": {
+    "Композитный: средний вынос": {
         "surface": Point3D(0.0, 0.0, 0.0),
         "t1": Point3D(800.0, 1066.6667, 2400.0),
         "t3": Point3D(2600.0, 3466.6667, 2600.0),
     },
-    "Composite long reach": {
+    "Композитный: длинный вынос": {
         "surface": Point3D(0.0, 0.0, 0.0),
         "t1": Point3D(900.0, 1200.0, 2500.0),
         "t3": Point3D(2800.0, 3733.3333, 2650.0),
     },
 }
 OBJECTIVE_OPTIONS = {
-    OBJECTIVE_MAXIMIZE_HOLD: "Maximize HOLD length",
-    OBJECTIVE_MINIMIZE_BUILD_DLS: "Minimize BUILD DLS",
+    OBJECTIVE_MAXIMIZE_HOLD: "Максимизировать длину HOLD",
+    OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать DLS на BUILD",
 }
 
 
@@ -213,7 +213,7 @@ def _run_planner() -> None:
 
 
 def run_app() -> None:
-    st.set_page_config(page_title="Composite Well Planner", layout="wide")
+    st.set_page_config(page_title="Планировщик траектории скважины", layout="wide")
 
     _init_state()
     _inject_styles()
@@ -221,8 +221,8 @@ def run_app() -> None:
     st.markdown(
         """
         <div class="hero">
-          <h2>Composite Well Planner</h2>
-          <p>Profile is fixed: VERTICAL -> BUILD1 -> HOLD -> BUILD2 -> HORIZONTAL. Point t1 is reached at the end of BUILD2 (start of HORIZONTAL). No TURN support: S, t1, t3 must share one azimuth in plan.</p>
+          <h2>Планировщик траектории скважины</h2>
+          <p>Профиль фиксирован: VERTICAL -> BUILD1 -> HOLD -> BUILD2 -> HORIZONTAL. Точка t1 достигается в конце BUILD2 (начало HORIZONTAL). TURN не поддерживается: S, t1, t3 должны лежать на одном азимуте в плане.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -230,13 +230,13 @@ def run_app() -> None:
 
     top_left, top_mid, top_right = st.columns([1.5, 1.1, 3.0], gap="small")
     with top_left:
-        st.selectbox("Template", options=list(SCENARIOS.keys()), key="scenario_name")
+        st.selectbox("Шаблон", options=list(SCENARIOS.keys()), key="scenario_name")
     with top_mid:
-        st.markdown("<div class='small-note'>Template actions</div>", unsafe_allow_html=True)
-        if st.button("Apply template", icon=":material/sync:", width="stretch"):
+        st.markdown("<div class='small-note'>Действия шаблона</div>", unsafe_allow_html=True)
+        if st.button("Применить шаблон", icon=":material/sync:", width="stretch"):
             _apply_scenario(st.session_state["scenario_name"])
             st.rerun()
-        if st.button("Clear result", icon=":material/delete:", width="stretch"):
+        if st.button("Очистить результат", icon=":material/delete:", width="stretch"):
             st.session_state["last_result"] = None
             st.session_state["last_error"] = ""
             st.session_state["last_built_at"] = ""
@@ -244,14 +244,14 @@ def run_app() -> None:
             st.rerun()
     with top_right:
         st.markdown(
-            "<div class='small-note'>Tip: edit parameters in the form and click Build. "
-            "The last successful trajectory stays visible until you rebuild.</div>",
+            "<div class='small-note'>Подсказка: измените параметры в форме и нажмите «Построить траекторию». "
+            "Последний успешный расчет сохраняется на экране до следующего запуска.</div>",
             unsafe_allow_html=True,
         )
 
     with st.form("planner_form", clear_on_submit=False, enter_to_submit=False, border=False):
         with st.container(border=True):
-            st.markdown("### Input workspace")
+            st.markdown("### Рабочая область ввода")
             c0, c1, c2, c3, c4 = st.columns(
                 [1.0, 1.25, 1.25, 1.25, 2.35],
                 gap="small",
@@ -260,57 +260,63 @@ def run_app() -> None:
             )
 
             with c0:
-                st.markdown("**Build**")
+                st.markdown("**Расчет**")
                 build_clicked = st.form_submit_button(
-                    "Build trajectory",
+                    "Построить траекторию",
                     type="primary",
                     icon=":material/play_arrow:",
                     width="stretch",
                 )
                 if st.session_state["last_built_at"]:
-                    st.caption(f"Last build: {st.session_state['last_built_at']}")
+                    st.caption(f"Последний расчет: {st.session_state['last_built_at']}")
 
             with c1:
-                st.markdown("**Surface S**")
+                st.markdown("**Устье S**")
                 st.number_input("S X (E), m", key="surface_x", step=10.0)
                 st.number_input("S Y (N), m", key="surface_y", step=10.0)
                 st.number_input("S Z (TVD), m", key="surface_z", step=10.0)
 
             with c2:
-                st.markdown("**Entry t1**")
+                st.markdown("**Точка входа t1**")
                 st.number_input("t1 X (E), m", key="t1_x", step=10.0)
                 st.number_input("t1 Y (N), m", key="t1_y", step=10.0)
                 st.number_input("t1 Z (TVD), m", key="t1_z", step=10.0)
 
             with c3:
-                st.markdown("**End t3**")
+                st.markdown("**Концевая точка t3**")
                 st.number_input("t3 X (E), m", key="t3_x", step=10.0)
                 st.number_input("t3 Y (N), m", key="t3_y", step=10.0)
                 st.number_input("t3 Z (TVD), m", key="t3_z", step=10.0)
 
             with c4:
-                st.markdown("**Profile constraints**")
+                st.markdown("**Ограничения профиля**")
                 r1, r2, r3 = st.columns(3, gap="small")
-                r1.number_input("MD step", key="md_step", min_value=1.0, step=1.0)
-                r2.number_input("Control MD", key="md_control", min_value=0.5, step=0.5)
-                r3.number_input("Pos tol", key="pos_tol", min_value=0.1, step=0.1)
+                r1.number_input("Шаг MD", key="md_step", min_value=1.0, step=1.0)
+                r2.number_input("Контрольный шаг MD", key="md_control", min_value=0.5, step=0.5)
+                r3.number_input("Допуск по позиции", key="pos_tol", min_value=0.1, step=0.1)
 
                 rr1, rr2 = st.columns(2, gap="small")
-                rr1.number_input("Entry INC target", key="entry_inc_target", min_value=70.0, max_value=89.0, step=0.5)
-                rr2.number_input("Entry INC tolerance", key="entry_inc_tol", min_value=0.1, max_value=5.0, step=0.1)
+                rr1.number_input("Целевой INC входа", key="entry_inc_target", min_value=70.0, max_value=89.0, step=0.5)
+                rr2.number_input("Допуск INC входа", key="entry_inc_tol", min_value=0.1, max_value=5.0, step=0.1)
 
                 rd1, rd2 = st.columns(2, gap="small")
-                rd1.number_input("DLS BUILD min", key="dls_build_min", min_value=0.1, step=0.1, help="deg/30m")
-                rd2.number_input("DLS BUILD max", key="dls_build_max", min_value=0.1, step=0.1, help="applies to BUILD1 and BUILD2")
+                rd1.number_input("Мин DLS BUILD", key="dls_build_min", min_value=0.1, step=0.1, help="deg/30m")
+                rd2.number_input(
+                    "Макс DLS BUILD",
+                    key="dls_build_max",
+                    min_value=0.1,
+                    step=0.1,
+                    help="для BUILD1 и BUILD2",
+                )
                 st.number_input(
-                    "Min vertical before KOP, m",
+                    "Мин VERTICAL до KOP, м",
                     key="kop_min_vertical",
                     min_value=0.0,
                     step=10.0,
-                    help="Minimum vertical segment from S before BUILD1 starts.",
+                    help="Минимальный VERTICAL участок от S до начала BUILD1.",
                 )
                 st.selectbox(
-                    "Objective",
+                    "Целевая функция",
                     options=list(OBJECTIVE_OPTIONS.keys()),
                     index=list(OBJECTIVE_OPTIONS.keys()).index(str(st.session_state["objective_mode"])),
                     key="objective_mode",
@@ -328,12 +334,12 @@ def run_app() -> None:
 
     last_result = st.session_state.get("last_result")
     if last_result is None:
-        st.info("Set inputs and click Build trajectory to generate the profile.")
+        st.info("Задайте параметры и нажмите «Построить траекторию».")
         return
 
     is_stale = st.session_state.get("last_input_signature") != _current_input_signature()
     if is_stale:
-        st.warning("Inputs changed after the last build. Showing previous trajectory. Press Build to refresh.")
+        st.warning("Параметры изменились после последнего расчета. Показан предыдущий результат. Нажмите «Построить траекторию» для обновления.")
 
     summary = last_result["summary"]
     stations = last_result["stations"]
@@ -345,15 +351,14 @@ def run_app() -> None:
     md_t1_m = float(last_result["md_t1_m"])
     t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
 
-    m1, m2, m3, m4, m5 = st.columns(5, gap="small")
-    m1.metric("t1 horizontal offset", _format_distance(t1_horizontal_offset_m))
-    m2.metric("INC at t1", f"{summary['entry_inc_deg']:.2f} deg")
-    m3.metric("INC target", f"{config.entry_inc_target_deg:.1f}±{config.entry_inc_tolerance_deg:.1f}")
-    m4.metric("KOP MD", _format_distance(float(summary["kop_md_m"])))
-    m5.metric("Max DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
+    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1.metric("Горизонтальный отход t1", _format_distance(t1_horizontal_offset_m))
+    m2.metric("Угол входа в пласт", f"{summary['entry_inc_deg']:.2f} deg")
+    m3.metric("KOP MD", _format_distance(float(summary["kop_md_m"])))
+    m4.metric("Макс DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
 
     with st.container(border=True):
-        st.markdown("### 3D trajectory and DLS")
+        st.markdown("### 3D траектория и DLS")
         row1_col1, row1_col2 = st.columns(2, gap="medium")
         row1_col1.plotly_chart(
             trajectory_3d_figure(stations, surface=surface, t1=t1, t3=t3, md_t1_m=md_t1_m),
@@ -365,7 +370,7 @@ def run_app() -> None:
         )
 
     with st.container(border=True):
-        st.markdown("### Plan and vertical section")
+        st.markdown("### План и вертикальный разрез")
         row2_col1, row2_col2 = st.columns(2, gap="medium")
         row2_col1.plotly_chart(
             plan_view_figure(stations, surface=surface, t1=t1, t3=t3),
@@ -376,7 +381,7 @@ def run_app() -> None:
             width="stretch",
         )
 
-    tab_summary, tab_survey = st.tabs(["Summary", "Survey"])
+    tab_summary, tab_survey = st.tabs(["Сводка", "Инклинометрия"])
     with tab_summary:
         hidden_metrics = {"distance_t1_m", "distance_t3_m"}
         summary_visible = {key: value for key, value in summary.items() if key not in hidden_metrics}
@@ -389,7 +394,7 @@ def run_app() -> None:
     with tab_survey:
         st.dataframe(stations, width="stretch")
         st.download_button(
-            "Download survey CSV",
+            "Скачать CSV инклинометрии",
             data=stations.to_csv(index=False).encode("utf-8"),
             file_name="well_survey.csv",
             mime="text/csv",
@@ -400,5 +405,5 @@ def run_app() -> None:
 
 if __name__ == "__main__":
     if not st.runtime.exists():
-        raise SystemExit("Use `streamlit run app.py` to start the application.")
+        raise SystemExit("Запустите приложение командой `streamlit run app.py`.")
     run_app()

@@ -185,7 +185,7 @@ def trajectory_3d_figure(
             y=df["Y_m"],
             z=df["Z_m"],
             mode="lines",
-            name="Trajectory",
+            name="Траектория",
             line={"width": 6, "color": "#006D77"},
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
@@ -207,7 +207,7 @@ def trajectory_3d_figure(
             mode="markers+text",
             text=["S", "t1", "t3"],
             textposition="top center",
-            name="Targets",
+            name="Цели",
             marker={"size": 6, "color": ["#EF476F", "#FFD166", "#118AB2"]},
             customdata=_build_hover_customdata(
                 x_values=targets_df["X_m"].to_numpy(dtype=float),
@@ -229,7 +229,7 @@ def trajectory_3d_figure(
                 y=[float(t1_calc["Y_m"]), float(t3_calc["Y_m"])],
                 z=[float(t1_calc["Z_m"]), float(t3_calc["Z_m"])],
                 mode="markers",
-                name="Calculated at t1/t3",
+                name="Расчетные в t1/t3",
                 marker={"size": 5, "color": "#073B4C", "symbol": "diamond"},
                 customdata=_station_hover_customdata(calc_df),
                 hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
@@ -266,10 +266,10 @@ def trajectory_3d_figure(
         )
 
     fig.update_layout(
-        title="3D trajectory",
+        title="3D траектория",
         scene={
-            "xaxis_title": "X / East (m)",
-            "yaxis_title": "Y / North (m)",
+            "xaxis_title": "X / Восток (м)",
+            "yaxis_title": "Y / Север (м)",
             "zaxis_title": "Z / TVD (m)",
             "xaxis": {"range": x_range, **xy_axis_style},
             "yaxis": {"range": y_range, **xy_axis_style},
@@ -302,7 +302,7 @@ def plan_view_figure(
             x=df["X_m"],
             y=df["Y_m"],
             mode="lines",
-            name="Trajectory",
+            name="Траектория",
             line={"width": 4, "color": "#0B6E4F"},
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
@@ -322,7 +322,7 @@ def plan_view_figure(
             mode="markers+text",
             text=["S", "t1", "t3"],
             textposition="top center",
-            name="Targets",
+            name="Цели",
             marker={"size": 9, "color": ["#FF006E", "#FB5607", "#3A86FF"]},
             customdata=_build_hover_customdata(
                 x_values=targets_df["X_m"].to_numpy(dtype=float),
@@ -334,9 +334,9 @@ def plan_view_figure(
     )
 
     fig.update_layout(
-        title="Plan view (E-N)",
-        xaxis_title="East (m)",
-        yaxis_title="North (m)",
+        title="План (E-N)",
+        xaxis_title="Восток (м)",
+        yaxis_title="Север (м)",
         yaxis={"scaleanchor": "x", "scaleratio": 1},
         height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
@@ -370,7 +370,7 @@ def section_view_figure(
             x=vs,
             y=df["Z_m"],
             mode="lines",
-            name="Trajectory",
+            name="Траектория",
             line={"width": 4, "color": "#1D3557"},
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
@@ -383,7 +383,7 @@ def section_view_figure(
             mode="markers+text",
             text=t_points["name"],
             textposition="top center",
-            name="Targets",
+            name="Цели",
             marker={"size": 9, "color": "#E76F51"},
             customdata=_build_hover_customdata(
                 x_values=t_points["X_m"].to_numpy(dtype=float),
@@ -395,9 +395,9 @@ def section_view_figure(
     )
 
     fig.update_layout(
-        title="Vertical section",
-        xaxis_title="Section coordinate (m)",
-        yaxis_title="TVD (m)",
+        title="Вертикальный разрез",
+        xaxis_title="Координата по разрезу (м)",
+        yaxis_title="TVD (м)",
         yaxis={"autorange": "reversed"},
         height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
@@ -465,7 +465,7 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
                     x=[md_values[idx - 1], md_values[idx]],
                     y=[y0, y1],
                     mode="lines",
-                    name="Transition",
+                    name="Переход",
                     legendgroup="transition",
                     showlegend=False,
                     line={"width": 2, "color": "rgba(120, 120, 120, 0.9)", "dash": "dash"},
@@ -479,7 +479,7 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
             y=float(limit),
             line_dash="dot",
             line_color="#C1121F",
-            annotation_text=f"{segment} limit {limit:.1f}",
+            annotation_text=f"{segment} лимит {limit:.1f}",
             annotation_position="top left",
         )
 
