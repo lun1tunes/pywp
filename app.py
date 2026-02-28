@@ -112,7 +112,7 @@ def _init_state() -> None:
     st.session_state.setdefault("entry_inc_target", 86.0)
     st.session_state.setdefault("entry_inc_tol", 2.0)
     st.session_state.setdefault("dls_build_min", 0.5)
-    st.session_state.setdefault("dls_build_max", 10.0)
+    st.session_state.setdefault("dls_build_max", 3.0)
     st.session_state.setdefault("kop_min_vertical", 300.0)
     st.session_state.setdefault("objective_mode", OBJECTIVE_MAXIMIZE_HOLD)
 

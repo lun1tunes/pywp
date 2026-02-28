@@ -474,12 +474,19 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
                 )
             )
 
+    # Avoid overlapping labels for equal DLS limits (e.g., BUILD1/BUILD2 or HOLD/HORIZONTAL).
+    grouped_limits: dict[float, list[str]] = {}
     for segment, limit in dls_limits.items():
+        key = round(float(limit), 6)
+        grouped_limits.setdefault(key, []).append(str(segment))
+
+    for limit_value in sorted(grouped_limits.keys(), reverse=True):
+        segment_label = "/".join(grouped_limits[limit_value])
         fig.add_hline(
-            y=float(limit),
+            y=limit_value,
             line_dash="dot",
             line_color="#C1121F",
-            annotation_text=f"{segment} лимит {limit:.1f}",
+            annotation_text=f"{segment_label} лимит {limit_value:.1f}",
             annotation_position="top left",
         )
 

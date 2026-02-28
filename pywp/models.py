@@ -27,7 +27,7 @@ class TrajectoryConfig:
     entry_inc_tolerance_deg: float = 2.0
 
     dls_build_min_deg_per_30m: float = 0.5
-    dls_build_max_deg_per_30m: float = 10.0
+    dls_build_max_deg_per_30m: float = 3.0
     kop_min_vertical_m: float = 300.0
     kop_search_grid_size: int = 81
 
@@ -37,9 +37,9 @@ class TrajectoryConfig:
     dls_limits_deg_per_30m: Dict[str, float] = field(
         default_factory=lambda: {
             "VERTICAL": 1.0,
-            "BUILD1": 10.0,
+            "BUILD1": 3.0,
             "HOLD": 2.0,
-            "BUILD2": 10.0,
+            "BUILD2": 3.0,
             "HORIZONTAL": 2.0,
         }
     )
