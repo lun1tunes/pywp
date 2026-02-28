@@ -249,7 +249,7 @@ def run_app() -> None:
             unsafe_allow_html=True,
         )
 
-    with st.form("planner_form", clear_on_submit=False, border=False):
+    with st.form("planner_form", clear_on_submit=False, enter_to_submit=False, border=False):
         with st.container(border=True):
             st.markdown("### Input workspace")
             c0, c1, c2, c3, c4 = st.columns(
