@@ -7,6 +7,10 @@ OBJECTIVE_MAXIMIZE_HOLD = "maximize_hold"
 OBJECTIVE_MINIMIZE_BUILD_DLS = "minimize_build_dls"
 ALLOWED_OBJECTIVE_MODES = (OBJECTIVE_MAXIMIZE_HOLD, OBJECTIVE_MINIMIZE_BUILD_DLS)
 ObjectiveMode = Literal["maximize_hold", "minimize_build_dls"]
+TURN_SOLVER_LEAST_SQUARES = "least_squares"
+TURN_SOLVER_DE_HYBRID = "de_hybrid"
+ALLOWED_TURN_SOLVER_MODES = (TURN_SOLVER_LEAST_SQUARES, TURN_SOLVER_DE_HYBRID)
+TurnSolverMode = Literal["least_squares", "de_hybrid"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +40,9 @@ class TrajectoryConfig:
 
     max_total_md_m: float = 12000.0
     objective_mode: ObjectiveMode = OBJECTIVE_MAXIMIZE_HOLD
+    turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
+    turn_solver_qmc_samples: int = 24
+    turn_solver_local_starts: int = 12
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: float = 30.0
 

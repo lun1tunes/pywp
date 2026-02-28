@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
+from time import perf_counter
 
 import pandas as pd
 import streamlit as st
 
 from pywp import Point3D, TrajectoryConfig, TrajectoryPlanner
-from pywp.models import OBJECTIVE_MAXIMIZE_HOLD, OBJECTIVE_MINIMIZE_BUILD_DLS
+from pywp.models import (
+    OBJECTIVE_MAXIMIZE_HOLD,
+    OBJECTIVE_MINIMIZE_BUILD_DLS,
+    TURN_SOLVER_DE_HYBRID,
+    TURN_SOLVER_LEAST_SQUARES,
+)
 from pywp.planner import PlanningError
+from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import arrow_safe_text_dataframe, format_distance
 from pywp.visualization import dls_figure, plan_view_figure, section_view_figure, trajectory_3d_figure
 
@@ -47,53 +55,16 @@ OBJECTIVE_OPTIONS = {
     OBJECTIVE_MAXIMIZE_HOLD: "Максимизировать длину HOLD",
     OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать DLS на BUILD",
 }
+TURN_SOLVER_OPTIONS = {
+    TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF)",
+    TURN_SOLVER_DE_HYBRID: "DE Hybrid (global + local)",
+}
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
     dx = float(point.x - reference.x)
     dy = float(point.y - reference.y)
     return float((dx * dx + dy * dy) ** 0.5)
-
-
-def _inject_styles() -> None:
-    st.markdown(
-        """
-        <style>
-        .stApp {
-            background: radial-gradient(1200px 500px at 20% -20%, #E8F1FF 0%, #F8FAFD 45%, #FAFCFF 100%);
-        }
-        .block-container {
-            max-width: 1650px;
-            padding-top: 1.2rem;
-            padding-bottom: 2rem;
-        }
-        .hero {
-            border: 1px solid #D6E4FF;
-            background: linear-gradient(135deg, #F1F7FF 0%, #FFFFFF 60%);
-            border-radius: 16px;
-            padding: 1.05rem 1.2rem;
-            margin-bottom: 0.8rem;
-            box-shadow: 0 8px 24px rgba(15, 33, 66, 0.06);
-        }
-        .hero h2 {
-            margin: 0 0 0.25rem 0;
-            font-size: 1.55rem;
-            letter-spacing: 0.01em;
-            color: #12355B;
-        }
-        .hero p {
-            margin: 0;
-            color: #355070;
-            font-size: 0.97rem;
-        }
-        .small-note {
-            color: #54657D;
-            font-size: 0.87rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def _apply_scenario(name: str) -> None:
@@ -121,11 +92,25 @@ def _init_state() -> None:
     st.session_state.setdefault("dls_build_max", 3.0)
     st.session_state.setdefault("kop_min_vertical", 300.0)
     st.session_state.setdefault("objective_mode", OBJECTIVE_MAXIMIZE_HOLD)
+    st.session_state.setdefault("turn_solver_mode", TURN_SOLVER_LEAST_SQUARES)
+    st.session_state.setdefault("turn_solver_qmc_samples", 24)
+    st.session_state.setdefault("turn_solver_local_starts", 12)
 
     st.session_state.setdefault("last_result", None)
     st.session_state.setdefault("last_error", "")
     st.session_state.setdefault("last_built_at", "")
+    st.session_state.setdefault("last_runtime_s", None)
     st.session_state.setdefault("last_input_signature", None)
+    st.session_state.setdefault("solver_profile_rows", None)
+    st.session_state.setdefault("solver_profile_at", "")
+
+
+def _clear_result() -> None:
+    st.session_state["last_result"] = None
+    st.session_state["last_error"] = ""
+    st.session_state["last_built_at"] = ""
+    st.session_state["last_runtime_s"] = None
+    st.session_state["last_input_signature"] = None
 
 
 def _current_input_signature() -> tuple[object, ...]:
@@ -147,9 +132,12 @@ def _current_input_signature() -> tuple[object, ...]:
         "dls_build_min",
         "dls_build_max",
         "kop_min_vertical",
+        "turn_solver_qmc_samples",
+        "turn_solver_local_starts",
     )
     signature = [float(st.session_state[key]) for key in keys]
     signature.append(str(st.session_state["objective_mode"]))
+    signature.append(str(st.session_state["turn_solver_mode"]))
     return tuple(signature)
 
 
@@ -186,6 +174,9 @@ def _build_config_from_state() -> TrajectoryConfig:
         dls_build_max_deg_per_30m=max(dls_build_min, dls_build_max),
         kop_min_vertical_m=float(st.session_state["kop_min_vertical"]),
         objective_mode=str(st.session_state["objective_mode"]),
+        turn_solver_mode=str(st.session_state["turn_solver_mode"]),
+        turn_solver_qmc_samples=int(st.session_state["turn_solver_qmc_samples"]),
+        turn_solver_local_starts=int(st.session_state["turn_solver_local_starts"]),
         dls_limits_deg_per_30m={
             "VERTICAL": 1.0,
             "BUILD_REV": max(dls_build_min, dls_build_max),
@@ -199,10 +190,20 @@ def _build_config_from_state() -> TrajectoryConfig:
     )
 
 
-def _run_planner() -> None:
-    surface, t1, t3 = _build_points_from_state()
-    config = _build_config_from_state()
+def _validate_input(surface: Point3D, t1: Point3D, t3: Point3D, config: TrajectoryConfig) -> list[str]:
+    errors: list[str] = []
+    if t1.z <= surface.z:
+        errors.append("t1 должен быть ниже устья S по TVD.")
+    if t3.z <= surface.z:
+        errors.append("t3 должен быть ниже устья S по TVD.")
+    if config.kop_min_vertical_m >= max(0.0, t1.z - surface.z):
+        errors.append("Мин VERTICAL до KOP должен быть меньше TVD до t1.")
+    if config.md_step_m < config.md_step_control_m:
+        errors.append("Шаг MD должен быть больше либо равен контрольному шагу MD.")
+    return errors
 
+
+def _run_planner(surface: Point3D, t1: Point3D, t3: Point3D, config: TrajectoryConfig) -> None:
     planner = TrajectoryPlanner()
     result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
 
@@ -221,41 +222,99 @@ def _run_planner() -> None:
     st.session_state["last_input_signature"] = _current_input_signature()
 
 
+def _run_solver_profiling() -> None:
+    planner = TrajectoryPlanner()
+    base_config = _build_config_from_state()
+
+    started_total = perf_counter()
+    rows: list[dict[str, str]] = []
+    run_items = [
+        (scenario_name, scenario_points, solver_mode)
+        for scenario_name, scenario_points in SCENARIOS.items()
+        for solver_mode in (TURN_SOLVER_LEAST_SQUARES, TURN_SOLVER_DE_HYBRID)
+    ]
+    total_items = len(run_items)
+    progress = st.progress(0, text="Профилирование TURN-методов...")
+    with st.status("Выполняется profiling TURN-решателей...", expanded=True) as status:
+        for index, (scenario_name, scenario_points, solver_mode) in enumerate(run_items, start=1):
+            progress.progress(
+                int(((index - 1) / max(total_items, 1)) * 100),
+                text=f"{index}/{total_items}: {scenario_name}",
+            )
+            status.write(f"[{index}/{total_items}] {scenario_name} · {TURN_SOLVER_OPTIONS[solver_mode]}")
+            surface = scenario_points["surface"]
+            t1 = scenario_points["t1"]
+            t3 = scenario_points["t3"]
+            config = replace(base_config, turn_solver_mode=solver_mode)
+            started = perf_counter()
+            try:
+                result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
+                elapsed_s = perf_counter() - started
+                rows.append(
+                    {
+                        "Шаблон": scenario_name,
+                        "TURN solver": TURN_SOLVER_OPTIONS[solver_mode],
+                        "Статус": "OK",
+                        "Время, с": f"{elapsed_s:.3f}",
+                        "Промах t1, м": f"{float(result.summary['distance_t1_m']):.4f}",
+                        "Промах t3, м": f"{float(result.summary['distance_t3_m']):.4f}",
+                        "TURN, deg": f"{float(result.summary.get('azimuth_turn_deg', 0.0)):.2f}",
+                        "Тип траектории": str(result.summary.get("trajectory_type", "—")),
+                    }
+                )
+            except PlanningError as exc:
+                elapsed_s = perf_counter() - started
+                rows.append(
+                    {
+                        "Шаблон": scenario_name,
+                        "TURN solver": TURN_SOLVER_OPTIONS[solver_mode],
+                        "Статус": "Ошибка",
+                        "Время, с": f"{elapsed_s:.3f}",
+                        "Промах t1, м": "—",
+                        "Промах t3, м": "—",
+                        "TURN, deg": "—",
+                        "Тип траектории": "—",
+                        "Причина": str(exc),
+                    }
+                )
+
+        elapsed_total_s = perf_counter() - started_total
+        progress.progress(100, text="Профилирование завершено.")
+        status.update(label=f"Профилирование завершено за {elapsed_total_s:.2f} с", state="complete", expanded=False)
+    progress.empty()
+    st.session_state["solver_profile_rows"] = rows
+    st.session_state["solver_profile_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def run_app() -> None:
     st.set_page_config(page_title="Планировщик траектории скважины", layout="wide")
 
     _init_state()
-    _inject_styles()
-
-    st.markdown(
-        """
-        <div class="hero">
-          <h2>Планировщик траектории скважины</h2>
-          <p>Профиль фиксирован по инженерным шаблонам. Для близких t1 используется режим «Цели в обратном направлении» с дополнительными сегментами BUILD_REV/HOLD_REV/DROP_REV, затем BUILD1 -> HOLD -> BUILD2 -> HORIZONTAL.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    apply_page_style(max_width_px=1680)
+    render_hero(
+        title="Планировщик траектории скважины",
+        subtitle=(
+            "Профиль фиксирован по инженерным шаблонам. Для близких t1 используется режим "
+            "«Цели в обратном направлении» с сегментами BUILD_REV/HOLD_REV/DROP_REV, далее "
+            "BUILD1 -> HOLD -> BUILD2 -> HORIZONTAL."
+        ),
     )
 
     top_left, top_mid, top_right = st.columns([1.5, 1.1, 3.0], gap="small")
     with top_left:
         st.selectbox("Шаблон", options=list(SCENARIOS.keys()), key="scenario_name")
     with top_mid:
-        st.markdown("<div class='small-note'>Действия шаблона</div>", unsafe_allow_html=True)
+        render_small_note("Действия шаблона")
         if st.button("Применить шаблон", icon=":material/sync:", width="stretch"):
             _apply_scenario(st.session_state["scenario_name"])
             st.rerun()
         if st.button("Очистить результат", icon=":material/delete:", width="stretch"):
-            st.session_state["last_result"] = None
-            st.session_state["last_error"] = ""
-            st.session_state["last_built_at"] = ""
-            st.session_state["last_input_signature"] = None
+            _clear_result()
             st.rerun()
     with top_right:
-        st.markdown(
-            "<div class='small-note'>Подсказка: измените параметры в форме и нажмите «Построить траекторию». "
-            "Последний успешный расчет сохраняется на экране до следующего запуска.</div>",
-            unsafe_allow_html=True,
+        render_small_note(
+            "Подсказка: измените параметры в форме и нажмите «Построить траекторию». "
+            "Последний успешный расчет сохраняется до следующего запуска."
         )
 
     with st.form("planner_form", clear_on_submit=False, enter_to_submit=False, border=False):
@@ -278,6 +337,8 @@ def run_app() -> None:
                 )
                 if st.session_state["last_built_at"]:
                     st.caption(f"Последний расчет: {st.session_state['last_built_at']}")
+                if st.session_state.get("last_runtime_s") is not None:
+                    st.caption(f"Время расчета: {float(st.session_state['last_runtime_s']):.2f} с")
 
             with c1:
                 st.markdown("**Устье S**")
@@ -324,19 +385,75 @@ def run_app() -> None:
                     step=10.0,
                     help="Минимальный VERTICAL участок от S до начала BUILD1.",
                 )
-                st.selectbox(
-                    "Целевая функция",
-                    options=list(OBJECTIVE_OPTIONS.keys()),
-                    index=list(OBJECTIVE_OPTIONS.keys()).index(str(st.session_state["objective_mode"])),
-                    key="objective_mode",
-                    format_func=lambda value: OBJECTIVE_OPTIONS[str(value)],
-                )
+                with st.expander("TURN и оптимизация", expanded=False):
+                    st.selectbox(
+                        "Целевая функция",
+                        options=list(OBJECTIVE_OPTIONS.keys()),
+                        key="objective_mode",
+                        format_func=lambda value: OBJECTIVE_OPTIONS[str(value)],
+                    )
+                    st.selectbox(
+                        "TURN solver",
+                        options=list(TURN_SOLVER_OPTIONS.keys()),
+                        key="turn_solver_mode",
+                        format_func=lambda value: TURN_SOLVER_OPTIONS[str(value)],
+                    )
+                    rs1, rs2 = st.columns(2, gap="small")
+                    rs1.number_input(
+                        "TURN QMC samples",
+                        key="turn_solver_qmc_samples",
+                        min_value=0,
+                        step=4,
+                        help="Дополнительные стартовые точки Latin Hypercube для TURN-решателя.",
+                    )
+                    rs2.number_input(
+                        "TURN local starts",
+                        key="turn_solver_local_starts",
+                        min_value=1,
+                        step=1,
+                        help="Количество лучших стартов для локального решателя.",
+                    )
+
+    surface_input, t1_input, t3_input = _build_points_from_state()
+    config_input = _build_config_from_state()
+    preflight_errors = _validate_input(surface=surface_input, t1=t1_input, t3=t3_input, config=config_input)
+    if preflight_errors:
+        st.warning("Предварительная проверка параметров:\n- " + "\n- ".join(preflight_errors))
+
+    with st.expander("Профилирование TURN-методов", expanded=False):
+        st.caption("Сравнение методов на типовых шаблонах текущего проекта.")
+        if st.button("Запустить profiling", icon=":material/speed:", width="content"):
+            _run_solver_profiling()
+        profile_rows = st.session_state.get("solver_profile_rows")
+        if st.session_state.get("solver_profile_at"):
+            st.caption(f"Последний profiling: {st.session_state['solver_profile_at']}")
+        if profile_rows:
+            profile_df = pd.DataFrame(profile_rows)
+            st.dataframe(arrow_safe_text_dataframe(profile_df), width="stretch", hide_index=True)
 
     if build_clicked:
-        try:
-            _run_planner()
-        except PlanningError as exc:
-            st.session_state["last_error"] = str(exc)
+        progress = st.progress(0, text="Подготовка расчета...")
+        with st.status("Расчет траектории...", expanded=True) as status:
+            try:
+                status.write("Проверка входных данных.")
+                progress.progress(20, text="Проверка входных данных...")
+                if preflight_errors:
+                    raise PlanningError("; ".join(preflight_errors))
+                status.write("Запуск планировщика и решателя.")
+                progress.progress(55, text="Выполняется расчет траектории...")
+                started = perf_counter()
+                _run_planner(surface=surface_input, t1=t1_input, t3=t3_input, config=config_input)
+                elapsed_s = perf_counter() - started
+                st.session_state["last_runtime_s"] = float(elapsed_s)
+                progress.progress(100, text="Расчет завершен.")
+                status.update(label=f"Расчет завершен за {elapsed_s:.2f} с", state="complete", expanded=False)
+            except PlanningError as exc:
+                st.session_state["last_error"] = str(exc)
+                st.session_state["last_runtime_s"] = None
+                status.write(str(exc))
+                status.update(label="Расчет завершился ошибкой", state="error", expanded=True)
+            finally:
+                progress.empty()
 
     if st.session_state["last_error"]:
         st.error(st.session_state["last_error"])
@@ -360,16 +477,18 @@ def run_app() -> None:
     md_t1_m = float(last_result["md_t1_m"])
     t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
 
-    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1, m2, m3, m4, m5 = st.columns(5, gap="small")
     m1.metric("Горизонтальный отход t1", format_distance(t1_horizontal_offset_m))
     m2.metric("Угол входа в пласт", f"{summary['entry_inc_deg']:.2f} deg")
     m3.metric("ЗУ секции HOLD", f"{float(summary['hold_inc_deg']):.2f} deg")
     m4.metric("Сложность", str(summary["well_complexity"]))
+    runtime_s = st.session_state.get("last_runtime_s")
+    m5.metric("Время расчета", "—" if runtime_s is None else f"{float(runtime_s):.2f} с")
 
-    m5, m6, m7 = st.columns(3, gap="small")
-    m5.metric("Тип траектории", str(summary["trajectory_type"]))
-    m6.metric("KOP MD", format_distance(float(summary["kop_md_m"])))
-    m7.metric("Макс DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
+    n1, n2, n3 = st.columns(3, gap="small")
+    n1.metric("Тип траектории", str(summary["trajectory_type"]))
+    n2.metric("KOP MD", format_distance(float(summary["kop_md_m"])))
+    n3.metric("Макс DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
 
     with st.container(border=True):
         st.markdown("### 3D траектория и DLS")

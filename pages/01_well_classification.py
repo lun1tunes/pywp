@@ -10,6 +10,7 @@ from pywp.classification import (
     reference_table_rows,
     trajectory_type_label,
 )
+from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import arrow_safe_text_dataframe
 
 
@@ -52,8 +53,11 @@ def _classification_result_frame(gv_m: float, horizontal_offset_t1_m: float, hol
 
 def run_page() -> None:
     st.set_page_config(page_title="Классификация скважин", layout="wide")
-    st.title("Классификация сложности скважин")
-    st.caption("Базовая таблица порогов и линейная интерполяция по фактической ГВ t1.")
+    apply_page_style(max_width_px=1500)
+    render_hero(
+        title="Классификация сложности скважин",
+        subtitle="Базовая таблица порогов и линейная интерполяция по фактической ГВ t1.",
+    )
 
     st.markdown("### Базовая таблица")
     st.dataframe(_reference_frame(), width="stretch", hide_index=True)
@@ -63,6 +67,7 @@ def run_page() -> None:
     gv_m = c1.number_input("ГВ t1, м", min_value=1000.0, max_value=3600.0, value=2400.0, step=10.0)
     horizontal_offset_t1_m = c2.number_input("Горизонтальный отход t1, м", min_value=0.0, value=1000.0, step=10.0)
     hold_inc_deg = c3.number_input("ЗУ секции HOLD, deg", min_value=0.0, max_value=89.0, value=20.0, step=0.5)
+    render_small_note("Тип траектории и класс сложности определяются по наихудшему из критериев (отход/ЗУ HOLD).")
 
     st.dataframe(_interpolated_frame(gv_m=float(gv_m)), width="stretch", hide_index=True)
     st.dataframe(

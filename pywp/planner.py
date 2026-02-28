@@ -5,7 +5,8 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize_scalar
+from scipy.optimize import differential_evolution, least_squares, minimize_scalar
+from scipy.stats import qmc
 
 from pywp.classification import (
     TRAJECTORY_REVERSE_DIRECTION,
@@ -16,13 +17,16 @@ from pywp.classification import (
     complexity_label,
     trajectory_type_label,
 )
-from pywp.mcm import add_dls, compute_positions_min_curv
+from pywp.mcm import add_dls, compute_positions_min_curv, dogleg_angle_rad, minimum_curvature_increment
 from pywp.models import (
+    ALLOWED_TURN_SOLVER_MODES,
     ALLOWED_OBJECTIVE_MODES,
     OBJECTIVE_MAXIMIZE_HOLD,
     OBJECTIVE_MINIMIZE_BUILD_DLS,
     PlannerResult,
     Point3D,
+    TURN_SOLVER_DE_HYBRID,
+    TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
 )
 from pywp.segments import BuildSegment, HoldSegment, HorizontalSegment, VerticalSegment
@@ -49,8 +53,14 @@ class SectionGeometry:
     z1_m: float
     ds_13_m: float
     dz_13_m: float
-    azimuth_deg: float
+    azimuth_entry_deg: float
+    azimuth_surface_t1_deg: float
     inc_entry_deg: float
+    t1_cross_m: float
+    t3_cross_m: float
+    t1_east_m: float
+    t1_north_m: float
+    t1_tvd_m: float
 
 
 @dataclass(frozen=True)
@@ -68,7 +78,8 @@ class ProfileParameters:
     hold_length_m: float
     build2_length_m: float
     horizontal_length_m: float
-    azimuth_deg: float
+    azimuth_hold_deg: float
+    azimuth_entry_deg: float
 
     @property
     def reverse_build_length_m(self) -> float:
@@ -110,9 +121,15 @@ class TrajectoryPlanner:
         trajectory_type = classify_trajectory_type(gv_m=geometry.z1_m, horizontal_offset_t1_m=horizontal_offset_t1_m)
 
         if trajectory_type == TRAJECTORY_REVERSE_DIRECTION:
-            params = _solve_reverse_direction_profile(geometry=geometry, config=config)
+            if _is_geometry_coplanar(geometry=geometry, tolerance_m=config.pos_tolerance_m):
+                params = _solve_reverse_direction_profile(geometry=geometry, config=config)
+            else:
+                params = _solve_reverse_direction_profile_with_turn(geometry=geometry, config=config)
         else:
-            params = _solve_same_direction_profile(geometry=geometry, config=config)
+            if _is_geometry_coplanar(geometry=geometry, tolerance_m=config.pos_tolerance_m):
+                params = _solve_same_direction_profile(geometry=geometry, config=config)
+            else:
+                params = _solve_same_direction_profile_with_turn(geometry=geometry, config=config)
 
         trajectory = _build_trajectory(params=params)
 
@@ -146,7 +163,7 @@ class TrajectoryPlanner:
         return PlannerResult(
             stations=output,
             summary=summary,
-            azimuth_deg=geometry.azimuth_deg,
+            azimuth_deg=geometry.azimuth_entry_deg,
             md_t1_m=params.md_t1_m,
         )
 
@@ -157,23 +174,13 @@ def _build_section_geometry(
     t3: Point3D,
     config: TrajectoryConfig,
 ) -> SectionGeometry:
-    azimuth_deg = _azimuth_deg_from_points(t1=t1, t3=t3)
-    s1_m, c1_m, z1_m = _project_to_section_axis(surface=surface, point=t1, azimuth_deg=azimuth_deg)
-    s3_m, c3_m, z3_m = _project_to_section_axis(surface=surface, point=t3, azimuth_deg=azimuth_deg)
+    azimuth_entry_deg = _azimuth_deg_from_points(t1=t1, t3=t3)
+    azimuth_surface_t1_deg = _azimuth_deg_from_pair(surface=surface, target=t1)
+    s1_m, c1_m, z1_m = _project_to_section_axis(surface=surface, point=t1, azimuth_deg=azimuth_entry_deg)
+    s3_m, c3_m, z3_m = _project_to_section_axis(surface=surface, point=t3, azimuth_deg=azimuth_entry_deg)
 
-    if abs(c1_m) > config.pos_tolerance_m or abs(c3_m) > config.pos_tolerance_m:
-        az_s_t1 = float(np.mod(np.degrees(np.arctan2(t1.x - surface.x, t1.y - surface.y)), 360.0))
-        az_s_t3 = float(np.mod(np.degrees(np.arctan2(t3.x - surface.x, t3.y - surface.y)), 360.0))
-        raise PlanningError(
-            "Points are not coplanar for no-TURN profile. "
-            f"S->t1 azimuth={az_s_t1:.2f} deg, S->t3 azimuth={az_s_t3:.2f} deg. "
-            "Use coplanar targets (same azimuth from S) or add TURN support."
-        )
-
-    if s1_m <= 0.0:
-        raise PlanningError("t1 must be ahead of surface along section direction.")
-    if s3_m <= s1_m:
-        raise PlanningError("t3 must be ahead of t1 along section direction.")
+    if z1_m <= 0.0:
+        raise PlanningError("t1 must be below surface in TVD.")
 
     ds_13_m = s3_m - s1_m
     dz_13_m = z3_m - z1_m
@@ -192,9 +199,19 @@ def _build_section_geometry(
         z1_m=float(z1_m),
         ds_13_m=float(ds_13_m),
         dz_13_m=float(dz_13_m),
-        azimuth_deg=float(azimuth_deg),
+        azimuth_entry_deg=float(azimuth_entry_deg),
+        azimuth_surface_t1_deg=float(azimuth_surface_t1_deg),
         inc_entry_deg=float(inc_entry_deg),
+        t1_cross_m=float(c1_m),
+        t3_cross_m=float(c3_m),
+        t1_east_m=float(t1.x - surface.x),
+        t1_north_m=float(t1.y - surface.y),
+        t1_tvd_m=float(t1.z - surface.z),
     )
+
+
+def _is_geometry_coplanar(geometry: SectionGeometry, tolerance_m: float) -> bool:
+    return bool(abs(geometry.t1_cross_m) <= tolerance_m and abs(geometry.t3_cross_m) <= tolerance_m)
 
 
 def _solve_same_direction_profile(
@@ -247,6 +264,107 @@ def _solve_same_direction_profile(
     )
 
 
+def _solve_same_direction_profile_with_turn(
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+) -> ProfileParameters:
+    lower, upper = _effective_dls_search_bounds(
+        config=config,
+        constrained_segments=("BUILD1", "BUILD2"),
+    )
+    min_segment_m = max(float(config.min_structural_segment_m), SMALL)
+    horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
+    if horizontal_length_m <= SMALL:
+        raise PlanningError("Invalid t1->t3 geometry: horizontal section length must be positive.")
+
+    kop_min = float(max(config.kop_min_vertical_m, 0.0))
+    kop_max = float(geometry.z1_m - min_segment_m)
+    if kop_min >= kop_max:
+        raise PlanningError(
+            "No valid profile: minimum vertical before KOP is too deep for t1 TVD. "
+            f"t1 TVD is {geometry.z1_m:.2f} m, requested minimum vertical is {config.kop_min_vertical_m:.2f} m."
+        )
+
+    inc_hold_min = 0.5
+    inc_hold_max = float(geometry.inc_entry_deg - 0.1)
+    if inc_hold_max <= inc_hold_min:
+        raise PlanningError("No valid TURN solution: INC at t1 is too small for BUILD1->BUILD2 structure.")
+
+    mandatory_md_without_hold = kop_min + horizontal_length_m + 2.0 * min_segment_m
+    hold_max = float(max(min_segment_m, config.max_total_md_m - mandatory_md_without_hold))
+    if hold_max <= min_segment_m + SMALL:
+        raise PlanningError(
+            "No valid TURN solution found for non-coplanar targets within configured limits. "
+            "Maximum total MD is too restrictive for mandatory VERTICAL/BUILD/HORIZONTAL sections."
+        )
+
+    bounds = (
+        (kop_min, kop_max),
+        (lower, upper),
+        (inc_hold_min, inc_hold_max),
+        (min_segment_m, hold_max),
+        (0.0, 360.0),
+    )
+
+    base_kop = float(np.clip(geometry.z1_m * 0.25, kop_min, kop_max))
+    shallow_kop = float(np.clip(geometry.z1_m * 0.12, kop_min, kop_max))
+    deep_kop = float(np.clip(geometry.z1_m * 0.4, kop_min, kop_max))
+    mid_dls = 0.5 * (lower + upper)
+
+    inc_low = float(np.clip(geometry.inc_entry_deg * 0.35, inc_hold_min, inc_hold_max))
+    inc_mid = float(np.clip(geometry.inc_entry_deg * 0.55, inc_hold_min, inc_hold_max))
+    inc_high = float(np.clip(geometry.inc_entry_deg * 0.75, inc_hold_min, inc_hold_max))
+
+    hold_guess = float(np.clip(max(min_segment_m, geometry.s1_m * 0.35), min_segment_m, hold_max))
+    hold_low = float(np.clip(hold_guess * 0.6, min_segment_m, hold_max))
+    hold_high = float(np.clip(hold_guess * 1.5, min_segment_m, hold_max))
+
+    azimuth_mid = _mid_azimuth_deg(geometry.azimuth_surface_t1_deg, geometry.azimuth_entry_deg)
+    seeds = [
+        np.array([base_kop, mid_dls, inc_mid, hold_guess, geometry.azimuth_surface_t1_deg], dtype=float),
+        np.array([base_kop, mid_dls, inc_mid, hold_guess, geometry.azimuth_entry_deg], dtype=float),
+        np.array([base_kop, mid_dls, inc_mid, hold_guess, azimuth_mid], dtype=float),
+        np.array([shallow_kop, lower, inc_low, hold_low, geometry.azimuth_surface_t1_deg], dtype=float),
+        np.array([shallow_kop, upper, inc_high, hold_high, geometry.azimuth_surface_t1_deg], dtype=float),
+        np.array([deep_kop, lower, inc_low, hold_low, geometry.azimuth_entry_deg], dtype=float),
+        np.array([deep_kop, upper, inc_high, hold_high, geometry.azimuth_entry_deg], dtype=float),
+        np.array([base_kop, lower, inc_high, hold_guess, azimuth_mid], dtype=float),
+        np.array([base_kop, upper, inc_low, hold_guess, azimuth_mid], dtype=float),
+    ]
+    def profile_builder(values: np.ndarray) -> ProfileParameters | None:
+        kop_vertical_m, dls_build, inc_hold_deg, hold_length_m, azimuth_hold_deg = values.tolist()
+        return _profile_same_direction_with_turn(
+            geometry=geometry,
+            dls_build_deg_per_30m=float(dls_build),
+            kop_vertical_m=float(kop_vertical_m),
+            inc_hold_deg=float(inc_hold_deg),
+            hold_length_m=float(hold_length_m),
+            azimuth_hold_deg=float(azimuth_hold_deg),
+            min_structural_segment_m=min_segment_m,
+        )
+
+    best, best_miss = _solve_turn_profile_multistart(
+        bounds=bounds,
+        seed_vectors=seeds,
+        qmc_samples=int(max(config.turn_solver_qmc_samples, 0)),
+        qmc_seed=42,
+        max_local_starts=int(max(config.turn_solver_local_starts, 1)),
+        profile_builder=profile_builder,
+        objective_mode=config.objective_mode,
+        turn_solver_mode=config.turn_solver_mode,
+        config=config,
+        target_point_east_north_tvd=(geometry.t1_east_m, geometry.t1_north_m, geometry.t1_tvd_m),
+    )
+    if best is not None:
+        return best
+
+    raise PlanningError(
+        "No valid TURN solution found for non-coplanar targets within configured limits. "
+        f"Closest miss to t1 is {best_miss:.2f} m. "
+        "Try increasing BUILD max DLS, reducing minimum vertical before KOP, or relaxing tolerance."
+    )
+
+
 def _solve_reverse_direction_profile(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
@@ -287,6 +405,314 @@ def _solve_reverse_direction_profile(
         "Try increasing BUILD max DLS, reducing minimum vertical before KOP, "
         "or widening reverse INC search limits."
     )
+
+
+def _solve_reverse_direction_profile_with_turn(
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+) -> ProfileParameters:
+    lower, upper = _effective_dls_search_bounds(
+        config=config,
+        constrained_segments=("BUILD_REV", "DROP_REV", "BUILD1", "BUILD2"),
+    )
+    min_segment_m = max(float(config.min_structural_segment_m), SMALL)
+    horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
+    if horizontal_length_m <= SMALL:
+        raise PlanningError("Invalid t1->t3 geometry: horizontal section length must be positive.")
+
+    kop_min = float(max(config.kop_min_vertical_m, 0.0))
+    kop_max = float(geometry.z1_m - min_segment_m)
+    if kop_min >= kop_max:
+        raise PlanningError(
+            "No valid reverse profile: minimum vertical before KOP is too deep for t1 TVD. "
+            f"t1 TVD is {geometry.z1_m:.2f} m, requested minimum vertical is {config.kop_min_vertical_m:.2f} m."
+        )
+
+    inc_hold_min = 0.5
+    inc_hold_max = float(geometry.inc_entry_deg - 0.1)
+    if inc_hold_max <= inc_hold_min:
+        raise PlanningError("No valid reverse TURN solution: INC at t1 is too small for BUILD1->BUILD2 structure.")
+
+    reverse_inc_min = float(max(config.reverse_inc_min_deg, 0.1))
+    reverse_inc_max = float(min(config.reverse_inc_max_deg, 89.0))
+    if reverse_inc_max <= reverse_inc_min:
+        raise PlanningError("No valid reverse TURN solution: reverse INC bounds are invalid.")
+
+    mandatory_md_without_holds = kop_min + horizontal_length_m + 4.0 * min_segment_m
+    hold_upper = float(max(min_segment_m, config.max_total_md_m - mandatory_md_without_holds))
+    reverse_hold_upper = hold_upper
+    if hold_upper <= min_segment_m + SMALL:
+        raise PlanningError(
+            "No valid reverse TURN solution found for non-coplanar targets within configured limits. "
+            "Maximum total MD is too restrictive for mandatory reverse and forward sections."
+        )
+
+    bounds = (
+        (kop_min, kop_max),
+        (lower, upper),
+        (reverse_inc_min, reverse_inc_max),
+        (min_segment_m, reverse_hold_upper),
+        (inc_hold_min, inc_hold_max),
+        (min_segment_m, hold_upper),
+        (0.0, 360.0),
+    )
+
+    base_kop = float(np.clip(geometry.z1_m * 0.25, kop_min, kop_max))
+    shallow_kop = float(np.clip(geometry.z1_m * 0.1, kop_min, kop_max))
+    deep_kop = float(np.clip(geometry.z1_m * 0.4, kop_min, kop_max))
+    mid_dls = 0.5 * (lower + upper)
+
+    reverse_mid = float(np.clip(0.5 * (reverse_inc_min + reverse_inc_max), reverse_inc_min, reverse_inc_max))
+    reverse_low = float(np.clip(reverse_inc_min * 1.2, reverse_inc_min, reverse_inc_max))
+    reverse_high = float(np.clip(reverse_inc_max * 0.8, reverse_inc_min, reverse_inc_max))
+    inc_low = float(np.clip(geometry.inc_entry_deg * 0.35, inc_hold_min, inc_hold_max))
+    inc_mid = float(np.clip(geometry.inc_entry_deg * 0.55, inc_hold_min, inc_hold_max))
+    inc_high = float(np.clip(geometry.inc_entry_deg * 0.75, inc_hold_min, inc_hold_max))
+
+    hold_guess = float(np.clip(max(min_segment_m, geometry.s1_m * 0.3), min_segment_m, hold_upper))
+    reverse_hold_guess = float(np.clip(max(min_segment_m, geometry.s1_m * 0.2), min_segment_m, reverse_hold_upper))
+    hold_low = float(np.clip(hold_guess * 0.6, min_segment_m, hold_upper))
+    hold_high = float(np.clip(hold_guess * 1.6, min_segment_m, hold_upper))
+    reverse_hold_low = float(np.clip(reverse_hold_guess * 0.5, min_segment_m, reverse_hold_upper))
+    reverse_hold_high = float(np.clip(reverse_hold_guess * 1.8, min_segment_m, reverse_hold_upper))
+
+    azimuth_mid = _mid_azimuth_deg(geometry.azimuth_surface_t1_deg, geometry.azimuth_entry_deg)
+    seeds = [
+        np.array(
+            [base_kop, mid_dls, reverse_mid, reverse_hold_guess, inc_mid, hold_guess, geometry.azimuth_surface_t1_deg],
+            dtype=float,
+        ),
+        np.array(
+            [base_kop, mid_dls, reverse_mid, reverse_hold_guess, inc_mid, hold_guess, geometry.azimuth_entry_deg],
+            dtype=float,
+        ),
+        np.array([base_kop, mid_dls, reverse_mid, reverse_hold_guess, inc_mid, hold_guess, azimuth_mid], dtype=float),
+        np.array(
+            [shallow_kop, lower, reverse_low, reverse_hold_low, inc_low, hold_low, geometry.azimuth_surface_t1_deg],
+            dtype=float,
+        ),
+        np.array(
+            [deep_kop, upper, reverse_high, reverse_hold_high, inc_high, hold_high, geometry.azimuth_entry_deg],
+            dtype=float,
+        ),
+    ]
+    def profile_builder(values: np.ndarray) -> ProfileParameters | None:
+        (
+            kop_vertical_m,
+            dls_build,
+            reverse_inc_deg,
+            reverse_hold_length_m,
+            inc_hold_deg,
+            hold_length_m,
+            azimuth_hold_deg,
+        ) = values.tolist()
+        return _profile_reverse_direction_with_turn(
+            geometry=geometry,
+            dls_build_deg_per_30m=float(dls_build),
+            kop_vertical_m=float(kop_vertical_m),
+            reverse_inc_deg=float(reverse_inc_deg),
+            reverse_hold_length_m=float(reverse_hold_length_m),
+            inc_hold_deg=float(inc_hold_deg),
+            hold_length_m=float(hold_length_m),
+            azimuth_hold_deg=float(azimuth_hold_deg),
+            min_structural_segment_m=min_segment_m,
+        )
+
+    best, best_miss = _solve_turn_profile_multistart(
+        bounds=bounds,
+        seed_vectors=seeds,
+        qmc_samples=int(max(config.turn_solver_qmc_samples, 36)),
+        qmc_seed=42,
+        max_local_starts=int(max(config.turn_solver_local_starts, 12)),
+        profile_builder=profile_builder,
+        objective_mode=config.objective_mode,
+        turn_solver_mode=config.turn_solver_mode,
+        config=config,
+        target_point_east_north_tvd=(geometry.t1_east_m, geometry.t1_north_m, geometry.t1_tvd_m),
+    )
+    if best is not None:
+        return best
+
+    raise PlanningError(
+        "No valid reverse TURN solution found for non-coplanar targets within configured limits. "
+        f"Closest miss to t1 is {best_miss:.2f} m. "
+        "Try increasing BUILD max DLS, reducing minimum vertical before KOP, or relaxing tolerance."
+    )
+
+
+def _solve_turn_profile_multistart(
+    bounds: tuple[tuple[float, float], ...],
+    seed_vectors: list[np.ndarray],
+    qmc_samples: int,
+    qmc_seed: int,
+    max_local_starts: int,
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    objective_mode: str,
+    turn_solver_mode: str,
+    config: TrajectoryConfig,
+    target_point_east_north_tvd: tuple[float, float, float],
+) -> tuple[ProfileParameters | None, float]:
+    # For TURN cases we solve endpoint matching as bounded nonlinear least-squares in 3D:
+    # residuals = [dE, dN, dTVD, max(0, MD_excess)] with multiple starts.
+    # A feasible candidate is then selected by the configured engineering objective.
+    lower = np.array([pair[0] for pair in bounds], dtype=float)
+    upper = np.array([pair[1] for pair in bounds], dtype=float)
+    pos_tol = max(float(config.pos_tolerance_m), 1e-9)
+    md_scale = max(float(config.max_total_md_m), 1.0)
+    target_e, target_n, target_z = target_point_east_north_tvd
+
+    all_seed_vectors = _seed_vectors_with_qmc(
+        deterministic_seeds=seed_vectors,
+        lower_bounds=lower,
+        upper_bounds=upper,
+        qmc_samples=qmc_samples,
+        qmc_seed=qmc_seed,
+    )
+
+    def residuals(values: np.ndarray) -> np.ndarray:
+        candidate = profile_builder(values)
+        if candidate is None:
+            return np.full(4, 1e6, dtype=float)
+        end_e, end_n, end_z = _estimate_t1_endpoint_for_profile(candidate)
+        md_excess = max(0.0, float(candidate.md_total_m - config.max_total_md_m))
+        return np.array(
+            [
+                (end_e - target_e) / pos_tol,
+                (end_n - target_n) / pos_tol,
+                (end_z - target_z) / pos_tol,
+                md_excess / md_scale,
+            ],
+            dtype=float,
+        )
+
+    best_candidate: ProfileParameters | None = None
+    best_miss = np.inf
+    scored_starts: list[tuple[float, np.ndarray]] = []
+
+    for seed in all_seed_vectors:
+        clipped_seed = _clip_to_bounds(seed, bounds=bounds)
+        start_residuals = residuals(clipped_seed)
+        start_score = float(np.linalg.norm(start_residuals))
+        scored_starts.append((start_score, clipped_seed))
+
+        candidate = profile_builder(clipped_seed)
+        if candidate is None:
+            continue
+        endpoint = _estimate_t1_endpoint_for_profile(candidate)
+        miss = _distance_3d(
+            endpoint[0],
+            endpoint[1],
+            endpoint[2],
+            target_e,
+            target_n,
+            target_z,
+        )
+        best_miss = min(best_miss, miss)
+        if miss <= config.pos_tolerance_m + SMALL and _is_candidate_feasible(candidate=candidate, config=config):
+            best_candidate = _select_better_candidate(
+                current=best_candidate,
+                candidate=candidate,
+                objective_mode=objective_mode,
+            )
+
+    scored_starts.sort(key=lambda item: item[0])
+    local_starts = [seed for _, seed in scored_starts[: max(1, int(max_local_starts))]]
+
+    if turn_solver_mode == TURN_SOLVER_DE_HYBRID:
+        de_result = differential_evolution(
+            func=lambda vector: float(np.linalg.norm(residuals(np.asarray(vector, dtype=float)))),
+            bounds=list(bounds),
+            strategy="best1bin",
+            maxiter=35,
+            popsize=8,
+            tol=1e-3,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            seed=qmc_seed,
+            init="latinhypercube",
+            polish=False,
+            updating="deferred",
+            workers=1,
+        )
+        if de_result.success and np.all(np.isfinite(de_result.x)):
+            local_starts = [_clip_to_bounds(np.asarray(de_result.x, dtype=float), bounds=bounds), *local_starts]
+    elif turn_solver_mode != TURN_SOLVER_LEAST_SQUARES:
+        raise PlanningError(f"Unsupported TURN solver mode: {turn_solver_mode}")
+
+    # Deduplicate starts while preserving order.
+    deduped: list[np.ndarray] = []
+    seen: set[tuple[float, ...]] = set()
+    for seed in local_starts:
+        key = tuple(np.round(seed, decimals=8).tolist())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(seed)
+    local_starts = deduped[: max(1, int(max_local_starts) + 1)]
+
+    for start in local_starts:
+        solution = least_squares(
+            residuals,
+            x0=start,
+            bounds=(lower, upper),
+            method="trf",
+            jac="2-point",
+            x_scale="jac",
+            ftol=1e-10,
+            xtol=1e-10,
+            gtol=1e-10,
+            max_nfev=300,
+        )
+        probes = [start]
+        if solution.success and np.all(np.isfinite(solution.x)):
+            probes.append(_clip_to_bounds(np.asarray(solution.x, dtype=float), bounds=bounds))
+
+        for probe in probes:
+            candidate = profile_builder(probe)
+            if candidate is None:
+                continue
+            endpoint = _estimate_t1_endpoint_for_profile(candidate)
+            miss = _distance_3d(
+                endpoint[0],
+                endpoint[1],
+                endpoint[2],
+                target_e,
+                target_n,
+                target_z,
+            )
+            best_miss = min(best_miss, miss)
+            if miss > config.pos_tolerance_m + SMALL:
+                continue
+            if not _is_candidate_feasible(candidate=candidate, config=config):
+                continue
+            best_candidate = _select_better_candidate(
+                current=best_candidate,
+                candidate=candidate,
+                objective_mode=objective_mode,
+            )
+
+    return best_candidate, float(best_miss)
+
+
+def _seed_vectors_with_qmc(
+    deterministic_seeds: list[np.ndarray],
+    lower_bounds: np.ndarray,
+    upper_bounds: np.ndarray,
+    qmc_samples: int,
+    qmc_seed: int,
+) -> list[np.ndarray]:
+    vectors = [np.asarray(seed, dtype=float) for seed in deterministic_seeds]
+    sample_count = int(max(qmc_samples, 0))
+    if sample_count <= 0:
+        return vectors
+    if np.any(upper_bounds <= lower_bounds + SMALL):
+        return vectors
+
+    sampler = qmc.LatinHypercube(d=len(lower_bounds), seed=qmc_seed)
+    unit = sampler.random(n=sample_count)
+    scaled = qmc.scale(unit, l_bounds=lower_bounds, u_bounds=upper_bounds)
+    vectors.extend(np.asarray(row, dtype=float) for row in scaled)
+    return vectors
 
 
 def _profile_same_direction(
@@ -376,6 +802,73 @@ def _profile_reverse_direction(
     return candidate
 
 
+def _profile_reverse_direction_with_turn(
+    geometry: SectionGeometry,
+    dls_build_deg_per_30m: float,
+    kop_vertical_m: float,
+    reverse_inc_deg: float,
+    reverse_hold_length_m: float,
+    inc_hold_deg: float,
+    hold_length_m: float,
+    azimuth_hold_deg: float,
+    min_structural_segment_m: float,
+) -> ProfileParameters | None:
+    if dls_build_deg_per_30m <= SMALL or kop_vertical_m < 0.0:
+        return None
+    if reverse_inc_deg <= SMALL or reverse_inc_deg >= 89.5:
+        return None
+    if hold_length_m <= SMALL or reverse_hold_length_m <= SMALL:
+        return None
+    if inc_hold_deg <= SMALL or inc_hold_deg >= geometry.inc_entry_deg - SMALL:
+        return None
+
+    horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
+    if horizontal_length_m <= SMALL:
+        return None
+
+    radius_m = _radius_from_dls(dls_build_deg_per_30m)
+    min_segment = max(float(min_structural_segment_m), SMALL)
+
+    reverse_build_length_m = float(radius_m * np.radians(reverse_inc_deg))
+    build1_length_m = float(radius_m * np.radians(inc_hold_deg))
+    build2_dogleg_rad = float(
+        dogleg_angle_rad(
+            inc_hold_deg,
+            azimuth_hold_deg,
+            geometry.inc_entry_deg,
+            geometry.azimuth_entry_deg,
+        )
+    )
+    build2_length_m = float(radius_m * build2_dogleg_rad)
+
+    if (
+        reverse_build_length_m < min_segment - SMALL
+        or reverse_hold_length_m < min_segment - SMALL
+        or build1_length_m < min_segment - SMALL
+        or hold_length_m < min_segment - SMALL
+        or build2_length_m < min_segment - SMALL
+    ):
+        return None
+
+    return ProfileParameters(
+        trajectory_type=TRAJECTORY_REVERSE_DIRECTION,
+        kop_vertical_m=float(kop_vertical_m),
+        reverse_inc_deg=float(reverse_inc_deg),
+        reverse_hold_length_m=float(reverse_hold_length_m),
+        reverse_dls_deg_per_30m=float(dls_build_deg_per_30m),
+        inc_entry_deg=float(geometry.inc_entry_deg),
+        inc_hold_deg=float(inc_hold_deg),
+        dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
+        dls_build2_deg_per_30m=float(dls_build_deg_per_30m),
+        build1_length_m=build1_length_m,
+        hold_length_m=float(hold_length_m),
+        build2_length_m=build2_length_m,
+        horizontal_length_m=horizontal_length_m,
+        azimuth_hold_deg=_normalize_azimuth_deg(azimuth_hold_deg),
+        azimuth_entry_deg=_normalize_azimuth_deg(geometry.azimuth_entry_deg),
+    )
+
+
 def _build_profile_from_effective_targets(
     geometry: SectionGeometry,
     dls_build_deg_per_30m: float,
@@ -437,8 +930,175 @@ def _build_profile_from_effective_targets(
         hold_length_m=hold_length_m,
         build2_length_m=build2_length_m,
         horizontal_length_m=horizontal_length_m,
-        azimuth_deg=float(geometry.azimuth_deg),
+        azimuth_hold_deg=float(geometry.azimuth_entry_deg),
+        azimuth_entry_deg=float(geometry.azimuth_entry_deg),
     )
+
+
+def _profile_same_direction_with_turn(
+    geometry: SectionGeometry,
+    dls_build_deg_per_30m: float,
+    kop_vertical_m: float,
+    inc_hold_deg: float,
+    hold_length_m: float,
+    azimuth_hold_deg: float,
+    min_structural_segment_m: float,
+) -> ProfileParameters | None:
+    if dls_build_deg_per_30m <= SMALL or kop_vertical_m < 0.0:
+        return None
+    if hold_length_m <= SMALL:
+        return None
+    if inc_hold_deg <= SMALL or inc_hold_deg >= geometry.inc_entry_deg - SMALL:
+        return None
+
+    horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
+    if horizontal_length_m <= SMALL:
+        return None
+
+    min_segment = max(float(min_structural_segment_m), SMALL)
+    radius_m = _radius_from_dls(dls_build_deg_per_30m)
+    build1_dogleg_rad = float(dogleg_angle_rad(0.0, azimuth_hold_deg, inc_hold_deg, azimuth_hold_deg))
+    build2_dogleg_rad = float(
+        dogleg_angle_rad(
+            inc_hold_deg,
+            azimuth_hold_deg,
+            geometry.inc_entry_deg,
+            geometry.azimuth_entry_deg,
+        )
+    )
+
+    build1_length_m = float(radius_m * build1_dogleg_rad)
+    build2_length_m = float(radius_m * build2_dogleg_rad)
+    if (
+        build1_length_m < min_segment - SMALL
+        or hold_length_m < min_segment - SMALL
+        or build2_length_m < min_segment - SMALL
+    ):
+        return None
+
+    return ProfileParameters(
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        kop_vertical_m=float(kop_vertical_m),
+        reverse_inc_deg=0.0,
+        reverse_hold_length_m=0.0,
+        reverse_dls_deg_per_30m=0.0,
+        inc_entry_deg=float(geometry.inc_entry_deg),
+        inc_hold_deg=float(inc_hold_deg),
+        dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
+        dls_build2_deg_per_30m=float(dls_build_deg_per_30m),
+        build1_length_m=build1_length_m,
+        hold_length_m=float(hold_length_m),
+        build2_length_m=build2_length_m,
+        horizontal_length_m=horizontal_length_m,
+        azimuth_hold_deg=_normalize_azimuth_deg(azimuth_hold_deg),
+        azimuth_entry_deg=_normalize_azimuth_deg(geometry.azimuth_entry_deg),
+    )
+
+
+def _estimate_t1_endpoint_for_profile(profile: ProfileParameters) -> tuple[float, float, float]:
+    north_m = 0.0
+    east_m = 0.0
+    tvd_m = float(profile.kop_vertical_m)
+
+    if profile.trajectory_type == TRAJECTORY_REVERSE_DIRECTION and profile.reverse_total_length_m > SMALL:
+        opposite_azimuth_deg = _opposite_azimuth(profile.azimuth_hold_deg)
+        reverse_build_length_m = float(profile.reverse_build_length_m)
+
+        dn, de, dz = minimum_curvature_increment(
+            md1_m=0.0,
+            inc1_deg=0.0,
+            azi1_deg=opposite_azimuth_deg,
+            md2_m=reverse_build_length_m,
+            inc2_deg=profile.reverse_inc_deg,
+            azi2_deg=opposite_azimuth_deg,
+        )
+        north_m += dn
+        east_m += de
+        tvd_m += dz
+
+        dn, de, dz = minimum_curvature_increment(
+            md1_m=0.0,
+            inc1_deg=profile.reverse_inc_deg,
+            azi1_deg=opposite_azimuth_deg,
+            md2_m=float(profile.reverse_hold_length_m),
+            inc2_deg=profile.reverse_inc_deg,
+            azi2_deg=opposite_azimuth_deg,
+        )
+        north_m += dn
+        east_m += de
+        tvd_m += dz
+
+        dn, de, dz = minimum_curvature_increment(
+            md1_m=0.0,
+            inc1_deg=profile.reverse_inc_deg,
+            azi1_deg=opposite_azimuth_deg,
+            md2_m=reverse_build_length_m,
+            inc2_deg=0.0,
+            azi2_deg=opposite_azimuth_deg,
+        )
+        north_m += dn
+        east_m += de
+        tvd_m += dz
+
+    dn, de, dz = minimum_curvature_increment(
+        md1_m=0.0,
+        inc1_deg=0.0,
+        azi1_deg=profile.azimuth_hold_deg,
+        md2_m=float(profile.build1_length_m),
+        inc2_deg=profile.inc_hold_deg,
+        azi2_deg=profile.azimuth_hold_deg,
+    )
+    north_m += dn
+    east_m += de
+    tvd_m += dz
+
+    dn, de, dz = minimum_curvature_increment(
+        md1_m=0.0,
+        inc1_deg=profile.inc_hold_deg,
+        azi1_deg=profile.azimuth_hold_deg,
+        md2_m=float(profile.hold_length_m),
+        inc2_deg=profile.inc_hold_deg,
+        azi2_deg=profile.azimuth_hold_deg,
+    )
+    north_m += dn
+    east_m += de
+    tvd_m += dz
+
+    dn, de, dz = minimum_curvature_increment(
+        md1_m=0.0,
+        inc1_deg=profile.inc_hold_deg,
+        azi1_deg=profile.azimuth_hold_deg,
+        md2_m=float(profile.build2_length_m),
+        inc2_deg=profile.inc_entry_deg,
+        azi2_deg=profile.azimuth_entry_deg,
+    )
+    north_m += dn
+    east_m += de
+    tvd_m += dz
+
+    return float(east_m), float(north_m), float(tvd_m)
+
+
+def _clip_to_bounds(values: np.ndarray, bounds: tuple[tuple[float, float], ...]) -> np.ndarray:
+    clipped = np.asarray(values, dtype=float).copy()
+    for idx, (low, high) in enumerate(bounds):
+        clipped[idx] = float(np.clip(clipped[idx], low, high))
+    return clipped
+
+
+def _normalize_azimuth_deg(azimuth_deg: float) -> float:
+    return float(np.mod(float(azimuth_deg), 360.0))
+
+
+def _shortest_azimuth_delta_deg(azimuth_from_deg: float, azimuth_to_deg: float) -> float:
+    delta = _normalize_azimuth_deg(azimuth_to_deg - azimuth_from_deg)
+    if delta > 180.0:
+        delta -= 360.0
+    return float(delta)
+
+
+def _mid_azimuth_deg(azimuth_from_deg: float, azimuth_to_deg: float) -> float:
+    return _normalize_azimuth_deg(azimuth_from_deg + 0.5 * _shortest_azimuth_delta_deg(azimuth_from_deg, azimuth_to_deg))
 
 
 def _iter_kop_candidates(geometry: SectionGeometry, config: TrajectoryConfig) -> np.ndarray:
@@ -623,13 +1283,13 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
     segments = [
         VerticalSegment(
             length_m=params.kop_vertical_m,
-            azi_deg=params.azimuth_deg,
+            azi_deg=params.azimuth_hold_deg,
             name="VERTICAL",
         )
     ]
 
     if params.trajectory_type == TRAJECTORY_REVERSE_DIRECTION and params.reverse_total_length_m > SMALL:
-        opposite_azimuth_deg = _opposite_azimuth(params.azimuth_deg)
+        opposite_azimuth_deg = _opposite_azimuth(params.azimuth_hold_deg)
         segments.append(
             BuildSegment(
                 inc_from_deg=0.0,
@@ -664,26 +1324,27 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 inc_from_deg=0.0,
                 inc_to_deg=params.inc_hold_deg,
                 dls_deg_per_30m=params.dls_build1_deg_per_30m,
-                azi_deg=params.azimuth_deg,
+                azi_deg=params.azimuth_hold_deg,
                 name="BUILD1",
             ),
             HoldSegment(
                 length_m=params.hold_length_m,
                 inc_deg=params.inc_hold_deg,
-                azi_deg=params.azimuth_deg,
+                azi_deg=params.azimuth_hold_deg,
                 name="HOLD",
             ),
             BuildSegment(
                 inc_from_deg=params.inc_hold_deg,
                 inc_to_deg=params.inc_entry_deg,
                 dls_deg_per_30m=params.dls_build2_deg_per_30m,
-                azi_deg=params.azimuth_deg,
+                azi_deg=params.azimuth_hold_deg,
+                azi_to_deg=params.azimuth_entry_deg,
                 name="BUILD2",
             ),
             HorizontalSegment(
                 length_m=params.horizontal_length_m,
                 inc_deg=params.inc_entry_deg,
-                azi_deg=params.azimuth_deg,
+                azi_deg=params.azimuth_entry_deg,
                 name="HORIZONTAL",
             ),
         ]
@@ -727,6 +1388,9 @@ def _build_summary(
         "well_complexity_by_hold": complexity_label(classification.complexity_by_hold),
         "reverse_inc_deg": float(params.reverse_inc_deg),
         "reverse_hold_length_m": float(params.reverse_hold_length_m),
+        "hold_azimuth_deg": float(params.azimuth_hold_deg),
+        "entry_azimuth_deg": float(params.azimuth_entry_deg),
+        "azimuth_turn_deg": float(abs(_shortest_azimuth_delta_deg(params.azimuth_hold_deg, params.azimuth_entry_deg))),
     }
 
     summary["class_reverse_offset_min_m"] = float(classification.limits.reverse_min_m)
@@ -788,16 +1452,27 @@ def _validate_config(config: TrajectoryConfig) -> None:
     if config.objective_mode not in ALLOWED_OBJECTIVE_MODES:
         allowed = ", ".join(ALLOWED_OBJECTIVE_MODES)
         raise PlanningError(f"objective_mode must be one of: {allowed}.")
+    if config.turn_solver_mode not in ALLOWED_TURN_SOLVER_MODES:
+        allowed_turn = ", ".join(ALLOWED_TURN_SOLVER_MODES)
+        raise PlanningError(f"turn_solver_mode must be one of: {allowed_turn}.")
+    if config.turn_solver_qmc_samples < 0:
+        raise PlanningError("turn_solver_qmc_samples must be non-negative.")
+    if config.turn_solver_local_starts < 1:
+        raise PlanningError("turn_solver_local_starts must be >= 1.")
     for segment, limit in config.dls_limits_deg_per_30m.items():
         if limit < 0.0:
             raise PlanningError(f"DLS limit for segment {segment} cannot be negative.")
 
 
 def _azimuth_deg_from_points(t1: Point3D, t3: Point3D) -> float:
-    dn = t3.y - t1.y
-    de = t3.x - t1.x
+    return _azimuth_deg_from_pair(surface=t1, target=t3)
+
+
+def _azimuth_deg_from_pair(surface: Point3D, target: Point3D) -> float:
+    dn = target.y - surface.y
+    de = target.x - surface.x
     if np.isclose(dn, 0.0) and np.isclose(de, 0.0):
-        raise PlanningError("t1 and t3 overlap in plan; azimuth is undefined.")
+        raise PlanningError("Azimuth is undefined for overlapping plan coordinates.")
     azimuth_rad = np.arctan2(de, dn)
     return float(np.mod(azimuth_rad * RAD2DEG, 360.0))
 

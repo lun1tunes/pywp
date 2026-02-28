@@ -46,15 +46,104 @@ def test_planner_finds_solution_for_reference_scenarios(
     assert set(result.stations["segment"]) == {"VERTICAL", "BUILD1", "HOLD", "BUILD2", "HORIZONTAL"}
 
 
-def test_planner_raises_for_non_planar_geometry_without_turn() -> None:
+def test_planner_supports_turn_for_non_planar_reverse_geometry() -> None:
     planner = TrajectoryPlanner()
     config = TrajectoryConfig(pos_tolerance_m=1.0)
 
-    with pytest.raises(PlanningError):
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(300.0, 300.0, 2000.0),
+        t3=Point3D(900.0, 1200.0, 2075.0),
+        config=config,
+    )
+    assert result.summary["distance_t1_m"] <= config.pos_tolerance_m
+    assert result.summary["distance_t3_m"] <= config.pos_tolerance_m
+    assert str(result.summary["trajectory_type"]) == "Цели в обратном направлении"
+    assert float(result.summary["azimuth_turn_deg"]) > 1.0
+    build2 = result.stations[result.stations["segment"] == "BUILD2"]
+    assert float(build2["AZI_deg"].max() - build2["AZI_deg"].min()) > 1.0
+
+
+def test_planner_supports_turn_in_build_for_non_planar_same_direction_geometry() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        md_step_m=5.0,
+        md_step_control_m=1.0,
+        pos_tolerance_m=2.0,
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=6.0,
+        dls_limits_deg_per_30m={
+            "VERTICAL": 1.0,
+            "BUILD1": 6.0,
+            "HOLD": 2.0,
+            "BUILD2": 6.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1400.0, 500.0, 2500.0),
+        t3=Point3D(2200.0, 1700.0, 2580.0),
+        config=config,
+    )
+
+    assert result.summary["distance_t1_m"] <= config.pos_tolerance_m
+    assert result.summary["distance_t3_m"] <= config.pos_tolerance_m
+    assert float(result.summary["azimuth_turn_deg"]) > 1.0
+
+    build2 = result.stations[result.stations["segment"] == "BUILD2"]
+    assert float(build2["AZI_deg"].max() - build2["AZI_deg"].min()) > 1.0
+
+
+def test_reverse_non_planar_turn_respects_objective_mode_for_build_dls() -> None:
+    planner = TrajectoryPlanner()
+    base_kwargs = dict(
+        md_step_m=5.0,
+        md_step_control_m=1.0,
+        pos_tolerance_m=1.0,
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=6.0,
+        dls_limits_deg_per_30m={
+            "VERTICAL": 1.0,
+            "BUILD_REV": 6.0,
+            "HOLD_REV": 2.0,
+            "DROP_REV": 6.0,
+            "BUILD1": 6.0,
+            "HOLD": 2.0,
+            "BUILD2": 6.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+    config_hold = TrajectoryConfig(**base_kwargs, objective_mode="maximize_hold")
+    config_min_dls = TrajectoryConfig(**base_kwargs, objective_mode="minimize_build_dls")
+
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(300.0, 300.0, 2000.0)
+    t3 = Point3D(900.0, 1200.0, 2075.0)
+    result_hold = planner.plan(surface=surface, t1=t1, t3=t3, config=config_hold)
+    result_min_dls = planner.plan(surface=surface, t1=t1, t3=t3, config=config_min_dls)
+
+    assert result_min_dls.summary["max_dls_build1_deg_per_30m"] <= result_hold.summary["max_dls_build1_deg_per_30m"] + 1e-6
+    assert result_min_dls.summary["max_dls_build2_deg_per_30m"] <= result_hold.summary["max_dls_build2_deg_per_30m"] + 1e-6
+
+
+def test_non_planar_turn_solver_honors_max_total_md_limit() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        md_step_m=5.0,
+        md_step_control_m=1.0,
+        pos_tolerance_m=1.0,
+        max_total_md_m=800.0,
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=6.0,
+    )
+
+    with pytest.raises(PlanningError, match="No valid TURN solution found"):
         planner.plan(
             surface=Point3D(0.0, 0.0, 0.0),
-            t1=Point3D(300.0, 40.0, 2500.0),
-            t3=Point3D(1500.0, 0.0, 2600.0),
+            t1=Point3D(1400.0, 500.0, 2500.0),
+            t3=Point3D(2200.0, 1700.0, 2580.0),
             config=config,
         )
 
@@ -126,6 +215,38 @@ def test_planner_rejects_unknown_objective_mode() -> None:
             t1=Point3D(600.0, 800.0, 2400.0),
             t3=Point3D(1500.0, 2000.0, 2500.0),
             config=config,
+        )
+
+
+def test_planner_rejects_unknown_turn_solver_mode() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(turn_solver_mode="unsupported_turn_solver")  # type: ignore[arg-type]
+
+    with pytest.raises(PlanningError, match="turn_solver_mode must be one of"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=config,
+        )
+
+
+def test_planner_validates_turn_solver_numeric_controls() -> None:
+    planner = TrajectoryPlanner()
+    with pytest.raises(PlanningError, match="turn_solver_qmc_samples must be non-negative"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=TrajectoryConfig(turn_solver_qmc_samples=-1),
+        )
+
+    with pytest.raises(PlanningError, match="turn_solver_local_starts must be >= 1"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=TrajectoryConfig(turn_solver_local_starts=0),
         )
 
 

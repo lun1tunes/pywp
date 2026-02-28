@@ -36,3 +36,47 @@ def test_batch_planner_evaluates_success_and_format_error() -> None:
     assert by_name["BAD-2"]["Статус"] == "Ошибка формата"
     assert len(successes) == 1
     assert successes[0].name == "OK-1"
+
+
+def test_batch_planner_reports_progress_callback_for_selected_wells() -> None:
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1460.0, y=1950.0, z=2410.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="SKIP-ME",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=100.0, z=1000.0, md=1000.0),
+                WelltrackPoint(x=110.0, y=110.0, z=1010.0, md=1015.0),
+            ),
+        ),
+    ]
+    seen: list[tuple[int, int, str]] = []
+
+    def on_progress(index: int, total: int, name: str) -> None:
+        seen.append((index, total, name))
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={"WELL-A", "WELL-B"},
+        config=TrajectoryConfig(),
+        progress_callback=on_progress,
+    )
+
+    assert len(rows) == 2
+    assert len(successes) == 2
+    assert seen == [(1, 2, "WELL-A"), (2, 2, "WELL-B")]
