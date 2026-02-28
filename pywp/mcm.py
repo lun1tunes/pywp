@@ -48,8 +48,8 @@ def dls_deg_per_30m(
     dmd = np.asarray(md2_m, dtype=float) - np.asarray(md1_m, dtype=float)
     beta_deg = dogleg_angle_rad(inc1_deg, azi1_deg, inc2_deg, azi2_deg) * RAD2DEG
     with np.errstate(divide="ignore", invalid="ignore"):
-        dls = beta_deg * (30.0 / dmd)
-    return dls
+        dls = np.where(dmd > 0.0, beta_deg * (30.0 / dmd), np.nan)
+    return np.asarray(dls, dtype=float)
 
 
 def minimum_curvature_increment(

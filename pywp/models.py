@@ -30,6 +30,9 @@ class TrajectoryConfig:
     dls_build_max_deg_per_30m: float = 3.0
     kop_min_vertical_m: float = 300.0
     kop_search_grid_size: int = 81
+    reverse_inc_min_deg: float = 8.0
+    reverse_inc_max_deg: float = 80.0
+    reverse_inc_grid_size: int = 49
 
     max_total_md_m: float = 12000.0
     objective_mode: ObjectiveMode = OBJECTIVE_MAXIMIZE_HOLD
@@ -37,6 +40,9 @@ class TrajectoryConfig:
     dls_limits_deg_per_30m: Dict[str, float] = field(
         default_factory=lambda: {
             "VERTICAL": 1.0,
+            "BUILD_REV": 3.0,
+            "HOLD_REV": 2.0,
+            "DROP_REV": 3.0,
             "BUILD1": 3.0,
             "HOLD": 2.0,
             "BUILD2": 3.0,
@@ -48,6 +54,6 @@ class TrajectoryConfig:
 @dataclass(frozen=True)
 class PlannerResult:
     stations: "pandas.DataFrame"
-    summary: Dict[str, float]
+    summary: Dict[str, float | str]
     azimuth_deg: float
     md_t1_m: float

@@ -55,3 +55,16 @@ def test_dls_is_zero_for_parallel_stations() -> None:
 def test_dogleg_angle_zero_for_same_direction() -> None:
     beta = dogleg_angle_rad(10.0, 20.0, 10.0, 20.0)
     assert np.isclose(beta, 0.0, atol=1e-7)
+
+
+def test_add_dls_returns_nan_for_zero_md_interval() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [100.0, 100.0],
+            "INC_deg": [10.0, 12.0],
+            "AZI_deg": [20.0, 20.0],
+            "segment": ["HOLD", "HOLD"],
+        }
+    )
+    out = add_dls(stations)
+    assert np.isnan(out.loc[1, "DLS_deg_per_30m"])

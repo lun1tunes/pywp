@@ -94,6 +94,14 @@ def test_planner_validates_invalid_kop_config() -> None:
             config=TrajectoryConfig(kop_search_grid_size=1),
         )
 
+    with pytest.raises(PlanningError, match="reverse_inc_min_deg must be < reverse_inc_max_deg"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(300.0, 0.0, 2500.0),
+            t3=Point3D(1500.0, 0.0, 2600.0),
+            config=TrajectoryConfig(reverse_inc_min_deg=45.0, reverse_inc_max_deg=45.0),
+        )
+
 
 def test_planner_raises_if_entry_angle_from_t1_t3_not_86pm2() -> None:
     planner = TrajectoryPlanner()
@@ -297,6 +305,77 @@ def test_planner_raises_when_kop_min_vertical_exceeds_t1_depth() -> None:
     planner = TrajectoryPlanner()
     config = TrajectoryConfig(kop_min_vertical_m=2500.0)
     with pytest.raises(PlanningError, match="minimum vertical before KOP is too deep"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=config,
+        )
+
+
+def test_planner_builds_reverse_profile_when_classification_requires_it() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        md_step_m=5.0,
+        md_step_control_m=1.0,
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=3.0,
+    )
+
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(300.0, 0.0, 2000.0),
+        t3=Point3D(1300.0, 0.0, 2070.0),
+        config=config,
+    )
+
+    segments = set(result.stations["segment"])
+    assert {"BUILD_REV", "DROP_REV"}.issubset(segments)
+    assert str(result.summary["trajectory_type"]) == "Цели в обратном направлении"
+    assert "hold_inc_deg" in result.summary
+    assert "well_complexity" in result.summary
+
+
+def test_planner_honors_segment_build_limits_even_if_global_build_max_is_higher() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=10.0,
+        dls_limits_deg_per_30m={
+            "BUILD1": 3.0,
+            "HOLD": 2.0,
+            "BUILD2": 3.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
+
+    assert result.summary["distance_t1_m"] <= config.pos_tolerance_m
+    assert result.summary["distance_t3_m"] <= config.pos_tolerance_m
+    assert result.summary["max_dls_build1_deg_per_30m"] <= 3.0 + 1e-6
+    assert result.summary["max_dls_build2_deg_per_30m"] <= 3.0 + 1e-6
+
+
+def test_planner_raises_when_build_segment_limits_conflict_with_global_min() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        dls_build_min_deg_per_30m=4.0,
+        dls_build_max_deg_per_30m=10.0,
+        dls_limits_deg_per_30m={
+            "BUILD1": 3.0,
+            "HOLD": 2.0,
+            "BUILD2": 3.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+
+    with pytest.raises(PlanningError, match="No feasible BUILD DLS interval"):
         planner.plan(
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(600.0, 800.0, 2400.0),

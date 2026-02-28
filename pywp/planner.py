@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
 
+from pywp.classification import (
+    TRAJECTORY_REVERSE_DIRECTION,
+    TRAJECTORY_SAME_DIRECTION,
+    WellClassification,
+    classify_trajectory_type,
+    classify_well,
+    complexity_label,
+    trajectory_type_label,
+)
 from pywp.mcm import add_dls, compute_positions_min_curv
 from pywp.models import (
     ALLOWED_OBJECTIVE_MODES,
@@ -18,12 +28,12 @@ from pywp.models import (
 from pywp.segments import BuildSegment, HoldSegment, HorizontalSegment, VerticalSegment
 from pywp.trajectory import WellTrajectory
 
-# Directional-planning formulas use the standard circular-arc relations:
+# Directional-planning formulas use standard circular-arc relations:
 # arc length L = R * dI(rad), ds = R * (cos(I0)-cos(I1)), dTVD = R * (sin(I1)-sin(I0)).
 # DLS/R conversion: DLS(deg/30m) = 30 * (180/pi) / R.
-# See references used in this task:
-# - IHS Petra help (minimum curvature / SPE 2262): https://onlinehelp.ihs.com/Energy/Petra/2021/Content/main_survey_computation.htm
-# - SLB dogleg severity definition: https://glossary.slb.com/en/terms/d/dogleg_severity
+# References used in this task:
+# - IADC drilling lexicon (minimum curvature): https://iadclexicon.org/minimum-curvature-method/
+# - IADC drilling lexicon (dogleg severity): https://iadclexicon.org/dogleg-severity/
 DEG2RAD = np.pi / 180.0
 RAD2DEG = 180.0 / np.pi
 SMALL = 1e-9
@@ -45,7 +55,11 @@ class SectionGeometry:
 
 @dataclass(frozen=True)
 class ProfileParameters:
+    trajectory_type: str
     kop_vertical_m: float
+    reverse_inc_deg: float
+    reverse_hold_length_m: float
+    reverse_dls_deg_per_30m: float
     inc_entry_deg: float
     inc_hold_deg: float
     dls_build1_deg_per_30m: float
@@ -57,8 +71,24 @@ class ProfileParameters:
     azimuth_deg: float
 
     @property
+    def reverse_build_length_m(self) -> float:
+        if self.reverse_inc_deg <= SMALL or self.reverse_dls_deg_per_30m <= SMALL:
+            return 0.0
+        return float(_radius_from_dls(self.reverse_dls_deg_per_30m) * self.reverse_inc_deg * DEG2RAD)
+
+    @property
+    def reverse_total_length_m(self) -> float:
+        return float(2.0 * self.reverse_build_length_m + self.reverse_hold_length_m)
+
+    @property
     def md_t1_m(self) -> float:
-        return float(self.kop_vertical_m + self.build1_length_m + self.hold_length_m + self.build2_length_m)
+        return float(
+            self.kop_vertical_m
+            + self.reverse_total_length_m
+            + self.build1_length_m
+            + self.hold_length_m
+            + self.build2_length_m
+        )
 
     @property
     def md_total_m(self) -> float:
@@ -76,7 +106,14 @@ class TrajectoryPlanner:
         _validate_config(config)
 
         geometry = _build_section_geometry(surface=surface, t1=t1, t3=t3, config=config)
-        params = _solve_build_hold_build_horizontal_profile(geometry=geometry, config=config)
+        horizontal_offset_t1_m = _horizontal_offset(surface=surface, point=t1)
+        trajectory_type = classify_trajectory_type(gv_m=geometry.z1_m, horizontal_offset_t1_m=horizontal_offset_t1_m)
+
+        if trajectory_type == TRAJECTORY_REVERSE_DIRECTION:
+            params = _solve_reverse_direction_profile(geometry=geometry, config=config)
+        else:
+            params = _solve_same_direction_profile(geometry=geometry, config=config)
+
         trajectory = _build_trajectory(params=params)
 
         control = compute_positions_min_curv(
@@ -85,12 +122,20 @@ class TrajectoryPlanner:
         )
         control = add_dls(control)
 
+        classification = classify_well(
+            gv_m=geometry.z1_m,
+            horizontal_offset_t1_m=horizontal_offset_t1_m,
+            hold_inc_deg=params.inc_hold_deg,
+        )
+
         summary = _build_summary(
             df=control,
             t1=t1,
             t3=t3,
             md_t1_m=params.md_t1_m,
-            kop_vertical_m=params.kop_vertical_m,
+            params=params,
+            horizontal_offset_t1_m=horizontal_offset_t1_m,
+            classification=classification,
             config=config,
         )
         _assert_solution_is_valid(summary=summary, config=config)
@@ -152,12 +197,14 @@ def _build_section_geometry(
     )
 
 
-def _solve_build_hold_build_horizontal_profile(
+def _solve_same_direction_profile(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
 ) -> ProfileParameters:
-    lower = float(config.dls_build_min_deg_per_30m)
-    upper = float(config.dls_build_max_deg_per_30m)
+    lower, upper = _effective_dls_search_bounds(
+        config=config,
+        constrained_segments=("BUILD1", "BUILD2"),
+    )
 
     kop_candidates = _iter_kop_candidates(geometry=geometry, config=config)
     best: ProfileParameters | None = None
@@ -165,8 +212,12 @@ def _solve_build_hold_build_horizontal_profile(
         candidate = _optimize_profile_for_objective(
             lower_dls=lower,
             upper_dls=upper,
-            geometry=geometry,
-            kop_vertical_m=kop_vertical_m,
+            profile_builder=lambda dls: _profile_same_direction(
+                geometry=geometry,
+                dls_build_deg_per_30m=dls,
+                kop_vertical_m=kop_vertical_m,
+            ),
+            objective_mode=config.objective_mode,
             config=config,
         )
         if candidate is None:
@@ -195,16 +246,141 @@ def _solve_build_hold_build_horizontal_profile(
     )
 
 
-def _profile_for_dls(
+def _solve_reverse_direction_profile(
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+) -> ProfileParameters:
+    lower, upper = _effective_dls_search_bounds(
+        config=config,
+        constrained_segments=("BUILD_REV", "DROP_REV", "BUILD1", "BUILD2"),
+    )
+
+    kop_candidates = _iter_kop_candidates(geometry=geometry, config=config)
+    reverse_inc_candidates = _iter_reverse_inc_candidates(config=config)
+
+    best: ProfileParameters | None = None
+    for kop_vertical_m in kop_candidates:
+        for reverse_inc_deg in reverse_inc_candidates:
+            candidate = _optimize_profile_for_objective(
+                lower_dls=lower,
+                upper_dls=upper,
+                profile_builder=lambda dls: _profile_reverse_direction(
+                    geometry=geometry,
+                    dls_build_deg_per_30m=dls,
+                    kop_vertical_m=kop_vertical_m,
+                    reverse_inc_deg=reverse_inc_deg,
+                ),
+                objective_mode=config.objective_mode,
+                config=config,
+            )
+            if candidate is None:
+                continue
+            best = _select_better_candidate(current=best, candidate=candidate, objective_mode=config.objective_mode)
+
+    if best is not None:
+        return best
+
+    raise PlanningError(
+        "No valid reverse-direction profile found within configured limits. "
+        "Try increasing BUILD max DLS, reducing minimum vertical before KOP, "
+        "or widening reverse INC search limits."
+    )
+
+
+def _profile_same_direction(
     geometry: SectionGeometry,
     dls_build_deg_per_30m: float,
     kop_vertical_m: float,
 ) -> ProfileParameters | None:
-    if dls_build_deg_per_30m <= 0.0:
-        return None
-    if kop_vertical_m < 0.0:
+    if dls_build_deg_per_30m <= 0.0 or kop_vertical_m < 0.0:
         return None
 
+    z_after_preamble_m = geometry.z1_m - kop_vertical_m
+    if z_after_preamble_m <= SMALL:
+        return None
+
+    return _build_profile_from_effective_targets(
+        geometry=geometry,
+        dls_build_deg_per_30m=dls_build_deg_per_30m,
+        s_to_t1_m=geometry.s1_m,
+        z_to_t1_m=z_after_preamble_m,
+        kop_vertical_m=kop_vertical_m,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        reverse_inc_deg=0.0,
+        reverse_hold_length_m=0.0,
+        reverse_dls_deg_per_30m=0.0,
+    )
+
+
+def _profile_reverse_direction(
+    geometry: SectionGeometry,
+    dls_build_deg_per_30m: float,
+    kop_vertical_m: float,
+    reverse_inc_deg: float,
+) -> ProfileParameters | None:
+    if dls_build_deg_per_30m <= 0.0 or kop_vertical_m < 0.0:
+        return None
+    if reverse_inc_deg <= SMALL or reverse_inc_deg >= 89.9:
+        return None
+
+    radius_m = _radius_from_dls(dls_build_deg_per_30m)
+    reverse_inc_rad = reverse_inc_deg * DEG2RAD
+    sin_reverse = np.sin(reverse_inc_rad)
+    cos_reverse = np.cos(reverse_inc_rad)
+
+    reverse_base_offset_m = 2.0 * radius_m * (1.0 - cos_reverse)
+    reverse_base_depth_m = 2.0 * radius_m * sin_reverse
+
+    z_after_base_reverse_m = geometry.z1_m - kop_vertical_m - reverse_base_depth_m
+    if z_after_base_reverse_m <= SMALL:
+        return None
+
+    inc_entry_rad = geometry.inc_entry_deg * DEG2RAD
+    forward_min_offset_m = radius_m * (1.0 - np.cos(inc_entry_rad))
+    required_extra_offset_m = max(forward_min_offset_m - (geometry.s1_m + reverse_base_offset_m) + SMALL, 0.0)
+
+    if sin_reverse <= SMALL:
+        return None
+
+    reverse_hold_length_m = required_extra_offset_m / sin_reverse
+    reverse_total_depth_m = reverse_base_depth_m + reverse_hold_length_m * cos_reverse
+    z_after_reverse_m = geometry.z1_m - kop_vertical_m - reverse_total_depth_m
+    if z_after_reverse_m <= SMALL:
+        return None
+
+    s_after_reverse_m = geometry.s1_m + reverse_base_offset_m + reverse_hold_length_m * sin_reverse
+
+    candidate = _build_profile_from_effective_targets(
+        geometry=geometry,
+        dls_build_deg_per_30m=dls_build_deg_per_30m,
+        s_to_t1_m=s_after_reverse_m,
+        z_to_t1_m=z_after_reverse_m,
+        kop_vertical_m=kop_vertical_m,
+        trajectory_type=TRAJECTORY_REVERSE_DIRECTION,
+        reverse_inc_deg=reverse_inc_deg,
+        reverse_hold_length_m=reverse_hold_length_m,
+        reverse_dls_deg_per_30m=dls_build_deg_per_30m,
+    )
+    if candidate is None:
+        return None
+
+    if candidate.reverse_total_length_m <= SMALL:
+        return None
+
+    return candidate
+
+
+def _build_profile_from_effective_targets(
+    geometry: SectionGeometry,
+    dls_build_deg_per_30m: float,
+    s_to_t1_m: float,
+    z_to_t1_m: float,
+    kop_vertical_m: float,
+    trajectory_type: str,
+    reverse_inc_deg: float,
+    reverse_hold_length_m: float,
+    reverse_dls_deg_per_30m: float,
+) -> ProfileParameters | None:
     horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
     if horizontal_length_m <= SMALL:
         return None
@@ -214,14 +390,11 @@ def _profile_for_dls(
         return None
 
     radius_m = _radius_from_dls(dls_build_deg_per_30m)
-    z1_after_kop_m = geometry.z1_m - kop_vertical_m
-    if z1_after_kop_m <= SMALL:
-        return None
 
-    # Aggregate build displacement to t1 for BUILD1 (0->Ih) + BUILD2 (Ih->Ientry):
+    # Aggregate forward build displacement to t1 for BUILD1 (0->Ih) + BUILD2 (Ih->Ientry):
     # ds_build_total = R*(1-cos(Ientry)), dz_build_total = R*sin(Ientry)
-    a_m = geometry.s1_m - radius_m * (1.0 - np.cos(inc_entry_rad))
-    b_m = z1_after_kop_m - radius_m * np.sin(inc_entry_rad)
+    a_m = s_to_t1_m - radius_m * (1.0 - np.cos(inc_entry_rad))
+    b_m = z_to_t1_m - radius_m * np.sin(inc_entry_rad)
     if a_m <= SMALL or b_m <= SMALL:
         return None
 
@@ -236,7 +409,11 @@ def _profile_for_dls(
         return None
 
     return ProfileParameters(
+        trajectory_type=trajectory_type,
         kop_vertical_m=float(kop_vertical_m),
+        reverse_inc_deg=float(max(reverse_inc_deg, 0.0)),
+        reverse_hold_length_m=float(max(reverse_hold_length_m, 0.0)),
+        reverse_dls_deg_per_30m=float(max(reverse_dls_deg_per_30m, 0.0)),
         inc_entry_deg=float(geometry.inc_entry_deg),
         inc_hold_deg=float(inc_hold_rad * RAD2DEG),
         dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
@@ -261,18 +438,54 @@ def _iter_kop_candidates(geometry: SectionGeometry, config: TrajectoryConfig) ->
     return np.linspace(kop_min, kop_max, grid_size, dtype=float)
 
 
-def _candidate_rank(candidate: ProfileParameters, objective_mode: str) -> tuple[float, float, float]:
+def _iter_reverse_inc_candidates(config: TrajectoryConfig) -> np.ndarray:
+    inc_min = float(max(config.reverse_inc_min_deg, 0.0))
+    inc_max = float(min(config.reverse_inc_max_deg, 89.5))
+    if inc_min >= inc_max:
+        return np.array([], dtype=float)
+
+    grid_size = int(max(config.reverse_inc_grid_size, 2))
+    return np.linspace(inc_min, inc_max, grid_size, dtype=float)
+
+
+def _effective_dls_search_bounds(config: TrajectoryConfig, constrained_segments: tuple[str, ...]) -> tuple[float, float]:
+    lower = float(config.dls_build_min_deg_per_30m)
+    upper = float(config.dls_build_max_deg_per_30m)
+
+    for segment in constrained_segments:
+        segment_limit = config.dls_limits_deg_per_30m.get(segment)
+        if segment_limit is None:
+            continue
+        upper = min(upper, float(segment_limit))
+
+    if upper <= SMALL:
+        segments = ", ".join(constrained_segments)
+        raise PlanningError(
+            f"No feasible BUILD DLS: constrained upper bound is {upper:.2f} deg/30m for segments [{segments}]."
+        )
+    if lower > upper + SMALL:
+        segments = ", ".join(constrained_segments)
+        raise PlanningError(
+            "No feasible BUILD DLS interval after applying segment limits: "
+            f"min={lower:.2f} deg/30m, max={upper:.2f} deg/30m for [{segments}]."
+        )
+    return lower, upper
+
+
+def _candidate_rank(candidate: ProfileParameters, objective_mode: str) -> tuple[float, float, float, float]:
     if objective_mode == OBJECTIVE_MINIMIZE_BUILD_DLS:
         return (
             candidate.dls_build1_deg_per_30m,
             -candidate.hold_length_m,
             -candidate.kop_vertical_m,
+            candidate.reverse_total_length_m,
         )
 
     return (
         -candidate.hold_length_m,
         candidate.dls_build1_deg_per_30m,
         -candidate.kop_vertical_m,
+        candidate.reverse_total_length_m,
     )
 
 
@@ -291,24 +504,22 @@ def _select_better_candidate(
 def _optimize_profile_for_objective(
     lower_dls: float,
     upper_dls: float,
-    geometry: SectionGeometry,
-    kop_vertical_m: float,
+    profile_builder: Callable[[float], ProfileParameters | None],
+    objective_mode: str,
     config: TrajectoryConfig,
 ) -> ProfileParameters | None:
-    if config.objective_mode == OBJECTIVE_MINIMIZE_BUILD_DLS:
+    if objective_mode == OBJECTIVE_MINIMIZE_BUILD_DLS:
         return _optimize_minimize_build_dls(
             lower_dls=lower_dls,
             upper_dls=upper_dls,
-            geometry=geometry,
-            kop_vertical_m=kop_vertical_m,
+            profile_builder=profile_builder,
             config=config,
         )
 
     return _optimize_maximize_hold(
         lower_dls=lower_dls,
         upper_dls=upper_dls,
-        geometry=geometry,
-        kop_vertical_m=kop_vertical_m,
+        profile_builder=profile_builder,
         config=config,
     )
 
@@ -316,18 +527,13 @@ def _optimize_profile_for_objective(
 def _optimize_maximize_hold(
     lower_dls: float,
     upper_dls: float,
-    geometry: SectionGeometry,
-    kop_vertical_m: float,
+    profile_builder: Callable[[float], ProfileParameters | None],
     config: TrajectoryConfig,
 ) -> ProfileParameters | None:
     def objective(dls_build: float) -> float:
-        candidate = _profile_for_dls(
-            geometry=geometry,
-            dls_build_deg_per_30m=dls_build,
-            kop_vertical_m=kop_vertical_m,
-        )
+        candidate = profile_builder(float(dls_build))
         if not _is_candidate_feasible(candidate=candidate, config=config):
-            return 1e12 + abs(dls_build - lower_dls)
+            return 1e12 + abs(float(dls_build) - lower_dls)
         return -candidate.hold_length_m
 
     optimum = minimize_scalar(objective, bounds=(lower_dls, upper_dls), method="bounded", options={"xatol": 1e-5})
@@ -337,11 +543,7 @@ def _optimize_maximize_hold(
     best_hold = -1.0
     for dls in probes:
         dls_clamped = float(np.clip(dls, lower_dls, upper_dls))
-        candidate = _profile_for_dls(
-            geometry=geometry,
-            dls_build_deg_per_30m=dls_clamped,
-            kop_vertical_m=kop_vertical_m,
-        )
+        candidate = profile_builder(dls_clamped)
         if not _is_candidate_feasible(candidate=candidate, config=config):
             continue
         if candidate.hold_length_m > best_hold:
@@ -353,27 +555,15 @@ def _optimize_maximize_hold(
 def _optimize_minimize_build_dls(
     lower_dls: float,
     upper_dls: float,
-    geometry: SectionGeometry,
-    kop_vertical_m: float,
+    profile_builder: Callable[[float], ProfileParameters | None],
     config: TrajectoryConfig,
 ) -> ProfileParameters | None:
-    lower_candidate = _profile_for_dls(
-        geometry=geometry,
-        dls_build_deg_per_30m=lower_dls,
-        kop_vertical_m=kop_vertical_m,
-    )
+    lower_candidate = profile_builder(lower_dls)
     if _is_candidate_feasible(candidate=lower_candidate, config=config):
         return lower_candidate
 
     grid = np.linspace(lower_dls, upper_dls, 400, dtype=float)
-    candidates: list[ProfileParameters | None] = [
-        _profile_for_dls(
-            geometry=geometry,
-            dls_build_deg_per_30m=float(dls),
-            kop_vertical_m=kop_vertical_m,
-        )
-        for dls in grid
-    ]
+    candidates: list[ProfileParameters | None] = [profile_builder(float(dls)) for dls in grid]
     feasible_mask = [bool(_is_candidate_feasible(candidate=cand, config=config)) for cand in candidates]
     try:
         first_feasible_idx = feasible_mask.index(True)
@@ -388,21 +578,13 @@ def _optimize_minimize_build_dls(
     hi = float(grid[first_feasible_idx])
     for _ in range(40):
         mid = 0.5 * (lo + hi)
-        mid_candidate = _profile_for_dls(
-            geometry=geometry,
-            dls_build_deg_per_30m=mid,
-            kop_vertical_m=kop_vertical_m,
-        )
+        mid_candidate = profile_builder(mid)
         if _is_candidate_feasible(candidate=mid_candidate, config=config):
             hi = mid
         else:
             lo = mid
 
-    candidate = _profile_for_dls(
-        geometry=geometry,
-        dls_build_deg_per_30m=hi,
-        kop_vertical_m=kop_vertical_m,
-    )
+    candidate = profile_builder(hi)
     if _is_candidate_feasible(candidate=candidate, config=config):
         return candidate
     return None
@@ -428,34 +610,69 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
             length_m=params.kop_vertical_m,
             azi_deg=params.azimuth_deg,
             name="VERTICAL",
-        ),
-        BuildSegment(
-            inc_from_deg=0.0,
-            inc_to_deg=params.inc_hold_deg,
-            dls_deg_per_30m=params.dls_build1_deg_per_30m,
-            azi_deg=params.azimuth_deg,
-            name="BUILD1",
-        ),
-        HoldSegment(
-            length_m=params.hold_length_m,
-            inc_deg=params.inc_hold_deg,
-            azi_deg=params.azimuth_deg,
-            name="HOLD",
-        ),
-        BuildSegment(
-            inc_from_deg=params.inc_hold_deg,
-            inc_to_deg=params.inc_entry_deg,
-            dls_deg_per_30m=params.dls_build2_deg_per_30m,
-            azi_deg=params.azimuth_deg,
-            name="BUILD2",
-        ),
-        HorizontalSegment(
-            length_m=params.horizontal_length_m,
-            inc_deg=params.inc_entry_deg,
-            azi_deg=params.azimuth_deg,
-            name="HORIZONTAL",
-        ),
+        )
     ]
+
+    if params.trajectory_type == TRAJECTORY_REVERSE_DIRECTION and params.reverse_total_length_m > SMALL:
+        opposite_azimuth_deg = _opposite_azimuth(params.azimuth_deg)
+        segments.append(
+            BuildSegment(
+                inc_from_deg=0.0,
+                inc_to_deg=params.reverse_inc_deg,
+                dls_deg_per_30m=params.reverse_dls_deg_per_30m,
+                azi_deg=opposite_azimuth_deg,
+                name="BUILD_REV",
+            )
+        )
+        if params.reverse_hold_length_m > SMALL:
+            segments.append(
+                HoldSegment(
+                    length_m=params.reverse_hold_length_m,
+                    inc_deg=params.reverse_inc_deg,
+                    azi_deg=opposite_azimuth_deg,
+                    name="HOLD_REV",
+                )
+            )
+        segments.append(
+            BuildSegment(
+                inc_from_deg=params.reverse_inc_deg,
+                inc_to_deg=0.0,
+                dls_deg_per_30m=params.reverse_dls_deg_per_30m,
+                azi_deg=opposite_azimuth_deg,
+                name="DROP_REV",
+            )
+        )
+
+    segments.extend(
+        [
+            BuildSegment(
+                inc_from_deg=0.0,
+                inc_to_deg=params.inc_hold_deg,
+                dls_deg_per_30m=params.dls_build1_deg_per_30m,
+                azi_deg=params.azimuth_deg,
+                name="BUILD1",
+            ),
+            HoldSegment(
+                length_m=params.hold_length_m,
+                inc_deg=params.inc_hold_deg,
+                azi_deg=params.azimuth_deg,
+                name="HOLD",
+            ),
+            BuildSegment(
+                inc_from_deg=params.inc_hold_deg,
+                inc_to_deg=params.inc_entry_deg,
+                dls_deg_per_30m=params.dls_build2_deg_per_30m,
+                azi_deg=params.azimuth_deg,
+                name="BUILD2",
+            ),
+            HorizontalSegment(
+                length_m=params.horizontal_length_m,
+                inc_deg=params.inc_entry_deg,
+                azi_deg=params.azimuth_deg,
+                name="HORIZONTAL",
+            ),
+        ]
+    )
     return WellTrajectory(segments=segments)
 
 
@@ -464,9 +681,11 @@ def _build_summary(
     t1: Point3D,
     t3: Point3D,
     md_t1_m: float,
-    kop_vertical_m: float,
+    params: ProfileParameters,
+    horizontal_offset_t1_m: float,
+    classification: WellClassification,
     config: TrajectoryConfig,
-) -> dict[str, float]:
+) -> dict[str, float | str]:
     t1_idx = int((df["MD_m"] - md_t1_m).abs().idxmin())
     t1_row = df.loc[t1_idx]
     t3_row = df.iloc[-1]
@@ -475,17 +694,32 @@ def _build_summary(
     distance_t3 = _distance_3d(t3_row["X_m"], t3_row["Y_m"], t3_row["Z_m"], t3.x, t3.y, t3.z)
 
     max_dls = float(np.nanmax(df["DLS_deg_per_30m"].to_numpy()))
-    summary: dict[str, float] = {
+    summary: dict[str, float | str] = {
         "distance_t1_m": float(distance_t1),
         "distance_t3_m": float(distance_t3),
-        "kop_vertical_m": float(kop_vertical_m),
-        "kop_md_m": float(kop_vertical_m),
+        "kop_vertical_m": float(params.kop_vertical_m),
+        "kop_md_m": float(params.kop_vertical_m),
         "entry_inc_deg": float(t1_row["INC_deg"]),
         "entry_inc_target_deg": float(config.entry_inc_target_deg),
         "entry_inc_tolerance_deg": float(config.entry_inc_tolerance_deg),
+        "hold_inc_deg": float(params.inc_hold_deg),
         "max_dls_total_deg_per_30m": max_dls,
         "md_total_m": float(df["MD_m"].iloc[-1]),
+        "t1_horizontal_offset_m": float(horizontal_offset_t1_m),
+        "trajectory_type": trajectory_type_label(classification.trajectory_type),
+        "well_complexity": complexity_label(classification.complexity),
+        "well_complexity_by_offset": complexity_label(classification.complexity_by_offset),
+        "well_complexity_by_hold": complexity_label(classification.complexity_by_hold),
+        "reverse_inc_deg": float(params.reverse_inc_deg),
+        "reverse_hold_length_m": float(params.reverse_hold_length_m),
     }
+
+    summary["class_reverse_offset_min_m"] = float(classification.limits.reverse_min_m)
+    summary["class_reverse_offset_max_m"] = float(classification.limits.reverse_max_m)
+    summary["class_offset_ordinary_max_m"] = float(classification.limits.ordinary_offset_max_m)
+    summary["class_offset_complex_max_m"] = float(classification.limits.complex_offset_max_m)
+    summary["class_hold_ordinary_max_deg"] = float(classification.limits.hold_ordinary_max_deg)
+    summary["class_hold_complex_max_deg"] = float(classification.limits.hold_complex_max_deg)
 
     for segment, limit in config.dls_limits_deg_per_30m.items():
         seg_max = float(df.loc[df["segment"] == segment, "DLS_deg_per_30m"].max(skipna=True))
@@ -496,15 +730,15 @@ def _build_summary(
     return summary
 
 
-def _assert_solution_is_valid(summary: dict[str, float], config: TrajectoryConfig) -> None:
-    if summary["distance_t1_m"] > config.pos_tolerance_m:
+def _assert_solution_is_valid(summary: dict[str, float | str], config: TrajectoryConfig) -> None:
+    if float(summary["distance_t1_m"]) > config.pos_tolerance_m:
         raise PlanningError("Failed to hit t1 within tolerance.")
-    if summary["distance_t3_m"] > config.pos_tolerance_m:
+    if float(summary["distance_t3_m"]) > config.pos_tolerance_m:
         raise PlanningError("Failed to hit t3 within tolerance.")
-    if abs(summary["entry_inc_deg"] - config.entry_inc_target_deg) > config.entry_inc_tolerance_deg + 1e-6:
+    if abs(float(summary["entry_inc_deg"]) - config.entry_inc_target_deg) > config.entry_inc_tolerance_deg + 1e-6:
         raise PlanningError("Entry inclination at t1 is outside required target range.")
     for segment, limit in config.dls_limits_deg_per_30m.items():
-        actual = summary.get(f"max_dls_{segment.lower()}_deg_per_30m", 0.0)
+        actual = float(summary.get(f"max_dls_{segment.lower()}_deg_per_30m", 0.0))
         if actual > limit + 1e-6:
             raise PlanningError(f"DLS limit exceeded on segment {segment}: {actual:.2f} > {limit:.2f}")
 
@@ -518,6 +752,14 @@ def _validate_config(config: TrajectoryConfig) -> None:
         raise PlanningError("kop_min_vertical_m must be non-negative.")
     if config.kop_search_grid_size < 2:
         raise PlanningError("kop_search_grid_size must be >= 2.")
+    if config.reverse_inc_min_deg < 0.0:
+        raise PlanningError("reverse_inc_min_deg must be non-negative.")
+    if config.reverse_inc_max_deg > 89.5:
+        raise PlanningError("reverse_inc_max_deg must be <= 89.5.")
+    if config.reverse_inc_min_deg >= config.reverse_inc_max_deg:
+        raise PlanningError("reverse_inc_min_deg must be < reverse_inc_max_deg.")
+    if config.reverse_inc_grid_size < 2:
+        raise PlanningError("reverse_inc_grid_size must be >= 2.")
     if config.entry_inc_tolerance_deg < 0.0:
         raise PlanningError("entry_inc_tolerance_deg must be non-negative.")
     if config.dls_build_min_deg_per_30m > config.dls_build_max_deg_per_30m:
@@ -566,3 +808,11 @@ def _radius_from_dls(dls_deg_per_30m: float) -> float:
 
 def _distance_3d(x1: float, y1: float, z1: float, x2: float, y2: float, z2: float) -> float:
     return float(np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2))
+
+
+def _horizontal_offset(surface: Point3D, point: Point3D) -> float:
+    return float(np.hypot(point.x - surface.x, point.y - surface.y))
+
+
+def _opposite_azimuth(azimuth_deg: float) -> float:
+    return float(np.mod(azimuth_deg + 180.0, 360.0))
