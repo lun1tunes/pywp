@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-import hashlib
 from pathlib import Path
 from time import perf_counter
 
@@ -32,10 +31,21 @@ TURN_SOLVER_OPTIONS = {
     TURN_SOLVER_DE_HYBRID: "DE Hybrid (global + local)",
 }
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
-
-
-def _hash_text(value: str) -> str:
-    return hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+WT_UI_DEFAULTS_VERSION = 5
+WT_PROFILE_DEFAULTS: dict[str, float | int | str] = {
+    "wt_md_step_m": 10.0,
+    "wt_md_step_control_m": 2.0,
+    "wt_pos_tolerance_m": 2.0,
+    "wt_entry_inc_target_deg": 86.0,
+    "wt_entry_inc_tolerance_deg": 2.0,
+    "wt_dls_build_min": 0.5,
+    "wt_dls_build_max": 3.0,
+    "wt_kop_min_vertical_m": 300.0,
+    "wt_objective_mode": OBJECTIVE_MAXIMIZE_HOLD,
+    "wt_turn_solver_mode": TURN_SOLVER_LEAST_SQUARES,
+    "wt_turn_solver_qmc_samples": 24,
+    "wt_turn_solver_local_starts": 12,
+}
 
 
 @st.cache_data(show_spinner=False)
@@ -47,23 +57,15 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_source_mode", "Файл по пути")
     st.session_state.setdefault("wt_source_path", str(DEFAULT_WELLTRACK_PATH))
     st.session_state.setdefault("wt_source_inline", "")
+    _apply_profile_defaults(force=False)
+    st.session_state.setdefault("wt_ui_defaults_version", 0)
 
-    st.session_state.setdefault("wt_md_step_m", 10.0)
-    st.session_state.setdefault("wt_md_step_control_m", 2.0)
-    st.session_state.setdefault("wt_pos_tolerance_m", 2.0)
-    st.session_state.setdefault("wt_entry_inc_target_deg", 86.0)
-    st.session_state.setdefault("wt_entry_inc_tolerance_deg", 2.0)
-    st.session_state.setdefault("wt_dls_build_min", 0.5)
-    st.session_state.setdefault("wt_dls_build_max", 3.0)
-    st.session_state.setdefault("wt_kop_min_vertical_m", 300.0)
-    st.session_state.setdefault("wt_objective_mode", OBJECTIVE_MAXIMIZE_HOLD)
-    st.session_state.setdefault("wt_turn_solver_mode", TURN_SOLVER_LEAST_SQUARES)
-    st.session_state.setdefault("wt_turn_solver_qmc_samples", 24)
-    st.session_state.setdefault("wt_turn_solver_local_starts", 12)
+    if int(st.session_state.get("wt_ui_defaults_version", 0)) < WT_UI_DEFAULTS_VERSION:
+        _apply_profile_defaults(force=True)
+        st.session_state["wt_ui_defaults_version"] = WT_UI_DEFAULTS_VERSION
 
     st.session_state.setdefault("wt_records", None)
     st.session_state.setdefault("wt_selected_names", [])
-    st.session_state.setdefault("wt_source_hash", "")
     st.session_state.setdefault("wt_loaded_at", "")
 
     st.session_state.setdefault("wt_summary_rows", None)
@@ -79,6 +81,12 @@ def _clear_results() -> None:
     st.session_state["wt_last_error"] = ""
     st.session_state["wt_last_run_at"] = ""
     st.session_state["wt_last_runtime_s"] = None
+
+
+def _apply_profile_defaults(force: bool) -> None:
+    for key, value in WT_PROFILE_DEFAULTS.items():
+        if force or key not in st.session_state:
+            st.session_state[key] = value
 
 
 def _read_welltrack_file(path_text: str) -> str:
@@ -205,7 +213,7 @@ def _all_wells_plan_figure(successes: list[SuccessfulWellPlan], height: int = 56
 
 
 def _build_config_form() -> TrajectoryConfig:
-    st.markdown("### 2) Параметры расчета")
+    st.markdown("### Параметры расчета")
     c1, c2, c3, c4, c5 = st.columns(5, gap="small")
     md_step_m = c1.number_input("Шаг MD", key="wt_md_step_m", min_value=1.0, step=1.0)
     md_step_control_m = c2.number_input("Контрольный шаг MD", key="wt_md_step_control_m", min_value=0.5, step=0.5)
@@ -295,9 +303,8 @@ def _render_source_input() -> str:
     return st.text_area("Текст WELLTRACK", key="wt_source_inline", height=220, placeholder="WELLTRACK 'WELL-1' ...")
 
 
-def _store_parsed_records(source_text: str, records: list[WelltrackRecord]) -> None:
+def _store_parsed_records(records: list[WelltrackRecord]) -> None:
     st.session_state["wt_records"] = records
-    st.session_state["wt_source_hash"] = _hash_text(source_text)
     st.session_state["wt_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["wt_selected_names"] = [record.name for record in records]
     st.session_state["wt_last_error"] = ""
@@ -305,16 +312,10 @@ def _store_parsed_records(source_text: str, records: list[WelltrackRecord]) -> N
 
 
 def run_page() -> None:
-    st.set_page_config(page_title="Импорт WELLTRACK (ECLIPSE)", layout="wide")
+    st.set_page_config(page_title="Импорт WELLTRACK", layout="wide")
     _init_state()
     apply_page_style(max_width_px=1700)
-    render_hero(
-        title="Импорт WELLTRACK (ECLIPSE)",
-        subtitle=(
-            "Поддерживается формат WELLTRACK <имя> с точками X Y Z MD, комментарии '--', "
-            "а также завершение скважины через '/' или ';'."
-        ),
-    )
+    render_hero(title="Импорт WELLTRACK", subtitle="")
 
     source_col, action_col = st.columns([4.0, 1.2], gap="small", vertical_alignment="bottom")
     with source_col:
@@ -327,8 +328,8 @@ def run_page() -> None:
     if clear_clicked:
         st.session_state["wt_records"] = None
         st.session_state["wt_selected_names"] = []
-        st.session_state["wt_source_hash"] = ""
         st.session_state["wt_loaded_at"] = ""
+        _apply_profile_defaults(force=True)
         _clear_results()
         st.rerun()
 
@@ -341,7 +342,7 @@ def run_page() -> None:
                 try:
                     status.write("Проверка структуры WELLTRACK-блоков.")
                     records = _parse_welltrack_cached(source_text)
-                    _store_parsed_records(source_text=source_text, records=records)
+                    _store_parsed_records(records=records)
                     status.write(f"Найдено блоков WELLTRACK: {len(records)}.")
                     elapsed = perf_counter() - started
                     status.update(label=f"Импорт завершен за {elapsed:.2f} с", state="complete", expanded=False)
@@ -363,11 +364,10 @@ def run_page() -> None:
         return
 
     ready_count = sum(1 for record in records if len(record.points) == 3)
-    x1, x2, x3, x4 = st.columns(4, gap="small")
+    x1, x2, x3 = st.columns(3, gap="small")
     x1.metric("Скважин в файле", f"{len(records)}")
     x2.metric("Готово к расчету", f"{ready_count}")
-    x3.metric("Хэш источника", st.session_state.get("wt_source_hash", "—"))
-    x4.metric("Загружено", st.session_state.get("wt_loaded_at", "—"))
+    x3.metric("Загружено", st.session_state.get("wt_loaded_at", "—"))
 
     parsed_df = pd.DataFrame(
         [{"Скважина": record.name, "Точек": len(record.points), "Готова к расчету (3 точки)": len(record.points) == 3} for record in records]
@@ -382,7 +382,7 @@ def run_page() -> None:
         st.session_state["wt_selected_names"] = selected_names
 
     with st.form("welltrack_run_form", clear_on_submit=False):
-        st.markdown("### 3) Выбор скважин и запуск расчета")
+        st.markdown("### Выбор скважин и запуск расчета")
         st.multiselect(
             "Скважины для расчета",
             options=all_names,

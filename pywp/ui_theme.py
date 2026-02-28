@@ -44,12 +44,13 @@ def apply_page_style(max_width_px: int = 1680) -> None:
     )
 
 
-def render_hero(title: str, subtitle: str) -> None:
+def render_hero(title: str, subtitle: str = "") -> None:
+    subtitle_html = f"<p>{subtitle}</p>" if subtitle else ""
     st.markdown(
         f"""
         <div class="pywp-hero">
           <h2>{title}</h2>
-          <p>{subtitle}</p>
+          {subtitle_html}
         </div>
         """,
         unsafe_allow_html=True,

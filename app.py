@@ -59,6 +59,7 @@ TURN_SOLVER_OPTIONS = {
     TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF)",
     TURN_SOLVER_DE_HYBRID: "DE Hybrid (global + local)",
 }
+UI_DEFAULTS_VERSION = 3
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
@@ -95,6 +96,13 @@ def _init_state() -> None:
     st.session_state.setdefault("turn_solver_mode", TURN_SOLVER_LEAST_SQUARES)
     st.session_state.setdefault("turn_solver_qmc_samples", 24)
     st.session_state.setdefault("turn_solver_local_starts", 12)
+    st.session_state.setdefault("ui_defaults_version", 0)
+
+    if int(st.session_state.get("ui_defaults_version", 0)) < UI_DEFAULTS_VERSION:
+        st.session_state["md_step"] = 10.0
+        st.session_state["entry_inc_target"] = 86.0
+        st.session_state["entry_inc_tol"] = 2.0
+        st.session_state["ui_defaults_version"] = UI_DEFAULTS_VERSION
 
     st.session_state.setdefault("last_result", None)
     st.session_state.setdefault("last_error", "")
@@ -291,14 +299,7 @@ def run_app() -> None:
 
     _init_state()
     apply_page_style(max_width_px=1680)
-    render_hero(
-        title="Планировщик траектории скважины",
-        subtitle=(
-            "Профиль фиксирован по инженерным шаблонам. Для близких t1 используется режим "
-            "«Цели в обратном направлении» с сегментами BUILD_REV/HOLD_REV/DROP_REV, далее "
-            "BUILD1 -> HOLD -> BUILD2 -> HORIZONTAL."
-        ),
-    )
+    render_hero(title="Планировщик траектории скважины")
 
     top_left, top_mid, top_right = st.columns([1.5, 1.1, 3.0], gap="small")
     with top_left:
