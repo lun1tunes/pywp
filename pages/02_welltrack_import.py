@@ -63,6 +63,12 @@ def _parse_welltrack_cached(text: str) -> list[WelltrackRecord]:
     return parse_welltrack_text(text)
 
 
+def _log_line(run_started_s: float, message: str) -> str:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    elapsed_s = perf_counter() - run_started_s
+    return f"[{timestamp}] elapsed={elapsed_s:.2f}s | {message}"
+
+
 def _init_state() -> None:
     st.session_state.setdefault("wt_source_mode", "Файл по пути")
     st.session_state.setdefault("wt_source_path", str(DEFAULT_WELLTRACK_PATH))
@@ -83,6 +89,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_error", "")
     st.session_state.setdefault("wt_last_run_at", "")
     st.session_state.setdefault("wt_last_runtime_s", None)
+    st.session_state.setdefault("wt_last_run_log_lines", [])
 
 
 def _clear_results() -> None:
@@ -91,6 +98,7 @@ def _clear_results() -> None:
     st.session_state["wt_last_error"] = ""
     st.session_state["wt_last_run_at"] = ""
     st.session_state["wt_last_runtime_s"] = None
+    st.session_state["wt_last_run_log_lines"] = []
 
 
 def _apply_profile_defaults(force: bool) -> None:
@@ -539,19 +547,32 @@ def run_page() -> None:
             st.warning("Выберите минимум одну скважину для расчета.")
         else:
             batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
+            run_started_s = perf_counter()
+            log_lines: list[str] = []
             progress = st.progress(0, text="Подготовка batch-расчета...")
             with st.status(
                 "Выполняется расчет WELLTRACK-набора...", expanded=True
             ) as status:
                 try:
                     started = perf_counter()
+                    start_msg = _log_line(
+                        run_started_s,
+                        f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}.",
+                    )
+                    status.write(start_msg)
+                    log_lines.append(start_msg)
 
                     def on_progress(index: int, total: int, name: str) -> None:
                         progress.progress(
                             int((index / max(total, 1)) * 100),
                             text=f"{index}/{total}: {name}",
                         )
-                        status.write(f"[{index}/{total}] {name}")
+                        line = _log_line(
+                            run_started_s,
+                            f"Расчет скважины {index}/{total}: {name}",
+                        )
+                        status.write(line)
+                        log_lines.append(line)
 
                     summary_rows, successes = batch.evaluate(
                         records=records,
@@ -568,6 +589,14 @@ def run_page() -> None:
                         "%Y-%m-%d %H:%M:%S"
                     )
                     st.session_state["wt_last_runtime_s"] = float(elapsed_s)
+                    done_msg = _log_line(
+                        run_started_s,
+                        f"Batch-расчет завершен. Успешно: {len(successes)}, "
+                        f"ошибок: {len(summary_rows) - len(successes)}. "
+                        f"Затраченное время: {elapsed_s:.2f} с.",
+                    )
+                    status.write(done_msg)
+                    log_lines.append(done_msg)
                     if successes:
                         status.update(
                             label=f"Расчет завершен за {elapsed_s:.2f} с. Успешно: {len(successes)}",
@@ -582,17 +611,26 @@ def run_page() -> None:
                         )
                 except Exception as exc:  # noqa: BLE001
                     st.session_state["wt_last_error"] = str(exc)
-                    status.write(str(exc))
+                    err_msg = _log_line(run_started_s, f"Ошибка batch-расчета: {exc}")
+                    status.write(err_msg)
+                    log_lines.append(err_msg)
                     status.update(
                         label="Batch-расчет завершился ошибкой",
                         state="error",
                         expanded=True,
                     )
                 finally:
+                    st.session_state["wt_last_run_log_lines"] = log_lines
                     progress.empty()
 
     summary_rows = st.session_state.get("wt_summary_rows")
     successes = st.session_state.get("wt_successes")
+    run_log_lines = st.session_state.get("wt_last_run_log_lines")
+    if run_log_lines:
+        with st.container(border=True):
+            st.markdown("### Лог расчета")
+            st.code("\n".join(run_log_lines), language="text")
+
     if not summary_rows:
         render_small_note("Результаты расчета появятся после запуска batch-расчета.")
         return

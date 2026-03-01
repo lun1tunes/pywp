@@ -74,6 +74,12 @@ def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
     return float((dx * dx + dy * dy) ** 0.5)
 
 
+def _log_line(run_started_s: float, message: str) -> str:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    elapsed_s = perf_counter() - run_started_s
+    return f"[{timestamp}] elapsed={elapsed_s:.2f}s | {message}"
+
+
 def _apply_scenario(name: str) -> None:
     values = SCENARIOS[name]
     for prefix, point_key in (("surface", "surface"), ("t1", "t1"), ("t3", "t3")):
@@ -148,6 +154,7 @@ def _init_state() -> None:
     st.session_state.setdefault("last_input_signature", None)
     st.session_state.setdefault("solver_profile_rows", None)
     st.session_state.setdefault("solver_profile_at", "")
+    st.session_state.setdefault("last_run_log_lines", [])
 
 
 def _clear_result() -> None:
@@ -156,6 +163,7 @@ def _clear_result() -> None:
     st.session_state["last_built_at"] = ""
     st.session_state["last_runtime_s"] = None
     st.session_state["last_input_signature"] = None
+    st.session_state["last_run_log_lines"] = []
 
 
 def _current_input_signature() -> tuple[object, ...]:
@@ -537,14 +545,26 @@ def run_app() -> None:
             )
 
     if build_clicked:
+        run_started_s = perf_counter()
+        log_lines: list[str] = []
         progress = st.progress(0, text="Подготовка расчета...")
         with st.status("Расчет траектории...", expanded=True) as status:
             try:
-                status.write("Проверка входных данных.")
+                check_msg = _log_line(
+                    run_started_s,
+                    "Проверка входных данных.",
+                )
+                status.write(check_msg)
+                log_lines.append(check_msg)
                 progress.progress(20, text="Проверка входных данных...")
                 if preflight_errors:
                     raise PlanningError("; ".join(preflight_errors))
-                status.write("Запуск планировщика и решателя.")
+                solve_msg = _log_line(
+                    run_started_s,
+                    "Запуск планировщика и решателя.",
+                )
+                status.write(solve_msg)
+                log_lines.append(solve_msg)
                 progress.progress(55, text="Выполняется расчет траектории...")
                 started = perf_counter()
                 _run_planner(
@@ -552,6 +572,12 @@ def run_app() -> None:
                 )
                 elapsed_s = perf_counter() - started
                 st.session_state["last_runtime_s"] = float(elapsed_s)
+                done_msg = _log_line(
+                    run_started_s,
+                    f"Расчет завершен успешно. Затраченное время солвера: {elapsed_s:.2f} с.",
+                )
+                status.write(done_msg)
+                log_lines.append(done_msg)
                 progress.progress(100, text="Расчет завершен.")
                 status.update(
                     label=f"Расчет завершен за {elapsed_s:.2f} с",
@@ -561,15 +587,24 @@ def run_app() -> None:
             except PlanningError as exc:
                 st.session_state["last_error"] = str(exc)
                 st.session_state["last_runtime_s"] = None
-                status.write(str(exc))
+                err_msg = _log_line(run_started_s, f"Ошибка расчета: {exc}")
+                status.write(err_msg)
+                log_lines.append(err_msg)
                 status.update(
                     label="Расчет завершился ошибкой", state="error", expanded=True
                 )
             finally:
+                st.session_state["last_run_log_lines"] = log_lines
                 progress.empty()
 
     if st.session_state["last_error"]:
         st.error(st.session_state["last_error"])
+
+    run_log_lines = st.session_state.get("last_run_log_lines")
+    if run_log_lines:
+        with st.container(border=True):
+            st.markdown("### Лог расчета")
+            st.code("\n".join(run_log_lines), language="text")
 
     last_result = st.session_state.get("last_result")
     if last_result is None:
@@ -593,25 +628,25 @@ def run_app() -> None:
     azimuth_deg = float(last_result["azimuth_deg"])
     md_t1_m = float(last_result["md_t1_m"])
     t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
-
-    m1, m2, m3, m4, m5 = st.columns(5, gap="small")
-    m1.metric("Горизонтальный отход t1", format_distance(t1_horizontal_offset_m))
-    m2.metric("Угол входа в пласт", f"{summary['entry_inc_deg']:.2f} deg")
-    m3.metric("ЗУ секции HOLD", f"{float(summary['hold_inc_deg']):.2f} deg")
-    m4.metric("Сложность", str(summary["well_complexity"]))
     runtime_s = st.session_state.get("last_runtime_s")
-    m5.metric(
-        "Время расчета", "—" if runtime_s is None else f"{float(runtime_s):.2f} с"
-    )
-
-    n1, n2, n3, n4 = st.columns(4, gap="small")
-    n1.metric("Тип траектории", str(summary["trajectory_type"]))
-    n2.metric("KOP MD", format_distance(float(summary["kop_md_m"])))
-    n3.metric(
-        "Длина горизонтального ствола",
-        format_distance(float(summary["horizontal_length_m"])),
-    )
-    n4.metric("Макс DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
+    kpi_row = {
+        "Горизонтальный отход t1": format_distance(t1_horizontal_offset_m),
+        "Угол входа в пласт": f"{summary['entry_inc_deg']:.2f} deg",
+        "ЗУ секции HOLD": f"{float(summary['hold_inc_deg']):.2f} deg",
+        "Тип траектории": str(summary["trajectory_type"]),
+        "Сложность": str(summary["well_complexity"]),
+        "KOP MD": format_distance(float(summary["kop_md_m"])),
+        "Длина горизонтального ствола": format_distance(float(summary["horizontal_length_m"])),
+        "Макс DLS": f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m",
+        "Время расчета": "—" if runtime_s is None else f"{float(runtime_s):.2f} с",
+    }
+    with st.container(border=True):
+        st.markdown("### Ключевые показатели")
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame([kpi_row])),
+            width="stretch",
+            hide_index=True,
+        )
 
     with st.container(border=True):
         st.markdown("### 3D траектория и DLS")
