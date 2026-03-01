@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
+from time import perf_counter
+
 import pandas as pd
 
 
@@ -19,3 +22,9 @@ def arrow_safe_text_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         if safe[column].dtype == "object":
             safe[column] = safe[column].map(lambda item: "—" if item is None else str(item))
     return safe
+
+
+def format_run_log_line(run_started_s: float, message: str) -> str:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    elapsed_s = perf_counter() - run_started_s
+    return f"[{timestamp}] elapsed={elapsed_s:.2f}s | {message}"

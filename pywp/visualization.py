@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from pywp.models import Point3D
+from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_step
 
 DEG2RAD = np.pi / 180.0
 SEGMENT_COLORS = {
@@ -250,65 +251,6 @@ def _section_coordinate(df: pd.DataFrame, surface: Point3D, azimuth_deg: float) 
     return dn * np.cos(az) + de * np.sin(az)
 
 
-def _equalized_axis_ranges(
-    x_values: np.ndarray,
-    y_values: np.ndarray,
-    z_values: np.ndarray,
-    pad_fraction: float = 0.08,
-) -> tuple[list[float], list[float], list[float]]:
-    x_min, x_max = float(np.min(x_values)), float(np.max(x_values))
-    y_min, y_max = float(np.min(y_values)), float(np.max(y_values))
-    z_min, z_max = float(np.min(z_values)), float(np.max(z_values))
-
-    xy_min = min(x_min, y_min)
-    xy_max = max(x_max, y_max)
-    xy_span = xy_max - xy_min
-
-    span = max(xy_span, z_max - z_min, 1.0)
-    span = span * (1.0 + pad_fraction)
-
-    xy_center = (xy_min + xy_max) / 2.0
-    z_center = (z_min + z_max) / 2.0
-
-    half = span / 2.0
-    # Keep X and Y on the exact same range so both axes have identical scale and ticks.
-    x_range = [xy_center - half, xy_center + half]
-    y_range = [xy_center - half, xy_center + half]
-    # Reverse Z to keep depth increasing downward while maintaining equal scale.
-    z_range = [z_center + half, z_center - half]
-    return x_range, y_range, z_range
-
-
-def _nice_tick_step(span: float, target_ticks: int = 6) -> float:
-    if span <= 0.0:
-        return 1.0
-    raw = span / max(target_ticks, 1)
-    exponent = np.floor(np.log10(raw))
-    base = 10.0**exponent
-    fraction = raw / base
-    if fraction <= 1.0:
-        nice = 1.0
-    elif fraction <= 2.0:
-        nice = 2.0
-    elif fraction <= 5.0:
-        nice = 5.0
-    else:
-        nice = 10.0
-    return float(nice * base)
-
-
-def _linear_tick_values(axis_range: list[float], step: float) -> list[float]:
-    lo = min(axis_range[0], axis_range[1])
-    hi = max(axis_range[0], axis_range[1])
-    if step <= 0.0:
-        return [float(lo), float(hi)]
-    first = np.floor(lo / step) * step
-    values = np.arange(first, hi + step * 0.5, step, dtype=float)
-    if values.size == 0:
-        values = np.array([lo, hi], dtype=float)
-    return np.round(values, 6).tolist()
-
-
 def _segment_color(segment_name: str) -> str:
     normalized = segment_name.strip().upper()
     if normalized in SEGMENT_COLORS:
@@ -372,11 +314,11 @@ def trajectory_3d_figure(
     x_values = np.concatenate([df["X_m"].to_numpy(), np.array([surface.x, t1.x, t3.x])])
     y_values = np.concatenate([df["Y_m"].to_numpy(), np.array([surface.y, t1.y, t3.y])])
     z_values = np.concatenate([df["Z_m"].to_numpy(), np.array([surface.z, t1.z, t3.z])])
-    x_range, y_range, z_range = _equalized_axis_ranges(x_values=x_values, y_values=y_values, z_values=z_values)
+    x_range, y_range, z_range = equalized_axis_ranges(x_values=x_values, y_values=y_values, z_values=z_values)
     xy_span = x_range[1] - x_range[0]
-    xy_dtick = _nice_tick_step(xy_span, target_ticks=6)
+    xy_dtick = nice_tick_step(xy_span, target_ticks=6)
     xy_tick0 = float(np.floor(min(x_range[0], y_range[0]) / xy_dtick) * xy_dtick)
-    xy_tickvals = _linear_tick_values(axis_range=x_range, step=xy_dtick)
+    xy_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
     xy_axis_style = {
         "tickmode": "array",
         "tickvals": xy_tickvals,

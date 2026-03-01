@@ -15,15 +15,16 @@ from pywp.eclipse_welltrack import (
     WelltrackRecord,
     parse_welltrack_text,
 )
-from pywp.models import (
-    OBJECTIVE_MAXIMIZE_HOLD,
-    OBJECTIVE_MINIMIZE_BUILD_DLS,
-    TURN_SOLVER_DE_HYBRID,
-    TURN_SOLVER_LEAST_SQUARES,
+from pywp.planner_config import (
+    CFG_DEFAULTS,
+    OBJECTIVE_OPTIONS,
+    TURN_SOLVER_OPTIONS,
+    build_trajectory_config,
 )
-from pywp.solver_diagnostics import diagnostics_rows_ru, parse_solver_error
+from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_step
+from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
-from pywp.ui_utils import arrow_safe_text_dataframe, format_distance
+from pywp.ui_utils import arrow_safe_text_dataframe, format_distance, format_run_log_line
 from pywp.visualization import (
     dls_figure,
     plan_view_figure,
@@ -32,17 +33,8 @@ from pywp.visualization import (
 )
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
-OBJECTIVE_OPTIONS = {
-    OBJECTIVE_MAXIMIZE_HOLD: "Максимизировать длину HOLD",
-    OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать DLS на BUILD",
-}
-TURN_SOLVER_OPTIONS = {
-    TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF, рекомендуется)",
-    TURN_SOLVER_DE_HYBRID: "DE Hybrid (глобальный + локальный)",
-}
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
 WT_UI_DEFAULTS_VERSION = 7
-CFG_DEFAULTS = TrajectoryConfig()
 WT_PROFILE_DEFAULTS: dict[str, float | int | str] = {
     "wt_cfg_md_step_m": float(CFG_DEFAULTS.md_step_m),
     "wt_cfg_md_step_control_m": float(CFG_DEFAULTS.md_step_control_m),
@@ -63,67 +55,6 @@ WT_PROFILE_DEFAULTS: dict[str, float | int | str] = {
 @st.cache_data(show_spinner=False)
 def _parse_welltrack_cached(text: str) -> list[WelltrackRecord]:
     return parse_welltrack_text(text)
-
-
-def _equalized_axis_ranges(
-    x_values: np.ndarray,
-    y_values: np.ndarray,
-    z_values: np.ndarray,
-    pad_fraction: float = 0.08,
-) -> tuple[list[float], list[float], list[float]]:
-    x_min, x_max = float(np.min(x_values)), float(np.max(x_values))
-    y_min, y_max = float(np.min(y_values)), float(np.max(y_values))
-    z_min, z_max = float(np.min(z_values)), float(np.max(z_values))
-
-    xy_min = min(x_min, y_min)
-    xy_max = max(x_max, y_max)
-    xy_span = xy_max - xy_min
-    span = max(xy_span, z_max - z_min, 1.0) * (1.0 + pad_fraction)
-
-    xy_center = 0.5 * (xy_min + xy_max)
-    z_center = 0.5 * (z_min + z_max)
-    half = 0.5 * span
-    x_range = [xy_center - half, xy_center + half]
-    y_range = [xy_center - half, xy_center + half]
-    # Depth-positive-down view: reverse Z axis.
-    z_range = [z_center + half, z_center - half]
-    return x_range, y_range, z_range
-
-
-def _nice_tick_step(span: float, target_ticks: int = 6) -> float:
-    if span <= 0.0:
-        return 1.0
-    raw = span / max(target_ticks, 1)
-    exponent = np.floor(np.log10(raw))
-    base = 10.0**exponent
-    fraction = raw / base
-    if fraction <= 1.0:
-        nice = 1.0
-    elif fraction <= 2.0:
-        nice = 2.0
-    elif fraction <= 5.0:
-        nice = 5.0
-    else:
-        nice = 10.0
-    return float(nice * base)
-
-
-def _linear_tick_values(axis_range: list[float], step: float) -> list[float]:
-    lo = min(axis_range[0], axis_range[1])
-    hi = max(axis_range[0], axis_range[1])
-    if step <= 0.0:
-        return [float(lo), float(hi)]
-    first = np.floor(lo / step) * step
-    values = np.arange(first, hi + step * 0.5, step, dtype=float)
-    if values.size == 0:
-        values = np.array([lo, hi], dtype=float)
-    return np.round(values, 6).tolist()
-
-
-def _log_line(run_started_s: float, message: str) -> str:
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    elapsed_s = perf_counter() - run_started_s
-    return f"[{timestamp}] elapsed={elapsed_s:.2f}s | {message}"
 
 
 def _init_state() -> None:
@@ -247,14 +178,14 @@ def _all_wells_3d_figure(
     x_values = np.concatenate(x_arrays) if x_arrays else np.array([0.0], dtype=float)
     y_values = np.concatenate(y_arrays) if y_arrays else np.array([0.0], dtype=float)
     z_values = np.concatenate(z_arrays) if z_arrays else np.array([0.0], dtype=float)
-    x_range, y_range, z_range = _equalized_axis_ranges(
+    x_range, y_range, z_range = equalized_axis_ranges(
         x_values=x_values,
         y_values=y_values,
         z_values=z_values,
     )
     xy_span = x_range[1] - x_range[0]
-    xy_dtick = _nice_tick_step(xy_span, target_ticks=6)
-    xy_tickvals = _linear_tick_values(axis_range=x_range, step=xy_dtick)
+    xy_dtick = nice_tick_step(xy_span, target_ticks=6)
+    xy_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
     xy_tick0 = float(np.floor(min(x_range[0], y_range[0]) / xy_dtick) * xy_dtick)
     xy_axis_style = {
         "tickmode": "array",
@@ -346,8 +277,8 @@ def _all_wells_plan_figure(
     half = 0.5 * xy_span * 1.08
     center = 0.5 * (xy_min + xy_max)
     xy_range = [center - half, center + half]
-    xy_dtick = _nice_tick_step(xy_range[1] - xy_range[0], target_ticks=6)
-    xy_tickvals = _linear_tick_values(axis_range=xy_range, step=xy_dtick)
+    xy_dtick = nice_tick_step(xy_range[1] - xy_range[0], target_ticks=6)
+    xy_tickvals = linear_tick_values(axis_range=xy_range, step=xy_dtick)
 
     fig.update_layout(
         title="Все рассчитанные скважины (план E-N, X=Восток, Y=Север)",
@@ -495,17 +426,15 @@ def _build_config_form() -> TrajectoryConfig:
             ),
         )
 
-    max_build = max(float(dls_build_min), float(dls_build_max))
-    min_build = min(float(dls_build_min), float(dls_build_max))
-    return TrajectoryConfig(
+    return build_trajectory_config(
         md_step_m=float(md_step_m),
         md_step_control_m=float(md_step_control_m),
         pos_tolerance_m=float(pos_tolerance_m),
         entry_inc_target_deg=float(entry_inc_target_deg),
         entry_inc_tolerance_deg=float(entry_inc_tolerance_deg),
         max_inc_deg=float(max_inc_deg),
-        dls_build_min_deg_per_30m=min_build,
-        dls_build_max_deg_per_30m=max_build,
+        dls_build_min_deg_per_30m=float(dls_build_min),
+        dls_build_max_deg_per_30m=float(dls_build_max),
         kop_min_vertical_m=float(kop_min_vertical_m),
         objective_mode=str(objective_mode),
         turn_solver_mode=str(turn_solver_mode),
@@ -513,21 +442,11 @@ def _build_config_form() -> TrajectoryConfig:
         turn_solver_local_starts=int(
             st.session_state["wt_cfg_turn_solver_local_starts"]
         ),
-        dls_limits_deg_per_30m={
-            "VERTICAL": 1.0,
-            "BUILD_REV": max_build,
-            "HOLD_REV": 2.0,
-            "DROP_REV": max_build,
-            "BUILD1": max_build,
-            "HOLD": 2.0,
-            "BUILD2": max_build,
-            "HORIZONTAL": 2.0,
-        },
     )
 
 
 def _render_source_input() -> str:
-    st.markdown("### 1) Источник WELLTRACK")
+    st.markdown("### Источник WELLTRACK")
     source_mode = st.radio(
         "Режим загрузки",
         options=["Файл по пути", "Загрузить файл", "Вставить текст"],
@@ -636,19 +555,7 @@ def run_page() -> None:
                     )
 
     if st.session_state.get("wt_last_error"):
-        parsed_error = parse_solver_error(st.session_state["wt_last_error"])
-        st.error(parsed_error.title_ru)
-        diagnostic_rows = diagnostics_rows_ru(st.session_state["wt_last_error"])
-        if diagnostic_rows:
-            with st.container(border=True):
-                st.markdown("### Причины небуримости и рекомендации")
-                st.dataframe(
-                    arrow_safe_text_dataframe(pd.DataFrame(diagnostic_rows)),
-                    width="stretch",
-                    hide_index=True,
-                )
-        with st.expander("Технические детали ошибки", expanded=False):
-            st.code(st.session_state["wt_last_error"], language="text")
+        render_solver_diagnostics(st.session_state["wt_last_error"])
 
     records = st.session_state.get("wt_records")
     if records is None:
@@ -744,7 +651,7 @@ def run_page() -> None:
             ) as status:
                 try:
                     started = perf_counter()
-                    start_msg = _log_line(
+                    start_msg = format_run_log_line(
                         run_started_s,
                         f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}.",
                     )
@@ -756,7 +663,7 @@ def run_page() -> None:
                             int((index / max(total, 1)) * 100),
                             text=f"{index}/{total}: {name}",
                         )
-                        line = _log_line(
+                        line = format_run_log_line(
                             run_started_s,
                             f"Расчет скважины {index}/{total}: {name}",
                         )
@@ -778,7 +685,7 @@ def run_page() -> None:
                         "%Y-%m-%d %H:%M:%S"
                     )
                     st.session_state["wt_last_runtime_s"] = float(elapsed_s)
-                    done_msg = _log_line(
+                    done_msg = format_run_log_line(
                         run_started_s,
                         f"Batch-расчет завершен. Успешно: {len(successes)}, "
                         f"ошибок: {len(summary_rows) - len(successes)}. "
@@ -800,7 +707,9 @@ def run_page() -> None:
                         )
                 except Exception as exc:  # noqa: BLE001
                     st.session_state["wt_last_error"] = str(exc)
-                    err_msg = _log_line(run_started_s, f"Ошибка batch-расчета: {exc}")
+                    err_msg = format_run_log_line(
+                        run_started_s, f"Ошибка batch-расчета: {exc}"
+                    )
                     status.write(err_msg)
                     log_lines.append(err_msg)
                     status.update(
@@ -844,7 +753,7 @@ def run_page() -> None:
         f"Последний запуск: {st.session_state.get('wt_last_run_at', '—')}"
     )
 
-    st.markdown("### 4) Сводка расчета")
+    st.markdown("### Сводка расчета")
     st.dataframe(summary_df, width="stretch", hide_index=True)
     st.download_button(
         "Скачать сводку (CSV)",

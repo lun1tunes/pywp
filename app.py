@@ -8,16 +8,16 @@ import pandas as pd
 import streamlit as st
 
 from pywp import Point3D, TrajectoryConfig, TrajectoryPlanner
-from pywp.models import (
-    OBJECTIVE_MAXIMIZE_HOLD,
-    OBJECTIVE_MINIMIZE_BUILD_DLS,
-    TURN_SOLVER_DE_HYBRID,
-    TURN_SOLVER_LEAST_SQUARES,
-)
 from pywp.planner import PlanningError
-from pywp.solver_diagnostics import diagnostics_rows_ru, parse_solver_error
+from pywp.planner_config import (
+    CFG_DEFAULTS,
+    OBJECTIVE_OPTIONS,
+    TURN_SOLVER_OPTIONS,
+    build_trajectory_config,
+)
+from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
-from pywp.ui_utils import arrow_safe_text_dataframe, format_distance
+from pywp.ui_utils import arrow_safe_text_dataframe, format_distance, format_run_log_line
 from pywp.visualization import (
     dls_figure,
     plan_view_figure,
@@ -57,15 +57,6 @@ SCENARIOS = {
         "t3": Point3D(3360.0, 4480.0, 3739.8536),
     },
 }
-OBJECTIVE_OPTIONS = {
-    OBJECTIVE_MAXIMIZE_HOLD: "Максимизировать длину HOLD",
-    OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать DLS на BUILD",
-}
-TURN_SOLVER_OPTIONS = {
-    TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF, рекомендуется)",
-    TURN_SOLVER_DE_HYBRID: "DE Hybrid (глобальный + локальный)",
-}
-CFG_DEFAULTS = TrajectoryConfig()
 UI_DEFAULTS_VERSION = 5
 
 
@@ -73,12 +64,6 @@ def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
     dx = float(point.x - reference.x)
     dy = float(point.y - reference.y)
     return float((dx * dx + dy * dy) ** 0.5)
-
-
-def _log_line(run_started_s: float, message: str) -> str:
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    elapsed_s = perf_counter() - run_started_s
-    return f"[{timestamp}] elapsed={elapsed_s:.2f}s | {message}"
 
 
 def _apply_scenario(name: str) -> None:
@@ -218,33 +203,20 @@ def _build_points_from_state() -> tuple[Point3D, Point3D, Point3D]:
 
 
 def _build_config_from_state() -> TrajectoryConfig:
-    dls_build_min = float(st.session_state["dls_build_min"])
-    dls_build_max = float(st.session_state["dls_build_max"])
-
-    return TrajectoryConfig(
+    return build_trajectory_config(
         md_step_m=float(st.session_state["md_step"]),
         md_step_control_m=float(st.session_state["md_control"]),
         pos_tolerance_m=float(st.session_state["pos_tol"]),
         entry_inc_target_deg=float(st.session_state["entry_inc_target"]),
         entry_inc_tolerance_deg=float(st.session_state["entry_inc_tol"]),
         max_inc_deg=float(st.session_state["max_inc"]),
-        dls_build_min_deg_per_30m=min(dls_build_min, dls_build_max),
-        dls_build_max_deg_per_30m=max(dls_build_min, dls_build_max),
+        dls_build_min_deg_per_30m=float(st.session_state["dls_build_min"]),
+        dls_build_max_deg_per_30m=float(st.session_state["dls_build_max"]),
         kop_min_vertical_m=float(st.session_state["kop_min_vertical"]),
         objective_mode=str(st.session_state["objective_mode"]),
         turn_solver_mode=str(st.session_state["turn_solver_mode"]),
         turn_solver_qmc_samples=int(st.session_state["turn_solver_qmc_samples"]),
         turn_solver_local_starts=int(st.session_state["turn_solver_local_starts"]),
-        dls_limits_deg_per_30m={
-            "VERTICAL": 1.0,
-            "BUILD_REV": max(dls_build_min, dls_build_max),
-            "HOLD_REV": 2.0,
-            "DROP_REV": max(dls_build_min, dls_build_max),
-            "BUILD1": max(dls_build_min, dls_build_max),
-            "HOLD": 2.0,
-            "BUILD2": max(dls_build_min, dls_build_max),
-            "HORIZONTAL": 2.0,
-        },
     )
 
 
@@ -295,7 +267,7 @@ def _run_solver_profiling() -> None:
     run_items = [
         (scenario_name, scenario_points, solver_mode)
         for scenario_name, scenario_points in SCENARIOS.items()
-        for solver_mode in (TURN_SOLVER_LEAST_SQUARES, TURN_SOLVER_DE_HYBRID)
+        for solver_mode in tuple(TURN_SOLVER_OPTIONS.keys())
     ]
     total_items = len(run_items)
     progress = st.progress(0, text="Профилирование TURN-методов...")
@@ -565,7 +537,7 @@ def run_app() -> None:
         progress = st.progress(0, text="Подготовка расчета...")
         with st.status("Расчет траектории...", expanded=True) as status:
             try:
-                check_msg = _log_line(
+                check_msg = format_run_log_line(
                     run_started_s,
                     "Проверка входных данных.",
                 )
@@ -574,7 +546,7 @@ def run_app() -> None:
                 progress.progress(20, text="Проверка входных данных...")
                 if preflight_errors:
                     raise PlanningError("; ".join(preflight_errors))
-                solve_msg = _log_line(
+                solve_msg = format_run_log_line(
                     run_started_s,
                     "Запуск планировщика и решателя.",
                 )
@@ -587,7 +559,7 @@ def run_app() -> None:
                 )
                 elapsed_s = perf_counter() - started
                 st.session_state["last_runtime_s"] = float(elapsed_s)
-                done_msg = _log_line(
+                done_msg = format_run_log_line(
                     run_started_s,
                     f"Расчет завершен успешно. Затраченное время солвера: {elapsed_s:.2f} с.",
                 )
@@ -602,7 +574,7 @@ def run_app() -> None:
             except PlanningError as exc:
                 st.session_state["last_error"] = str(exc)
                 st.session_state["last_runtime_s"] = None
-                err_msg = _log_line(run_started_s, f"Ошибка расчета: {exc}")
+                err_msg = format_run_log_line(run_started_s, f"Ошибка расчета: {exc}")
                 status.write(err_msg)
                 log_lines.append(err_msg)
                 status.update(
@@ -613,19 +585,7 @@ def run_app() -> None:
                 progress.empty()
 
     if st.session_state["last_error"]:
-        parsed_error = parse_solver_error(st.session_state["last_error"])
-        st.error(parsed_error.title_ru)
-        diagnostic_rows = diagnostics_rows_ru(st.session_state["last_error"])
-        if diagnostic_rows:
-            with st.container(border=True):
-                st.markdown("### Причины небуримости и рекомендации")
-                st.dataframe(
-                    arrow_safe_text_dataframe(pd.DataFrame(diagnostic_rows)),
-                    width="stretch",
-                    hide_index=True,
-                )
-        with st.expander("Технические детали ошибки", expanded=False):
-            st.code(st.session_state["last_error"], language="text")
+        render_solver_diagnostics(st.session_state["last_error"])
 
     run_log_lines = st.session_state.get("last_run_log_lines")
     if run_log_lines:
