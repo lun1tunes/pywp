@@ -839,7 +839,33 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
     )
 
     st.markdown("### Сводка расчета")
-    st.dataframe(summary_df, width="stretch", hide_index=True)
+    st.dataframe(
+        summary_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Скважина": st.column_config.TextColumn("Скважина"),
+            "Точек": st.column_config.NumberColumn("Точек", format="%d"),
+            "Статус": st.column_config.TextColumn("Статус"),
+            "Тип траектории": st.column_config.TextColumn("Тип траектории"),
+            "Сложность": st.column_config.TextColumn("Сложность"),
+            "Горизонтальный отход t1, м": st.column_config.NumberColumn(
+                "Отход t1, м",
+                format="%.2f",
+            ),
+            "Длина HORIZONTAL, м": st.column_config.NumberColumn(
+                "HORIZONTAL, м",
+                format="%.2f",
+            ),
+            "INC в t1, deg": st.column_config.NumberColumn("INC t1, deg", format="%.2f"),
+            "ЗУ HOLD, deg": st.column_config.NumberColumn("ЗУ HOLD, deg", format="%.2f"),
+            "Макс DLS, deg/30m": st.column_config.NumberColumn(
+                "Макс DLS, deg/30m",
+                format="%.2f",
+            ),
+            "Проблема": st.column_config.TextColumn("Проблема"),
+        },
+    )
     st.download_button(
         "Скачать сводку (CSV)",
         data=summary_df.to_csv(index=False).encode("utf-8"),

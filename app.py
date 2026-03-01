@@ -133,6 +133,28 @@ TRAJECTORY_OPTIONS: tuple[str, ...] = (
     TRAJECTORY_SAME_DIRECTION,
     TRAJECTORY_REVERSE_DIRECTION,
 )
+TRAJECTORY_SELECTOR_LABELS = {
+    TRAJECTORY_SAME_DIRECTION: "Прямое",
+    TRAJECTORY_REVERSE_DIRECTION: "Обратное",
+}
+COMPLEXITY_SELECTOR_LABELS = {
+    COMPLEXITY_ORDINARY: "Обычная",
+    COMPLEXITY_COMPLEX: "Сложная",
+    COMPLEXITY_VERY_COMPLEX: "Очень сложная",
+}
+SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
+    ("trajectory_type", "Тип траектории"),
+    ("well_complexity", "Класс сложности"),
+    ("entry_inc_deg", "Угол входа в пласт, deg"),
+    ("hold_inc_deg", "ЗУ секции HOLD, deg"),
+    ("hold_length_m", "Длина HOLD, м"),
+    ("horizontal_length_m", "Длина горизонтального ствола, м"),
+    ("kop_md_m", "KOP MD, м"),
+    ("max_dls_total_deg_per_30m", "Макс DLS по стволу, deg/30m"),
+    ("max_inc_actual_deg", "Макс INC фактический, deg"),
+    ("max_inc_deg", "Макс INC лимит, deg"),
+    ("md_total_m", "Итоговая MD, м"),
+)
 UI_DEFAULTS_VERSION = 7
 
 
@@ -465,7 +487,7 @@ def _run_solver_profiling() -> None:
     ]
     total_items = len(run_items)
     progress = st.progress(0, text="Профилирование TURN-методов...")
-    with st.status("Выполняется profiling TURN-решателей...", expanded=True) as status:
+    with st.status("Выполняется профилирование TURN-решателей...", expanded=True) as status:
         for index, (scenario_name, scenario_points, solver_mode) in enumerate(
             run_items, start=1
         ):
@@ -533,6 +555,13 @@ def _render_template_controls() -> None:
             "Выберите тип конструкции, класс сложности и типовую глубину. "
             "Шаблоны соответствуют вашей таблице классификации и ускоряют старт настройки."
         )
+        with st.popover("Как выбирать шаблон", icon=":material/help:"):
+            st.markdown(
+                "- `Прямое/Обратное` определяет базовый тип конструкции.\n"
+                "- `Класс сложности` ориентируется на референсные границы по отходу и HOLD.\n"
+                "- `Типовая ГВ t1` ограничивает каталог по глубине.\n"
+                "- Если точного совпадения нет, будет предложен ближайший вариант."
+            )
         f1, f2, f3, f4 = st.columns([1.2, 1.8, 1.8, 2.8], gap="small")
         with f1:
             st.selectbox(
@@ -542,20 +571,22 @@ def _render_template_controls() -> None:
                 format_func=_depth_filter_label,
             )
         with f2:
-            st.radio(
+            st.segmented_control(
                 "Тип конструкции",
                 options=list(TRAJECTORY_OPTIONS),
                 key="template_trajectory_type",
-                format_func=trajectory_type_label,
-                horizontal=True,
+                format_func=lambda code: TRAJECTORY_SELECTOR_LABELS[str(code)],
+                selection_mode="single",
+                help="Тип строящейся конструкции относительно направления на t1.",
             )
         with f3:
-            st.radio(
+            st.segmented_control(
                 "Класс сложности",
                 options=list(COMPLEXITY_OPTIONS),
                 key="template_complexity",
-                format_func=complexity_label,
-                horizontal=True,
+                format_func=lambda code: COMPLEXITY_SELECTOR_LABELS[str(code)],
+                selection_mode="single",
+                help="Класс из типовой шкалы по глубине, отходу и HOLD.",
             )
 
         selected_depth_filter = st.session_state["template_depth_filter"]
@@ -654,47 +685,108 @@ def _render_input_form() -> bool:
 
             with c1:
                 st.markdown("**Устье S**")
-                st.number_input("S X (E), m", key="surface_x", step=50.0)
-                st.number_input("S Y (N), m", key="surface_y", step=50.0)
-                st.number_input("S Z (TVD), m", key="surface_z", step=50.0)
+                st.number_input(
+                    "S X (East), м",
+                    key="surface_x",
+                    step=50.0,
+                    help="Координата X устья S в локальной системе координат.",
+                )
+                st.number_input(
+                    "S Y (North), м",
+                    key="surface_y",
+                    step=50.0,
+                    help="Координата Y устья S в локальной системе координат.",
+                )
+                st.number_input(
+                    "S Z (TVD), м",
+                    key="surface_z",
+                    step=50.0,
+                    help="Обычно 0 м для поверхности. TVD положителен вниз.",
+                )
 
             with c2:
                 st.markdown("**Точка входа t1**")
-                st.number_input("t1 X (E), m", key="t1_x", step=50.0)
-                st.number_input("t1 Y (N), m", key="t1_y", step=50.0)
-                st.number_input("t1 Z (TVD), m", key="t1_z", step=50.0)
+                st.number_input(
+                    "t1 X (East), м",
+                    key="t1_x",
+                    step=50.0,
+                    help="Координата X точки входа в пласт.",
+                )
+                st.number_input(
+                    "t1 Y (North), м",
+                    key="t1_y",
+                    step=50.0,
+                    help="Координата Y точки входа в пласт.",
+                )
+                st.number_input(
+                    "t1 Z (TVD), м",
+                    key="t1_z",
+                    step=50.0,
+                    help="TVD точки входа t1.",
+                )
 
             with c3:
                 st.markdown("**Концевая точка t3**")
-                st.number_input("t3 X (E), m", key="t3_x", step=50.0)
-                st.number_input("t3 Y (N), m", key="t3_y", step=50.0)
-                st.number_input("t3 Z (TVD), m", key="t3_z", step=50.0)
+                st.number_input(
+                    "t3 X (East), м",
+                    key="t3_x",
+                    step=50.0,
+                    help="Координата X целевой точки в пласте.",
+                )
+                st.number_input(
+                    "t3 Y (North), м",
+                    key="t3_y",
+                    step=50.0,
+                    help="Координата Y целевой точки в пласте.",
+                )
+                st.number_input(
+                    "t3 Z (TVD), м",
+                    key="t3_z",
+                    step=50.0,
+                    help="TVD конечной точки t3.",
+                )
 
             with c4:
                 st.markdown("**Ограничения профиля**")
                 r1, r2, r3 = st.columns(3, gap="small")
-                r1.number_input("Шаг MD", key="md_step", min_value=1.0, step=1.0)
+                r1.number_input(
+                    "Шаг MD, м",
+                    key="md_step",
+                    min_value=1.0,
+                    step=1.0,
+                    help="Шаг выходной инклинометрии. Меньше шаг = подробнее профиль.",
+                )
                 r2.number_input(
-                    "Контрольный шаг MD", key="md_control", min_value=0.5, step=0.5
+                    "Контрольный шаг MD, м",
+                    key="md_control",
+                    min_value=0.5,
+                    step=0.5,
+                    help="Внутренний расчетный шаг для проверки ограничений и качества решения.",
                 )
                 r3.number_input(
-                    "Допуск по позиции", key="pos_tol", min_value=0.1, step=0.1
+                    "Допуск по позиции, м",
+                    key="pos_tol",
+                    min_value=0.1,
+                    step=0.1,
+                    help="Максимально допустимый промах по t1 и t3.",
                 )
 
                 rr1, rr2, rr3 = st.columns(3, gap="small")
                 rr1.number_input(
-                    "Целевой INC входа",
+                    "Целевой INC на t1, deg",
                     key="entry_inc_target",
                     min_value=70.0,
                     max_value=89.0,
                     step=0.5,
+                    help="Плановый угол входа в пласт в точке t1.",
                 )
                 rr2.number_input(
-                    "Допуск INC входа",
+                    "Допуск INC на t1, deg",
                     key="entry_inc_tol",
                     min_value=0.1,
                     max_value=5.0,
                     step=0.1,
+                    help="Отклонение от целевого INC в точке t1.",
                 )
                 rr3.number_input(
                     "Макс INC по стволу",
@@ -712,7 +804,7 @@ def _render_input_form() -> bool:
                     min_value=0.1,
                     value=0.5,
                     step=0.1,
-                    help="deg/30m",
+                    help="Нижняя граница поиска DLS на BUILD-сегментах (deg/30m).",
                 )
                 rd2.number_input(
                     "Макс DLS BUILD",
@@ -720,7 +812,7 @@ def _render_input_form() -> bool:
                     min_value=0.1,
                     value=3.0,
                     step=0.1,
-                    help="для BUILD1 и BUILD2",
+                    help="Верхняя граница поиска DLS на BUILD1/BUILD2 (deg/30m).",
                 )
                 st.number_input(
                     "Мин VERTICAL до KOP, м",
@@ -731,6 +823,14 @@ def _render_input_form() -> bool:
                     help="Минимальный VERTICAL участок от S до начала BUILD1.",
                 )
                 with st.expander("Параметры солвера", expanded=False):
+                    with st.popover("Что означают параметры солвера", icon=":material/tune:"):
+                        st.markdown(
+                            "- `Целевая функция` задает критерий выбора из допустимых профилей.\n"
+                            "- `TURN` параметры влияют только на некомпланарные случаи.\n"
+                            "- `Adaptive` ускоряет перебор KOP/reverse INC.\n"
+                            "- `Parallel jobs` использует процессы в coplanar-поиске.\n"
+                            "- `Кэш профилей` сокращает повторные вычисления внутри оптимизации."
+                        )
                     st.selectbox(
                         "Целевая функция",
                         options=list(OBJECTIVE_OPTIONS.keys()),
@@ -833,11 +933,11 @@ def _render_input_form() -> bool:
 def _render_solver_profiling_panel() -> None:
     with st.expander("Профилирование TURN-методов", expanded=False):
         st.caption("Сравнение методов на типовых шаблонах текущего проекта.")
-        if st.button("Запустить profiling", icon=":material/speed:", width="content"):
+        if st.button("Запустить профилирование", icon=":material/speed:", width="content"):
             _run_solver_profiling()
         profile_rows = st.session_state.get("solver_profile_rows")
         if st.session_state.get("solver_profile_at"):
-            st.caption(f"Последний profiling: {st.session_state['solver_profile_at']}")
+            st.caption(f"Последнее профилирование: {st.session_state['solver_profile_at']}")
         if profile_rows:
             profile_df = pd.DataFrame(profile_rows)
             st.dataframe(
@@ -914,30 +1014,54 @@ def _render_calculation_feedback() -> None:
     render_run_log_panel(st.session_state.get("last_run_log_lines"))
 
 
+def _format_summary_value(metric_key: str, metric_value: object) -> str:
+    if isinstance(metric_value, str):
+        return metric_value
+    if metric_value is None:
+        return "—"
+    try:
+        value = float(metric_value)
+    except (TypeError, ValueError):
+        return str(metric_value)
+
+    if metric_key.endswith("_deg") or "_deg_" in metric_key:
+        return f"{value:.2f}"
+    if metric_key.endswith("_m") or metric_key.startswith("md_"):
+        return f"{value:.2f}"
+    return f"{value:.4g}"
+
+
 def _render_result_overview(last_result: dict[str, object]) -> float:
     summary = last_result["summary"]
     surface = last_result["surface"]
     t1 = last_result["t1"]
     runtime_s = st.session_state.get("last_runtime_s")
     t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
-    kpi_row = {
-        "Горизонтальный отход t1": format_distance(t1_horizontal_offset_m),
-        "Угол входа в пласт": f"{summary['entry_inc_deg']:.2f} deg",
-        "ЗУ секции HOLD": f"{float(summary['hold_inc_deg']):.2f} deg",
-        "Тип траектории": str(summary["trajectory_type"]),
-        "Сложность": str(summary["well_complexity"]),
-        "KOP MD": format_distance(float(summary["kop_md_m"])),
-        "Длина горизонтального ствола": format_distance(float(summary["horizontal_length_m"])),
-        "Макс DLS": f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m",
-        "Макс INC факт/лимит": f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
-        "Время расчета": "—" if runtime_s is None else f"{float(runtime_s):.2f} с",
-    }
     with st.container(border=True):
         st.markdown("### Ключевые показатели")
-        st.dataframe(
-            arrow_safe_text_dataframe(pd.DataFrame([kpi_row])),
-            width="stretch",
-            hide_index=True,
+        m1, m2, m3, m4 = st.columns(4, gap="small")
+        m1.metric("Тип траектории", str(summary["trajectory_type"]))
+        m2.metric("Класс сложности", str(summary["well_complexity"]))
+        m3.metric("INC на t1", f"{float(summary['entry_inc_deg']):.2f} deg")
+        m4.metric("ЗУ HOLD", f"{float(summary['hold_inc_deg']):.2f} deg")
+
+        n1, n2, n3, n4 = st.columns(4, gap="small")
+        n1.metric("Отход t1", format_distance(t1_horizontal_offset_m))
+        n2.metric("KOP MD", format_distance(float(summary["kop_md_m"])))
+        n3.metric("Длина HORIZONTAL", format_distance(float(summary["horizontal_length_m"])))
+        n4.metric(
+            "Макс INC факт/лимит",
+            f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
+        )
+
+        k1, k2, k3 = st.columns(3, gap="small")
+        k1.metric("Макс DLS", f"{float(summary['max_dls_total_deg_per_30m']):.2f} deg/30m")
+        k2.metric("Итоговая MD", format_distance(float(summary["md_total_m"])))
+        k3.metric("Время расчета", "—" if runtime_s is None else f"{float(runtime_s):.2f} с")
+
+        render_small_note(
+            "Проверяйте соответствие фактического INC/DLS лимитам, особенно при изменении "
+            "целевого угла входа и границ DLS."
         )
     return float(t1_horizontal_offset_m)
 
@@ -979,19 +1103,55 @@ def _render_result_tables(
     tab_summary, tab_survey = st.tabs(["Сводка", "Инклинометрия"])
     with tab_summary:
         hidden_metrics = {"distance_t1_m", "distance_t3_m"}
-        summary_visible = {
-            key: value for key, value in summary.items() if key not in hidden_metrics
-        }
+        summary_visible = {key: value for key, value in summary.items() if key not in hidden_metrics}
         summary_visible["t1_horizontal_offset_m"] = t1_horizontal_offset_m
-        summary_df = pd.DataFrame(
-            {
-                "metric": list(summary_visible.keys()),
-                "value": list(summary_visible.values()),
-            }
-        )
+
+        main_rows: list[dict[str, str]] = []
+        for key, label in SUMMARY_MAIN_METRICS:
+            if key not in summary_visible:
+                continue
+            main_rows.append(
+                {
+                    "Показатель": label,
+                    "Значение": _format_summary_value(key, summary_visible[key]),
+                }
+            )
+        if "t1_horizontal_offset_m" in summary_visible:
+            main_rows.insert(
+                4,
+                {
+                    "Показатель": "Горизонтальный отход t1, м",
+                    "Значение": _format_summary_value(
+                        "t1_horizontal_offset_m",
+                        summary_visible["t1_horizontal_offset_m"],
+                    ),
+                },
+            )
+
+        tech_rows: list[dict[str, str]] = []
+        for key, value in sorted(summary_visible.items()):
+            if any(key == metric_key for metric_key, _ in SUMMARY_MAIN_METRICS):
+                continue
+            if key == "t1_horizontal_offset_m":
+                continue
+            tech_rows.append(
+                {
+                    "Параметр": key,
+                    "Значение": _format_summary_value(key, value),
+                }
+            )
+
         st.dataframe(
-            arrow_safe_text_dataframe(summary_df), width="stretch", hide_index=True
+            arrow_safe_text_dataframe(pd.DataFrame(main_rows)),
+            width="stretch",
+            hide_index=True,
         )
+        with st.expander("Технические параметры и диагностика решателя", expanded=False):
+            st.dataframe(
+                arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),
+                width="stretch",
+                hide_index=True,
+            )
 
     with tab_survey:
         render_survey_table_with_download(

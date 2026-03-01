@@ -106,7 +106,22 @@ def render_survey_table_with_download(
     button_label: str = "Скачать CSV инклинометрии",
     file_name: str = "well_survey.csv",
 ) -> None:
-    st.dataframe(stations, width="stretch")
+    column_config: dict[str, object] = {
+        "MD_m": st.column_config.NumberColumn("MD, м", format="%.2f"),
+        "X_m": st.column_config.NumberColumn("X (East), м", format="%.2f"),
+        "Y_m": st.column_config.NumberColumn("Y (North), м", format="%.2f"),
+        "Z_m": st.column_config.NumberColumn("Z (TVD), м", format="%.2f"),
+        "INC_deg": st.column_config.NumberColumn("INC, deg", format="%.2f"),
+        "AZI_deg": st.column_config.NumberColumn("AZI, deg", format="%.2f"),
+        "DLS_deg_per_30m": st.column_config.NumberColumn("DLS, deg/30m", format="%.2f"),
+        "segment": st.column_config.TextColumn("Сегмент"),
+    }
+    st.dataframe(
+        stations,
+        width="stretch",
+        hide_index=True,
+        column_config=column_config,
+    )
     st.download_button(
         button_label,
         data=stations.to_csv(index=False).encode("utf-8"),
