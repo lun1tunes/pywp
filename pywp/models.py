@@ -38,6 +38,12 @@ class TrajectoryConfig:
     reverse_inc_min_deg: float = 8.0
     reverse_inc_max_deg: float = 80.0
     reverse_inc_grid_size: int = 49
+    adaptive_grid_initial_size: int = 11
+    adaptive_grid_refine_levels: int = 2
+    adaptive_grid_top_k: int = 6
+    adaptive_grid_enabled: bool = True
+    parallel_jobs: int = 1
+    profile_cache_enabled: bool = True
 
     max_total_md_m: float = 12000.0
     objective_mode: ObjectiveMode = OBJECTIVE_MAXIMIZE_HOLD

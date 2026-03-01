@@ -270,6 +270,48 @@ def test_planner_validates_turn_solver_numeric_controls() -> None:
         )
 
 
+def test_planner_validates_adaptive_and_parallel_controls() -> None:
+    planner = TrajectoryPlanner()
+    base_kwargs = dict(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+    )
+
+    with pytest.raises(PlanningError, match="adaptive_grid_initial_size must be >= 2"):
+        planner.plan(**base_kwargs, config=TrajectoryConfig(adaptive_grid_initial_size=1))
+
+    with pytest.raises(PlanningError, match="adaptive_grid_refine_levels must be >= 0"):
+        planner.plan(**base_kwargs, config=TrajectoryConfig(adaptive_grid_refine_levels=-1))
+
+    with pytest.raises(PlanningError, match="adaptive_grid_top_k must be >= 1"):
+        planner.plan(**base_kwargs, config=TrajectoryConfig(adaptive_grid_top_k=0))
+
+    with pytest.raises(PlanningError, match="parallel_jobs must be >= 1"):
+        planner.plan(**base_kwargs, config=TrajectoryConfig(parallel_jobs=0))
+
+
+def test_reverse_turn_summary_uses_configured_turn_solver_depth_without_hidden_minima() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        pos_tolerance_m=1.0,
+        turn_solver_qmc_samples=0,
+        turn_solver_local_starts=1,
+    )
+
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(300.0, 300.0, 2000.0),
+        t3=Point3D(900.0, 1200.0, 2075.0),
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["solver_turn_qmc_samples"]) == pytest.approx(0.0)
+    assert float(result.summary["solver_turn_local_starts"]) == pytest.approx(1.0)
+
+
 def test_objective_mode_minimize_build_dls_not_higher_than_maximize_hold() -> None:
     planner = TrajectoryPlanner()
     base_kwargs = dict(

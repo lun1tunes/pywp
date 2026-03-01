@@ -57,7 +57,7 @@ SCENARIOS = {
         "t3": Point3D(3360.0, 4480.0, 3739.8536),
     },
 }
-UI_DEFAULTS_VERSION = 5
+UI_DEFAULTS_VERSION = 6
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
@@ -109,6 +109,22 @@ def _init_state() -> None:
     st.session_state.setdefault(
         "turn_solver_local_starts", int(CFG_DEFAULTS.turn_solver_local_starts)
     )
+    st.session_state.setdefault(
+        "adaptive_grid_enabled", bool(CFG_DEFAULTS.adaptive_grid_enabled)
+    )
+    st.session_state.setdefault(
+        "adaptive_grid_initial_size", int(CFG_DEFAULTS.adaptive_grid_initial_size)
+    )
+    st.session_state.setdefault(
+        "adaptive_grid_refine_levels", int(CFG_DEFAULTS.adaptive_grid_refine_levels)
+    )
+    st.session_state.setdefault(
+        "adaptive_grid_top_k", int(CFG_DEFAULTS.adaptive_grid_top_k)
+    )
+    st.session_state.setdefault("parallel_jobs", int(CFG_DEFAULTS.parallel_jobs))
+    st.session_state.setdefault(
+        "profile_cache_enabled", bool(CFG_DEFAULTS.profile_cache_enabled)
+    )
     st.session_state.setdefault("ui_defaults_version", 0)
 
     if int(st.session_state.get("ui_defaults_version", 0)) < UI_DEFAULTS_VERSION:
@@ -132,6 +148,20 @@ def _init_state() -> None:
         )
         st.session_state["turn_solver_local_starts"] = int(
             CFG_DEFAULTS.turn_solver_local_starts
+        )
+        st.session_state["adaptive_grid_enabled"] = bool(
+            CFG_DEFAULTS.adaptive_grid_enabled
+        )
+        st.session_state["adaptive_grid_initial_size"] = int(
+            CFG_DEFAULTS.adaptive_grid_initial_size
+        )
+        st.session_state["adaptive_grid_refine_levels"] = int(
+            CFG_DEFAULTS.adaptive_grid_refine_levels
+        )
+        st.session_state["adaptive_grid_top_k"] = int(CFG_DEFAULTS.adaptive_grid_top_k)
+        st.session_state["parallel_jobs"] = int(CFG_DEFAULTS.parallel_jobs)
+        st.session_state["profile_cache_enabled"] = bool(
+            CFG_DEFAULTS.profile_cache_enabled
         )
         st.session_state["ui_defaults_version"] = UI_DEFAULTS_VERSION
 
@@ -176,10 +206,16 @@ def _current_input_signature() -> tuple[object, ...]:
         "kop_min_vertical",
         "turn_solver_qmc_samples",
         "turn_solver_local_starts",
+        "adaptive_grid_initial_size",
+        "adaptive_grid_refine_levels",
+        "adaptive_grid_top_k",
+        "parallel_jobs",
     )
     signature = [float(st.session_state[key]) for key in keys]
     signature.append(str(st.session_state["objective_mode"]))
     signature.append(str(st.session_state["turn_solver_mode"]))
+    signature.append(str(bool(st.session_state["adaptive_grid_enabled"])))
+    signature.append(str(bool(st.session_state["profile_cache_enabled"])))
     return tuple(signature)
 
 
@@ -217,6 +253,14 @@ def _build_config_from_state() -> TrajectoryConfig:
         turn_solver_mode=str(st.session_state["turn_solver_mode"]),
         turn_solver_qmc_samples=int(st.session_state["turn_solver_qmc_samples"]),
         turn_solver_local_starts=int(st.session_state["turn_solver_local_starts"]),
+        adaptive_grid_enabled=bool(st.session_state["adaptive_grid_enabled"]),
+        adaptive_grid_initial_size=int(st.session_state["adaptive_grid_initial_size"]),
+        adaptive_grid_refine_levels=int(
+            st.session_state["adaptive_grid_refine_levels"]
+        ),
+        adaptive_grid_top_k=int(st.session_state["adaptive_grid_top_k"]),
+        parallel_jobs=int(st.session_state["parallel_jobs"]),
+        profile_cache_enabled=bool(st.session_state["profile_cache_enabled"]),
     )
 
 
@@ -501,6 +545,56 @@ def _render_input_form() -> bool:
                         help=(
                             "Сколько лучших стартовых точек запускать локальным решателем. "
                             "Больше — стабильнее подбор, но медленнее. Дефолт 12 — обычно оптимальный."
+                        ),
+                    )
+                    st.markdown("**Производительность и поиск**")
+                    p1, p2 = st.columns(2, gap="small")
+                    p1.toggle(
+                        "Adaptive coarse-to-fine",
+                        key="adaptive_grid_enabled",
+                        help=(
+                            "Итеративно уточняет сетку KOP/reverse INC вокруг лучших кандидатов. "
+                            "Обычно ускоряет расчет без потери качества."
+                        ),
+                    )
+                    p2.toggle(
+                        "Кэш профилей",
+                        key="profile_cache_enabled",
+                        help=(
+                            "Кэширует промежуточные расчеты профиля в рамках оптимизации. "
+                            "Полезно для ускорения при повторных оценках."
+                        ),
+                    )
+                    p3, p4, p5 = st.columns(3, gap="small")
+                    p3.number_input(
+                        "Adaptive initial grid",
+                        key="adaptive_grid_initial_size",
+                        min_value=2,
+                        step=1,
+                        help="Размер стартовой coarse-сетки для KOP/reverse INC.",
+                    )
+                    p4.number_input(
+                        "Adaptive refine levels",
+                        key="adaptive_grid_refine_levels",
+                        min_value=0,
+                        step=1,
+                        help="Количество итераций уточнения сетки вокруг лучших решений.",
+                    )
+                    p5.number_input(
+                        "Adaptive top-k",
+                        key="adaptive_grid_top_k",
+                        min_value=1,
+                        step=1,
+                        help="Сколько лучших кандидатов брать как фокус для следующего refinement.",
+                    )
+                    st.number_input(
+                        "Parallel jobs",
+                        key="parallel_jobs",
+                        min_value=1,
+                        step=1,
+                        help=(
+                            "Число процессов для параллельной оценки кандидатов в coplanar режиме. "
+                            "1 = без параллелизма."
                         ),
                     )
     return bool(build_clicked)
