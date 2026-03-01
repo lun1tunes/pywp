@@ -164,6 +164,40 @@ class _SolverRuntimeContext:
     candidate_evaluations: int = 0
 
 
+ProgressCallback = Callable[[str, float], None]
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    message: str,
+    fraction: float,
+) -> None:
+    if progress_callback is None:
+        return
+    clamped = float(max(0.0, min(1.0, fraction)))
+    progress_callback(message, clamped)
+
+
+def _scaled_progress_callback(
+    progress_callback: ProgressCallback | None,
+    start_fraction: float,
+    end_fraction: float,
+) -> ProgressCallback | None:
+    if progress_callback is None:
+        return None
+    start = float(max(0.0, min(1.0, start_fraction)))
+    end = float(max(0.0, min(1.0, end_fraction)))
+    if end < start:
+        end = start
+    span = end - start
+
+    def wrapped(message: str, local_fraction: float) -> None:
+        local = float(max(0.0, min(1.0, local_fraction)))
+        progress_callback(message, start + span * local)
+
+    return wrapped
+
+
 class TrajectoryPlanner:
     def plan(
         self,
@@ -171,15 +205,28 @@ class TrajectoryPlanner:
         t1: Point3D,
         t3: Point3D,
         config: TrajectoryConfig,
+        progress_callback: ProgressCallback | None = None,
     ) -> PlannerResult:
+        _emit_progress(progress_callback, "Планировщик: проверка конфигурации.", 0.03)
         _validate_config(config)
         runtime_context = _SolverRuntimeContext(
             parallel_requested_jobs=int(max(config.parallel_jobs, 1))
         )
 
+        _emit_progress(progress_callback, "Планировщик: подготовка геометрии цели.", 0.08)
         geometry = _build_section_geometry(surface=surface, t1=t1, t3=t3, config=config)
         horizontal_offset_t1_m = _horizontal_offset(surface=surface, point=t1)
+        _emit_progress(
+            progress_callback,
+            "Планировщик: классификация типа конструкции.",
+            0.14,
+        )
         trajectory_type = classify_trajectory_type(gv_m=geometry.z1_m, horizontal_offset_t1_m=horizontal_offset_t1_m)
+        solve_progress_callback = _scaled_progress_callback(
+            progress_callback=progress_callback,
+            start_fraction=0.20,
+            end_fraction=0.74,
+        )
 
         if trajectory_type == TRAJECTORY_REVERSE_DIRECTION:
             if _is_geometry_coplanar(geometry=geometry, tolerance_m=config.pos_tolerance_m):
@@ -187,27 +234,50 @@ class TrajectoryPlanner:
                     geometry=geometry,
                     config=config,
                     runtime_context=runtime_context,
+                    progress_callback=solve_progress_callback,
                 )
             else:
-                params = _solve_reverse_direction_profile_with_turn(geometry=geometry, config=config)
+                _emit_progress(
+                    progress_callback,
+                    "Солвер: reverse TURN-оптимизация (некомпланарный случай).",
+                    0.22,
+                )
+                params = _solve_reverse_direction_profile_with_turn(
+                    geometry=geometry,
+                    config=config,
+                    progress_callback=solve_progress_callback,
+                )
         else:
             if _is_geometry_coplanar(geometry=geometry, tolerance_m=config.pos_tolerance_m):
                 params = _solve_same_direction_profile(
                     geometry=geometry,
                     config=config,
                     runtime_context=runtime_context,
+                    progress_callback=solve_progress_callback,
                 )
             else:
-                params = _solve_same_direction_profile_with_turn(geometry=geometry, config=config)
+                _emit_progress(
+                    progress_callback,
+                    "Солвер: TURN-оптимизация (некомпланарный случай).",
+                    0.22,
+                )
+                params = _solve_same_direction_profile_with_turn(
+                    geometry=geometry,
+                    config=config,
+                    progress_callback=solve_progress_callback,
+                )
 
+        _emit_progress(progress_callback, "Планировщик: сборка секций траектории.", 0.78)
         trajectory = _build_trajectory(params=params)
 
+        _emit_progress(progress_callback, "Планировщик: контрольный расчет MD (control step).", 0.84)
         control = compute_positions_min_curv(
             trajectory.stations(md_step_m=config.md_step_control_m),
             start=surface,
         )
         control = add_dls(control)
 
+        _emit_progress(progress_callback, "Планировщик: проверка ограничений и сводка.", 0.90)
         classification = classify_well(
             gv_m=geometry.z1_m,
             horizontal_offset_t1_m=horizontal_offset_t1_m,
@@ -227,8 +297,10 @@ class TrajectoryPlanner:
         )
         _assert_solution_is_valid(summary=summary, config=config)
 
+        _emit_progress(progress_callback, "Планировщик: формирование выходной инклинометрии.", 0.96)
         output = compute_positions_min_curv(trajectory.stations(md_step_m=config.md_step_m), start=surface)
         output = add_dls(output)
+        _emit_progress(progress_callback, "Планировщик: результат готов.", 1.00)
 
         return PlannerResult(
             stations=output,
@@ -473,6 +545,7 @@ def _search_coplanar_profile_with_adaptive_grid(
         list[tuple[tuple[float, ...], ProfileParameters | None]],
     ],
     runtime_context: _SolverRuntimeContext,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters | None:
     evaluated: dict[tuple[float, ...], ProfileParameters | None] = {}
     best: ProfileParameters | None = None
@@ -503,7 +576,13 @@ def _search_coplanar_profile_with_adaptive_grid(
             )
 
     if not config.adaptive_grid_enabled:
+        _emit_progress(progress_callback, "Солвер: расчет по полной сетке кандидатов.", 0.18)
         evaluate_axis_values(dense_axes)
+        _emit_progress(
+            progress_callback,
+            f"Солвер: проверено кандидатов {runtime_context.candidate_evaluations:.0f}.",
+            1.00,
+        )
         return best
 
     axis_values = tuple(
@@ -515,9 +594,26 @@ def _search_coplanar_profile_with_adaptive_grid(
     )
     refine_levels = int(max(config.adaptive_grid_refine_levels, 0))
     top_k = int(max(config.adaptive_grid_top_k, 1))
+    total_levels = refine_levels + 1
+    _emit_progress(
+        progress_callback,
+        "Солвер: старт по грубой сетке (coarse).",
+        0.08,
+    )
 
     for level in range(refine_levels + 1):
+        level_ratio = float((level + 1) / max(total_levels, 1))
+        _emit_progress(
+            progress_callback,
+            f"Солвер: уточнение сетки {level + 1}/{total_levels}.",
+            0.10 + 0.45 * level_ratio,
+        )
         evaluate_axis_values(axis_values)
+        _emit_progress(
+            progress_callback,
+            f"Солвер: проверено кандидатов {runtime_context.candidate_evaluations:.0f}.",
+            0.16 + 0.47 * level_ratio,
+        )
         ranked = _rank_feasible_candidates(
             evaluated=evaluated,
             objective_mode=config.objective_mode,
@@ -537,7 +633,17 @@ def _search_coplanar_profile_with_adaptive_grid(
         axis_values = refined_axes
 
     runtime_context.adaptive_dense_validation_performed = True
+    _emit_progress(
+        progress_callback,
+        "Солвер: финальная проверка на полной сетке (dense-check).",
+        0.80,
+    )
     evaluate_axis_values(dense_axes)
+    _emit_progress(
+        progress_callback,
+        f"Солвер: итогово проверено кандидатов {runtime_context.candidate_evaluations:.0f}.",
+        1.00,
+    )
     return best
 
 
@@ -589,6 +695,7 @@ def _search_same_direction_coplanar_profile(
     upper_dls: float,
     horizontal_dls_deg_per_30m: float,
     runtime_context: _SolverRuntimeContext,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters | None:
     dense_kops = _iter_kop_candidates(geometry=geometry, config=config)
     if dense_kops.size == 0:
@@ -624,6 +731,7 @@ def _search_same_direction_coplanar_profile(
         config=config,
         evaluate_candidates=evaluate_candidates,
         runtime_context=runtime_context,
+        progress_callback=progress_callback,
     )
 
 
@@ -634,6 +742,7 @@ def _search_reverse_direction_coplanar_profile(
     upper_dls: float,
     horizontal_dls_deg_per_30m: float,
     runtime_context: _SolverRuntimeContext,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters | None:
     dense_kops = _iter_kop_candidates(geometry=geometry, config=config)
     dense_reverse = _iter_reverse_inc_candidates(config=config)
@@ -671,6 +780,7 @@ def _search_reverse_direction_coplanar_profile(
         config=config,
         evaluate_candidates=evaluate_candidates,
         runtime_context=runtime_context,
+        progress_callback=progress_callback,
     )
 
 
@@ -678,6 +788,7 @@ def _solve_same_direction_profile(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
     runtime_context: _SolverRuntimeContext,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters:
     lower, upper = _effective_dls_search_bounds(
         config=config,
@@ -687,6 +798,11 @@ def _solve_same_direction_profile(
     horizontal_dls_deg_per_30m = float(
         max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper), SMALL)
     )
+    _emit_progress(
+        progress_callback,
+        "Солвер: same-direction coplanar-поиск по KOP/DLS.",
+        0.05,
+    )
     best = _search_same_direction_coplanar_profile(
         geometry=geometry,
         config=config,
@@ -694,9 +810,11 @@ def _solve_same_direction_profile(
         upper_dls=upper,
         horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
         runtime_context=runtime_context,
+        progress_callback=progress_callback,
     )
 
     if best is not None:
+        _emit_progress(progress_callback, "Солвер: найден допустимый профиль.", 1.00)
         return best
 
     available_z_for_builds = geometry.z1_m - float(config.kop_min_vertical_m)
@@ -729,6 +847,7 @@ def _solve_same_direction_profile(
 def _solve_same_direction_profile_with_turn(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters:
     lower, upper = _effective_dls_search_bounds(
         config=config,
@@ -821,8 +940,10 @@ def _solve_same_direction_profile_with_turn(
         turn_solver_mode=config.turn_solver_mode,
         config=config,
         target_point_east_north_tvd=(geometry.t1_east_m, geometry.t1_north_m, geometry.t1_tvd_m),
+        progress_callback=progress_callback,
     )
     if best is not None:
+        _emit_progress(progress_callback, "TURN: найден допустимый профиль.", 1.00)
         return best
 
     required_dls = _required_dls_for_t1_reach(
@@ -853,6 +974,7 @@ def _solve_reverse_direction_profile(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
     runtime_context: _SolverRuntimeContext,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters:
     lower, upper = _effective_dls_search_bounds(
         config=config,
@@ -862,6 +984,11 @@ def _solve_reverse_direction_profile(
     horizontal_dls_deg_per_30m = float(
         max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper), SMALL)
     )
+    _emit_progress(
+        progress_callback,
+        "Солвер: reverse-direction coplanar-поиск по KOP/reverse INC/DLS.",
+        0.05,
+    )
     best = _search_reverse_direction_coplanar_profile(
         geometry=geometry,
         config=config,
@@ -869,9 +996,11 @@ def _solve_reverse_direction_profile(
         upper_dls=upper,
         horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
         runtime_context=runtime_context,
+        progress_callback=progress_callback,
     )
 
     if best is not None:
+        _emit_progress(progress_callback, "Солвер: найден допустимый reverse-профиль.", 1.00)
         return best
 
     diagnostics = _diagnose_reverse_no_solution(
@@ -890,6 +1019,7 @@ def _solve_reverse_direction_profile(
 def _solve_reverse_direction_profile_with_turn(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters:
     lower, upper = _effective_dls_search_bounds(
         config=config,
@@ -1014,8 +1144,10 @@ def _solve_reverse_direction_profile_with_turn(
         turn_solver_mode=config.turn_solver_mode,
         config=config,
         target_point_east_north_tvd=(geometry.t1_east_m, geometry.t1_north_m, geometry.t1_tvd_m),
+        progress_callback=progress_callback,
     )
     if best is not None:
+        _emit_progress(progress_callback, "TURN: найден допустимый reverse-профиль.", 1.00)
         return best
 
     diagnostics = _diagnose_reverse_no_solution(
@@ -1046,6 +1178,7 @@ def _solve_turn_profile_multistart(
     turn_solver_mode: str,
     config: TrajectoryConfig,
     target_point_east_north_tvd: tuple[float, float, float],
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[ProfileParameters | None, float]:
     # For TURN cases we solve endpoint matching as bounded nonlinear least-squares in 3D:
     # residuals = [dE, dN, dTVD, max(0, MD_excess)] with multiple starts.
@@ -1062,6 +1195,11 @@ def _solve_turn_profile_multistart(
         upper_bounds=upper,
         qmc_samples=qmc_samples,
         qmc_seed=qmc_seed,
+    )
+    _emit_progress(
+        progress_callback,
+        f"TURN: оценка стартовых точек ({len(all_seed_vectors)} шт.).",
+        0.08,
     )
 
     def residuals(values: np.ndarray) -> np.ndarray:
@@ -1084,7 +1222,9 @@ def _solve_turn_profile_multistart(
     best_miss = np.inf
     scored_starts: list[tuple[float, np.ndarray]] = []
 
-    for seed in all_seed_vectors:
+    seed_count = len(all_seed_vectors)
+    seed_progress_step = max(seed_count // 4, 1)
+    for idx, seed in enumerate(all_seed_vectors, start=1):
         clipped_seed = _clip_to_bounds(seed, bounds=bounds)
         start_residuals = residuals(clipped_seed)
         start_score = float(np.linalg.norm(start_residuals))
@@ -1109,11 +1249,18 @@ def _solve_turn_profile_multistart(
                 candidate=candidate,
                 objective_mode=objective_mode,
             )
+        if idx == seed_count or idx % seed_progress_step == 0:
+            _emit_progress(
+                progress_callback,
+                f"TURN: проверены старты {idx}/{seed_count}.",
+                0.12 + 0.33 * float(idx / max(seed_count, 1)),
+            )
 
     scored_starts.sort(key=lambda item: item[0])
     local_starts = [seed for _, seed in scored_starts[: max(1, int(max_local_starts))]]
 
     if turn_solver_mode == TURN_SOLVER_DE_HYBRID:
+        _emit_progress(progress_callback, "TURN: глобальный DE-поиск старта.", 0.50)
         de_result = differential_evolution(
             func=lambda vector: float(np.linalg.norm(residuals(np.asarray(vector, dtype=float)))),
             bounds=list(bounds),
@@ -1144,8 +1291,15 @@ def _solve_turn_profile_multistart(
         seen.add(key)
         deduped.append(seed)
     local_starts = deduped[: max(1, int(max_local_starts) + 1)]
+    _emit_progress(
+        progress_callback,
+        f"TURN: локальная оптимизация ({len(local_starts)} стартов).",
+        0.58,
+    )
 
-    for start in local_starts:
+    local_total = len(local_starts)
+    local_progress_step = max(local_total // 4, 1)
+    for idx, start in enumerate(local_starts, start=1):
         solution = least_squares(
             residuals,
             x0=start,
@@ -1185,7 +1339,14 @@ def _solve_turn_profile_multistart(
                 candidate=candidate,
                 objective_mode=objective_mode,
             )
+        if idx == local_total or idx % local_progress_step == 0:
+            _emit_progress(
+                progress_callback,
+                f"TURN: локальные решатели {idx}/{local_total}.",
+                0.62 + 0.34 * float(idx / max(local_total, 1)),
+            )
 
+    _emit_progress(progress_callback, "TURN: завершение этапа оптимизации.", 1.00)
     return best_candidate, float(best_miss)
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from time import perf_counter
+from typing import Callable
 
 import pandas as pd
 import streamlit as st
@@ -28,13 +29,18 @@ from pywp.planner_config import (
 )
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
-from pywp.ui_utils import arrow_safe_text_dataframe, format_distance, format_run_log_line
+from pywp.ui_utils import (
+    arrow_safe_text_dataframe,
+    format_distance,
+    format_run_log_line,
+)
 from pywp.ui_well_panels import (
     render_plan_section_panel,
     render_run_log_panel,
     render_survey_table_with_download,
     render_trajectory_dls_panel,
 )
+
 
 @dataclass(frozen=True)
 class ScenarioPreset:
@@ -68,6 +74,36 @@ SCENARIO_PRESETS: tuple[ScenarioPreset, ...] = (
         t1=Point3D(300.0, 400.0, 3000.0),
         t3=Point3D(1020.0, 1360.0, 3083.9122),
         description="Обратное направление в диапазоне offset из референсной таблицы.",
+    ),
+    ScenarioPreset(
+        name="Типовой: ГВ 3000, прямое направление, обычная",
+        gv_m=3000.0,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        complexity=COMPLEXITY_ORDINARY,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(960.0, 1280.0, 3000.0),
+        t3=Point3D(1860.0, 2480.0, 3083.9122),
+        description="Базовый same-direction кейс на 3000 м (класс обычная).",
+    ),
+    ScenarioPreset(
+        name="Типовой: ГВ 3000, прямое направление, сложная",
+        gv_m=3000.0,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        complexity=COMPLEXITY_COMPLEX,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1440.0, 1920.0, 3000.0),
+        t3=Point3D(2460.0, 3280.0, 3083.9122),
+        description="Same-direction шаблон для сложного класса на 3000 м.",
+    ),
+    ScenarioPreset(
+        name="Типовой: ГВ 3000, прямое направление, очень сложная",
+        gv_m=3000.0,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        complexity=COMPLEXITY_VERY_COMPLEX,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(2100.0, 2800.0, 3000.0),
+        t3=Point3D(3300.0, 4400.0, 3083.9122),
+        description="Same-direction шаблон для очень сложного класса на 3000 м.",
     ),
     ScenarioPreset(
         name="Типовой: ГВ 2000, обратное направление, очень сложная",
@@ -186,37 +222,84 @@ def _apply_template_filters_for_scenario(scenario_name: str) -> None:
     st.session_state["template_complexity"] = str(preset.complexity)
 
 
+def _available_trajectory_options(depth_filter: str | float) -> list[str]:
+    depth_value = None if depth_filter == DEPTH_FILTER_ALL else float(depth_filter)
+    available_set = {
+        str(preset.trajectory_type)
+        for preset in SCENARIO_PRESETS
+        if depth_value is None or abs(float(preset.gv_m) - depth_value) < 1e-6
+    }
+    options = [code for code in TRAJECTORY_OPTIONS if code in available_set]
+    return options or list(TRAJECTORY_OPTIONS)
+
+
+def _available_complexity_options(
+    depth_filter: str | float, trajectory_type: str
+) -> list[str]:
+    depth_value = None if depth_filter == DEPTH_FILTER_ALL else float(depth_filter)
+    options = sorted(
+        {
+            str(preset.complexity)
+            for preset in SCENARIO_PRESETS
+            if str(preset.trajectory_type) == str(trajectory_type)
+            and (depth_value is None or abs(float(preset.gv_m) - depth_value) < 1e-6)
+        },
+        key=lambda code: (
+            list(COMPLEXITY_OPTIONS).index(code) if code in COMPLEXITY_OPTIONS else 99
+        ),
+    )
+    return options
+
+
 def _filtered_scenario_names(
     depth_filter: str | float,
     trajectory_type: str,
     complexity: str,
 ) -> list[str]:
     depth_value = None if depth_filter == DEPTH_FILTER_ALL else float(depth_filter)
-    by_type = [
-        preset
+    exact = [
+        preset.name
         for preset in SCENARIO_PRESETS
-        if preset.trajectory_type == trajectory_type
+        if str(preset.trajectory_type) == str(trajectory_type)
+        and str(preset.complexity) == str(complexity)
+        and (depth_value is None or abs(float(preset.gv_m) - depth_value) < 1e-6)
     ]
-    by_type_depth = (
-        by_type
-        if depth_value is None
-        else [
-            preset
-            for preset in by_type
-            if abs(float(preset.gv_m) - depth_value) < 1e-6
-        ]
-    )
-    exact = [preset for preset in by_type_depth if preset.complexity == complexity]
     if exact:
-        return [preset.name for preset in exact]
-    by_type_complex = [preset for preset in by_type if preset.complexity == complexity]
-    if by_type_complex:
-        return [preset.name for preset in by_type_complex]
-    if by_type_depth:
-        return [preset.name for preset in by_type_depth]
-    if by_type:
-        return [preset.name for preset in by_type]
+        return exact
     return [preset.name for preset in SCENARIO_PRESETS]
+
+
+def _template_coverage_frame() -> pd.DataFrame:
+    rows: list[dict[str, str]] = []
+    depth_values = sorted({float(preset.gv_m) for preset in SCENARIO_PRESETS})
+    for gv in depth_values:
+        for trajectory in TRAJECTORY_OPTIONS:
+            options = _available_complexity_options(
+                depth_filter=gv,
+                trajectory_type=trajectory,
+            )
+            presets_count = sum(
+                1
+                for preset in SCENARIO_PRESETS
+                if abs(float(preset.gv_m) - float(gv)) < 1e-6
+                and str(preset.trajectory_type) == str(trajectory)
+            )
+            rows.append(
+                {
+                    "ГВ t1, м": f"{int(gv)}",
+                    "Тип конструкции": trajectory_type_label(trajectory),
+                    "Классы с примерами": (
+                        ", ".join(
+                            COMPLEXITY_SELECTOR_LABELS.get(code, code)
+                            for code in options
+                        )
+                        if options
+                        else "Нет"
+                    ),
+                    "Шаблонов в каталоге": str(presets_count),
+                }
+            )
+    return arrow_safe_text_dataframe(pd.DataFrame(rows))
 
 
 def _apply_scenario(name: str) -> None:
@@ -454,10 +537,20 @@ def _validate_input(
 
 
 def _run_planner(
-    surface: Point3D, t1: Point3D, t3: Point3D, config: TrajectoryConfig
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    config: TrajectoryConfig,
+    progress_callback: Callable[[str, float], None] | None = None,
 ) -> None:
     planner = TrajectoryPlanner()
-    result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
+    result = planner.plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=config,
+        progress_callback=progress_callback,
+    )
 
     st.session_state["last_result"] = {
         "surface": surface,
@@ -487,7 +580,9 @@ def _run_solver_profiling() -> None:
     ]
     total_items = len(run_items)
     progress = st.progress(0, text="Профилирование TURN-методов...")
-    with st.status("Выполняется профилирование TURN-решателей...", expanded=True) as status:
+    with st.status(
+        "Выполняется профилирование TURN-решателей...", expanded=True
+    ) as status:
         for index, (scenario_name, scenario_points, solver_mode) in enumerate(
             run_items, start=1
         ):
@@ -555,13 +650,30 @@ def _render_template_controls() -> None:
             "Выберите тип конструкции, класс сложности и типовую глубину. "
             "Шаблоны соответствуют вашей таблице классификации и ускоряют старт настройки."
         )
-        with st.popover("Как выбирать шаблон", icon=":material/help:"):
-            st.markdown(
-                "- `Прямое/Обратное` определяет базовый тип конструкции.\n"
-                "- `Класс сложности` ориентируется на референсные границы по отходу и HOLD.\n"
-                "- `Типовая ГВ t1` ограничивает каталог по глубине.\n"
-                "- Если точного совпадения нет, будет предложен ближайший вариант."
-            )
+        h1, h2, h3 = st.columns([3.8, 1.2, 1.2], gap="small")
+        with h1:
+            with st.popover("Как выбирать шаблон", icon=":material/help:"):
+                st.markdown(
+                    "- `Прямое/Обратное` определяет базовый тип конструкции.\n"
+                    "- `Класс сложности` ориентируется на референсные границы по отходу и HOLD.\n"
+                    "- `Типовая ГВ t1` ограничивает каталог по глубине.\n"
+                    "- Если точного совпадения нет, будет предложен ближайший вариант."
+                )
+        with h2:
+            if st.button(
+                "Применить шаблон",
+                icon=":material/check_circle:",
+                type="primary",
+                width="stretch",
+            ):
+                _apply_scenario(st.session_state["scenario_name"])
+                st.rerun()
+        with h3:
+            if st.button(
+                "Очистить результат", icon=":material/delete:", width="stretch"
+            ):
+                _clear_result()
+                st.rerun()
         f1, f2, f3, f4 = st.columns([1.2, 1.8, 1.8, 2.8], gap="small")
         with f1:
             st.selectbox(
@@ -570,19 +682,37 @@ def _render_template_controls() -> None:
                 key="template_depth_filter",
                 format_func=_depth_filter_label,
             )
+        selected_depth_filter = st.session_state["template_depth_filter"]
+        available_trajectory = _available_trajectory_options(
+            depth_filter=selected_depth_filter
+        )
+        if (
+            str(st.session_state["template_trajectory_type"])
+            not in available_trajectory
+        ):
+            st.session_state["template_trajectory_type"] = available_trajectory[0]
         with f2:
             st.segmented_control(
                 "Тип конструкции",
-                options=list(TRAJECTORY_OPTIONS),
+                options=available_trajectory,
                 key="template_trajectory_type",
                 format_func=lambda code: TRAJECTORY_SELECTOR_LABELS[str(code)],
                 selection_mode="single",
                 help="Тип строящейся конструкции относительно направления на t1.",
             )
+        selected_trajectory = str(st.session_state["template_trajectory_type"])
+        available_complexity = _available_complexity_options(
+            depth_filter=selected_depth_filter,
+            trajectory_type=selected_trajectory,
+        )
+        if not available_complexity:
+            available_complexity = list(COMPLEXITY_OPTIONS)
+        if str(st.session_state["template_complexity"]) not in available_complexity:
+            st.session_state["template_complexity"] = available_complexity[0]
         with f3:
             st.segmented_control(
                 "Класс сложности",
-                options=list(COMPLEXITY_OPTIONS),
+                options=available_complexity,
                 key="template_complexity",
                 format_func=lambda code: COMPLEXITY_SELECTOR_LABELS[str(code)],
                 selection_mode="single",
@@ -610,16 +740,6 @@ def _render_template_controls() -> None:
 
         selected_name = str(st.session_state["scenario_name"])
         selected_preset = SCENARIO_BY_NAME[selected_name]
-        depth_exact = (
-            selected_depth_filter == DEPTH_FILTER_ALL
-            or abs(float(selected_preset.gv_m) - float(selected_depth_filter)) < 1e-6
-        )
-        complexity_exact = selected_preset.complexity == selected_complexity
-        if not (depth_exact and complexity_exact):
-            st.info(
-                "Для выбранных фильтров нет точного шаблона. "
-                "Показан ближайший доступный вариант в выбранном типе конструкции."
-            )
         if selected_preset.description:
             st.caption(selected_preset.description)
 
@@ -631,29 +751,39 @@ def _render_template_controls() -> None:
         m1, m2, m3, m4 = st.columns(4, gap="small")
         m1.metric("ГВ t1", f"{selected_preset.gv_m:.0f} м")
         m2.metric("Отход t1", f"{offset_t1:.0f} м")
-        m3.metric("Окно reverse", reverse_window)
+        m3.metric("Референс reverse по ГВ", reverse_window)
         m4.metric("Класс шаблона", complexity_label(selected_preset.complexity))
-
-        a1, a2 = st.columns([1.2, 3.8], gap="small")
-        with a1:
-            render_small_note("Действия шаблона")
-            if st.button("Применить шаблон", icon=":material/sync:", width="stretch"):
-                _apply_scenario(st.session_state["scenario_name"])
-                st.rerun()
-            if st.button("Очистить результат", icon=":material/delete:", width="stretch"):
-                _clear_result()
-                st.rerun()
-        with a2:
-            render_small_note(
-                "Подсказка: после применения шаблона можно вручную скорректировать координаты S/t1/t3. "
-                "Последний успешный расчет сохраняется до следующего запуска."
+        with st.expander(
+            "Что такое окно reverse и как оно используется?", expanded=False
+        ):
+            st.markdown(
+                "- `Окно reverse` — это диапазон **горизонтального отхода t1** (S→t1), "
+                "в котором цель относится к типу `обратное направление`.\n"
+                "- Значение в карточке — **справочный референс по ГВ t1** из таблицы классификации, "
+                "а не «дефолт» решателя.\n"
+                "- На расчет влияет через автоматическую классификацию типа траектории "
+                "(`прямое`/`обратное`) и выбор подходящего шаблона.\n"
+                "- Из UI главной страницы это окно не редактируется: пороги задаются "
+                "в референсной таблице на странице `Классификация скважин` "
+                "(модуль `pywp/classification.py`)."
             )
-            with st.expander("Референс классов по типовым глубинам", expanded=False):
-                st.dataframe(
-                    arrow_safe_text_dataframe(pd.DataFrame(reference_table_rows())),
-                    width="stretch",
-                    hide_index=True,
-                )
+
+        render_small_note(
+            "Подсказка: после применения шаблона можно вручную скорректировать координаты S/t1/t3. "
+            "Последний успешный расчет сохраняется до следующего запуска."
+        )
+        with st.expander("Покрытие каталога шаблонов", expanded=False):
+            st.dataframe(
+                _template_coverage_frame(),
+                width="stretch",
+                hide_index=True,
+            )
+        with st.expander("Референс классов по типовым глубинам", expanded=False):
+            st.dataframe(
+                arrow_safe_text_dataframe(pd.DataFrame(reference_table_rows())),
+                width="stretch",
+                hide_index=True,
+            )
 
 
 def _render_input_form() -> bool:
@@ -823,11 +953,14 @@ def _render_input_form() -> bool:
                     help="Минимальный VERTICAL участок от S до начала BUILD1.",
                 )
                 with st.expander("Параметры солвера", expanded=False):
-                    with st.popover("Что означают параметры солвера", icon=":material/tune:"):
+                    with st.popover(
+                        "Что означают параметры солвера", icon=":material/tune:"
+                    ):
                         st.markdown(
                             "- `Целевая функция` задает критерий выбора из допустимых профилей.\n"
                             "- `TURN` параметры влияют только на некомпланарные случаи.\n"
-                            "- `Adaptive` ускоряет перебор KOP/reverse INC.\n"
+                            "- `Сетка поиска` — это набор пробных значений KOP и reverse INC.\n"
+                            "- `Adaptive` сначала считает по редкой сетке, затем уплотняет ее около лучших решений.\n"
                             "- `Parallel jobs` использует процессы в coplanar-поиске.\n"
                             "- `Кэш профилей` сокращает повторные вычисления внутри оптимизации."
                         )
@@ -878,13 +1011,18 @@ def _render_input_form() -> bool:
                         ),
                     )
                     st.markdown("**Производительность и поиск**")
+                    st.caption(
+                        "Сетка простыми словами: это «точки, где солвер пробует решение». "
+                        "Плотнее сетка = точнее поиск, но дольше расчет. "
+                        "Adaptive делает это умнее: грубо в начале, подробно рядом с лучшими вариантами."
+                    )
                     p1, p2 = st.columns(2, gap="small")
                     p1.toggle(
-                        "Adaptive coarse-to-fine",
+                        "Умная сетка (coarse → fine)",
                         key="adaptive_grid_enabled",
                         help=(
-                            "Итеративно уточняет сетку KOP/reverse INC вокруг лучших кандидатов. "
-                            "Обычно ускоряет расчет без потери качества."
+                            "Сначала быстрый грубый просмотр, потом уточнение около лучших решений. "
+                            "Обычно быстрее, чем сразу считать очень плотную сетку."
                         ),
                     )
                     p2.toggle(
@@ -897,34 +1035,43 @@ def _render_input_form() -> bool:
                     )
                     p3, p4, p5 = st.columns(3, gap="small")
                     p3.number_input(
-                        "Adaptive initial grid",
+                        "Стартовая сетка (точек)",
                         key="adaptive_grid_initial_size",
                         min_value=2,
                         step=1,
-                        help="Размер стартовой coarse-сетки для KOP/reverse INC.",
+                        help=(
+                            "Сколько точек брать в первом грубом проходе. "
+                            "Больше точек = плотнее стартовая сетка = медленнее, но точнее на старте."
+                        ),
                     )
                     p4.number_input(
-                        "Adaptive refine levels",
+                        "Шагов уточнения",
                         key="adaptive_grid_refine_levels",
                         min_value=0,
                         step=1,
-                        help="Количество итераций уточнения сетки вокруг лучших решений.",
+                        help=(
+                            "Сколько раз дополнительно уплотнять сетку вокруг лучших кандидатов. "
+                            "0 = только стартовый проход."
+                        ),
                     )
                     p5.number_input(
-                        "Adaptive top-k",
+                        "Лучших зон для уточнения (top-k)",
                         key="adaptive_grid_top_k",
                         min_value=1,
                         step=1,
-                        help="Сколько лучших кандидатов брать как фокус для следующего refinement.",
+                        help=(
+                            "Сколько лучших кандидатов брать как «центры внимания» на следующем шаге. "
+                            "Больше значение повышает надежность поиска, но увеличивает время."
+                        ),
                     )
                     st.number_input(
-                        "Parallel jobs",
+                        "Параллельные процессы (jobs)",
                         key="parallel_jobs",
                         min_value=1,
                         step=1,
                         help=(
-                            "Число процессов для параллельной оценки кандидатов в coplanar режиме. "
-                            "1 = без параллелизма."
+                            "Сколько процессов одновременно проверяют кандидаты в coplanar-режиме. "
+                            "1 = без параллелизма. Обычно ставьте не больше числа физических ядер."
                         ),
                     )
     return bool(build_clicked)
@@ -933,11 +1080,15 @@ def _render_input_form() -> bool:
 def _render_solver_profiling_panel() -> None:
     with st.expander("Профилирование TURN-методов", expanded=False):
         st.caption("Сравнение методов на типовых шаблонах текущего проекта.")
-        if st.button("Запустить профилирование", icon=":material/speed:", width="content"):
+        if st.button(
+            "Запустить профилирование", icon=":material/speed:", width="content"
+        ):
             _run_solver_profiling()
         profile_rows = st.session_state.get("solver_profile_rows")
         if st.session_state.get("solver_profile_at"):
-            st.caption(f"Последнее профилирование: {st.session_state['solver_profile_at']}")
+            st.caption(
+                f"Последнее профилирование: {st.session_state['solver_profile_at']}"
+            )
         if profile_rows:
             profile_df = pd.DataFrame(profile_rows)
             st.dataframe(
@@ -958,27 +1109,50 @@ def _run_planner_if_clicked(
     run_started_s = perf_counter()
     log_lines: list[str] = []
     progress = st.progress(0, text="Подготовка расчета...")
-    with st.status("Расчет траектории...", expanded=True) as status:
-        try:
+    phase_placeholder = st.empty()
+    try:
+        with st.spinner("Расчет траектории...", show_time=True):
             check_msg = format_run_log_line(
                 run_started_s,
                 "Проверка входных данных.",
             )
-            status.write(check_msg)
             log_lines.append(check_msg)
+            phase_placeholder.caption("Проверка входных данных...")
             progress.progress(20, text="Проверка входных данных...")
             if preflight_errors:
                 raise PlanningError("; ".join(preflight_errors))
             solve_msg = format_run_log_line(
                 run_started_s,
-                "Запуск планировщика и решателя.",
+                "Запуск планировщика и решателя. Инициализация фаз расчета.",
             )
-            status.write(solve_msg)
             log_lines.append(solve_msg)
-            progress.progress(55, text="Выполняется расчет траектории...")
+            phase_placeholder.caption("Запуск солвера...")
+            progress.progress(35, text="Запуск солвера...")
+
+            callback_state: dict[str, object] = {"last_text": "", "last_progress": 35}
+
+            def planner_progress(stage_text: str, stage_fraction: float) -> None:
+                clamped = float(max(0.0, min(1.0, stage_fraction)))
+                mapped_progress = int(35 + round(clamped * 60))
+                mapped_progress = max(
+                    int(callback_state["last_progress"]),
+                    min(mapped_progress, 99),
+                )
+                progress.progress(mapped_progress, text=stage_text)
+                phase_placeholder.caption(stage_text)
+                if str(callback_state["last_text"]) != stage_text:
+                    log_line = format_run_log_line(run_started_s, stage_text)
+                    log_lines.append(log_line)
+                    callback_state["last_text"] = stage_text
+                callback_state["last_progress"] = mapped_progress
+
             started = perf_counter()
             _run_planner(
-                surface=surface_input, t1=t1_input, t3=t3_input, config=config_input
+                surface=surface_input,
+                t1=t1_input,
+                t3=t3_input,
+                config=config_input,
+                progress_callback=planner_progress,
             )
             elapsed_s = perf_counter() - started
             st.session_state["last_runtime_s"] = float(elapsed_s)
@@ -986,26 +1160,18 @@ def _run_planner_if_clicked(
                 run_started_s,
                 f"Расчет завершен успешно. Затраченное время солвера: {elapsed_s:.2f} с.",
             )
-            status.write(done_msg)
             log_lines.append(done_msg)
             progress.progress(100, text="Расчет завершен.")
-            status.update(
-                label=f"Расчет завершен за {elapsed_s:.2f} с",
-                state="complete",
-                expanded=False,
-            )
-        except PlanningError as exc:
-            st.session_state["last_error"] = str(exc)
-            st.session_state["last_runtime_s"] = None
-            err_msg = format_run_log_line(run_started_s, f"Ошибка расчета: {exc}")
-            status.write(err_msg)
-            log_lines.append(err_msg)
-            status.update(
-                label="Расчет завершился ошибкой", state="error", expanded=True
-            )
-        finally:
-            st.session_state["last_run_log_lines"] = log_lines
-            progress.empty()
+            phase_placeholder.success(f"Расчет завершен за {elapsed_s:.2f} с")
+    except PlanningError as exc:
+        st.session_state["last_error"] = str(exc)
+        st.session_state["last_runtime_s"] = None
+        err_msg = format_run_log_line(run_started_s, f"Ошибка расчета: {exc}")
+        log_lines.append(err_msg)
+        phase_placeholder.error("Расчет завершился ошибкой")
+    finally:
+        st.session_state["last_run_log_lines"] = log_lines
+        progress.empty()
 
 
 def _render_calculation_feedback() -> None:
@@ -1039,25 +1205,36 @@ def _render_result_overview(last_result: dict[str, object]) -> float:
     t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
     with st.container(border=True):
         st.markdown("### Ключевые показатели")
-        m1, m2, m3, m4 = st.columns(4, gap="small")
-        m1.metric("Тип траектории", str(summary["trajectory_type"]))
-        m2.metric("Класс сложности", str(summary["well_complexity"]))
-        m3.metric("INC на t1", f"{float(summary['entry_inc_deg']):.2f} deg")
-        m4.metric("ЗУ HOLD", f"{float(summary['hold_inc_deg']):.2f} deg")
-
-        n1, n2, n3, n4 = st.columns(4, gap="small")
-        n1.metric("Отход t1", format_distance(t1_horizontal_offset_m))
-        n2.metric("KOP MD", format_distance(float(summary["kop_md_m"])))
-        n3.metric("Длина HORIZONTAL", format_distance(float(summary["horizontal_length_m"])))
-        n4.metric(
-            "Макс INC факт/лимит",
-            f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
+        metrics_rows = [
+            {"Показатель": "Тип траектории", "Значение": str(summary["trajectory_type"])},
+            {"Показатель": "Класс сложности", "Значение": str(summary["well_complexity"])},
+            {"Показатель": "INC на t1", "Значение": f"{float(summary['entry_inc_deg']):.2f} deg"},
+            {"Показатель": "ЗУ HOLD", "Значение": f"{float(summary['hold_inc_deg']):.2f} deg"},
+            {"Показатель": "Отход t1", "Значение": format_distance(t1_horizontal_offset_m)},
+            {"Показатель": "KOP MD", "Значение": format_distance(float(summary["kop_md_m"]))},
+            {
+                "Показатель": "Длина HORIZONTAL",
+                "Значение": format_distance(float(summary["horizontal_length_m"])),
+            },
+            {
+                "Показатель": "Макс INC факт/лимит",
+                "Значение": f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
+            },
+            {
+                "Показатель": "Макс DLS",
+                "Значение": f"{float(summary['max_dls_total_deg_per_30m']):.2f} deg/30m",
+            },
+            {"Показатель": "Итоговая MD", "Значение": format_distance(float(summary["md_total_m"]))},
+            {
+                "Показатель": "Время расчета",
+                "Значение": "—" if runtime_s is None else f"{float(runtime_s):.2f} с",
+            },
+        ]
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(metrics_rows)),
+            width="stretch",
+            hide_index=True,
         )
-
-        k1, k2, k3 = st.columns(3, gap="small")
-        k1.metric("Макс DLS", f"{float(summary['max_dls_total_deg_per_30m']):.2f} deg/30m")
-        k2.metric("Итоговая MD", format_distance(float(summary["md_total_m"])))
-        k3.metric("Время расчета", "—" if runtime_s is None else f"{float(runtime_s):.2f} с")
 
         render_small_note(
             "Проверяйте соответствие фактического INC/DLS лимитам, особенно при изменении "
@@ -1103,7 +1280,9 @@ def _render_result_tables(
     tab_summary, tab_survey = st.tabs(["Сводка", "Инклинометрия"])
     with tab_summary:
         hidden_metrics = {"distance_t1_m", "distance_t3_m"}
-        summary_visible = {key: value for key, value in summary.items() if key not in hidden_metrics}
+        summary_visible = {
+            key: value for key, value in summary.items() if key not in hidden_metrics
+        }
         summary_visible["t1_horizontal_offset_m"] = t1_horizontal_offset_m
 
         main_rows: list[dict[str, str]] = []
@@ -1146,7 +1325,9 @@ def _render_result_tables(
             width="stretch",
             hide_index=True,
         )
-        with st.expander("Технические параметры и диагностика решателя", expanded=False):
+        with st.expander(
+            "Технические параметры и диагностика решателя", expanded=False
+        ):
             st.dataframe(
                 arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),
                 width="stretch",

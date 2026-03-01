@@ -35,6 +35,8 @@ from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
 WT_UI_DEFAULTS_VERSION = 8
+WELL_TRAJECTORY_COLOR = "#0B6E4F"
+WELL_TARGET_COLOR = "#C1121F"
 WT_PROFILE_DEFAULTS: dict[str, float | int | str | bool] = {
     "wt_cfg_md_step_m": float(CFG_DEFAULTS.md_step_m),
     "wt_cfg_md_step_control_m": float(CFG_DEFAULTS.md_step_control_m),
@@ -163,7 +165,7 @@ def _all_wells_3d_figure(
                 z=stations["Z_m"],
                 mode="lines",
                 name=name,
-                line={"width": 5},
+                line={"width": 5, "color": WELL_TRAJECTORY_COLOR},
                 customdata=np.column_stack(
                     [
                         stations["MD_m"].to_numpy(dtype=float),
@@ -193,7 +195,7 @@ def _all_wells_3d_figure(
                 z=[surface.z, t1.z, t3.z],
                 mode="markers",
                 name=f"{name}: S/t1/t3",
-                marker={"size": 4},
+                marker={"size": 4, "color": WELL_TARGET_COLOR},
                 showlegend=False,
                 hovertemplate="X: %{x:.2f} m<br>Y: %{y:.2f} m<br>Z/TVD: %{z:.2f} m<extra>%{fullData.name}</extra>",
             )
@@ -275,7 +277,7 @@ def _all_wells_plan_figure(
                 y=stations["Y_m"],
                 mode="lines",
                 name=name,
-                line={"width": 4},
+                line={"width": 4, "color": WELL_TRAJECTORY_COLOR},
                 customdata=np.column_stack(
                     [
                         stations["Z_m"].to_numpy(dtype=float),
@@ -741,26 +743,31 @@ def _run_batch_if_clicked(
     run_started_s = perf_counter()
     log_lines: list[str] = []
     progress = st.progress(0, text="Подготовка batch-расчета...")
-    with st.status("Выполняется расчет WELLTRACK-набора...", expanded=True) as status:
-        try:
+    phase_placeholder = st.empty()
+    try:
+        with st.spinner("Выполняется расчет WELLTRACK-набора...", show_time=True):
             started = perf_counter()
             start_msg = format_run_log_line(
                 run_started_s,
                 f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}.",
             )
-            status.write(start_msg)
             log_lines.append(start_msg)
+            phase_placeholder.caption(
+                f"Старт расчета набора. Выбрано скважин: {len(selected_set)}."
+            )
 
             def on_progress(index: int, total: int, name: str) -> None:
                 progress.progress(
                     int((index / max(total, 1)) * 100),
                     text=f"{index}/{total}: {name}",
                 )
+                phase_placeholder.caption(
+                    f"Расчет скважины {index}/{total}: {name}"
+                )
                 line = format_run_log_line(
                     run_started_s,
                     f"Расчет скважины {index}/{total}: {name}",
                 )
-                status.write(line)
                 log_lines.append(line)
 
             summary_rows, successes = batch.evaluate(
@@ -784,33 +791,23 @@ def _run_batch_if_clicked(
                 f"ошибок: {len(summary_rows) - len(successes)}. "
                 f"Затраченное время: {elapsed_s:.2f} с.",
             )
-            status.write(done_msg)
             log_lines.append(done_msg)
             if successes:
-                status.update(
-                    label=f"Расчет завершен за {elapsed_s:.2f} с. Успешно: {len(successes)}",
-                    state="complete",
-                    expanded=False,
+                phase_placeholder.success(
+                    f"Расчет завершен за {elapsed_s:.2f} с. Успешно: {len(successes)}"
                 )
             else:
-                status.update(
-                    label=f"Расчет завершен за {elapsed_s:.2f} с, но без успешных скважин.",
-                    state="error",
-                    expanded=True,
+                phase_placeholder.error(
+                    f"Расчет завершен за {elapsed_s:.2f} с, но без успешных скважин."
                 )
-        except Exception as exc:  # noqa: BLE001
-            st.session_state["wt_last_error"] = str(exc)
-            err_msg = format_run_log_line(run_started_s, f"Ошибка batch-расчета: {exc}")
-            status.write(err_msg)
-            log_lines.append(err_msg)
-            status.update(
-                label="Batch-расчет завершился ошибкой",
-                state="error",
-                expanded=True,
-            )
-        finally:
-            st.session_state["wt_last_run_log_lines"] = log_lines
-            progress.empty()
+    except Exception as exc:  # noqa: BLE001
+        st.session_state["wt_last_error"] = str(exc)
+        err_msg = format_run_log_line(run_started_s, f"Ошибка batch-расчета: {exc}")
+        log_lines.append(err_msg)
+        phase_placeholder.error("Batch-расчет завершился ошибкой")
+    finally:
+        st.session_state["wt_last_run_log_lines"] = log_lines
+        progress.empty()
 
 
 def _render_batch_log() -> None:

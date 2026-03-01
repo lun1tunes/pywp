@@ -8,6 +8,10 @@ from pywp.models import Point3D
 from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_step
 
 DEG2RAD = np.pi / 180.0
+TRAJECTORY_COLOR_PRIMARY = "#0B6E4F"
+TARGET_COLOR_PRIMARY = "#C1121F"
+INC_LABEL_COLOR = "#0F172A"
+INC_LABEL_BG = "rgba(255, 255, 255, 0.88)"
 SEGMENT_COLORS = {
     "BUILD1": "#F77F00",
     "HOLD": "#2A9D8F",
@@ -158,9 +162,19 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
 
     x_span = max(float(np.max(section_x) - np.min(section_x)), 1.0)
     z_span = max(float(np.max(z_values) - np.min(z_values)), 1.0)
+    x_min = float(np.min(section_x))
+    x_max = float(np.max(section_x))
+    z_min = float(np.min(z_values))
+    z_max = float(np.max(z_values))
     tick_length = max(35.0, min(120.0, x_span * 0.04))
     text_dx = max(28.0, x_span * 0.03)
     text_dy = max(18.0, z_span * 0.02)
+    pad_x = max(18.0, x_span * 0.02)
+    pad_z = max(14.0, z_span * 0.02)
+    x_low = float(min(x_min + pad_x, x_max - pad_x))
+    x_high = float(max(x_min + pad_x, x_max - pad_x))
+    z_low = float(min(z_min + pad_z, z_max - pad_z))
+    z_high = float(max(z_min + pad_z, z_max - pad_z))
 
     text_x: list[float] = []
     text_y: list[float] = []
@@ -179,15 +193,17 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
             tangent_x, tangent_y = 1.0, 0.0
             tangent_norm = 1.0
 
-        # Normal to local trajectory for a compact tick mark.
-        normal_x = tangent_y / tangent_norm
-        normal_y = -tangent_x / tangent_norm
+        # Keep the short mark parallel to local trajectory direction.
+        tangent_unit_x = tangent_x / tangent_norm
+        tangent_unit_y = tangent_y / tangent_norm
+        normal_x = tangent_unit_y
+        normal_y = -tangent_unit_x
         direction = 1.0 if normal_x >= 0.0 else -1.0
 
-        x_start = float(section_x[idx] - 0.5 * tick_length * direction * normal_x)
-        y_start = float(z_values[idx] - 0.5 * tick_length * direction * normal_y)
-        x_end = float(section_x[idx] + 0.5 * tick_length * direction * normal_x)
-        y_end = float(z_values[idx] + 0.5 * tick_length * direction * normal_y)
+        x_start = float(section_x[idx] - 0.5 * tick_length * tangent_unit_x)
+        y_start = float(z_values[idx] - 0.5 * tick_length * tangent_unit_y)
+        x_end = float(section_x[idx] + 0.5 * tick_length * tangent_unit_x)
+        y_end = float(z_values[idx] + 0.5 * tick_length * tangent_unit_y)
 
         fig.add_shape(
             type="line",
@@ -195,11 +211,18 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
             y0=y_start,
             x1=x_end,
             y1=y_end,
-            line={"color": "#E63946", "width": 3},
+            line={"color": INC_LABEL_COLOR, "width": 3},
         )
 
-        label_x = x_end + direction * text_dx
-        label_y = y_end + (text_dy * (1.0 if rank % 2 == 0 else -1.0))
+        label_x = (
+            float(section_x[idx])
+            + direction * normal_x * (0.55 * tick_length + text_dx)
+        )
+        label_y = (
+            float(z_values[idx])
+            + direction * normal_y * (0.55 * tick_length + 0.7 * text_dy)
+            + text_dy * (1.0 if rank % 2 == 0 else -1.0) * 0.45
+        )
         for attempt in range(6):
             conflict = False
             for used_x, used_y in occupied_text_points:
@@ -210,6 +233,8 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
                     break
             if not conflict:
                 break
+        label_x = float(np.clip(label_x, x_low, x_high))
+        label_y = float(np.clip(label_y, z_low, z_high))
         occupied_text_points.append((label_x, label_y))
 
         marker_x.append(float(section_x[idx]))
@@ -224,7 +249,7 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
             y=marker_y,
             mode="markers",
             name="INC точки",
-            marker={"size": 5, "color": "#E63946"},
+            marker={"size": 5, "color": INC_LABEL_COLOR},
             showlegend=False,
             hoverinfo="skip",
         )
@@ -233,10 +258,17 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
         go.Scatter(
             x=text_x,
             y=text_y,
-            mode="text",
+            mode="markers+text",
             text=text_labels,
-            textposition="middle left",
-            textfont={"size": 14, "color": "#E63946"},
+            textposition="middle center",
+            textfont={"size": 13, "color": INC_LABEL_COLOR},
+            marker={
+                "size": 20,
+                "color": INC_LABEL_BG,
+                "line": {"color": INC_LABEL_COLOR, "width": 1},
+                "symbol": "circle",
+            },
+            cliponaxis=False,
             name="INC метки",
             showlegend=False,
             hoverinfo="skip",
@@ -462,7 +494,7 @@ def plan_view_figure(
             y=df["Y_m"],
             mode="lines",
             name="Траектория",
-            line={"width": 4, "color": "#0B6E4F"},
+            line={"width": 4, "color": TRAJECTORY_COLOR_PRIMARY},
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
@@ -482,7 +514,7 @@ def plan_view_figure(
             text=["S", "t1", "t3"],
             textposition="top center",
             name="Цели",
-            marker={"size": 9, "color": ["#FF006E", "#FB5607", "#3A86FF"]},
+            marker={"size": 9, "color": TARGET_COLOR_PRIMARY},
             customdata=_build_hover_customdata(
                 x_values=targets_df["X_m"].to_numpy(dtype=float),
                 y_values=targets_df["Y_m"].to_numpy(dtype=float),
@@ -530,7 +562,7 @@ def section_view_figure(
             y=df["Z_m"],
             mode="lines",
             name="Траектория",
-            line={"width": 4, "color": "#1D3557"},
+            line={"width": 4, "color": TRAJECTORY_COLOR_PRIMARY},
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
@@ -543,7 +575,7 @@ def section_view_figure(
             text=t_points["name"],
             textposition="top center",
             name="Цели",
-            marker={"size": 9, "color": "#E76F51"},
+            marker={"size": 9, "color": TARGET_COLOR_PRIMARY},
             customdata=_build_hover_customdata(
                 x_values=t_points["X_m"].to_numpy(dtype=float),
                 y_values=t_points["Y_m"].to_numpy(dtype=float),
