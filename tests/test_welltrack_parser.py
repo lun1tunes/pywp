@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from pywp.eclipse_welltrack import (
+    WelltrackPoint,
     WelltrackParseError,
+    decode_welltrack_bytes,
     parse_welltrack_text,
     welltrack_points_to_targets,
 )
@@ -46,19 +48,45 @@ def test_parse_rejects_non_multiple_of_four_values() -> None:
         parse_welltrack_text(text)
 
 
-def test_points_to_targets_uses_input_order_and_ignores_md() -> None:
+def test_parse_rejects_decreasing_md_sequence() -> None:
     text = """
-    WELLTRACK 'A'
+    WELLTRACK 'BROKEN-MD'
     0 0 0 0
     100 100 2000 3000
     200 200 2100 2000
     /
     """
-    record = parse_welltrack_text(text)[0]
-    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    with pytest.raises(WelltrackParseError, match="MD must be non-decreasing"):
+        parse_welltrack_text(text)
+
+
+def test_points_to_targets_requires_strict_md_order_by_default() -> None:
+    points = (
+        WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+        WelltrackPoint(x=200.0, y=200.0, z=2100.0, md=3500.0),
+        WelltrackPoint(x=100.0, y=100.0, z=2000.0, md=3000.0),
+    )
+    with pytest.raises(ValueError, match="strictly increasing MD"):
+        welltrack_points_to_targets(points)
+
+
+def test_points_to_targets_can_sort_by_md_when_requested() -> None:
+    points = (
+        WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+        WelltrackPoint(x=200.0, y=200.0, z=2100.0, md=3500.0),
+        WelltrackPoint(x=100.0, y=100.0, z=2000.0, md=3000.0),
+    )
+    surface, t1, t3 = welltrack_points_to_targets(points, order_mode="sort_by_md")
     assert surface.z == pytest.approx(0.0)
     assert t1.z == pytest.approx(2000.0)
     assert t3.z == pytest.approx(2100.0)
+
+
+def test_decode_welltrack_bytes_supports_cp1251_fallback() -> None:
+    raw = "WELLTRACK 'СКВ-01'\n0 0 0 0\n/".encode("cp1251")
+    decoded, encoding = decode_welltrack_bytes(raw)
+    assert encoding == "cp1251"
+    assert "СКВ-01" in decoded
 
 
 def test_points_to_targets_requires_exactly_three_points() -> None:

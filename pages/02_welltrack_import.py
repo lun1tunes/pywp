@@ -13,6 +13,7 @@ from pywp import TrajectoryConfig, TrajectoryPlanner
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackRecord,
+    decode_welltrack_bytes,
     parse_welltrack_text,
 )
 from pywp.planner_config import (
@@ -94,6 +95,23 @@ def _apply_profile_defaults(force: bool) -> None:
             st.session_state[key] = value
 
 
+def _decode_welltrack_payload(raw_payload: bytes, source_label: str) -> str:
+    text, encoding = decode_welltrack_bytes(raw_payload)
+    if encoding == "utf-8":
+        return text
+    if encoding.endswith("(replace)"):
+        st.warning(
+            f"{source_label}: не удалось надежно определить кодировку. "
+            f"Текст декодирован как `{encoding}` с заменой поврежденных символов."
+        )
+        return text
+    st.info(
+        f"{source_label}: текст декодирован как `{encoding}` (fallback, не UTF-8). "
+        "Проверьте корректность имен и комментариев."
+    )
+    return text
+
+
 def _read_welltrack_file(path_text: str) -> str:
     file_path_raw = path_text.strip()
     if not file_path_raw:
@@ -112,7 +130,8 @@ def _read_welltrack_file(path_text: str) -> str:
         return ""
 
     try:
-        return file_path.read_text(encoding="utf-8")
+        payload = file_path.read_bytes()
+        return _decode_welltrack_payload(payload, source_label=f"Файл `{file_path}`")
     except OSError as exc:
         st.error(f"Не удалось прочитать файл `{file_path}`: {exc}")
         return ""
@@ -467,7 +486,10 @@ def _render_source_input() -> str:
         )
         if uploaded_file is None:
             return ""
-        return uploaded_file.getvalue().decode("utf-8", errors="replace")
+        return _decode_welltrack_payload(
+            uploaded_file.getvalue(),
+            source_label=f"Загруженный файл `{uploaded_file.name}`",
+        )
 
     return st.text_area(
         "Текст WELLTRACK",

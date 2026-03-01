@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
-from typing import Callable
+from typing import Callable, Literal
 
 from pywp.models import Point3D
 
 _WELLTRACK_RE = re.compile(r"^\s*WELLTRACK\b(.*)$", flags=re.IGNORECASE)
+DEFAULT_WELLTRACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp1251", "latin-1")
+_MD_EPS = 1e-9
 
 
 class WelltrackParseError(ValueError):
@@ -25,6 +28,24 @@ class WelltrackPoint:
 class WelltrackRecord:
     name: str
     points: tuple[WelltrackPoint, ...]
+
+
+def decode_welltrack_bytes(
+    raw: bytes,
+    encodings: tuple[str, ...] = DEFAULT_WELLTRACK_ENCODINGS,
+) -> tuple[str, str]:
+    payload = bytes(raw)
+    if not payload:
+        return "", "utf-8"
+
+    for encoding in encodings:
+        try:
+            return payload.decode(encoding, errors="strict"), encoding
+        except UnicodeDecodeError:
+            continue
+
+    first_encoding = encodings[0] if encodings else "utf-8"
+    return payload.decode(first_encoding, errors="replace"), f"{first_encoding}(replace)"
 
 
 def parse_welltrack_text(text: str) -> list[WelltrackRecord]:
@@ -53,6 +74,7 @@ def parse_welltrack_text(text: str) -> list[WelltrackRecord]:
                     f"WELLTRACK '{current_name}': failed to parse numeric value near line {line_no}: {exc}"
                 ) from exc
             points.append(WelltrackPoint(x=x, y=y, z=z, md=md))
+        _validate_record_md(points=points, well_name=current_name)
 
         records.append(WelltrackRecord(name=current_name, points=tuple(points)))
         current_name = None
@@ -93,14 +115,47 @@ def parse_welltrack_text(text: str) -> list[WelltrackRecord]:
     return records
 
 
-def welltrack_points_to_targets(points: tuple[WelltrackPoint, ...]) -> tuple[Point3D, Point3D, Point3D]:
+def welltrack_points_to_targets(
+    points: tuple[WelltrackPoint, ...],
+    *,
+    order_mode: Literal["strict_file_order", "sort_by_md"] = "strict_file_order",
+) -> tuple[Point3D, Point3D, Point3D]:
     if len(points) != 3:
         raise ValueError(f"Expected exactly 3 points (S, t1, t3), got {len(points)}.")
-    # By project contract, WELLTRACK points are provided as S, t1, t3.
-    # MD is parsed for compatibility, but not used for target mapping.
-    surface = Point3D(x=points[0].x, y=points[0].y, z=points[0].z)
-    t1 = Point3D(x=points[1].x, y=points[1].y, z=points[1].z)
-    t3 = Point3D(x=points[2].x, y=points[2].y, z=points[2].z)
+    if order_mode not in {"strict_file_order", "sort_by_md"}:
+        raise ValueError(
+            f"Unsupported order_mode={order_mode!r}. "
+            "Supported values: 'strict_file_order', 'sort_by_md'."
+        )
+
+    ordered_points = points
+    if order_mode == "sort_by_md":
+        ordered_points = tuple(sorted(points, key=lambda point: float(point.md)))
+
+    md_values = [float(point.md) for point in ordered_points]
+    if not all(math.isfinite(value) for value in md_values):
+        raise ValueError("All MD values must be finite numbers for S, t1, t3 mapping.")
+    if not (md_values[0] + _MD_EPS < md_values[1] and md_values[1] + _MD_EPS < md_values[2]):
+        raise ValueError(
+            "Expected strictly increasing MD for points S, t1, t3 "
+            f"(got MD sequence: {md_values[0]:.3f}, {md_values[1]:.3f}, {md_values[2]:.3f})."
+        )
+
+    surface = Point3D(
+        x=ordered_points[0].x,
+        y=ordered_points[0].y,
+        z=ordered_points[0].z,
+    )
+    t1 = Point3D(
+        x=ordered_points[1].x,
+        y=ordered_points[1].y,
+        z=ordered_points[1].z,
+    )
+    t3 = Point3D(
+        x=ordered_points[2].x,
+        y=ordered_points[2].y,
+        z=ordered_points[2].z,
+    )
     return surface, t1, t3
 
 
@@ -135,3 +190,22 @@ def _consume_tail_tokens(tail: str, numeric_tokens: list[str], finalize: Callabl
             finalize()
             continue
         numeric_tokens.append(token)
+
+
+def _validate_record_md(points: list[WelltrackPoint], well_name: str) -> None:
+    if not points:
+        return
+    for index, point in enumerate(points, start=1):
+        if not math.isfinite(float(point.md)):
+            raise WelltrackParseError(
+                f"WELLTRACK '{well_name}': MD at point #{index} must be finite."
+            )
+        if index == 1:
+            continue
+        previous_md = float(points[index - 2].md)
+        current_md = float(point.md)
+        if current_md + _MD_EPS < previous_md:
+            raise WelltrackParseError(
+                f"WELLTRACK '{well_name}': MD must be non-decreasing by point order. "
+                f"Found MD[{index - 1}]={previous_md:.3f} > MD[{index}]={current_md:.3f}."
+            )
