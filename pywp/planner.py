@@ -15,6 +15,7 @@ from pywp.classification import (
     classify_trajectory_type,
     classify_well,
     complexity_label,
+    interpolate_limits,
     trajectory_type_label,
 )
 from pywp.mcm import add_dls, compute_positions_min_curv, dogleg_angle_rad, minimum_curvature_increment
@@ -207,13 +208,16 @@ def _build_section_geometry(
     if inc_entry_deg > config.max_inc_deg + SMALL:
         raise PlanningError(
             "Entry INC target exceeds configured max INC. "
-            f"entry_inc_target={inc_entry_deg:.2f} deg, max_inc={config.max_inc_deg:.2f} deg."
+            f"entry_inc_target={inc_entry_deg:.2f} deg, max_inc={config.max_inc_deg:.2f} deg. "
+            "Reduce entry_inc_target_deg or increase max_inc_deg."
         )
     if inc_required_t1_t3_deg > config.max_inc_deg + SMALL:
         raise PlanningError(
             "With current global max INC the t1->t3 geometry is infeasible without overbend. "
             f"Required straight INC is {inc_required_t1_t3_deg:.2f} deg, "
-            f"max INC is {config.max_inc_deg:.2f} deg."
+            f"max INC is {config.max_inc_deg:.2f} deg. "
+            "To make target drillable, move t3 deeper and/or closer to t1 in horizontal projection, "
+            "or increase max_inc_deg."
         )
 
     return SectionGeometry(
@@ -285,10 +289,18 @@ def _solve_same_direction_profile(
         z1_m=available_z_for_builds,
         inc_entry_deg=geometry.inc_entry_deg,
     )
+    diagnostics = _diagnose_same_direction_no_solution(
+        geometry=geometry,
+        config=config,
+        lower_dls=lower,
+        upper_dls=upper,
+        required_dls=required_dls,
+    )
     raise PlanningError(
         "No valid VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL solution found within configured limits. "
         f"Try increasing BUILD max DLS above {required_dls:.2f} deg/30m, reducing minimum vertical before KOP, "
         "increasing max INC (or allowing overbend), or relaxing constraints."
+        + _format_failure_diagnostics(diagnostics)
     )
 
 
@@ -391,11 +403,27 @@ def _solve_same_direction_profile_with_turn(
     if best is not None:
         return best
 
+    required_dls = _required_dls_for_t1_reach(
+        s1_m=geometry.s1_m,
+        z1_m=max(geometry.z1_m - float(config.kop_min_vertical_m), SMALL),
+        inc_entry_deg=geometry.inc_entry_deg,
+    )
+    diagnostics = _diagnose_same_direction_no_solution(
+        geometry=geometry,
+        config=config,
+        lower_dls=lower,
+        upper_dls=upper,
+        required_dls=required_dls,
+    )
+    diagnostics.append(
+        f"TURN endpoint miss to t1 after optimization is {best_miss:.2f} m (tolerance {config.pos_tolerance_m:.2f} m)."
+    )
     raise PlanningError(
         "No valid TURN solution found for non-coplanar targets within configured limits. "
         f"Closest miss to t1 is {best_miss:.2f} m. "
         "Try increasing BUILD max DLS, increasing max INC (or allowing overbend), reducing minimum vertical before KOP, "
         "or relaxing tolerance."
+        + _format_failure_diagnostics(diagnostics)
     )
 
 
@@ -439,10 +467,16 @@ def _solve_reverse_direction_profile(
     if best is not None:
         return best
 
+    diagnostics = _diagnose_reverse_no_solution(
+        geometry=geometry,
+        config=config,
+        upper_dls=upper,
+    )
     raise PlanningError(
         "No valid reverse-direction profile found within configured limits. "
         "Try increasing BUILD max DLS, increasing max INC (or allowing overbend), reducing minimum vertical before KOP, "
         "or widening reverse INC search limits."
+        + _format_failure_diagnostics(diagnostics)
     )
 
 
@@ -577,11 +611,20 @@ def _solve_reverse_direction_profile_with_turn(
     if best is not None:
         return best
 
+    diagnostics = _diagnose_reverse_no_solution(
+        geometry=geometry,
+        config=config,
+        upper_dls=upper,
+    )
+    diagnostics.append(
+        f"TURN endpoint miss to t1 after optimization is {best_miss:.2f} m (tolerance {config.pos_tolerance_m:.2f} m)."
+    )
     raise PlanningError(
         "No valid reverse TURN solution found for non-coplanar targets within configured limits. "
         f"Closest miss to t1 is {best_miss:.2f} m. "
         "Try increasing BUILD max DLS, increasing max INC (or allowing overbend), reducing minimum vertical before KOP, "
         "or relaxing tolerance."
+        + _format_failure_diagnostics(diagnostics)
     )
 
 
@@ -887,6 +930,224 @@ def _solve_post_entry_section(
         )
     )
     return candidates[0]
+
+
+def _format_failure_diagnostics(lines: list[str]) -> str:
+    compact: list[str] = []
+    for line in lines:
+        text = str(line).strip()
+        if not text or text in compact:
+            continue
+        compact.append(text)
+    if not compact:
+        return ""
+    return "\nReasons and actions:\n- " + "\n- ".join(compact)
+
+
+def _required_post_entry_dls(
+    geometry: SectionGeometry,
+    inc_entry_deg: float,
+    max_inc_deg: float,
+    dls_min_deg_per_30m: float,
+    dls_max_deg_per_30m: float,
+) -> float | None:
+    low = max(float(dls_min_deg_per_30m), SMALL)
+    high = max(float(dls_max_deg_per_30m), low)
+    if _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=inc_entry_deg,
+        dls_deg_per_30m=low,
+        max_inc_deg=max_inc_deg,
+    ) is not None:
+        return low
+
+    if _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=inc_entry_deg,
+        dls_deg_per_30m=high,
+        max_inc_deg=max_inc_deg,
+    ) is None:
+        return None
+
+    lo = low
+    hi = high
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        candidate = _solve_post_entry_section(
+            ds_m=geometry.ds_13_m,
+            dz_m=geometry.dz_13_m,
+            inc_entry_deg=inc_entry_deg,
+            dls_deg_per_30m=mid,
+            max_inc_deg=max_inc_deg,
+        )
+        if candidate is None:
+            lo = mid
+        else:
+            hi = mid
+    return float(hi)
+
+
+def _diagnose_post_entry_constraints(
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+    horizontal_dls_deg_per_30m: float,
+) -> list[str]:
+    messages: list[str] = []
+    if geometry.inc_required_t1_t3_deg > config.max_inc_deg + SMALL:
+        messages.append(
+            "t1->t3 geometry requires INC "
+            f"{geometry.inc_required_t1_t3_deg:.2f} deg, above max INC {config.max_inc_deg:.2f} deg "
+            "(overbend would be required). Make t3 deeper and/or reduce t1->t3 horizontal offset."
+        )
+        return messages
+
+    current = _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        max_inc_deg=config.max_inc_deg,
+    )
+    if current is not None:
+        return messages
+
+    required_dls = _required_post_entry_dls(
+        geometry=geometry,
+        inc_entry_deg=geometry.inc_entry_deg,
+        max_inc_deg=config.max_inc_deg,
+        dls_min_deg_per_30m=horizontal_dls_deg_per_30m,
+        dls_max_deg_per_30m=max(horizontal_dls_deg_per_30m, 30.0),
+    )
+    if required_dls is not None:
+        messages.append(
+            "Post-entry t1->t3 connection is not feasible with HORIZONTAL DLS limit "
+            f"{horizontal_dls_deg_per_30m:.2f} deg/30m; requires about {required_dls:.2f} deg/30m. "
+            "Increase HORIZONTAL DLS limit or move t3 closer to t1 in section."
+        )
+    else:
+        messages.append(
+            "Post-entry t1->t3 connection is infeasible even with high DLS scan up to 30 deg/30m. "
+            "Adjust geometry (increase t3 TVD and/or reduce t1->t3 horizontal offset) or relax entry INC target/max INC."
+        )
+    return messages
+
+
+def _diagnose_same_direction_no_solution(
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+    lower_dls: float,
+    upper_dls: float,
+    required_dls: float,
+) -> list[str]:
+    messages: list[str] = []
+    horizontal_dls = float(
+        max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper_dls), SMALL)
+    )
+    if upper_dls + SMALL < required_dls:
+        messages.append(
+            "BUILD DLS upper bound is insufficient for t1 reach: "
+            f"available max {upper_dls:.2f} deg/30m, required about {required_dls:.2f} deg/30m."
+        )
+    if config.kop_min_vertical_m >= geometry.z1_m - SMALL:
+        messages.append(
+            "Minimum VERTICAL before KOP is too deep for current t1 TVD. "
+            f"kop_min_vertical={config.kop_min_vertical_m:.1f} m, t1 TVD={geometry.z1_m:.1f} m."
+        )
+
+    messages.extend(
+        _diagnose_post_entry_constraints(
+            geometry=geometry,
+            config=config,
+            horizontal_dls_deg_per_30m=horizontal_dls,
+        )
+    )
+
+    post_entry = _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=horizontal_dls,
+        max_inc_deg=config.max_inc_deg,
+    )
+    if post_entry is not None:
+        md_floor = (
+            max(config.kop_min_vertical_m, 0.0)
+            + 3.0 * max(config.min_structural_segment_m, SMALL)
+            + post_entry.total_length_m
+        )
+        if md_floor > config.max_total_md_m + SMALL:
+            messages.append(
+                "Total MD limit is too restrictive for mandatory same-direction structure: "
+                f"minimum required MD is about {md_floor:.1f} m, limit is {config.max_total_md_m:.1f} m."
+            )
+    if lower_dls > upper_dls + SMALL:
+        messages.append(
+            "BUILD DLS interval is empty after constraints. "
+            f"Configured range [{lower_dls:.2f}, {upper_dls:.2f}] deg/30m."
+        )
+    return messages
+
+
+def _diagnose_reverse_no_solution(
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+    upper_dls: float,
+) -> list[str]:
+    messages: list[str] = []
+    limits = interpolate_limits(gv_m=geometry.z1_m)
+    offset_t1 = float(np.hypot(geometry.t1_east_m, geometry.t1_north_m))
+    if limits.reverse_allowed:
+        messages.append(
+            "Reverse mode selected by classification: "
+            f"t1 offset={offset_t1:.1f} m is inside reverse range [{limits.reverse_min_m:.1f}, {limits.reverse_max_m:.1f}] m."
+        )
+        messages.append(
+            "To force same-direction trajectory, move t1 farther from S: "
+            f"offset above about {limits.reverse_max_m:.1f} m."
+        )
+
+    horizontal_dls = float(
+        max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper_dls), SMALL)
+    )
+    messages.extend(
+        _diagnose_post_entry_constraints(
+            geometry=geometry,
+            config=config,
+            horizontal_dls_deg_per_30m=horizontal_dls,
+        )
+    )
+
+    if config.reverse_inc_max_deg <= config.reverse_inc_min_deg + SMALL:
+        messages.append(
+            "Reverse INC bounds are too narrow; increase reverse_inc_max_deg or decrease reverse_inc_min_deg."
+        )
+
+    md_floor = (
+        max(config.kop_min_vertical_m, 0.0)
+        + 6.0 * max(config.min_structural_segment_m, SMALL)
+    )
+    post_entry = _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=horizontal_dls,
+        max_inc_deg=config.max_inc_deg,
+    )
+    if post_entry is not None:
+        md_floor += post_entry.total_length_m
+        if md_floor > config.max_total_md_m + SMALL:
+            messages.append(
+                "Total MD limit is too restrictive for reverse mandatory structure: "
+                f"minimum required MD is about {md_floor:.1f} m, limit is {config.max_total_md_m:.1f} m."
+            )
+
+    messages.append(
+        "If reverse profile stays infeasible, increase BUILD max DLS and reverse_inc_max_deg, "
+        "or reduce kop_min_vertical_m."
+    )
+    return messages
 
 
 def _profile_same_direction(
@@ -1662,9 +1923,17 @@ def _build_summary(
 
 def _assert_solution_is_valid(summary: dict[str, float | str], config: TrajectoryConfig) -> None:
     if float(summary["distance_t1_m"]) > config.pos_tolerance_m:
-        raise PlanningError("Failed to hit t1 within tolerance.")
+        raise PlanningError(
+            "Failed to hit t1 within tolerance. "
+            f"Miss={float(summary['distance_t1_m']):.2f} m, tolerance={config.pos_tolerance_m:.2f} m. "
+            "Increase solver search depth (TURN samples/starts), relax tolerance, or adjust target geometry."
+        )
     if float(summary["distance_t3_m"]) > config.pos_tolerance_m:
-        raise PlanningError("Failed to hit t3 within tolerance.")
+        raise PlanningError(
+            "Failed to hit t3 within tolerance. "
+            f"Miss={float(summary['distance_t3_m']):.2f} m, tolerance={config.pos_tolerance_m:.2f} m. "
+            "Increase HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
+        )
     if abs(float(summary["entry_inc_deg"]) - config.entry_inc_target_deg) > config.entry_inc_tolerance_deg + 1e-6:
         raise PlanningError("Entry inclination at t1 is outside required target range.")
     if float(summary["max_inc_actual_deg"]) > config.max_inc_deg + 1e-6:

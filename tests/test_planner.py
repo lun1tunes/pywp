@@ -365,13 +365,16 @@ def test_planner_raises_when_build_dls_limit_is_too_low_for_geometry() -> None:
         },
     )
 
-    with pytest.raises(PlanningError, match="BUILD max DLS"):
+    with pytest.raises(PlanningError, match="BUILD max DLS") as exc_info:
         planner.plan(
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(600.0, 800.0, 2400.0),
             t3=Point3D(1500.0, 2000.0, 2500.0),
             config=config,
         )
+    message = str(exc_info.value)
+    assert "Reasons and actions" in message
+    assert "BUILD DLS upper bound is insufficient" in message
 
 
 def test_planner_respects_max_total_md_limit() -> None:

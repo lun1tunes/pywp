@@ -29,6 +29,220 @@ HOVER_TEMPLATE_XYZ_MD_DLS = (
 )
 
 
+def _segment_blocks(segment_names: np.ndarray) -> list[tuple[int, int, str]]:
+    if len(segment_names) == 0:
+        return []
+    blocks: list[tuple[int, int, str]] = []
+    start = 0
+    for idx in range(1, len(segment_names) + 1):
+        if idx == len(segment_names) or segment_names[idx] != segment_names[start]:
+            blocks.append((start, idx, str(segment_names[start])))
+            start = idx
+    return blocks
+
+
+def _inc_label_candidate_indices(df: pd.DataFrame) -> list[int]:
+    count = len(df)
+    if count == 0:
+        return []
+
+    inc_values = df["INC_deg"].to_numpy(dtype=float)
+    if "segment" in df.columns:
+        segment_names = (
+            df["segment"].fillna("UNKNOWN").astype(str).str.upper().to_numpy()
+        )
+    else:
+        segment_names = np.full(count, "TRAJECTORY", dtype=object)
+
+    candidates: list[int] = [0, count - 1]
+    for start, end, segment_name in _segment_blocks(segment_names):
+        if end <= start:
+            continue
+        block_indices = np.arange(start, end, dtype=int)
+        if block_indices.size == 0:
+            continue
+
+        midpoint = int(block_indices[len(block_indices) // 2])
+        candidates.append(midpoint)
+
+        inc_delta = abs(float(inc_values[end - 1]) - float(inc_values[start]))
+        is_curved_segment = (
+            inc_delta >= 3.0
+            or "BUILD" in segment_name
+            or "DROP" in segment_name
+        )
+        if is_curved_segment and block_indices.size >= 3:
+            sample_count = 2 if inc_delta < 25.0 else 3
+            for t_value in np.linspace(0.2, 0.8, sample_count):
+                pos = int(round(t_value * (block_indices.size - 1)))
+                candidates.append(int(block_indices[pos]))
+
+    unique_sorted = sorted({int(np.clip(idx, 0, count - 1)) for idx in candidates})
+    return unique_sorted
+
+
+def _select_inc_label_indices(df: pd.DataFrame, section_x: np.ndarray) -> list[int]:
+    count = len(df)
+    if count == 0:
+        return []
+
+    z_values = df["Z_m"].to_numpy(dtype=float)
+    inc_values = df["INC_deg"].to_numpy(dtype=float)
+    candidates = _inc_label_candidate_indices(df=df)
+    if not candidates:
+        return []
+
+    x_span = max(float(np.max(section_x) - np.min(section_x)), 1.0)
+    z_span = max(float(np.max(z_values) - np.min(z_values)), 1.0)
+    min_spacing = max(120.0, 0.08 * max(x_span, z_span))
+    min_angle_step = 5
+    max_labels = 8
+
+    selected: list[int] = []
+    seen_angles: set[int] = set()
+    for idx in candidates:
+        angle_int = int(np.rint(float(inc_values[idx])))
+        is_forced = idx in (0, count - 1)
+
+        if angle_int in seen_angles:
+            continue
+
+        if selected:
+            prev = selected[-1]
+            prev_angle = int(np.rint(float(inc_values[prev])))
+            spacing = float(
+                np.hypot(section_x[idx] - section_x[prev], z_values[idx] - z_values[prev])
+            )
+            if spacing < min_spacing and abs(angle_int - prev_angle) < min_angle_step:
+                if not is_forced:
+                    continue
+
+        crowding = False
+        for chosen in selected:
+            spacing = float(
+                np.hypot(
+                    section_x[idx] - section_x[chosen], z_values[idx] - z_values[chosen]
+                )
+            )
+            chosen_angle = int(np.rint(float(inc_values[chosen])))
+            if spacing < 0.7 * min_spacing and abs(angle_int - chosen_angle) <= 2:
+                crowding = True
+                break
+        if crowding and not is_forced:
+            continue
+
+        selected.append(idx)
+        seen_angles.add(angle_int)
+
+    if len(selected) <= max_labels:
+        return selected
+
+    keep: list[int] = [selected[0]]
+    middle = selected[1:-1]
+    take = max_labels - 2
+    if middle and take > 0:
+        pick = np.unique(np.linspace(0, len(middle) - 1, take, dtype=int))
+        keep.extend(middle[int(pos)] for pos in pick.tolist())
+    keep.append(selected[-1])
+    return sorted(set(keep))
+
+
+def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndarray) -> None:
+    label_indices = _select_inc_label_indices(df=df, section_x=section_x)
+    if not label_indices:
+        return
+
+    z_values = df["Z_m"].to_numpy(dtype=float)
+    inc_values = df["INC_deg"].to_numpy(dtype=float)
+
+    x_span = max(float(np.max(section_x) - np.min(section_x)), 1.0)
+    z_span = max(float(np.max(z_values) - np.min(z_values)), 1.0)
+    tick_length = max(35.0, min(120.0, x_span * 0.04))
+    text_dx = max(28.0, x_span * 0.03)
+    text_dy = max(18.0, z_span * 0.02)
+
+    text_x: list[float] = []
+    text_y: list[float] = []
+    text_labels: list[str] = []
+    marker_x: list[float] = []
+    marker_y: list[float] = []
+    occupied_text_points: list[tuple[float, float]] = []
+
+    for rank, idx in enumerate(label_indices):
+        left = max(idx - 1, 0)
+        right = min(idx + 1, len(section_x) - 1)
+        tangent_x = float(section_x[right] - section_x[left])
+        tangent_y = float(z_values[right] - z_values[left])
+        tangent_norm = float(np.hypot(tangent_x, tangent_y))
+        if tangent_norm <= 1e-9:
+            tangent_x, tangent_y = 1.0, 0.0
+            tangent_norm = 1.0
+
+        # Normal to local trajectory for a compact tick mark.
+        normal_x = tangent_y / tangent_norm
+        normal_y = -tangent_x / tangent_norm
+        direction = 1.0 if normal_x >= 0.0 else -1.0
+
+        x_start = float(section_x[idx] - 0.5 * tick_length * direction * normal_x)
+        y_start = float(z_values[idx] - 0.5 * tick_length * direction * normal_y)
+        x_end = float(section_x[idx] + 0.5 * tick_length * direction * normal_x)
+        y_end = float(z_values[idx] + 0.5 * tick_length * direction * normal_y)
+
+        fig.add_shape(
+            type="line",
+            x0=x_start,
+            y0=y_start,
+            x1=x_end,
+            y1=y_end,
+            line={"color": "#E63946", "width": 3},
+        )
+
+        label_x = x_end + direction * text_dx
+        label_y = y_end + (text_dy * (1.0 if rank % 2 == 0 else -1.0))
+        for attempt in range(6):
+            conflict = False
+            for used_x, used_y in occupied_text_points:
+                if np.hypot(label_x - used_x, label_y - used_y) < max(text_dx, text_dy):
+                    conflict = True
+                    shift_sign = 1.0 if (rank + attempt) % 2 == 0 else -1.0
+                    label_y += shift_sign * text_dy
+                    break
+            if not conflict:
+                break
+        occupied_text_points.append((label_x, label_y))
+
+        marker_x.append(float(section_x[idx]))
+        marker_y.append(float(z_values[idx]))
+        text_x.append(float(label_x))
+        text_y.append(float(label_y))
+        text_labels.append(f"{int(np.rint(float(inc_values[idx])))}°")
+
+    fig.add_trace(
+        go.Scatter(
+            x=marker_x,
+            y=marker_y,
+            mode="markers",
+            name="INC точки",
+            marker={"size": 5, "color": "#E63946"},
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=text_x,
+            y=text_y,
+            mode="text",
+            text=text_labels,
+            textposition="middle left",
+            textfont={"size": 14, "color": "#E63946"},
+            name="INC метки",
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+
+
 def _section_coordinate(df: pd.DataFrame, surface: Point3D, azimuth_deg: float) -> np.ndarray:
     az = azimuth_deg * DEG2RAD
     dn = df["Y_m"].to_numpy() - surface.y
@@ -396,6 +610,7 @@ def section_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    _add_section_inc_labels(fig=fig, df=df, section_x=vs)
 
     fig.update_layout(
         title="Вертикальный разрез",

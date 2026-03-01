@@ -64,6 +64,61 @@ def _parse_welltrack_cached(text: str) -> list[WelltrackRecord]:
     return parse_welltrack_text(text)
 
 
+def _equalized_axis_ranges(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    z_values: np.ndarray,
+    pad_fraction: float = 0.08,
+) -> tuple[list[float], list[float], list[float]]:
+    x_min, x_max = float(np.min(x_values)), float(np.max(x_values))
+    y_min, y_max = float(np.min(y_values)), float(np.max(y_values))
+    z_min, z_max = float(np.min(z_values)), float(np.max(z_values))
+
+    xy_min = min(x_min, y_min)
+    xy_max = max(x_max, y_max)
+    xy_span = xy_max - xy_min
+    span = max(xy_span, z_max - z_min, 1.0) * (1.0 + pad_fraction)
+
+    xy_center = 0.5 * (xy_min + xy_max)
+    z_center = 0.5 * (z_min + z_max)
+    half = 0.5 * span
+    x_range = [xy_center - half, xy_center + half]
+    y_range = [xy_center - half, xy_center + half]
+    # Depth-positive-down view: reverse Z axis.
+    z_range = [z_center + half, z_center - half]
+    return x_range, y_range, z_range
+
+
+def _nice_tick_step(span: float, target_ticks: int = 6) -> float:
+    if span <= 0.0:
+        return 1.0
+    raw = span / max(target_ticks, 1)
+    exponent = np.floor(np.log10(raw))
+    base = 10.0**exponent
+    fraction = raw / base
+    if fraction <= 1.0:
+        nice = 1.0
+    elif fraction <= 2.0:
+        nice = 2.0
+    elif fraction <= 5.0:
+        nice = 5.0
+    else:
+        nice = 10.0
+    return float(nice * base)
+
+
+def _linear_tick_values(axis_range: list[float], step: float) -> list[float]:
+    lo = min(axis_range[0], axis_range[1])
+    hi = max(axis_range[0], axis_range[1])
+    if step <= 0.0:
+        return [float(lo), float(hi)]
+    first = np.floor(lo / step) * step
+    values = np.arange(first, hi + step * 0.5, step, dtype=float)
+    if values.size == 0:
+        values = np.array([lo, hi], dtype=float)
+    return np.round(values, 6).tolist()
+
+
 def _log_line(run_started_s: float, message: str) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     elapsed_s = perf_counter() - run_started_s
@@ -136,9 +191,15 @@ def _all_wells_3d_figure(
     successes: list[SuccessfulWellPlan], height: int = 620
 ) -> go.Figure:
     fig = go.Figure()
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
+    z_arrays: list[np.ndarray] = []
     for item in successes:
         name = item.name
         stations = item.stations
+        x_arrays.append(stations["X_m"].to_numpy(dtype=float))
+        y_arrays.append(stations["Y_m"].to_numpy(dtype=float))
+        z_arrays.append(stations["Z_m"].to_numpy(dtype=float))
         fig.add_trace(
             go.Scatter3d(
                 x=stations["X_m"],
@@ -166,6 +227,9 @@ def _all_wells_3d_figure(
         surface = item.surface
         t1 = item.t1
         t3 = item.t3
+        x_arrays.append(np.array([surface.x, t1.x, t3.x], dtype=float))
+        y_arrays.append(np.array([surface.y, t1.y, t3.y], dtype=float))
+        z_arrays.append(np.array([surface.z, t1.z, t3.z], dtype=float))
         fig.add_trace(
             go.Scatter3d(
                 x=[surface.x, t1.x, t3.x],
@@ -179,13 +243,58 @@ def _all_wells_3d_figure(
             )
         )
 
+    x_values = np.concatenate(x_arrays) if x_arrays else np.array([0.0], dtype=float)
+    y_values = np.concatenate(y_arrays) if y_arrays else np.array([0.0], dtype=float)
+    z_values = np.concatenate(z_arrays) if z_arrays else np.array([0.0], dtype=float)
+    x_range, y_range, z_range = _equalized_axis_ranges(
+        x_values=x_values,
+        y_values=y_values,
+        z_values=z_values,
+    )
+    xy_span = x_range[1] - x_range[0]
+    xy_dtick = _nice_tick_step(xy_span, target_ticks=6)
+    xy_tickvals = _linear_tick_values(axis_range=x_range, step=xy_dtick)
+    xy_tick0 = float(np.floor(min(x_range[0], y_range[0]) / xy_dtick) * xy_dtick)
+    xy_axis_style = {
+        "tickmode": "array",
+        "tickvals": xy_tickvals,
+        "dtick": xy_dtick,
+        "tick0": xy_tick0,
+        "tickformat": ".0f",
+        "showexponent": "none",
+        "exponentformat": "none",
+        "showgrid": True,
+        "gridcolor": "rgba(0, 0, 0, 0.15)",
+        "gridwidth": 1,
+        "zeroline": True,
+        "zerolinecolor": "rgba(0, 0, 0, 0.65)",
+        "zerolinewidth": 2,
+        "showline": True,
+        "linecolor": "rgba(0, 0, 0, 0.65)",
+        "linewidth": 1.5,
+    }
+
     fig.update_layout(
         title="Все рассчитанные скважины (3D)",
         scene={
             "xaxis_title": "X / Восток (м)",
             "yaxis_title": "Y / Север (м)",
             "zaxis_title": "Z / TVD (м)",
-            "aspectmode": "data",
+            "xaxis": {"range": x_range, **xy_axis_style},
+            "yaxis": {"range": y_range, **xy_axis_style},
+            "zaxis": {
+                "range": z_range,
+                "tickformat": ".0f",
+                "showexponent": "none",
+                "exponentformat": "none",
+                "showgrid": True,
+                "gridcolor": "rgba(0, 0, 0, 0.12)",
+                "gridwidth": 1,
+                "zeroline": True,
+                "zerolinecolor": "rgba(0, 0, 0, 0.45)",
+                "zerolinewidth": 1,
+            },
+            "aspectmode": "cube",
         },
         height=height,
         margin={"l": 0, "r": 0, "t": 40, "b": 0},
@@ -197,9 +306,13 @@ def _all_wells_plan_figure(
     successes: list[SuccessfulWellPlan], height: int = 560
 ) -> go.Figure:
     fig = go.Figure()
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
     for item in successes:
         name = item.name
         stations = item.stations
+        x_arrays.append(stations["X_m"].to_numpy(dtype=float))
+        y_arrays.append(stations["Y_m"].to_numpy(dtype=float))
         fig.add_trace(
             go.Scatter(
                 x=stations["X_m"],
@@ -224,11 +337,35 @@ def _all_wells_plan_figure(
                 ),
             )
         )
+    x_values = np.concatenate(x_arrays) if x_arrays else np.array([0.0], dtype=float)
+    y_values = np.concatenate(y_arrays) if y_arrays else np.array([0.0], dtype=float)
+    xy_min = float(min(np.min(x_values), np.min(y_values)))
+    xy_max = float(max(np.max(x_values), np.max(y_values)))
+    xy_span = max(xy_max - xy_min, 1.0)
+    half = 0.5 * xy_span * 1.08
+    center = 0.5 * (xy_min + xy_max)
+    xy_range = [center - half, center + half]
+    xy_dtick = _nice_tick_step(xy_range[1] - xy_range[0], target_ticks=6)
+    xy_tickvals = _linear_tick_values(axis_range=xy_range, step=xy_dtick)
+
     fig.update_layout(
-        title="Все рассчитанные скважины (план E-N)",
-        xaxis_title="Восток (м)",
-        yaxis_title="Север (м)",
-        yaxis={"scaleanchor": "x", "scaleratio": 1},
+        title="Все рассчитанные скважины (план E-N, X=Восток, Y=Север)",
+        xaxis_title="X / Восток (м)",
+        yaxis_title="Y / Север (м)",
+        xaxis={
+            "range": xy_range,
+            "tickmode": "array",
+            "tickvals": xy_tickvals,
+            "tickformat": ".0f",
+        },
+        yaxis={
+            "range": xy_range,
+            "tickmode": "array",
+            "tickvals": xy_tickvals,
+            "tickformat": ".0f",
+            "scaleanchor": "x",
+            "scaleratio": 1,
+        },
         height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
     )

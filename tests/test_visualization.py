@@ -101,3 +101,24 @@ def test_dls_limit_annotations_hide_rev_for_same_direction_profile() -> None:
     annotation_texts = [str(item.text) for item in annotations]
     assert annotation_texts
     assert all("REV" not in text for text in annotation_texts)
+
+
+def test_section_view_includes_non_overlapping_unique_inc_labels() -> None:
+    df = _sample_df()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(35.0, 0.0, 85.0)
+    t3 = Point3D(120.0, 0.0, 85.0)
+    fig_section = section_view_figure(
+        df,
+        surface=surface,
+        azimuth_deg=90.0,
+        t1=t1,
+        t3=t3,
+    )
+
+    inc_text_trace = next(
+        trace for trace in fig_section.data if str(trace.name) == "INC метки"
+    )
+    labels = [str(value) for value in inc_text_trace.text]
+    assert labels
+    assert len(labels) == len(set(labels))
