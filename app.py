@@ -18,11 +18,11 @@ from pywp.planner_config import (
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import arrow_safe_text_dataframe, format_distance, format_run_log_line
-from pywp.visualization import (
-    dls_figure,
-    plan_view_figure,
-    section_view_figure,
-    trajectory_3d_figure,
+from pywp.ui_well_panels import (
+    render_plan_section_panel,
+    render_run_log_panel,
+    render_survey_table_with_download,
+    render_trajectory_dls_panel,
 )
 
 SCENARIOS = {
@@ -587,11 +587,7 @@ def _run_planner_if_clicked(
 def _render_calculation_feedback() -> None:
     if st.session_state["last_error"]:
         render_solver_diagnostics(st.session_state["last_error"])
-    run_log_lines = st.session_state.get("last_run_log_lines")
-    if run_log_lines:
-        with st.container(border=True):
-            st.markdown("### Лог расчета")
-            st.code("\n".join(run_log_lines), language="text")
+    render_run_log_panel(st.session_state.get("last_run_log_lines"))
 
 
 def _render_result_overview(last_result: dict[str, object]) -> float:
@@ -630,33 +626,25 @@ def _render_result_plots(last_result: dict[str, object]) -> None:
     config = last_result["config"]
     azimuth_deg = float(last_result["azimuth_deg"])
     md_t1_m = float(last_result["md_t1_m"])
-    with st.container(border=True):
-        st.markdown("### 3D траектория и DLS")
-        row1_col1, row1_col2 = st.columns(2, gap="medium")
-        row1_col1.plotly_chart(
-            trajectory_3d_figure(
-                stations, surface=surface, t1=t1, t3=t3, md_t1_m=md_t1_m
-            ),
-            width="stretch",
-        )
-        row1_col2.plotly_chart(
-            dls_figure(stations, dls_limits=config.dls_limits_deg_per_30m),
-            width="stretch",
-        )
-
-    with st.container(border=True):
-        st.markdown("### План и вертикальный разрез")
-        row2_col1, row2_col2 = st.columns(2, gap="medium")
-        row2_col1.plotly_chart(
-            plan_view_figure(stations, surface=surface, t1=t1, t3=t3),
-            width="stretch",
-        )
-        row2_col2.plotly_chart(
-            section_view_figure(
-                stations, surface=surface, azimuth_deg=azimuth_deg, t1=t1, t3=t3
-            ),
-            width="stretch",
-        )
+    render_trajectory_dls_panel(
+        stations=stations,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        md_t1_m=md_t1_m,
+        dls_limits=config.dls_limits_deg_per_30m,
+        title="3D траектория и DLS",
+        border=True,
+    )
+    render_plan_section_panel(
+        stations=stations,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        azimuth_deg=azimuth_deg,
+        title="План и вертикальный разрез",
+        border=True,
+    )
 
 
 def _render_result_tables(
@@ -682,14 +670,10 @@ def _render_result_tables(
         )
 
     with tab_survey:
-        st.dataframe(stations, width="stretch")
-        st.download_button(
-            "Скачать CSV инклинометрии",
-            data=stations.to_csv(index=False).encode("utf-8"),
+        render_survey_table_with_download(
+            stations=stations,
+            button_label="Скачать CSV инклинометрии",
             file_name="well_survey.csv",
-            mime="text/csv",
-            icon=":material/download:",
-            width="content",
         )
 
 

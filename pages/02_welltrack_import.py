@@ -25,11 +25,10 @@ from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import arrow_safe_text_dataframe, format_distance, format_run_log_line
-from pywp.visualization import (
-    dls_figure,
-    plan_view_figure,
-    section_view_figure,
-    trajectory_3d_figure,
+from pywp.ui_well_panels import (
+    render_plan_section_panel,
+    render_run_log_panel,
+    render_trajectory_dls_panel,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
@@ -725,12 +724,7 @@ def _run_batch_if_clicked(
 
 
 def _render_batch_log() -> None:
-    run_log_lines = st.session_state.get("wt_last_run_log_lines")
-    if not run_log_lines:
-        return
-    with st.container(border=True):
-        st.markdown("### Лог расчета")
-        st.code("\n".join(run_log_lines), language="text")
+    render_run_log_panel(st.session_state.get("wt_last_run_log_lines"))
 
 
 def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame:
@@ -780,26 +774,24 @@ def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
         md_t1_m = float(selected.md_t1_m)
         cfg = selected.config
 
-        c1, c2 = st.columns(2, gap="medium")
-        c1.plotly_chart(
-            trajectory_3d_figure(
-                stations, surface=surface, t1=t1, t3=t3, md_t1_m=md_t1_m
-            ),
-            width="stretch",
+        render_trajectory_dls_panel(
+            stations=stations,
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            md_t1_m=md_t1_m,
+            dls_limits=cfg.dls_limits_deg_per_30m,
+            title=None,
+            border=False,
         )
-        c2.plotly_chart(
-            dls_figure(stations, dls_limits=cfg.dls_limits_deg_per_30m), width="stretch"
-        )
-
-        c3, c4 = st.columns(2, gap="medium")
-        c3.plotly_chart(
-            plan_view_figure(stations, surface=surface, t1=t1, t3=t3), width="stretch"
-        )
-        c4.plotly_chart(
-            section_view_figure(
-                stations, surface=surface, azimuth_deg=azimuth_deg, t1=t1, t3=t3
-            ),
-            width="stretch",
+        render_plan_section_panel(
+            stations=stations,
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            azimuth_deg=azimuth_deg,
+            title=None,
+            border=False,
         )
 
         st.caption(
