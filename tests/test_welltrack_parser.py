@@ -46,12 +46,12 @@ def test_parse_rejects_non_multiple_of_four_values() -> None:
         parse_welltrack_text(text)
 
 
-def test_points_to_targets_orders_by_md() -> None:
+def test_points_to_targets_uses_input_order_and_ignores_md() -> None:
     text = """
     WELLTRACK 'A'
-    100 100 2000 2000
     0 0 0 0
-    200 200 2100 3000
+    100 100 2000 3000
+    200 200 2100 2000
     /
     """
     record = parse_welltrack_text(text)[0]

@@ -604,10 +604,14 @@ def run_app() -> None:
         "Время расчета", "—" if runtime_s is None else f"{float(runtime_s):.2f} с"
     )
 
-    n1, n2, n3 = st.columns(3, gap="small")
+    n1, n2, n3, n4 = st.columns(4, gap="small")
     n1.metric("Тип траектории", str(summary["trajectory_type"]))
     n2.metric("KOP MD", format_distance(float(summary["kop_md_m"])))
-    n3.metric("Макс DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
+    n3.metric(
+        "Длина горизонтального ствола",
+        format_distance(float(summary["horizontal_length_m"])),
+    )
+    n4.metric("Макс DLS", f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m")
 
     with st.container(border=True):
         st.markdown("### 3D траектория и DLS")

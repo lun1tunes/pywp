@@ -1382,6 +1382,7 @@ def _build_summary(
         "max_dls_total_deg_per_30m": max_dls,
         "md_total_m": float(df["MD_m"].iloc[-1]),
         "t1_horizontal_offset_m": float(horizontal_offset_t1_m),
+        "horizontal_length_m": float(params.horizontal_length_m),
         "trajectory_type": trajectory_type_label(classification.trajectory_type),
         "well_complexity": complexity_label(classification.complexity),
         "well_complexity_by_offset": complexity_label(classification.complexity_by_offset),

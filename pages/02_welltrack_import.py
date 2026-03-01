@@ -234,24 +234,36 @@ def _build_config_form() -> TrajectoryConfig:
         key="wt_cfg_md_step_m",
         min_value=1.0,
         step=1.0,
-        value=10.0,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_md_step_m"]),
     )
     md_step_control_m = c2.number_input(
-        "Контрольный шаг MD", key="wt_cfg_md_step_control_m", min_value=0.5, step=0.5
+        "Контрольный шаг MD",
+        key="wt_cfg_md_step_control_m",
+        min_value=0.5,
+        step=0.5,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_md_step_control_m"]),
     )
     pos_tolerance_m = c3.number_input(
-        "Допуск по позиции, м", key="wt_cfg_pos_tolerance_m", min_value=0.1, step=0.1
+        "Допуск по позиции, м",
+        key="wt_cfg_pos_tolerance_m",
+        min_value=0.1,
+        step=0.1,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_pos_tolerance_m"]),
     )
     entry_inc_target_deg = c4.number_input(
         "Целевой INC входа в пласт",
         key="wt_cfg_entry_inc_target_deg",
-        value=86.0,
+        min_value=70.0,
+        max_value=89.0,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_entry_inc_target_deg"]),
         step=0.5,
     )
     entry_inc_tolerance_deg = c5.number_input(
         "Допуск INC",
         key="wt_cfg_entry_inc_tolerance_deg",
-        value=2.0,
+        min_value=0.1,
+        max_value=5.0,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_entry_inc_tolerance_deg"]),
         step=0.1,
     )
 
@@ -261,21 +273,21 @@ def _build_config_form() -> TrajectoryConfig:
         key="wt_cfg_dls_build_min",
         min_value=0.1,
         step=0.1,
-        value=0.5,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_dls_build_min"]),
     )
     dls_build_max = d2.number_input(
         "Макс DLS BUILD",
         key="wt_cfg_dls_build_max",
         min_value=0.1,
         step=0.1,
-        value=3.0,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_dls_build_max"]),
     )
     kop_min_vertical_m = d3.number_input(
         "Мин VERTICAL до KOP, м",
         key="wt_cfg_kop_min_vertical_m",
         min_value=0.0,
         step=10.0,
-        value=300.0,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_kop_min_vertical_m"]),
     )
 
     with st.expander("Параметры солвера", expanded=False):
@@ -306,7 +318,7 @@ def _build_config_form() -> TrajectoryConfig:
             "TURN QMC samples",
             key="wt_cfg_turn_solver_qmc_samples",
             min_value=0,
-            value=24,
+            value=int(WT_PROFILE_DEFAULTS["wt_cfg_turn_solver_qmc_samples"]),
             step=4,
             help=(
                 "Количество дополнительных стартовых точек (Latin Hypercube). "
@@ -318,7 +330,7 @@ def _build_config_form() -> TrajectoryConfig:
             "TURN local starts",
             key="wt_cfg_turn_solver_local_starts",
             min_value=1,
-            value=12,
+            value=int(WT_PROFILE_DEFAULTS["wt_cfg_turn_solver_local_starts"]),
             step=1,
             help=(
                 "Сколько лучших стартовых точек запускать локальным решателем. "
@@ -420,12 +432,24 @@ def run_page() -> None:
         clear_clicked = st.button(
             "Очистить импорт", icon=":material/delete:", width="stretch"
         )
+        reset_params_clicked = st.button(
+            "Сбросить параметры к рекомендованным",
+            icon=":material/restart_alt:",
+            width="stretch",
+            help=(
+                "Сбрасывает только параметры расчета и солвера к рекомендованным "
+                "значениям. Импортированный WELLTRACK и выбранные скважины не удаляются."
+            ),
+        )
+
+    if reset_params_clicked:
+        _apply_profile_defaults(force=True)
+        st.toast("Параметры расчета сброшены к рекомендованным.")
 
     if clear_clicked:
         st.session_state["wt_records"] = None
         st.session_state["wt_selected_names"] = []
         st.session_state["wt_loaded_at"] = ""
-        _apply_profile_defaults(force=True)
         _clear_results()
         st.rerun()
 

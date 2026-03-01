@@ -96,10 +96,11 @@ def parse_welltrack_text(text: str) -> list[WelltrackRecord]:
 def welltrack_points_to_targets(points: tuple[WelltrackPoint, ...]) -> tuple[Point3D, Point3D, Point3D]:
     if len(points) != 3:
         raise ValueError(f"Expected exactly 3 points (S, t1, t3), got {len(points)}.")
-    ordered = sorted(points, key=lambda point: point.md)
-    surface = Point3D(x=ordered[0].x, y=ordered[0].y, z=ordered[0].z)
-    t1 = Point3D(x=ordered[1].x, y=ordered[1].y, z=ordered[1].z)
-    t3 = Point3D(x=ordered[2].x, y=ordered[2].y, z=ordered[2].z)
+    # By project contract, WELLTRACK points are provided as S, t1, t3.
+    # MD is parsed for compatibility, but not used for target mapping.
+    surface = Point3D(x=points[0].x, y=points[0].y, z=points[0].z)
+    t1 = Point3D(x=points[1].x, y=points[1].y, z=points[1].z)
+    t3 = Point3D(x=points[2].x, y=points[2].y, z=points[2].z)
     return surface, t1, t3
 
 
