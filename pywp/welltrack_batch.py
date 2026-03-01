@@ -9,6 +9,7 @@ import pandas as pd
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.planner import PlanningError, TrajectoryPlanner
+from pywp.solver_diagnostics import summarize_problem_ru
 
 ProgressCallback = Callable[[int, int, str], None]
 
@@ -89,7 +90,7 @@ class WelltrackBatchPlanner:
             result = self._planner.plan(surface=surface, t1=t1, t3=t3, config=config)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
-            row["Проблема"] = str(exc)
+            row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
 
         t1_offset = float(np.hypot(t1.x - surface.x, t1.y - surface.y))

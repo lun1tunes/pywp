@@ -21,6 +21,7 @@ from pywp.models import (
     TURN_SOLVER_DE_HYBRID,
     TURN_SOLVER_LEAST_SQUARES,
 )
+from pywp.solver_diagnostics import diagnostics_rows_ru, parse_solver_error
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import arrow_safe_text_dataframe, format_distance
 from pywp.visualization import (
@@ -635,7 +636,19 @@ def run_page() -> None:
                     )
 
     if st.session_state.get("wt_last_error"):
-        st.error(st.session_state["wt_last_error"])
+        parsed_error = parse_solver_error(st.session_state["wt_last_error"])
+        st.error(parsed_error.title_ru)
+        diagnostic_rows = diagnostics_rows_ru(st.session_state["wt_last_error"])
+        if diagnostic_rows:
+            with st.container(border=True):
+                st.markdown("### Причины небуримости и рекомендации")
+                st.dataframe(
+                    arrow_safe_text_dataframe(pd.DataFrame(diagnostic_rows)),
+                    width="stretch",
+                    hide_index=True,
+                )
+        with st.expander("Технические детали ошибки", expanded=False):
+            st.code(st.session_state["wt_last_error"], language="text")
 
     records = st.session_state.get("wt_records")
     if records is None:
