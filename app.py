@@ -332,13 +332,7 @@ def _run_solver_profiling() -> None:
     st.session_state["solver_profile_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def run_app() -> None:
-    st.set_page_config(page_title="Планировщик траектории скважины", layout="wide")
-
-    _init_state()
-    apply_page_style(max_width_px=1680)
-    render_hero(title="Планировщик траектории скважины")
-
+def _render_template_controls() -> None:
     top_left, top_mid, top_right = st.columns([1.5, 1.1, 3.0], gap="small")
     with top_left:
         st.selectbox("Шаблон", options=list(SCENARIOS.keys()), key="scenario_name")
@@ -356,6 +350,8 @@ def run_app() -> None:
             "Последний успешный расчет сохраняется до следующего запуска."
         )
 
+
+def _render_input_form() -> bool:
     with st.form(
         "planner_form", clear_on_submit=False, enter_to_submit=False, border=False
     ):
@@ -507,17 +503,10 @@ def run_app() -> None:
                             "Больше — стабильнее подбор, но медленнее. Дефолт 12 — обычно оптимальный."
                         ),
                     )
+    return bool(build_clicked)
 
-    surface_input, t1_input, t3_input = _build_points_from_state()
-    config_input = _build_config_from_state()
-    preflight_errors = _validate_input(
-        surface=surface_input, t1=t1_input, t3=t3_input, config=config_input
-    )
-    if preflight_errors:
-        st.warning(
-            "Предварительная проверка параметров:\n- " + "\n- ".join(preflight_errors)
-        )
 
+def _render_solver_profiling_panel() -> None:
     with st.expander("Профилирование TURN-методов", expanded=False):
         st.caption("Сравнение методов на типовых шаблонах текущего проекта.")
         if st.button("Запустить profiling", icon=":material/speed:", width="content"):
@@ -531,91 +520,86 @@ def run_app() -> None:
                 arrow_safe_text_dataframe(profile_df), width="stretch", hide_index=True
             )
 
-    if build_clicked:
-        run_started_s = perf_counter()
-        log_lines: list[str] = []
-        progress = st.progress(0, text="Подготовка расчета...")
-        with st.status("Расчет траектории...", expanded=True) as status:
-            try:
-                check_msg = format_run_log_line(
-                    run_started_s,
-                    "Проверка входных данных.",
-                )
-                status.write(check_msg)
-                log_lines.append(check_msg)
-                progress.progress(20, text="Проверка входных данных...")
-                if preflight_errors:
-                    raise PlanningError("; ".join(preflight_errors))
-                solve_msg = format_run_log_line(
-                    run_started_s,
-                    "Запуск планировщика и решателя.",
-                )
-                status.write(solve_msg)
-                log_lines.append(solve_msg)
-                progress.progress(55, text="Выполняется расчет траектории...")
-                started = perf_counter()
-                _run_planner(
-                    surface=surface_input, t1=t1_input, t3=t3_input, config=config_input
-                )
-                elapsed_s = perf_counter() - started
-                st.session_state["last_runtime_s"] = float(elapsed_s)
-                done_msg = format_run_log_line(
-                    run_started_s,
-                    f"Расчет завершен успешно. Затраченное время солвера: {elapsed_s:.2f} с.",
-                )
-                status.write(done_msg)
-                log_lines.append(done_msg)
-                progress.progress(100, text="Расчет завершен.")
-                status.update(
-                    label=f"Расчет завершен за {elapsed_s:.2f} с",
-                    state="complete",
-                    expanded=False,
-                )
-            except PlanningError as exc:
-                st.session_state["last_error"] = str(exc)
-                st.session_state["last_runtime_s"] = None
-                err_msg = format_run_log_line(run_started_s, f"Ошибка расчета: {exc}")
-                status.write(err_msg)
-                log_lines.append(err_msg)
-                status.update(
-                    label="Расчет завершился ошибкой", state="error", expanded=True
-                )
-            finally:
-                st.session_state["last_run_log_lines"] = log_lines
-                progress.empty()
 
+def _run_planner_if_clicked(
+    build_clicked: bool,
+    preflight_errors: list[str],
+    surface_input: Point3D,
+    t1_input: Point3D,
+    t3_input: Point3D,
+    config_input: TrajectoryConfig,
+) -> None:
+    if not build_clicked:
+        return
+    run_started_s = perf_counter()
+    log_lines: list[str] = []
+    progress = st.progress(0, text="Подготовка расчета...")
+    with st.status("Расчет траектории...", expanded=True) as status:
+        try:
+            check_msg = format_run_log_line(
+                run_started_s,
+                "Проверка входных данных.",
+            )
+            status.write(check_msg)
+            log_lines.append(check_msg)
+            progress.progress(20, text="Проверка входных данных...")
+            if preflight_errors:
+                raise PlanningError("; ".join(preflight_errors))
+            solve_msg = format_run_log_line(
+                run_started_s,
+                "Запуск планировщика и решателя.",
+            )
+            status.write(solve_msg)
+            log_lines.append(solve_msg)
+            progress.progress(55, text="Выполняется расчет траектории...")
+            started = perf_counter()
+            _run_planner(
+                surface=surface_input, t1=t1_input, t3=t3_input, config=config_input
+            )
+            elapsed_s = perf_counter() - started
+            st.session_state["last_runtime_s"] = float(elapsed_s)
+            done_msg = format_run_log_line(
+                run_started_s,
+                f"Расчет завершен успешно. Затраченное время солвера: {elapsed_s:.2f} с.",
+            )
+            status.write(done_msg)
+            log_lines.append(done_msg)
+            progress.progress(100, text="Расчет завершен.")
+            status.update(
+                label=f"Расчет завершен за {elapsed_s:.2f} с",
+                state="complete",
+                expanded=False,
+            )
+        except PlanningError as exc:
+            st.session_state["last_error"] = str(exc)
+            st.session_state["last_runtime_s"] = None
+            err_msg = format_run_log_line(run_started_s, f"Ошибка расчета: {exc}")
+            status.write(err_msg)
+            log_lines.append(err_msg)
+            status.update(
+                label="Расчет завершился ошибкой", state="error", expanded=True
+            )
+        finally:
+            st.session_state["last_run_log_lines"] = log_lines
+            progress.empty()
+
+
+def _render_calculation_feedback() -> None:
     if st.session_state["last_error"]:
         render_solver_diagnostics(st.session_state["last_error"])
-
     run_log_lines = st.session_state.get("last_run_log_lines")
     if run_log_lines:
         with st.container(border=True):
             st.markdown("### Лог расчета")
             st.code("\n".join(run_log_lines), language="text")
 
-    last_result = st.session_state.get("last_result")
-    if last_result is None:
-        st.info("Задайте параметры и нажмите «Построить траекторию».")
-        return
 
-    is_stale = (
-        st.session_state.get("last_input_signature") != _current_input_signature()
-    )
-    if is_stale:
-        st.warning(
-            "Параметры изменились после последнего расчета. Показан предыдущий результат. Нажмите «Построить траекторию» для обновления."
-        )
-
+def _render_result_overview(last_result: dict[str, object]) -> float:
     summary = last_result["summary"]
-    stations = last_result["stations"]
     surface = last_result["surface"]
     t1 = last_result["t1"]
-    t3 = last_result["t3"]
-    config = last_result["config"]
-    azimuth_deg = float(last_result["azimuth_deg"])
-    md_t1_m = float(last_result["md_t1_m"])
-    t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
     runtime_s = st.session_state.get("last_runtime_s")
+    t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
     kpi_row = {
         "Горизонтальный отход t1": format_distance(t1_horizontal_offset_m),
         "Угол входа в пласт": f"{summary['entry_inc_deg']:.2f} deg",
@@ -635,7 +619,17 @@ def run_app() -> None:
             width="stretch",
             hide_index=True,
         )
+    return float(t1_horizontal_offset_m)
 
+
+def _render_result_plots(last_result: dict[str, object]) -> None:
+    stations = last_result["stations"]
+    surface = last_result["surface"]
+    t1 = last_result["t1"]
+    t3 = last_result["t3"]
+    config = last_result["config"]
+    azimuth_deg = float(last_result["azimuth_deg"])
+    md_t1_m = float(last_result["md_t1_m"])
     with st.container(border=True):
         st.markdown("### 3D траектория и DLS")
         row1_col1, row1_col2 = st.columns(2, gap="medium")
@@ -664,6 +658,12 @@ def run_app() -> None:
             width="stretch",
         )
 
+
+def _render_result_tables(
+    last_result: dict[str, object], t1_horizontal_offset_m: float
+) -> None:
+    summary = last_result["summary"]
+    stations = last_result["stations"]
     tab_summary, tab_survey = st.tabs(["Сводка", "Инклинометрия"])
     with tab_summary:
         hidden_metrics = {"distance_t1_m", "distance_t3_m"}
@@ -691,6 +691,58 @@ def run_app() -> None:
             icon=":material/download:",
             width="content",
         )
+
+
+def _render_last_result() -> None:
+    last_result = st.session_state.get("last_result")
+    if last_result is None:
+        st.info("Задайте параметры и нажмите «Построить траекторию».")
+        return
+
+    is_stale = (
+        st.session_state.get("last_input_signature") != _current_input_signature()
+    )
+    if is_stale:
+        st.warning(
+            "Параметры изменились после последнего расчета. Показан предыдущий результат. Нажмите «Построить траекторию» для обновления."
+        )
+
+    t1_horizontal_offset_m = _render_result_overview(last_result=last_result)
+    _render_result_plots(last_result=last_result)
+    _render_result_tables(
+        last_result=last_result, t1_horizontal_offset_m=t1_horizontal_offset_m
+    )
+
+
+def run_app() -> None:
+    st.set_page_config(page_title="Планировщик траектории скважины", layout="wide")
+
+    _init_state()
+    apply_page_style(max_width_px=1680)
+    render_hero(title="Планировщик траектории скважины")
+    _render_template_controls()
+    build_clicked = _render_input_form()
+
+    surface_input, t1_input, t3_input = _build_points_from_state()
+    config_input = _build_config_from_state()
+    preflight_errors = _validate_input(
+        surface=surface_input, t1=t1_input, t3=t3_input, config=config_input
+    )
+    if preflight_errors:
+        st.warning(
+            "Предварительная проверка параметров:\n- " + "\n- ".join(preflight_errors)
+        )
+    _render_solver_profiling_panel()
+    _run_planner_if_clicked(
+        build_clicked=build_clicked,
+        preflight_errors=preflight_errors,
+        surface_input=surface_input,
+        t1_input=t1_input,
+        t3_input=t3_input,
+        config_input=config_input,
+    )
+    _render_calculation_feedback()
+    _render_last_result()
 
 
 if __name__ == "__main__":

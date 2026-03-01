@@ -486,12 +486,7 @@ def _store_parsed_records(records: list[WelltrackRecord]) -> None:
     _clear_results()
 
 
-def run_page() -> None:
-    st.set_page_config(page_title="Импорт WELLTRACK", layout="wide")
-    _init_state()
-    apply_page_style(max_width_px=1700)
-    render_hero(title="Импорт WELLTRACK", subtitle="")
-
+def _render_import_controls() -> tuple[str, bool, bool, bool]:
     source_col, action_col = st.columns(
         [4.0, 1.2], gap="small", vertical_alignment="bottom"
     )
@@ -517,7 +512,12 @@ def run_page() -> None:
                 "значениям. Импортированный WELLTRACK и выбранные скважины не удаляются."
             ),
         )
+    return source_text, bool(parse_clicked), bool(clear_clicked), bool(reset_params_clicked)
 
+
+def _handle_import_actions(
+    source_text: str, parse_clicked: bool, clear_clicked: bool, reset_params_clicked: bool
+) -> None:
     if reset_params_clicked:
         _apply_profile_defaults(force=True)
         st.toast("Параметры расчета сброшены к рекомендованным.")
@@ -529,42 +529,34 @@ def run_page() -> None:
         _clear_results()
         st.rerun()
 
-    if parse_clicked:
-        if not source_text.strip():
-            st.warning("Источник пустой. Загрузите файл или вставьте текст WELLTRACK.")
-        else:
-            with st.status("Чтение и парсинг WELLTRACK...", expanded=True) as status:
-                started = perf_counter()
-                try:
-                    status.write("Проверка структуры WELLTRACK-блоков.")
-                    records = _parse_welltrack_cached(source_text)
-                    _store_parsed_records(records=records)
-                    status.write(f"Найдено блоков WELLTRACK: {len(records)}.")
-                    elapsed = perf_counter() - started
-                    status.update(
-                        label=f"Импорт завершен за {elapsed:.2f} с",
-                        state="complete",
-                        expanded=False,
-                    )
-                except WelltrackParseError as exc:
-                    st.session_state["wt_records"] = None
-                    st.session_state["wt_last_error"] = str(exc)
-                    status.write(str(exc))
-                    status.update(
-                        label="Ошибка парсинга WELLTRACK", state="error", expanded=True
-                    )
-
-    if st.session_state.get("wt_last_error"):
-        render_solver_diagnostics(st.session_state["wt_last_error"])
-
-    records = st.session_state.get("wt_records")
-    if records is None:
-        st.info("Загрузите источник и нажмите «Прочитать WELLTRACK».")
+    if not parse_clicked:
         return
-    if not records:
-        st.warning("В источнике не найдено ни одного WELLTRACK блока.")
+    if not source_text.strip():
+        st.warning("Источник пустой. Загрузите файл или вставьте текст WELLTRACK.")
         return
+    with st.status("Чтение и парсинг WELLTRACK...", expanded=True) as status:
+        started = perf_counter()
+        try:
+            status.write("Проверка структуры WELLTRACK-блоков.")
+            records = _parse_welltrack_cached(source_text)
+            _store_parsed_records(records=records)
+            status.write(f"Найдено блоков WELLTRACK: {len(records)}.")
+            elapsed = perf_counter() - started
+            status.update(
+                label=f"Импорт завершен за {elapsed:.2f} с",
+                state="complete",
+                expanded=False,
+            )
+        except WelltrackParseError as exc:
+            st.session_state["wt_records"] = None
+            st.session_state["wt_last_error"] = str(exc)
+            status.write(str(exc))
+            status.update(
+                label="Ошибка парсинга WELLTRACK", state="error", expanded=True
+            )
 
+
+def _render_records_overview(records: list[WelltrackRecord]) -> None:
     ready_count = sum(1 for record in records if len(record.points) == 3)
     x1, x2, x3 = st.columns(3, gap="small")
     x1.metric("Скважин в файле", f"{len(records)}")
@@ -583,6 +575,9 @@ def run_page() -> None:
     )
     st.markdown("### Загруженные скважины")
     st.dataframe(arrow_safe_text_dataframe(parsed_df), width="stretch", hide_index=True)
+
+
+def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
     with st.expander("Исходные данные скважин (вход WELLTRACK)", expanded=False):
         raw_rows: list[dict[str, object]] = []
         for record in records:
@@ -612,6 +607,8 @@ def run_page() -> None:
             hide_index=True,
         )
 
+
+def _sync_selected_names(records: list[WelltrackRecord]) -> list[str]:
     all_names = [record.name for record in records]
     selected_names = [
         name
@@ -621,7 +618,10 @@ def run_page() -> None:
     if not selected_names:
         selected_names = all_names
         st.session_state["wt_selected_names"] = selected_names
+    return all_names
 
+
+def _render_batch_run_form(all_names: list[str]) -> tuple[TrajectoryConfig, bool]:
     with st.form("welltrack_run_form", clear_on_submit=False):
         st.markdown("### Выбор скважин и запуск расчета")
         st.multiselect(
@@ -636,103 +636,104 @@ def run_page() -> None:
             type="primary",
             icon=":material/play_arrow:",
         )
+    return config, bool(run_clicked)
 
-    if run_clicked:
-        selected_set = set(st.session_state.get("wt_selected_names", []))
-        if not selected_set:
-            st.warning("Выберите минимум одну скважину для расчета.")
-        else:
-            batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
-            run_started_s = perf_counter()
-            log_lines: list[str] = []
-            progress = st.progress(0, text="Подготовка batch-расчета...")
-            with st.status(
-                "Выполняется расчет WELLTRACK-набора...", expanded=True
-            ) as status:
-                try:
-                    started = perf_counter()
-                    start_msg = format_run_log_line(
-                        run_started_s,
-                        f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}.",
-                    )
-                    status.write(start_msg)
-                    log_lines.append(start_msg)
 
-                    def on_progress(index: int, total: int, name: str) -> None:
-                        progress.progress(
-                            int((index / max(total, 1)) * 100),
-                            text=f"{index}/{total}: {name}",
-                        )
-                        line = format_run_log_line(
-                            run_started_s,
-                            f"Расчет скважины {index}/{total}: {name}",
-                        )
-                        status.write(line)
-                        log_lines.append(line)
-
-                    summary_rows, successes = batch.evaluate(
-                        records=records,
-                        selected_names=selected_set,
-                        config=config,
-                        progress_callback=on_progress,
-                    )
-                    elapsed_s = perf_counter() - started
-                    progress.progress(100, text="Batch-расчет завершен.")
-                    st.session_state["wt_summary_rows"] = summary_rows
-                    st.session_state["wt_successes"] = successes
-                    st.session_state["wt_last_error"] = ""
-                    st.session_state["wt_last_run_at"] = datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    st.session_state["wt_last_runtime_s"] = float(elapsed_s)
-                    done_msg = format_run_log_line(
-                        run_started_s,
-                        f"Batch-расчет завершен. Успешно: {len(successes)}, "
-                        f"ошибок: {len(summary_rows) - len(successes)}. "
-                        f"Затраченное время: {elapsed_s:.2f} с.",
-                    )
-                    status.write(done_msg)
-                    log_lines.append(done_msg)
-                    if successes:
-                        status.update(
-                            label=f"Расчет завершен за {elapsed_s:.2f} с. Успешно: {len(successes)}",
-                            state="complete",
-                            expanded=False,
-                        )
-                    else:
-                        status.update(
-                            label=f"Расчет завершен за {elapsed_s:.2f} с, но без успешных скважин.",
-                            state="error",
-                            expanded=True,
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    st.session_state["wt_last_error"] = str(exc)
-                    err_msg = format_run_log_line(
-                        run_started_s, f"Ошибка batch-расчета: {exc}"
-                    )
-                    status.write(err_msg)
-                    log_lines.append(err_msg)
-                    status.update(
-                        label="Batch-расчет завершился ошибкой",
-                        state="error",
-                        expanded=True,
-                    )
-                finally:
-                    st.session_state["wt_last_run_log_lines"] = log_lines
-                    progress.empty()
-
-    summary_rows = st.session_state.get("wt_summary_rows")
-    successes = st.session_state.get("wt_successes")
-    run_log_lines = st.session_state.get("wt_last_run_log_lines")
-    if run_log_lines:
-        with st.container(border=True):
-            st.markdown("### Лог расчета")
-            st.code("\n".join(run_log_lines), language="text")
-
-    if not summary_rows:
-        render_small_note("Результаты расчета появятся после запуска batch-расчета.")
+def _run_batch_if_clicked(
+    run_clicked: bool, records: list[WelltrackRecord], config: TrajectoryConfig
+) -> None:
+    if not run_clicked:
         return
+    selected_set = set(st.session_state.get("wt_selected_names", []))
+    if not selected_set:
+        st.warning("Выберите минимум одну скважину для расчета.")
+        return
+    batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
+    run_started_s = perf_counter()
+    log_lines: list[str] = []
+    progress = st.progress(0, text="Подготовка batch-расчета...")
+    with st.status("Выполняется расчет WELLTRACK-набора...", expanded=True) as status:
+        try:
+            started = perf_counter()
+            start_msg = format_run_log_line(
+                run_started_s,
+                f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}.",
+            )
+            status.write(start_msg)
+            log_lines.append(start_msg)
 
+            def on_progress(index: int, total: int, name: str) -> None:
+                progress.progress(
+                    int((index / max(total, 1)) * 100),
+                    text=f"{index}/{total}: {name}",
+                )
+                line = format_run_log_line(
+                    run_started_s,
+                    f"Расчет скважины {index}/{total}: {name}",
+                )
+                status.write(line)
+                log_lines.append(line)
+
+            summary_rows, successes = batch.evaluate(
+                records=records,
+                selected_names=selected_set,
+                config=config,
+                progress_callback=on_progress,
+            )
+            elapsed_s = perf_counter() - started
+            progress.progress(100, text="Batch-расчет завершен.")
+            st.session_state["wt_summary_rows"] = summary_rows
+            st.session_state["wt_successes"] = successes
+            st.session_state["wt_last_error"] = ""
+            st.session_state["wt_last_run_at"] = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            st.session_state["wt_last_runtime_s"] = float(elapsed_s)
+            done_msg = format_run_log_line(
+                run_started_s,
+                f"Batch-расчет завершен. Успешно: {len(successes)}, "
+                f"ошибок: {len(summary_rows) - len(successes)}. "
+                f"Затраченное время: {elapsed_s:.2f} с.",
+            )
+            status.write(done_msg)
+            log_lines.append(done_msg)
+            if successes:
+                status.update(
+                    label=f"Расчет завершен за {elapsed_s:.2f} с. Успешно: {len(successes)}",
+                    state="complete",
+                    expanded=False,
+                )
+            else:
+                status.update(
+                    label=f"Расчет завершен за {elapsed_s:.2f} с, но без успешных скважин.",
+                    state="error",
+                    expanded=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            st.session_state["wt_last_error"] = str(exc)
+            err_msg = format_run_log_line(run_started_s, f"Ошибка batch-расчета: {exc}")
+            status.write(err_msg)
+            log_lines.append(err_msg)
+            status.update(
+                label="Batch-расчет завершился ошибкой",
+                state="error",
+                expanded=True,
+            )
+        finally:
+            st.session_state["wt_last_run_log_lines"] = log_lines
+            progress.empty()
+
+
+def _render_batch_log() -> None:
+    run_log_lines = st.session_state.get("wt_last_run_log_lines")
+    if not run_log_lines:
+        return
+    with st.container(border=True):
+        st.markdown("### Лог расчета")
+        st.code("\n".join(run_log_lines), language="text")
+
+
+def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame:
     summary_df = WelltrackBatchPlanner.summary_dataframe(summary_rows)
     if not summary_df.empty:
         summary_df = arrow_safe_text_dataframe(summary_df)
@@ -763,16 +764,13 @@ def run_page() -> None:
         icon=":material/download:",
         width="content",
     )
+    return summary_df
 
-    if not successes:
-        st.warning("Все выбранные скважины завершились ошибками расчета.")
-        return
 
+def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
     tab_single, tab_all = st.tabs(["Отдельная скважина", "Все скважины"])
     with tab_single:
-        selected_name = st.selectbox(
-            "Скважина", options=[item.name for item in successes]
-        )
+        selected_name = st.selectbox("Скважина", options=[item.name for item in successes])
         selected = next(item for item in successes if item.name == selected_name)
         stations = selected.stations
         surface = selected.surface
@@ -814,6 +812,51 @@ def run_page() -> None:
         c1, c2 = st.columns(2, gap="medium")
         c1.plotly_chart(_all_wells_3d_figure(successes), width="stretch")
         c2.plotly_chart(_all_wells_plan_figure(successes), width="stretch")
+
+
+def run_page() -> None:
+    st.set_page_config(page_title="Импорт WELLTRACK", layout="wide")
+    _init_state()
+    apply_page_style(max_width_px=1700)
+    render_hero(title="Импорт WELLTRACK", subtitle="")
+    source_text, parse_clicked, clear_clicked, reset_params_clicked = (
+        _render_import_controls()
+    )
+    _handle_import_actions(
+        source_text=source_text,
+        parse_clicked=parse_clicked,
+        clear_clicked=clear_clicked,
+        reset_params_clicked=reset_params_clicked,
+    )
+
+    if st.session_state.get("wt_last_error"):
+        render_solver_diagnostics(st.session_state["wt_last_error"])
+
+    records = st.session_state.get("wt_records")
+    if records is None:
+        st.info("Загрузите источник и нажмите «Прочитать WELLTRACK».")
+        return
+    if not records:
+        st.warning("В источнике не найдено ни одного WELLTRACK блока.")
+        return
+
+    _render_records_overview(records=records)
+    _render_raw_records_table(records=records)
+    all_names = _sync_selected_names(records=records)
+    config, run_clicked = _render_batch_run_form(all_names=all_names)
+    _run_batch_if_clicked(run_clicked=run_clicked, records=records, config=config)
+    _render_batch_log()
+
+    summary_rows = st.session_state.get("wt_summary_rows")
+    successes = st.session_state.get("wt_successes")
+    if not summary_rows:
+        render_small_note("Результаты расчета появятся после запуска batch-расчета.")
+        return
+    _render_batch_summary(summary_rows=summary_rows)
+    if not successes:
+        st.warning("Все выбранные скважины завершились ошибками расчета.")
+        return
+    _render_success_tabs(successes=successes)
 
 
 if __name__ == "__main__":
