@@ -65,7 +65,7 @@ TURN_SOLVER_OPTIONS = {
     TURN_SOLVER_DE_HYBRID: "DE Hybrid (глобальный + локальный)",
 }
 CFG_DEFAULTS = TrajectoryConfig()
-UI_DEFAULTS_VERSION = 4
+UI_DEFAULTS_VERSION = 5
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
@@ -105,6 +105,7 @@ def _init_state() -> None:
     st.session_state.setdefault(
         "entry_inc_tol", float(CFG_DEFAULTS.entry_inc_tolerance_deg)
     )
+    st.session_state.setdefault("max_inc", float(CFG_DEFAULTS.max_inc_deg))
     st.session_state.setdefault(
         "dls_build_min", float(CFG_DEFAULTS.dls_build_min_deg_per_30m)
     )
@@ -130,6 +131,7 @@ def _init_state() -> None:
         st.session_state["pos_tol"] = float(CFG_DEFAULTS.pos_tolerance_m)
         st.session_state["entry_inc_target"] = float(CFG_DEFAULTS.entry_inc_target_deg)
         st.session_state["entry_inc_tol"] = float(CFG_DEFAULTS.entry_inc_tolerance_deg)
+        st.session_state["max_inc"] = float(CFG_DEFAULTS.max_inc_deg)
         st.session_state["dls_build_min"] = float(
             CFG_DEFAULTS.dls_build_min_deg_per_30m
         )
@@ -182,6 +184,7 @@ def _current_input_signature() -> tuple[object, ...]:
         "pos_tol",
         "entry_inc_target",
         "entry_inc_tol",
+        "max_inc",
         "dls_build_min",
         "dls_build_max",
         "kop_min_vertical",
@@ -223,6 +226,7 @@ def _build_config_from_state() -> TrajectoryConfig:
         pos_tolerance_m=float(st.session_state["pos_tol"]),
         entry_inc_target_deg=float(st.session_state["entry_inc_target"]),
         entry_inc_tolerance_deg=float(st.session_state["entry_inc_tol"]),
+        max_inc_deg=float(st.session_state["max_inc"]),
         dls_build_min_deg_per_30m=min(dls_build_min, dls_build_max),
         dls_build_max_deg_per_30m=max(dls_build_min, dls_build_max),
         kop_min_vertical_m=float(st.session_state["kop_min_vertical"]),
@@ -255,6 +259,8 @@ def _validate_input(
         errors.append("Мин VERTICAL до KOP должен быть меньше TVD до t1.")
     if config.md_step_m < config.md_step_control_m:
         errors.append("Шаг MD должен быть больше либо равен контрольному шагу MD.")
+    if config.entry_inc_target_deg > config.max_inc_deg:
+        errors.append("Целевой INC входа не должен превышать Макс INC по стволу.")
     return errors
 
 
@@ -432,7 +438,7 @@ def run_app() -> None:
                     "Допуск по позиции", key="pos_tol", min_value=0.1, step=0.1
                 )
 
-                rr1, rr2 = st.columns(2, gap="small")
+                rr1, rr2, rr3 = st.columns(3, gap="small")
                 rr1.number_input(
                     "Целевой INC входа",
                     key="entry_inc_target",
@@ -446,6 +452,14 @@ def run_app() -> None:
                     min_value=0.1,
                     max_value=5.0,
                     step=0.1,
+                )
+                rr3.number_input(
+                    "Макс INC по стволу",
+                    key="max_inc",
+                    min_value=80.0,
+                    max_value=120.0,
+                    step=0.5,
+                    help="Глобальное ограничение по зенитному углу. При недостатке этого лимита расчет потребует overbend.",
                 )
 
                 rd1, rd2 = st.columns(2, gap="small")
@@ -638,6 +652,7 @@ def run_app() -> None:
         "KOP MD": format_distance(float(summary["kop_md_m"])),
         "Длина горизонтального ствола": format_distance(float(summary["horizontal_length_m"])),
         "Макс DLS": f"{summary['max_dls_total_deg_per_30m']:.2f} deg/30m",
+        "Макс INC факт/лимит": f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
         "Время расчета": "—" if runtime_s is None else f"{float(runtime_s):.2f} с",
     }
     with st.container(border=True):

@@ -56,6 +56,7 @@ class SectionGeometry:
     azimuth_entry_deg: float
     azimuth_surface_t1_deg: float
     inc_entry_deg: float
+    inc_required_t1_t3_deg: float
     t1_cross_m: float
     t3_cross_m: float
     t1_east_m: float
@@ -71,6 +72,7 @@ class ProfileParameters:
     reverse_hold_length_m: float
     reverse_dls_deg_per_30m: float
     inc_entry_deg: float
+    inc_required_t1_t3_deg: float
     inc_hold_deg: float
     dls_build1_deg_per_30m: float
     dls_build2_deg_per_30m: float
@@ -78,6 +80,10 @@ class ProfileParameters:
     hold_length_m: float
     build2_length_m: float
     horizontal_length_m: float
+    horizontal_adjust_length_m: float
+    horizontal_hold_length_m: float
+    horizontal_inc_deg: float
+    horizontal_dls_deg_per_30m: float
     azimuth_hold_deg: float
     azimuth_entry_deg: float
 
@@ -104,6 +110,15 @@ class ProfileParameters:
     @property
     def md_total_m(self) -> float:
         return float(self.md_t1_m + self.horizontal_length_m)
+
+
+@dataclass(frozen=True)
+class PostEntrySection:
+    total_length_m: float
+    transition_length_m: float
+    hold_length_m: float
+    hold_inc_deg: float
+    transition_dls_deg_per_30m: float
 
 
 class TrajectoryPlanner:
@@ -187,11 +202,18 @@ def _build_section_geometry(
     if ds_13_m <= 0.0:
         raise PlanningError("Invalid t1->t3 geometry: along-section offset must be positive.")
 
-    inc_entry_deg = _inclination_from_displacement(ds_13=ds_13_m, dz_13=dz_13_m)
-    if abs(inc_entry_deg - config.entry_inc_target_deg) > config.entry_inc_tolerance_deg:
+    inc_required_t1_t3_deg = _inclination_from_displacement(ds_13=ds_13_m, dz_13=dz_13_m)
+    inc_entry_deg = float(config.entry_inc_target_deg)
+    if inc_entry_deg > config.max_inc_deg + SMALL:
         raise PlanningError(
-            f"INC at t1 from target geometry is {inc_entry_deg:.2f} deg, "
-            f"outside required {config.entry_inc_target_deg:.1f}±{config.entry_inc_tolerance_deg:.1f} deg."
+            "Entry INC target exceeds configured max INC. "
+            f"entry_inc_target={inc_entry_deg:.2f} deg, max_inc={config.max_inc_deg:.2f} deg."
+        )
+    if inc_required_t1_t3_deg > config.max_inc_deg + SMALL:
+        raise PlanningError(
+            "With current global max INC the t1->t3 geometry is infeasible without overbend. "
+            f"Required straight INC is {inc_required_t1_t3_deg:.2f} deg, "
+            f"max INC is {config.max_inc_deg:.2f} deg."
         )
 
     return SectionGeometry(
@@ -202,6 +224,7 @@ def _build_section_geometry(
         azimuth_entry_deg=float(azimuth_entry_deg),
         azimuth_surface_t1_deg=float(azimuth_surface_t1_deg),
         inc_entry_deg=float(inc_entry_deg),
+        inc_required_t1_t3_deg=float(inc_required_t1_t3_deg),
         t1_cross_m=float(c1_m),
         t3_cross_m=float(c3_m),
         t1_east_m=float(t1.x - surface.x),
@@ -224,6 +247,9 @@ def _solve_same_direction_profile(
     )
 
     kop_candidates = _iter_kop_candidates(geometry=geometry, config=config)
+    horizontal_dls_deg_per_30m = float(
+        max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper), SMALL)
+    )
     best: ProfileParameters | None = None
     for kop_vertical_m in kop_candidates:
         candidate = _optimize_profile_for_objective(
@@ -234,6 +260,8 @@ def _solve_same_direction_profile(
                 dls_build_deg_per_30m=dls,
                 kop_vertical_m=kop_vertical_m,
                 min_structural_segment_m=config.min_structural_segment_m,
+                max_inc_deg=config.max_inc_deg,
+                horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
             ),
             objective_mode=config.objective_mode,
             config=config,
@@ -260,7 +288,7 @@ def _solve_same_direction_profile(
     raise PlanningError(
         "No valid VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL solution found within configured limits. "
         f"Try increasing BUILD max DLS above {required_dls:.2f} deg/30m, reducing minimum vertical before KOP, "
-        "or relaxing constraints."
+        "increasing max INC (or allowing overbend), or relaxing constraints."
     )
 
 
@@ -331,6 +359,9 @@ def _solve_same_direction_profile_with_turn(
         np.array([base_kop, lower, inc_high, hold_guess, azimuth_mid], dtype=float),
         np.array([base_kop, upper, inc_low, hold_guess, azimuth_mid], dtype=float),
     ]
+    horizontal_dls_deg_per_30m = float(
+        max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper), SMALL)
+    )
     def profile_builder(values: np.ndarray) -> ProfileParameters | None:
         kop_vertical_m, dls_build, inc_hold_deg, hold_length_m, azimuth_hold_deg = values.tolist()
         return _profile_same_direction_with_turn(
@@ -341,6 +372,8 @@ def _solve_same_direction_profile_with_turn(
             hold_length_m=float(hold_length_m),
             azimuth_hold_deg=float(azimuth_hold_deg),
             min_structural_segment_m=min_segment_m,
+            max_inc_deg=config.max_inc_deg,
+            horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
         )
 
     best, best_miss = _solve_turn_profile_multistart(
@@ -361,7 +394,8 @@ def _solve_same_direction_profile_with_turn(
     raise PlanningError(
         "No valid TURN solution found for non-coplanar targets within configured limits. "
         f"Closest miss to t1 is {best_miss:.2f} m. "
-        "Try increasing BUILD max DLS, reducing minimum vertical before KOP, or relaxing tolerance."
+        "Try increasing BUILD max DLS, increasing max INC (or allowing overbend), reducing minimum vertical before KOP, "
+        "or relaxing tolerance."
     )
 
 
@@ -376,6 +410,9 @@ def _solve_reverse_direction_profile(
 
     kop_candidates = _iter_kop_candidates(geometry=geometry, config=config)
     reverse_inc_candidates = _iter_reverse_inc_candidates(config=config)
+    horizontal_dls_deg_per_30m = float(
+        max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper), SMALL)
+    )
 
     best: ProfileParameters | None = None
     for kop_vertical_m in kop_candidates:
@@ -389,6 +426,8 @@ def _solve_reverse_direction_profile(
                     kop_vertical_m=kop_vertical_m,
                     reverse_inc_deg=reverse_inc_deg,
                     min_structural_segment_m=config.min_structural_segment_m,
+                    max_inc_deg=config.max_inc_deg,
+                    horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
                 ),
                 objective_mode=config.objective_mode,
                 config=config,
@@ -402,7 +441,7 @@ def _solve_reverse_direction_profile(
 
     raise PlanningError(
         "No valid reverse-direction profile found within configured limits. "
-        "Try increasing BUILD max DLS, reducing minimum vertical before KOP, "
+        "Try increasing BUILD max DLS, increasing max INC (or allowing overbend), reducing minimum vertical before KOP, "
         "or widening reverse INC search limits."
     )
 
@@ -496,6 +535,9 @@ def _solve_reverse_direction_profile_with_turn(
             dtype=float,
         ),
     ]
+    horizontal_dls_deg_per_30m = float(
+        max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper), SMALL)
+    )
     def profile_builder(values: np.ndarray) -> ProfileParameters | None:
         (
             kop_vertical_m,
@@ -516,6 +558,8 @@ def _solve_reverse_direction_profile_with_turn(
             hold_length_m=float(hold_length_m),
             azimuth_hold_deg=float(azimuth_hold_deg),
             min_structural_segment_m=min_segment_m,
+            max_inc_deg=config.max_inc_deg,
+            horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
         )
 
     best, best_miss = _solve_turn_profile_multistart(
@@ -536,7 +580,8 @@ def _solve_reverse_direction_profile_with_turn(
     raise PlanningError(
         "No valid reverse TURN solution found for non-coplanar targets within configured limits. "
         f"Closest miss to t1 is {best_miss:.2f} m. "
-        "Try increasing BUILD max DLS, reducing minimum vertical before KOP, or relaxing tolerance."
+        "Try increasing BUILD max DLS, increasing max INC (or allowing overbend), reducing minimum vertical before KOP, "
+        "or relaxing tolerance."
     )
 
 
@@ -715,11 +760,142 @@ def _seed_vectors_with_qmc(
     return vectors
 
 
+def _solve_post_entry_section(
+    ds_m: float,
+    dz_m: float,
+    inc_entry_deg: float,
+    dls_deg_per_30m: float,
+    max_inc_deg: float,
+) -> PostEntrySection | None:
+    if ds_m <= SMALL:
+        return None
+
+    inc_entry_rad = float(np.radians(inc_entry_deg))
+    if inc_entry_rad < -SMALL:
+        return None
+    max_inc_rad = float(np.radians(max_inc_deg))
+    if max_inc_rad <= SMALL or inc_entry_rad > max_inc_rad + SMALL:
+        return None
+
+    if dls_deg_per_30m <= SMALL:
+        sin_inc = float(np.sin(inc_entry_rad))
+        cos_inc = float(np.cos(inc_entry_rad))
+        mismatch = ds_m * cos_inc - dz_m * sin_inc
+        if abs(mismatch) > 1e-3:
+            return None
+        hold_length_m = ds_m * sin_inc + dz_m * cos_inc
+        if hold_length_m < -1e-3:
+            return None
+        hold_length_m = float(max(hold_length_m, 0.0))
+        return PostEntrySection(
+            total_length_m=hold_length_m,
+            transition_length_m=0.0,
+            hold_length_m=hold_length_m,
+            hold_inc_deg=float(inc_entry_deg),
+            transition_dls_deg_per_30m=0.0,
+        )
+
+    radius_m = _radius_from_dls(dls_deg_per_30m)
+    tolerance = 1e-3
+
+    def residual(inc_hold_rad: float) -> float:
+        ds_arc = radius_m * (np.cos(inc_entry_rad) - np.cos(inc_hold_rad))
+        dz_arc = radius_m * (np.sin(inc_hold_rad) - np.sin(inc_entry_rad))
+        ds_rem = ds_m - ds_arc
+        dz_rem = dz_m - dz_arc
+        return float(ds_rem * np.cos(inc_hold_rad) - dz_rem * np.sin(inc_hold_rad))
+
+    def build_candidate(inc_hold_rad: float) -> PostEntrySection | None:
+        ds_arc = radius_m * (np.cos(inc_entry_rad) - np.cos(inc_hold_rad))
+        dz_arc = radius_m * (np.sin(inc_hold_rad) - np.sin(inc_entry_rad))
+        ds_rem = ds_m - ds_arc
+        dz_rem = dz_m - dz_arc
+        hold_length_m = float(ds_rem * np.sin(inc_hold_rad) + dz_rem * np.cos(inc_hold_rad))
+        if hold_length_m < -tolerance:
+            return None
+        hold_length_m = float(max(hold_length_m, 0.0))
+
+        ds_pred = float(ds_arc + hold_length_m * np.sin(inc_hold_rad))
+        dz_pred = float(dz_arc + hold_length_m * np.cos(inc_hold_rad))
+        miss = float(np.hypot(ds_pred - ds_m, dz_pred - dz_m))
+        if miss > 5e-3:
+            return None
+
+        transition_length_m = float(radius_m * abs(inc_hold_rad - inc_entry_rad))
+        return PostEntrySection(
+            total_length_m=float(transition_length_m + hold_length_m),
+            transition_length_m=transition_length_m,
+            hold_length_m=hold_length_m,
+            hold_inc_deg=float(np.degrees(inc_hold_rad)),
+            transition_dls_deg_per_30m=float(dls_deg_per_30m),
+        )
+
+    samples = np.linspace(0.0, max_inc_rad, 721, dtype=float)
+    values = np.array([residual(float(angle)) for angle in samples], dtype=float)
+    candidate_angles: list[float] = []
+    for idx in range(len(samples) - 1):
+        f0 = values[idx]
+        f1 = values[idx + 1]
+        a0 = float(samples[idx])
+        a1 = float(samples[idx + 1])
+        if abs(f0) <= tolerance:
+            candidate_angles.append(a0)
+            continue
+        if abs(f1) <= tolerance:
+            candidate_angles.append(a1)
+            continue
+        if np.signbit(f0) == np.signbit(f1):
+            continue
+        lo = a0
+        hi = a1
+        flo = f0
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            fmid = residual(mid)
+            if abs(fmid) <= tolerance:
+                lo = mid
+                hi = mid
+                break
+            if np.signbit(fmid) == np.signbit(flo):
+                lo = mid
+                flo = fmid
+            else:
+                hi = mid
+        candidate_angles.append(0.5 * (lo + hi))
+
+    if not candidate_angles:
+        min_idx = int(np.argmin(np.abs(values)))
+        candidate_angles.append(float(samples[min_idx]))
+
+    candidates: list[PostEntrySection] = []
+    for angle in candidate_angles:
+        clamped = float(np.clip(angle, 0.0, max_inc_rad))
+        candidate = build_candidate(clamped)
+        if candidate is None:
+            continue
+        if candidate.hold_inc_deg > max_inc_deg + 1e-6:
+            continue
+        candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda candidate: (
+            abs(candidate.hold_inc_deg - inc_entry_deg),
+            candidate.total_length_m,
+        )
+    )
+    return candidates[0]
+
+
 def _profile_same_direction(
     geometry: SectionGeometry,
     dls_build_deg_per_30m: float,
     kop_vertical_m: float,
     min_structural_segment_m: float,
+    max_inc_deg: float,
+    horizontal_dls_deg_per_30m: float,
 ) -> ProfileParameters | None:
     if dls_build_deg_per_30m <= 0.0 or kop_vertical_m < 0.0:
         return None
@@ -739,6 +915,8 @@ def _profile_same_direction(
         reverse_hold_length_m=0.0,
         reverse_dls_deg_per_30m=0.0,
         min_structural_segment_m=min_structural_segment_m,
+        max_inc_deg=max_inc_deg,
+        horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
     )
 
 
@@ -748,6 +926,8 @@ def _profile_reverse_direction(
     kop_vertical_m: float,
     reverse_inc_deg: float,
     min_structural_segment_m: float,
+    max_inc_deg: float,
+    horizontal_dls_deg_per_30m: float,
 ) -> ProfileParameters | None:
     if dls_build_deg_per_30m <= 0.0 or kop_vertical_m < 0.0:
         return None
@@ -792,6 +972,8 @@ def _profile_reverse_direction(
         reverse_hold_length_m=reverse_hold_length_m,
         reverse_dls_deg_per_30m=dls_build_deg_per_30m,
         min_structural_segment_m=min_structural_segment_m,
+        max_inc_deg=max_inc_deg,
+        horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
     )
     if candidate is None:
         return None
@@ -812,6 +994,8 @@ def _profile_reverse_direction_with_turn(
     hold_length_m: float,
     azimuth_hold_deg: float,
     min_structural_segment_m: float,
+    max_inc_deg: float,
+    horizontal_dls_deg_per_30m: float,
 ) -> ProfileParameters | None:
     if dls_build_deg_per_30m <= SMALL or kop_vertical_m < 0.0:
         return None
@@ -822,8 +1006,14 @@ def _profile_reverse_direction_with_turn(
     if inc_hold_deg <= SMALL or inc_hold_deg >= geometry.inc_entry_deg - SMALL:
         return None
 
-    horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
-    if horizontal_length_m <= SMALL:
+    post_entry = _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        max_inc_deg=max_inc_deg,
+    )
+    if post_entry is None:
         return None
 
     radius_m = _radius_from_dls(dls_build_deg_per_30m)
@@ -857,13 +1047,18 @@ def _profile_reverse_direction_with_turn(
         reverse_hold_length_m=float(reverse_hold_length_m),
         reverse_dls_deg_per_30m=float(dls_build_deg_per_30m),
         inc_entry_deg=float(geometry.inc_entry_deg),
+        inc_required_t1_t3_deg=float(geometry.inc_required_t1_t3_deg),
         inc_hold_deg=float(inc_hold_deg),
         dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
         dls_build2_deg_per_30m=float(dls_build_deg_per_30m),
         build1_length_m=build1_length_m,
         hold_length_m=float(hold_length_m),
         build2_length_m=build2_length_m,
-        horizontal_length_m=horizontal_length_m,
+        horizontal_length_m=float(post_entry.total_length_m),
+        horizontal_adjust_length_m=float(post_entry.transition_length_m),
+        horizontal_hold_length_m=float(post_entry.hold_length_m),
+        horizontal_inc_deg=float(post_entry.hold_inc_deg),
+        horizontal_dls_deg_per_30m=float(post_entry.transition_dls_deg_per_30m),
         azimuth_hold_deg=_normalize_azimuth_deg(azimuth_hold_deg),
         azimuth_entry_deg=_normalize_azimuth_deg(geometry.azimuth_entry_deg),
     )
@@ -880,9 +1075,17 @@ def _build_profile_from_effective_targets(
     reverse_hold_length_m: float,
     reverse_dls_deg_per_30m: float,
     min_structural_segment_m: float,
+    max_inc_deg: float,
+    horizontal_dls_deg_per_30m: float,
 ) -> ProfileParameters | None:
-    horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
-    if horizontal_length_m <= SMALL:
+    post_entry = _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        max_inc_deg=max_inc_deg,
+    )
+    if post_entry is None:
         return None
 
     inc_entry_rad = geometry.inc_entry_deg * DEG2RAD
@@ -923,13 +1126,18 @@ def _build_profile_from_effective_targets(
         reverse_hold_length_m=float(max(reverse_hold_length_m, 0.0)),
         reverse_dls_deg_per_30m=float(max(reverse_dls_deg_per_30m, 0.0)),
         inc_entry_deg=float(geometry.inc_entry_deg),
+        inc_required_t1_t3_deg=float(geometry.inc_required_t1_t3_deg),
         inc_hold_deg=inc_hold_deg,
         dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
         dls_build2_deg_per_30m=float(dls_build_deg_per_30m),
         build1_length_m=build1_length_m,
         hold_length_m=hold_length_m,
         build2_length_m=build2_length_m,
-        horizontal_length_m=horizontal_length_m,
+        horizontal_length_m=float(post_entry.total_length_m),
+        horizontal_adjust_length_m=float(post_entry.transition_length_m),
+        horizontal_hold_length_m=float(post_entry.hold_length_m),
+        horizontal_inc_deg=float(post_entry.hold_inc_deg),
+        horizontal_dls_deg_per_30m=float(post_entry.transition_dls_deg_per_30m),
         azimuth_hold_deg=float(geometry.azimuth_entry_deg),
         azimuth_entry_deg=float(geometry.azimuth_entry_deg),
     )
@@ -943,6 +1151,8 @@ def _profile_same_direction_with_turn(
     hold_length_m: float,
     azimuth_hold_deg: float,
     min_structural_segment_m: float,
+    max_inc_deg: float,
+    horizontal_dls_deg_per_30m: float,
 ) -> ProfileParameters | None:
     if dls_build_deg_per_30m <= SMALL or kop_vertical_m < 0.0:
         return None
@@ -951,8 +1161,14 @@ def _profile_same_direction_with_turn(
     if inc_hold_deg <= SMALL or inc_hold_deg >= geometry.inc_entry_deg - SMALL:
         return None
 
-    horizontal_length_m = float(np.hypot(geometry.ds_13_m, geometry.dz_13_m))
-    if horizontal_length_m <= SMALL:
+    post_entry = _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        max_inc_deg=max_inc_deg,
+    )
+    if post_entry is None:
         return None
 
     min_segment = max(float(min_structural_segment_m), SMALL)
@@ -983,13 +1199,18 @@ def _profile_same_direction_with_turn(
         reverse_hold_length_m=0.0,
         reverse_dls_deg_per_30m=0.0,
         inc_entry_deg=float(geometry.inc_entry_deg),
+        inc_required_t1_t3_deg=float(geometry.inc_required_t1_t3_deg),
         inc_hold_deg=float(inc_hold_deg),
         dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
         dls_build2_deg_per_30m=float(dls_build_deg_per_30m),
         build1_length_m=build1_length_m,
         hold_length_m=float(hold_length_m),
         build2_length_m=build2_length_m,
-        horizontal_length_m=horizontal_length_m,
+        horizontal_length_m=float(post_entry.total_length_m),
+        horizontal_adjust_length_m=float(post_entry.transition_length_m),
+        horizontal_hold_length_m=float(post_entry.hold_length_m),
+        horizontal_inc_deg=float(post_entry.hold_inc_deg),
+        horizontal_dls_deg_per_30m=float(post_entry.transition_dls_deg_per_30m),
         azimuth_hold_deg=_normalize_azimuth_deg(azimuth_hold_deg),
         azimuth_entry_deg=_normalize_azimuth_deg(geometry.azimuth_entry_deg),
     )
@@ -1268,7 +1489,14 @@ def _optimize_minimize_build_dls(
 def _is_candidate_feasible(candidate: ProfileParameters | None, config: TrajectoryConfig) -> bool:
     if candidate is None:
         return False
-    return bool(candidate.md_total_m <= config.max_total_md_m + SMALL)
+    if candidate.md_total_m > config.max_total_md_m + SMALL:
+        return False
+    horizontal_limit = config.dls_limits_deg_per_30m.get("HORIZONTAL")
+    if horizontal_limit is not None and candidate.horizontal_dls_deg_per_30m > float(horizontal_limit) + SMALL:
+        return False
+    if candidate.horizontal_inc_deg > config.max_inc_deg + SMALL:
+        return False
+    return True
 
 
 def _required_dls_for_t1_reach(s1_m: float, z1_m: float, inc_entry_deg: float) -> float:
@@ -1341,14 +1569,29 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 azi_to_deg=params.azimuth_entry_deg,
                 name="BUILD2",
             ),
-            HorizontalSegment(
-                length_m=params.horizontal_length_m,
-                inc_deg=params.inc_entry_deg,
-                azi_deg=params.azimuth_entry_deg,
-                name="HORIZONTAL",
-            ),
         ]
     )
+    if params.horizontal_adjust_length_m > SMALL and abs(params.horizontal_inc_deg - params.inc_entry_deg) > 1e-6:
+        segments.append(
+            BuildSegment(
+                inc_from_deg=params.inc_entry_deg,
+                inc_to_deg=params.horizontal_inc_deg,
+                dls_deg_per_30m=params.horizontal_dls_deg_per_30m,
+                azi_deg=params.azimuth_entry_deg,
+                name="HORIZONTAL",
+            )
+        )
+
+    if params.horizontal_hold_length_m > SMALL:
+        segments.append(
+            HorizontalSegment(
+                length_m=params.horizontal_hold_length_m,
+                inc_deg=params.horizontal_inc_deg,
+                azi_deg=params.azimuth_entry_deg,
+                name="HORIZONTAL",
+            )
+        )
+
     return WellTrajectory(segments=segments)
 
 
@@ -1370,6 +1613,7 @@ def _build_summary(
     distance_t3 = _distance_3d(t3_row["X_m"], t3_row["Y_m"], t3_row["Z_m"], t3.x, t3.y, t3.z)
 
     max_dls = float(np.nanmax(df["DLS_deg_per_30m"].to_numpy()))
+    max_inc_actual = float(np.nanmax(df["INC_deg"].to_numpy()))
     summary: dict[str, float | str] = {
         "distance_t1_m": float(distance_t1),
         "distance_t3_m": float(distance_t3),
@@ -1378,6 +1622,12 @@ def _build_summary(
         "entry_inc_deg": float(t1_row["INC_deg"]),
         "entry_inc_target_deg": float(config.entry_inc_target_deg),
         "entry_inc_tolerance_deg": float(config.entry_inc_tolerance_deg),
+        "max_inc_deg": float(config.max_inc_deg),
+        "max_inc_actual_deg": max_inc_actual,
+        "inc_required_t1_t3_deg": float(params.inc_required_t1_t3_deg),
+        "horizontal_adjust_length_m": float(params.horizontal_adjust_length_m),
+        "horizontal_hold_length_m": float(params.horizontal_hold_length_m),
+        "horizontal_inc_deg": float(params.horizontal_inc_deg),
         "hold_inc_deg": float(params.inc_hold_deg),
         "max_dls_total_deg_per_30m": max_dls,
         "md_total_m": float(df["MD_m"].iloc[-1]),
@@ -1417,6 +1667,12 @@ def _assert_solution_is_valid(summary: dict[str, float | str], config: Trajector
         raise PlanningError("Failed to hit t3 within tolerance.")
     if abs(float(summary["entry_inc_deg"]) - config.entry_inc_target_deg) > config.entry_inc_tolerance_deg + 1e-6:
         raise PlanningError("Entry inclination at t1 is outside required target range.")
+    if float(summary["max_inc_actual_deg"]) > config.max_inc_deg + 1e-6:
+        raise PlanningError(
+            "Trajectory exceeds configured max INC. "
+            f"max actual INC={float(summary['max_inc_actual_deg']):.2f} deg, "
+            f"limit={config.max_inc_deg:.2f} deg."
+        )
     for segment, limit in config.dls_limits_deg_per_30m.items():
         actual = float(summary.get(f"max_dls_{segment.lower()}_deg_per_30m", 0.0))
         if actual > limit + 1e-6:
@@ -1442,6 +1698,10 @@ def _validate_config(config: TrajectoryConfig) -> None:
         raise PlanningError("reverse_inc_grid_size must be >= 2.")
     if config.entry_inc_tolerance_deg < 0.0:
         raise PlanningError("entry_inc_tolerance_deg must be non-negative.")
+    if config.max_inc_deg <= 0.0 or config.max_inc_deg > 120.0:
+        raise PlanningError("max_inc_deg must be in (0, 120].")
+    if config.entry_inc_target_deg > config.max_inc_deg + SMALL:
+        raise PlanningError("entry_inc_target_deg cannot exceed max_inc_deg.")
     if config.dls_build_min_deg_per_30m > config.dls_build_max_deg_per_30m:
         raise PlanningError("dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m.")
     if config.max_total_md_m <= 0.0:

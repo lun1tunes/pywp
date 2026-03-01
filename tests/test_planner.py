@@ -192,15 +192,35 @@ def test_planner_validates_invalid_kop_config() -> None:
         )
 
 
-def test_planner_raises_if_entry_angle_from_t1_t3_not_86pm2() -> None:
+def test_planner_allows_post_entry_build_to_match_t3_with_entry_inc_target() -> None:
     planner = TrajectoryPlanner()
     config = TrajectoryConfig(entry_inc_target_deg=86.0, entry_inc_tolerance_deg=2.0)
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
 
-    with pytest.raises(PlanningError):
+    assert abs(float(result.summary["entry_inc_deg"]) - 86.0) <= 2.0
+    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["horizontal_adjust_length_m"]) > 0.0
+
+
+def test_planner_reports_overbend_requirement_when_max_inc_is_too_low() -> None:
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        entry_inc_target_deg=86.0,
+        entry_inc_tolerance_deg=2.0,
+        max_inc_deg=88.0,
+    )
+
+    with pytest.raises(PlanningError, match="without overbend"):
         planner.plan(
             surface=Point3D(0.0, 0.0, 0.0),
-            t1=Point3D(300.0, 0.0, 2500.0),
-            t3=Point3D(700.0, 0.0, 3200.0),  # steeply downward: INC much lower than 84 deg
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2200.0),
             config=config,
         )
 
@@ -286,7 +306,7 @@ def test_objective_mode_minimize_build_dls_not_higher_than_maximize_hold() -> No
     )
 
 
-def test_horizontal_segment_has_zero_dls_when_inc_and_azi_are_constant() -> None:
+def test_horizontal_segment_respects_horizontal_dls_limit_with_post_entry_smoothing() -> None:
     planner = TrajectoryPlanner()
     config = TrajectoryConfig(
         md_step_m=5.0,
@@ -307,7 +327,8 @@ def test_horizontal_segment_has_zero_dls_when_inc_and_azi_are_constant() -> None
 
     horizontal = result.stations[result.stations["segment"] == "HORIZONTAL"]
     assert len(horizontal) > 2
-    assert float(horizontal["DLS_deg_per_30m"].max(skipna=True)) <= 1e-6
+    assert float(horizontal["DLS_deg_per_30m"].max(skipna=True)) <= config.dls_limits_deg_per_30m["HORIZONTAL"] + 1e-6
+    assert float(result.summary["horizontal_adjust_length_m"]) >= 0.0
 
 
 def test_profile_has_all_segments_in_expected_order() -> None:

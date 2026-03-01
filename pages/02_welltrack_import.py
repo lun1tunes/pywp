@@ -40,7 +40,7 @@ TURN_SOLVER_OPTIONS = {
     TURN_SOLVER_DE_HYBRID: "DE Hybrid (глобальный + локальный)",
 }
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
-WT_UI_DEFAULTS_VERSION = 6
+WT_UI_DEFAULTS_VERSION = 7
 CFG_DEFAULTS = TrajectoryConfig()
 WT_PROFILE_DEFAULTS: dict[str, float | int | str] = {
     "wt_cfg_md_step_m": float(CFG_DEFAULTS.md_step_m),
@@ -48,6 +48,7 @@ WT_PROFILE_DEFAULTS: dict[str, float | int | str] = {
     "wt_cfg_pos_tolerance_m": float(CFG_DEFAULTS.pos_tolerance_m),
     "wt_cfg_entry_inc_target_deg": float(CFG_DEFAULTS.entry_inc_target_deg),
     "wt_cfg_entry_inc_tolerance_deg": float(CFG_DEFAULTS.entry_inc_tolerance_deg),
+    "wt_cfg_max_inc_deg": float(CFG_DEFAULTS.max_inc_deg),
     "wt_cfg_dls_build_min": float(CFG_DEFAULTS.dls_build_min_deg_per_30m),
     "wt_cfg_dls_build_max": float(CFG_DEFAULTS.dls_build_max_deg_per_30m),
     "wt_cfg_kop_min_vertical_m": float(CFG_DEFAULTS.kop_min_vertical_m),
@@ -236,7 +237,7 @@ def _all_wells_plan_figure(
 
 def _build_config_form() -> TrajectoryConfig:
     st.markdown("### Параметры расчета")
-    c1, c2, c3, c4, c5 = st.columns(5, gap="small")
+    c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
     md_step_m = c1.number_input(
         "Шаг MD",
         key="wt_cfg_md_step_m",
@@ -273,6 +274,15 @@ def _build_config_form() -> TrajectoryConfig:
         max_value=5.0,
         value=float(WT_PROFILE_DEFAULTS["wt_cfg_entry_inc_tolerance_deg"]),
         step=0.1,
+    )
+    max_inc_deg = c6.number_input(
+        "Макс INC по стволу",
+        key="wt_cfg_max_inc_deg",
+        min_value=80.0,
+        max_value=120.0,
+        value=float(WT_PROFILE_DEFAULTS["wt_cfg_max_inc_deg"]),
+        step=0.5,
+        help="Глобальное ограничение по зенитному углу. При недостатке этого лимита расчет потребует overbend.",
     )
 
     d1, d2, d3 = st.columns(3, gap="small")
@@ -355,6 +365,7 @@ def _build_config_form() -> TrajectoryConfig:
         pos_tolerance_m=float(pos_tolerance_m),
         entry_inc_target_deg=float(entry_inc_target_deg),
         entry_inc_tolerance_deg=float(entry_inc_tolerance_deg),
+        max_inc_deg=float(max_inc_deg),
         dls_build_min_deg_per_30m=min_build,
         dls_build_max_deg_per_30m=max_build,
         kop_min_vertical_m=float(kop_min_vertical_m),
@@ -515,6 +526,34 @@ def run_page() -> None:
     )
     st.markdown("### Загруженные скважины")
     st.dataframe(arrow_safe_text_dataframe(parsed_df), width="stretch", hide_index=True)
+    with st.expander("Исходные данные скважин (вход WELLTRACK)", expanded=False):
+        raw_rows: list[dict[str, object]] = []
+        for record in records:
+            for idx, point in enumerate(record.points, start=1):
+                if idx == 1:
+                    point_label = "S"
+                elif idx == 2:
+                    point_label = "t1"
+                elif idx == 3:
+                    point_label = "t3"
+                else:
+                    point_label = f"p{idx}"
+                raw_rows.append(
+                    {
+                        "Скважина": record.name,
+                        "Порядок": idx,
+                        "Точка": point_label,
+                        "X, м": float(point.x),
+                        "Y, м": float(point.y),
+                        "Z/TVD, м": float(point.z),
+                        "MD (из файла), м": float(point.md),
+                    }
+                )
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(raw_rows)),
+            width="stretch",
+            hide_index=True,
+        )
 
     all_names = [record.name for record in records]
     selected_names = [

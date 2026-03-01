@@ -53,7 +53,7 @@ def test_batch_planner_reports_progress_callback_for_selected_wells() -> None:
             points=(
                 WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
                 WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
-                WelltrackPoint(x=1460.0, y=1950.0, z=2410.0, md=3400.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
             ),
         ),
         WelltrackRecord(

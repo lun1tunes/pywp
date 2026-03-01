@@ -17,8 +17,8 @@ def test_parse_welltracks_sample_file() -> None:
 
     assert [record.name for record in records] == ["PROD-01", "PROD-02", "PROD-03", "PROD-04"]
     assert all(len(record.points) == 3 for record in records)
-    assert records[0].points[1].x == pytest.approx(1500.0)
-    assert records[1].points[2].md == pytest.approx(1322.0)
+    assert records[0].points[1].x == pytest.approx(600.0)
+    assert records[1].points[2].md == pytest.approx(4500.0)
     assert records[2].points[2].md == pytest.approx(1281.5)
 
 

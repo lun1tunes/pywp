@@ -29,6 +29,7 @@ class TrajectoryConfig:
     pos_tolerance_m: float = 2.0
     entry_inc_target_deg: float = 86.0
     entry_inc_tolerance_deg: float = 2.0
+    max_inc_deg: float = 90.0
 
     dls_build_min_deg_per_30m: float = 0.5
     dls_build_max_deg_per_30m: float = 3.0
