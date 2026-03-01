@@ -34,8 +34,8 @@ from pywp.ui_well_panels import (
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
-WT_UI_DEFAULTS_VERSION = 7
-WT_PROFILE_DEFAULTS: dict[str, float | int | str] = {
+WT_UI_DEFAULTS_VERSION = 8
+WT_PROFILE_DEFAULTS: dict[str, float | int | str | bool] = {
     "wt_cfg_md_step_m": float(CFG_DEFAULTS.md_step_m),
     "wt_cfg_md_step_control_m": float(CFG_DEFAULTS.md_step_control_m),
     "wt_cfg_pos_tolerance_m": float(CFG_DEFAULTS.pos_tolerance_m),
@@ -49,6 +49,12 @@ WT_PROFILE_DEFAULTS: dict[str, float | int | str] = {
     "wt_cfg_turn_solver_mode": str(CFG_DEFAULTS.turn_solver_mode),
     "wt_cfg_turn_solver_qmc_samples": int(CFG_DEFAULTS.turn_solver_qmc_samples),
     "wt_cfg_turn_solver_local_starts": int(CFG_DEFAULTS.turn_solver_local_starts),
+    "wt_cfg_adaptive_grid_enabled": bool(CFG_DEFAULTS.adaptive_grid_enabled),
+    "wt_cfg_adaptive_grid_initial_size": int(CFG_DEFAULTS.adaptive_grid_initial_size),
+    "wt_cfg_adaptive_grid_refine_levels": int(CFG_DEFAULTS.adaptive_grid_refine_levels),
+    "wt_cfg_adaptive_grid_top_k": int(CFG_DEFAULTS.adaptive_grid_top_k),
+    "wt_cfg_parallel_jobs": int(CFG_DEFAULTS.parallel_jobs),
+    "wt_cfg_profile_cache_enabled": bool(CFG_DEFAULTS.profile_cache_enabled),
 }
 
 
@@ -443,6 +449,62 @@ def _build_config_form() -> TrajectoryConfig:
                 "Дефолт 12 — рабочий стандарт."
             ),
         )
+        st.markdown("**Производительность и поиск**")
+        p1, p2 = st.columns(2, gap="small")
+        p1.toggle(
+            "Adaptive coarse-to-fine",
+            key="wt_cfg_adaptive_grid_enabled",
+            value=bool(WT_PROFILE_DEFAULTS["wt_cfg_adaptive_grid_enabled"]),
+            help=(
+                "Итеративно уточняет сетку KOP/reverse INC вокруг лучших кандидатов. "
+                "Обычно ускоряет расчет без потери качества."
+            ),
+        )
+        p2.toggle(
+            "Кэш профилей",
+            key="wt_cfg_profile_cache_enabled",
+            value=bool(WT_PROFILE_DEFAULTS["wt_cfg_profile_cache_enabled"]),
+            help=(
+                "Кэширует промежуточные расчеты профиля в рамках оптимизации. "
+                "Полезно для ускорения при повторных оценках."
+            ),
+        )
+        p3, p4, p5 = st.columns(3, gap="small")
+        p3.number_input(
+            "Adaptive initial grid",
+            key="wt_cfg_adaptive_grid_initial_size",
+            min_value=2,
+            value=int(WT_PROFILE_DEFAULTS["wt_cfg_adaptive_grid_initial_size"]),
+            step=1,
+            help="Размер стартовой coarse-сетки для KOP/reverse INC.",
+        )
+        p4.number_input(
+            "Adaptive refine levels",
+            key="wt_cfg_adaptive_grid_refine_levels",
+            min_value=0,
+            value=int(WT_PROFILE_DEFAULTS["wt_cfg_adaptive_grid_refine_levels"]),
+            step=1,
+            help="Количество итераций уточнения сетки вокруг лучших решений.",
+        )
+        p5.number_input(
+            "Adaptive top-k",
+            key="wt_cfg_adaptive_grid_top_k",
+            min_value=1,
+            value=int(WT_PROFILE_DEFAULTS["wt_cfg_adaptive_grid_top_k"]),
+            step=1,
+            help="Сколько лучших кандидатов брать как фокус для следующего refinement.",
+        )
+        st.number_input(
+            "Parallel jobs",
+            key="wt_cfg_parallel_jobs",
+            min_value=1,
+            value=int(WT_PROFILE_DEFAULTS["wt_cfg_parallel_jobs"]),
+            step=1,
+            help=(
+                "Число процессов для параллельной оценки кандидатов в coplanar режиме. "
+                "1 = без параллелизма."
+            ),
+        )
 
     return build_trajectory_config(
         md_step_m=float(md_step_m),
@@ -460,6 +522,12 @@ def _build_config_form() -> TrajectoryConfig:
         turn_solver_local_starts=int(
             st.session_state["wt_cfg_turn_solver_local_starts"]
         ),
+        adaptive_grid_enabled=bool(st.session_state["wt_cfg_adaptive_grid_enabled"]),
+        adaptive_grid_initial_size=int(st.session_state["wt_cfg_adaptive_grid_initial_size"]),
+        adaptive_grid_refine_levels=int(st.session_state["wt_cfg_adaptive_grid_refine_levels"]),
+        adaptive_grid_top_k=int(st.session_state["wt_cfg_adaptive_grid_top_k"]),
+        parallel_jobs=int(st.session_state["wt_cfg_parallel_jobs"]),
+        profile_cache_enabled=bool(st.session_state["wt_cfg_profile_cache_enabled"]),
     )
 
 

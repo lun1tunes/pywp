@@ -291,6 +291,94 @@ def test_planner_validates_adaptive_and_parallel_controls() -> None:
         planner.plan(**base_kwargs, config=TrajectoryConfig(parallel_jobs=0))
 
 
+@pytest.mark.parametrize("objective_mode", ["maximize_hold", "minimize_build_dls"])
+def test_adaptive_search_objective_is_not_worse_than_dense_baseline(
+    objective_mode: str,
+) -> None:
+    planner = TrajectoryPlanner()
+    base_kwargs = dict(
+        md_step_m=10.0,
+        md_step_control_m=2.0,
+        pos_tolerance_m=2.0,
+        entry_inc_target_deg=86.0,
+        entry_inc_tolerance_deg=2.0,
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=10.0,
+        objective_mode=objective_mode,
+        kop_search_grid_size=61,
+        adaptive_grid_initial_size=3,
+        adaptive_grid_refine_levels=0,
+        adaptive_grid_top_k=1,
+        parallel_jobs=1,
+    )
+    dense_config = TrajectoryConfig(**base_kwargs, adaptive_grid_enabled=False)
+    adaptive_config = TrajectoryConfig(**base_kwargs, adaptive_grid_enabled=True)
+
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(600.0, 800.0, 2400.0)
+    t3 = Point3D(1500.0, 2000.0, 2500.0)
+    result_dense = planner.plan(surface=surface, t1=t1, t3=t3, config=dense_config)
+    result_adaptive = planner.plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=adaptive_config,
+    )
+
+    hold_dense = float(result_dense.summary["hold_length_m"])
+    hold_adaptive = float(result_adaptive.summary["hold_length_m"])
+    dls_dense = float(result_dense.summary["max_dls_build1_deg_per_30m"])
+    dls_adaptive = float(result_adaptive.summary["max_dls_build1_deg_per_30m"])
+
+    if objective_mode == "maximize_hold":
+        assert hold_adaptive >= hold_dense - 1e-6
+        if abs(hold_adaptive - hold_dense) <= 1e-4:
+            assert dls_adaptive <= dls_dense + 1e-6
+    else:
+        assert dls_adaptive <= dls_dense + 1e-6
+        if abs(dls_adaptive - dls_dense) <= 1e-4:
+            assert hold_adaptive >= hold_dense - 1e-6
+
+    assert str(result_dense.summary["solver_adaptive_dense_check"]) == "no"
+    assert str(result_adaptive.summary["solver_adaptive_dense_check"]) == "yes"
+
+
+def test_parallel_fallback_is_reported_in_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BrokenExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "_BrokenExecutor":
+            raise RuntimeError("forced parallel failure for test")
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+    monkeypatch.setattr("pywp.planner.ProcessPoolExecutor", _BrokenExecutor)
+    planner = TrajectoryPlanner()
+    config = TrajectoryConfig(
+        parallel_jobs=2,
+        adaptive_grid_enabled=False,
+        kop_search_grid_size=21,
+    )
+
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
+    assert str(result.summary["solver_parallel_status"]) == "fallback_to_sequential"
+    assert str(result.summary["solver_parallel_fallback"]) == "yes"
+    assert float(result.summary["solver_parallel_fallback_batches"]) >= 1.0
+    assert "forced parallel failure for test" in str(
+        result.summary["solver_parallel_fallback_reason"]
+    )
+
+
 def test_reverse_turn_summary_uses_configured_turn_solver_depth_without_hidden_minima() -> None:
     planner = TrajectoryPlanner()
     config = TrajectoryConfig(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from time import perf_counter
 
@@ -8,6 +8,17 @@ import pandas as pd
 import streamlit as st
 
 from pywp import Point3D, TrajectoryConfig, TrajectoryPlanner
+from pywp.classification import (
+    COMPLEXITY_COMPLEX,
+    COMPLEXITY_ORDINARY,
+    COMPLEXITY_VERY_COMPLEX,
+    TRAJECTORY_REVERSE_DIRECTION,
+    TRAJECTORY_SAME_DIRECTION,
+    complexity_label,
+    interpolate_limits,
+    reference_table_rows,
+    trajectory_type_label,
+)
 from pywp.planner import PlanningError
 from pywp.planner_config import (
     CFG_DEFAULTS,
@@ -25,45 +36,165 @@ from pywp.ui_well_panels import (
     render_trajectory_dls_panel,
 )
 
+@dataclass(frozen=True)
+class ScenarioPreset:
+    name: str
+    gv_m: float
+    trajectory_type: str
+    complexity: str
+    surface: Point3D
+    t1: Point3D
+    t3: Point3D
+    description: str = ""
+
+
+SCENARIO_PRESETS: tuple[ScenarioPreset, ...] = (
+    ScenarioPreset(
+        name="Базовый пример: ГВ 2400, прямое направление",
+        gv_m=2400.0,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        complexity=COMPLEXITY_ORDINARY,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        description="Универсальный стартовый шаблон для быстрых проверок.",
+    ),
+    ScenarioPreset(
+        name="Типовой: ГВ 3000, обратное направление, обычная",
+        gv_m=3000.0,
+        trajectory_type=TRAJECTORY_REVERSE_DIRECTION,
+        complexity=COMPLEXITY_ORDINARY,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(300.0, 400.0, 3000.0),
+        t3=Point3D(1020.0, 1360.0, 3083.9122),
+        description="Обратное направление в диапазоне offset из референсной таблицы.",
+    ),
+    ScenarioPreset(
+        name="Типовой: ГВ 2000, обратное направление, очень сложная",
+        gv_m=2000.0,
+        trajectory_type=TRAJECTORY_REVERSE_DIRECTION,
+        complexity=COMPLEXITY_VERY_COMPLEX,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(210.0, 280.0, 2000.0),
+        t3=Point3D(810.0, 1080.0, 2069.9268),
+        description="Сценарий с повышенной геометрической сложностью для reverse-кейса.",
+    ),
+    ScenarioPreset(
+        name="Типовой: ГВ 2000, прямое направление, обычная",
+        gv_m=2000.0,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        complexity=COMPLEXITY_ORDINARY,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(540.0, 720.0, 2000.0),
+        t3=Point3D(1140.0, 1520.0, 2069.9268),
+        description="Базовый same-direction кейс на 2000 м.",
+    ),
+    ScenarioPreset(
+        name="Типовой: ГВ 3600, прямое направление, сложная",
+        gv_m=3600.0,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        complexity=COMPLEXITY_COMPLEX,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1500.0, 2000.0, 3600.0),
+        t3=Point3D(2520.0, 3360.0, 3718.8756),
+        description="Сложный same-direction кейс для типовой глубины 3600 м.",
+    ),
+    ScenarioPreset(
+        name="Типовой: ГВ 3600, прямое направление, очень сложная",
+        gv_m=3600.0,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        complexity=COMPLEXITY_VERY_COMPLEX,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(2160.0, 2880.0, 3600.0),
+        t3=Point3D(3360.0, 4480.0, 3739.8536),
+        description="Очень сложный same-direction кейс с большим отходом t1.",
+    ),
+)
+SCENARIO_BY_NAME = {preset.name: preset for preset in SCENARIO_PRESETS}
 SCENARIOS = {
-    "default": {
-        "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(600.0, 800.0, 2400.0),
-        "t3": Point3D(1500.0, 2000.0, 2500.0),
-    },
-    "Типовой: ГВ 3000, обратное направление, обычная": {
-        "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(300.0, 400.0, 3000.0),
-        "t3": Point3D(1020.0, 1360.0, 3083.9122),
-    },
-    "Типовой: ГВ 2000, обратное направление, очень сложная": {
-        "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(210.0, 280.0, 2000.0),
-        "t3": Point3D(810.0, 1080.0, 2069.9268),
-    },
-    "Типовой: ГВ 2000, прямое направление, обычная": {
-        "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(540.0, 720.0, 2000.0),
-        "t3": Point3D(1140.0, 1520.0, 2069.9268),
-    },
-    "Типовой: ГВ 3600, прямое направление, сложная": {
-        "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(1500.0, 2000.0, 3600.0),
-        "t3": Point3D(2520.0, 3360.0, 3718.8756),
-    },
-    "Типовой: ГВ 3600, прямое направление, очень сложная": {
-        "surface": Point3D(0.0, 0.0, 0.0),
-        "t1": Point3D(2160.0, 2880.0, 3600.0),
-        "t3": Point3D(3360.0, 4480.0, 3739.8536),
-    },
+    preset.name: {
+        "surface": preset.surface,
+        "t1": preset.t1,
+        "t3": preset.t3,
+    }
+    for preset in SCENARIO_PRESETS
 }
-UI_DEFAULTS_VERSION = 6
+DEPTH_FILTER_ALL = "all"
+DEPTH_FILTER_OPTIONS: tuple[str | float, ...] = (
+    DEPTH_FILTER_ALL,
+    *tuple(sorted({float(preset.gv_m) for preset in SCENARIO_PRESETS})),
+)
+COMPLEXITY_OPTIONS: tuple[str, ...] = (
+    COMPLEXITY_ORDINARY,
+    COMPLEXITY_COMPLEX,
+    COMPLEXITY_VERY_COMPLEX,
+)
+TRAJECTORY_OPTIONS: tuple[str, ...] = (
+    TRAJECTORY_SAME_DIRECTION,
+    TRAJECTORY_REVERSE_DIRECTION,
+)
+UI_DEFAULTS_VERSION = 7
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
     dx = float(point.x - reference.x)
     dy = float(point.y - reference.y)
     return float((dx * dx + dy * dy) ** 0.5)
+
+
+def _depth_filter_label(value: str | float) -> str:
+    if value == DEPTH_FILTER_ALL:
+        return "Любая типовая глубина"
+    return f"{int(float(value))} м"
+
+
+def _preset_reverse_window_label(gv_m: float) -> str:
+    limits = interpolate_limits(gv_m=float(gv_m))
+    if not limits.reverse_allowed:
+        return "Не допускается"
+    return f"{float(limits.reverse_min_m):.0f}-{float(limits.reverse_max_m):.0f} м"
+
+
+def _apply_template_filters_for_scenario(scenario_name: str) -> None:
+    preset = SCENARIO_BY_NAME.get(scenario_name)
+    if preset is None:
+        return
+    st.session_state["template_depth_filter"] = float(preset.gv_m)
+    st.session_state["template_trajectory_type"] = str(preset.trajectory_type)
+    st.session_state["template_complexity"] = str(preset.complexity)
+
+
+def _filtered_scenario_names(
+    depth_filter: str | float,
+    trajectory_type: str,
+    complexity: str,
+) -> list[str]:
+    depth_value = None if depth_filter == DEPTH_FILTER_ALL else float(depth_filter)
+    by_type = [
+        preset
+        for preset in SCENARIO_PRESETS
+        if preset.trajectory_type == trajectory_type
+    ]
+    by_type_depth = (
+        by_type
+        if depth_value is None
+        else [
+            preset
+            for preset in by_type
+            if abs(float(preset.gv_m) - depth_value) < 1e-6
+        ]
+    )
+    exact = [preset for preset in by_type_depth if preset.complexity == complexity]
+    if exact:
+        return [preset.name for preset in exact]
+    by_type_complex = [preset for preset in by_type if preset.complexity == complexity]
+    if by_type_complex:
+        return [preset.name for preset in by_type_complex]
+    if by_type_depth:
+        return [preset.name for preset in by_type_depth]
+    if by_type:
+        return [preset.name for preset in by_type]
+    return [preset.name for preset in SCENARIO_PRESETS]
 
 
 def _apply_scenario(name: str) -> None:
@@ -73,11 +204,29 @@ def _apply_scenario(name: str) -> None:
         st.session_state[f"{prefix}_x"] = float(point.x)
         st.session_state[f"{prefix}_y"] = float(point.y)
         st.session_state[f"{prefix}_z"] = float(point.z)
+    st.session_state["scenario_name"] = str(name)
+    _apply_template_filters_for_scenario(str(name))
 
 
 def _init_state() -> None:
     default_scenario = next(iter(SCENARIOS.keys()))
     st.session_state.setdefault("scenario_name", default_scenario)
+    if str(st.session_state["scenario_name"]) not in SCENARIOS:
+        st.session_state["scenario_name"] = default_scenario
+    current_preset = SCENARIO_BY_NAME.get(str(st.session_state["scenario_name"]))
+    default_template_depth: str | float = DEPTH_FILTER_ALL
+    default_template_type = str(TRAJECTORY_SAME_DIRECTION)
+    default_template_complexity = str(COMPLEXITY_ORDINARY)
+    if current_preset is not None:
+        default_template_depth = float(current_preset.gv_m)
+        default_template_type = str(current_preset.trajectory_type)
+        default_template_complexity = str(current_preset.complexity)
+    st.session_state.setdefault("template_depth_filter", default_template_depth)
+    st.session_state.setdefault(
+        "template_trajectory_type",
+        default_template_type,
+    )
+    st.session_state.setdefault("template_complexity", default_template_complexity)
 
     if "surface_x" not in st.session_state:
         _apply_scenario(st.session_state["scenario_name"])
@@ -163,6 +312,7 @@ def _init_state() -> None:
         st.session_state["profile_cache_enabled"] = bool(
             CFG_DEFAULTS.profile_cache_enabled
         )
+        _apply_template_filters_for_scenario(str(st.session_state["scenario_name"]))
         st.session_state["ui_defaults_version"] = UI_DEFAULTS_VERSION
 
     st.session_state.setdefault("last_result", None)
@@ -377,22 +527,102 @@ def _run_solver_profiling() -> None:
 
 
 def _render_template_controls() -> None:
-    top_left, top_mid, top_right = st.columns([1.5, 1.1, 3.0], gap="small")
-    with top_left:
-        st.selectbox("Шаблон", options=list(SCENARIOS.keys()), key="scenario_name")
-    with top_mid:
-        render_small_note("Действия шаблона")
-        if st.button("Применить шаблон", icon=":material/sync:", width="stretch"):
-            _apply_scenario(st.session_state["scenario_name"])
-            st.rerun()
-        if st.button("Очистить результат", icon=":material/delete:", width="stretch"):
-            _clear_result()
-            st.rerun()
-    with top_right:
+    with st.container(border=True):
+        st.markdown("### Каталог шаблонов конструкции")
         render_small_note(
-            "Подсказка: измените параметры в форме и нажмите «Построить траекторию». "
-            "Последний успешный расчет сохраняется до следующего запуска."
+            "Выберите тип конструкции, класс сложности и типовую глубину. "
+            "Шаблоны соответствуют вашей таблице классификации и ускоряют старт настройки."
         )
+        f1, f2, f3, f4 = st.columns([1.2, 1.8, 1.8, 2.8], gap="small")
+        with f1:
+            st.selectbox(
+                "Типовая ГВ t1",
+                options=list(DEPTH_FILTER_OPTIONS),
+                key="template_depth_filter",
+                format_func=_depth_filter_label,
+            )
+        with f2:
+            st.radio(
+                "Тип конструкции",
+                options=list(TRAJECTORY_OPTIONS),
+                key="template_trajectory_type",
+                format_func=trajectory_type_label,
+                horizontal=True,
+            )
+        with f3:
+            st.radio(
+                "Класс сложности",
+                options=list(COMPLEXITY_OPTIONS),
+                key="template_complexity",
+                format_func=complexity_label,
+                horizontal=True,
+            )
+
+        selected_depth_filter = st.session_state["template_depth_filter"]
+        selected_trajectory = str(st.session_state["template_trajectory_type"])
+        selected_complexity = str(st.session_state["template_complexity"])
+        filtered_names = _filtered_scenario_names(
+            depth_filter=selected_depth_filter,
+            trajectory_type=selected_trajectory,
+            complexity=selected_complexity,
+        )
+        if str(st.session_state["scenario_name"]) not in filtered_names:
+            st.session_state["scenario_name"] = filtered_names[0]
+
+        with f4:
+            st.selectbox(
+                "Шаблон",
+                options=filtered_names,
+                key="scenario_name",
+                help="Показаны шаблоны в выбранном диапазоне глубины и типе конструкции.",
+            )
+
+        selected_name = str(st.session_state["scenario_name"])
+        selected_preset = SCENARIO_BY_NAME[selected_name]
+        depth_exact = (
+            selected_depth_filter == DEPTH_FILTER_ALL
+            or abs(float(selected_preset.gv_m) - float(selected_depth_filter)) < 1e-6
+        )
+        complexity_exact = selected_preset.complexity == selected_complexity
+        if not (depth_exact and complexity_exact):
+            st.info(
+                "Для выбранных фильтров нет точного шаблона. "
+                "Показан ближайший доступный вариант в выбранном типе конструкции."
+            )
+        if selected_preset.description:
+            st.caption(selected_preset.description)
+
+        offset_t1 = _horizontal_offset_m(
+            point=selected_preset.t1,
+            reference=selected_preset.surface,
+        )
+        reverse_window = _preset_reverse_window_label(gv_m=selected_preset.gv_m)
+        m1, m2, m3, m4 = st.columns(4, gap="small")
+        m1.metric("ГВ t1", f"{selected_preset.gv_m:.0f} м")
+        m2.metric("Отход t1", f"{offset_t1:.0f} м")
+        m3.metric("Окно reverse", reverse_window)
+        m4.metric("Класс шаблона", complexity_label(selected_preset.complexity))
+
+        a1, a2 = st.columns([1.2, 3.8], gap="small")
+        with a1:
+            render_small_note("Действия шаблона")
+            if st.button("Применить шаблон", icon=":material/sync:", width="stretch"):
+                _apply_scenario(st.session_state["scenario_name"])
+                st.rerun()
+            if st.button("Очистить результат", icon=":material/delete:", width="stretch"):
+                _clear_result()
+                st.rerun()
+        with a2:
+            render_small_note(
+                "Подсказка: после применения шаблона можно вручную скорректировать координаты S/t1/t3. "
+                "Последний успешный расчет сохраняется до следующего запуска."
+            )
+            with st.expander("Референс классов по типовым глубинам", expanded=False):
+                st.dataframe(
+                    arrow_safe_text_dataframe(pd.DataFrame(reference_table_rows())),
+                    width="stretch",
+                    hide_index=True,
+                )
 
 
 def _render_input_form() -> bool:

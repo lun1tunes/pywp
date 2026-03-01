@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import product
 from typing import Callable
 
 import numpy as np
@@ -144,6 +145,25 @@ class _ReverseDirectionTaskInput:
     horizontal_dls_deg_per_30m: float
 
 
+@dataclass(frozen=True)
+class _BatchExecutionMetadata:
+    requested_jobs: int
+    attempted_parallel: bool
+    used_parallel: bool
+    fallback_reason: str | None = None
+
+
+@dataclass
+class _SolverRuntimeContext:
+    parallel_requested_jobs: int
+    parallel_batches_total: int = 0
+    parallel_batches_parallel: int = 0
+    parallel_fallback_batches: int = 0
+    parallel_fallback_reasons: list[str] = field(default_factory=list)
+    adaptive_dense_validation_performed: bool = False
+    candidate_evaluations: int = 0
+
+
 class TrajectoryPlanner:
     def plan(
         self,
@@ -153,6 +173,9 @@ class TrajectoryPlanner:
         config: TrajectoryConfig,
     ) -> PlannerResult:
         _validate_config(config)
+        runtime_context = _SolverRuntimeContext(
+            parallel_requested_jobs=int(max(config.parallel_jobs, 1))
+        )
 
         geometry = _build_section_geometry(surface=surface, t1=t1, t3=t3, config=config)
         horizontal_offset_t1_m = _horizontal_offset(surface=surface, point=t1)
@@ -160,12 +183,20 @@ class TrajectoryPlanner:
 
         if trajectory_type == TRAJECTORY_REVERSE_DIRECTION:
             if _is_geometry_coplanar(geometry=geometry, tolerance_m=config.pos_tolerance_m):
-                params = _solve_reverse_direction_profile(geometry=geometry, config=config)
+                params = _solve_reverse_direction_profile(
+                    geometry=geometry,
+                    config=config,
+                    runtime_context=runtime_context,
+                )
             else:
                 params = _solve_reverse_direction_profile_with_turn(geometry=geometry, config=config)
         else:
             if _is_geometry_coplanar(geometry=geometry, tolerance_m=config.pos_tolerance_m):
-                params = _solve_same_direction_profile(geometry=geometry, config=config)
+                params = _solve_same_direction_profile(
+                    geometry=geometry,
+                    config=config,
+                    runtime_context=runtime_context,
+                )
             else:
                 params = _solve_same_direction_profile_with_turn(geometry=geometry, config=config)
 
@@ -192,6 +223,7 @@ class TrajectoryPlanner:
             horizontal_offset_t1_m=horizontal_offset_t1_m,
             classification=classification,
             config=config,
+            runtime_context=runtime_context,
         )
         _assert_solution_is_valid(summary=summary, config=config)
 
@@ -267,6 +299,15 @@ def _float_cache_key(*values: float) -> tuple[float, ...]:
     return tuple(float(np.round(value, decimals=8)) for value in values)
 
 
+def _axis_grid_keys(axis_values: tuple[np.ndarray, ...]) -> list[tuple[float, ...]]:
+    if not axis_values:
+        return []
+    axis_lists = [np.asarray(axis, dtype=float).tolist() for axis in axis_values]
+    if any(len(axis) == 0 for axis in axis_lists):
+        return []
+    return [tuple(float(value) for value in key) for key in product(*axis_lists)]
+
+
 def _adaptive_axis_initial_points(
     dense_points: np.ndarray,
     initial_size: int,
@@ -312,24 +353,197 @@ def _refine_axis_points(
     return np.asarray(merged, dtype=float)
 
 
+def _refine_axes_around_focus_points(
+    axis_values: tuple[np.ndarray, ...],
+    focus_keys: list[tuple[float, ...]],
+    dense_axes: tuple[np.ndarray, ...],
+) -> tuple[np.ndarray, ...]:
+    refined_axes: list[np.ndarray] = []
+    for idx, axis in enumerate(axis_values):
+        focus = [float(key[idx]) for key in focus_keys]
+        refined_axes.append(
+            _refine_axis_points(
+                axis_points=axis,
+                focus_points=focus,
+                lo=float(dense_axes[idx][0]),
+                hi=float(dense_axes[idx][-1]),
+            )
+        )
+    return tuple(refined_axes)
+
+
+def _axes_equal(lhs_axes: tuple[np.ndarray, ...], rhs_axes: tuple[np.ndarray, ...]) -> bool:
+    if len(lhs_axes) != len(rhs_axes):
+        return False
+    for lhs, rhs in zip(lhs_axes, rhs_axes, strict=True):
+        if lhs.size != rhs.size or not np.allclose(lhs, rhs):
+            return False
+    return True
+
+
+def _rank_feasible_candidates(
+    evaluated: dict[tuple[float, ...], ProfileParameters | None],
+    objective_mode: str,
+) -> list[tuple[tuple[float, ...], ProfileParameters]]:
+    ranked = [
+        (key, candidate)
+        for key, candidate in evaluated.items()
+        if candidate is not None
+    ]
+    ranked.sort(key=lambda pair: _candidate_rank(pair[1], objective_mode))
+    return ranked
+
+
 def _run_task_batch(
     tasks: list[object],
     worker: Callable[[object], object],
     parallel_jobs: int,
-) -> list[object]:
+) -> tuple[list[object], _BatchExecutionMetadata]:
     if not tasks:
-        return []
+        return (
+            [],
+            _BatchExecutionMetadata(
+                requested_jobs=int(max(parallel_jobs, 1)),
+                attempted_parallel=False,
+                used_parallel=False,
+                fallback_reason=None,
+            ),
+        )
     jobs = int(max(parallel_jobs, 1))
     if jobs <= 1 or len(tasks) <= 1:
-        return [worker(task) for task in tasks]
+        return (
+            [worker(task) for task in tasks],
+            _BatchExecutionMetadata(
+                requested_jobs=jobs,
+                attempted_parallel=False,
+                used_parallel=False,
+                fallback_reason=None,
+            ),
+        )
     try:
         with ProcessPoolExecutor(max_workers=jobs) as executor:
-            return list(executor.map(worker, tasks, chunksize=1))
-    except Exception:
-        return [worker(task) for task in tasks]
+            return (
+                list(executor.map(worker, tasks, chunksize=1)),
+                _BatchExecutionMetadata(
+                    requested_jobs=jobs,
+                    attempted_parallel=True,
+                    used_parallel=True,
+                    fallback_reason=None,
+                ),
+            )
+    except Exception as exc:  # noqa: BLE001
+        return (
+            [worker(task) for task in tasks],
+            _BatchExecutionMetadata(
+                requested_jobs=jobs,
+                attempted_parallel=True,
+                used_parallel=False,
+                fallback_reason=f"{exc.__class__.__name__}: {exc}",
+            ),
+        )
 
 
-def _same_direction_task_worker(task: _SameDirectionTaskInput) -> tuple[float, ProfileParameters | None]:
+def _record_batch_execution(
+    runtime_context: _SolverRuntimeContext,
+    metadata: _BatchExecutionMetadata,
+) -> None:
+    runtime_context.parallel_requested_jobs = max(
+        int(runtime_context.parallel_requested_jobs),
+        int(metadata.requested_jobs),
+    )
+    if not metadata.attempted_parallel:
+        return
+    runtime_context.parallel_batches_total += 1
+    if metadata.used_parallel:
+        runtime_context.parallel_batches_parallel += 1
+    if metadata.fallback_reason:
+        runtime_context.parallel_fallback_batches += 1
+        if (
+            metadata.fallback_reason not in runtime_context.parallel_fallback_reasons
+            and len(runtime_context.parallel_fallback_reasons) < 3
+        ):
+            runtime_context.parallel_fallback_reasons.append(metadata.fallback_reason)
+
+
+def _search_coplanar_profile_with_adaptive_grid(
+    dense_axes: tuple[np.ndarray, ...],
+    config: TrajectoryConfig,
+    evaluate_candidates: Callable[
+        [list[tuple[float, ...]]],
+        list[tuple[tuple[float, ...], ProfileParameters | None]],
+    ],
+    runtime_context: _SolverRuntimeContext,
+) -> ProfileParameters | None:
+    evaluated: dict[tuple[float, ...], ProfileParameters | None] = {}
+    best: ProfileParameters | None = None
+
+    def evaluate_axis_values(axis_values: tuple[np.ndarray, ...]) -> None:
+        nonlocal best
+        pending_keys: list[tuple[float, ...]] = []
+        for key in _axis_grid_keys(axis_values):
+            normalized_key = _float_cache_key(*key)
+            if normalized_key in evaluated:
+                continue
+            pending_keys.append(normalized_key)
+        if not pending_keys:
+            return
+
+        runtime_context.candidate_evaluations += len(pending_keys)
+        for key, candidate in evaluate_candidates(pending_keys):
+            normalized_key = _float_cache_key(*key)
+            if normalized_key in evaluated:
+                continue
+            evaluated[normalized_key] = candidate
+            if candidate is None:
+                continue
+            best = _select_better_candidate(
+                current=best,
+                candidate=candidate,
+                objective_mode=config.objective_mode,
+            )
+
+    if not config.adaptive_grid_enabled:
+        evaluate_axis_values(dense_axes)
+        return best
+
+    axis_values = tuple(
+        _adaptive_axis_initial_points(
+            dense_points=dense_axis,
+            initial_size=config.adaptive_grid_initial_size,
+        )
+        for dense_axis in dense_axes
+    )
+    refine_levels = int(max(config.adaptive_grid_refine_levels, 0))
+    top_k = int(max(config.adaptive_grid_top_k, 1))
+
+    for level in range(refine_levels + 1):
+        evaluate_axis_values(axis_values)
+        ranked = _rank_feasible_candidates(
+            evaluated=evaluated,
+            objective_mode=config.objective_mode,
+        )
+        if not ranked:
+            break
+        if level >= refine_levels:
+            break
+        focus_keys = [key for key, _ in ranked[:top_k]]
+        refined_axes = _refine_axes_around_focus_points(
+            axis_values=axis_values,
+            focus_keys=focus_keys,
+            dense_axes=dense_axes,
+        )
+        if _axes_equal(refined_axes, axis_values):
+            break
+        axis_values = refined_axes
+
+    runtime_context.adaptive_dense_validation_performed = True
+    evaluate_axis_values(dense_axes)
+    return best
+
+
+def _same_direction_task_worker(
+    task: _SameDirectionTaskInput,
+) -> tuple[tuple[float, ...], ProfileParameters | None]:
     candidate = _optimize_profile_for_objective(
         lower_dls=float(task.lower_dls),
         upper_dls=float(task.upper_dls),
@@ -344,12 +558,12 @@ def _same_direction_task_worker(task: _SameDirectionTaskInput) -> tuple[float, P
         objective_mode=task.config.objective_mode,
         config=task.config,
     )
-    return float(task.kop_vertical_m), candidate
+    return _float_cache_key(float(task.kop_vertical_m)), candidate
 
 
 def _reverse_direction_task_worker(
     task: _ReverseDirectionTaskInput,
-) -> tuple[float, float, ProfileParameters | None]:
+) -> tuple[tuple[float, ...], ProfileParameters | None]:
     candidate = _optimize_profile_for_objective(
         lower_dls=float(task.lower_dls),
         upper_dls=float(task.upper_dls),
@@ -365,7 +579,7 @@ def _reverse_direction_task_worker(
         objective_mode=task.config.objective_mode,
         config=task.config,
     )
-    return float(task.kop_vertical_m), float(task.reverse_inc_deg), candidate
+    return _float_cache_key(float(task.kop_vertical_m), float(task.reverse_inc_deg)), candidate
 
 
 def _search_same_direction_coplanar_profile(
@@ -374,87 +588,43 @@ def _search_same_direction_coplanar_profile(
     lower_dls: float,
     upper_dls: float,
     horizontal_dls_deg_per_30m: float,
+    runtime_context: _SolverRuntimeContext,
 ) -> ProfileParameters | None:
     dense_kops = _iter_kop_candidates(geometry=geometry, config=config)
     if dense_kops.size == 0:
         return None
 
-    evaluated: dict[tuple[float, ...], ProfileParameters | None] = {}
-    best: ProfileParameters | None = None
-
-    def evaluate_kops(kop_values: np.ndarray) -> None:
-        nonlocal best
-        unique_values = [float(value) for value in np.asarray(kop_values, dtype=float).tolist()]
-        tasks: list[_SameDirectionTaskInput] = []
-        for kop in unique_values:
-            key = _float_cache_key(kop)
-            if key in evaluated:
-                continue
-            tasks.append(
-                _SameDirectionTaskInput(
-                    geometry=geometry,
-                    config=config,
-                    lower_dls=lower_dls,
-                    upper_dls=upper_dls,
-                    kop_vertical_m=kop,
-                    horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
-                )
+    def evaluate_candidates(
+        candidate_keys: list[tuple[float, ...]],
+    ) -> list[tuple[tuple[float, ...], ProfileParameters | None]]:
+        tasks = [
+            _SameDirectionTaskInput(
+                geometry=geometry,
+                config=config,
+                lower_dls=lower_dls,
+                upper_dls=upper_dls,
+                kop_vertical_m=float(key[0]),
+                horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
             )
-
-        results = _run_task_batch(
+            for key in candidate_keys
+        ]
+        results, metadata = _run_task_batch(
             tasks=tasks,
             worker=_same_direction_task_worker,
             parallel_jobs=config.parallel_jobs,
         )
-        for kop_value, candidate in results:
-            evaluated[_float_cache_key(float(kop_value))] = candidate
-            if candidate is None:
-                continue
-            best = _select_better_candidate(
-                current=best,
-                candidate=candidate,
-                objective_mode=config.objective_mode,
-            )
-
-    if not config.adaptive_grid_enabled:
-        evaluate_kops(dense_kops)
-        return best
-
-    axis_values = _adaptive_axis_initial_points(
-        dense_points=dense_kops,
-        initial_size=config.adaptive_grid_initial_size,
-    )
-    refine_levels = int(max(config.adaptive_grid_refine_levels, 0))
-    top_k = int(max(config.adaptive_grid_top_k, 1))
-
-    for level in range(refine_levels + 1):
-        evaluate_kops(axis_values)
-        feasible_points = [
-            (point_key[0], candidate)
-            for point_key, candidate in evaluated.items()
-            if candidate is not None
+        _record_batch_execution(runtime_context=runtime_context, metadata=metadata)
+        return [
+            (key, candidate)
+            for key, candidate in results
         ]
-        if not feasible_points:
-            break
-        if level >= refine_levels:
-            break
-        feasible_points.sort(key=lambda pair: _candidate_rank(pair[1], config.objective_mode))
-        focus = [float(point) for point, _ in feasible_points[:top_k]]
-        refined = _refine_axis_points(
-            axis_points=axis_values,
-            focus_points=focus,
-            lo=float(dense_kops[0]),
-            hi=float(dense_kops[-1]),
-        )
-        if refined.size == axis_values.size and np.allclose(refined, axis_values):
-            break
-        axis_values = refined
 
-    if best is not None:
-        return best
-
-    evaluate_kops(dense_kops)
-    return best
+    return _search_coplanar_profile_with_adaptive_grid(
+        dense_axes=(dense_kops,),
+        config=config,
+        evaluate_candidates=evaluate_candidates,
+        runtime_context=runtime_context,
+    )
 
 
 def _search_reverse_direction_coplanar_profile(
@@ -463,113 +633,51 @@ def _search_reverse_direction_coplanar_profile(
     lower_dls: float,
     upper_dls: float,
     horizontal_dls_deg_per_30m: float,
+    runtime_context: _SolverRuntimeContext,
 ) -> ProfileParameters | None:
     dense_kops = _iter_kop_candidates(geometry=geometry, config=config)
     dense_reverse = _iter_reverse_inc_candidates(config=config)
     if dense_kops.size == 0 or dense_reverse.size == 0:
         return None
 
-    evaluated: dict[tuple[float, ...], ProfileParameters | None] = {}
-    best: ProfileParameters | None = None
-
-    def evaluate_pairs(kop_values: np.ndarray, reverse_values: np.ndarray) -> None:
-        nonlocal best
-        tasks: list[_ReverseDirectionTaskInput] = []
-        for kop in np.asarray(kop_values, dtype=float).tolist():
-            for reverse_inc in np.asarray(reverse_values, dtype=float).tolist():
-                key = _float_cache_key(float(kop), float(reverse_inc))
-                if key in evaluated:
-                    continue
-                tasks.append(
-                    _ReverseDirectionTaskInput(
-                        geometry=geometry,
-                        config=config,
-                        lower_dls=lower_dls,
-                        upper_dls=upper_dls,
-                        kop_vertical_m=float(kop),
-                        reverse_inc_deg=float(reverse_inc),
-                        horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
-                    )
-                )
-
-        results = _run_task_batch(
+    def evaluate_candidates(
+        candidate_keys: list[tuple[float, ...]],
+    ) -> list[tuple[tuple[float, ...], ProfileParameters | None]]:
+        tasks = [
+            _ReverseDirectionTaskInput(
+                geometry=geometry,
+                config=config,
+                lower_dls=lower_dls,
+                upper_dls=upper_dls,
+                kop_vertical_m=float(key[0]),
+                reverse_inc_deg=float(key[1]),
+                horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
+            )
+            for key in candidate_keys
+        ]
+        results, metadata = _run_task_batch(
             tasks=tasks,
             worker=_reverse_direction_task_worker,
             parallel_jobs=config.parallel_jobs,
         )
-        for kop_value, reverse_inc, candidate in results:
-            evaluated[_float_cache_key(float(kop_value), float(reverse_inc))] = candidate
-            if candidate is None:
-                continue
-            best = _select_better_candidate(
-                current=best,
-                candidate=candidate,
-                objective_mode=config.objective_mode,
-            )
-
-    if not config.adaptive_grid_enabled:
-        evaluate_pairs(dense_kops, dense_reverse)
-        return best
-
-    kop_axis = _adaptive_axis_initial_points(
-        dense_points=dense_kops,
-        initial_size=config.adaptive_grid_initial_size,
-    )
-    reverse_axis = _adaptive_axis_initial_points(
-        dense_points=dense_reverse,
-        initial_size=config.adaptive_grid_initial_size,
-    )
-    refine_levels = int(max(config.adaptive_grid_refine_levels, 0))
-    top_k = int(max(config.adaptive_grid_top_k, 1))
-
-    for level in range(refine_levels + 1):
-        evaluate_pairs(kop_axis, reverse_axis)
-        feasible_pairs = [
-            ((pair_key[0], pair_key[1]), candidate)
-            for pair_key, candidate in evaluated.items()
-            if candidate is not None
+        _record_batch_execution(runtime_context=runtime_context, metadata=metadata)
+        return [
+            (key, candidate)
+            for key, candidate in results
         ]
-        if not feasible_pairs:
-            break
-        if level >= refine_levels:
-            break
-        feasible_pairs.sort(key=lambda pair: _candidate_rank(pair[1], config.objective_mode))
-        top_pairs = feasible_pairs[:top_k]
-        focus_kops = [float(pair[0][0]) for pair in top_pairs]
-        focus_reverse = [float(pair[0][1]) for pair in top_pairs]
 
-        refined_kops = _refine_axis_points(
-            axis_points=kop_axis,
-            focus_points=focus_kops,
-            lo=float(dense_kops[0]),
-            hi=float(dense_kops[-1]),
-        )
-        refined_reverse = _refine_axis_points(
-            axis_points=reverse_axis,
-            focus_points=focus_reverse,
-            lo=float(dense_reverse[0]),
-            hi=float(dense_reverse[-1]),
-        )
-        if (
-            refined_kops.size == kop_axis.size
-            and refined_reverse.size == reverse_axis.size
-            and np.allclose(refined_kops, kop_axis)
-            and np.allclose(refined_reverse, reverse_axis)
-        ):
-            break
-        kop_axis = refined_kops
-        reverse_axis = refined_reverse
-
-    if best is not None:
-        return best
-
-    evaluate_pairs(dense_kops, dense_reverse)
-    return best
+    return _search_coplanar_profile_with_adaptive_grid(
+        dense_axes=(dense_kops, dense_reverse),
+        config=config,
+        evaluate_candidates=evaluate_candidates,
+        runtime_context=runtime_context,
+    )
 
 
 def _solve_same_direction_profile(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
+    runtime_context: _SolverRuntimeContext,
 ) -> ProfileParameters:
     lower, upper = _effective_dls_search_bounds(
         config=config,
@@ -585,6 +693,7 @@ def _solve_same_direction_profile(
         lower_dls=lower,
         upper_dls=upper,
         horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        runtime_context=runtime_context,
     )
 
     if best is not None:
@@ -743,6 +852,7 @@ def _solve_same_direction_profile_with_turn(
 def _solve_reverse_direction_profile(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
+    runtime_context: _SolverRuntimeContext,
 ) -> ProfileParameters:
     lower, upper = _effective_dls_search_bounds(
         config=config,
@@ -758,6 +868,7 @@ def _solve_reverse_direction_profile(
         lower_dls=lower,
         upper_dls=upper,
         horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        runtime_context=runtime_context,
     )
 
     if best is not None:
@@ -2165,6 +2276,18 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
     return WellTrajectory(segments=segments)
 
 
+def _solver_parallel_status(runtime_context: _SolverRuntimeContext) -> str:
+    if runtime_context.parallel_requested_jobs <= 1:
+        return "disabled"
+    if runtime_context.parallel_batches_total <= 0:
+        return "not_used"
+    if runtime_context.parallel_fallback_batches <= 0:
+        return "parallel"
+    if runtime_context.parallel_batches_parallel <= 0:
+        return "fallback_to_sequential"
+    return "mixed_parallel_with_fallback"
+
+
 def _build_summary(
     df: pd.DataFrame,
     t1: Point3D,
@@ -2174,6 +2297,7 @@ def _build_summary(
     horizontal_offset_t1_m: float,
     classification: WellClassification,
     config: TrajectoryConfig,
+    runtime_context: _SolverRuntimeContext,
 ) -> dict[str, float | str]:
     t1_idx = int((df["MD_m"] - md_t1_m).abs().idxmin())
     t1_row = df.loc[t1_idx]
@@ -2199,6 +2323,7 @@ def _build_summary(
         "horizontal_hold_length_m": float(params.horizontal_hold_length_m),
         "horizontal_inc_deg": float(params.horizontal_inc_deg),
         "hold_inc_deg": float(params.inc_hold_deg),
+        "hold_length_m": float(params.hold_length_m),
         "max_dls_total_deg_per_30m": max_dls,
         "md_total_m": float(df["MD_m"].iloc[-1]),
         "t1_horizontal_offset_m": float(horizontal_offset_t1_m),
@@ -2218,6 +2343,14 @@ def _build_summary(
         "solver_adaptive_grid_enabled": "yes" if bool(config.adaptive_grid_enabled) else "no",
         "solver_parallel_jobs": float(config.parallel_jobs),
         "solver_profile_cache_enabled": "yes" if bool(config.profile_cache_enabled) else "no",
+        "solver_parallel_status": _solver_parallel_status(runtime_context),
+        "solver_parallel_batches_total": float(runtime_context.parallel_batches_total),
+        "solver_parallel_batches_parallel": float(runtime_context.parallel_batches_parallel),
+        "solver_parallel_fallback_batches": float(runtime_context.parallel_fallback_batches),
+        "solver_parallel_fallback": "yes" if runtime_context.parallel_fallback_batches > 0 else "no",
+        "solver_parallel_fallback_reason": "; ".join(runtime_context.parallel_fallback_reasons),
+        "solver_adaptive_dense_check": "yes" if runtime_context.adaptive_dense_validation_performed else "no",
+        "solver_candidate_evaluations": float(runtime_context.candidate_evaluations),
     }
 
     summary["class_reverse_offset_min_m"] = float(classification.limits.reverse_min_m)
