@@ -40,8 +40,20 @@ from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
 WT_UI_DEFAULTS_VERSION = 12
-WELL_TRAJECTORY_COLOR = "#0B6E4F"
-WELL_TARGET_COLOR = "#C1121F"
+WELL_COLOR_PALETTE: tuple[str, ...] = (
+    "#0B6E4F",
+    "#D1495B",
+    "#00798C",
+    "#FF9F1C",
+    "#6A4C93",
+    "#1F7A8C",
+    "#3D5A80",
+    "#E76F51",
+    "#2A9D8F",
+    "#4D908E",
+    "#577590",
+    "#BC4749",
+)
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
     "wt_cfg_md_step_control_m": "wt_cfg_md_control",
@@ -52,6 +64,10 @@ _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_max_total_md_postcheck_m": "wt_cfg_max_total_md_postcheck",
     "wt_cfg_kop_min_vertical_m": "wt_cfg_kop_min_vertical",
 }
+
+
+def _well_color(index: int) -> str:
+    return WELL_COLOR_PALETTE[index % len(WELL_COLOR_PALETTE)]
 
 
 @st.cache_data(show_spinner=False)
@@ -151,7 +167,8 @@ def _all_wells_3d_figure(
     x_arrays: list[np.ndarray] = []
     y_arrays: list[np.ndarray] = []
     z_arrays: list[np.ndarray] = []
-    for item in successes:
+    for index, item in enumerate(successes):
+        line_color = _well_color(index)
         name = item.name
         stations = item.stations
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
@@ -164,7 +181,7 @@ def _all_wells_3d_figure(
                 z=stations["Z_m"],
                 mode="lines",
                 name=name,
-                line={"width": 5, "color": WELL_TRAJECTORY_COLOR},
+                line={"width": 5, "color": line_color},
                 customdata=np.column_stack(
                     [
                         stations["MD_m"].to_numpy(dtype=float),
@@ -196,7 +213,11 @@ def _all_wells_3d_figure(
                 z=[surface.z, t1.z, t3.z],
                 mode="markers",
                 name=f"{name}: S/t1/t3",
-                marker={"size": 4, "color": WELL_TARGET_COLOR},
+                marker={
+                    "size": 5,
+                    "color": line_color,
+                    "line": {"width": 1, "color": "rgba(255,255,255,0.9)"},
+                },
                 showlegend=False,
                 hovertemplate="X: %{x:.2f} m<br>Y: %{y:.2f} m<br>Z/TVD: %{z:.2f} m<extra>%{fullData.name}</extra>",
             )
@@ -267,7 +288,8 @@ def _all_wells_plan_figure(
     fig = go.Figure()
     x_arrays: list[np.ndarray] = []
     y_arrays: list[np.ndarray] = []
-    for item in successes:
+    for index, item in enumerate(successes):
+        line_color = _well_color(index)
         name = item.name
         stations = item.stations
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
@@ -278,7 +300,7 @@ def _all_wells_plan_figure(
                 y=stations["Y_m"],
                 mode="lines",
                 name=name,
-                line={"width": 4, "color": WELL_TRAJECTORY_COLOR},
+                line={"width": 4, "color": line_color},
                 customdata=np.column_stack(
                     [
                         stations["Z_m"].to_numpy(dtype=float),
@@ -294,6 +316,28 @@ def _all_wells_plan_figure(
                     "Z/TVD: %{customdata[0]:.2f} m<br>"
                     "MD: %{customdata[1]:.2f} m<br>"
                     "ПИ: %{customdata[2]:.2f} deg/10m"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+        surface = item.surface
+        t1 = item.t1
+        t3 = item.t3
+        fig.add_trace(
+            go.Scatter(
+                x=[surface.x, t1.x, t3.x],
+                y=[surface.y, t1.y, t3.y],
+                mode="markers",
+                name=f"{name}: S/t1/t3",
+                marker={
+                    "size": 7,
+                    "color": line_color,
+                    "line": {"width": 1, "color": "rgba(255,255,255,0.9)"},
+                },
+                showlegend=False,
+                hovertemplate=(
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
                     "<extra>%{fullData.name}</extra>"
                 ),
             )

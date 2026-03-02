@@ -63,6 +63,13 @@ CALC_PARAM_DEFAULTS: dict[str, float | int | str | bool] = {
     "parallel_jobs": int(CFG_DEFAULTS.parallel_jobs),
     "profile_cache_enabled": bool(CFG_DEFAULTS.profile_cache_enabled),
 }
+_DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
+
+
+def _defaults_signature() -> tuple[tuple[str, float | int | str | bool], ...]:
+    return tuple(
+        (key, CALC_PARAM_DEFAULTS[key]) for key in sorted(CALC_PARAM_DEFAULTS.keys())
+    )
 
 
 def _state_key(prefix: str, suffix: str) -> str:
@@ -89,7 +96,12 @@ def _setdefault_many(
 
 
 def apply_calc_param_defaults(prefix: str = "", *, force: bool = False) -> None:
-    _setdefault_many(prefixes=(prefix,), force=force)
+    signature_key = _state_key(prefix, _DEFAULTS_SIGNATURE_KEY_SUFFIX)
+    current_signature = _defaults_signature()
+    signature_changed = st.session_state.get(signature_key) != current_signature
+    effective_force = bool(force or signature_changed)
+    _setdefault_many(prefixes=(prefix,), force=effective_force)
+    st.session_state[signature_key] = current_signature
 
 
 def calc_param_signature(prefix: str = "") -> tuple[object, ...]:
