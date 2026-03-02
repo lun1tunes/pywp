@@ -103,7 +103,7 @@ def run_page() -> None:
         "Горизонтальный отход t1, м", min_value=0.0, value=1000.0, step=100.0
     )
     hold_inc_deg = c3.number_input(
-        "ЗУ секции HOLD, deg", min_value=0.0, max_value=89.0, value=20.0, step=5
+        "ЗУ секции HOLD, deg", min_value=0.0, max_value=89.0, value=20.0, step=5.0
     )
     render_small_note(
         "Тип траектории и класс сложности определяются по наихудшему из критериев (отход/ЗУ HOLD)."

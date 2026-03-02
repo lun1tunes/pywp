@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 
 from pywp.models import Point3D
 from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_step
+from pywp.ui_utils import dls_to_pi
 
 DEG2RAD = np.pi / 180.0
 TRAJECTORY_COLOR_PRIMARY = "#0B6E4F"
@@ -29,7 +30,7 @@ HOVER_TEMPLATE_XYZ_MD_DLS = (
     "Y: %{customdata[1]} m<br>"
     "Z/TVD: %{customdata[2]} m<br>"
     "MD: %{customdata[3]} m<br>"
-    "DLS: %{customdata[4]} deg/30m"
+    "ПИ: %{customdata[4]} deg/10m"
     "<extra>%{fullData.name}</extra>"
 )
 
@@ -307,14 +308,19 @@ def _build_hover_customdata(
 ) -> np.ndarray:
     count = len(x_values)
     md = np.full(count, np.nan, dtype=float) if md_values is None else np.asarray(md_values, dtype=float)
-    dls = np.full(count, np.nan, dtype=float) if dls_values is None else np.asarray(dls_values, dtype=float)
+    dls = (
+        np.full(count, np.nan, dtype=float)
+        if dls_values is None
+        else np.asarray(dls_values, dtype=float)
+    )
+    pi = dls_to_pi(dls)
     return np.column_stack(
         [
             _hover_value_strings(np.asarray(x_values, dtype=float)),
             _hover_value_strings(np.asarray(y_values, dtype=float)),
             _hover_value_strings(np.asarray(z_values, dtype=float)),
             _hover_value_strings(md),
-            _hover_value_strings(dls),
+            _hover_value_strings(pi),
         ]
     )
 
@@ -604,9 +610,9 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
         fig.add_trace(
             go.Scatter(
                 x=df["MD_m"],
-                y=df["DLS_deg_per_30m"],
+                y=dls_to_pi(df["DLS_deg_per_30m"].to_numpy(dtype=float)),
                 mode="lines+markers",
-                name="DLS",
+                name="ПИ",
                 line={"width": 2, "color": "#6A4C93"},
                 marker={"size": 4},
                 customdata=_station_hover_customdata(df),
@@ -629,7 +635,7 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
             fig.add_trace(
                 go.Scatter(
                     x=block["MD_m"],
-                    y=block["DLS_deg_per_30m"],
+                    y=dls_to_pi(block["DLS_deg_per_30m"].to_numpy(dtype=float)),
                     mode="lines+markers",
                     name=segment_name,
                     legendgroup=f"segment_{segment_name}",
@@ -643,9 +649,9 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
             legend_shown.add(segment_name)
             start_idx = idx
 
-        # Draw dashed links where segment traces break to keep DLS transitions readable.
+        # Draw dashed links where segment traces break to keep PI transitions readable.
         md_values = df["MD_m"].to_numpy(dtype=float)
-        dls_values = df["DLS_deg_per_30m"].to_numpy(dtype=float)
+        dls_values = dls_to_pi(df["DLS_deg_per_30m"].to_numpy(dtype=float))
         for idx in range(1, len(df)):
             if segments[idx] == segments[idx - 1]:
                 continue
@@ -668,13 +674,13 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
                 )
             )
 
-    # Avoid overlapping labels for equal DLS limits (e.g., BUILD1/BUILD2 or HOLD/HORIZONTAL).
+    # Avoid overlapping labels for equal PI limits (e.g., BUILD1/BUILD2 or HOLD/HORIZONTAL).
     grouped_limits: dict[float, list[str]] = {}
     for segment, limit in dls_limits.items():
         segment_name = str(segment).upper()
         if active_segments is not None and segment_name not in active_segments:
             continue
-        key = round(float(limit), 6)
+        key = round(float(dls_to_pi(limit)), 6)
         grouped_limits.setdefault(key, []).append(segment_name)
 
     for limit_value in sorted(grouped_limits.keys(), reverse=True):
@@ -683,14 +689,14 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
             y=limit_value,
             line_dash="dot",
             line_color="#C1121F",
-            annotation_text=f"{segment_label} лимит {limit_value:.1f}",
+            annotation_text=f"{segment_label} лимит ПИ {limit_value:.2f}",
             annotation_position="top left",
         )
 
     fig.update_layout(
-        title="DLS vs MD",
+        title="ПИ vs MD",
         xaxis_title="MD (m)",
-        yaxis_title="DLS (deg/30m)",
+        yaxis_title="ПИ (deg/10m)",
         height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
         showlegend=True,

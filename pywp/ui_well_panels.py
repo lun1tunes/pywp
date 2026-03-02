@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from pywp.models import Point3D
+from pywp.ui_utils import dls_to_pi
 from pywp.visualization import (
     dls_figure,
     plan_view_figure,
@@ -106,6 +107,13 @@ def render_survey_table_with_download(
     button_label: str = "Скачать CSV инклинометрии",
     file_name: str = "well_survey.csv",
 ) -> None:
+    display_df = stations.copy()
+    if "DLS_deg_per_30m" in display_df.columns:
+        display_df["PI_deg_per_10m"] = dls_to_pi(
+            display_df["DLS_deg_per_30m"].to_numpy(dtype=float)
+        )
+        display_df = display_df.drop(columns=["DLS_deg_per_30m"])
+
     column_config: dict[str, object] = {
         "MD_m": st.column_config.NumberColumn("MD, м", format="%.2f"),
         "X_m": st.column_config.NumberColumn("X (East), м", format="%.2f"),
@@ -113,18 +121,18 @@ def render_survey_table_with_download(
         "Z_m": st.column_config.NumberColumn("Z (TVD), м", format="%.2f"),
         "INC_deg": st.column_config.NumberColumn("INC, deg", format="%.2f"),
         "AZI_deg": st.column_config.NumberColumn("AZI, deg", format="%.2f"),
-        "DLS_deg_per_30m": st.column_config.NumberColumn("DLS, deg/30m", format="%.2f"),
+        "PI_deg_per_10m": st.column_config.NumberColumn("ПИ, deg/10m", format="%.2f"),
         "segment": st.column_config.TextColumn("Сегмент"),
     }
     st.dataframe(
-        stations,
+        display_df,
         width="stretch",
         hide_index=True,
         column_config=column_config,
     )
     st.download_button(
         button_label,
-        data=stations.to_csv(index=False).encode("utf-8"),
+        data=display_df.to_csv(index=False).encode("utf-8"),
         file_name=file_name,
         mime="text/csv",
         icon=":material/download:",

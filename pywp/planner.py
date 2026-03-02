@@ -632,18 +632,28 @@ def _search_coplanar_profile_with_adaptive_grid(
             break
         axis_values = refined_axes
 
-    runtime_context.adaptive_dense_validation_performed = True
-    _emit_progress(
-        progress_callback,
-        "Солвер: финальная проверка на полной сетке (dense-check).",
-        0.80,
-    )
-    evaluate_axis_values(dense_axes)
-    _emit_progress(
-        progress_callback,
-        f"Солвер: итогово проверено кандидатов {runtime_context.candidate_evaluations:.0f}.",
-        1.00,
-    )
+    if bool(config.adaptive_dense_check_enabled):
+        runtime_context.adaptive_dense_validation_performed = True
+        _emit_progress(
+            progress_callback,
+            "Солвер: финальная проверка на полной сетке (dense-check).",
+            0.80,
+        )
+        evaluate_axis_values(dense_axes)
+        _emit_progress(
+            progress_callback,
+            f"Солвер: итогово проверено кандидатов {runtime_context.candidate_evaluations:.0f}.",
+            1.00,
+        )
+    else:
+        _emit_progress(
+            progress_callback,
+            (
+                "Солвер: dense-check отключен. "
+                f"Проверено кандидатов {runtime_context.candidate_evaluations:.0f}."
+            ),
+            1.00,
+        )
     return best
 
 
@@ -800,7 +810,7 @@ def _solve_same_direction_profile(
     )
     _emit_progress(
         progress_callback,
-        "Солвер: same-direction coplanar-поиск по KOP/DLS.",
+        "Солвер: same-direction coplanar-поиск по KOP/ПИ.",
         0.05,
     )
     best = _search_same_direction_coplanar_profile(
@@ -986,7 +996,7 @@ def _solve_reverse_direction_profile(
     )
     _emit_progress(
         progress_callback,
-        "Солвер: reverse-direction coplanar-поиск по KOP/reverse INC/DLS.",
+        "Солвер: reverse-direction coplanar-поиск по KOP/reverse INC/ПИ.",
         0.05,
     )
     best = _search_reverse_direction_coplanar_profile(
@@ -2487,6 +2497,7 @@ def _build_summary(
         "hold_length_m": float(params.hold_length_m),
         "max_dls_total_deg_per_30m": max_dls,
         "md_total_m": float(df["MD_m"].iloc[-1]),
+        "max_total_md_postcheck_m": float(config.max_total_md_postcheck_m),
         "t1_horizontal_offset_m": float(horizontal_offset_t1_m),
         "horizontal_length_m": float(params.horizontal_length_m),
         "trajectory_type": trajectory_type_label(classification.trajectory_type),
@@ -2555,6 +2566,13 @@ def _assert_solution_is_valid(summary: dict[str, float | str], config: Trajector
         actual = float(summary.get(f"max_dls_{segment.lower()}_deg_per_30m", 0.0))
         if actual > limit + 1e-6:
             raise PlanningError(f"DLS limit exceeded on segment {segment}: {actual:.2f} > {limit:.2f}")
+    md_total = float(summary.get("md_total_m", 0.0))
+    if md_total > config.max_total_md_postcheck_m + 1e-6:
+        raise PlanningError(
+            "Total MD exceeds configured post-check limit. "
+            f"Calculated total MD={md_total:.2f} m, limit={config.max_total_md_postcheck_m:.2f} m. "
+            "The resulting well is too long for the selected MD threshold."
+        )
 
 
 def _validate_config(config: TrajectoryConfig) -> None:
@@ -2592,6 +2610,8 @@ def _validate_config(config: TrajectoryConfig) -> None:
         raise PlanningError("dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m.")
     if config.max_total_md_m <= 0.0:
         raise PlanningError("max_total_md_m must be positive.")
+    if config.max_total_md_postcheck_m <= 0.0:
+        raise PlanningError("max_total_md_postcheck_m must be positive.")
     if config.min_structural_segment_m <= 0.0:
         raise PlanningError("min_structural_segment_m must be positive.")
     if config.min_structural_segment_m < config.md_step_control_m:

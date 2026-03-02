@@ -76,7 +76,7 @@ def test_plotly_figures_are_constructed() -> None:
         assert "Y:" in hover
         assert "Z/TVD:" in hover
         assert "MD:" in hover
-        assert "DLS:" in hover
+        assert "ПИ:" in hover
 
     assert list(trace_dls.y)[-1] == 0.0
 

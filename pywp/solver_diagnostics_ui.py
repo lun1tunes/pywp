@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from pywp.solver_diagnostics import diagnostics_rows_ru, parse_solver_error
+from pywp.solver_diagnostics import diagnostics_rows_ru, parse_solver_error, ui_error_text
 from pywp.ui_utils import arrow_safe_text_dataframe
 
 
@@ -25,5 +25,4 @@ def render_solver_diagnostics(
             )
 
     with st.expander("Технические детали ошибки", expanded=False):
-        st.code(raw_error, language="text")
-
+        st.code(ui_error_text(raw_error), language="text")

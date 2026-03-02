@@ -12,7 +12,7 @@ CFG_DEFAULTS = TrajectoryConfig()
 
 OBJECTIVE_OPTIONS = {
     OBJECTIVE_MAXIMIZE_HOLD: "Максимизировать длину HOLD",
-    OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать DLS на BUILD",
+    OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать ПИ на BUILD",
 }
 
 TURN_SOLVER_OPTIONS = {
@@ -60,11 +60,13 @@ def build_trajectory_config(
     turn_solver_qmc_samples: int,
     turn_solver_local_starts: int,
     adaptive_grid_enabled: bool = True,
+    adaptive_dense_check_enabled: bool = True,
     adaptive_grid_initial_size: int = 11,
     adaptive_grid_refine_levels: int = 2,
     adaptive_grid_top_k: int = 6,
     parallel_jobs: int = 1,
     profile_cache_enabled: bool = True,
+    max_total_md_postcheck_m: float = 6500.0,
 ) -> TrajectoryConfig:
     min_build, max_build = normalize_build_dls_bounds(
         dls_build_min_deg_per_30m=dls_build_min_deg_per_30m,
@@ -85,11 +87,13 @@ def build_trajectory_config(
         turn_solver_qmc_samples=int(turn_solver_qmc_samples),
         turn_solver_local_starts=int(turn_solver_local_starts),
         adaptive_grid_enabled=bool(adaptive_grid_enabled),
+        adaptive_dense_check_enabled=bool(adaptive_dense_check_enabled),
         adaptive_grid_initial_size=int(adaptive_grid_initial_size),
         adaptive_grid_refine_levels=int(adaptive_grid_refine_levels),
         adaptive_grid_top_k=int(adaptive_grid_top_k),
         parallel_jobs=int(parallel_jobs),
         profile_cache_enabled=bool(profile_cache_enabled),
+        max_total_md_postcheck_m=float(max_total_md_postcheck_m),
         dls_limits_deg_per_30m=build_segment_dls_limits(
             build_dls_max_deg_per_30m=max_build
         ),

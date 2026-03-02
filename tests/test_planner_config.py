@@ -54,3 +54,4 @@ def test_build_trajectory_config_reuses_normalized_bounds_and_limits() -> None:
     assert config.dls_build_max_deg_per_30m == 3.2
     assert config.dls_limits_deg_per_30m["BUILD1"] == 3.2
     assert config.dls_limits_deg_per_30m["BUILD2"] == 3.2
+    assert config.adaptive_dense_check_enabled is True

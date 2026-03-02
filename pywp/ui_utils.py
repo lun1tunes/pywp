@@ -6,6 +6,17 @@ from time import perf_counter
 import pandas as pd
 
 
+PI_DLS_RATIO = 3.0
+
+
+def dls_to_pi(value_deg_per_30m: float | object) -> float | object:
+    return value_deg_per_30m / PI_DLS_RATIO
+
+
+def pi_to_dls(value_deg_per_10m: float | object) -> float | object:
+    return value_deg_per_10m * PI_DLS_RATIO
+
+
 def format_distance(value_m: float) -> str:
     if value_m < 1e-6:
         return "< 1e-6 m"

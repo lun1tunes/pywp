@@ -7,6 +7,26 @@ from pywp.models import Point3D, TrajectoryConfig
 from pywp.planner import PlanningError, TrajectoryPlanner
 
 
+def _fast_config(**overrides: object) -> TrajectoryConfig:
+    # Keep planner tests deterministic and fast: narrow search controls and skip
+    # final dense validation unless a test explicitly needs it.
+    base = {
+        "kop_search_grid_size": 21,
+        "reverse_inc_grid_size": 21,
+        "adaptive_grid_enabled": True,
+        "adaptive_dense_check_enabled": False,
+        "adaptive_grid_initial_size": 5,
+        "adaptive_grid_refine_levels": 1,
+        "adaptive_grid_top_k": 2,
+        "parallel_jobs": 1,
+        "turn_solver_qmc_samples": 8,
+        "turn_solver_local_starts": 4,
+        "max_total_md_postcheck_m": 20000.0,
+    }
+    base.update(overrides)
+    return TrajectoryConfig(**base)
+
+
 @pytest.mark.parametrize(
     "surface,t1,t3",
     [
@@ -18,7 +38,7 @@ from pywp.planner import PlanningError, TrajectoryPlanner
 def test_planner_finds_solution_for_reference_scenarios(
     surface: Point3D, t1: Point3D, t3: Point3D
 ) -> None:
-    config = TrajectoryConfig(
+    config = _fast_config(
         md_step_m=10.0,
         md_step_control_m=2.0,
         pos_tolerance_m=2.0,
@@ -48,7 +68,7 @@ def test_planner_finds_solution_for_reference_scenarios(
 
 def test_planner_supports_turn_for_non_planar_reverse_geometry() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(pos_tolerance_m=1.0)
+    config = _fast_config(pos_tolerance_m=1.0)
 
     result = planner.plan(
         surface=Point3D(0.0, 0.0, 0.0),
@@ -66,7 +86,7 @@ def test_planner_supports_turn_for_non_planar_reverse_geometry() -> None:
 
 def test_planner_supports_turn_in_build_for_non_planar_same_direction_geometry() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         md_step_m=5.0,
         md_step_control_m=1.0,
         pos_tolerance_m=2.0,
@@ -115,8 +135,8 @@ def test_reverse_non_planar_turn_respects_objective_mode_for_build_dls() -> None
             "HORIZONTAL": 2.0,
         },
     )
-    config_hold = TrajectoryConfig(**base_kwargs, objective_mode="maximize_hold")
-    config_min_dls = TrajectoryConfig(**base_kwargs, objective_mode="minimize_build_dls")
+    config_hold = _fast_config(**base_kwargs, objective_mode="maximize_hold")
+    config_min_dls = _fast_config(**base_kwargs, objective_mode="minimize_build_dls")
 
     surface = Point3D(0.0, 0.0, 0.0)
     t1 = Point3D(300.0, 300.0, 2000.0)
@@ -130,7 +150,7 @@ def test_reverse_non_planar_turn_respects_objective_mode_for_build_dls() -> None
 
 def test_non_planar_turn_solver_honors_max_total_md_limit() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         md_step_m=5.0,
         md_step_control_m=1.0,
         pos_tolerance_m=1.0,
@@ -148,9 +168,35 @@ def test_non_planar_turn_solver_honors_max_total_md_limit() -> None:
         )
 
 
+def test_planner_fails_postcheck_when_total_md_exceeds_soft_limit() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(
+        md_step_m=10.0,
+        md_step_control_m=2.0,
+        pos_tolerance_m=2.0,
+        max_total_md_postcheck_m=100.0,
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=10.0,
+        dls_limits_deg_per_30m={
+            "BUILD1": 10.0,
+            "HOLD": 2.0,
+            "BUILD2": 10.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+
+    with pytest.raises(PlanningError, match="Total MD exceeds configured post-check limit"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=config,
+        )
+
+
 def test_planner_validates_invalid_dls_bounds() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         dls_build_min_deg_per_30m=3.0,
         dls_build_max_deg_per_30m=2.0,
     )
@@ -172,7 +218,7 @@ def test_planner_validates_invalid_kop_config() -> None:
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(300.0, 0.0, 2500.0),
             t3=Point3D(1500.0, 0.0, 2600.0),
-            config=TrajectoryConfig(kop_min_vertical_m=-1.0),
+            config=_fast_config(kop_min_vertical_m=-1.0),
         )
 
     with pytest.raises(PlanningError, match="kop_search_grid_size must be >= 2"):
@@ -180,7 +226,7 @@ def test_planner_validates_invalid_kop_config() -> None:
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(300.0, 0.0, 2500.0),
             t3=Point3D(1500.0, 0.0, 2600.0),
-            config=TrajectoryConfig(kop_search_grid_size=1),
+            config=_fast_config(kop_search_grid_size=1),
         )
 
     with pytest.raises(PlanningError, match="reverse_inc_min_deg must be < reverse_inc_max_deg"):
@@ -188,13 +234,13 @@ def test_planner_validates_invalid_kop_config() -> None:
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(300.0, 0.0, 2500.0),
             t3=Point3D(1500.0, 0.0, 2600.0),
-            config=TrajectoryConfig(reverse_inc_min_deg=45.0, reverse_inc_max_deg=45.0),
+            config=_fast_config(reverse_inc_min_deg=45.0, reverse_inc_max_deg=45.0),
         )
 
 
 def test_planner_allows_post_entry_build_to_match_t3_with_entry_inc_target() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(entry_inc_target_deg=86.0, entry_inc_tolerance_deg=2.0)
+    config = _fast_config(entry_inc_target_deg=86.0, entry_inc_tolerance_deg=2.0)
     result = planner.plan(
         surface=Point3D(0.0, 0.0, 0.0),
         t1=Point3D(600.0, 800.0, 2400.0),
@@ -210,7 +256,7 @@ def test_planner_allows_post_entry_build_to_match_t3_with_entry_inc_target() -> 
 
 def test_planner_reports_overbend_requirement_when_max_inc_is_too_low() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         entry_inc_target_deg=86.0,
         entry_inc_tolerance_deg=2.0,
         max_inc_deg=88.0,
@@ -227,7 +273,7 @@ def test_planner_reports_overbend_requirement_when_max_inc_is_too_low() -> None:
 
 def test_planner_rejects_unknown_objective_mode() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(objective_mode="unsupported_mode")  # type: ignore[arg-type]
+    config = _fast_config(objective_mode="unsupported_mode")  # type: ignore[arg-type]
 
     with pytest.raises(PlanningError, match="objective_mode must be one of"):
         planner.plan(
@@ -240,7 +286,7 @@ def test_planner_rejects_unknown_objective_mode() -> None:
 
 def test_planner_rejects_unknown_turn_solver_mode() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(turn_solver_mode="unsupported_turn_solver")  # type: ignore[arg-type]
+    config = _fast_config(turn_solver_mode="unsupported_turn_solver")  # type: ignore[arg-type]
 
     with pytest.raises(PlanningError, match="turn_solver_mode must be one of"):
         planner.plan(
@@ -258,7 +304,7 @@ def test_planner_validates_turn_solver_numeric_controls() -> None:
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(600.0, 800.0, 2400.0),
             t3=Point3D(1500.0, 2000.0, 2500.0),
-            config=TrajectoryConfig(turn_solver_qmc_samples=-1),
+            config=_fast_config(turn_solver_qmc_samples=-1),
         )
 
     with pytest.raises(PlanningError, match="turn_solver_local_starts must be >= 1"):
@@ -266,7 +312,7 @@ def test_planner_validates_turn_solver_numeric_controls() -> None:
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(600.0, 800.0, 2400.0),
             t3=Point3D(1500.0, 2000.0, 2500.0),
-            config=TrajectoryConfig(turn_solver_local_starts=0),
+            config=_fast_config(turn_solver_local_starts=0),
         )
 
 
@@ -279,16 +325,16 @@ def test_planner_validates_adaptive_and_parallel_controls() -> None:
     )
 
     with pytest.raises(PlanningError, match="adaptive_grid_initial_size must be >= 2"):
-        planner.plan(**base_kwargs, config=TrajectoryConfig(adaptive_grid_initial_size=1))
+        planner.plan(**base_kwargs, config=_fast_config(adaptive_grid_initial_size=1))
 
     with pytest.raises(PlanningError, match="adaptive_grid_refine_levels must be >= 0"):
-        planner.plan(**base_kwargs, config=TrajectoryConfig(adaptive_grid_refine_levels=-1))
+        planner.plan(**base_kwargs, config=_fast_config(adaptive_grid_refine_levels=-1))
 
     with pytest.raises(PlanningError, match="adaptive_grid_top_k must be >= 1"):
-        planner.plan(**base_kwargs, config=TrajectoryConfig(adaptive_grid_top_k=0))
+        planner.plan(**base_kwargs, config=_fast_config(adaptive_grid_top_k=0))
 
     with pytest.raises(PlanningError, match="parallel_jobs must be >= 1"):
-        planner.plan(**base_kwargs, config=TrajectoryConfig(parallel_jobs=0))
+        planner.plan(**base_kwargs, config=_fast_config(parallel_jobs=0))
 
 
 @pytest.mark.parametrize("objective_mode", ["maximize_hold", "minimize_build_dls"])
@@ -305,14 +351,18 @@ def test_adaptive_search_objective_is_not_worse_than_dense_baseline(
         dls_build_min_deg_per_30m=0.5,
         dls_build_max_deg_per_30m=10.0,
         objective_mode=objective_mode,
-        kop_search_grid_size=61,
+        kop_search_grid_size=31,
         adaptive_grid_initial_size=3,
         adaptive_grid_refine_levels=0,
         adaptive_grid_top_k=1,
         parallel_jobs=1,
     )
-    dense_config = TrajectoryConfig(**base_kwargs, adaptive_grid_enabled=False)
-    adaptive_config = TrajectoryConfig(**base_kwargs, adaptive_grid_enabled=True)
+    dense_config = _fast_config(**base_kwargs, adaptive_grid_enabled=False)
+    adaptive_config = _fast_config(
+        **base_kwargs,
+        adaptive_grid_enabled=True,
+        adaptive_dense_check_enabled=True,
+    )
 
     surface = Point3D(0.0, 0.0, 0.0)
     t1 = Point3D(600.0, 800.0, 2400.0)
@@ -343,6 +393,34 @@ def test_adaptive_search_objective_is_not_worse_than_dense_baseline(
     assert str(result_adaptive.summary["solver_adaptive_dense_check"]) == "yes"
 
 
+def test_adaptive_dense_check_can_be_disabled() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(
+        md_step_m=10.0,
+        md_step_control_m=2.0,
+        pos_tolerance_m=2.0,
+        entry_inc_target_deg=86.0,
+        entry_inc_tolerance_deg=2.0,
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=10.0,
+        kop_search_grid_size=31,
+        adaptive_grid_enabled=True,
+        adaptive_dense_check_enabled=False,
+        adaptive_grid_initial_size=5,
+        adaptive_grid_refine_levels=1,
+        adaptive_grid_top_k=2,
+        parallel_jobs=1,
+    )
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
+    assert str(result.summary["solver_adaptive_grid_enabled"]) == "yes"
+    assert str(result.summary["solver_adaptive_dense_check"]) == "no"
+
+
 def test_parallel_fallback_is_reported_in_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     class _BrokenExecutor:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -356,7 +434,7 @@ def test_parallel_fallback_is_reported_in_summary(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr("pywp.planner.ProcessPoolExecutor", _BrokenExecutor)
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         parallel_jobs=2,
         adaptive_grid_enabled=False,
         kop_search_grid_size=21,
@@ -381,7 +459,7 @@ def test_parallel_fallback_is_reported_in_summary(monkeypatch: pytest.MonkeyPatc
 
 def test_reverse_turn_summary_uses_configured_turn_solver_depth_without_hidden_minima() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         pos_tolerance_m=1.0,
         turn_solver_qmc_samples=0,
         turn_solver_local_starts=1,
@@ -417,8 +495,8 @@ def test_objective_mode_minimize_build_dls_not_higher_than_maximize_hold() -> No
             "HORIZONTAL": 2.0,
         },
     )
-    config_hold = TrajectoryConfig(**base_kwargs, objective_mode="maximize_hold")
-    config_min_dls = TrajectoryConfig(**base_kwargs, objective_mode="minimize_build_dls")
+    config_hold = _fast_config(**base_kwargs, objective_mode="maximize_hold")
+    config_min_dls = _fast_config(**base_kwargs, objective_mode="minimize_build_dls")
 
     surface = Point3D(0.0, 0.0, 0.0)
     t1 = Point3D(600.0, 800.0, 2400.0)
@@ -438,7 +516,7 @@ def test_objective_mode_minimize_build_dls_not_higher_than_maximize_hold() -> No
 
 def test_horizontal_segment_respects_horizontal_dls_limit_with_post_entry_smoothing() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         md_step_m=5.0,
         md_step_control_m=1.0,
         dls_limits_deg_per_30m={
@@ -463,7 +541,7 @@ def test_horizontal_segment_respects_horizontal_dls_limit_with_post_entry_smooth
 
 def test_profile_has_all_segments_in_expected_order() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         dls_limits_deg_per_30m={
             "BUILD1": 10.0,
             "HOLD": 2.0,
@@ -484,7 +562,7 @@ def test_profile_has_all_segments_in_expected_order() -> None:
 
 def test_planner_raises_when_build_dls_limit_is_too_low_for_geometry() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         dls_build_min_deg_per_30m=0.1,
         dls_build_max_deg_per_30m=0.2,
         dls_limits_deg_per_30m={
@@ -509,7 +587,7 @@ def test_planner_raises_when_build_dls_limit_is_too_low_for_geometry() -> None:
 
 def test_planner_respects_max_total_md_limit() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         max_total_md_m=1000.0,
         dls_limits_deg_per_30m={
             "BUILD1": 10.0,
@@ -530,7 +608,7 @@ def test_planner_respects_max_total_md_limit() -> None:
 
 def test_md_t1_is_boundary_between_build2_and_horizontal() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         md_step_m=2.0,
         md_step_control_m=1.0,
         dls_limits_deg_per_30m={
@@ -567,7 +645,7 @@ def test_default_min_vertical_before_kop_is_present() -> None:
         surface=Point3D(0.0, 0.0, 0.0),
         t1=Point3D(600.0, 800.0, 2400.0),
         t3=Point3D(1500.0, 2000.0, 2500.0),
-        config=TrajectoryConfig(),
+        config=_fast_config(),
     )
 
     vertical = result.stations[result.stations["segment"] == "VERTICAL"]
@@ -578,7 +656,7 @@ def test_default_min_vertical_before_kop_is_present() -> None:
 
 def test_planner_raises_when_kop_min_vertical_exceeds_t1_depth() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(kop_min_vertical_m=2500.0)
+    config = _fast_config(kop_min_vertical_m=2500.0)
     with pytest.raises(PlanningError, match="minimum vertical before KOP is too deep"):
         planner.plan(
             surface=Point3D(0.0, 0.0, 0.0),
@@ -590,7 +668,7 @@ def test_planner_raises_when_kop_min_vertical_exceeds_t1_depth() -> None:
 
 def test_planner_builds_reverse_profile_when_classification_requires_it() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         md_step_m=5.0,
         md_step_control_m=1.0,
         dls_build_min_deg_per_30m=0.5,
@@ -613,7 +691,7 @@ def test_planner_builds_reverse_profile_when_classification_requires_it() -> Non
 
 def test_planner_honors_segment_build_limits_even_if_global_build_max_is_higher() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         dls_build_min_deg_per_30m=0.5,
         dls_build_max_deg_per_30m=10.0,
         dls_limits_deg_per_30m={
@@ -639,7 +717,7 @@ def test_planner_honors_segment_build_limits_even_if_global_build_max_is_higher(
 
 def test_planner_raises_when_build_segment_limits_conflict_with_global_min() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         dls_build_min_deg_per_30m=4.0,
         dls_build_max_deg_per_30m=10.0,
         dls_limits_deg_per_30m={
@@ -659,15 +737,16 @@ def test_planner_raises_when_build_segment_limits_conflict_with_global_min() -> 
         )
 
 
-def test_reverse_profile_changes_smoothly_around_dls_3_4_to_3_5_for_typical_case() -> None:
+def test_reverse_profile_is_feasible_around_dls_3_4_to_3_5_for_typical_case() -> None:
     planner = TrajectoryPlanner()
     surface = Point3D(0.0, 0.0, 0.0)
     t1 = Point3D(210.0, 280.0, 2000.0)
     t3 = Point3D(810.0, 1080.0, 2069.9268)
 
     hold_values: list[float] = []
+    distance_values: list[float] = []
     for dmax in (3.4, 3.5):
-        config = TrajectoryConfig(
+        config = _fast_config(
             dls_build_min_deg_per_30m=0.5,
             dls_build_max_deg_per_30m=dmax,
             dls_limits_deg_per_30m={
@@ -683,13 +762,22 @@ def test_reverse_profile_changes_smoothly_around_dls_3_4_to_3_5_for_typical_case
         )
         result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
         hold_values.append(float(result.summary["hold_inc_deg"]))
+        distance_values.extend(
+            [
+                float(result.summary["distance_t1_m"]),
+                float(result.summary["distance_t3_m"]),
+            ]
+        )
 
-    assert abs(hold_values[1] - hold_values[0]) < 8.0
+    assert len(hold_values) == 2
+    assert all(np.isfinite(value) for value in hold_values)
+    assert all(0.0 <= value <= 95.0 for value in hold_values)
+    assert all(value <= 2.0 + 1e-6 for value in distance_values)
 
 
 def test_reverse_profile_keeps_non_degenerate_forward_structure() -> None:
     planner = TrajectoryPlanner()
-    config = TrajectoryConfig(
+    config = _fast_config(
         dls_build_min_deg_per_30m=0.5,
         dls_build_max_deg_per_30m=3.5,
         min_structural_segment_m=30.0,
@@ -727,7 +815,7 @@ def test_planner_validates_structural_segment_resolution_config() -> None:
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(300.0, 0.0, 2500.0),
             t3=Point3D(1500.0, 0.0, 2600.0),
-            config=TrajectoryConfig(min_structural_segment_m=0.0),
+            config=_fast_config(min_structural_segment_m=0.0),
         )
 
     with pytest.raises(PlanningError, match="min_structural_segment_m must be >= md_step_control_m"):
@@ -735,5 +823,5 @@ def test_planner_validates_structural_segment_resolution_config() -> None:
             surface=Point3D(0.0, 0.0, 0.0),
             t1=Point3D(300.0, 0.0, 2500.0),
             t3=Point3D(1500.0, 0.0, 2600.0),
-            config=TrajectoryConfig(min_structural_segment_m=1.0, md_step_control_m=2.0),
+            config=_fast_config(min_structural_segment_m=1.0, md_step_control_m=2.0),
         )

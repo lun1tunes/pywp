@@ -22,15 +22,20 @@ from pywp.classification import (
 )
 from pywp.planner import PlanningError
 from pywp.planner_config import (
-    CFG_DEFAULTS,
-    OBJECTIVE_OPTIONS,
     TURN_SOLVER_OPTIONS,
-    build_trajectory_config,
 )
+from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
+from pywp.ui_calc_params import (
+    apply_calc_param_defaults,
+    build_config_from_state,
+    calc_param_signature,
+    render_calc_params_block,
+)
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import (
     arrow_safe_text_dataframe,
+    dls_to_pi,
     format_distance,
     format_run_log_line,
 )
@@ -186,12 +191,13 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("hold_length_m", "Длина HOLD, м"),
     ("horizontal_length_m", "Длина горизонтального ствола, м"),
     ("kop_md_m", "KOP MD, м"),
-    ("max_dls_total_deg_per_30m", "Макс DLS по стволу, deg/30m"),
+    ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
     ("max_inc_actual_deg", "Макс INC фактический, deg"),
     ("max_inc_deg", "Макс INC лимит, deg"),
     ("md_total_m", "Итоговая MD, м"),
+    ("max_total_md_postcheck_m", "Лимит итоговой MD (постпроверка), м"),
 )
-UI_DEFAULTS_VERSION = 7
+UI_DEFAULTS_VERSION = 10
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
@@ -336,87 +342,11 @@ def _init_state() -> None:
     if "surface_x" not in st.session_state:
         _apply_scenario(st.session_state["scenario_name"])
 
-    st.session_state.setdefault("md_step", float(CFG_DEFAULTS.md_step_m))
-    st.session_state.setdefault("md_control", float(CFG_DEFAULTS.md_step_control_m))
-    st.session_state.setdefault("pos_tol", float(CFG_DEFAULTS.pos_tolerance_m))
-    st.session_state.setdefault(
-        "entry_inc_target", float(CFG_DEFAULTS.entry_inc_target_deg)
-    )
-    st.session_state.setdefault(
-        "entry_inc_tol", float(CFG_DEFAULTS.entry_inc_tolerance_deg)
-    )
-    st.session_state.setdefault("max_inc", float(CFG_DEFAULTS.max_inc_deg))
-    st.session_state.setdefault(
-        "dls_build_min", float(CFG_DEFAULTS.dls_build_min_deg_per_30m)
-    )
-    st.session_state.setdefault(
-        "dls_build_max", float(CFG_DEFAULTS.dls_build_max_deg_per_30m)
-    )
-    st.session_state.setdefault(
-        "kop_min_vertical", float(CFG_DEFAULTS.kop_min_vertical_m)
-    )
-    st.session_state.setdefault("objective_mode", str(CFG_DEFAULTS.objective_mode))
-    st.session_state.setdefault("turn_solver_mode", str(CFG_DEFAULTS.turn_solver_mode))
-    st.session_state.setdefault(
-        "turn_solver_qmc_samples", int(CFG_DEFAULTS.turn_solver_qmc_samples)
-    )
-    st.session_state.setdefault(
-        "turn_solver_local_starts", int(CFG_DEFAULTS.turn_solver_local_starts)
-    )
-    st.session_state.setdefault(
-        "adaptive_grid_enabled", bool(CFG_DEFAULTS.adaptive_grid_enabled)
-    )
-    st.session_state.setdefault(
-        "adaptive_grid_initial_size", int(CFG_DEFAULTS.adaptive_grid_initial_size)
-    )
-    st.session_state.setdefault(
-        "adaptive_grid_refine_levels", int(CFG_DEFAULTS.adaptive_grid_refine_levels)
-    )
-    st.session_state.setdefault(
-        "adaptive_grid_top_k", int(CFG_DEFAULTS.adaptive_grid_top_k)
-    )
-    st.session_state.setdefault("parallel_jobs", int(CFG_DEFAULTS.parallel_jobs))
-    st.session_state.setdefault(
-        "profile_cache_enabled", bool(CFG_DEFAULTS.profile_cache_enabled)
-    )
+    apply_calc_param_defaults(force=False)
     st.session_state.setdefault("ui_defaults_version", 0)
 
     if int(st.session_state.get("ui_defaults_version", 0)) < UI_DEFAULTS_VERSION:
-        st.session_state["md_step"] = float(CFG_DEFAULTS.md_step_m)
-        st.session_state["md_control"] = float(CFG_DEFAULTS.md_step_control_m)
-        st.session_state["pos_tol"] = float(CFG_DEFAULTS.pos_tolerance_m)
-        st.session_state["entry_inc_target"] = float(CFG_DEFAULTS.entry_inc_target_deg)
-        st.session_state["entry_inc_tol"] = float(CFG_DEFAULTS.entry_inc_tolerance_deg)
-        st.session_state["max_inc"] = float(CFG_DEFAULTS.max_inc_deg)
-        st.session_state["dls_build_min"] = float(
-            CFG_DEFAULTS.dls_build_min_deg_per_30m
-        )
-        st.session_state["dls_build_max"] = float(
-            CFG_DEFAULTS.dls_build_max_deg_per_30m
-        )
-        st.session_state["kop_min_vertical"] = float(CFG_DEFAULTS.kop_min_vertical_m)
-        st.session_state["objective_mode"] = str(CFG_DEFAULTS.objective_mode)
-        st.session_state["turn_solver_mode"] = str(CFG_DEFAULTS.turn_solver_mode)
-        st.session_state["turn_solver_qmc_samples"] = int(
-            CFG_DEFAULTS.turn_solver_qmc_samples
-        )
-        st.session_state["turn_solver_local_starts"] = int(
-            CFG_DEFAULTS.turn_solver_local_starts
-        )
-        st.session_state["adaptive_grid_enabled"] = bool(
-            CFG_DEFAULTS.adaptive_grid_enabled
-        )
-        st.session_state["adaptive_grid_initial_size"] = int(
-            CFG_DEFAULTS.adaptive_grid_initial_size
-        )
-        st.session_state["adaptive_grid_refine_levels"] = int(
-            CFG_DEFAULTS.adaptive_grid_refine_levels
-        )
-        st.session_state["adaptive_grid_top_k"] = int(CFG_DEFAULTS.adaptive_grid_top_k)
-        st.session_state["parallel_jobs"] = int(CFG_DEFAULTS.parallel_jobs)
-        st.session_state["profile_cache_enabled"] = bool(
-            CFG_DEFAULTS.profile_cache_enabled
-        )
+        apply_calc_param_defaults(force=True)
         _apply_template_filters_for_scenario(str(st.session_state["scenario_name"]))
         st.session_state["ui_defaults_version"] = UI_DEFAULTS_VERSION
 
@@ -440,7 +370,7 @@ def _clear_result() -> None:
 
 
 def _current_input_signature() -> tuple[object, ...]:
-    keys = (
+    point_keys = (
         "surface_x",
         "surface_y",
         "surface_z",
@@ -450,27 +380,9 @@ def _current_input_signature() -> tuple[object, ...]:
         "t3_x",
         "t3_y",
         "t3_z",
-        "md_step",
-        "md_control",
-        "pos_tol",
-        "entry_inc_target",
-        "entry_inc_tol",
-        "max_inc",
-        "dls_build_min",
-        "dls_build_max",
-        "kop_min_vertical",
-        "turn_solver_qmc_samples",
-        "turn_solver_local_starts",
-        "adaptive_grid_initial_size",
-        "adaptive_grid_refine_levels",
-        "adaptive_grid_top_k",
-        "parallel_jobs",
     )
-    signature = [float(st.session_state[key]) for key in keys]
-    signature.append(str(st.session_state["objective_mode"]))
-    signature.append(str(st.session_state["turn_solver_mode"]))
-    signature.append(str(bool(st.session_state["adaptive_grid_enabled"])))
-    signature.append(str(bool(st.session_state["profile_cache_enabled"])))
+    signature = [float(st.session_state[key]) for key in point_keys]
+    signature.extend(calc_param_signature())
     return tuple(signature)
 
 
@@ -494,29 +406,7 @@ def _build_points_from_state() -> tuple[Point3D, Point3D, Point3D]:
 
 
 def _build_config_from_state() -> TrajectoryConfig:
-    return build_trajectory_config(
-        md_step_m=float(st.session_state["md_step"]),
-        md_step_control_m=float(st.session_state["md_control"]),
-        pos_tolerance_m=float(st.session_state["pos_tol"]),
-        entry_inc_target_deg=float(st.session_state["entry_inc_target"]),
-        entry_inc_tolerance_deg=float(st.session_state["entry_inc_tol"]),
-        max_inc_deg=float(st.session_state["max_inc"]),
-        dls_build_min_deg_per_30m=float(st.session_state["dls_build_min"]),
-        dls_build_max_deg_per_30m=float(st.session_state["dls_build_max"]),
-        kop_min_vertical_m=float(st.session_state["kop_min_vertical"]),
-        objective_mode=str(st.session_state["objective_mode"]),
-        turn_solver_mode=str(st.session_state["turn_solver_mode"]),
-        turn_solver_qmc_samples=int(st.session_state["turn_solver_qmc_samples"]),
-        turn_solver_local_starts=int(st.session_state["turn_solver_local_starts"]),
-        adaptive_grid_enabled=bool(st.session_state["adaptive_grid_enabled"]),
-        adaptive_grid_initial_size=int(st.session_state["adaptive_grid_initial_size"]),
-        adaptive_grid_refine_levels=int(
-            st.session_state["adaptive_grid_refine_levels"]
-        ),
-        adaptive_grid_top_k=int(st.session_state["adaptive_grid_top_k"]),
-        parallel_jobs=int(st.session_state["parallel_jobs"]),
-        profile_cache_enabled=bool(st.session_state["profile_cache_enabled"]),
-    )
+    return build_config_from_state()
 
 
 def _validate_input(
@@ -759,19 +649,8 @@ def _render_template_controls() -> None:
             st.markdown(
                 "- `Окно reverse` — это диапазон **горизонтального отхода t1** (S→t1), "
                 "в котором цель относится к типу `обратное направление`.\n"
-                "- Значение в карточке — **справочный референс по ГВ t1** из таблицы классификации, "
-                "а не «дефолт» решателя.\n"
-                "- На расчет влияет через автоматическую классификацию типа траектории "
-                "(`прямое`/`обратное`) и выбор подходящего шаблона.\n"
-                "- Из UI главной страницы это окно не редактируется: пороги задаются "
-                "в референсной таблице на странице `Классификация скважин` "
-                "(модуль `pywp/classification.py`)."
             )
 
-        render_small_note(
-            "Подсказка: после применения шаблона можно вручную скорректировать координаты S/t1/t3. "
-            "Последний успешный расчет сохраняется до следующего запуска."
-        )
         with st.expander("Покрытие каталога шаблонов", expanded=False):
             st.dataframe(
                 _template_coverage_frame(),
@@ -786,20 +665,81 @@ def _render_template_controls() -> None:
             )
 
 
+def _render_point_config_block() -> None:
+    with st.container(border=True):
+        st.markdown("### Конфигурация точек (S, t1, t3)")
+        st.caption(
+            "Это геометрия задачи (координаты точек). Параметры расчета и солвера задаются отдельным блоком ниже."
+        )
+        c1, c2, c3 = st.columns(3, gap="small", border=True, vertical_alignment="top")
+        with c1:
+            st.markdown("**Устье S**")
+            st.number_input(
+                "S X (East), м",
+                key="surface_x",
+                step=50.0,
+                help="Координата X устья S в локальной системе координат.",
+            )
+            st.number_input(
+                "S Y (North), м",
+                key="surface_y",
+                step=50.0,
+                help="Координата Y устья S в локальной системе координат.",
+            )
+            st.number_input(
+                "S Z (TVD), м",
+                key="surface_z",
+                step=50.0,
+                help="Обычно 0 м для поверхности. TVD положителен вниз.",
+            )
+        with c2:
+            st.markdown("**Точка входа t1**")
+            st.number_input(
+                "t1 X (East), м",
+                key="t1_x",
+                step=50.0,
+                help="Координата X точки входа в пласт.",
+            )
+            st.number_input(
+                "t1 Y (North), м",
+                key="t1_y",
+                step=50.0,
+                help="Координата Y точки входа в пласт.",
+            )
+            st.number_input(
+                "t1 Z (TVD), м",
+                key="t1_z",
+                step=50.0,
+                help="TVD точки входа t1.",
+            )
+        with c3:
+            st.markdown("**Концевая точка t3**")
+            st.number_input(
+                "t3 X (East), м",
+                key="t3_x",
+                step=50.0,
+                help="Координата X целевой точки в пласте.",
+            )
+            st.number_input(
+                "t3 Y (North), м",
+                key="t3_y",
+                step=50.0,
+                help="Координата Y целевой точки в пласте.",
+            )
+            st.number_input(
+                "t3 Z (TVD), м",
+                key="t3_z",
+                step=50.0,
+                help="TVD конечной точки t3.",
+            )
+
+
 def _render_input_form() -> bool:
     with st.form(
         "planner_form", clear_on_submit=False, enter_to_submit=False, border=False
     ):
         with st.container(border=True):
-            st.markdown("### Параметры расчёта")
-            c1, c2, c3, c4 = st.columns(
-                [1.25, 1.25, 1.25, 2.35],
-                gap="small",
-                border=True,
-                vertical_alignment="top",
-            )
-
-            st.markdown("**Расчет траектории**")
+            st.markdown("### Расчет траектории")
             build_clicked = st.form_submit_button(
                 "Построить траекторию",
                 type="primary",
@@ -813,267 +753,9 @@ def _render_input_form() -> bool:
                     f"Время расчета: {float(st.session_state['last_runtime_s']):.2f} с"
                 )
 
-            with c1:
-                st.markdown("**Устье S**")
-                st.number_input(
-                    "S X (East), м",
-                    key="surface_x",
-                    step=50.0,
-                    help="Координата X устья S в локальной системе координат.",
-                )
-                st.number_input(
-                    "S Y (North), м",
-                    key="surface_y",
-                    step=50.0,
-                    help="Координата Y устья S в локальной системе координат.",
-                )
-                st.number_input(
-                    "S Z (TVD), м",
-                    key="surface_z",
-                    step=50.0,
-                    help="Обычно 0 м для поверхности. TVD положителен вниз.",
-                )
-
-            with c2:
-                st.markdown("**Точка входа t1**")
-                st.number_input(
-                    "t1 X (East), м",
-                    key="t1_x",
-                    step=50.0,
-                    help="Координата X точки входа в пласт.",
-                )
-                st.number_input(
-                    "t1 Y (North), м",
-                    key="t1_y",
-                    step=50.0,
-                    help="Координата Y точки входа в пласт.",
-                )
-                st.number_input(
-                    "t1 Z (TVD), м",
-                    key="t1_z",
-                    step=50.0,
-                    help="TVD точки входа t1.",
-                )
-
-            with c3:
-                st.markdown("**Концевая точка t3**")
-                st.number_input(
-                    "t3 X (East), м",
-                    key="t3_x",
-                    step=50.0,
-                    help="Координата X целевой точки в пласте.",
-                )
-                st.number_input(
-                    "t3 Y (North), м",
-                    key="t3_y",
-                    step=50.0,
-                    help="Координата Y целевой точки в пласте.",
-                )
-                st.number_input(
-                    "t3 Z (TVD), м",
-                    key="t3_z",
-                    step=50.0,
-                    help="TVD конечной точки t3.",
-                )
-
-            with c4:
-                st.markdown("**Ограничения профиля**")
-                r1, r2, r3 = st.columns(3, gap="small")
-                r1.number_input(
-                    "Шаг MD, м",
-                    key="md_step",
-                    min_value=1.0,
-                    step=1.0,
-                    help="Шаг выходной инклинометрии. Меньше шаг = подробнее профиль.",
-                )
-                r2.number_input(
-                    "Контрольный шаг MD, м",
-                    key="md_control",
-                    min_value=0.5,
-                    step=0.5,
-                    help="Внутренний расчетный шаг для проверки ограничений и качества решения.",
-                )
-                r3.number_input(
-                    "Допуск по позиции, м",
-                    key="pos_tol",
-                    min_value=0.1,
-                    step=0.1,
-                    help="Максимально допустимый промах по t1 и t3.",
-                )
-
-                rr1, rr2, rr3 = st.columns(3, gap="small")
-                rr1.number_input(
-                    "Целевой INC на t1, deg",
-                    key="entry_inc_target",
-                    min_value=70.0,
-                    max_value=89.0,
-                    step=0.5,
-                    help="Плановый угол входа в пласт в точке t1.",
-                )
-                rr2.number_input(
-                    "Допуск INC на t1, deg",
-                    key="entry_inc_tol",
-                    min_value=0.1,
-                    max_value=5.0,
-                    step=0.1,
-                    help="Отклонение от целевого INC в точке t1.",
-                )
-                rr3.number_input(
-                    "Макс INC по стволу",
-                    key="max_inc",
-                    min_value=80.0,
-                    max_value=120.0,
-                    step=0.5,
-                    help="Глобальное ограничение по зенитному углу. При недостатке этого лимита расчет потребует overbend.",
-                )
-
-                rd1, rd2 = st.columns(2, gap="small")
-                rd1.number_input(
-                    "Мин DLS BUILD",
-                    key="dls_build_min",
-                    min_value=0.1,
-                    value=0.5,
-                    step=0.1,
-                    help="Нижняя граница поиска DLS на BUILD-сегментах (deg/30m).",
-                )
-                rd2.number_input(
-                    "Макс DLS BUILD",
-                    key="dls_build_max",
-                    min_value=0.1,
-                    value=3.0,
-                    step=0.1,
-                    help="Верхняя граница поиска DLS на BUILD1/BUILD2 (deg/30m).",
-                )
-                st.number_input(
-                    "Мин VERTICAL до KOP, м",
-                    key="kop_min_vertical",
-                    min_value=0.0,
-                    value=300.0,
-                    step=10.0,
-                    help="Минимальный VERTICAL участок от S до начала BUILD1.",
-                )
-                with st.expander("Параметры солвера", expanded=False):
-                    with st.popover(
-                        "Что означают параметры солвера", icon=":material/tune:"
-                    ):
-                        st.markdown(
-                            "- `Целевая функция` задает критерий выбора из допустимых профилей.\n"
-                            "- `TURN` параметры влияют только на некомпланарные случаи.\n"
-                            "- `Сетка поиска` — это набор пробных значений KOP и reverse INC.\n"
-                            "- `Adaptive` сначала считает по редкой сетке, затем уплотняет ее около лучших решений.\n"
-                            "- `Parallel jobs` использует процессы в coplanar-поиске.\n"
-                            "- `Кэш профилей` сокращает повторные вычисления внутри оптимизации."
-                        )
-                    st.selectbox(
-                        "Целевая функция",
-                        options=list(OBJECTIVE_OPTIONS.keys()),
-                        key="objective_mode",
-                        format_func=lambda value: OBJECTIVE_OPTIONS[str(value)],
-                        help=(
-                            "Определяет, что оптимизирует решатель среди допустимых решений. "
-                            "Рекомендуется оставить «Максимизировать длину HOLD»: обычно это дает "
-                            "более стабильную конструкцию и меньше ручной подстройки."
-                        ),
-                    )
-                    st.selectbox(
-                        "Метод TURN-решателя",
-                        options=list(TURN_SOLVER_OPTIONS.keys()),
-                        key="turn_solver_mode",
-                        format_func=lambda value: TURN_SOLVER_OPTIONS[str(value)],
-                        help=(
-                            "Least Squares (TRF) — быстрый и достаточно устойчивый метод для большинства кейсов "
-                            "(рекомендуемый дефолт). DE Hybrid — более медленный, но может помочь в особенно "
-                            "сложной геометрии."
-                        ),
-                    )
-                    rs1, rs2 = st.columns(2, gap="small")
-                    rs1.number_input(
-                        "TURN QMC samples",
-                        key="turn_solver_qmc_samples",
-                        min_value=0,
-                        value=24,
-                        step=4,
-                        help=(
-                            "Количество дополнительных стартовых точек (Latin Hypercube). "
-                            "Больше значение — выше шанс найти решение в сложных случаях, но дольше расчет. "
-                            "Дефолт 24 — рабочий компромисс."
-                        ),
-                    )
-                    rs2.number_input(
-                        "TURN local starts",
-                        key="turn_solver_local_starts",
-                        min_value=1,
-                        value=12,
-                        step=1,
-                        help=(
-                            "Сколько лучших стартовых точек запускать локальным решателем. "
-                            "Больше — стабильнее подбор, но медленнее. Дефолт 12 — обычно оптимальный."
-                        ),
-                    )
-                    st.markdown("**Производительность и поиск**")
-                    st.caption(
-                        "Сетка простыми словами: это «точки, где солвер пробует решение». "
-                        "Плотнее сетка = точнее поиск, но дольше расчет. "
-                        "Adaptive делает это умнее: грубо в начале, подробно рядом с лучшими вариантами."
-                    )
-                    p1, p2 = st.columns(2, gap="small")
-                    p1.toggle(
-                        "Умная сетка (coarse → fine)",
-                        key="adaptive_grid_enabled",
-                        help=(
-                            "Сначала быстрый грубый просмотр, потом уточнение около лучших решений. "
-                            "Обычно быстрее, чем сразу считать очень плотную сетку."
-                        ),
-                    )
-                    p2.toggle(
-                        "Кэш профилей",
-                        key="profile_cache_enabled",
-                        help=(
-                            "Кэширует промежуточные расчеты профиля в рамках оптимизации. "
-                            "Полезно для ускорения при повторных оценках."
-                        ),
-                    )
-                    p3, p4, p5 = st.columns(3, gap="small")
-                    p3.number_input(
-                        "Стартовая сетка (точек)",
-                        key="adaptive_grid_initial_size",
-                        min_value=2,
-                        step=1,
-                        help=(
-                            "Сколько точек брать в первом грубом проходе. "
-                            "Больше точек = плотнее стартовая сетка = медленнее, но точнее на старте."
-                        ),
-                    )
-                    p4.number_input(
-                        "Шагов уточнения",
-                        key="adaptive_grid_refine_levels",
-                        min_value=0,
-                        step=1,
-                        help=(
-                            "Сколько раз дополнительно уплотнять сетку вокруг лучших кандидатов. "
-                            "0 = только стартовый проход."
-                        ),
-                    )
-                    p5.number_input(
-                        "Лучших зон для уточнения (top-k)",
-                        key="adaptive_grid_top_k",
-                        min_value=1,
-                        step=1,
-                        help=(
-                            "Сколько лучших кандидатов брать как «центры внимания» на следующем шаге. "
-                            "Больше значение повышает надежность поиска, но увеличивает время."
-                        ),
-                    )
-                    st.number_input(
-                        "Параллельные процессы (jobs)",
-                        key="parallel_jobs",
-                        min_value=1,
-                        step=1,
-                        help=(
-                            "Сколько процессов одновременно проверяют кандидаты в coplanar-режиме. "
-                            "1 = без параллелизма. Обычно ставьте не больше числа физических ядер."
-                        ),
-                    )
+        _render_point_config_block()
+        with st.container(border=True):
+            render_calc_params_block(show_solver_help=True)
     return bool(build_clicked)
 
 
@@ -1166,7 +848,10 @@ def _run_planner_if_clicked(
     except PlanningError as exc:
         st.session_state["last_error"] = str(exc)
         st.session_state["last_runtime_s"] = None
-        err_msg = format_run_log_line(run_started_s, f"Ошибка расчета: {exc}")
+        err_msg = format_run_log_line(
+            run_started_s,
+            f"Ошибка расчета: {summarize_problem_ru(str(exc))}",
+        )
         log_lines.append(err_msg)
         phase_placeholder.error("Расчет завершился ошибкой")
     finally:
@@ -1190,11 +875,22 @@ def _format_summary_value(metric_key: str, metric_value: object) -> str:
     except (TypeError, ValueError):
         return str(metric_value)
 
+    if "dls" in str(metric_key).lower():
+        return f"{dls_to_pi(value):.2f}"
     if metric_key.endswith("_deg") or "_deg_" in metric_key:
         return f"{value:.2f}"
     if metric_key.endswith("_m") or metric_key.startswith("md_"):
         return f"{value:.2f}"
     return f"{value:.4g}"
+
+
+def _format_summary_key(metric_key: str) -> str:
+    key = str(metric_key)
+    if "dls" not in key.lower():
+        return key
+    key = key.replace("DLS", "PI").replace("dls", "pi")
+    key = key.replace("_deg_per_30m", "_deg_per_10m")
+    return key
 
 
 def _render_result_overview(last_result: dict[str, object]) -> float:
@@ -1206,12 +902,30 @@ def _render_result_overview(last_result: dict[str, object]) -> float:
     with st.container(border=True):
         st.markdown("### Ключевые показатели")
         metrics_rows = [
-            {"Показатель": "Тип траектории", "Значение": str(summary["trajectory_type"])},
-            {"Показатель": "Класс сложности", "Значение": str(summary["well_complexity"])},
-            {"Показатель": "INC на t1", "Значение": f"{float(summary['entry_inc_deg']):.2f} deg"},
-            {"Показатель": "ЗУ HOLD", "Значение": f"{float(summary['hold_inc_deg']):.2f} deg"},
-            {"Показатель": "Отход t1", "Значение": format_distance(t1_horizontal_offset_m)},
-            {"Показатель": "KOP MD", "Значение": format_distance(float(summary["kop_md_m"]))},
+            {
+                "Показатель": "Тип траектории",
+                "Значение": str(summary["trajectory_type"]),
+            },
+            {
+                "Показатель": "Класс сложности",
+                "Значение": str(summary["well_complexity"]),
+            },
+            {
+                "Показатель": "INC на t1",
+                "Значение": f"{float(summary['entry_inc_deg']):.2f} deg",
+            },
+            {
+                "Показатель": "ЗУ HOLD",
+                "Значение": f"{float(summary['hold_inc_deg']):.2f} deg",
+            },
+            {
+                "Показатель": "Отход t1",
+                "Значение": format_distance(t1_horizontal_offset_m),
+            },
+            {
+                "Показатель": "KOP MD",
+                "Значение": format_distance(float(summary["kop_md_m"])),
+            },
             {
                 "Показатель": "Длина HORIZONTAL",
                 "Значение": format_distance(float(summary["horizontal_length_m"])),
@@ -1221,10 +935,13 @@ def _render_result_overview(last_result: dict[str, object]) -> float:
                 "Значение": f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
             },
             {
-                "Показатель": "Макс DLS",
-                "Значение": f"{float(summary['max_dls_total_deg_per_30m']):.2f} deg/30m",
+                "Показатель": "Макс ПИ",
+                "Значение": f"{dls_to_pi(float(summary['max_dls_total_deg_per_30m'])):.2f} deg/10m",
             },
-            {"Показатель": "Итоговая MD", "Значение": format_distance(float(summary["md_total_m"]))},
+            {
+                "Показатель": "Итоговая MD",
+                "Значение": format_distance(float(summary["md_total_m"])),
+            },
             {
                 "Показатель": "Время расчета",
                 "Значение": "—" if runtime_s is None else f"{float(runtime_s):.2f} с",
@@ -1237,8 +954,8 @@ def _render_result_overview(last_result: dict[str, object]) -> float:
         )
 
         render_small_note(
-            "Проверяйте соответствие фактического INC/DLS лимитам, особенно при изменении "
-            "целевого угла входа и границ DLS."
+            "Проверяйте соответствие фактического INC/ПИ лимитам, особенно при изменении "
+            "целевого угла входа и границ ПИ."
         )
     return float(t1_horizontal_offset_m)
 
@@ -1258,7 +975,7 @@ def _render_result_plots(last_result: dict[str, object]) -> None:
         t3=t3,
         md_t1_m=md_t1_m,
         dls_limits=config.dls_limits_deg_per_30m,
-        title="3D траектория и DLS",
+        title="3D траектория и ПИ",
         border=True,
     )
     render_plan_section_panel(
@@ -1315,7 +1032,7 @@ def _render_result_tables(
                 continue
             tech_rows.append(
                 {
-                    "Параметр": key,
+                    "Параметр": _format_summary_key(key),
                     "Значение": _format_summary_value(key, value),
                 }
             )

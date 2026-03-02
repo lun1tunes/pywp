@@ -10,6 +10,7 @@ from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.solver_diagnostics import summarize_problem_ru
+from pywp.ui_utils import dls_to_pi
 
 ProgressCallback = Callable[[int, int, str], None]
 
@@ -70,7 +71,7 @@ class WelltrackBatchPlanner:
             "Длина HORIZONTAL, м": "—",
             "INC в t1, deg": "—",
             "ЗУ HOLD, deg": "—",
-            "Макс DLS, deg/30m": "—",
+            "Макс ПИ, deg/10m": "—",
             "Проблема": "",
         }
 
@@ -104,7 +105,7 @@ class WelltrackBatchPlanner:
                 "Длина HORIZONTAL, м": f"{float(summary.get('horizontal_length_m', 0.0)):.2f}",
                 "INC в t1, deg": f"{float(summary.get('entry_inc_deg', 0.0)):.2f}",
                 "ЗУ HOLD, deg": f"{float(summary.get('hold_inc_deg', 0.0)):.2f}",
-                "Макс DLS, deg/30m": f"{float(summary.get('max_dls_total_deg_per_30m', 0.0)):.2f}",
+                "Макс ПИ, deg/10m": f"{dls_to_pi(float(summary.get('max_dls_total_deg_per_30m', 0.0))):.2f}",
                 "Проблема": "",
             }
         )

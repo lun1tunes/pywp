@@ -29,11 +29,11 @@ class TrajectoryConfig:
     pos_tolerance_m: float = 2.0
     entry_inc_target_deg: float = 86.0
     entry_inc_tolerance_deg: float = 2.0
-    max_inc_deg: float = 90.0
+    max_inc_deg: float = 95.0
 
-    dls_build_min_deg_per_30m: float = 0.5
+    dls_build_min_deg_per_30m: float = 0.1
     dls_build_max_deg_per_30m: float = 3.0
-    kop_min_vertical_m: float = 300.0
+    kop_min_vertical_m: float = 550.0
     kop_search_grid_size: int = 81
     reverse_inc_min_deg: float = 8.0
     reverse_inc_max_deg: float = 80.0
@@ -42,10 +42,14 @@ class TrajectoryConfig:
     adaptive_grid_refine_levels: int = 2
     adaptive_grid_top_k: int = 6
     adaptive_grid_enabled: bool = True
+    adaptive_dense_check_enabled: bool = True
     parallel_jobs: int = 1
     profile_cache_enabled: bool = True
 
     max_total_md_m: float = 12000.0
+    # Post-processing MD threshold for user-facing validation only.
+    # Does not participate in solver search/optimization constraints.
+    max_total_md_postcheck_m: float = 6500.0
     objective_mode: ObjectiveMode = OBJECTIVE_MAXIMIZE_HOLD
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_qmc_samples: int = 24

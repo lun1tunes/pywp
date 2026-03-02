@@ -16,16 +16,21 @@ from pywp.eclipse_welltrack import (
     decode_welltrack_bytes,
     parse_welltrack_text,
 )
-from pywp.planner_config import (
-    CFG_DEFAULTS,
-    OBJECTIVE_OPTIONS,
-    TURN_SOLVER_OPTIONS,
-    build_trajectory_config,
-)
 from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_step
+from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
+from pywp.ui_calc_params import (
+    apply_calc_param_defaults,
+    build_config_from_state,
+    render_calc_params_block,
+)
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
-from pywp.ui_utils import arrow_safe_text_dataframe, format_distance, format_run_log_line
+from pywp.ui_utils import (
+    arrow_safe_text_dataframe,
+    dls_to_pi,
+    format_distance,
+    format_run_log_line,
+)
 from pywp.ui_well_panels import (
     render_plan_section_panel,
     render_run_log_panel,
@@ -34,29 +39,18 @@ from pywp.ui_well_panels import (
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
-WT_UI_DEFAULTS_VERSION = 8
+WT_UI_DEFAULTS_VERSION = 12
 WELL_TRAJECTORY_COLOR = "#0B6E4F"
 WELL_TARGET_COLOR = "#C1121F"
-WT_PROFILE_DEFAULTS: dict[str, float | int | str | bool] = {
-    "wt_cfg_md_step_m": float(CFG_DEFAULTS.md_step_m),
-    "wt_cfg_md_step_control_m": float(CFG_DEFAULTS.md_step_control_m),
-    "wt_cfg_pos_tolerance_m": float(CFG_DEFAULTS.pos_tolerance_m),
-    "wt_cfg_entry_inc_target_deg": float(CFG_DEFAULTS.entry_inc_target_deg),
-    "wt_cfg_entry_inc_tolerance_deg": float(CFG_DEFAULTS.entry_inc_tolerance_deg),
-    "wt_cfg_max_inc_deg": float(CFG_DEFAULTS.max_inc_deg),
-    "wt_cfg_dls_build_min": float(CFG_DEFAULTS.dls_build_min_deg_per_30m),
-    "wt_cfg_dls_build_max": float(CFG_DEFAULTS.dls_build_max_deg_per_30m),
-    "wt_cfg_kop_min_vertical_m": float(CFG_DEFAULTS.kop_min_vertical_m),
-    "wt_cfg_objective_mode": str(CFG_DEFAULTS.objective_mode),
-    "wt_cfg_turn_solver_mode": str(CFG_DEFAULTS.turn_solver_mode),
-    "wt_cfg_turn_solver_qmc_samples": int(CFG_DEFAULTS.turn_solver_qmc_samples),
-    "wt_cfg_turn_solver_local_starts": int(CFG_DEFAULTS.turn_solver_local_starts),
-    "wt_cfg_adaptive_grid_enabled": bool(CFG_DEFAULTS.adaptive_grid_enabled),
-    "wt_cfg_adaptive_grid_initial_size": int(CFG_DEFAULTS.adaptive_grid_initial_size),
-    "wt_cfg_adaptive_grid_refine_levels": int(CFG_DEFAULTS.adaptive_grid_refine_levels),
-    "wt_cfg_adaptive_grid_top_k": int(CFG_DEFAULTS.adaptive_grid_top_k),
-    "wt_cfg_parallel_jobs": int(CFG_DEFAULTS.parallel_jobs),
-    "wt_cfg_profile_cache_enabled": bool(CFG_DEFAULTS.profile_cache_enabled),
+_WT_LEGACY_KEY_ALIASES: dict[str, str] = {
+    "wt_cfg_md_step_m": "wt_cfg_md_step",
+    "wt_cfg_md_step_control_m": "wt_cfg_md_control",
+    "wt_cfg_pos_tolerance_m": "wt_cfg_pos_tol",
+    "wt_cfg_entry_inc_target_deg": "wt_cfg_entry_inc_target",
+    "wt_cfg_entry_inc_tolerance_deg": "wt_cfg_entry_inc_tol",
+    "wt_cfg_max_inc_deg": "wt_cfg_max_inc",
+    "wt_cfg_max_total_md_postcheck_m": "wt_cfg_max_total_md_postcheck",
+    "wt_cfg_kop_min_vertical_m": "wt_cfg_kop_min_vertical",
 }
 
 
@@ -98,9 +92,14 @@ def _clear_results() -> None:
 
 
 def _apply_profile_defaults(force: bool) -> None:
-    for key, value in WT_PROFILE_DEFAULTS.items():
-        if force or key not in st.session_state:
-            st.session_state[key] = value
+    _migrate_legacy_calc_param_keys()
+    apply_calc_param_defaults(prefix="wt_cfg_", force=force)
+
+
+def _migrate_legacy_calc_param_keys() -> None:
+    for legacy_key, new_key in _WT_LEGACY_KEY_ALIASES.items():
+        if new_key not in st.session_state and legacy_key in st.session_state:
+            st.session_state[new_key] = st.session_state[legacy_key]
 
 
 def _decode_welltrack_payload(raw_payload: bytes, source_label: str) -> str:
@@ -169,7 +168,9 @@ def _all_wells_3d_figure(
                 customdata=np.column_stack(
                     [
                         stations["MD_m"].to_numpy(dtype=float),
-                        stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float),
+                        dls_to_pi(
+                            stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
+                        ),
                     ]
                 ),
                 hovertemplate=(
@@ -177,7 +178,7 @@ def _all_wells_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m<br>"
-                    "DLS: %{customdata[1]:.2f} deg/30m"
+                    "ПИ: %{customdata[1]:.2f} deg/10m"
                     "<extra>%{fullData.name}</extra>"
                 ),
             )
@@ -282,7 +283,9 @@ def _all_wells_plan_figure(
                     [
                         stations["Z_m"].to_numpy(dtype=float),
                         stations["MD_m"].to_numpy(dtype=float),
-                        stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float),
+                        dls_to_pi(
+                            stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
+                        ),
                     ]
                 ),
                 hovertemplate=(
@@ -290,7 +293,7 @@ def _all_wells_plan_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{customdata[0]:.2f} m<br>"
                     "MD: %{customdata[1]:.2f} m<br>"
-                    "DLS: %{customdata[2]:.2f} deg/30m"
+                    "ПИ: %{customdata[2]:.2f} deg/10m"
                     "<extra>%{fullData.name}</extra>"
                 ),
             )
@@ -331,206 +334,8 @@ def _all_wells_plan_figure(
 
 
 def _build_config_form() -> TrajectoryConfig:
-    st.markdown("### Параметры расчета")
-    c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
-    md_step_m = c1.number_input(
-        "Шаг MD",
-        key="wt_cfg_md_step_m",
-        min_value=1.0,
-        step=1.0,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_md_step_m"]),
-    )
-    md_step_control_m = c2.number_input(
-        "Контрольный шаг MD",
-        key="wt_cfg_md_step_control_m",
-        min_value=0.5,
-        step=0.5,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_md_step_control_m"]),
-    )
-    pos_tolerance_m = c3.number_input(
-        "Допуск по позиции, м",
-        key="wt_cfg_pos_tolerance_m",
-        min_value=0.1,
-        step=0.1,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_pos_tolerance_m"]),
-    )
-    entry_inc_target_deg = c4.number_input(
-        "Целевой INC входа в пласт",
-        key="wt_cfg_entry_inc_target_deg",
-        min_value=70.0,
-        max_value=89.0,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_entry_inc_target_deg"]),
-        step=0.5,
-    )
-    entry_inc_tolerance_deg = c5.number_input(
-        "Допуск INC",
-        key="wt_cfg_entry_inc_tolerance_deg",
-        min_value=0.1,
-        max_value=5.0,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_entry_inc_tolerance_deg"]),
-        step=0.1,
-    )
-    max_inc_deg = c6.number_input(
-        "Макс INC по стволу",
-        key="wt_cfg_max_inc_deg",
-        min_value=80.0,
-        max_value=120.0,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_max_inc_deg"]),
-        step=0.5,
-        help="Глобальное ограничение по зенитному углу. При недостатке этого лимита расчет потребует overbend.",
-    )
-
-    d1, d2, d3 = st.columns(3, gap="small")
-    dls_build_min = d1.number_input(
-        "Мин DLS BUILD",
-        key="wt_cfg_dls_build_min",
-        min_value=0.1,
-        step=0.1,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_dls_build_min"]),
-    )
-    dls_build_max = d2.number_input(
-        "Макс DLS BUILD",
-        key="wt_cfg_dls_build_max",
-        min_value=0.1,
-        step=0.1,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_dls_build_max"]),
-    )
-    kop_min_vertical_m = d3.number_input(
-        "Мин VERTICAL до KOP, м",
-        key="wt_cfg_kop_min_vertical_m",
-        min_value=0.0,
-        step=10.0,
-        value=float(WT_PROFILE_DEFAULTS["wt_cfg_kop_min_vertical_m"]),
-    )
-
-    with st.expander("Параметры солвера", expanded=False):
-        e1, e2, e3 = st.columns(3, gap="small")
-        objective_mode = e1.selectbox(
-            "Целевая функция",
-            options=list(OBJECTIVE_OPTIONS.keys()),
-            key="wt_cfg_objective_mode",
-            format_func=lambda key: OBJECTIVE_OPTIONS[str(key)],
-            help=(
-                "Определяет приоритет оптимизации среди допустимых решений. "
-                "Рекомендуется «Максимизировать длину HOLD»: как правило, дает более устойчивую "
-                "траекторию и снижает потребность в ручной подстройке."
-            ),
-        )
-        turn_solver_mode = e2.selectbox(
-            "Метод TURN-решателя",
-            options=list(TURN_SOLVER_OPTIONS.keys()),
-            key="wt_cfg_turn_solver_mode",
-            format_func=lambda key: TURN_SOLVER_OPTIONS[str(key)],
-            help=(
-                "Least Squares (TRF) — быстрый и стабильный метод для большинства задач "
-                "(рекомендуемый дефолт). DE Hybrid — более тяжелый по времени, но полезен "
-                "для самых сложных геометрий."
-            ),
-        )
-        e3.number_input(
-            "TURN QMC samples",
-            key="wt_cfg_turn_solver_qmc_samples",
-            min_value=0,
-            value=int(WT_PROFILE_DEFAULTS["wt_cfg_turn_solver_qmc_samples"]),
-            step=4,
-            help=(
-                "Количество дополнительных стартовых точек (Latin Hypercube). "
-                "Больше — выше устойчивость в сложных кейсах, но медленнее расчет. "
-                "Дефолт 24 — оптимальный баланс."
-            ),
-        )
-        st.number_input(
-            "TURN local starts",
-            key="wt_cfg_turn_solver_local_starts",
-            min_value=1,
-            value=int(WT_PROFILE_DEFAULTS["wt_cfg_turn_solver_local_starts"]),
-            step=1,
-            help=(
-                "Сколько лучших стартовых точек запускать локальным решателем. "
-                "Больше — выше шанс попасть в хорошее решение, но выше время расчета. "
-                "Дефолт 12 — рабочий стандарт."
-            ),
-        )
-        st.markdown("**Производительность и поиск**")
-        p1, p2 = st.columns(2, gap="small")
-        p1.toggle(
-            "Adaptive coarse-to-fine",
-            key="wt_cfg_adaptive_grid_enabled",
-            value=bool(WT_PROFILE_DEFAULTS["wt_cfg_adaptive_grid_enabled"]),
-            help=(
-                "Итеративно уточняет сетку KOP/reverse INC вокруг лучших кандидатов. "
-                "Обычно ускоряет расчет без потери качества."
-            ),
-        )
-        p2.toggle(
-            "Кэш профилей",
-            key="wt_cfg_profile_cache_enabled",
-            value=bool(WT_PROFILE_DEFAULTS["wt_cfg_profile_cache_enabled"]),
-            help=(
-                "Кэширует промежуточные расчеты профиля в рамках оптимизации. "
-                "Полезно для ускорения при повторных оценках."
-            ),
-        )
-        p3, p4, p5 = st.columns(3, gap="small")
-        p3.number_input(
-            "Adaptive initial grid",
-            key="wt_cfg_adaptive_grid_initial_size",
-            min_value=2,
-            value=int(WT_PROFILE_DEFAULTS["wt_cfg_adaptive_grid_initial_size"]),
-            step=1,
-            help="Размер стартовой coarse-сетки для KOP/reverse INC.",
-        )
-        p4.number_input(
-            "Adaptive refine levels",
-            key="wt_cfg_adaptive_grid_refine_levels",
-            min_value=0,
-            value=int(WT_PROFILE_DEFAULTS["wt_cfg_adaptive_grid_refine_levels"]),
-            step=1,
-            help="Количество итераций уточнения сетки вокруг лучших решений.",
-        )
-        p5.number_input(
-            "Adaptive top-k",
-            key="wt_cfg_adaptive_grid_top_k",
-            min_value=1,
-            value=int(WT_PROFILE_DEFAULTS["wt_cfg_adaptive_grid_top_k"]),
-            step=1,
-            help="Сколько лучших кандидатов брать как фокус для следующего refinement.",
-        )
-        st.number_input(
-            "Parallel jobs",
-            key="wt_cfg_parallel_jobs",
-            min_value=1,
-            value=int(WT_PROFILE_DEFAULTS["wt_cfg_parallel_jobs"]),
-            step=1,
-            help=(
-                "Число процессов для параллельной оценки кандидатов в coplanar режиме. "
-                "1 = без параллелизма."
-            ),
-        )
-
-    return build_trajectory_config(
-        md_step_m=float(md_step_m),
-        md_step_control_m=float(md_step_control_m),
-        pos_tolerance_m=float(pos_tolerance_m),
-        entry_inc_target_deg=float(entry_inc_target_deg),
-        entry_inc_tolerance_deg=float(entry_inc_tolerance_deg),
-        max_inc_deg=float(max_inc_deg),
-        dls_build_min_deg_per_30m=float(dls_build_min),
-        dls_build_max_deg_per_30m=float(dls_build_max),
-        kop_min_vertical_m=float(kop_min_vertical_m),
-        objective_mode=str(objective_mode),
-        turn_solver_mode=str(turn_solver_mode),
-        turn_solver_qmc_samples=int(st.session_state["wt_cfg_turn_solver_qmc_samples"]),
-        turn_solver_local_starts=int(
-            st.session_state["wt_cfg_turn_solver_local_starts"]
-        ),
-        adaptive_grid_enabled=bool(st.session_state["wt_cfg_adaptive_grid_enabled"]),
-        adaptive_grid_initial_size=int(st.session_state["wt_cfg_adaptive_grid_initial_size"]),
-        adaptive_grid_refine_levels=int(st.session_state["wt_cfg_adaptive_grid_refine_levels"]),
-        adaptive_grid_top_k=int(st.session_state["wt_cfg_adaptive_grid_top_k"]),
-        parallel_jobs=int(st.session_state["wt_cfg_parallel_jobs"]),
-        profile_cache_enabled=bool(st.session_state["wt_cfg_profile_cache_enabled"]),
-    )
+    render_calc_params_block(prefix="wt_cfg_")
+    return build_config_from_state(prefix="wt_cfg_")
 
 
 def _render_source_input() -> str:
@@ -721,6 +526,10 @@ def _render_batch_run_form(all_names: list[str]) -> tuple[TrajectoryConfig, bool
             key="wt_selected_names",
             help="Для каждой скважины ожидается ровно 3 точки: S, t1, t3.",
         )
+        st.caption(
+            "Точки `S/t1/t3` подставляются автоматически из входного WELLTRACK. "
+            "Ниже задаются универсальные параметры расчета и солвера."
+        )
         config = _build_config_form()
         run_clicked = st.form_submit_button(
             "Рассчитать выбранные скважины",
@@ -802,7 +611,10 @@ def _run_batch_if_clicked(
                 )
     except Exception as exc:  # noqa: BLE001
         st.session_state["wt_last_error"] = str(exc)
-        err_msg = format_run_log_line(run_started_s, f"Ошибка batch-расчета: {exc}")
+        err_msg = format_run_log_line(
+            run_started_s,
+            f"Ошибка batch-расчета: {summarize_problem_ru(str(exc))}",
+        )
         log_lines.append(err_msg)
         phase_placeholder.error("Batch-расчет завершился ошибкой")
     finally:
@@ -856,8 +668,8 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
             ),
             "INC в t1, deg": st.column_config.NumberColumn("INC t1, deg", format="%.2f"),
             "ЗУ HOLD, deg": st.column_config.NumberColumn("ЗУ HOLD, deg", format="%.2f"),
-            "Макс DLS, deg/30m": st.column_config.NumberColumn(
-                "Макс DLS, deg/30m",
+            "Макс ПИ, deg/10m": st.column_config.NumberColumn(
+                "Макс ПИ, deg/10m",
                 format="%.2f",
             ),
             "Проблема": st.column_config.TextColumn("Проблема"),

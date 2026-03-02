@@ -20,6 +20,37 @@ class ParsedSolverError:
 _RE_FLOAT = r"[-+]?\d+(?:\.\d+)?"
 
 
+def _pi_text_from_dls_text(value_text: str) -> str:
+    try:
+        value = float(value_text)
+    except (TypeError, ValueError):
+        return value_text
+    return f"{value / 3.0:.2f}"
+
+
+def _replace_dls_terms_for_ui(text: str) -> str:
+    source = str(text or "")
+    if not source:
+        return source
+
+    def _convert_deg_30_to_deg_10(match: re.Match[str]) -> str:
+        value_text = match.group(1)
+        return f"{_pi_text_from_dls_text(value_text)} deg/10m"
+
+    converted = re.sub(
+        rf"({_RE_FLOAT})\s*deg/30m",
+        _convert_deg_30_to_deg_10,
+        source,
+    )
+    converted = converted.replace("deg/30m", "deg/10m")
+    converted = converted.replace("DLS", "ПИ")
+    return converted
+
+
+def ui_error_text(raw_message: str) -> str:
+    return _replace_dls_terms_for_ui(str(raw_message or "").strip())
+
+
 def _split_error(raw_message: str) -> tuple[str, list[str]]:
     message = str(raw_message or "").strip()
     if not message:
@@ -58,7 +89,7 @@ def _translate_title_ru(text: str) -> str:
     if "Failed to hit t3 within tolerance" in source:
         return "Точка t3 не достигнута в заданном допуске."
     if "DLS limit exceeded on segment" in source:
-        return "Превышен лимит DLS на одном из участков."
+        return "Превышен лимит ПИ на одном из участков."
     return "Ошибка расчета траектории."
 
 
@@ -114,15 +145,33 @@ def _item_from_text(line: str) -> DiagnosticItem:
     )
     if match:
         dls_max, dls_req = match.group(1), match.group(2)
+        pi_max = _pi_text_from_dls_text(dls_max)
+        pi_req = _pi_text_from_dls_text(dls_req)
         return DiagnosticItem(
             reason_ru=(
-                f"Ограничение BUILD DLS недостаточно для достижения t1: "
-                f"доступно max {dls_max} deg/30m, требуется примерно {dls_req} deg/30m."
+                f"Ограничение BUILD по ПИ недостаточно для достижения t1: "
+                f"доступно max {pi_max} deg/10m, требуется примерно {pi_req} deg/10m."
             ),
             action_ru=(
-                "Увеличьте max DLS BUILD, либо уменьшите горизонтальный отход до t1 "
+                "Увеличьте max ПИ BUILD, либо уменьшите горизонтальный отход до t1 "
                 "и/или увеличьте TVD t1."
             ),
+        )
+
+    match = re.search(
+        rf"DLS limit exceeded on segment ([A-Z0-9_]+):\s*({_RE_FLOAT})\s*>\s*({_RE_FLOAT})",
+        text,
+    )
+    if match:
+        segment_name, dls_actual, dls_limit = match.group(1), match.group(2), match.group(3)
+        pi_actual = _pi_text_from_dls_text(dls_actual)
+        pi_limit = _pi_text_from_dls_text(dls_limit)
+        return DiagnosticItem(
+            reason_ru=(
+                f"Превышен лимит ПИ на сегменте {segment_name}: "
+                f"{pi_actual} > {pi_limit} deg/10m."
+            ),
+            action_ru="Снизьте фактический ПИ на этом сегменте или увеличьте допустимый лимит ПИ.",
         )
 
     match = re.search(
@@ -162,18 +211,21 @@ def _item_from_text(line: str) -> DiagnosticItem:
     )
     if match:
         dls_lim, dls_req = match.group(1), match.group(2)
+        pi_lim = _pi_text_from_dls_text(dls_lim)
+        pi_req = _pi_text_from_dls_text(dls_req)
         return DiagnosticItem(
             reason_ru=(
-                f"Участок после входа в пласт не бурим при HORIZONTAL DLS limit {dls_lim} deg/30m: "
-                f"нужно примерно {dls_req} deg/30m."
+                f"Участок после входа в пласт не бурим при HORIZONTAL ПИ limit {pi_lim} deg/10m: "
+                f"нужно примерно {pi_req} deg/10m."
             ),
-            action_ru="Увеличьте лимит HORIZONTAL DLS или переместите t3 ближе к t1 по разрезу.",
+            action_ru="Увеличьте лимит HORIZONTAL ПИ или переместите t3 ближе к t1 по разрезу.",
         )
 
     if "Post-entry t1->t3 connection is infeasible even with high DLS scan up to 30 deg/30m" in text:
+        pi_scan_max = _pi_text_from_dls_text("30")
         return DiagnosticItem(
             reason_ru=(
-                "Участок после входа в пласт небурим даже при высоком DLS (проверка до 30 deg/30m)."
+                f"Участок после входа в пласт небурим даже при высоком ПИ (проверка до {pi_scan_max} deg/10m)."
             ),
             action_ru=(
                 "Измените геометрию целей: увеличьте TVD t3 и/или сократите отход t1->t3; "
@@ -197,8 +249,8 @@ def _item_from_text(line: str) -> DiagnosticItem:
 
     if "BUILD DLS interval is empty after constraints" in text:
         return DiagnosticItem(
-            reason_ru="Допустимый интервал BUILD DLS пустой после применения всех ограничений.",
-            action_ru="Проверьте и разведите min/max DLS BUILD и лимиты DLS по сегментам.",
+            reason_ru="Допустимый интервал BUILD ПИ пустой после применения всех ограничений.",
+            action_ru="Проверьте и разведите min/max ПИ BUILD и лимиты ПИ по сегментам.",
         )
 
     match = re.search(
@@ -215,6 +267,23 @@ def _item_from_text(line: str) -> DiagnosticItem:
             action_ru=(
                 "Если нужен профиль «цели в одном направлении», увеличьте отход до t1 "
                 "выше верхней границы reverse-диапазона."
+            ),
+        )
+
+    match = re.search(
+        rf"Total MD exceeds configured post-check limit.*Calculated total MD=({_RE_FLOAT}) m, limit=({_RE_FLOAT}) m",
+        text,
+    )
+    if match:
+        md_actual, md_limit = match.group(1), match.group(2)
+        return DiagnosticItem(
+            reason_ru=(
+                f"Итоговая длина скважины по MD превышает заданный порог: "
+                f"получено {md_actual} м при лимите {md_limit} м."
+            ),
+            action_ru=(
+                "Скважина получается слишком длинной для текущего лимита MD. "
+                "Увеличьте порог «Макс итоговая MD (постпроверка), м» или упростите геометрию целей."
             ),
         )
 
@@ -238,7 +307,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
     if "If reverse profile stays infeasible" in text:
         return DiagnosticItem(
             reason_ru="Reverse-профиль не сходится в текущих ограничениях.",
-            action_ru="Увеличьте BUILD max DLS, поднимите reverse_inc_max_deg или уменьшите kop_min_vertical_m.",
+            action_ru="Увеличьте BUILD max ПИ, поднимите reverse_inc_max_deg или уменьшите kop_min_vertical_m.",
         )
 
     match = re.search(
@@ -256,7 +325,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
         )
 
     return DiagnosticItem(
-        reason_ru=text,
+        reason_ru=_replace_dls_terms_for_ui(text),
         action_ru="Проверьте ограничения профиля и геометрию целей.",
     )
 
