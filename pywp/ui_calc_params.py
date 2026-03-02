@@ -6,7 +6,6 @@ import streamlit as st
 
 from pywp import TrajectoryConfig
 from pywp.planner_config import (
-    CFG_DEFAULTS,
     OBJECTIVE_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_trajectory_config,
@@ -40,35 +39,44 @@ _BOOL_SUFFIXES: tuple[str, ...] = (
     "profile_cache_enabled",
 )
 
-CALC_PARAM_DEFAULTS: dict[str, float | int | str | bool] = {
-    "md_step": float(CFG_DEFAULTS.md_step_m),
-    "md_control": float(CFG_DEFAULTS.md_step_control_m),
-    "pos_tol": float(CFG_DEFAULTS.pos_tolerance_m),
-    "entry_inc_target": float(CFG_DEFAULTS.entry_inc_target_deg),
-    "entry_inc_tol": float(CFG_DEFAULTS.entry_inc_tolerance_deg),
-    "max_inc": float(CFG_DEFAULTS.max_inc_deg),
-    "max_total_md_postcheck": float(CFG_DEFAULTS.max_total_md_postcheck_m),
-    "dls_build_min": float(dls_to_pi(CFG_DEFAULTS.dls_build_min_deg_per_30m)),
-    "dls_build_max": float(dls_to_pi(CFG_DEFAULTS.dls_build_max_deg_per_30m)),
-    "kop_min_vertical": float(CFG_DEFAULTS.kop_min_vertical_m),
-    "objective_mode": str(CFG_DEFAULTS.objective_mode),
-    "turn_solver_mode": str(CFG_DEFAULTS.turn_solver_mode),
-    "turn_solver_qmc_samples": int(CFG_DEFAULTS.turn_solver_qmc_samples),
-    "turn_solver_local_starts": int(CFG_DEFAULTS.turn_solver_local_starts),
-    "adaptive_grid_enabled": bool(CFG_DEFAULTS.adaptive_grid_enabled),
-    "adaptive_dense_check_enabled": bool(CFG_DEFAULTS.adaptive_dense_check_enabled),
-    "adaptive_grid_initial_size": int(CFG_DEFAULTS.adaptive_grid_initial_size),
-    "adaptive_grid_refine_levels": int(CFG_DEFAULTS.adaptive_grid_refine_levels),
-    "adaptive_grid_top_k": int(CFG_DEFAULTS.adaptive_grid_top_k),
-    "parallel_jobs": int(CFG_DEFAULTS.parallel_jobs),
-    "profile_cache_enabled": bool(CFG_DEFAULTS.profile_cache_enabled),
-}
+def calc_param_defaults() -> dict[str, float | int | str | bool]:
+    """Build UI defaults directly from TrajectoryConfig defaults."""
+
+    cfg = TrajectoryConfig()
+    return {
+        "md_step": float(cfg.md_step_m),
+        "md_control": float(cfg.md_step_control_m),
+        "pos_tol": float(cfg.pos_tolerance_m),
+        "entry_inc_target": float(cfg.entry_inc_target_deg),
+        "entry_inc_tol": float(cfg.entry_inc_tolerance_deg),
+        "max_inc": float(cfg.max_inc_deg),
+        "max_total_md_postcheck": float(cfg.max_total_md_postcheck_m),
+        "dls_build_min": float(dls_to_pi(cfg.dls_build_min_deg_per_30m)),
+        "dls_build_max": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
+        "kop_min_vertical": float(cfg.kop_min_vertical_m),
+        "objective_mode": str(cfg.objective_mode),
+        "turn_solver_mode": str(cfg.turn_solver_mode),
+        "turn_solver_qmc_samples": int(cfg.turn_solver_qmc_samples),
+        "turn_solver_local_starts": int(cfg.turn_solver_local_starts),
+        "adaptive_grid_enabled": bool(cfg.adaptive_grid_enabled),
+        "adaptive_dense_check_enabled": bool(cfg.adaptive_dense_check_enabled),
+        "adaptive_grid_initial_size": int(cfg.adaptive_grid_initial_size),
+        "adaptive_grid_refine_levels": int(cfg.adaptive_grid_refine_levels),
+        "adaptive_grid_top_k": int(cfg.adaptive_grid_top_k),
+        "parallel_jobs": int(cfg.parallel_jobs),
+        "profile_cache_enabled": bool(cfg.profile_cache_enabled),
+    }
+
+
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
+_DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
+_DEFAULTS_SCHEMA_VERSION = 2
 
 
 def _defaults_signature() -> tuple[tuple[str, float | int | str | bool], ...]:
+    defaults = calc_param_defaults()
     return tuple(
-        (key, CALC_PARAM_DEFAULTS[key]) for key in sorted(CALC_PARAM_DEFAULTS.keys())
+        (key, defaults[key]) for key in sorted(defaults.keys())
     )
 
 
@@ -80,28 +88,35 @@ def _state_value(prefix: str, suffix: str) -> float | int | str | bool:
     key = _state_key(prefix, suffix)
     if key in st.session_state:
         return st.session_state[key]
-    return CALC_PARAM_DEFAULTS[suffix]
+    return calc_param_defaults()[suffix]
 
 
 def _setdefault_many(
     *,
     prefixes: Iterable[str],
     force: bool,
+    defaults: dict[str, float | int | str | bool],
 ) -> None:
     for prefix in prefixes:
-        for suffix, default_value in CALC_PARAM_DEFAULTS.items():
+        for suffix, default_value in defaults.items():
             key = _state_key(prefix, suffix)
             if force or key not in st.session_state:
                 st.session_state[key] = default_value
 
 
 def apply_calc_param_defaults(prefix: str = "", *, force: bool = False) -> None:
+    defaults = calc_param_defaults()
     signature_key = _state_key(prefix, _DEFAULTS_SIGNATURE_KEY_SUFFIX)
+    schema_key = _state_key(prefix, _DEFAULTS_SCHEMA_KEY_SUFFIX)
     current_signature = _defaults_signature()
     signature_changed = st.session_state.get(signature_key) != current_signature
-    effective_force = bool(force or signature_changed)
-    _setdefault_many(prefixes=(prefix,), force=effective_force)
+    schema_changed = int(st.session_state.get(schema_key, 0)) < int(
+        _DEFAULTS_SCHEMA_VERSION
+    )
+    effective_force = bool(force or signature_changed or schema_changed)
+    _setdefault_many(prefixes=(prefix,), force=effective_force, defaults=defaults)
     st.session_state[signature_key] = current_signature
+    st.session_state[schema_key] = int(_DEFAULTS_SCHEMA_VERSION)
 
 
 def calc_param_signature(prefix: str = "") -> tuple[object, ...]:
@@ -153,6 +168,8 @@ def render_calc_params_block(
     title: str = "Параметры расчета",
     show_solver_help: bool = True,
 ) -> None:
+    # Guard against any code path that renders widgets before page-level init.
+    apply_calc_param_defaults(prefix=prefix, force=False)
     if title:
         st.markdown(f"### {title}")
     c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")

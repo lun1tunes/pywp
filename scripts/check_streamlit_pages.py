@@ -11,6 +11,9 @@ import urllib.request
 
 from streamlit.testing.v1 import AppTest
 
+from pywp.models import TrajectoryConfig
+from pywp.ui_utils import dls_to_pi
+
 
 def _collect_page_files(project_root: Path) -> list[Path]:
     pages_dir = project_root / "pages"
@@ -26,6 +29,66 @@ def _check_page(path: Path) -> list[str]:
         if not message:
             message = "Unknown Streamlit exception"
         errors.append(message)
+    return errors
+
+
+def _expected_calc_defaults() -> dict[str, float]:
+    cfg = TrajectoryConfig()
+    return {
+        "Шаг MD, м": float(cfg.md_step_m),
+        "Контрольный шаг MD, м": float(cfg.md_step_control_m),
+        "Допуск по позиции, м": float(cfg.pos_tolerance_m),
+        "Целевой INC на t1, deg": float(cfg.entry_inc_target_deg),
+        "Допуск INC на t1, deg": float(cfg.entry_inc_tolerance_deg),
+        "Макс INC по стволу, deg": float(cfg.max_inc_deg),
+        "Мин ПИ BUILD, deg/10m": float(dls_to_pi(cfg.dls_build_min_deg_per_30m)),
+        "Макс ПИ BUILD, deg/10m": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
+        "Мин VERTICAL до KOP, м": float(cfg.kop_min_vertical_m),
+        "Макс итоговая MD (постпроверка), м": float(cfg.max_total_md_postcheck_m),
+    }
+
+
+def _find_number_value(at: AppTest, label: str) -> float | None:
+    matches = [widget for widget in at.number_input if widget.label == label]
+    if not matches:
+        return None
+    return float(matches[0].value)
+
+
+def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
+    expected = _expected_calc_defaults()
+    errors: list[str] = []
+
+    app_at = AppTest.from_file(str(project_root / "app.py")).run()
+    for label, expected_value in expected.items():
+        actual = _find_number_value(app_at, label)
+        if actual is None:
+            errors.append(f"app.py: input '{label}' not found.")
+            continue
+        if abs(float(actual) - float(expected_value)) > 1e-9:
+            errors.append(
+                f"app.py: '{label}'={actual} but expected {expected_value}."
+            )
+
+    wt_at = AppTest.from_file(str(project_root / "pages" / "02_welltrack_import.py")).run()
+    parse_buttons = [button for button in wt_at.button if button.label == "Прочитать WELLTRACK"]
+    if not parse_buttons:
+        errors.append("pages/02_welltrack_import.py: parse button not found.")
+        return errors
+    parse_buttons[0].click()
+    wt_at.run()
+    for label, expected_value in expected.items():
+        actual = _find_number_value(wt_at, label)
+        if actual is None:
+            errors.append(
+                f"pages/02_welltrack_import.py: input '{label}' not found after parse."
+            )
+            continue
+        if abs(float(actual) - float(expected_value)) > 1e-9:
+            errors.append(
+                "pages/02_welltrack_import.py: "
+                f"'{label}'={actual} but expected {expected_value}."
+            )
     return errors
 
 
@@ -110,6 +173,13 @@ def main() -> int:
             print(f"[FAIL] {rel}: {errors[0]}")
         else:
             print(f"[ OK ] {rel}")
+
+    defaults_errors = _check_calc_defaults_on_pages(project_root=project_root)
+    if defaults_errors:
+        failed = True
+        print(f"[FAIL] calc defaults sync: {defaults_errors[0]}")
+    else:
+        print("[ OK ] calc defaults sync (app + welltrack)")
 
     if failed:
         print("\nStreamlit smoke-check failed.")
