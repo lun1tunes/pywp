@@ -16,7 +16,12 @@ from pywp.eclipse_welltrack import (
     decode_welltrack_bytes,
     parse_welltrack_text,
 )
-from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_step
+from pywp.plot_axes import (
+    equalized_axis_ranges,
+    equalized_xy_ranges,
+    linear_tick_values,
+    nice_tick_step,
+)
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_calc_params import (
@@ -259,15 +264,12 @@ def _all_wells_3d_figure(
         y_values=y_values,
         z_values=z_values,
     )
-    xy_span = x_range[1] - x_range[0]
+    xy_span = max(x_range[1] - x_range[0], y_range[1] - y_range[0])
     xy_dtick = nice_tick_step(xy_span, target_ticks=6)
-    xy_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
-    xy_tick0 = float(np.floor(min(x_range[0], y_range[0]) / xy_dtick) * xy_dtick)
+    x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
+    y_tickvals = linear_tick_values(axis_range=y_range, step=xy_dtick)
     xy_axis_style = {
         "tickmode": "array",
-        "tickvals": xy_tickvals,
-        "dtick": xy_dtick,
-        "tick0": xy_tick0,
         "tickformat": ".0f",
         "showexponent": "none",
         "exponentformat": "none",
@@ -288,8 +290,16 @@ def _all_wells_3d_figure(
             "xaxis_title": "X / Восток (м)",
             "yaxis_title": "Y / Север (м)",
             "zaxis_title": "Z / TVD (м)",
-            "xaxis": {"range": x_range, **xy_axis_style},
-            "yaxis": {"range": y_range, **xy_axis_style},
+            "xaxis": {
+                "range": x_range,
+                "tickvals": x_tickvals,
+                **xy_axis_style,
+            },
+            "yaxis": {
+                "range": y_range,
+                "tickvals": y_tickvals,
+                **xy_axis_style,
+            },
             "zaxis": {
                 "range": z_range,
                 "tickformat": ".0f",
@@ -351,6 +361,8 @@ def _all_wells_plan_figure(
         surface = item.surface
         t1 = item.t1
         t3 = item.t3
+        x_arrays.append(np.array([surface.x, t1.x, t3.x], dtype=float))
+        y_arrays.append(np.array([surface.y, t1.y, t3.y], dtype=float))
         fig.add_trace(
             go.Scatter(
                 x=[surface.x, t1.x, t3.x],
@@ -372,30 +384,32 @@ def _all_wells_plan_figure(
         )
     x_values = np.concatenate(x_arrays) if x_arrays else np.array([0.0], dtype=float)
     y_values = np.concatenate(y_arrays) if y_arrays else np.array([0.0], dtype=float)
-    xy_min = float(min(np.min(x_values), np.min(y_values)))
-    xy_max = float(max(np.max(x_values), np.max(y_values)))
-    xy_span = max(xy_max - xy_min, 1.0)
-    half = 0.5 * xy_span * 1.08
-    center = 0.5 * (xy_min + xy_max)
-    xy_range = [center - half, center + half]
-    xy_dtick = nice_tick_step(xy_range[1] - xy_range[0], target_ticks=6)
-    xy_tickvals = linear_tick_values(axis_range=xy_range, step=xy_dtick)
+    x_range, y_range = equalized_xy_ranges(x_values=x_values, y_values=y_values)
+    xy_dtick = nice_tick_step(
+        max(x_range[1] - x_range[0], y_range[1] - y_range[0]), target_ticks=6
+    )
+    x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
+    y_tickvals = linear_tick_values(axis_range=y_range, step=xy_dtick)
 
     fig.update_layout(
         title="Все рассчитанные скважины (план E-N, X=Восток, Y=Север)",
         xaxis_title="X / Восток (м)",
         yaxis_title="Y / Север (м)",
         xaxis={
-            "range": xy_range,
+            "range": x_range,
             "tickmode": "array",
-            "tickvals": xy_tickvals,
+            "tickvals": x_tickvals,
             "tickformat": ".0f",
+            "showexponent": "none",
+            "exponentformat": "none",
         },
         yaxis={
-            "range": xy_range,
+            "range": y_range,
             "tickmode": "array",
-            "tickvals": xy_tickvals,
+            "tickvals": y_tickvals,
             "tickformat": ".0f",
+            "showexponent": "none",
+            "exponentformat": "none",
             "scaleanchor": "x",
             "scaleratio": 1,
         },

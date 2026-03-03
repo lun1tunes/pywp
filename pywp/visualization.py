@@ -5,7 +5,12 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from pywp.models import Point3D
-from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_step
+from pywp.plot_axes import (
+    equalized_axis_ranges,
+    equalized_xy_ranges,
+    linear_tick_values,
+    nice_tick_step,
+)
 from pywp.ui_utils import dls_to_pi
 
 DEG2RAD = np.pi / 180.0
@@ -353,15 +358,12 @@ def trajectory_3d_figure(
     y_values = np.concatenate([df["Y_m"].to_numpy(), np.array([surface.y, t1.y, t3.y])])
     z_values = np.concatenate([df["Z_m"].to_numpy(), np.array([surface.z, t1.z, t3.z])])
     x_range, y_range, z_range = equalized_axis_ranges(x_values=x_values, y_values=y_values, z_values=z_values)
-    xy_span = x_range[1] - x_range[0]
+    xy_span = max(x_range[1] - x_range[0], y_range[1] - y_range[0])
     xy_dtick = nice_tick_step(xy_span, target_ticks=6)
-    xy_tick0 = float(np.floor(min(x_range[0], y_range[0]) / xy_dtick) * xy_dtick)
-    xy_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
+    x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
+    y_tickvals = linear_tick_values(axis_range=y_range, step=xy_dtick)
     xy_axis_style = {
         "tickmode": "array",
-        "tickvals": xy_tickvals,
-        "dtick": xy_dtick,
-        "tick0": xy_tick0,
         "tickformat": ".0f",
         "showexponent": "none",
         "exponentformat": "none",
@@ -468,8 +470,16 @@ def trajectory_3d_figure(
             "xaxis_title": "X / Восток (м)",
             "yaxis_title": "Y / Север (м)",
             "zaxis_title": "Z / TVD (m)",
-            "xaxis": {"range": x_range, **xy_axis_style},
-            "yaxis": {"range": y_range, **xy_axis_style},
+            "xaxis": {
+                "range": x_range,
+                "tickvals": x_tickvals,
+                **xy_axis_style,
+            },
+            "yaxis": {
+                "range": y_range,
+                "tickvals": y_tickvals,
+                **xy_axis_style,
+            },
             "zaxis": {
                 "range": z_range,
                 "tickformat": ".0f",
@@ -493,6 +503,19 @@ def trajectory_3d_figure(
 def plan_view_figure(
     df: pd.DataFrame, surface: Point3D, t1: Point3D, t3: Point3D, height: int = 460
 ) -> go.Figure:
+    x_values = np.concatenate(
+        [df["X_m"].to_numpy(dtype=float), np.array([surface.x, t1.x, t3.x], dtype=float)]
+    )
+    y_values = np.concatenate(
+        [df["Y_m"].to_numpy(dtype=float), np.array([surface.y, t1.y, t3.y], dtype=float)]
+    )
+    x_range, y_range = equalized_xy_ranges(x_values=x_values, y_values=y_values)
+    xy_dtick = nice_tick_step(
+        max(x_range[1] - x_range[0], y_range[1] - y_range[0]), target_ticks=6
+    )
+    x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
+    y_tickvals = linear_tick_values(axis_range=y_range, step=xy_dtick)
+
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -534,7 +557,24 @@ def plan_view_figure(
         title="План (E-N)",
         xaxis_title="Восток (м)",
         yaxis_title="Север (м)",
-        yaxis={"scaleanchor": "x", "scaleratio": 1},
+        xaxis={
+            "range": x_range,
+            "tickmode": "array",
+            "tickvals": x_tickvals,
+            "tickformat": ".0f",
+            "showexponent": "none",
+            "exponentformat": "none",
+        },
+        yaxis={
+            "range": y_range,
+            "tickmode": "array",
+            "tickvals": y_tickvals,
+            "tickformat": ".0f",
+            "showexponent": "none",
+            "exponentformat": "none",
+            "scaleanchor": "x",
+            "scaleratio": 1,
+        },
         height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
     )

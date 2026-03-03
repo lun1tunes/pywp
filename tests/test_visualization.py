@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from pywp.models import Point3D
@@ -48,10 +50,9 @@ def test_plotly_figures_are_constructed() -> None:
     scene = fig3d.layout.scene
     assert scene is not None
     assert scene.xaxis.tickmode == scene.yaxis.tickmode == "array"
-    assert tuple(scene.xaxis.tickvals) == tuple(scene.yaxis.tickvals)
-    assert scene.xaxis.dtick == scene.yaxis.dtick
-    assert scene.xaxis.tick0 == scene.yaxis.tick0
-    assert tuple(scene.xaxis.range) == tuple(scene.yaxis.range)
+    x_span = abs(float(scene.xaxis.range[1]) - float(scene.xaxis.range[0]))
+    y_span = abs(float(scene.yaxis.range[1]) - float(scene.yaxis.range[0]))
+    assert math.isclose(x_span, y_span, rel_tol=0.0, abs_tol=1e-9)
     assert scene.xaxis.zeroline is True
     assert scene.yaxis.zeroline is True
     assert scene.xaxis.gridcolor == scene.yaxis.gridcolor
@@ -79,6 +80,39 @@ def test_plotly_figures_are_constructed() -> None:
         assert "ПИ:" in hover
 
     assert list(trace_dls.y)[-1] == 0.0
+
+
+def test_plotly_xy_ranges_support_large_absolute_coordinates() -> None:
+    df = _sample_df().copy()
+    df["X_m"] = df["X_m"] + 350_000.0
+    df["Y_m"] = df["Y_m"] + 6_250_500.0
+
+    surface = Point3D(350_000.0, 6_250_500.0, 0.0)
+    t1 = Point3D(350_035.0, 6_250_500.0, 85.0)
+    t3 = Point3D(350_120.0, 6_250_500.0, 85.0)
+
+    fig3d = trajectory_3d_figure(df, surface=surface, t1=t1, t3=t3)
+    fig_plan = plan_view_figure(df, surface=surface, t1=t1, t3=t3)
+
+    scene = fig3d.layout.scene
+    assert scene is not None
+    assert tuple(scene.xaxis.range) != tuple(scene.yaxis.range)
+    assert not (
+        float(scene.xaxis.range[0]) <= 0.0 <= float(scene.xaxis.range[1])
+    )
+    assert not (
+        float(scene.yaxis.range[0]) <= 0.0 <= float(scene.yaxis.range[1])
+    )
+
+    assert fig_plan.layout.xaxis is not None
+    assert fig_plan.layout.yaxis is not None
+    assert tuple(fig_plan.layout.xaxis.range) != tuple(fig_plan.layout.yaxis.range)
+    assert not (
+        float(fig_plan.layout.xaxis.range[0]) <= 0.0 <= float(fig_plan.layout.xaxis.range[1])
+    )
+    assert not (
+        float(fig_plan.layout.yaxis.range[0]) <= 0.0 <= float(fig_plan.layout.yaxis.range[1])
+    )
 
 
 def test_dls_limit_annotations_hide_rev_for_same_direction_profile() -> None:
