@@ -1291,16 +1291,13 @@ def _solve_turn_profile_multistart(
     elif turn_solver_mode != TURN_SOLVER_LEAST_SQUARES:
         raise PlanningError(f"Unsupported TURN solver mode: {turn_solver_mode}")
 
-    # Deduplicate starts while preserving order.
-    deduped: list[np.ndarray] = []
-    seen: set[tuple[float, ...]] = set()
-    for seed in local_starts:
-        key = tuple(np.round(seed, decimals=8).tolist())
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(seed)
-    local_starts = deduped[: max(1, int(max_local_starts) + 1)]
+    local_starts = _dedupe_seed_vectors(local_starts)[: max(1, int(max_local_starts) + 1)]
+    if int(max_local_starts) <= 1:
+        local_starts = _augment_turn_local_starts_with_azimuth_jitter(
+            local_starts=local_starts,
+            bounds=bounds,
+            azimuth_jitter_deg=12.0,
+        )
     _emit_progress(
         progress_callback,
         f"TURN: локальная оптимизация ({len(local_starts)} стартов).",
@@ -1358,6 +1355,45 @@ def _solve_turn_profile_multistart(
 
     _emit_progress(progress_callback, "TURN: завершение этапа оптимизации.", 1.00)
     return best_candidate, float(best_miss)
+
+
+def _dedupe_seed_vectors(seed_vectors: list[np.ndarray]) -> list[np.ndarray]:
+    deduped: list[np.ndarray] = []
+    seen: set[tuple[float, ...]] = set()
+    for seed in seed_vectors:
+        key = tuple(np.round(np.asarray(seed, dtype=float), decimals=8).tolist())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(np.asarray(seed, dtype=float))
+    return deduped
+
+
+def _augment_turn_local_starts_with_azimuth_jitter(
+    local_starts: list[np.ndarray],
+    bounds: tuple[tuple[float, float], ...],
+    azimuth_jitter_deg: float,
+) -> list[np.ndarray]:
+    if not local_starts:
+        return local_starts
+    if not bounds:
+        return local_starts
+    azimuth_min, azimuth_max = bounds[-1]
+    if float(azimuth_max - azimuth_min) < 359.0:
+        return local_starts
+    jitter = float(abs(azimuth_jitter_deg))
+    if jitter <= SMALL:
+        return local_starts
+
+    augmented: list[np.ndarray] = []
+    for seed in local_starts:
+        seed_vec = np.asarray(seed, dtype=float)
+        augmented.append(seed_vec)
+        for delta in (-jitter, jitter):
+            jittered = seed_vec.copy()
+            jittered[-1] = _normalize_azimuth_deg(float(jittered[-1]) + float(delta))
+            augmented.append(_clip_to_bounds(jittered, bounds=bounds))
+    return _dedupe_seed_vectors(augmented)
 
 
 def _seed_vectors_with_qmc(

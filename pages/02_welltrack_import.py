@@ -743,10 +743,10 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             {
                 "Куст": str(pad.pad_id),
                 "Скважин": int(len(pad.wells)),
+                "Авто НДС, deg": float(pad.auto_nds_azimuth_deg),
                 "S X, м": float(pad.surface.x),
                 "S Y, м": float(pad.surface.y),
                 "S Z, м": float(pad.surface.z),
-                "Авто НДС, deg": float(pad.auto_nds_azimuth_deg),
             }
             for pad in pads
         ]

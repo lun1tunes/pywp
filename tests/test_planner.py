@@ -481,6 +481,29 @@ def test_reverse_turn_summary_uses_configured_turn_solver_depth_without_hidden_m
     assert float(result.summary["solver_turn_local_starts"]) == pytest.approx(1.0)
 
 
+def test_reverse_turn_single_start_uses_azimuth_jitter_for_stability() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(
+        pos_tolerance_m=2.0,
+        turn_solver_qmc_samples=0,
+        turn_solver_local_starts=1,
+        adaptive_dense_check_enabled=False,
+    )
+
+    result = planner.plan(
+        surface=Point3D(598863.0, 7411139.0, 0.0),
+        t1=Point3D(598533.0, 7410844.0, 3769.876),
+        t3=Point3D(596660.0, 7409688.0, 3771.395),
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
+    # Regression guard: a single-start TURN solve should avoid the previous
+    # high-turn local minimum (~25.9 deg for this geometry).
+    assert float(result.summary["azimuth_turn_deg"]) < 24.0
+
+
 def test_objective_mode_minimize_build_dls_not_higher_than_maximize_hold() -> None:
     planner = TrajectoryPlanner()
     base_kwargs = dict(

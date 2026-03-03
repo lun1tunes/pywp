@@ -42,7 +42,7 @@ class TrajectoryConfig:
     adaptive_grid_refine_levels: int = 2
     adaptive_grid_top_k: int = 6
     adaptive_grid_enabled: bool = True
-    adaptive_dense_check_enabled: bool = True
+    adaptive_dense_check_enabled: bool = False
     parallel_jobs: int = 1
     profile_cache_enabled: bool = True
 
@@ -52,8 +52,8 @@ class TrajectoryConfig:
     max_total_md_postcheck_m: float = 6500.0
     objective_mode: ObjectiveMode = OBJECTIVE_MAXIMIZE_HOLD
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
-    turn_solver_qmc_samples: int = 24
-    turn_solver_local_starts: int = 12
+    turn_solver_qmc_samples: int = 32
+    turn_solver_local_starts: int = 1
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: float = 30.0
 
