@@ -737,6 +737,9 @@ def _render_input_form() -> bool:
     with st.form(
         "planner_form", clear_on_submit=False, enter_to_submit=False, border=False
     ):
+        _render_point_config_block()
+        with st.container(border=True):
+            APP_CALC_PARAMS.render_block(show_solver_help=True)
         with st.container(border=True):
             st.markdown("### Расчет траектории")
             build_clicked = st.form_submit_button(
@@ -751,10 +754,6 @@ def _render_input_form() -> bool:
                 st.caption(
                     f"Время расчета: {float(st.session_state['last_runtime_s']):.2f} с"
                 )
-
-        _render_point_config_block()
-        with st.container(border=True):
-            APP_CALC_PARAMS.render_block(show_solver_help=True)
     return bool(build_clicked)
 
 
