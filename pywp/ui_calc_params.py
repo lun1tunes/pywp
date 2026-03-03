@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable
 
 import streamlit as st
@@ -73,6 +74,40 @@ _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
 _DEFAULTS_SCHEMA_VERSION = 2
 
 
+@dataclass(frozen=True)
+class CalcParamBinding:
+    """Shared OOP binding for calc-parameter state and UI widgets."""
+
+    prefix: str = ""
+
+    def defaults(self) -> dict[str, float | int | str | bool]:
+        return calc_param_defaults()
+
+    def apply_defaults(self, *, force: bool = False) -> None:
+        apply_calc_param_defaults(prefix=self.prefix, force=force)
+
+    def preserve_state(self) -> None:
+        preserve_calc_param_state(prefix=self.prefix)
+
+    def state_signature(self) -> tuple[object, ...]:
+        return calc_param_signature(prefix=self.prefix)
+
+    def build_config(self) -> TrajectoryConfig:
+        return build_config_from_state(prefix=self.prefix)
+
+    def render_block(
+        self,
+        *,
+        title: str = "Параметры расчета",
+        show_solver_help: bool = True,
+    ) -> None:
+        render_calc_params_block(
+            prefix=self.prefix,
+            title=title,
+            show_solver_help=show_solver_help,
+        )
+
+
 def _defaults_signature() -> tuple[tuple[str, float | int | str | bool], ...]:
     defaults = calc_param_defaults()
     return tuple(
@@ -117,6 +152,19 @@ def apply_calc_param_defaults(prefix: str = "", *, force: bool = False) -> None:
     _setdefault_many(prefixes=(prefix,), force=effective_force, defaults=defaults)
     st.session_state[signature_key] = current_signature
     st.session_state[schema_key] = int(_DEFAULTS_SCHEMA_VERSION)
+
+
+def preserve_calc_param_state(prefix: str = "") -> None:
+    """Interrupt Streamlit widget cleanup for calc-param keys.
+
+    Recommended by Streamlit docs for multipage/dynamic rendering scenarios.
+    """
+
+    defaults = calc_param_defaults()
+    for suffix in defaults:
+        key = _state_key(prefix, suffix)
+        if key in st.session_state:
+            st.session_state[key] = st.session_state[key]
 
 
 def calc_param_signature(prefix: str = "") -> tuple[object, ...]:

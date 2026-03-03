@@ -12,7 +12,19 @@ import urllib.request
 from streamlit.testing.v1 import AppTest
 
 from pywp.models import TrajectoryConfig
+from pywp.ui_calc_params import calc_param_defaults
 from pywp.ui_utils import dls_to_pi
+
+_WT_LEGACY_MIN_VALUES: dict[str, float] = {
+    "wt_cfg_md_step_m": 1.0,
+    "wt_cfg_md_step_control_m": 0.5,
+    "wt_cfg_pos_tolerance_m": 0.1,
+    "wt_cfg_entry_inc_target_deg": 70.0,
+    "wt_cfg_entry_inc_tolerance_deg": 0.1,
+    "wt_cfg_max_inc_deg": 80.0,
+    "wt_cfg_max_total_md_postcheck_m": 100.0,
+    "wt_cfg_kop_min_vertical_m": 0.0,
+}
 
 
 def _collect_page_files(project_root: Path) -> list[Path]:
@@ -87,6 +99,43 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
         if abs(float(actual) - float(expected_value)) > 1e-9:
             errors.append(
                 "pages/02_welltrack_import.py: "
+                f"'{label}'={actual} but expected {expected_value}."
+            )
+
+    # Regression check: even with stale legacy keys in state, defaults must recover
+    # without requiring manual "reset params" click.
+    wt_legacy = AppTest.from_file(
+        str(project_root / "pages" / "02_welltrack_import.py")
+    )
+    calc_defaults = calc_param_defaults()
+    for key, value in _WT_LEGACY_MIN_VALUES.items():
+        wt_legacy.session_state[key] = value
+    wt_legacy.session_state["wt_cfg___calc_param_defaults_signature__"] = tuple(
+        (key, calc_defaults[key]) for key in sorted(calc_defaults.keys())
+    )
+    wt_legacy.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 2
+    wt_legacy.run()
+    legacy_parse_buttons = [
+        button for button in wt_legacy.button if button.label == "Прочитать WELLTRACK"
+    ]
+    if not legacy_parse_buttons:
+        errors.append(
+            "pages/02_welltrack_import.py: parse button not found (legacy check)."
+        )
+        return errors
+    legacy_parse_buttons[0].click()
+    wt_legacy.run()
+    for label, expected_value in expected.items():
+        actual = _find_number_value(wt_legacy, label)
+        if actual is None:
+            errors.append(
+                "pages/02_welltrack_import.py: "
+                f"input '{label}' not found after parse (legacy check)."
+            )
+            continue
+        if abs(float(actual) - float(expected_value)) > 1e-9:
+            errors.append(
+                "pages/02_welltrack_import.py legacy recovery: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
     return errors

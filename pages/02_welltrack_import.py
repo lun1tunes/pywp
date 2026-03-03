@@ -20,9 +20,7 @@ from pywp.plot_axes import equalized_axis_ranges, linear_tick_values, nice_tick_
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_calc_params import (
-    apply_calc_param_defaults,
-    build_config_from_state,
-    render_calc_params_block,
+    CalcParamBinding,
 )
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import (
@@ -35,6 +33,13 @@ from pywp.ui_well_panels import (
     render_plan_section_panel,
     render_run_log_panel,
     render_trajectory_dls_panel,
+)
+from pywp.well_pad import (
+    PadLayoutPlan,
+    WellPad,
+    apply_pad_layout,
+    detect_well_pads,
+    ordered_pad_wells,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
@@ -64,6 +69,8 @@ _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_max_total_md_postcheck_m": "wt_cfg_max_total_md_postcheck",
     "wt_cfg_kop_min_vertical_m": "wt_cfg_kop_min_vertical",
 }
+WT_CALC_PARAMS = CalcParamBinding(prefix="wt_cfg_")
+DEFAULT_PAD_SPACING_M = 20.0
 
 
 def _well_color(index: int) -> str:
@@ -87,8 +94,12 @@ def _init_state() -> None:
         st.session_state["wt_ui_defaults_version"] = WT_UI_DEFAULTS_VERSION
 
     st.session_state.setdefault("wt_records", None)
+    st.session_state.setdefault("wt_records_original", None)
     st.session_state.setdefault("wt_selected_names", [])
     st.session_state.setdefault("wt_loaded_at", "")
+    st.session_state.setdefault("wt_pad_configs", {})
+    st.session_state.setdefault("wt_pad_selected_id", "")
+    st.session_state.setdefault("wt_pad_last_applied_at", "")
 
     st.session_state.setdefault("wt_summary_rows", None)
     st.session_state.setdefault("wt_successes", None)
@@ -107,15 +118,32 @@ def _clear_results() -> None:
     st.session_state["wt_last_run_log_lines"] = []
 
 
+def _clear_pad_state() -> None:
+    st.session_state["wt_pad_configs"] = {}
+    st.session_state["wt_pad_selected_id"] = ""
+    st.session_state["wt_pad_last_applied_at"] = ""
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("wt_pad_cfg_"):
+            del st.session_state[key]
+
+
 def _apply_profile_defaults(force: bool) -> None:
-    _migrate_legacy_calc_param_keys()
-    apply_calc_param_defaults(prefix="wt_cfg_", force=force)
+    WT_CALC_PARAMS.preserve_state()
+    legacy_found = _migrate_legacy_calc_param_keys()
+    WT_CALC_PARAMS.apply_defaults(force=bool(force or legacy_found))
 
 
-def _migrate_legacy_calc_param_keys() -> None:
+def _migrate_legacy_calc_param_keys() -> bool:
+    legacy_found = False
     for legacy_key, new_key in _WT_LEGACY_KEY_ALIASES.items():
-        if new_key not in st.session_state and legacy_key in st.session_state:
-            st.session_state[new_key] = st.session_state[legacy_key]
+        if legacy_key in st.session_state:
+            # Legacy widget keys are removed from active flow to avoid stale/corrupted
+            # values being copied back into the new unified parameter keys.
+            del st.session_state[legacy_key]
+            legacy_found = True
+        if new_key in st.session_state:
+            st.session_state[new_key] = st.session_state[new_key]
+    return legacy_found
 
 
 def _decode_welltrack_payload(raw_payload: bytes, source_label: str) -> str:
@@ -378,8 +406,8 @@ def _all_wells_plan_figure(
 
 
 def _build_config_form() -> TrajectoryConfig:
-    render_calc_params_block(prefix="wt_cfg_")
-    return build_config_from_state(prefix="wt_cfg_")
+    WT_CALC_PARAMS.render_block()
+    return WT_CALC_PARAMS.build_config()
 
 
 def _render_source_input() -> str:
@@ -419,9 +447,11 @@ def _render_source_input() -> str:
 
 
 def _store_parsed_records(records: list[WelltrackRecord]) -> None:
-    st.session_state["wt_records"] = records
+    st.session_state["wt_records"] = list(records)
+    st.session_state["wt_records_original"] = list(records)
     st.session_state["wt_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["wt_selected_names"] = [record.name for record in records]
+    _clear_pad_state()
     st.session_state["wt_last_error"] = ""
     _clear_results()
 
@@ -464,8 +494,10 @@ def _handle_import_actions(
 
     if clear_clicked:
         st.session_state["wt_records"] = None
+        st.session_state["wt_records_original"] = None
         st.session_state["wt_selected_names"] = []
         st.session_state["wt_loaded_at"] = ""
+        _clear_pad_state()
         _clear_results()
         st.rerun()
 
@@ -489,6 +521,8 @@ def _handle_import_actions(
             )
         except WelltrackParseError as exc:
             st.session_state["wt_records"] = None
+            st.session_state["wt_records_original"] = None
+            _clear_pad_state()
             st.session_state["wt_last_error"] = str(exc)
             status.write(str(exc))
             status.update(
@@ -518,7 +552,10 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
 
 
 def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
-    with st.expander("Исходные данные скважин (вход WELLTRACK)", expanded=False):
+    with st.expander(
+        "Текущие точки скважин (используются в расчете, включая обновленные устья S)",
+        expanded=False,
+    ):
         raw_rows: list[dict[str, object]] = []
         for record in records:
             for idx, point in enumerate(record.points, start=1):
@@ -546,6 +583,227 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
             width="stretch",
             hide_index=True,
         )
+
+
+def _pad_config_defaults(pad: WellPad) -> dict[str, float]:
+    return {
+        "spacing_m": float(DEFAULT_PAD_SPACING_M),
+        "nds_azimuth_deg": float(pad.auto_nds_azimuth_deg),
+        "first_surface_x": float(pad.surface.x),
+        "first_surface_y": float(pad.surface.y),
+        "first_surface_z": float(pad.surface.z),
+    }
+
+
+def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
+    pads = detect_well_pads(base_records)
+    existing = st.session_state.get("wt_pad_configs", {})
+    merged: dict[str, dict[str, float]] = {}
+    for pad in pads:
+        defaults = _pad_config_defaults(pad)
+        current = existing.get(str(pad.pad_id), {})
+        merged[str(pad.pad_id)] = {
+            "spacing_m": float(current.get("spacing_m", defaults["spacing_m"])),
+            "nds_azimuth_deg": float(
+                current.get("nds_azimuth_deg", defaults["nds_azimuth_deg"])
+            )
+            % 360.0,
+            "first_surface_x": float(
+                current.get("first_surface_x", defaults["first_surface_x"])
+            ),
+            "first_surface_y": float(
+                current.get("first_surface_y", defaults["first_surface_y"])
+            ),
+            "first_surface_z": float(
+                current.get("first_surface_z", defaults["first_surface_z"])
+            ),
+        }
+    st.session_state["wt_pad_configs"] = merged
+
+    pad_ids = [str(pad.pad_id) for pad in pads]
+    if not pad_ids:
+        st.session_state["wt_pad_selected_id"] = ""
+        return pads
+    if str(st.session_state.get("wt_pad_selected_id", "")) not in pad_ids:
+        st.session_state["wt_pad_selected_id"] = pad_ids[0]
+    return pads
+
+
+def _build_pad_plan_map(pads: list[WellPad]) -> dict[str, PadLayoutPlan]:
+    config_map = st.session_state.get("wt_pad_configs", {})
+    plan_map: dict[str, PadLayoutPlan] = {}
+    for pad in pads:
+        pad_id = str(pad.pad_id)
+        cfg = config_map.get(pad_id, _pad_config_defaults(pad))
+        plan_map[pad_id] = PadLayoutPlan(
+            pad_id=pad_id,
+            first_surface_x=float(cfg["first_surface_x"]),
+            first_surface_y=float(cfg["first_surface_y"]),
+            first_surface_z=float(cfg["first_surface_z"]),
+            spacing_m=float(max(cfg["spacing_m"], 0.0)),
+            nds_azimuth_deg=float(cfg["nds_azimuth_deg"]) % 360.0,
+        )
+    return plan_map
+
+
+def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
+    base_records = st.session_state.get("wt_records_original")
+    if base_records is None:
+        base_records = list(records)
+    pads = _ensure_pad_configs(base_records=list(base_records))
+    if not pads:
+        return
+
+    with st.container(border=True):
+        st.markdown("### Кусты и расчет устьев")
+        st.caption(
+            "Куст определяется по совпадающим координатам устья S при импорте. "
+            "Последовательность бурения строится по проекции середины (t1+t3)/2 вдоль НДС."
+        )
+        pad_rows = [
+            {
+                "Куст": str(pad.pad_id),
+                "Скважин": int(len(pad.wells)),
+                "S X, м": float(pad.surface.x),
+                "S Y, м": float(pad.surface.y),
+                "S Z, м": float(pad.surface.z),
+                "Авто НДС, deg": float(pad.auto_nds_azimuth_deg),
+            }
+            for pad in pads
+        ]
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(pad_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+
+        pad_ids = [str(pad.pad_id) for pad in pads]
+        st.selectbox("Выберите куст", options=pad_ids, key="wt_pad_selected_id")
+        selected_id = str(st.session_state.get("wt_pad_selected_id", pad_ids[0]))
+        selected_pad = next((pad for pad in pads if str(pad.pad_id) == selected_id), pads[0])
+        config_map = st.session_state.get("wt_pad_configs", {})
+        selected_cfg = dict(config_map.get(selected_id, _pad_config_defaults(selected_pad)))
+
+        widget_keys = {
+            "spacing_m": f"wt_pad_cfg_spacing_m_{selected_id}",
+            "nds_azimuth_deg": f"wt_pad_cfg_nds_azimuth_deg_{selected_id}",
+            "first_surface_x": f"wt_pad_cfg_first_surface_x_{selected_id}",
+            "first_surface_y": f"wt_pad_cfg_first_surface_y_{selected_id}",
+            "first_surface_z": f"wt_pad_cfg_first_surface_z_{selected_id}",
+        }
+        for field, widget_key in widget_keys.items():
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = float(selected_cfg[field])
+
+        p1, p2, p3, p4, p5 = st.columns(5, gap="small")
+        spacing_m = p1.number_input(
+            "Расстояние между устьями, м",
+            min_value=0.0,
+            step=1.0,
+            key=widget_keys["spacing_m"],
+            help="Шаг по кусту между соседними устьями скважин.",
+        )
+        nds_azimuth_deg = p2.number_input(
+            "НДС (азимут), deg",
+            min_value=0.0,
+            max_value=360.0,
+            step=0.5,
+            key=widget_keys["nds_azimuth_deg"],
+            help="Направление движения станка по кусту.",
+        )
+        first_surface_x = p3.number_input(
+            "S1 X (East), м",
+            step=10.0,
+            key=widget_keys["first_surface_x"],
+        )
+        first_surface_y = p4.number_input(
+            "S1 Y (North), м",
+            step=10.0,
+            key=widget_keys["first_surface_y"],
+        )
+        first_surface_z = p5.number_input(
+            "S1 Z (TVD), м",
+            step=10.0,
+            key=widget_keys["first_surface_z"],
+        )
+
+        selected_cfg["spacing_m"] = float(max(spacing_m, 0.0))
+        selected_cfg["nds_azimuth_deg"] = float(nds_azimuth_deg) % 360.0
+        selected_cfg["first_surface_x"] = float(first_surface_x)
+        selected_cfg["first_surface_y"] = float(first_surface_y)
+        selected_cfg["first_surface_z"] = float(first_surface_z)
+        config_map[selected_id] = selected_cfg
+        st.session_state["wt_pad_configs"] = config_map
+
+        ordered_wells = ordered_pad_wells(
+            pad=selected_pad,
+            nds_azimuth_deg=float(selected_cfg["nds_azimuth_deg"]),
+        )
+        angle_rad = np.deg2rad(float(selected_cfg["nds_azimuth_deg"]))
+        ux = float(np.sin(angle_rad))
+        uy = float(np.cos(angle_rad))
+        preview_rows: list[dict[str, object]] = []
+        for slot_index, well in enumerate(ordered_wells, start=1):
+            shift_m = float(slot_index - 1) * float(selected_cfg["spacing_m"])
+            preview_rows.append(
+                {
+                    "Порядок": int(slot_index),
+                    "Скважина": str(well.name),
+                    "Середина t1-t3 X, м": float(well.midpoint_x),
+                    "Середина t1-t3 Y, м": float(well.midpoint_y),
+                    "Новое S X, м": float(selected_cfg["first_surface_x"] + shift_m * ux),
+                    "Новое S Y, м": float(selected_cfg["first_surface_y"] + shift_m * uy),
+                    "Новое S Z, м": float(selected_cfg["first_surface_z"]),
+                }
+            )
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(preview_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+
+        a1, a2 = st.columns(2, gap="small")
+        apply_clicked = a1.button(
+            "Рассчитать устья скважин",
+            type="primary",
+            icon=":material/tune:",
+            width="stretch",
+            help=(
+                "Обновляет координаты первой точки S для скважин по выбранным "
+                "параметрам кустов. Последующие расчеты будут использовать новые устья."
+            ),
+        )
+        reset_clicked = a2.button(
+            "Вернуть исходные устья",
+            icon=":material/restart_alt:",
+            width="stretch",
+        )
+
+        if apply_clicked:
+            plan_map = _build_pad_plan_map(pads)
+            updated_records = apply_pad_layout(
+                records=list(base_records),
+                pads=pads,
+                plan_by_pad_id=plan_map,
+            )
+            st.session_state["wt_records"] = list(updated_records)
+            st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            _clear_results()
+            st.toast("Координаты устьев обновлены по параметрам кустов.")
+            st.rerun()
+
+        if reset_clicked:
+            st.session_state["wt_records"] = list(base_records)
+            st.session_state["wt_pad_last_applied_at"] = ""
+            _clear_results()
+            st.rerun()
+
+        if str(st.session_state.get("wt_pad_last_applied_at", "")):
+            st.caption(
+                f"Последнее обновление устьев: {st.session_state['wt_pad_last_applied_at']}"
+            )
 
 
 def _sync_selected_names(records: list[WelltrackRecord]) -> list[str]:
@@ -803,6 +1061,7 @@ def run_page() -> None:
 
     _render_records_overview(records=records)
     _render_raw_records_table(records=records)
+    _render_pad_layout_panel(records=records)
     all_names = _sync_selected_names(records=records)
     config, run_clicked = _render_batch_run_form(all_names=all_names)
     _run_batch_if_clicked(run_clicked=run_clicked, records=records, config=config)

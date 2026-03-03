@@ -3,7 +3,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from pywp import TrajectoryConfig
-from pywp.ui_calc_params import apply_calc_param_defaults, calc_param_defaults
+from pywp.ui_calc_params import (
+    CalcParamBinding,
+    apply_calc_param_defaults,
+    calc_param_defaults,
+)
 from pywp.ui_utils import dls_to_pi
 
 
@@ -125,3 +129,17 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 2
     )
+
+
+def test_calc_param_binding_uses_shared_defaults(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    binding = CalcParamBinding(prefix="wt_cfg_")
+    binding.apply_defaults(force=True)
+    defaults = calc_param_defaults()
+
+    for suffix, default in defaults.items():
+        assert fake_st.session_state[f"wt_cfg_{suffix}"] == default

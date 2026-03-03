@@ -27,10 +27,7 @@ from pywp.planner_config import (
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_calc_params import (
-    apply_calc_param_defaults,
-    build_config_from_state,
-    calc_param_signature,
-    render_calc_params_block,
+    CalcParamBinding,
 )
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import (
@@ -198,6 +195,7 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("max_total_md_postcheck_m", "Лимит итоговой MD (постпроверка), м"),
 )
 UI_DEFAULTS_VERSION = 10
+APP_CALC_PARAMS = CalcParamBinding(prefix="")
 
 
 def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
@@ -342,11 +340,12 @@ def _init_state() -> None:
     if "surface_x" not in st.session_state:
         _apply_scenario(st.session_state["scenario_name"])
 
-    apply_calc_param_defaults(force=False)
+    APP_CALC_PARAMS.preserve_state()
+    APP_CALC_PARAMS.apply_defaults(force=False)
     st.session_state.setdefault("ui_defaults_version", 0)
 
     if int(st.session_state.get("ui_defaults_version", 0)) < UI_DEFAULTS_VERSION:
-        apply_calc_param_defaults(force=True)
+        APP_CALC_PARAMS.apply_defaults(force=True)
         _apply_template_filters_for_scenario(str(st.session_state["scenario_name"]))
         st.session_state["ui_defaults_version"] = UI_DEFAULTS_VERSION
 
@@ -382,7 +381,7 @@ def _current_input_signature() -> tuple[object, ...]:
         "t3_z",
     )
     signature = [float(st.session_state[key]) for key in point_keys]
-    signature.extend(calc_param_signature())
+    signature.extend(APP_CALC_PARAMS.state_signature())
     return tuple(signature)
 
 
@@ -406,7 +405,7 @@ def _build_points_from_state() -> tuple[Point3D, Point3D, Point3D]:
 
 
 def _build_config_from_state() -> TrajectoryConfig:
-    return build_config_from_state()
+    return APP_CALC_PARAMS.build_config()
 
 
 def _validate_input(
@@ -755,7 +754,7 @@ def _render_input_form() -> bool:
 
         _render_point_config_block()
         with st.container(border=True):
-            render_calc_params_block(show_solver_help=True)
+            APP_CALC_PARAMS.render_block(show_solver_help=True)
     return bool(build_clicked)
 
 
