@@ -50,6 +50,9 @@ from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
 WT_UI_DEFAULTS_VERSION = 12
+WT_LOG_COMPACT = "Краткий"
+WT_LOG_VERBOSE = "Подробный"
+WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
 WELL_COLOR_PALETTE: tuple[str, ...] = (
     "#0B6E4F",
     "#D1495B",
@@ -112,6 +115,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_run_at", "")
     st.session_state.setdefault("wt_last_runtime_s", None)
     st.session_state.setdefault("wt_last_run_log_lines", [])
+    st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
 
 
 def _clear_results() -> None:
@@ -846,6 +850,16 @@ def _render_batch_run_form(all_names: list[str]) -> tuple[TrajectoryConfig, bool
             "Точки `S/t1/t3` подставляются автоматически из входного WELLTRACK. "
             "Ниже задаются универсальные параметры расчета и солвера."
         )
+        st.radio(
+            "Детализация лога расчета",
+            options=list(WT_LOG_LEVEL_OPTIONS),
+            key="wt_log_verbosity",
+            horizontal=True,
+            help=(
+                "`Краткий` — только ключевые события по каждой скважине. "
+                "`Подробный` — все стадии солвера в реальном времени."
+            ),
+        )
         config = _build_config_form()
         run_clicked = st.form_submit_button(
             "Рассчитать выбранные скважины",
@@ -865,13 +879,17 @@ def _run_batch_if_clicked(
         st.warning("Выберите минимум одну скважину для расчета.")
         return
     batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
+    log_verbosity = str(st.session_state.get("wt_log_verbosity", WT_LOG_COMPACT))
+    verbose_log_enabled = log_verbosity == WT_LOG_VERBOSE
     run_started_s = perf_counter()
     log_lines: list[str] = []
     progress = st.progress(0, text="Подготовка batch-расчета...")
     phase_placeholder = st.empty()
     live_log_placeholder = st.empty()
 
-    def append_log(message: str) -> None:
+    def append_log(message: str, *, verbose_only: bool = False) -> None:
+        if verbose_only and not verbose_log_enabled:
+            return
         log_lines.append(format_run_log_line(run_started_s, message))
         live_log_placeholder.code("\n".join(log_lines[-240:]), language="text")
 
@@ -881,7 +899,10 @@ def _run_batch_if_clicked(
     try:
         with st.spinner("Выполняется расчет WELLTRACK-набора...", show_time=True):
             started = perf_counter()
-            append_log(f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}.")
+            append_log(
+                f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}. "
+                f"Детализация лога: {log_verbosity}."
+            )
             set_phase(
                 f"Старт расчета набора. Выбрано скважин: {len(selected_set)}."
             )
@@ -902,7 +923,7 @@ def _run_batch_if_clicked(
                 )
                 set_phase(f"Расчет скважины {index}/{total}: {name}")
                 append_log(
-                    f"Расчет скважины {index}/{total}: {name}. Проверка входных данных."
+                    f"Расчет скважины {index}/{total}: {name}.",
                 )
 
             def on_solver_progress(
@@ -924,7 +945,7 @@ def _run_batch_if_clicked(
                 if last_stage_by_well.get(stage_key) == stage_norm:
                     return
                 last_stage_by_well[stage_key] = stage_norm
-                append_log(f"{name}: {stage_norm}")
+                append_log(f"{name}: {stage_norm}", verbose_only=True)
 
             def on_record_done(
                 index: int,
