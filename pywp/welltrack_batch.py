@@ -13,6 +13,8 @@ from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.ui_utils import dls_to_pi
 
 ProgressCallback = Callable[[int, int, str], None]
+SolverProgressCallback = Callable[[int, int, str, str, float], None]
+RecordDoneCallback = Callable[[int, int, str, dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,8 @@ class WelltrackBatchPlanner:
         selected_names: set[str],
         config: TrajectoryConfig,
         progress_callback: ProgressCallback | None = None,
+        solver_progress_callback: SolverProgressCallback | None = None,
+        record_done_callback: RecordDoneCallback | None = None,
     ) -> tuple[list[dict[str, Any]], list[SuccessfulWellPlan]]:
         summary_rows: list[dict[str, Any]] = []
         successes: list[SuccessfulWellPlan] = []
@@ -48,10 +52,33 @@ class WelltrackBatchPlanner:
             if progress_callback is not None:
                 progress_callback(index, total, record.name)
 
-            row, success = self._evaluate_record(record=record, config=config)
+            planner_progress_callback = None
+            if solver_progress_callback is not None:
+                index_i = int(index)
+                total_i = int(total)
+                name_i = str(record.name)
+
+                def _planner_progress(stage_text: str, stage_fraction: float) -> None:
+                    solver_progress_callback(
+                        index_i,
+                        total_i,
+                        name_i,
+                        stage_text,
+                        stage_fraction,
+                    )
+
+                planner_progress_callback = _planner_progress
+
+            row, success = self._evaluate_record(
+                record=record,
+                config=config,
+                planner_progress_callback=planner_progress_callback,
+            )
             summary_rows.append(row)
             if success is not None:
                 successes.append(success)
+            if record_done_callback is not None:
+                record_done_callback(index, total, record.name, row)
 
         return summary_rows, successes
 
@@ -79,6 +106,7 @@ class WelltrackBatchPlanner:
         self,
         record: WelltrackRecord,
         config: TrajectoryConfig,
+        planner_progress_callback: Callable[[str, float], None] | None = None,
     ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
         row = self._base_row(record=record)
         if len(record.points) != 3:
@@ -88,7 +116,13 @@ class WelltrackBatchPlanner:
 
         try:
             surface, t1, t3 = welltrack_points_to_targets(record.points)
-            result = self._planner.plan(surface=surface, t1=t1, t3=t3, config=config)
+            result = self._planner.plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                progress_callback=planner_progress_callback,
+            )
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
             row["Проблема"] = summarize_problem_ru(str(exc))

@@ -80,3 +80,44 @@ def test_batch_planner_reports_progress_callback_for_selected_wells() -> None:
     assert len(rows) == 2
     assert len(successes) == 2
     assert seen == [(1, 2, "WELL-A"), (2, 2, "WELL-B")]
+
+
+def test_batch_planner_reports_solver_stages_and_record_done_callbacks() -> None:
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+    solver_seen: list[tuple[int, int, str, str, float]] = []
+    done_seen: list[tuple[int, int, str, str]] = []
+
+    def on_solver(
+        index: int, total: int, name: str, stage_text: str, stage_fraction: float
+    ) -> None:
+        solver_seen.append((index, total, name, stage_text, stage_fraction))
+
+    def on_done(index: int, total: int, name: str, row: dict[str, object]) -> None:
+        done_seen.append((index, total, name, str(row.get("Статус", "—"))))
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={"WELL-A"},
+        config=TrajectoryConfig(),
+        solver_progress_callback=on_solver,
+        record_done_callback=on_done,
+    )
+
+    assert len(rows) == 1
+    assert len(successes) == 1
+    assert done_seen == [(1, 1, "WELL-A", "OK")]
+    assert solver_seen
+    fractions = [item[4] for item in solver_seen]
+    assert min(fractions) >= 0.0
+    assert max(fractions) <= 1.0
+    stage_names = [item[3] for item in solver_seen]
+    assert any("Планировщик" in stage for stage in stage_names)

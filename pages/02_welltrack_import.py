@@ -869,37 +869,91 @@ def _run_batch_if_clicked(
     log_lines: list[str] = []
     progress = st.progress(0, text="Подготовка batch-расчета...")
     phase_placeholder = st.empty()
+    live_log_placeholder = st.empty()
+
+    def append_log(message: str) -> None:
+        log_lines.append(format_run_log_line(run_started_s, message))
+        live_log_placeholder.code("\n".join(log_lines[-240:]), language="text")
+
+    def set_phase(message: str) -> None:
+        phase_placeholder.caption(message)
+
     try:
         with st.spinner("Выполняется расчет WELLTRACK-набора...", show_time=True):
             started = perf_counter()
-            start_msg = format_run_log_line(
-                run_started_s,
-                f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}.",
-            )
-            log_lines.append(start_msg)
-            phase_placeholder.caption(
+            append_log(f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}.")
+            set_phase(
                 f"Старт расчета набора. Выбрано скважин: {len(selected_set)}."
             )
+            progress_state: dict[str, int] = {"value": 0}
+            last_stage_by_well: dict[str, str] = {}
+
+            def update_progress(value: int, text: str) -> None:
+                clamped = int(max(0, min(99, value)))
+                clamped = max(int(progress_state["value"]), clamped)
+                progress_state["value"] = clamped
+                progress.progress(clamped, text=text)
 
             def on_progress(index: int, total: int, name: str) -> None:
-                progress.progress(
-                    int((index / max(total, 1)) * 100),
-                    text=f"{index}/{total}: {name}",
+                start_fraction = (float(index) - 1.0) / max(float(total), 1.0)
+                update_progress(
+                    int(round(start_fraction * 100.0)),
+                    text=f"{index}/{total}: {name} · подготовка",
                 )
-                phase_placeholder.caption(
-                    f"Расчет скважины {index}/{total}: {name}"
+                set_phase(f"Расчет скважины {index}/{total}: {name}")
+                append_log(
+                    f"Расчет скважины {index}/{total}: {name}. Проверка входных данных."
                 )
-                line = format_run_log_line(
-                    run_started_s,
-                    f"Расчет скважины {index}/{total}: {name}",
+
+            def on_solver_progress(
+                index: int,
+                total: int,
+                name: str,
+                stage_text: str,
+                stage_fraction: float,
+            ) -> None:
+                local_fraction = float(max(0.0, min(1.0, stage_fraction)))
+                overall = (float(index) - 1.0 + local_fraction) / max(float(total), 1.0)
+                update_progress(
+                    int(round(overall * 100.0)),
+                    text=f"{index}/{total}: {name} · {stage_text}",
                 )
-                log_lines.append(line)
+                set_phase(f"Скважина {index}/{total} {name}: {stage_text}")
+                stage_key = f"{index}:{name}"
+                stage_norm = str(stage_text)
+                if last_stage_by_well.get(stage_key) == stage_norm:
+                    return
+                last_stage_by_well[stage_key] = stage_norm
+                append_log(f"{name}: {stage_norm}")
+
+            def on_record_done(
+                index: int,
+                total: int,
+                name: str,
+                row: dict[str, object],
+            ) -> None:
+                end_fraction = float(index) / max(float(total), 1.0)
+                update_progress(
+                    int(round(end_fraction * 100.0)),
+                    text=f"{index}/{total}: {name} · завершено",
+                )
+                status = str(row.get("Статус", "—"))
+                if status == "OK":
+                    append_log(f"{name}: расчет завершен успешно.")
+                    return
+                problem = summarize_problem_ru(str(row.get("Проблема", "")))
+                if problem and problem != "ОК":
+                    append_log(f"{name}: {status}. {problem}")
+                else:
+                    append_log(f"{name}: {status}.")
 
             summary_rows, successes = batch.evaluate(
                 records=records,
                 selected_names=selected_set,
                 config=config,
                 progress_callback=on_progress,
+                solver_progress_callback=on_solver_progress,
+                record_done_callback=on_record_done,
             )
             elapsed_s = perf_counter() - started
             progress.progress(100, text="Batch-расчет завершен.")
@@ -910,13 +964,11 @@ def _run_batch_if_clicked(
                 "%Y-%m-%d %H:%M:%S"
             )
             st.session_state["wt_last_runtime_s"] = float(elapsed_s)
-            done_msg = format_run_log_line(
-                run_started_s,
+            append_log(
                 f"Batch-расчет завершен. Успешно: {len(successes)}, "
                 f"ошибок: {len(summary_rows) - len(successes)}. "
                 f"Затраченное время: {elapsed_s:.2f} с.",
             )
-            log_lines.append(done_msg)
             if successes:
                 phase_placeholder.success(
                     f"Расчет завершен за {elapsed_s:.2f} с. Успешно: {len(successes)}"
@@ -927,15 +979,14 @@ def _run_batch_if_clicked(
                 )
     except Exception as exc:  # noqa: BLE001
         st.session_state["wt_last_error"] = str(exc)
-        err_msg = format_run_log_line(
-            run_started_s,
+        append_log(
             f"Ошибка batch-расчета: {summarize_problem_ru(str(exc))}",
         )
-        log_lines.append(err_msg)
         phase_placeholder.error("Batch-расчет завершился ошибкой")
     finally:
         st.session_state["wt_last_run_log_lines"] = log_lines
         progress.empty()
+        live_log_placeholder.empty()
 
 
 def _render_batch_log() -> None:
