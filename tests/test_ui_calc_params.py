@@ -39,7 +39,16 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     )
     assert defaults["kop_min_vertical"] == float(cfg.kop_min_vertical_m)
     assert defaults["objective_mode"] == str(cfg.objective_mode)
+    assert defaults["objective_auto_switch_to_turn"] == bool(
+        cfg.objective_auto_switch_to_turn
+    )
+    assert defaults["objective_auto_turn_threshold"] == float(
+        cfg.objective_auto_turn_threshold_deg
+    )
     assert defaults["turn_solver_mode"] == str(cfg.turn_solver_mode)
+    assert defaults["same_direction_profile_mode"] == str(
+        cfg.same_direction_profile_mode
+    )
     assert defaults["turn_solver_qmc_samples"] == int(
         cfg.turn_solver_qmc_samples
     )
@@ -104,7 +113,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
 
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
-    assert int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 2
+    assert int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 3
 
 
 def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
@@ -127,7 +136,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
-        int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 2
+        int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 3
     )
 
 

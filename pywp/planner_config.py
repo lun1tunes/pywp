@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pywp.models import (
     OBJECTIVE_MAXIMIZE_HOLD,
+    OBJECTIVE_MINIMIZE_AZIMUTH_TURN,
     OBJECTIVE_MINIMIZE_BUILD_DLS,
+    OBJECTIVE_MINIMIZE_TOTAL_MD,
+    SAME_DIRECTION_PROFILE_AUTO,
+    SAME_DIRECTION_PROFILE_CLASSIC,
+    SAME_DIRECTION_PROFILE_J_CURVE,
     TURN_SOLVER_DE_HYBRID,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
@@ -13,11 +18,18 @@ CFG_DEFAULTS = TrajectoryConfig()
 OBJECTIVE_OPTIONS = {
     OBJECTIVE_MAXIMIZE_HOLD: "Максимизировать длину HOLD",
     OBJECTIVE_MINIMIZE_BUILD_DLS: "Минимизировать ПИ на BUILD",
+    OBJECTIVE_MINIMIZE_AZIMUTH_TURN: "Минимизировать азимутальный доворот",
+    OBJECTIVE_MINIMIZE_TOTAL_MD: "Минимизировать итоговую MD",
 }
 
 TURN_SOLVER_OPTIONS = {
     TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF, рекомендуется)",
     TURN_SOLVER_DE_HYBRID: "DE Hybrid (глобальный + локальный)",
+}
+SAME_DIRECTION_PROFILE_OPTIONS = {
+    SAME_DIRECTION_PROFILE_AUTO: "Авто (рекомендованный)",
+    SAME_DIRECTION_PROFILE_CLASSIC: "Классический (2 BUILD + HOLD)",
+    SAME_DIRECTION_PROFILE_J_CURVE: "J-профиль (1 BUILD до t1)",
 }
 
 
@@ -56,9 +68,12 @@ def build_trajectory_config(
     dls_build_max_deg_per_30m: float,
     kop_min_vertical_m: float,
     objective_mode: str,
+    objective_auto_switch_to_turn: bool = CFG_DEFAULTS.objective_auto_switch_to_turn,
+    objective_auto_turn_threshold_deg: float = CFG_DEFAULTS.objective_auto_turn_threshold_deg,
     turn_solver_mode: str,
     turn_solver_qmc_samples: int,
     turn_solver_local_starts: int,
+    same_direction_profile_mode: str = SAME_DIRECTION_PROFILE_AUTO,
     adaptive_grid_enabled: bool = True,
     adaptive_dense_check_enabled: bool = True,
     adaptive_grid_initial_size: int = 11,
@@ -83,7 +98,10 @@ def build_trajectory_config(
         dls_build_max_deg_per_30m=max_build,
         kop_min_vertical_m=float(kop_min_vertical_m),
         objective_mode=str(objective_mode),
+        objective_auto_switch_to_turn=bool(objective_auto_switch_to_turn),
+        objective_auto_turn_threshold_deg=float(objective_auto_turn_threshold_deg),
         turn_solver_mode=str(turn_solver_mode),
+        same_direction_profile_mode=str(same_direction_profile_mode),
         turn_solver_qmc_samples=int(turn_solver_qmc_samples),
         turn_solver_local_starts=int(turn_solver_local_starts),
         adaptive_grid_enabled=bool(adaptive_grid_enabled),

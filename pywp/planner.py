@@ -22,12 +22,18 @@ from pywp.classification import (
 )
 from pywp.mcm import add_dls, compute_positions_min_curv, dogleg_angle_rad, minimum_curvature_increment
 from pywp.models import (
+    ALLOWED_SAME_DIRECTION_PROFILE_MODES,
     ALLOWED_TURN_SOLVER_MODES,
     ALLOWED_OBJECTIVE_MODES,
     OBJECTIVE_MAXIMIZE_HOLD,
+    OBJECTIVE_MINIMIZE_AZIMUTH_TURN,
     OBJECTIVE_MINIMIZE_BUILD_DLS,
+    OBJECTIVE_MINIMIZE_TOTAL_MD,
     PlannerResult,
     Point3D,
+    SAME_DIRECTION_PROFILE_AUTO,
+    SAME_DIRECTION_PROFILE_CLASSIC,
+    SAME_DIRECTION_PROFILE_J_CURVE,
     TURN_SOLVER_DE_HYBRID,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
@@ -44,6 +50,9 @@ from pywp.trajectory import WellTrajectory
 DEG2RAD = np.pi / 180.0
 RAD2DEG = 180.0 / np.pi
 SMALL = 1e-9
+SAME_DIRECTION_PROFILE_KIND_CLASSIC = "classic_s"
+SAME_DIRECTION_PROFILE_KIND_J_CURVE = "j_curve"
+SAME_DIRECTION_J_AUTO_KOP_RATIO_MIN = 0.65
 
 
 class PlanningError(RuntimeError):
@@ -69,6 +78,7 @@ class SectionGeometry:
 
 @dataclass(frozen=True)
 class ProfileParameters:
+    profile_kind: str
     trajectory_type: str
     kop_vertical_m: float
     reverse_inc_deg: float
@@ -156,12 +166,16 @@ class _BatchExecutionMetadata:
 @dataclass
 class _SolverRuntimeContext:
     parallel_requested_jobs: int
+    objective_mode_requested: str
+    objective_mode_applied: str
     parallel_batches_total: int = 0
     parallel_batches_parallel: int = 0
     parallel_fallback_batches: int = 0
     parallel_fallback_reasons: list[str] = field(default_factory=list)
     adaptive_dense_validation_performed: bool = False
     candidate_evaluations: int = 0
+    objective_auto_switched: bool = False
+    objective_auto_switch_trigger_turn_deg: float = 0.0
 
 
 ProgressCallback = Callable[[str, float], None]
@@ -210,7 +224,9 @@ class TrajectoryPlanner:
         _emit_progress(progress_callback, "Планировщик: проверка конфигурации.", 0.03)
         _validate_config(config)
         runtime_context = _SolverRuntimeContext(
-            parallel_requested_jobs=int(max(config.parallel_jobs, 1))
+            parallel_requested_jobs=int(max(config.parallel_jobs, 1)),
+            objective_mode_requested=str(config.objective_mode),
+            objective_mode_applied=str(config.objective_mode),
         )
 
         _emit_progress(progress_callback, "Планировщик: подготовка геометрии цели.", 0.08)
@@ -245,6 +261,7 @@ class TrajectoryPlanner:
                 params = _solve_reverse_direction_profile_with_turn(
                     geometry=geometry,
                     config=config,
+                    runtime_context=runtime_context,
                     progress_callback=solve_progress_callback,
                 )
         else:
@@ -256,6 +273,11 @@ class TrajectoryPlanner:
                     progress_callback=solve_progress_callback,
                 )
             else:
+                if str(config.same_direction_profile_mode) == SAME_DIRECTION_PROFILE_J_CURVE:
+                    raise PlanningError(
+                        "J-profile is only supported for coplanar same-direction geometry. "
+                        "Use same_direction_profile_mode='auto' or 'classic' for non-coplanar targets."
+                    )
                 _emit_progress(
                     progress_callback,
                     "Солвер: TURN-оптимизация (некомпланарный случай).",
@@ -264,6 +286,7 @@ class TrajectoryPlanner:
                 params = _solve_same_direction_profile_with_turn(
                     geometry=geometry,
                     config=config,
+                    runtime_context=runtime_context,
                     progress_callback=solve_progress_callback,
                 )
 
@@ -466,6 +489,92 @@ def _rank_feasible_candidates(
     return ranked
 
 
+def _feasible_candidates(
+    evaluated: dict[tuple[float, ...], ProfileParameters | None],
+) -> list[ProfileParameters]:
+    return [candidate for candidate in evaluated.values() if candidate is not None]
+
+
+def _effective_objective_mode_for_candidates(
+    candidates: list[ProfileParameters],
+    config: TrajectoryConfig,
+) -> tuple[str, bool, float]:
+    requested_mode = str(config.objective_mode)
+    if not candidates:
+        return requested_mode, False, 0.0
+    if (
+        requested_mode != OBJECTIVE_MAXIMIZE_HOLD
+        or not bool(config.objective_auto_switch_to_turn)
+    ):
+        return requested_mode, False, 0.0
+
+    threshold_turn_deg = float(max(config.objective_auto_turn_threshold_deg, 0.0))
+    hold_candidate = min(
+        candidates,
+        key=lambda candidate: _candidate_rank(candidate, OBJECTIVE_MAXIMIZE_HOLD),
+    )
+    hold_turn_deg = float(_candidate_turn_deg(hold_candidate))
+    if hold_turn_deg <= threshold_turn_deg + SMALL:
+        return requested_mode, False, hold_turn_deg
+
+    turn_candidate = min(
+        candidates,
+        key=lambda candidate: _candidate_rank(
+            candidate,
+            OBJECTIVE_MINIMIZE_AZIMUTH_TURN,
+        ),
+    )
+    if _candidate_turn_deg(turn_candidate) >= hold_turn_deg - SMALL:
+        return requested_mode, False, hold_turn_deg
+    return OBJECTIVE_MINIMIZE_AZIMUTH_TURN, True, hold_turn_deg
+
+
+def _record_objective_mode_decision(
+    runtime_context: _SolverRuntimeContext | None,
+    config: TrajectoryConfig,
+    applied_mode: str,
+    auto_switched: bool,
+    trigger_turn_deg: float,
+) -> None:
+    if runtime_context is None:
+        return
+    runtime_context.objective_mode_requested = str(config.objective_mode)
+    runtime_context.objective_mode_applied = str(applied_mode)
+    runtime_context.objective_auto_switched = bool(auto_switched)
+    runtime_context.objective_auto_switch_trigger_turn_deg = float(
+        max(trigger_turn_deg, 0.0)
+    )
+
+
+def _select_best_candidate_by_config(
+    candidates: list[ProfileParameters],
+    config: TrajectoryConfig,
+    runtime_context: _SolverRuntimeContext | None = None,
+) -> ProfileParameters | None:
+    if not candidates:
+        _record_objective_mode_decision(
+            runtime_context=runtime_context,
+            config=config,
+            applied_mode=str(config.objective_mode),
+            auto_switched=False,
+            trigger_turn_deg=0.0,
+        )
+        return None
+
+    applied_mode, auto_switched, trigger_turn_deg = _effective_objective_mode_for_candidates(
+        candidates=candidates,
+        config=config,
+    )
+    _record_objective_mode_decision(
+        runtime_context=runtime_context,
+        config=config,
+        applied_mode=applied_mode,
+        auto_switched=auto_switched,
+        trigger_turn_deg=trigger_turn_deg,
+    )
+    return min(candidates, key=lambda candidate: _candidate_rank(candidate, applied_mode))
+
+
 def _run_task_batch(
     tasks: list[object],
     worker: Callable[[object], object],
@@ -583,6 +692,13 @@ def _search_coplanar_profile_with_adaptive_grid(
             f"Солвер: проверено кандидатов {runtime_context.candidate_evaluations:.0f}.",
             1.00,
         )
+        selected = _select_best_candidate_by_config(
+            candidates=_feasible_candidates(evaluated),
+            config=config,
+            runtime_context=runtime_context,
+        )
+        if selected is not None:
+            return selected
         return best
 
     axis_values = tuple(
@@ -616,7 +732,10 @@ def _search_coplanar_profile_with_adaptive_grid(
         )
         ranked = _rank_feasible_candidates(
             evaluated=evaluated,
-            objective_mode=config.objective_mode,
+            objective_mode=_effective_objective_mode_for_candidates(
+                candidates=_feasible_candidates(evaluated),
+                config=config,
+            )[0],
         )
         if not ranked:
             break
@@ -654,6 +773,13 @@ def _search_coplanar_profile_with_adaptive_grid(
             ),
             1.00,
         )
+    selected = _select_best_candidate_by_config(
+        candidates=_feasible_candidates(evaluated),
+        config=config,
+        runtime_context=runtime_context,
+    )
+    if selected is not None:
+        return selected
     return best
 
 
@@ -794,33 +920,194 @@ def _search_reverse_direction_coplanar_profile(
     )
 
 
+def _profile_same_direction_j(
+    geometry: SectionGeometry,
+    *,
+    lower_dls: float,
+    upper_dls: float,
+    kop_min_vertical_m: float,
+    min_structural_segment_m: float,
+    max_inc_deg: float,
+    horizontal_dls_deg_per_30m: float,
+) -> ProfileParameters | None:
+    inc_entry_rad = float(geometry.inc_entry_deg * DEG2RAD)
+    one_minus_cos = float(1.0 - np.cos(inc_entry_rad))
+    sin_inc = float(np.sin(inc_entry_rad))
+    if one_minus_cos <= SMALL or sin_inc <= SMALL:
+        return None
+
+    radius_m = float(geometry.s1_m / one_minus_cos)
+    if radius_m <= SMALL:
+        return None
+    dls_build = float(_dls_from_radius(radius_m))
+    if dls_build < float(lower_dls) - SMALL or dls_build > float(upper_dls) + SMALL:
+        return None
+
+    z_build_m = float(radius_m * sin_inc)
+    kop_vertical_m = float(geometry.z1_m - z_build_m)
+    if kop_vertical_m < float(max(kop_min_vertical_m, 0.0)) - SMALL:
+        return None
+    if kop_vertical_m < -SMALL:
+        return None
+    kop_vertical_m = float(max(kop_vertical_m, 0.0))
+
+    build1_length_m = float(radius_m * inc_entry_rad)
+    if build1_length_m < float(min_structural_segment_m) - SMALL:
+        return None
+
+    post_entry = _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        max_inc_deg=max_inc_deg,
+    )
+    if post_entry is None:
+        return None
+
+    return ProfileParameters(
+        profile_kind=SAME_DIRECTION_PROFILE_KIND_J_CURVE,
+        trajectory_type=TRAJECTORY_SAME_DIRECTION,
+        kop_vertical_m=kop_vertical_m,
+        reverse_inc_deg=0.0,
+        reverse_hold_length_m=0.0,
+        reverse_dls_deg_per_30m=0.0,
+        inc_entry_deg=float(geometry.inc_entry_deg),
+        inc_required_t1_t3_deg=float(geometry.inc_required_t1_t3_deg),
+        inc_hold_deg=float(geometry.inc_entry_deg),
+        dls_build1_deg_per_30m=dls_build,
+        dls_build2_deg_per_30m=0.0,
+        build1_length_m=build1_length_m,
+        hold_length_m=0.0,
+        build2_length_m=0.0,
+        horizontal_length_m=float(post_entry.total_length_m),
+        horizontal_adjust_length_m=float(post_entry.transition_length_m),
+        horizontal_hold_length_m=float(post_entry.hold_length_m),
+        horizontal_inc_deg=float(post_entry.hold_inc_deg),
+        horizontal_dls_deg_per_30m=float(post_entry.transition_dls_deg_per_30m),
+        azimuth_hold_deg=float(geometry.azimuth_entry_deg),
+        azimuth_entry_deg=float(geometry.azimuth_entry_deg),
+    )
+
+
+def _j_auto_recommended(
+    geometry: SectionGeometry,
+    j_candidate: ProfileParameters,
+) -> bool:
+    kop_ratio = float(j_candidate.kop_vertical_m / max(geometry.z1_m, SMALL))
+    return bool(kop_ratio >= SAME_DIRECTION_J_AUTO_KOP_RATIO_MIN)
+
+
 def _solve_same_direction_profile(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
     runtime_context: _SolverRuntimeContext,
     progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters:
-    lower, upper = _effective_dls_search_bounds(
+    requested_mode = str(config.same_direction_profile_mode)
+    lower_classic, upper_classic = _effective_dls_search_bounds(
         config=config,
         constrained_segments=("BUILD1", "BUILD2"),
     )
+    lower_j, upper_j = _effective_dls_search_bounds(
+        config=config,
+        constrained_segments=("BUILD1",),
+    )
 
     horizontal_dls_deg_per_30m = float(
-        max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper), SMALL)
+        max(config.dls_limits_deg_per_30m.get("HORIZONTAL", upper_classic), SMALL)
     )
     _emit_progress(
         progress_callback,
         "Солвер: same-direction coplanar-поиск по KOP/ПИ.",
         0.05,
     )
-    best = _search_same_direction_coplanar_profile(
+    if requested_mode == SAME_DIRECTION_PROFILE_J_CURVE:
+        best_j_forced = _profile_same_direction_j(
+            geometry=geometry,
+            lower_dls=lower_j,
+            upper_dls=upper_j,
+            kop_min_vertical_m=float(config.kop_min_vertical_m),
+            min_structural_segment_m=float(config.min_structural_segment_m),
+            max_inc_deg=float(config.max_inc_deg),
+            horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        )
+        if best_j_forced is not None and _is_candidate_feasible(
+            candidate=best_j_forced,
+            config=config,
+        ):
+            _emit_progress(
+                progress_callback,
+                "Солвер: найден допустимый J-профиль.",
+                1.00,
+            )
+            return best_j_forced
+        raise PlanningError(
+            "J-profile is not feasible for current same-direction geometry and limits. "
+            "Try reducing minimum vertical before KOP, widening BUILD DLS limits, "
+            "or switch same_direction_profile_mode to 'auto'/'classic'."
+        )
+
+    best_classic = _search_same_direction_coplanar_profile(
         geometry=geometry,
         config=config,
-        lower_dls=lower,
-        upper_dls=upper,
+        lower_dls=lower_classic,
+        upper_dls=upper_classic,
         horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
         runtime_context=runtime_context,
         progress_callback=progress_callback,
+    )
+    if requested_mode == SAME_DIRECTION_PROFILE_CLASSIC and best_classic is not None:
+        _select_best_candidate_by_config(
+            candidates=[best_classic],
+            config=config,
+            runtime_context=runtime_context,
+        )
+        _emit_progress(
+            progress_callback,
+            "Солвер: найден допустимый классический профиль.",
+            1.00,
+        )
+        return best_classic
+
+    best_j: ProfileParameters | None = None
+    if requested_mode != SAME_DIRECTION_PROFILE_CLASSIC:
+        _emit_progress(
+            progress_callback,
+            "Солвер: проверка применимости J-профиля.",
+            0.88,
+        )
+        best_j = _profile_same_direction_j(
+            geometry=geometry,
+            lower_dls=lower_j,
+            upper_dls=upper_j,
+            kop_min_vertical_m=float(config.kop_min_vertical_m),
+            min_structural_segment_m=float(config.min_structural_segment_m),
+            max_inc_deg=float(config.max_inc_deg),
+            horizontal_dls_deg_per_30m=horizontal_dls_deg_per_30m,
+        )
+
+    candidates: list[ProfileParameters] = []
+    if best_classic is not None:
+        candidates.append(best_classic)
+    if best_j is not None and _is_candidate_feasible(candidate=best_j, config=config):
+        if requested_mode == SAME_DIRECTION_PROFILE_AUTO and _j_auto_recommended(
+            geometry=geometry,
+            j_candidate=best_j,
+        ):
+            _select_best_candidate_by_config(
+                candidates=[best_j],
+                config=config,
+                runtime_context=runtime_context,
+            )
+            _emit_progress(progress_callback, "Солвер: найден допустимый профиль.", 1.00)
+            return best_j
+        candidates.append(best_j)
+
+    best = _select_best_candidate_by_config(
+        candidates=candidates,
+        config=config,
+        runtime_context=runtime_context,
     )
 
     if best is not None:
@@ -842,12 +1129,12 @@ def _solve_same_direction_profile(
     diagnostics = _diagnose_same_direction_no_solution(
         geometry=geometry,
         config=config,
-        lower_dls=lower,
-        upper_dls=upper,
+        lower_dls=lower_classic,
+        upper_dls=upper_classic,
         required_dls=required_dls,
     )
     raise PlanningError(
-        "No valid VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL solution found within configured limits. "
+        "No valid same-direction profile (classic or J) found within configured limits. "
         f"Try increasing BUILD max DLS above {required_dls:.2f} deg/30m, reducing minimum vertical before KOP, "
         "increasing max INC (or allowing overbend), or relaxing constraints."
         + _format_failure_diagnostics(diagnostics)
@@ -857,6 +1144,7 @@ def _solve_same_direction_profile(
 def _solve_same_direction_profile_with_turn(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
+    runtime_context: _SolverRuntimeContext,
     progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters:
     lower, upper = _effective_dls_search_bounds(
@@ -949,6 +1237,7 @@ def _solve_same_direction_profile_with_turn(
         objective_mode=config.objective_mode,
         turn_solver_mode=config.turn_solver_mode,
         config=config,
+        runtime_context=runtime_context,
         target_point_east_north_tvd=(geometry.t1_east_m, geometry.t1_north_m, geometry.t1_tvd_m),
         progress_callback=progress_callback,
     )
@@ -1029,6 +1318,7 @@ def _solve_reverse_direction_profile(
 def _solve_reverse_direction_profile_with_turn(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
+    runtime_context: _SolverRuntimeContext,
     progress_callback: ProgressCallback | None = None,
 ) -> ProfileParameters:
     lower, upper = _effective_dls_search_bounds(
@@ -1153,6 +1443,7 @@ def _solve_reverse_direction_profile_with_turn(
         objective_mode=config.objective_mode,
         turn_solver_mode=config.turn_solver_mode,
         config=config,
+        runtime_context=runtime_context,
         target_point_east_north_tvd=(geometry.t1_east_m, geometry.t1_north_m, geometry.t1_tvd_m),
         progress_callback=progress_callback,
     )
@@ -1187,6 +1478,7 @@ def _solve_turn_profile_multistart(
     objective_mode: str,
     turn_solver_mode: str,
     config: TrajectoryConfig,
+    runtime_context: _SolverRuntimeContext,
     target_point_east_north_tvd: tuple[float, float, float],
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[ProfileParameters | None, float]:
@@ -1230,6 +1522,7 @@ def _solve_turn_profile_multistart(
 
     best_candidate: ProfileParameters | None = None
     best_miss = np.inf
+    feasible_candidates: list[ProfileParameters] = []
     scored_starts: list[tuple[float, np.ndarray]] = []
 
     seed_count = len(all_seed_vectors)
@@ -1254,6 +1547,7 @@ def _solve_turn_profile_multistart(
         )
         best_miss = min(best_miss, miss)
         if miss <= config.pos_tolerance_m + SMALL and _is_candidate_feasible(candidate=candidate, config=config):
+            feasible_candidates.append(candidate)
             best_candidate = _select_better_candidate(
                 current=best_candidate,
                 candidate=candidate,
@@ -1267,7 +1561,18 @@ def _solve_turn_profile_multistart(
             )
 
     scored_starts.sort(key=lambda item: item[0])
-    local_starts = [seed for _, seed in scored_starts[: max(1, int(max_local_starts))]]
+    turn_sensitive_search = bool(
+        objective_mode == OBJECTIVE_MINIMIZE_AZIMUTH_TURN
+        or (
+            objective_mode == OBJECTIVE_MAXIMIZE_HOLD
+            and bool(config.objective_auto_switch_to_turn)
+        )
+    )
+    local_seed_count = max(1, int(max_local_starts))
+    if turn_sensitive_search:
+        local_seed_count = max(local_seed_count, 5)
+    local_seed_count = min(local_seed_count, len(scored_starts))
+    local_starts = [seed for _, seed in scored_starts[:local_seed_count]]
 
     if turn_solver_mode == TURN_SOLVER_DE_HYBRID:
         _emit_progress(progress_callback, "TURN: глобальный DE-поиск старта.", 0.50)
@@ -1291,12 +1596,18 @@ def _solve_turn_profile_multistart(
     elif turn_solver_mode != TURN_SOLVER_LEAST_SQUARES:
         raise PlanningError(f"Unsupported TURN solver mode: {turn_solver_mode}")
 
-    local_starts = _dedupe_seed_vectors(local_starts)[: max(1, int(max_local_starts) + 1)]
-    if int(max_local_starts) <= 1:
+    local_starts = _dedupe_seed_vectors(local_starts)[: max(1, local_seed_count + 1)]
+    if turn_sensitive_search:
         local_starts = _augment_turn_local_starts_with_azimuth_jitter(
             local_starts=local_starts,
             bounds=bounds,
-            azimuth_jitter_deg=12.0,
+            jitter_levels_deg=(12.0, 24.0, 36.0, 48.0, 60.0),
+        )
+    elif int(max_local_starts) <= 1:
+        local_starts = _augment_turn_local_starts_with_azimuth_jitter(
+            local_starts=local_starts,
+            bounds=bounds,
+            jitter_levels_deg=(12.0,),
         )
     _emit_progress(
         progress_callback,
@@ -1341,6 +1652,7 @@ def _solve_turn_profile_multistart(
                 continue
             if not _is_candidate_feasible(candidate=candidate, config=config):
                 continue
+            feasible_candidates.append(candidate)
             best_candidate = _select_better_candidate(
                 current=best_candidate,
                 candidate=candidate,
@@ -1353,7 +1665,14 @@ def _solve_turn_profile_multistart(
                 0.62 + 0.34 * float(idx / max(local_total, 1)),
             )
 
+    selected = _select_best_candidate_by_config(
+        candidates=feasible_candidates,
+        config=config,
+        runtime_context=runtime_context,
+    )
     _emit_progress(progress_callback, "TURN: завершение этапа оптимизации.", 1.00)
+    if selected is not None:
+        return selected, float(best_miss)
     return best_candidate, float(best_miss)
 
 
@@ -1372,7 +1691,7 @@ def _dedupe_seed_vectors(seed_vectors: list[np.ndarray]) -> list[np.ndarray]:
 def _augment_turn_local_starts_with_azimuth_jitter(
     local_starts: list[np.ndarray],
     bounds: tuple[tuple[float, float], ...],
-    azimuth_jitter_deg: float,
+    jitter_levels_deg: tuple[float, ...],
 ) -> list[np.ndarray]:
     if not local_starts:
         return local_starts
@@ -1381,18 +1700,21 @@ def _augment_turn_local_starts_with_azimuth_jitter(
     azimuth_min, azimuth_max = bounds[-1]
     if float(azimuth_max - azimuth_min) < 359.0:
         return local_starts
-    jitter = float(abs(azimuth_jitter_deg))
-    if jitter <= SMALL:
+    offsets = [float(abs(value)) for value in jitter_levels_deg if abs(float(value)) > SMALL]
+    if not offsets:
         return local_starts
 
     augmented: list[np.ndarray] = []
     for seed in local_starts:
         seed_vec = np.asarray(seed, dtype=float)
         augmented.append(seed_vec)
-        for delta in (-jitter, jitter):
-            jittered = seed_vec.copy()
-            jittered[-1] = _normalize_azimuth_deg(float(jittered[-1]) + float(delta))
-            augmented.append(_clip_to_bounds(jittered, bounds=bounds))
+        for offset in offsets:
+            for direction in (-1.0, 1.0):
+                jittered = seed_vec.copy()
+                jittered[-1] = _normalize_azimuth_deg(
+                    float(jittered[-1]) + float(direction * offset)
+                )
+                augmented.append(_clip_to_bounds(jittered, bounds=bounds))
     return _dedupe_seed_vectors(augmented)
 
 
@@ -1916,6 +2238,7 @@ def _profile_reverse_direction_with_turn(
         return None
 
     return ProfileParameters(
+        profile_kind="reverse",
         trajectory_type=TRAJECTORY_REVERSE_DIRECTION,
         kop_vertical_m=float(kop_vertical_m),
         reverse_inc_deg=float(reverse_inc_deg),
@@ -1995,6 +2318,11 @@ def _build_profile_from_effective_targets(
         return None
 
     return ProfileParameters(
+        profile_kind=(
+            SAME_DIRECTION_PROFILE_KIND_CLASSIC
+            if trajectory_type == TRAJECTORY_SAME_DIRECTION
+            else "reverse"
+        ),
         trajectory_type=trajectory_type,
         kop_vertical_m=float(kop_vertical_m),
         reverse_inc_deg=float(max(reverse_inc_deg, 0.0)),
@@ -2068,6 +2396,7 @@ def _profile_same_direction_with_turn(
         return None
 
     return ProfileParameters(
+        profile_kind=SAME_DIRECTION_PROFILE_KIND_CLASSIC,
         trajectory_type=TRAJECTORY_SAME_DIRECTION,
         kop_vertical_m=float(kop_vertical_m),
         reverse_inc_deg=0.0,
@@ -2243,7 +2572,24 @@ def _effective_dls_search_bounds(config: TrajectoryConfig, constrained_segments:
     return lower, upper
 
 
-def _candidate_rank(candidate: ProfileParameters, objective_mode: str) -> tuple[float, float, float, float]:
+def _candidate_rank(candidate: ProfileParameters, objective_mode: str) -> tuple[float, ...]:
+    if objective_mode == OBJECTIVE_MINIMIZE_TOTAL_MD:
+        return (
+            candidate.md_total_m,
+            candidate.dls_build1_deg_per_30m,
+            -candidate.hold_length_m,
+            -candidate.kop_vertical_m,
+            _candidate_turn_deg(candidate),
+            candidate.reverse_total_length_m,
+        )
+    if objective_mode == OBJECTIVE_MINIMIZE_AZIMUTH_TURN:
+        return (
+            _candidate_turn_deg(candidate),
+            candidate.dls_build1_deg_per_30m,
+            -candidate.hold_length_m,
+            -candidate.kop_vertical_m,
+            candidate.reverse_total_length_m,
+        )
     if objective_mode == OBJECTIVE_MINIMIZE_BUILD_DLS:
         return (
             candidate.dls_build1_deg_per_30m,
@@ -2257,6 +2603,17 @@ def _candidate_rank(candidate: ProfileParameters, objective_mode: str) -> tuple[
         candidate.dls_build1_deg_per_30m,
         -candidate.kop_vertical_m,
         candidate.reverse_total_length_m,
+    )
+
+
+def _candidate_turn_deg(candidate: ProfileParameters) -> float:
+    return float(
+        abs(
+            _shortest_azimuth_delta_deg(
+                candidate.azimuth_hold_deg,
+                candidate.azimuth_entry_deg,
+            )
+        )
     )
 
 
@@ -2294,6 +2651,22 @@ def _optimize_profile_for_objective(
 
     if objective_mode == OBJECTIVE_MINIMIZE_BUILD_DLS:
         return _optimize_minimize_build_dls(
+            lower_dls=lower_dls,
+            upper_dls=upper_dls,
+            profile_builder=builder,
+            config=config,
+        )
+    if objective_mode == OBJECTIVE_MINIMIZE_TOTAL_MD:
+        return _optimize_minimize_total_md(
+            lower_dls=lower_dls,
+            upper_dls=upper_dls,
+            profile_builder=builder,
+            config=config,
+        )
+    if objective_mode == OBJECTIVE_MINIMIZE_AZIMUTH_TURN:
+        # In coplanar searches azimuth turn is fixed by geometry, so this mode
+        # uses the hold-oriented scalar search and then ranks candidates by turn.
+        return _optimize_maximize_hold(
             lower_dls=lower_dls,
             upper_dls=upper_dls,
             profile_builder=builder,
@@ -2374,6 +2747,45 @@ def _optimize_minimize_build_dls(
     return None
 
 
+def _optimize_minimize_total_md(
+    lower_dls: float,
+    upper_dls: float,
+    profile_builder: Callable[[float], ProfileParameters | None],
+    config: TrajectoryConfig,
+) -> ProfileParameters | None:
+    def objective(dls_build: float) -> float:
+        candidate = profile_builder(float(dls_build))
+        if not _is_candidate_feasible(candidate=candidate, config=config):
+            return 1e12 + abs(float(dls_build) - lower_dls)
+        return float(candidate.md_total_m)
+
+    optimum = minimize_scalar(
+        objective,
+        bounds=(lower_dls, upper_dls),
+        method="bounded",
+        options={"xatol": 1e-5},
+    )
+    probes = [
+        lower_dls,
+        upper_dls,
+        float(optimum.x),
+        float(optimum.x) - 1e-3,
+        float(optimum.x) + 1e-3,
+    ]
+
+    best: ProfileParameters | None = None
+    best_md = np.inf
+    for dls in probes:
+        dls_clamped = float(np.clip(dls, lower_dls, upper_dls))
+        candidate = profile_builder(dls_clamped)
+        if not _is_candidate_feasible(candidate=candidate, config=config):
+            continue
+        if candidate.md_total_m < best_md:
+            best = candidate
+            best_md = float(candidate.md_total_m)
+    return best
+
+
 def _is_candidate_feasible(candidate: ProfileParameters | None, config: TrajectoryConfig) -> bool:
     if candidate is None:
         return False
@@ -2434,21 +2846,27 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
             )
         )
 
-    segments.extend(
-        [
+    if params.build1_length_m > SMALL:
+        segments.append(
             BuildSegment(
                 inc_from_deg=0.0,
                 inc_to_deg=params.inc_hold_deg,
                 dls_deg_per_30m=params.dls_build1_deg_per_30m,
                 azi_deg=params.azimuth_hold_deg,
                 name="BUILD1",
-            ),
+            )
+        )
+    if params.hold_length_m > SMALL:
+        segments.append(
             HoldSegment(
                 length_m=params.hold_length_m,
                 inc_deg=params.inc_hold_deg,
                 azi_deg=params.azimuth_hold_deg,
                 name="HOLD",
-            ),
+            )
+        )
+    if params.build2_length_m > SMALL:
+        segments.append(
             BuildSegment(
                 inc_from_deg=params.inc_hold_deg,
                 inc_to_deg=params.inc_entry_deg,
@@ -2456,9 +2874,8 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 azi_deg=params.azimuth_hold_deg,
                 azi_to_deg=params.azimuth_entry_deg,
                 name="BUILD2",
-            ),
-        ]
-    )
+            )
+        )
     if params.horizontal_adjust_length_m > SMALL and abs(params.horizontal_inc_deg - params.inc_entry_deg) > 1e-6:
         segments.append(
             BuildSegment(
@@ -2493,6 +2910,16 @@ def _solver_parallel_status(runtime_context: _SolverRuntimeContext) -> str:
     if runtime_context.parallel_batches_parallel <= 0:
         return "fallback_to_sequential"
     return "mixed_parallel_with_fallback"
+
+
+def _profile_kind_label(profile_kind: str) -> str:
+    if profile_kind == SAME_DIRECTION_PROFILE_KIND_J_CURVE:
+        return "J-профиль (1 BUILD)"
+    if profile_kind == SAME_DIRECTION_PROFILE_KIND_CLASSIC:
+        return "Классический профиль (2 BUILD + HOLD)"
+    if profile_kind == "reverse":
+        return "Reverse-профиль"
+    return str(profile_kind)
 
 
 def _build_summary(
@@ -2543,6 +2970,25 @@ def _build_summary(
         "t1_horizontal_offset_m": float(horizontal_offset_t1_m),
         "horizontal_length_m": float(params.horizontal_length_m),
         "trajectory_type": trajectory_type_label(classification.trajectory_type),
+        "objective_mode_requested": str(runtime_context.objective_mode_requested),
+        "objective_mode_applied": str(runtime_context.objective_mode_applied),
+        "objective_auto_switch_to_turn": (
+            "yes" if bool(config.objective_auto_switch_to_turn) else "no"
+        ),
+        "objective_auto_turn_threshold_deg": float(
+            config.objective_auto_turn_threshold_deg
+        ),
+        "objective_auto_switched": (
+            "yes" if bool(runtime_context.objective_auto_switched) else "no"
+        ),
+        "objective_auto_switch_trigger_turn_deg": float(
+            runtime_context.objective_auto_switch_trigger_turn_deg
+        ),
+        "same_direction_profile_mode_requested": str(config.same_direction_profile_mode),
+        "same_direction_profile_mode_applied": str(params.profile_kind),
+        "same_direction_profile_mode_applied_label": _profile_kind_label(
+            str(params.profile_kind)
+        ),
         "well_complexity": complexity_label(classification.complexity),
         "well_complexity_by_offset": complexity_label(classification.complexity_by_offset),
         "well_complexity_by_hold": complexity_label(classification.complexity_by_hold),
@@ -2566,6 +3012,14 @@ def _build_summary(
         "solver_adaptive_dense_check": "yes" if runtime_context.adaptive_dense_validation_performed else "no",
         "solver_candidate_evaluations": float(runtime_context.candidate_evaluations),
     }
+    if bool(runtime_context.objective_auto_switched):
+        summary["objective_auto_message"] = (
+            "Автопереключение objective: maximize_hold -> minimize_azimuth_turn "
+            f"(TURN {float(runtime_context.objective_auto_switch_trigger_turn_deg):.2f} deg "
+            f"> порога {float(config.objective_auto_turn_threshold_deg):.2f} deg)."
+        )
+    else:
+        summary["objective_auto_message"] = ""
 
     summary["class_reverse_offset_min_m"] = float(classification.limits.reverse_min_m)
     summary["class_reverse_offset_max_m"] = float(classification.limits.reverse_max_m)
@@ -2651,6 +3105,13 @@ def _validate_config(config: TrajectoryConfig) -> None:
         raise PlanningError("min_structural_segment_m must be positive.")
     if config.min_structural_segment_m < config.md_step_control_m:
         raise PlanningError("min_structural_segment_m must be >= md_step_control_m.")
+    if not np.isfinite(float(config.objective_auto_turn_threshold_deg)):
+        raise PlanningError("objective_auto_turn_threshold_deg must be finite.")
+    if (
+        float(config.objective_auto_turn_threshold_deg) < 0.0
+        or float(config.objective_auto_turn_threshold_deg) > 180.0
+    ):
+        raise PlanningError("objective_auto_turn_threshold_deg must be in [0, 180].")
     if config.objective_mode not in ALLOWED_OBJECTIVE_MODES:
         allowed = ", ".join(ALLOWED_OBJECTIVE_MODES)
         raise PlanningError(f"objective_mode must be one of: {allowed}.")
@@ -2661,6 +3122,11 @@ def _validate_config(config: TrajectoryConfig) -> None:
         raise PlanningError("turn_solver_qmc_samples must be non-negative.")
     if config.turn_solver_local_starts < 1:
         raise PlanningError("turn_solver_local_starts must be >= 1.")
+    if config.same_direction_profile_mode not in ALLOWED_SAME_DIRECTION_PROFILE_MODES:
+        allowed_profile_modes = ", ".join(ALLOWED_SAME_DIRECTION_PROFILE_MODES)
+        raise PlanningError(
+            f"same_direction_profile_mode must be one of: {allowed_profile_modes}."
+        )
     for segment, limit in config.dls_limits_deg_per_30m.items():
         if limit < 0.0:
             raise PlanningError(f"DLS limit for segment {segment} cannot be negative.")

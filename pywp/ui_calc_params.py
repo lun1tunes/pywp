@@ -8,6 +8,7 @@ import streamlit as st
 from pywp import TrajectoryConfig
 from pywp.planner_config import (
     OBJECTIVE_OPTIONS,
+    SAME_DIRECTION_PROFILE_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_trajectory_config,
 )
@@ -24,6 +25,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "dls_build_min",
     "dls_build_max",
     "kop_min_vertical",
+    "objective_auto_turn_threshold",
 )
 _INT_SUFFIXES: tuple[str, ...] = (
     "turn_solver_qmc_samples",
@@ -33,8 +35,13 @@ _INT_SUFFIXES: tuple[str, ...] = (
     "adaptive_grid_top_k",
     "parallel_jobs",
 )
-_STR_SUFFIXES: tuple[str, ...] = ("objective_mode", "turn_solver_mode")
+_STR_SUFFIXES: tuple[str, ...] = (
+    "objective_mode",
+    "turn_solver_mode",
+    "same_direction_profile_mode",
+)
 _BOOL_SUFFIXES: tuple[str, ...] = (
+    "objective_auto_switch_to_turn",
     "adaptive_grid_enabled",
     "adaptive_dense_check_enabled",
     "profile_cache_enabled",
@@ -56,7 +63,10 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "dls_build_max": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
         "kop_min_vertical": float(cfg.kop_min_vertical_m),
         "objective_mode": str(cfg.objective_mode),
+        "objective_auto_switch_to_turn": bool(cfg.objective_auto_switch_to_turn),
+        "objective_auto_turn_threshold": float(cfg.objective_auto_turn_threshold_deg),
         "turn_solver_mode": str(cfg.turn_solver_mode),
+        "same_direction_profile_mode": str(cfg.same_direction_profile_mode),
         "turn_solver_qmc_samples": int(cfg.turn_solver_qmc_samples),
         "turn_solver_local_starts": int(cfg.turn_solver_local_starts),
         "adaptive_grid_enabled": bool(cfg.adaptive_grid_enabled),
@@ -71,7 +81,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 2
+_DEFAULTS_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -193,7 +203,16 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         dls_build_max_deg_per_30m=pi_to_dls(float(_state_value(prefix, "dls_build_max"))),
         kop_min_vertical_m=float(_state_value(prefix, "kop_min_vertical")),
         objective_mode=str(_state_value(prefix, "objective_mode")),
+        objective_auto_switch_to_turn=bool(
+            _state_value(prefix, "objective_auto_switch_to_turn")
+        ),
+        objective_auto_turn_threshold_deg=float(
+            _state_value(prefix, "objective_auto_turn_threshold")
+        ),
         turn_solver_mode=str(_state_value(prefix, "turn_solver_mode")),
+        same_direction_profile_mode=str(
+            _state_value(prefix, "same_direction_profile_mode")
+        ),
         turn_solver_qmc_samples=int(_state_value(prefix, "turn_solver_qmc_samples")),
         turn_solver_local_starts=int(_state_value(prefix, "turn_solver_local_starts")),
         adaptive_grid_enabled=bool(_state_value(prefix, "adaptive_grid_enabled")),
@@ -311,6 +330,10 @@ def render_calc_params_block(
             with st.popover("Что означают параметры солвера", icon=":material/tune:"):
                 st.markdown(
                     "- `Целевая функция` задает критерий выбора из допустимых профилей.\n"
+                    "- `Профиль для целей в одном направлении` включает/форсирует J-профиль (1 BUILD до t1).\n"
+                    "- `Минимизировать азимутальный доворот` полезно для сглаживания траектории после reverse-участка.\n"
+                    "- `Автопереключение objective` (для режима максимизации HOLD) переводит выбор на минимизацию доворота, если найден «конский» TURN выше порога.\n"
+                    "- `Минимизировать итоговую MD` уменьшает проходку и объем бурения.\n"
                     "- `TURN` параметры влияют только на некомпланарные случаи.\n"
                     "- `Сетка поиска` — это набор пробных значений KOP и reverse INC.\n"
                     "- `Adaptive` сначала считает по редкой сетке, затем уплотняет ее около лучших решений.\n"
@@ -319,7 +342,7 @@ def render_calc_params_block(
                     "- `Кэш профилей` сокращает повторные вычисления внутри оптимизации."
                 )
 
-        e1, e2, e3 = st.columns(3, gap="small")
+        e1, e2, e3, e4 = st.columns(4, gap="small")
         e1.selectbox(
             "Целевая функция",
             options=list(OBJECTIVE_OPTIONS.keys()),
@@ -327,7 +350,9 @@ def render_calc_params_block(
             format_func=lambda key: OBJECTIVE_OPTIONS[str(key)],
             help=(
                 "Определяет приоритет среди допустимых решений. "
-                "Обычно рекомендуется «Максимизировать длину HOLD»."
+                "«Минимизировать азимутальный доворот» уменьшает резкие повороты "
+                "в некомпланарных reverse-кейсах. "
+                "«Минимизировать итоговую MD» уменьшает длину проходки."
             ),
         )
         e2.selectbox(
@@ -348,6 +373,40 @@ def render_calc_params_block(
             help=(
                 "Дополнительные стартовые точки (Latin Hypercube). "
                 "Больше = устойчивее в сложных случаях, но медленнее."
+            ),
+        )
+        e4.selectbox(
+            "Профиль для целей в одном направлении",
+            options=list(SAME_DIRECTION_PROFILE_OPTIONS.keys()),
+            key=_state_key(prefix, "same_direction_profile_mode"),
+            format_func=lambda key: SAME_DIRECTION_PROFILE_OPTIONS[str(key)],
+            help=(
+                "Авто: включает J-профиль, когда цель близко к устью и геометрия "
+                "допускает проход одним BUILD. "
+                "Классический: всегда 2 BUILD + HOLD. "
+                "J-профиль: форсирует 1 BUILD до t1."
+            ),
+        )
+        auto_obj_1, auto_obj_2 = st.columns(2, gap="small")
+        auto_obj_1.toggle(
+            "Автопереключение objective по TURN",
+            key=_state_key(prefix, "objective_auto_switch_to_turn"),
+            help=(
+                "Работает при целевой функции «Максимизировать длину HOLD». "
+                "Если итоговый azimuth TURN превышает порог, солвер автоматически "
+                "выберет решение с минимальным доворотом."
+            ),
+        )
+        auto_obj_2.number_input(
+            "Порог TURN для автопереключения, deg",
+            key=_state_key(prefix, "objective_auto_turn_threshold"),
+            min_value=0.0,
+            max_value=180.0,
+            step=1.0,
+            help=(
+                "Порог «конского» доворота для автопереключения objective. "
+                "Если TURN выше этого значения, применяется "
+                "«Минимизировать азимутальный доворот»."
             ),
         )
         st.number_input(

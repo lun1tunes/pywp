@@ -3,7 +3,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pywp.models import Point3D, TrajectoryConfig
+import pywp.planner as planner_module
+from pywp.models import (
+    Point3D,
+    SAME_DIRECTION_PROFILE_AUTO,
+    SAME_DIRECTION_PROFILE_CLASSIC,
+    SAME_DIRECTION_PROFILE_J_CURVE,
+    TrajectoryConfig,
+)
 from pywp.planner import PlanningError, TrajectoryPlanner
 
 
@@ -22,9 +29,36 @@ def _fast_config(**overrides: object) -> TrajectoryConfig:
         "turn_solver_qmc_samples": 8,
         "turn_solver_local_starts": 4,
         "max_total_md_postcheck_m": 20000.0,
+        "same_direction_profile_mode": SAME_DIRECTION_PROFILE_CLASSIC,
     }
     base.update(overrides)
     return TrajectoryConfig(**base)
+
+
+def _profile_stub(*, hold_length_m: float, turn_deg: float, dls_build: float) -> planner_module.ProfileParameters:
+    return planner_module.ProfileParameters(
+        profile_kind="classic_s",
+        trajectory_type="same_direction",
+        kop_vertical_m=1000.0,
+        reverse_inc_deg=0.0,
+        reverse_hold_length_m=0.0,
+        reverse_dls_deg_per_30m=0.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=86.0,
+        inc_hold_deg=80.0,
+        dls_build1_deg_per_30m=float(dls_build),
+        dls_build2_deg_per_30m=float(dls_build),
+        build1_length_m=300.0,
+        hold_length_m=float(hold_length_m),
+        build2_length_m=200.0,
+        horizontal_length_m=1200.0,
+        horizontal_adjust_length_m=0.0,
+        horizontal_hold_length_m=1200.0,
+        horizontal_inc_deg=86.0,
+        horizontal_dls_deg_per_30m=0.5,
+        azimuth_hold_deg=0.0,
+        azimuth_entry_deg=float(turn_deg),
+    )
 
 
 @pytest.mark.parametrize(
@@ -82,6 +116,94 @@ def test_planner_supports_turn_for_non_planar_reverse_geometry() -> None:
     assert float(result.summary["azimuth_turn_deg"]) > 1.0
     build2 = result.stations[result.stations["segment"] == "BUILD2"]
     assert float(build2["AZI_deg"].max() - build2["AZI_deg"].min()) > 1.0
+
+
+def test_same_direction_j_profile_forced_uses_single_build_before_t1() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(
+        same_direction_profile_mode=SAME_DIRECTION_PROFILE_J_CURVE,
+        dls_build_min_deg_per_30m=0.1,
+        dls_build_max_deg_per_30m=6.0,
+        dls_limits_deg_per_30m={
+            "VERTICAL": 1.0,
+            "BUILD1": 6.0,
+            "HOLD": 2.0,
+            "BUILD2": 6.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(750.0, 0.0, 3000.0),
+        t3=Point3D(2300.0, 0.0, 3070.0),
+        config=config,
+    )
+
+    segments = set(result.stations["segment"])
+    assert "BUILD1" in segments
+    assert "HOLD" not in segments
+    assert "BUILD2" not in segments
+    assert str(result.summary["same_direction_profile_mode_applied"]) == "j_curve"
+
+
+def test_same_direction_auto_mode_selects_j_profile_for_near_wellhead_targets() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(
+        same_direction_profile_mode=SAME_DIRECTION_PROFILE_AUTO,
+        dls_build_min_deg_per_30m=0.1,
+        dls_build_max_deg_per_30m=6.0,
+        dls_limits_deg_per_30m={
+            "VERTICAL": 1.0,
+            "BUILD1": 6.0,
+            "HOLD": 2.0,
+            "BUILD2": 6.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(750.0, 0.0, 3000.0),
+        t3=Point3D(2300.0, 0.0, 3070.0),
+        config=config,
+    )
+
+    assert str(result.summary["same_direction_profile_mode_requested"]) == "auto"
+    assert str(result.summary["same_direction_profile_mode_applied"]) == "j_curve"
+
+
+def test_same_direction_forced_j_reports_infeasible_limits() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(
+        same_direction_profile_mode=SAME_DIRECTION_PROFILE_J_CURVE,
+        dls_build_min_deg_per_30m=0.1,
+        dls_build_max_deg_per_30m=2.0,
+        dls_limits_deg_per_30m={
+            "VERTICAL": 1.0,
+            "BUILD1": 2.0,
+            "HOLD": 2.0,
+            "BUILD2": 2.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+    with pytest.raises(PlanningError, match="J-profile is not feasible"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(750.0, 0.0, 3000.0),
+            t3=Point3D(2300.0, 0.0, 3070.0),
+            config=config,
+        )
+
+
+def test_same_direction_forced_j_rejects_non_coplanar_case() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(same_direction_profile_mode=SAME_DIRECTION_PROFILE_J_CURVE)
+    with pytest.raises(PlanningError, match="only supported for coplanar"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(1400.0, 500.0, 2500.0),
+            t3=Point3D(2200.0, 1700.0, 2580.0),
+            config=config,
+        )
 
 
 def test_planner_supports_turn_in_build_for_non_planar_same_direction_geometry() -> None:
@@ -300,6 +422,19 @@ def test_planner_rejects_unknown_turn_solver_mode() -> None:
         )
 
 
+def test_planner_rejects_unknown_same_direction_profile_mode() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(same_direction_profile_mode="unsupported_profile_mode")  # type: ignore[arg-type]
+
+    with pytest.raises(PlanningError, match="same_direction_profile_mode must be one of"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=config,
+        )
+
+
 def test_planner_validates_turn_solver_numeric_controls() -> None:
     planner = TrajectoryPlanner()
     with pytest.raises(PlanningError, match="turn_solver_qmc_samples must be non-negative"):
@@ -317,6 +452,66 @@ def test_planner_validates_turn_solver_numeric_controls() -> None:
             t3=Point3D(1500.0, 2000.0, 2500.0),
             config=_fast_config(turn_solver_local_starts=0),
         )
+    with pytest.raises(PlanningError, match="objective_auto_turn_threshold_deg must be in \\[0, 180\\]"):
+        planner.plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=_fast_config(objective_auto_turn_threshold_deg=-1.0),
+        )
+
+
+def test_objective_auto_switch_selects_min_turn_candidate_when_threshold_exceeded() -> None:
+    cfg = _fast_config(
+        objective_mode="maximize_hold",
+        objective_auto_switch_to_turn=True,
+        objective_auto_turn_threshold_deg=20.0,
+    )
+    hold_favored = _profile_stub(hold_length_m=500.0, turn_deg=34.0, dls_build=1.2)
+    turn_favored = _profile_stub(hold_length_m=420.0, turn_deg=7.0, dls_build=1.4)
+    runtime = planner_module._SolverRuntimeContext(
+        parallel_requested_jobs=1,
+        objective_mode_requested=str(cfg.objective_mode),
+        objective_mode_applied=str(cfg.objective_mode),
+    )
+
+    selected = planner_module._select_best_candidate_by_config(
+        candidates=[hold_favored, turn_favored],
+        config=cfg,
+        runtime_context=runtime,
+    )
+
+    assert selected is turn_favored
+    assert runtime.objective_mode_requested == "maximize_hold"
+    assert runtime.objective_mode_applied == "minimize_azimuth_turn"
+    assert runtime.objective_auto_switched is True
+    assert runtime.objective_auto_switch_trigger_turn_deg == pytest.approx(34.0)
+
+
+def test_objective_auto_switch_keeps_maximize_hold_below_threshold() -> None:
+    cfg = _fast_config(
+        objective_mode="maximize_hold",
+        objective_auto_switch_to_turn=True,
+        objective_auto_turn_threshold_deg=40.0,
+    )
+    hold_favored = _profile_stub(hold_length_m=500.0, turn_deg=34.0, dls_build=1.2)
+    turn_favored = _profile_stub(hold_length_m=420.0, turn_deg=7.0, dls_build=1.4)
+    runtime = planner_module._SolverRuntimeContext(
+        parallel_requested_jobs=1,
+        objective_mode_requested=str(cfg.objective_mode),
+        objective_mode_applied=str(cfg.objective_mode),
+    )
+
+    selected = planner_module._select_best_candidate_by_config(
+        candidates=[hold_favored, turn_favored],
+        config=cfg,
+        runtime_context=runtime,
+    )
+
+    assert selected is hold_favored
+    assert runtime.objective_mode_requested == "maximize_hold"
+    assert runtime.objective_mode_applied == "maximize_hold"
+    assert runtime.objective_auto_switched is False
 
 
 def test_planner_validates_adaptive_and_parallel_controls() -> None:
@@ -538,6 +733,76 @@ def test_objective_mode_minimize_build_dls_not_higher_than_maximize_hold() -> No
         result_min_dls.summary["max_dls_build2_deg_per_30m"]
         <= result_hold.summary["max_dls_build2_deg_per_30m"] + 1e-6
     )
+
+
+def test_objective_mode_minimize_azimuth_turn_prefers_smaller_turn_for_reverse_turn_case() -> None:
+    planner = TrajectoryPlanner()
+    base_kwargs = dict(
+        md_step_m=10.0,
+        md_step_control_m=2.0,
+        pos_tolerance_m=2.0,
+        turn_solver_qmc_samples=0,
+        turn_solver_local_starts=1,
+        adaptive_dense_check_enabled=False,
+        dls_build_min_deg_per_30m=0.1,
+        dls_build_max_deg_per_30m=3.0,
+    )
+    config_hold = _fast_config(**base_kwargs, objective_mode="maximize_hold")
+    config_turn = _fast_config(
+        **base_kwargs,
+        objective_mode="minimize_azimuth_turn",
+    )
+
+    surface = Point3D(598863.0, 7411139.0, 0.0)
+    t1 = Point3D(599168.0, 7411032.0, 3799.701)
+    t3 = Point3D(601041.0, 7412188.0, 3798.500)
+    result_hold = planner.plan(surface=surface, t1=t1, t3=t3, config=config_hold)
+    result_turn = planner.plan(surface=surface, t1=t1, t3=t3, config=config_turn)
+
+    assert float(result_hold.summary["distance_t1_m"]) <= config_hold.pos_tolerance_m
+    assert float(result_hold.summary["distance_t3_m"]) <= config_hold.pos_tolerance_m
+    assert float(result_turn.summary["distance_t1_m"]) <= config_turn.pos_tolerance_m
+    assert float(result_turn.summary["distance_t3_m"]) <= config_turn.pos_tolerance_m
+    assert float(result_turn.summary["azimuth_turn_deg"]) <= float(
+        result_hold.summary["azimuth_turn_deg"]
+    ) + 1e-6
+
+
+def test_objective_mode_minimize_total_md_prefers_shorter_well_path() -> None:
+    planner = TrajectoryPlanner()
+    base_kwargs = dict(
+        md_step_m=5.0,
+        md_step_control_m=1.0,
+        pos_tolerance_m=2.0,
+        turn_solver_qmc_samples=8,
+        turn_solver_local_starts=4,
+        adaptive_dense_check_enabled=False,
+        dls_build_min_deg_per_30m=0.5,
+        dls_build_max_deg_per_30m=6.0,
+        dls_limits_deg_per_30m={
+            "VERTICAL": 1.0,
+            "BUILD1": 6.0,
+            "HOLD": 2.0,
+            "BUILD2": 6.0,
+            "HORIZONTAL": 2.0,
+        },
+    )
+    config_hold = _fast_config(**base_kwargs, objective_mode="maximize_hold")
+    config_md = _fast_config(**base_kwargs, objective_mode="minimize_total_md")
+
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(1400.0, 500.0, 2500.0)
+    t3 = Point3D(2200.0, 1700.0, 2580.0)
+    result_hold = planner.plan(surface=surface, t1=t1, t3=t3, config=config_hold)
+    result_md = planner.plan(surface=surface, t1=t1, t3=t3, config=config_md)
+
+    assert float(result_hold.summary["distance_t1_m"]) <= config_hold.pos_tolerance_m
+    assert float(result_hold.summary["distance_t3_m"]) <= config_hold.pos_tolerance_m
+    assert float(result_md.summary["distance_t1_m"]) <= config_md.pos_tolerance_m
+    assert float(result_md.summary["distance_t3_m"]) <= config_md.pos_tolerance_m
+    assert float(result_md.summary["md_total_m"]) <= float(
+        result_hold.summary["md_total_m"]
+    ) + 1e-6
 
 
 def test_horizontal_segment_respects_horizontal_dls_limit_with_post_entry_smoothing() -> None:

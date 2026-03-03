@@ -15,9 +15,9 @@ from pywp.ui_utils import dls_to_pi
 
 DEG2RAD = np.pi / 180.0
 TRAJECTORY_COLOR_PRIMARY = "#0B6E4F"
+ACTUAL_TRAJECTORY_COLOR = "#FF6B35"
 TARGET_COLOR_PRIMARY = "#C1121F"
-INC_LABEL_COLOR = "#0F172A"
-INC_LABEL_BG = "rgba(255, 255, 255, 0.88)"
+INC_LABEL_COLOR = TARGET_COLOR_PRIMARY
 SEGMENT_COLORS = {
     "BUILD1": "#F77F00",
     "HOLD": "#2A9D8F",
@@ -172,9 +172,9 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
     x_max = float(np.max(section_x))
     z_min = float(np.min(z_values))
     z_max = float(np.max(z_values))
-    tick_length = max(35.0, min(120.0, x_span * 0.04))
-    text_dx = max(28.0, x_span * 0.03)
-    text_dy = max(18.0, z_span * 0.02)
+    tick_length_norm = 0.032
+    text_gap_norm = 0.018
+    text_drift_norm = 0.012
     pad_x = max(18.0, x_span * 0.02)
     pad_z = max(14.0, z_span * 0.02)
     x_low = float(min(x_min + pad_x, x_max - pad_x))
@@ -185,8 +185,7 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
     text_x: list[float] = []
     text_y: list[float] = []
     text_labels: list[str] = []
-    marker_x: list[float] = []
-    marker_y: list[float] = []
+    text_positions: list[str] = []
     occupied_text_points: list[tuple[float, float]] = []
 
     for rank, idx in enumerate(label_indices):
@@ -194,22 +193,42 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
         right = min(idx + 1, len(section_x) - 1)
         tangent_x = float(section_x[right] - section_x[left])
         tangent_y = float(z_values[right] - z_values[left])
-        tangent_norm = float(np.hypot(tangent_x, tangent_y))
+        tangent_x_norm = tangent_x / x_span
+        tangent_y_norm = tangent_y / z_span
+        tangent_norm = float(np.hypot(tangent_x_norm, tangent_y_norm))
         if tangent_norm <= 1e-9:
-            tangent_x, tangent_y = 1.0, 0.0
+            tangent_x_norm, tangent_y_norm = 1.0, 0.0
             tangent_norm = 1.0
 
-        # Keep the short mark parallel to local trajectory direction.
-        tangent_unit_x = tangent_x / tangent_norm
-        tangent_unit_y = tangent_y / tangent_norm
-        normal_x = tangent_unit_y
-        normal_y = -tangent_unit_x
-        direction = 1.0 if normal_x >= 0.0 else -1.0
+        # Compute a normal in normalized axes space to keep the mark visually
+        # perpendicular even when X/Z spans differ.
+        tangent_unit_x = tangent_x_norm / tangent_norm
+        tangent_unit_y = tangent_y_norm / tangent_norm
+        normal_x_norm = tangent_unit_y
+        normal_y_norm = -tangent_unit_x
 
-        x_start = float(section_x[idx] - 0.5 * tick_length * tangent_unit_x)
-        y_start = float(z_values[idx] - 0.5 * tick_length * tangent_unit_y)
-        x_end = float(section_x[idx] + 0.5 * tick_length * tangent_unit_x)
-        y_end = float(z_values[idx] + 0.5 * tick_length * tangent_unit_y)
+        center_x = float(section_x[idx])
+        center_y = float(z_values[idx])
+
+        tick_dx = normal_x_norm * tick_length_norm * x_span
+        tick_dy = normal_y_norm * tick_length_norm * z_span
+        if float(np.hypot(tick_dx, tick_dy)) <= 1e-9:
+            tick_dx = 0.0
+            tick_dy = -max(24.0, 0.015 * z_span)
+
+        def _direction_score(direction_sign: float) -> float:
+            end_x = center_x + direction_sign * tick_dx
+            end_y = center_y + direction_sign * tick_dy
+            margin_x = min(end_x - x_min, x_max - end_x)
+            margin_y = min(end_y - z_min, z_max - end_y)
+            return float(margin_x + 0.4 * margin_y)
+
+        direction = 1.0 if _direction_score(1.0) >= _direction_score(-1.0) else -1.0
+
+        x_start = center_x
+        y_start = center_y
+        x_end = float(center_x + direction * tick_dx)
+        y_end = float(center_y + direction * tick_dy)
 
         fig.add_shape(
             type="line",
@@ -220,22 +239,22 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
             line={"color": INC_LABEL_COLOR, "width": 3},
         )
 
-        label_x = (
-            float(section_x[idx])
-            + direction * normal_x * (0.55 * tick_length + text_dx)
+        label_dx = normal_x_norm * (tick_length_norm + text_gap_norm) * x_span
+        label_dy = normal_y_norm * (tick_length_norm + text_gap_norm) * z_span
+        drift_dy = text_drift_norm * z_span * (1.0 if rank % 2 == 0 else -1.0)
+        label_x = float(
+            center_x + direction * label_dx
         )
-        label_y = (
-            float(z_values[idx])
-            + direction * normal_y * (0.55 * tick_length + 0.7 * text_dy)
-            + text_dy * (1.0 if rank % 2 == 0 else -1.0) * 0.45
+        label_y = float(
+            center_y + direction * label_dy + drift_dy
         )
         for attempt in range(6):
             conflict = False
             for used_x, used_y in occupied_text_points:
-                if np.hypot(label_x - used_x, label_y - used_y) < max(text_dx, text_dy):
+                if np.hypot(label_x - used_x, label_y - used_y) < max(24.0, 0.02 * max(x_span, z_span)):
                     conflict = True
                     shift_sign = 1.0 if (rank + attempt) % 2 == 0 else -1.0
-                    label_y += shift_sign * text_dy
+                    label_y += shift_sign * text_drift_norm * z_span
                     break
             if not conflict:
                 break
@@ -243,37 +262,18 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
         label_y = float(np.clip(label_y, z_low, z_high))
         occupied_text_points.append((label_x, label_y))
 
-        marker_x.append(float(section_x[idx]))
-        marker_y.append(float(z_values[idx]))
         text_x.append(float(label_x))
         text_y.append(float(label_y))
         text_labels.append(f"{int(np.rint(float(inc_values[idx])))}°")
-
-    fig.add_trace(
-        go.Scatter(
-            x=marker_x,
-            y=marker_y,
-            mode="markers",
-            name="INC точки",
-            marker={"size": 5, "color": INC_LABEL_COLOR},
-            showlegend=False,
-            hoverinfo="skip",
-        )
-    )
+        text_positions.append("middle left" if direction >= 0.0 else "middle right")
     fig.add_trace(
         go.Scatter(
             x=text_x,
             y=text_y,
-            mode="markers+text",
+            mode="text",
             text=text_labels,
-            textposition="middle center",
+            textposition=text_positions,
             textfont={"size": 13, "color": INC_LABEL_COLOR},
-            marker={
-                "size": 20,
-                "color": INC_LABEL_BG,
-                "line": {"color": INC_LABEL_COLOR, "width": 1},
-                "symbol": "circle",
-            },
             cliponaxis=False,
             name="INC метки",
             showlegend=False,
@@ -353,11 +353,19 @@ def trajectory_3d_figure(
     height: int = 560,
     md_t1_m: float | None = None,
     trajectory_line_dash: str = "solid",
+    actual_df: pd.DataFrame | None = None,
 ) -> go.Figure:
     fig = go.Figure()
-    x_values = np.concatenate([df["X_m"].to_numpy(), np.array([surface.x, t1.x, t3.x])])
-    y_values = np.concatenate([df["Y_m"].to_numpy(), np.array([surface.y, t1.y, t3.y])])
-    z_values = np.concatenate([df["Z_m"].to_numpy(), np.array([surface.z, t1.z, t3.z])])
+    x_arrays = [df["X_m"].to_numpy(dtype=float), np.array([surface.x, t1.x, t3.x], dtype=float)]
+    y_arrays = [df["Y_m"].to_numpy(dtype=float), np.array([surface.y, t1.y, t3.y], dtype=float)]
+    z_arrays = [df["Z_m"].to_numpy(dtype=float), np.array([surface.z, t1.z, t3.z], dtype=float)]
+    if actual_df is not None and len(actual_df) > 0:
+        x_arrays.append(actual_df["X_m"].to_numpy(dtype=float))
+        y_arrays.append(actual_df["Y_m"].to_numpy(dtype=float))
+        z_arrays.append(actual_df["Z_m"].to_numpy(dtype=float))
+    x_values = np.concatenate(x_arrays)
+    y_values = np.concatenate(y_arrays)
+    z_values = np.concatenate(z_arrays)
     x_range, y_range, z_range = equalized_axis_ranges(x_values=x_values, y_values=y_values, z_values=z_values)
     xy_span = max(x_range[1] - x_range[0], y_range[1] - y_range[0])
     xy_dtick = nice_tick_step(xy_span, target_ticks=6)
@@ -391,6 +399,23 @@ def trajectory_3d_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    if actual_df is not None and len(actual_df) > 0:
+        fig.add_trace(
+            go.Scatter3d(
+                x=actual_df["X_m"],
+                y=actual_df["Y_m"],
+                z=actual_df["Z_m"],
+                mode="lines",
+                name="Фактическая траектория",
+                line={"width": 5, "color": ACTUAL_TRAJECTORY_COLOR},
+                customdata=_build_hover_customdata(
+                    x_values=actual_df["X_m"].to_numpy(dtype=float),
+                    y_values=actual_df["Y_m"].to_numpy(dtype=float),
+                    z_values=actual_df["Z_m"].to_numpy(dtype=float),
+                ),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
 
     targets_df = pd.DataFrame(
         {
@@ -508,13 +533,15 @@ def plan_view_figure(
     t3: Point3D,
     height: int = 460,
     trajectory_line_dash: str = "solid",
+    actual_df: pd.DataFrame | None = None,
 ) -> go.Figure:
-    x_values = np.concatenate(
-        [df["X_m"].to_numpy(dtype=float), np.array([surface.x, t1.x, t3.x], dtype=float)]
-    )
-    y_values = np.concatenate(
-        [df["Y_m"].to_numpy(dtype=float), np.array([surface.y, t1.y, t3.y], dtype=float)]
-    )
+    x_arrays = [df["X_m"].to_numpy(dtype=float), np.array([surface.x, t1.x, t3.x], dtype=float)]
+    y_arrays = [df["Y_m"].to_numpy(dtype=float), np.array([surface.y, t1.y, t3.y], dtype=float)]
+    if actual_df is not None and len(actual_df) > 0:
+        x_arrays.append(actual_df["X_m"].to_numpy(dtype=float))
+        y_arrays.append(actual_df["Y_m"].to_numpy(dtype=float))
+    x_values = np.concatenate(x_arrays)
+    y_values = np.concatenate(y_arrays)
     x_range, y_range = equalized_xy_ranges(x_values=x_values, y_values=y_values)
     xy_dtick = nice_tick_step(
         max(x_range[1] - x_range[0], y_range[1] - y_range[0]), target_ticks=6
@@ -538,6 +565,22 @@ def plan_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    if actual_df is not None and len(actual_df) > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=actual_df["X_m"],
+                y=actual_df["Y_m"],
+                mode="lines",
+                name="Фактическая траектория",
+                line={"width": 3, "color": ACTUAL_TRAJECTORY_COLOR},
+                customdata=_build_hover_customdata(
+                    x_values=actual_df["X_m"].to_numpy(dtype=float),
+                    y_values=actual_df["Y_m"].to_numpy(dtype=float),
+                    z_values=actual_df["Z_m"].to_numpy(dtype=float),
+                ),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
     targets_df = pd.DataFrame(
         {
             "X_m": [surface.x, t1.x, t3.x],
@@ -599,6 +642,7 @@ def section_view_figure(
     t3: Point3D,
     height: int = 460,
     trajectory_line_dash: str = "solid",
+    actual_df: pd.DataFrame | None = None,
 ) -> go.Figure:
     vs = _section_coordinate(df=df, surface=surface, azimuth_deg=azimuth_deg)
 
@@ -628,6 +672,27 @@ def section_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    if actual_df is not None and len(actual_df) > 0:
+        actual_vs = _section_coordinate(
+            df=actual_df,
+            surface=surface,
+            azimuth_deg=azimuth_deg,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=actual_vs,
+                y=actual_df["Z_m"],
+                mode="lines",
+                name="Фактическая траектория",
+                line={"width": 3, "color": ACTUAL_TRAJECTORY_COLOR},
+                customdata=_build_hover_customdata(
+                    x_values=actual_df["X_m"].to_numpy(dtype=float),
+                    y_values=actual_df["Y_m"].to_numpy(dtype=float),
+                    z_values=actual_df["Z_m"].to_numpy(dtype=float),
+                ),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
     fig.add_trace(
         go.Scatter(
             x=t_points["VS_m"],

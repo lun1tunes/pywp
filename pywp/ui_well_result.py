@@ -1,0 +1,314 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping, Sequence
+
+import pandas as pd
+import streamlit as st
+
+from pywp.models import Point3D, TrajectoryConfig
+from pywp.planner_config import OBJECTIVE_OPTIONS
+from pywp.ui_utils import arrow_safe_text_dataframe, dls_to_pi, format_distance
+from pywp.ui_well_panels import (
+    render_plan_section_panel,
+    render_survey_table_with_download,
+    render_trajectory_dls_panel,
+)
+
+SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
+    ("trajectory_type", "Тип траектории"),
+    ("well_complexity", "Класс сложности"),
+    ("entry_inc_deg", "Угол входа в пласт, deg"),
+    ("hold_inc_deg", "ЗУ секции HOLD, deg"),
+    ("hold_length_m", "Длина HOLD, м"),
+    ("horizontal_length_m", "Длина горизонтального ствола, м"),
+    ("kop_md_m", "KOP MD, м"),
+    ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
+    ("max_inc_actual_deg", "Макс INC фактический, deg"),
+    ("max_inc_deg", "Макс INC лимит, deg"),
+    ("md_total_m", "Итоговая MD, м"),
+    ("max_total_md_postcheck_m", "Лимит итоговой MD (постпроверка), м"),
+)
+
+
+@dataclass(frozen=True)
+class SingleWellResultView:
+    well_name: str
+    surface: Point3D
+    t1: Point3D
+    t3: Point3D
+    stations: pd.DataFrame
+    summary: Mapping[str, float | str]
+    config: TrajectoryConfig
+    azimuth_deg: float
+    md_t1_m: float
+    runtime_s: float | None = None
+    issue_messages: tuple[str, ...] = ()
+    trajectory_line_dash: str = "solid"
+    actual_stations: pd.DataFrame | None = None
+
+
+def horizontal_offset_m(*, point: Point3D, reference: Point3D) -> float:
+    dx = float(point.x - reference.x)
+    dy = float(point.y - reference.y)
+    return float((dx * dx + dy * dy) ** 0.5)
+
+
+def md_postcheck_issue_message(summary: Mapping[str, float | str]) -> str:
+    md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
+    if md_postcheck_excess_m <= 1e-6:
+        return ""
+    return (
+        "Превышен лимит итоговой MD (постпроверка): "
+        f"{float(summary.get('md_total_m', 0.0)):.2f} м > "
+        f"{float(summary.get('max_total_md_postcheck_m', 0.0)):.2f} м "
+        f"(+{md_postcheck_excess_m:.2f} м)."
+    )
+
+
+def collect_issue_messages(
+    *,
+    summary: Mapping[str, float | str],
+    extra_messages: Sequence[str] = (),
+) -> tuple[str, ...]:
+    messages: list[str] = []
+    md_message = md_postcheck_issue_message(summary)
+    if md_message:
+        messages.append(md_message)
+    for message in extra_messages:
+        text = str(message).strip()
+        if text:
+            messages.append(text)
+    unique: list[str] = []
+    for message in messages:
+        if message not in unique:
+            unique.append(message)
+    return tuple(unique)
+
+
+def _format_summary_value(metric_key: str, metric_value: object) -> str:
+    if isinstance(metric_value, str):
+        return metric_value
+    if metric_value is None:
+        return "—"
+    try:
+        value = float(metric_value)
+    except (TypeError, ValueError):
+        return str(metric_value)
+
+    if "dls" in str(metric_key).lower():
+        return f"{dls_to_pi(value):.2f}"
+    if metric_key.endswith("_deg") or "_deg_" in metric_key:
+        return f"{value:.2f}"
+    if metric_key.endswith("_m") or metric_key.startswith("md_"):
+        return f"{value:.2f}"
+    return f"{value:.4g}"
+
+
+def _format_summary_key(metric_key: str) -> str:
+    key = str(metric_key)
+    if "dls" not in key.lower():
+        return key
+    key = key.replace("DLS", "PI").replace("dls", "pi")
+    key = key.replace("_deg_per_30m", "_deg_per_10m")
+    return key
+
+
+def render_key_metrics(
+    *,
+    view: SingleWellResultView,
+    title: str = "Ключевые показатели",
+    border: bool = True,
+) -> float:
+    summary = view.summary
+    t1_horizontal_offset_m = horizontal_offset_m(point=view.t1, reference=view.surface)
+    issue_messages = collect_issue_messages(
+        summary=summary,
+        extra_messages=view.issue_messages,
+    )
+    problem_text = "ОК" if not issue_messages else " | ".join(issue_messages)
+
+    def _render_body() -> None:
+        if title:
+            st.markdown(f"### {title}")
+        objective_requested = str(summary.get("objective_mode_requested", ""))
+        objective_applied = str(
+            summary.get("objective_mode_applied", objective_requested)
+        )
+        objective_requested_label = OBJECTIVE_OPTIONS.get(
+            objective_requested,
+            objective_requested,
+        )
+        objective_applied_label = OBJECTIVE_OPTIONS.get(
+            objective_applied,
+            objective_applied,
+        )
+        metrics_rows = [
+            {"Показатель": "Тип траектории", "Значение": str(summary["trajectory_type"])},
+            {"Показатель": "Класс сложности", "Значение": str(summary["well_complexity"])},
+            {"Показатель": "INC на t1", "Значение": f"{float(summary['entry_inc_deg']):.2f} deg"},
+            {"Показатель": "ЗУ HOLD", "Значение": f"{float(summary['hold_inc_deg']):.2f} deg"},
+            {"Показатель": "Отход t1", "Значение": format_distance(t1_horizontal_offset_m)},
+            {"Показатель": "KOP MD", "Значение": format_distance(float(summary["kop_md_m"]))},
+            {"Показатель": "Длина HORIZONTAL", "Значение": format_distance(float(summary["horizontal_length_m"]))},
+            {
+                "Показатель": "Макс INC факт/лимит",
+                "Значение": f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
+            },
+            {
+                "Показатель": "Макс ПИ",
+                "Значение": f"{dls_to_pi(float(summary['max_dls_total_deg_per_30m'])):.2f} deg/10m",
+            },
+            {"Показатель": "Итоговая MD", "Значение": format_distance(float(summary["md_total_m"]))},
+            {"Показатель": "Проблемы", "Значение": problem_text},
+            {
+                "Показатель": "Время расчета",
+                "Значение": "—" if view.runtime_s is None else f"{float(view.runtime_s):.2f} с",
+            },
+        ]
+        if objective_requested:
+            objective_value = objective_requested_label
+            if objective_applied and objective_applied != objective_requested:
+                objective_value = (
+                    f"{objective_requested_label} -> {objective_applied_label}"
+                )
+            metrics_rows.insert(
+                2,
+                {
+                    "Показатель": "Целевая функция (запрошено/применено)",
+                    "Значение": objective_value,
+                },
+            )
+        profile_label = str(
+            summary.get("same_direction_profile_mode_applied_label", "")
+        ).strip()
+        if profile_label:
+            metrics_rows.insert(
+                2,
+                {
+                    "Показатель": "Профиль same-direction",
+                    "Значение": profile_label,
+                },
+            )
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(metrics_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+        for message in issue_messages:
+            st.warning(message)
+        st.caption(
+            "Проверяйте соответствие фактического INC/ПИ лимитам, особенно при изменении "
+            "целевого угла входа и границ ПИ."
+        )
+
+    if border:
+        with st.container(border=True):
+            _render_body()
+    else:
+        _render_body()
+    return float(t1_horizontal_offset_m)
+
+
+def render_result_plots(
+    *,
+    view: SingleWellResultView,
+    title_trajectory: str | None,
+    title_plan: str | None,
+    border: bool = True,
+) -> None:
+    render_trajectory_dls_panel(
+        stations=view.stations,
+        surface=view.surface,
+        t1=view.t1,
+        t3=view.t3,
+        md_t1_m=float(view.md_t1_m),
+        dls_limits=view.config.dls_limits_deg_per_30m,
+        title=title_trajectory,
+        border=border,
+        trajectory_line_dash=view.trajectory_line_dash,
+        actual_stations=view.actual_stations,
+    )
+    render_plan_section_panel(
+        stations=view.stations,
+        surface=view.surface,
+        t1=view.t1,
+        t3=view.t3,
+        azimuth_deg=float(view.azimuth_deg),
+        title=title_plan,
+        border=border,
+        trajectory_line_dash=view.trajectory_line_dash,
+        actual_stations=view.actual_stations,
+    )
+
+
+def render_result_tables(
+    *,
+    view: SingleWellResultView,
+    t1_horizontal_offset_m: float,
+    summary_tab_label: str = "Сводка",
+    survey_tab_label: str = "Инклинометрия",
+    survey_file_name: str = "well_survey.csv",
+) -> None:
+    summary = view.summary
+    tab_summary, tab_survey = st.tabs([summary_tab_label, survey_tab_label])
+    with tab_summary:
+        hidden_metrics = {"distance_t1_m", "distance_t3_m"}
+        summary_visible = {
+            key: value for key, value in summary.items() if key not in hidden_metrics
+        }
+        summary_visible["t1_horizontal_offset_m"] = float(t1_horizontal_offset_m)
+
+        main_rows: list[dict[str, str]] = []
+        for key, label in SUMMARY_MAIN_METRICS:
+            if key not in summary_visible:
+                continue
+            main_rows.append(
+                {
+                    "Показатель": label,
+                    "Значение": _format_summary_value(key, summary_visible[key]),
+                }
+            )
+        if "t1_horizontal_offset_m" in summary_visible:
+            main_rows.insert(
+                4,
+                {
+                    "Показатель": "Горизонтальный отход t1, м",
+                    "Значение": _format_summary_value(
+                        "t1_horizontal_offset_m",
+                        summary_visible["t1_horizontal_offset_m"],
+                    ),
+                },
+            )
+
+        tech_rows: list[dict[str, str]] = []
+        for key, value in sorted(summary_visible.items()):
+            if any(key == metric_key for metric_key, _ in SUMMARY_MAIN_METRICS):
+                continue
+            if key == "t1_horizontal_offset_m":
+                continue
+            tech_rows.append(
+                {
+                    "Параметр": _format_summary_key(key),
+                    "Значение": _format_summary_value(key, value),
+                }
+            )
+
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(main_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+        with st.expander("Технические параметры и диагностика решателя", expanded=False):
+            st.dataframe(
+                arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),
+                width="stretch",
+                hide_index=True,
+            )
+
+    with tab_survey:
+        render_survey_table_with_download(
+            stations=view.stations,
+            button_label="Скачать CSV инклинометрии",
+            file_name=survey_file_name,
+        )

@@ -47,6 +47,7 @@ def render_trajectory_dls_panel(
     title: str | None = None,
     border: bool = True,
     trajectory_line_dash: str = "solid",
+    actual_stations: pd.DataFrame | None = None,
 ) -> None:
     def _render_body() -> None:
         if title:
@@ -60,6 +61,7 @@ def render_trajectory_dls_panel(
                 t3=t3,
                 md_t1_m=md_t1_m,
                 trajectory_line_dash=trajectory_line_dash,
+                actual_df=actual_stations,
             ),
             width="stretch",
         )
@@ -85,6 +87,7 @@ def render_plan_section_panel(
     title: str | None = None,
     border: bool = True,
     trajectory_line_dash: str = "solid",
+    actual_stations: pd.DataFrame | None = None,
 ) -> None:
     def _render_body() -> None:
         if title:
@@ -97,6 +100,7 @@ def render_plan_section_panel(
                 t1=t1,
                 t3=t3,
                 trajectory_line_dash=trajectory_line_dash,
+                actual_df=actual_stations,
             ),
             width="stretch",
         )
@@ -108,6 +112,7 @@ def render_plan_section_panel(
                 t1=t1,
                 t3=t3,
                 trajectory_line_dash=trajectory_line_dash,
+                actual_df=actual_stations,
             ),
             width="stretch",
         )

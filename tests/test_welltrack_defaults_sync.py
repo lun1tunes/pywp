@@ -24,6 +24,13 @@ def _number_input_value(at: AppTest, label: str) -> float | None:
     return float(matches[0].value)
 
 
+def _selectbox_value(at: AppTest, label: str) -> str | None:
+    matches = [widget for widget in at.selectbox if widget.label == label]
+    if not matches:
+        return None
+    return str(matches[0].value)
+
+
 def test_welltrack_defaults_recover_from_legacy_keys() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     defaults = calc_param_defaults()
@@ -32,7 +39,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
     at.session_state["wt_cfg___calc_param_defaults_signature__"] = tuple(
         (key, defaults[key]) for key in sorted(defaults.keys())
     )
-    at.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 2
+    at.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 3
 
     at.run()
     parse_buttons = [button for button in at.button if button.label == "Прочитать WELLTRACK"]
@@ -51,6 +58,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         "Макс ПИ BUILD, deg/10m": "dls_build_max",
         "Мин VERTICAL до KOP, м": "kop_min_vertical",
         "Макс итоговая MD (постпроверка), м": "max_total_md_postcheck",
+        "Порог TURN для автопереключения, deg": "objective_auto_turn_threshold",
     }
     for label, suffix in label_to_suffix.items():
         actual = _number_input_value(at, label)
@@ -60,6 +68,9 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
             f"Для '{label}' ожидалось {expected}, получено {actual}."
         )
 
+    profile_actual = _selectbox_value(at, "Профиль для целей в одном направлении")
+    assert profile_actual is not None, "Поле профиля same-direction не найдено."
+    assert profile_actual == str(defaults["same_direction_profile_mode"])
+
     for key in LEGACY_MIN_VALUES:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
-

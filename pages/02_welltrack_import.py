@@ -31,13 +31,14 @@ from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import (
     arrow_safe_text_dataframe,
     dls_to_pi,
-    format_distance,
     format_run_log_line,
 )
-from pywp.ui_well_panels import (
-    render_plan_section_panel,
-    render_run_log_panel,
-    render_trajectory_dls_panel,
+from pywp.ui_well_panels import render_run_log_panel
+from pywp.ui_well_result import (
+    SingleWellResultView,
+    render_key_metrics,
+    render_result_plots,
+    render_result_tables,
 )
 from pywp.welltrack_quality import (
     detect_t1_t3_order_issues,
@@ -1181,46 +1182,43 @@ def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
     with tab_single:
         selected_name = st.selectbox("Скважина", options=[item.name for item in successes])
         selected = next(item for item in successes if item.name == selected_name)
-        stations = selected.stations
-        surface = selected.surface
-        t1 = selected.t1
-        t3 = selected.t3
-        azimuth_deg = float(selected.azimuth_deg)
-        md_t1_m = float(selected.md_t1_m)
-        cfg = selected.config
-        trajectory_line_dash = (
-            "dash" if bool(selected.md_postcheck_exceeded) else "solid"
+        well_view = SingleWellResultView(
+            well_name=str(selected.name),
+            surface=selected.surface,
+            t1=selected.t1,
+            t3=selected.t3,
+            stations=selected.stations,
+            summary=selected.summary,
+            config=selected.config,
+            azimuth_deg=float(selected.azimuth_deg),
+            md_t1_m=float(selected.md_t1_m),
+            issue_messages=(
+                (str(selected.md_postcheck_message),)
+                if str(selected.md_postcheck_message).strip()
+                else ()
+            ),
+            trajectory_line_dash=(
+                "dash" if bool(selected.md_postcheck_exceeded) else "solid"
+            ),
         )
-
-        render_trajectory_dls_panel(
-            stations=stations,
-            surface=surface,
-            t1=t1,
-            t3=t3,
-            md_t1_m=md_t1_m,
-            dls_limits=cfg.dls_limits_deg_per_30m,
-            title=None,
-            border=False,
-            trajectory_line_dash=trajectory_line_dash,
+        t1_horizontal_offset_m = render_key_metrics(
+            view=well_view,
+            title="Ключевые показатели",
+            border=True,
         )
-        render_plan_section_panel(
-            stations=stations,
-            surface=surface,
-            t1=t1,
-            t3=t3,
-            azimuth_deg=azimuth_deg,
-            title=None,
-            border=False,
-            trajectory_line_dash=trajectory_line_dash,
+        render_result_plots(
+            view=well_view,
+            title_trajectory="3D траектория и ПИ",
+            title_plan="План и вертикальный разрез",
+            border=True,
         )
-
-        st.caption(
-            f"Скважина `{selected_name}`: t1 отход `{format_distance(float(np.hypot(t1.x - surface.x, t1.y - surface.y)))}`, "
-            f"тип `{selected.summary.get('trajectory_type', '—')}`, "
-            f"сложность `{selected.summary.get('well_complexity', '—')}`."
+        render_result_tables(
+            view=well_view,
+            t1_horizontal_offset_m=t1_horizontal_offset_m,
+            summary_tab_label="Сводка",
+            survey_tab_label="Инклинометрия",
+            survey_file_name=f"{selected_name}_survey.csv",
         )
-        if str(selected.md_postcheck_message):
-            st.warning(str(selected.md_postcheck_message))
 
     with tab_all:
         c1, c2 = st.columns(2, gap="medium")

@@ -32,15 +32,15 @@ from pywp.ui_calc_params import (
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import (
     arrow_safe_text_dataframe,
-    dls_to_pi,
-    format_distance,
     format_run_log_line,
 )
-from pywp.ui_well_panels import (
-    render_plan_section_panel,
-    render_run_log_panel,
-    render_survey_table_with_download,
-    render_trajectory_dls_panel,
+from pywp.ui_well_panels import render_run_log_panel
+from pywp.ui_well_result import (
+    SingleWellResultView,
+    horizontal_offset_m,
+    render_key_metrics,
+    render_result_plots,
+    render_result_tables,
 )
 
 
@@ -180,28 +180,8 @@ COMPLEXITY_SELECTOR_LABELS = {
     COMPLEXITY_COMPLEX: "Сложная",
     COMPLEXITY_VERY_COMPLEX: "Очень сложная",
 }
-SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
-    ("trajectory_type", "Тип траектории"),
-    ("well_complexity", "Класс сложности"),
-    ("entry_inc_deg", "Угол входа в пласт, deg"),
-    ("hold_inc_deg", "ЗУ секции HOLD, deg"),
-    ("hold_length_m", "Длина HOLD, м"),
-    ("horizontal_length_m", "Длина горизонтального ствола, м"),
-    ("kop_md_m", "KOP MD, м"),
-    ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
-    ("max_inc_actual_deg", "Макс INC фактический, deg"),
-    ("max_inc_deg", "Макс INC лимит, deg"),
-    ("md_total_m", "Итоговая MD, м"),
-    ("max_total_md_postcheck_m", "Лимит итоговой MD (постпроверка), м"),
-)
 UI_DEFAULTS_VERSION = 10
 APP_CALC_PARAMS = CalcParamBinding(prefix="")
-
-
-def _horizontal_offset_m(point: Point3D, reference: Point3D) -> float:
-    dx = float(point.x - reference.x)
-    dy = float(point.y - reference.y)
-    return float((dx * dx + dy * dy) ** 0.5)
 
 
 def _depth_filter_label(value: str | float) -> str:
@@ -317,6 +297,71 @@ def _apply_scenario(name: str) -> None:
     _apply_template_filters_for_scenario(str(name))
 
 
+def _apply_points_to_state(surface: Point3D, t1: Point3D, t3: Point3D) -> None:
+    st.session_state["surface_x"] = float(surface.x)
+    st.session_state["surface_y"] = float(surface.y)
+    st.session_state["surface_z"] = float(surface.z)
+    st.session_state["t1_x"] = float(t1.x)
+    st.session_state["t1_y"] = float(t1.y)
+    st.session_state["t1_z"] = float(t1.z)
+    st.session_state["t3_x"] = float(t3.x)
+    st.session_state["t3_y"] = float(t3.y)
+    st.session_state["t3_z"] = float(t3.z)
+
+
+def _parse_points_import_text(raw_text: str) -> tuple[Point3D, Point3D, Point3D]:
+    normalized = str(raw_text).replace("\\n", "\n").replace("\\r", "\n")
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if len(lines) != 3:
+        raise ValueError(
+            "Ожидалось 3 строки (s1, t1, t3). "
+            f"Получено: {len(lines)}."
+        )
+
+    parsed_points: list[Point3D] = []
+    for line_no, line in enumerate(lines, start=1):
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
+            raise ValueError(
+                f"Строка {line_no}: ожидались 3 значения через запятую."
+            )
+        try:
+            x, y, z = (float(parts[0]), float(parts[1]), float(parts[2]))
+        except ValueError as exc:
+            raise ValueError(
+                f"Строка {line_no}: не удалось распознать числа."
+            ) from exc
+        parsed_points.append(Point3D(x=x, y=y, z=z))
+
+    return parsed_points[0], parsed_points[1], parsed_points[2]
+
+
+def _parse_actual_trajectory_import_text(raw_text: str) -> pd.DataFrame:
+    normalized = str(raw_text).replace("\\n", "\n").replace("\\r", "\n")
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise ValueError(
+            "Ожидалось минимум 2 строки `x,y,z` для фактической траектории."
+        )
+
+    rows: list[dict[str, float]] = []
+    for line_no, line in enumerate(lines, start=1):
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
+            raise ValueError(
+                f"Строка {line_no}: ожидались 3 значения через запятую."
+            )
+        try:
+            x, y, z = (float(parts[0]), float(parts[1]), float(parts[2]))
+        except ValueError as exc:
+            raise ValueError(
+                f"Строка {line_no}: не удалось распознать числа."
+            ) from exc
+        rows.append({"X_m": x, "Y_m": y, "Z_m": z})
+
+    return pd.DataFrame(rows, columns=["X_m", "Y_m", "Z_m"], dtype=float)
+
+
 def _init_state() -> None:
     default_scenario = next(iter(SCENARIOS.keys()))
     st.session_state.setdefault("scenario_name", default_scenario)
@@ -357,6 +402,9 @@ def _init_state() -> None:
     st.session_state.setdefault("solver_profile_rows", None)
     st.session_state.setdefault("solver_profile_at", "")
     st.session_state.setdefault("last_run_log_lines", [])
+    st.session_state.setdefault("points_import_text", "")
+    st.session_state.setdefault("actual_trajectory_import_text", "")
+    st.session_state.setdefault("actual_trajectory_df", None)
 
 
 def _clear_result() -> None:
@@ -632,7 +680,7 @@ def _render_template_controls() -> None:
         if selected_preset.description:
             st.caption(selected_preset.description)
 
-        offset_t1 = _horizontal_offset_m(
+        offset_t1 = horizontal_offset_m(
             point=selected_preset.t1,
             reference=selected_preset.surface,
         )
@@ -670,6 +718,91 @@ def _render_point_config_block() -> None:
         st.caption(
             "Это геометрия задачи (координаты точек). Параметры расчета и солвера задаются отдельным блоком ниже."
         )
+        st.markdown("**Импорт точек из текста (s1, t1, t3)**")
+        st.text_area(
+            "Формат: 3 строки `x,y,z` для s1, t1, t3",
+            key="points_import_text",
+            height=110,
+            placeholder=(
+                "0,0,0\n"
+                "600,800,2400\n"
+                "1500,2000,2500"
+            ),
+            help=(
+                "Поддерживается как перенос строк, так и литерал \\n. "
+                "Порядок строк: s1, затем t1, затем t3."
+            ),
+        )
+        import_clicked = st.form_submit_button(
+            "Импортировать точки",
+            type="secondary",
+            icon=":material/upload_file:",
+            width="content",
+        )
+        if import_clicked:
+            try:
+                imported_surface, imported_t1, imported_t3 = _parse_points_import_text(
+                    str(st.session_state.get("points_import_text", ""))
+                )
+            except ValueError as exc:
+                st.error(f"Импорт не выполнен: {exc}")
+            else:
+                _apply_points_to_state(
+                    surface=imported_surface,
+                    t1=imported_t1,
+                    t3=imported_t3,
+                )
+                st.success("Точки успешно импортированы в поля S/t1/t3.")
+        with st.expander("Фактическая траектория для сравнения (опционально)", expanded=False):
+            st.text_area(
+                "Формат: много строк `x,y,z`",
+                key="actual_trajectory_import_text",
+                height=150,
+                placeholder=(
+                    "0,0,0\n"
+                    "100,140,600\n"
+                    "240,320,1200\n"
+                    "600,800,2400\n"
+                    "1500,2000,2500"
+                ),
+                help=(
+                    "Импорт фактических координат ствола для сравнения с расчетом. "
+                    "Поддерживается перенос строк и литерал \\n."
+                ),
+            )
+            a1, a2 = st.columns(2, gap="small")
+            import_actual_clicked = a1.form_submit_button(
+                "Импортировать фактическую траекторию",
+                type="secondary",
+                icon=":material/polyline:",
+                width="stretch",
+            )
+            clear_actual_clicked = a2.form_submit_button(
+                "Очистить фактическую траекторию",
+                type="secondary",
+                icon=":material/delete_sweep:",
+                width="stretch",
+            )
+            if import_actual_clicked:
+                try:
+                    actual_df = _parse_actual_trajectory_import_text(
+                        str(st.session_state.get("actual_trajectory_import_text", ""))
+                    )
+                except ValueError as exc:
+                    st.error(f"Импорт фактической траектории не выполнен: {exc}")
+                else:
+                    st.session_state["actual_trajectory_df"] = actual_df
+                    st.success(
+                        f"Фактическая траектория загружена: {len(actual_df)} точек."
+                    )
+            if clear_actual_clicked:
+                st.session_state["actual_trajectory_df"] = None
+                st.success("Фактическая траектория очищена.")
+            actual_loaded = st.session_state.get("actual_trajectory_df")
+            if isinstance(actual_loaded, pd.DataFrame) and len(actual_loaded) > 0:
+                st.caption(
+                    f"Загружено точек фактической траектории: {len(actual_loaded)}."
+                )
         c1, c2, c3 = st.columns(3, gap="small", border=True, vertical_alignment="top")
         with c1:
             st.markdown("**Устье S**")
@@ -863,207 +996,26 @@ def _render_calculation_feedback() -> None:
     render_run_log_panel(st.session_state.get("last_run_log_lines"))
 
 
-def _format_summary_value(metric_key: str, metric_value: object) -> str:
-    if isinstance(metric_value, str):
-        return metric_value
-    if metric_value is None:
-        return "—"
-    try:
-        value = float(metric_value)
-    except (TypeError, ValueError):
-        return str(metric_value)
-
-    if "dls" in str(metric_key).lower():
-        return f"{dls_to_pi(value):.2f}"
-    if metric_key.endswith("_deg") or "_deg_" in metric_key:
-        return f"{value:.2f}"
-    if metric_key.endswith("_m") or metric_key.startswith("md_"):
-        return f"{value:.2f}"
-    return f"{value:.4g}"
-
-
-def _format_summary_key(metric_key: str) -> str:
-    key = str(metric_key)
-    if "dls" not in key.lower():
-        return key
-    key = key.replace("DLS", "PI").replace("dls", "pi")
-    key = key.replace("_deg_per_30m", "_deg_per_10m")
-    return key
-
-
-def _render_result_overview(last_result: dict[str, object]) -> float:
-    summary = last_result["summary"]
-    surface = last_result["surface"]
-    t1 = last_result["t1"]
-    runtime_s = st.session_state.get("last_runtime_s")
-    t1_horizontal_offset_m = _horizontal_offset_m(point=t1, reference=surface)
-    with st.container(border=True):
-        st.markdown("### Ключевые показатели")
-        metrics_rows = [
-            {
-                "Показатель": "Тип траектории",
-                "Значение": str(summary["trajectory_type"]),
-            },
-            {
-                "Показатель": "Класс сложности",
-                "Значение": str(summary["well_complexity"]),
-            },
-            {
-                "Показатель": "INC на t1",
-                "Значение": f"{float(summary['entry_inc_deg']):.2f} deg",
-            },
-            {
-                "Показатель": "ЗУ HOLD",
-                "Значение": f"{float(summary['hold_inc_deg']):.2f} deg",
-            },
-            {
-                "Показатель": "Отход t1",
-                "Значение": format_distance(t1_horizontal_offset_m),
-            },
-            {
-                "Показатель": "KOP MD",
-                "Значение": format_distance(float(summary["kop_md_m"])),
-            },
-            {
-                "Показатель": "Длина HORIZONTAL",
-                "Значение": format_distance(float(summary["horizontal_length_m"])),
-            },
-            {
-                "Показатель": "Макс INC факт/лимит",
-                "Значение": f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
-            },
-            {
-                "Показатель": "Макс ПИ",
-                "Значение": f"{dls_to_pi(float(summary['max_dls_total_deg_per_30m'])):.2f} deg/10m",
-            },
-            {
-                "Показатель": "Итоговая MD",
-                "Значение": format_distance(float(summary["md_total_m"])),
-            },
-            {
-                "Показатель": "Время расчета",
-                "Значение": "—" if runtime_s is None else f"{float(runtime_s):.2f} с",
-            },
-        ]
-        st.dataframe(
-            arrow_safe_text_dataframe(pd.DataFrame(metrics_rows)),
-            width="stretch",
-            hide_index=True,
-        )
-
-        md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
-        if md_postcheck_excess_m > 1e-6:
-            st.warning(
-                "Превышен лимит итоговой MD (постпроверка): "
-                f"{float(summary.get('md_total_m', 0.0)):.2f} м > "
-                f"{float(summary.get('max_total_md_postcheck_m', 0.0)):.2f} м "
-                f"(+{md_postcheck_excess_m:.2f} м)."
-            )
-
-        render_small_note(
-            "Проверяйте соответствие фактического INC/ПИ лимитам, особенно при изменении "
-            "целевого угла входа и границ ПИ."
-        )
-    return float(t1_horizontal_offset_m)
-
-
-def _render_result_plots(last_result: dict[str, object]) -> None:
-    stations = last_result["stations"]
-    surface = last_result["surface"]
-    t1 = last_result["t1"]
-    t3 = last_result["t3"]
-    config = last_result["config"]
-    azimuth_deg = float(last_result["azimuth_deg"])
-    md_t1_m = float(last_result["md_t1_m"])
-    render_trajectory_dls_panel(
-        stations=stations,
-        surface=surface,
-        t1=t1,
-        t3=t3,
-        md_t1_m=md_t1_m,
-        dls_limits=config.dls_limits_deg_per_30m,
-        title="3D траектория и ПИ",
-        border=True,
+def _build_single_well_result_view(last_result: dict[str, object]) -> SingleWellResultView:
+    actual_stations = st.session_state.get("actual_trajectory_df")
+    actual_df = (
+        actual_stations
+        if isinstance(actual_stations, pd.DataFrame) and len(actual_stations) > 0
+        else None
     )
-    render_plan_section_panel(
-        stations=stations,
-        surface=surface,
-        t1=t1,
-        t3=t3,
-        azimuth_deg=azimuth_deg,
-        title="План и вертикальный разрез",
-        border=True,
+    return SingleWellResultView(
+        well_name="single_well",
+        surface=last_result["surface"],
+        t1=last_result["t1"],
+        t3=last_result["t3"],
+        stations=last_result["stations"],
+        summary=last_result["summary"],
+        config=last_result["config"],
+        azimuth_deg=float(last_result["azimuth_deg"]),
+        md_t1_m=float(last_result["md_t1_m"]),
+        runtime_s=st.session_state.get("last_runtime_s"),
+        actual_stations=actual_df,
     )
-
-
-def _render_result_tables(
-    last_result: dict[str, object], t1_horizontal_offset_m: float
-) -> None:
-    summary = last_result["summary"]
-    stations = last_result["stations"]
-    tab_summary, tab_survey = st.tabs(["Сводка", "Инклинометрия"])
-    with tab_summary:
-        hidden_metrics = {"distance_t1_m", "distance_t3_m"}
-        summary_visible = {
-            key: value for key, value in summary.items() if key not in hidden_metrics
-        }
-        summary_visible["t1_horizontal_offset_m"] = t1_horizontal_offset_m
-
-        main_rows: list[dict[str, str]] = []
-        for key, label in SUMMARY_MAIN_METRICS:
-            if key not in summary_visible:
-                continue
-            main_rows.append(
-                {
-                    "Показатель": label,
-                    "Значение": _format_summary_value(key, summary_visible[key]),
-                }
-            )
-        if "t1_horizontal_offset_m" in summary_visible:
-            main_rows.insert(
-                4,
-                {
-                    "Показатель": "Горизонтальный отход t1, м",
-                    "Значение": _format_summary_value(
-                        "t1_horizontal_offset_m",
-                        summary_visible["t1_horizontal_offset_m"],
-                    ),
-                },
-            )
-
-        tech_rows: list[dict[str, str]] = []
-        for key, value in sorted(summary_visible.items()):
-            if any(key == metric_key for metric_key, _ in SUMMARY_MAIN_METRICS):
-                continue
-            if key == "t1_horizontal_offset_m":
-                continue
-            tech_rows.append(
-                {
-                    "Параметр": _format_summary_key(key),
-                    "Значение": _format_summary_value(key, value),
-                }
-            )
-
-        st.dataframe(
-            arrow_safe_text_dataframe(pd.DataFrame(main_rows)),
-            width="stretch",
-            hide_index=True,
-        )
-        with st.expander(
-            "Технические параметры и диагностика решателя", expanded=False
-        ):
-            st.dataframe(
-                arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),
-                width="stretch",
-                hide_index=True,
-            )
-
-    with tab_survey:
-        render_survey_table_with_download(
-            stations=stations,
-            button_label="Скачать CSV инклинометрии",
-            file_name="well_survey.csv",
-        )
 
 
 def _render_last_result() -> None:
@@ -1080,10 +1032,24 @@ def _render_last_result() -> None:
             "Параметры изменились после последнего расчета. Показан предыдущий результат. Нажмите «Построить траекторию» для обновления."
         )
 
-    t1_horizontal_offset_m = _render_result_overview(last_result=last_result)
-    _render_result_plots(last_result=last_result)
-    _render_result_tables(
-        last_result=last_result, t1_horizontal_offset_m=t1_horizontal_offset_m
+    well_view = _build_single_well_result_view(last_result=last_result)
+    t1_horizontal_offset_m = render_key_metrics(
+        view=well_view,
+        title="Ключевые показатели",
+        border=True,
+    )
+    render_result_plots(
+        view=well_view,
+        title_trajectory="3D траектория и ПИ",
+        title_plan="План и вертикальный разрез",
+        border=True,
+    )
+    render_result_tables(
+        view=well_view,
+        t1_horizontal_offset_m=t1_horizontal_offset_m,
+        summary_tab_label="Сводка",
+        survey_tab_label="Инклинометрия",
+        survey_file_name="well_survey.csv",
     )
 
 

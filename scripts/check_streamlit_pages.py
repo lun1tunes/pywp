@@ -67,9 +67,17 @@ def _find_number_value(at: AppTest, label: str) -> float | None:
     return float(matches[0].value)
 
 
+def _find_selectbox_value(at: AppTest, label: str) -> str | None:
+    matches = [widget for widget in at.selectbox if widget.label == label]
+    if not matches:
+        return None
+    return str(matches[0].value)
+
+
 def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
     expected = _expected_calc_defaults()
     errors: list[str] = []
+    expected_profile = str(TrajectoryConfig().same_direction_profile_mode)
 
     app_at = AppTest.from_file(str(project_root / "app.py")).run()
     for label, expected_value in expected.items():
@@ -81,6 +89,16 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
             errors.append(
                 f"app.py: '{label}'={actual} but expected {expected_value}."
             )
+    app_profile = _find_selectbox_value(
+        app_at, "Профиль для целей в одном направлении"
+    )
+    if app_profile is None:
+        errors.append("app.py: profile selectbox not found.")
+    elif app_profile != expected_profile:
+        errors.append(
+            "app.py: "
+            f"profile mode is '{app_profile}' but expected '{expected_profile}'."
+        )
 
     wt_at = AppTest.from_file(str(project_root / "pages" / "02_welltrack_import.py")).run()
     parse_buttons = [button for button in wt_at.button if button.label == "Прочитать WELLTRACK"]
@@ -101,6 +119,18 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
                 "pages/02_welltrack_import.py: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
+    wt_profile = _find_selectbox_value(
+        wt_at, "Профиль для целей в одном направлении"
+    )
+    if wt_profile is None:
+        errors.append(
+            "pages/02_welltrack_import.py: profile selectbox not found after parse."
+        )
+    elif wt_profile != expected_profile:
+        errors.append(
+            "pages/02_welltrack_import.py: "
+            f"profile mode is '{wt_profile}' but expected '{expected_profile}'."
+        )
 
     # Regression check: even with stale legacy keys in state, defaults must recover
     # without requiring manual "reset params" click.
@@ -138,6 +168,18 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
                 "pages/02_welltrack_import.py legacy recovery: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
+    legacy_profile = _find_selectbox_value(
+        wt_legacy, "Профиль для целей в одном направлении"
+    )
+    if legacy_profile is None:
+        errors.append(
+            "pages/02_welltrack_import.py: profile selectbox not found (legacy check)."
+        )
+    elif legacy_profile != expected_profile:
+        errors.append(
+            "pages/02_welltrack_import.py legacy recovery: "
+            f"profile mode is '{legacy_profile}' but expected '{expected_profile}'."
+        )
     return errors
 
 
