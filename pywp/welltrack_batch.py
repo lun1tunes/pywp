@@ -28,6 +28,8 @@ class SuccessfulWellPlan:
     azimuth_deg: float
     md_t1_m: float
     config: TrajectoryConfig
+    md_postcheck_exceeded: bool = False
+    md_postcheck_message: str = ""
 
 
 class WelltrackBatchPlanner:
@@ -99,6 +101,7 @@ class WelltrackBatchPlanner:
             "INC в t1, deg": "—",
             "ЗУ HOLD, deg": "—",
             "Макс ПИ, deg/10m": "—",
+            "Макс MD, м": "—",
             "Проблема": "",
         }
 
@@ -130,6 +133,17 @@ class WelltrackBatchPlanner:
 
         t1_offset = float(np.hypot(t1.x - surface.x, t1.y - surface.y))
         summary = result.summary
+        md_total_m = float(summary.get("md_total_m", 0.0))
+        md_limit_m = float(summary.get("max_total_md_postcheck_m", 0.0))
+        md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
+        md_postcheck_exceeded = bool(md_postcheck_excess_m > 1e-6)
+        md_postcheck_message = ""
+        if md_postcheck_exceeded:
+            md_postcheck_message = (
+                "Превышен лимит итоговой MD (постпроверка): "
+                f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
+            )
+
         row.update(
             {
                 "Статус": "OK",
@@ -140,7 +154,8 @@ class WelltrackBatchPlanner:
                 "INC в t1, deg": f"{float(summary.get('entry_inc_deg', 0.0)):.2f}",
                 "ЗУ HOLD, deg": f"{float(summary.get('hold_inc_deg', 0.0)):.2f}",
                 "Макс ПИ, deg/10m": f"{dls_to_pi(float(summary.get('max_dls_total_deg_per_30m', 0.0))):.2f}",
-                "Проблема": "",
+                "Макс MD, м": f"{md_total_m:.2f}",
+                "Проблема": md_postcheck_message,
             }
         )
         success = SuccessfulWellPlan(
@@ -153,5 +168,7 @@ class WelltrackBatchPlanner:
             azimuth_deg=result.azimuth_deg,
             md_t1_m=result.md_t1_m,
             config=config,
+            md_postcheck_exceeded=md_postcheck_exceeded,
+            md_postcheck_message=md_postcheck_message,
         )
         return row, success

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import TrajectoryConfig
 from pywp.welltrack_batch import WelltrackBatchPlanner
@@ -121,3 +123,31 @@ def test_batch_planner_reports_solver_stages_and_record_done_callbacks() -> None
     assert max(fractions) <= 1.0
     stage_names = [item[3] for item in solver_seen]
     assert any("Планировщик" in stage for stage in stage_names)
+
+
+def test_batch_planner_keeps_success_when_md_postcheck_exceeded() -> None:
+    records = [
+        WelltrackRecord(
+            name="WELL-MD",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+    cfg = replace(TrajectoryConfig(), max_total_md_postcheck_m=100.0)
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={"WELL-MD"},
+        config=cfg,
+    )
+
+    assert len(rows) == 1
+    assert len(successes) == 1
+    row = rows[0]
+    assert row["Статус"] == "OK"
+    assert float(row["Макс MD, м"]) > float(cfg.max_total_md_postcheck_m)
+    assert "Превышен лимит итоговой MD" in str(row["Проблема"])
+    assert successes[0].md_postcheck_exceeded is True
+    assert "Превышен лимит итоговой MD" in successes[0].md_postcheck_message

@@ -39,6 +39,10 @@ from pywp.ui_well_panels import (
     render_run_log_panel,
     render_trajectory_dls_panel,
 )
+from pywp.welltrack_quality import (
+    detect_t1_t3_order_issues,
+    swap_t1_t3_for_wells,
+)
 from pywp.well_pad import (
     PadLayoutPlan,
     WellPad,
@@ -53,6 +57,7 @@ WT_UI_DEFAULTS_VERSION = 12
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
 WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
+WT_T1T3_MIN_DELTA_M = 0.5
 WELL_COLOR_PALETTE: tuple[str, ...] = (
     "#0B6E4F",
     "#D1495B",
@@ -206,6 +211,7 @@ def _all_wells_3d_figure(
     z_arrays: list[np.ndarray] = []
     for index, item in enumerate(successes):
         line_color = _well_color(index)
+        line_dash = "dash" if bool(item.md_postcheck_exceeded) else "solid"
         name = item.name
         stations = item.stations
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
@@ -218,7 +224,7 @@ def _all_wells_3d_figure(
                 z=stations["Z_m"],
                 mode="lines",
                 name=name,
-                line={"width": 5, "color": line_color},
+                line={"width": 5, "color": line_color, "dash": line_dash},
                 customdata=np.column_stack(
                     [
                         stations["MD_m"].to_numpy(dtype=float),
@@ -332,6 +338,7 @@ def _all_wells_plan_figure(
     y_arrays: list[np.ndarray] = []
     for index, item in enumerate(successes):
         line_color = _well_color(index)
+        line_dash = "dash" if bool(item.md_postcheck_exceeded) else "solid"
         name = item.name
         stations = item.stations
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
@@ -342,7 +349,7 @@ def _all_wells_plan_figure(
                 y=stations["Y_m"],
                 mode="lines",
                 name=name,
-                line={"width": 4, "color": line_color},
+                line={"width": 4, "color": line_color, "dash": line_dash},
                 customdata=np.column_stack(
                     [
                         stations["Z_m"].to_numpy(dtype=float),
@@ -600,6 +607,60 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
             arrow_safe_text_dataframe(pd.DataFrame(raw_rows)),
             width="stretch",
             hide_index=True,
+        )
+
+
+def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
+    issues = detect_t1_t3_order_issues(records, min_delta_m=WT_T1T3_MIN_DELTA_M)
+    if not issues:
+        return
+
+    with st.container(border=True):
+        st.markdown("### Проверка порядка t1/t3")
+        st.warning(
+            "Найдены скважины, где `t1` дальше от устья `S` (куста) по горизонтальному "
+            "отходу, чем `t3`. Вероятно, порядок точек `t1/t3` перепутан."
+        )
+        issue_rows = [
+            {
+                "Скважина": item.well_name,
+                "Отход S→t1, м": float(item.t1_offset_m),
+                "Отход S→t3, м": float(item.t3_offset_m),
+                "Δ (t1 - t3), м": float(item.delta_m),
+            }
+            for item in issues
+        ]
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(issue_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+        if st.button(
+            "Исправить порядок t1/t3 для отмеченных скважин",
+            type="primary",
+            icon=":material/swap_horiz:",
+            width="stretch",
+        ):
+            target_names = {str(item.well_name) for item in issues}
+            st.session_state["wt_records"] = swap_t1_t3_for_wells(
+                records=list(records),
+                well_names=target_names,
+            )
+            original_records = st.session_state.get("wt_records_original")
+            if original_records is None:
+                original_records = list(records)
+            st.session_state["wt_records_original"] = swap_t1_t3_for_wells(
+                records=list(original_records),
+                well_names=target_names,
+            )
+            _clear_results()
+            st.toast(
+                f"Порядок t1/t3 исправлен для {len(target_names)} скважин."
+            )
+            st.rerun()
+        st.caption(
+            "Исправление меняет местами координаты `t1` и `t3`, но сохраняет MD "
+            "во 2-й и 3-й позиции, чтобы не ломать порядок MD."
         )
 
 
@@ -878,6 +939,21 @@ def _run_batch_if_clicked(
     if not selected_set:
         st.warning("Выберите минимум одну скважину для расчета.")
         return
+
+    records_for_run = list(records)
+    pad_layout_active = bool(str(st.session_state.get("wt_pad_last_applied_at", "")))
+    if pad_layout_active:
+        base_records = st.session_state.get("wt_records_original")
+        if base_records:
+            pads = _ensure_pad_configs(base_records=list(base_records))
+            plan_map = _build_pad_plan_map(pads)
+            records_for_run = apply_pad_layout(
+                records=list(base_records),
+                pads=pads,
+                plan_by_pad_id=plan_map,
+            )
+            st.session_state["wt_records"] = list(records_for_run)
+
     batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
     log_verbosity = str(st.session_state.get("wt_log_verbosity", WT_LOG_COMPACT))
     verbose_log_enabled = log_verbosity == WT_LOG_VERBOSE
@@ -903,6 +979,11 @@ def _run_batch_if_clicked(
                 f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}. "
                 f"Детализация лога: {log_verbosity}."
             )
+            if pad_layout_active:
+                append_log(
+                    "Активна раскладка устьев по кустам: перед расчетом применены "
+                    "текущие координаты S из блока 'Кусты и расчет устьев'."
+                )
             set_phase(
                 f"Старт расчета набора. Выбрано скважин: {len(selected_set)}."
             )
@@ -959,17 +1040,22 @@ def _run_batch_if_clicked(
                     text=f"{index}/{total}: {name} · завершено",
                 )
                 status = str(row.get("Статус", "—"))
+                problem_text = summarize_problem_ru(str(row.get("Проблема", "")))
                 if status == "OK":
-                    append_log(f"{name}: расчет завершен успешно.")
+                    if problem_text and problem_text != "ОК":
+                        append_log(
+                            f"{name}: расчет завершен с предупреждением. {problem_text}"
+                        )
+                    else:
+                        append_log(f"{name}: расчет завершен успешно.")
                     return
-                problem = summarize_problem_ru(str(row.get("Проблема", "")))
-                if problem and problem != "ОК":
-                    append_log(f"{name}: {status}. {problem}")
+                if problem_text and problem_text != "ОК":
+                    append_log(f"{name}: {status}. {problem_text}")
                 else:
                     append_log(f"{name}: {status}.")
 
             summary_rows, successes = batch.evaluate(
-                records=records,
+                records=records_for_run,
                 selected_names=selected_set,
                 config=config,
                 progress_callback=on_progress,
@@ -1034,6 +1120,18 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
     render_small_note(
         f"Последний запуск: {st.session_state.get('wt_last_run_at', '—')}"
     )
+    if not summary_df.empty and "Проблема" in summary_df.columns:
+        has_md_postcheck_warning = bool(
+            summary_df["Проблема"]
+            .astype(str)
+            .str.contains("Превышен лимит итоговой MD", regex=False)
+            .any()
+        )
+        if has_md_postcheck_warning:
+            st.caption(
+                "Скважины с превышением лимита итоговой MD отображаются пунктирной "
+                "траекторией на графиках."
+            )
 
     st.markdown("### Сводка расчета")
     st.dataframe(
@@ -1058,6 +1156,10 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
             "ЗУ HOLD, deg": st.column_config.NumberColumn("ЗУ HOLD, deg", format="%.2f"),
             "Макс ПИ, deg/10m": st.column_config.NumberColumn(
                 "Макс ПИ, deg/10m",
+                format="%.2f",
+            ),
+            "Макс MD, м": st.column_config.NumberColumn(
+                "Макс MD, м",
                 format="%.2f",
             ),
             "Проблема": st.column_config.TextColumn("Проблема"),
@@ -1086,6 +1188,9 @@ def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
         azimuth_deg = float(selected.azimuth_deg)
         md_t1_m = float(selected.md_t1_m)
         cfg = selected.config
+        trajectory_line_dash = (
+            "dash" if bool(selected.md_postcheck_exceeded) else "solid"
+        )
 
         render_trajectory_dls_panel(
             stations=stations,
@@ -1096,6 +1201,7 @@ def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
             dls_limits=cfg.dls_limits_deg_per_30m,
             title=None,
             border=False,
+            trajectory_line_dash=trajectory_line_dash,
         )
         render_plan_section_panel(
             stations=stations,
@@ -1105,6 +1211,7 @@ def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
             azimuth_deg=azimuth_deg,
             title=None,
             border=False,
+            trajectory_line_dash=trajectory_line_dash,
         )
 
         st.caption(
@@ -1112,6 +1219,8 @@ def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
             f"тип `{selected.summary.get('trajectory_type', '—')}`, "
             f"сложность `{selected.summary.get('well_complexity', '—')}`."
         )
+        if str(selected.md_postcheck_message):
+            st.warning(str(selected.md_postcheck_message))
 
     with tab_all:
         c1, c2 = st.columns(2, gap="medium")
@@ -1147,6 +1256,7 @@ def run_page() -> None:
 
     _render_records_overview(records=records)
     _render_raw_records_table(records=records)
+    _render_t1_t3_order_panel(records=records)
     _render_pad_layout_panel(records=records)
     all_names = _sync_selected_names(records=records)
     config, run_clicked = _render_batch_run_form(all_names=all_names)

@@ -168,7 +168,7 @@ def test_non_planar_turn_solver_honors_max_total_md_limit() -> None:
         )
 
 
-def test_planner_fails_postcheck_when_total_md_exceeds_soft_limit() -> None:
+def test_planner_keeps_solution_when_total_md_exceeds_soft_limit() -> None:
     planner = TrajectoryPlanner()
     config = _fast_config(
         md_step_m=10.0,
@@ -185,13 +185,16 @@ def test_planner_fails_postcheck_when_total_md_exceeds_soft_limit() -> None:
         },
     )
 
-    with pytest.raises(PlanningError, match="Total MD exceeds configured post-check limit"):
-        planner.plan(
-            surface=Point3D(0.0, 0.0, 0.0),
-            t1=Point3D(600.0, 800.0, 2400.0),
-            t3=Point3D(1500.0, 2000.0, 2500.0),
-            config=config,
-        )
+    result = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
+    summary = result.summary
+    assert float(summary["md_total_m"]) > float(config.max_total_md_postcheck_m)
+    assert str(summary["md_postcheck_exceeded"]) == "yes"
+    assert float(summary["md_postcheck_excess_m"]) > 0.0
 
 
 def test_planner_validates_invalid_dls_bounds() -> None:

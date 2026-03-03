@@ -46,6 +46,7 @@ def render_trajectory_dls_panel(
     dls_limits: dict[str, float],
     title: str | None = None,
     border: bool = True,
+    trajectory_line_dash: str = "solid",
 ) -> None:
     def _render_body() -> None:
         if title:
@@ -53,7 +54,12 @@ def render_trajectory_dls_panel(
         row1_col1, row1_col2 = st.columns(2, gap="medium")
         row1_col1.plotly_chart(
             trajectory_3d_figure(
-                stations, surface=surface, t1=t1, t3=t3, md_t1_m=md_t1_m
+                stations,
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                md_t1_m=md_t1_m,
+                trajectory_line_dash=trajectory_line_dash,
             ),
             width="stretch",
         )
@@ -78,18 +84,30 @@ def render_plan_section_panel(
     azimuth_deg: float,
     title: str | None = None,
     border: bool = True,
+    trajectory_line_dash: str = "solid",
 ) -> None:
     def _render_body() -> None:
         if title:
             st.markdown(f"### {title}")
         row2_col1, row2_col2 = st.columns(2, gap="medium")
         row2_col1.plotly_chart(
-            plan_view_figure(stations, surface=surface, t1=t1, t3=t3),
+            plan_view_figure(
+                stations,
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                trajectory_line_dash=trajectory_line_dash,
+            ),
             width="stretch",
         )
         row2_col2.plotly_chart(
             section_view_figure(
-                stations, surface=surface, azimuth_deg=azimuth_deg, t1=t1, t3=t3
+                stations,
+                surface=surface,
+                azimuth_deg=azimuth_deg,
+                t1=t1,
+                t3=t3,
+                trajectory_line_dash=trajectory_line_dash,
             ),
             width="stretch",
         )

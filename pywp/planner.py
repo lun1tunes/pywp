@@ -2479,6 +2479,10 @@ def _build_summary(
 
     max_dls = float(np.nanmax(df["DLS_deg_per_30m"].to_numpy()))
     max_inc_actual = float(np.nanmax(df["INC_deg"].to_numpy()))
+    md_total_m = float(df["MD_m"].iloc[-1])
+    md_postcheck_limit_m = float(config.max_total_md_postcheck_m)
+    md_postcheck_excess_m = float(max(0.0, md_total_m - md_postcheck_limit_m))
+    md_postcheck_exceeded = bool(md_postcheck_excess_m > 1e-6)
     summary: dict[str, float | str] = {
         "distance_t1_m": float(distance_t1),
         "distance_t3_m": float(distance_t3),
@@ -2496,8 +2500,10 @@ def _build_summary(
         "hold_inc_deg": float(params.inc_hold_deg),
         "hold_length_m": float(params.hold_length_m),
         "max_dls_total_deg_per_30m": max_dls,
-        "md_total_m": float(df["MD_m"].iloc[-1]),
-        "max_total_md_postcheck_m": float(config.max_total_md_postcheck_m),
+        "md_total_m": md_total_m,
+        "max_total_md_postcheck_m": md_postcheck_limit_m,
+        "md_postcheck_excess_m": md_postcheck_excess_m,
+        "md_postcheck_exceeded": "yes" if md_postcheck_exceeded else "no",
         "t1_horizontal_offset_m": float(horizontal_offset_t1_m),
         "horizontal_length_m": float(params.horizontal_length_m),
         "trajectory_type": trajectory_type_label(classification.trajectory_type),
@@ -2566,13 +2572,6 @@ def _assert_solution_is_valid(summary: dict[str, float | str], config: Trajector
         actual = float(summary.get(f"max_dls_{segment.lower()}_deg_per_30m", 0.0))
         if actual > limit + 1e-6:
             raise PlanningError(f"DLS limit exceeded on segment {segment}: {actual:.2f} > {limit:.2f}")
-    md_total = float(summary.get("md_total_m", 0.0))
-    if md_total > config.max_total_md_postcheck_m + 1e-6:
-        raise PlanningError(
-            "Total MD exceeds configured post-check limit. "
-            f"Calculated total MD={md_total:.2f} m, limit={config.max_total_md_postcheck_m:.2f} m. "
-            "The resulting well is too long for the selected MD threshold."
-        )
 
 
 def _validate_config(config: TrajectoryConfig) -> None:

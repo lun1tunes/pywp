@@ -951,6 +951,15 @@ def _render_result_overview(last_result: dict[str, object]) -> float:
             hide_index=True,
         )
 
+        md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
+        if md_postcheck_excess_m > 1e-6:
+            st.warning(
+                "Превышен лимит итоговой MD (постпроверка): "
+                f"{float(summary.get('md_total_m', 0.0)):.2f} м > "
+                f"{float(summary.get('max_total_md_postcheck_m', 0.0)):.2f} м "
+                f"(+{md_postcheck_excess_m:.2f} м)."
+            )
+
         render_small_note(
             "Проверяйте соответствие фактического INC/ПИ лимитам, особенно при изменении "
             "целевого угла входа и границ ПИ."

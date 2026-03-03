@@ -352,6 +352,7 @@ def trajectory_3d_figure(
     t3: Point3D,
     height: int = 560,
     md_t1_m: float | None = None,
+    trajectory_line_dash: str = "solid",
 ) -> go.Figure:
     fig = go.Figure()
     x_values = np.concatenate([df["X_m"].to_numpy(), np.array([surface.x, t1.x, t3.x])])
@@ -385,7 +386,7 @@ def trajectory_3d_figure(
             z=df["Z_m"],
             mode="lines",
             name="Траектория",
-            line={"width": 6, "color": "#006D77"},
+            line={"width": 6, "color": "#006D77", "dash": str(trajectory_line_dash)},
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
@@ -501,7 +502,12 @@ def trajectory_3d_figure(
 
 
 def plan_view_figure(
-    df: pd.DataFrame, surface: Point3D, t1: Point3D, t3: Point3D, height: int = 460
+    df: pd.DataFrame,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    height: int = 460,
+    trajectory_line_dash: str = "solid",
 ) -> go.Figure:
     x_values = np.concatenate(
         [df["X_m"].to_numpy(dtype=float), np.array([surface.x, t1.x, t3.x], dtype=float)]
@@ -523,7 +529,11 @@ def plan_view_figure(
             y=df["Y_m"],
             mode="lines",
             name="Траектория",
-            line={"width": 4, "color": TRAJECTORY_COLOR_PRIMARY},
+            line={
+                "width": 4,
+                "color": TRAJECTORY_COLOR_PRIMARY,
+                "dash": str(trajectory_line_dash),
+            },
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
@@ -588,6 +598,7 @@ def section_view_figure(
     t1: Point3D,
     t3: Point3D,
     height: int = 460,
+    trajectory_line_dash: str = "solid",
 ) -> go.Figure:
     vs = _section_coordinate(df=df, surface=surface, azimuth_deg=azimuth_deg)
 
@@ -608,7 +619,11 @@ def section_view_figure(
             y=df["Z_m"],
             mode="lines",
             name="Траектория",
-            line={"width": 4, "color": TRAJECTORY_COLOR_PRIMARY},
+            line={
+                "width": 4,
+                "color": TRAJECTORY_COLOR_PRIMARY,
+                "dash": str(trajectory_line_dash),
+            },
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
