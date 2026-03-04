@@ -14,8 +14,9 @@ from pywp.plot_axes import (
 from pywp.ui_utils import dls_to_pi
 
 DEG2RAD = np.pi / 180.0
-TRAJECTORY_COLOR_PRIMARY = "#0B6E4F"
-ACTUAL_TRAJECTORY_COLOR = "#FF6B35"
+TRAJECTORY_COLOR_PRIMARY = "#C1121F"
+PLAN_CSB_COLOR = "#0B6E4F"
+ACTUAL_PROFILE_COLOR = "#111111"
 TARGET_COLOR_PRIMARY = "#C1121F"
 INC_LABEL_COLOR = TARGET_COLOR_PRIMARY
 SEGMENT_COLORS = {
@@ -29,7 +30,14 @@ SEGMENT_COLORS = {
     "VERTICAL": "#5C677D",
     "BUILD": "#F77F00",
 }
-FALLBACK_SEGMENT_COLORS = ("#1D3557", "#8D99AE", "#EF476F", "#06D6A0", "#FFBE0B", "#8338EC")
+FALLBACK_SEGMENT_COLORS = (
+    "#1D3557",
+    "#8D99AE",
+    "#EF476F",
+    "#06D6A0",
+    "#FFBE0B",
+    "#8338EC",
+)
 HOVER_TEMPLATE_XYZ_MD_DLS = (
     "X: %{customdata[0]} m<br>"
     "Y: %{customdata[1]} m<br>"
@@ -78,9 +86,7 @@ def _inc_label_candidate_indices(df: pd.DataFrame) -> list[int]:
 
         inc_delta = abs(float(inc_values[end - 1]) - float(inc_values[start]))
         is_curved_segment = (
-            inc_delta >= 3.0
-            or "BUILD" in segment_name
-            or "DROP" in segment_name
+            inc_delta >= 3.0 or "BUILD" in segment_name or "DROP" in segment_name
         )
         if is_curved_segment and block_indices.size >= 3:
             sample_count = 2 if inc_delta < 25.0 else 3
@@ -122,7 +128,9 @@ def _select_inc_label_indices(df: pd.DataFrame, section_x: np.ndarray) -> list[i
             prev = selected[-1]
             prev_angle = int(np.rint(float(inc_values[prev])))
             spacing = float(
-                np.hypot(section_x[idx] - section_x[prev], z_values[idx] - z_values[prev])
+                np.hypot(
+                    section_x[idx] - section_x[prev], z_values[idx] - z_values[prev]
+                )
             )
             if spacing < min_spacing and abs(angle_int - prev_angle) < min_angle_step:
                 if not is_forced:
@@ -158,7 +166,9 @@ def _select_inc_label_indices(df: pd.DataFrame, section_x: np.ndarray) -> list[i
     return sorted(set(keep))
 
 
-def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndarray) -> None:
+def _add_section_inc_labels(
+    fig: go.Figure, df: pd.DataFrame, section_x: np.ndarray
+) -> None:
     label_indices = _select_inc_label_indices(df=df, section_x=section_x)
     if not label_indices:
         return
@@ -242,16 +252,14 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
         label_dx = normal_x_norm * (tick_length_norm + text_gap_norm) * x_span
         label_dy = normal_y_norm * (tick_length_norm + text_gap_norm) * z_span
         drift_dy = text_drift_norm * z_span * (1.0 if rank % 2 == 0 else -1.0)
-        label_x = float(
-            center_x + direction * label_dx
-        )
-        label_y = float(
-            center_y + direction * label_dy + drift_dy
-        )
+        label_x = float(center_x + direction * label_dx)
+        label_y = float(center_y + direction * label_dy + drift_dy)
         for attempt in range(6):
             conflict = False
             for used_x, used_y in occupied_text_points:
-                if np.hypot(label_x - used_x, label_y - used_y) < max(24.0, 0.02 * max(x_span, z_span)):
+                if np.hypot(label_x - used_x, label_y - used_y) < max(
+                    24.0, 0.02 * max(x_span, z_span)
+                ):
                     conflict = True
                     shift_sign = 1.0 if (rank + attempt) % 2 == 0 else -1.0
                     label_y += shift_sign * text_drift_norm * z_span
@@ -282,7 +290,9 @@ def _add_section_inc_labels(fig: go.Figure, df: pd.DataFrame, section_x: np.ndar
     )
 
 
-def _section_coordinate(df: pd.DataFrame, surface: Point3D, azimuth_deg: float) -> np.ndarray:
+def _section_coordinate(
+    df: pd.DataFrame, surface: Point3D, azimuth_deg: float
+) -> np.ndarray:
     az = azimuth_deg * DEG2RAD
     dn = df["Y_m"].to_numpy() - surface.y
     de = df["X_m"].to_numpy() - surface.x
@@ -312,7 +322,11 @@ def _build_hover_customdata(
     dls_values: np.ndarray | None = None,
 ) -> np.ndarray:
     count = len(x_values)
-    md = np.full(count, np.nan, dtype=float) if md_values is None else np.asarray(md_values, dtype=float)
+    md = (
+        np.full(count, np.nan, dtype=float)
+        if md_values is None
+        else np.asarray(md_values, dtype=float)
+    )
     dls = (
         np.full(count, np.nan, dtype=float)
         if dls_values is None
@@ -353,12 +367,26 @@ def trajectory_3d_figure(
     height: int = 560,
     md_t1_m: float | None = None,
     trajectory_line_dash: str = "solid",
+    plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
 ) -> go.Figure:
     fig = go.Figure()
-    x_arrays = [df["X_m"].to_numpy(dtype=float), np.array([surface.x, t1.x, t3.x], dtype=float)]
-    y_arrays = [df["Y_m"].to_numpy(dtype=float), np.array([surface.y, t1.y, t3.y], dtype=float)]
-    z_arrays = [df["Z_m"].to_numpy(dtype=float), np.array([surface.z, t1.z, t3.z], dtype=float)]
+    x_arrays = [
+        df["X_m"].to_numpy(dtype=float),
+        np.array([surface.x, t1.x, t3.x], dtype=float),
+    ]
+    y_arrays = [
+        df["Y_m"].to_numpy(dtype=float),
+        np.array([surface.y, t1.y, t3.y], dtype=float),
+    ]
+    z_arrays = [
+        df["Z_m"].to_numpy(dtype=float),
+        np.array([surface.z, t1.z, t3.z], dtype=float),
+    ]
+    if plan_csb_df is not None and len(plan_csb_df) > 0:
+        x_arrays.append(plan_csb_df["X_m"].to_numpy(dtype=float))
+        y_arrays.append(plan_csb_df["Y_m"].to_numpy(dtype=float))
+        z_arrays.append(plan_csb_df["Z_m"].to_numpy(dtype=float))
     if actual_df is not None and len(actual_df) > 0:
         x_arrays.append(actual_df["X_m"].to_numpy(dtype=float))
         y_arrays.append(actual_df["Y_m"].to_numpy(dtype=float))
@@ -366,7 +394,9 @@ def trajectory_3d_figure(
     x_values = np.concatenate(x_arrays)
     y_values = np.concatenate(y_arrays)
     z_values = np.concatenate(z_arrays)
-    x_range, y_range, z_range = equalized_axis_ranges(x_values=x_values, y_values=y_values, z_values=z_values)
+    x_range, y_range, z_range = equalized_axis_ranges(
+        x_values=x_values, y_values=y_values, z_values=z_values
+    )
     xy_span = max(x_range[1] - x_range[0], y_range[1] - y_range[0])
     xy_dtick = nice_tick_step(xy_span, target_ticks=6)
     x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
@@ -394,11 +424,32 @@ def trajectory_3d_figure(
             z=df["Z_m"],
             mode="lines",
             name="Траектория",
-            line={"width": 6, "color": "#006D77", "dash": str(trajectory_line_dash)},
+            line={
+                "width": 6,
+                "color": TRAJECTORY_COLOR_PRIMARY,
+                "dash": str(trajectory_line_dash),
+            },
             customdata=_station_hover_customdata(df),
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    if plan_csb_df is not None and len(plan_csb_df) > 0:
+        fig.add_trace(
+            go.Scatter3d(
+                x=plan_csb_df["X_m"],
+                y=plan_csb_df["Y_m"],
+                z=plan_csb_df["Z_m"],
+                mode="lines",
+                name="План ЦСБ",
+                line={"width": 5, "color": PLAN_CSB_COLOR},
+                customdata=_build_hover_customdata(
+                    x_values=plan_csb_df["X_m"].to_numpy(dtype=float),
+                    y_values=plan_csb_df["Y_m"].to_numpy(dtype=float),
+                    z_values=plan_csb_df["Z_m"].to_numpy(dtype=float),
+                ),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
     if actual_df is not None and len(actual_df) > 0:
         fig.add_trace(
             go.Scatter3d(
@@ -406,8 +457,8 @@ def trajectory_3d_figure(
                 y=actual_df["Y_m"],
                 z=actual_df["Z_m"],
                 mode="lines",
-                name="Фактическая траектория",
-                line={"width": 5, "color": ACTUAL_TRAJECTORY_COLOR},
+                name="Фактический профиль",
+                line={"width": 5, "color": ACTUAL_PROFILE_COLOR},
                 customdata=_build_hover_customdata(
                     x_values=actual_df["X_m"].to_numpy(dtype=float),
                     y_values=actual_df["Y_m"].to_numpy(dtype=float),
@@ -533,10 +584,20 @@ def plan_view_figure(
     t3: Point3D,
     height: int = 460,
     trajectory_line_dash: str = "solid",
+    plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
 ) -> go.Figure:
-    x_arrays = [df["X_m"].to_numpy(dtype=float), np.array([surface.x, t1.x, t3.x], dtype=float)]
-    y_arrays = [df["Y_m"].to_numpy(dtype=float), np.array([surface.y, t1.y, t3.y], dtype=float)]
+    x_arrays = [
+        df["X_m"].to_numpy(dtype=float),
+        np.array([surface.x, t1.x, t3.x], dtype=float),
+    ]
+    y_arrays = [
+        df["Y_m"].to_numpy(dtype=float),
+        np.array([surface.y, t1.y, t3.y], dtype=float),
+    ]
+    if plan_csb_df is not None and len(plan_csb_df) > 0:
+        x_arrays.append(plan_csb_df["X_m"].to_numpy(dtype=float))
+        y_arrays.append(plan_csb_df["Y_m"].to_numpy(dtype=float))
     if actual_df is not None and len(actual_df) > 0:
         x_arrays.append(actual_df["X_m"].to_numpy(dtype=float))
         y_arrays.append(actual_df["Y_m"].to_numpy(dtype=float))
@@ -565,14 +626,30 @@ def plan_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    if plan_csb_df is not None and len(plan_csb_df) > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=plan_csb_df["X_m"],
+                y=plan_csb_df["Y_m"],
+                mode="lines",
+                name="План ЦСБ",
+                line={"width": 3, "color": PLAN_CSB_COLOR},
+                customdata=_build_hover_customdata(
+                    x_values=plan_csb_df["X_m"].to_numpy(dtype=float),
+                    y_values=plan_csb_df["Y_m"].to_numpy(dtype=float),
+                    z_values=plan_csb_df["Z_m"].to_numpy(dtype=float),
+                ),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
     if actual_df is not None and len(actual_df) > 0:
         fig.add_trace(
             go.Scatter(
                 x=actual_df["X_m"],
                 y=actual_df["Y_m"],
                 mode="lines",
-                name="Фактическая траектория",
-                line={"width": 3, "color": ACTUAL_TRAJECTORY_COLOR},
+                name="Фактический профиль",
+                line={"width": 3, "color": ACTUAL_PROFILE_COLOR},
                 customdata=_build_hover_customdata(
                     x_values=actual_df["X_m"].to_numpy(dtype=float),
                     y_values=actual_df["Y_m"].to_numpy(dtype=float),
@@ -642,6 +719,7 @@ def section_view_figure(
     t3: Point3D,
     height: int = 460,
     trajectory_line_dash: str = "solid",
+    plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
 ) -> go.Figure:
     vs = _section_coordinate(df=df, surface=surface, azimuth_deg=azimuth_deg)
@@ -654,7 +732,9 @@ def section_view_figure(
             "name": ["S", "t1", "t3"],
         }
     )
-    t_points["VS_m"] = _section_coordinate(t_points, surface=surface, azimuth_deg=azimuth_deg)
+    t_points["VS_m"] = _section_coordinate(
+        t_points, surface=surface, azimuth_deg=azimuth_deg
+    )
 
     fig = go.Figure()
     fig.add_trace(
@@ -672,6 +752,27 @@ def section_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    if plan_csb_df is not None and len(plan_csb_df) > 0:
+        plan_csb_vs = _section_coordinate(
+            df=plan_csb_df,
+            surface=surface,
+            azimuth_deg=azimuth_deg,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=plan_csb_vs,
+                y=plan_csb_df["Z_m"],
+                mode="lines",
+                name="План ЦСБ",
+                line={"width": 3, "color": PLAN_CSB_COLOR},
+                customdata=_build_hover_customdata(
+                    x_values=plan_csb_df["X_m"].to_numpy(dtype=float),
+                    y_values=plan_csb_df["Y_m"].to_numpy(dtype=float),
+                    z_values=plan_csb_df["Z_m"].to_numpy(dtype=float),
+                ),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
     if actual_df is not None and len(actual_df) > 0:
         actual_vs = _section_coordinate(
             df=actual_df,
@@ -683,8 +784,8 @@ def section_view_figure(
                 x=actual_vs,
                 y=actual_df["Z_m"],
                 mode="lines",
-                name="Фактическая траектория",
-                line={"width": 3, "color": ACTUAL_TRAJECTORY_COLOR},
+                name="Фактический профиль",
+                line={"width": 3, "color": ACTUAL_PROFILE_COLOR},
                 customdata=_build_hover_customdata(
                     x_values=actual_df["X_m"].to_numpy(dtype=float),
                     y_values=actual_df["Y_m"].to_numpy(dtype=float),
@@ -723,7 +824,9 @@ def section_view_figure(
     return fig
 
 
-def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560) -> go.Figure:
+def dls_figure(
+    df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
+) -> go.Figure:
     fig = go.Figure()
     active_segments: set[str] | None = None
     if "segment" not in df.columns:
@@ -788,7 +891,11 @@ def dls_figure(df: pd.DataFrame, dls_limits: dict[str, float], height: int = 560
                     name="Переход",
                     legendgroup="transition",
                     showlegend=False,
-                    line={"width": 2, "color": "rgba(120, 120, 120, 0.9)", "dash": "dash"},
+                    line={
+                        "width": 2,
+                        "color": "rgba(120, 120, 120, 0.9)",
+                        "dash": "dash",
+                    },
                     customdata=_station_hover_customdata(transition_df),
                     hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
                 )

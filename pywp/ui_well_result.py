@@ -45,6 +45,7 @@ class SingleWellResultView:
     runtime_s: float | None = None
     issue_messages: tuple[str, ...] = ()
     trajectory_line_dash: str = "solid"
+    plan_csb_stations: pd.DataFrame | None = None
     actual_stations: pd.DataFrame | None = None
 
 
@@ -227,6 +228,7 @@ def render_result_plots(
         title=title_trajectory,
         border=border,
         trajectory_line_dash=view.trajectory_line_dash,
+        plan_csb_stations=view.plan_csb_stations,
         actual_stations=view.actual_stations,
     )
     render_plan_section_panel(
@@ -238,6 +240,7 @@ def render_result_plots(
         title=title_plan,
         border=border,
         trajectory_line_dash=view.trajectory_line_dash,
+        plan_csb_stations=view.plan_csb_stations,
         actual_stations=view.actual_stations,
     )
 

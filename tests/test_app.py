@@ -33,7 +33,7 @@ def test_format_run_log_line_contains_timestamp_elapsed_and_message() -> None:
 
 def test_parse_points_import_text_supports_multiline_format() -> None:
     surface, t1, t3 = app._parse_points_import_text(
-        "0,0,0\n600,800,2400\n1500,2000,2500"
+        "0 0 0\n600 800 2400\n1500 2000 2500"
     )
     assert surface == Point3D(0.0, 0.0, 0.0)
     assert t1 == Point3D(600.0, 800.0, 2400.0)
@@ -42,7 +42,7 @@ def test_parse_points_import_text_supports_multiline_format() -> None:
 
 def test_parse_points_import_text_supports_literal_backslash_n() -> None:
     surface, t1, t3 = app._parse_points_import_text(
-        "0,0,0\\n600,800,2400\\n1500,2000,2500"
+        "0 0 0\\n600 800 2400\\n1500 2000 2500"
     )
     assert surface == Point3D(0.0, 0.0, 0.0)
     assert t1 == Point3D(600.0, 800.0, 2400.0)
@@ -51,12 +51,12 @@ def test_parse_points_import_text_supports_literal_backslash_n() -> None:
 
 def test_parse_points_import_text_rejects_invalid_row_count() -> None:
     with pytest.raises(ValueError, match="Ожидалось 3 строки"):
-        app._parse_points_import_text("0,0,0\n1,1,1")
+        app._parse_points_import_text("0 0 0\n1 1 1")
 
 
-def test_parse_actual_trajectory_import_text_supports_multiline() -> None:
-    df = app._parse_actual_trajectory_import_text(
-        "0,0,0\n100,140,600\n240,320,1200"
+def test_parse_plan_csb_import_text_supports_multiline() -> None:
+    df = app._parse_plan_csb_import_text(
+        "0 0 0\n100 140 600\n240 320 1200"
     )
     assert list(df.columns) == ["X_m", "Y_m", "Z_m"]
     assert len(df) == 3
@@ -65,21 +65,21 @@ def test_parse_actual_trajectory_import_text_supports_multiline() -> None:
 
 def test_parse_actual_trajectory_import_text_supports_literal_backslash_n() -> None:
     df = app._parse_actual_trajectory_import_text(
-        "0,0,0\\n100,140,600\\n240,320,1200"
+        "0 0 0\\n100 140 600\\n240 320 1200"
     )
     assert len(df) == 3
 
 
 def test_parse_actual_trajectory_import_text_rejects_too_few_rows() -> None:
     with pytest.raises(ValueError, match="минимум 2 строки"):
-        app._parse_actual_trajectory_import_text("0,0,0")
+        app._parse_actual_trajectory_import_text("0 0 0")
 
 
 def test_parse_actual_trajectory_import_text_rejects_invalid_columns() -> None:
-    with pytest.raises(ValueError, match="3 значения через запятую"):
-        app._parse_actual_trajectory_import_text("0,0\n100,100,100")
+    with pytest.raises(ValueError, match="3 значения через пробел или табуляцию"):
+        app._parse_actual_trajectory_import_text("0 0\n100 100 100")
 
 
 def test_parse_actual_trajectory_import_text_rejects_non_numeric_values() -> None:
     with pytest.raises(ValueError, match="не удалось распознать числа"):
-        app._parse_actual_trajectory_import_text("0,0,0\nx,100,200")
+        app._parse_actual_trajectory_import_text("0 0 0\nx 100 200")

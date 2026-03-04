@@ -313,53 +313,54 @@ def _parse_points_import_text(raw_text: str) -> tuple[Point3D, Point3D, Point3D]
     normalized = str(raw_text).replace("\\n", "\n").replace("\\r", "\n")
     lines = [line.strip() for line in normalized.splitlines() if line.strip()]
     if len(lines) != 3:
-        raise ValueError(
-            "Ожидалось 3 строки (s1, t1, t3). "
-            f"Получено: {len(lines)}."
-        )
+        raise ValueError("Ожидалось 3 строки (s1, t1, t3). " f"Получено: {len(lines)}.")
 
     parsed_points: list[Point3D] = []
     for line_no, line in enumerate(lines, start=1):
-        parts = [part.strip() for part in line.split(",")]
+        parts = [part.strip() for part in line.split()]
         if len(parts) != 3:
             raise ValueError(
-                f"Строка {line_no}: ожидались 3 значения через запятую."
+                f"Строка {line_no}: ожидались 3 значения через пробел или табуляцию."
             )
         try:
             x, y, z = (float(parts[0]), float(parts[1]), float(parts[2]))
         except ValueError as exc:
-            raise ValueError(
-                f"Строка {line_no}: не удалось распознать числа."
-            ) from exc
+            raise ValueError(f"Строка {line_no}: не удалось распознать числа.") from exc
         parsed_points.append(Point3D(x=x, y=y, z=z))
 
     return parsed_points[0], parsed_points[1], parsed_points[2]
 
 
-def _parse_actual_trajectory_import_text(raw_text: str) -> pd.DataFrame:
+def _parse_trajectory_import_text(raw_text: str, *, profile_label: str) -> pd.DataFrame:
     normalized = str(raw_text).replace("\\n", "\n").replace("\\r", "\n")
     lines = [line.strip() for line in normalized.splitlines() if line.strip()]
     if len(lines) < 2:
         raise ValueError(
-            "Ожидалось минимум 2 строки `x,y,z` для фактической траектории."
+            f"Ожидалось минимум 2 строки `x y z` для {profile_label}."
         )
 
     rows: list[dict[str, float]] = []
     for line_no, line in enumerate(lines, start=1):
-        parts = [part.strip() for part in line.split(",")]
+        parts = [part.strip() for part in line.split()]
         if len(parts) != 3:
             raise ValueError(
-                f"Строка {line_no}: ожидались 3 значения через запятую."
+                f"Строка {line_no}: ожидались 3 значения через пробел или табуляцию."
             )
         try:
             x, y, z = (float(parts[0]), float(parts[1]), float(parts[2]))
         except ValueError as exc:
-            raise ValueError(
-                f"Строка {line_no}: не удалось распознать числа."
-            ) from exc
+            raise ValueError(f"Строка {line_no}: не удалось распознать числа.") from exc
         rows.append({"X_m": x, "Y_m": y, "Z_m": z})
 
     return pd.DataFrame(rows, columns=["X_m", "Y_m", "Z_m"], dtype=float)
+
+
+def _parse_plan_csb_import_text(raw_text: str) -> pd.DataFrame:
+    return _parse_trajectory_import_text(raw_text, profile_label="плана ЦСБ")
+
+
+def _parse_actual_trajectory_import_text(raw_text: str) -> pd.DataFrame:
+    return _parse_trajectory_import_text(raw_text, profile_label="фактического профиля")
 
 
 def _init_state() -> None:
@@ -403,8 +404,19 @@ def _init_state() -> None:
     st.session_state.setdefault("solver_profile_at", "")
     st.session_state.setdefault("last_run_log_lines", [])
     st.session_state.setdefault("points_import_text", "")
+    st.session_state.setdefault("plan_csb_import_text", "")
+    st.session_state.setdefault("plan_csb_df", None)
+    st.session_state.setdefault("actual_profile_import_text", "")
+    st.session_state.setdefault("actual_profile_df", None)
     st.session_state.setdefault("actual_trajectory_import_text", "")
     st.session_state.setdefault("actual_trajectory_df", None)
+    legacy_plan_df = st.session_state.get("actual_trajectory_df")
+    if (
+        st.session_state.get("plan_csb_df") is None
+        and isinstance(legacy_plan_df, pd.DataFrame)
+        and len(legacy_plan_df) > 0
+    ):
+        st.session_state["plan_csb_df"] = legacy_plan_df
 
 
 def _clear_result() -> None:
@@ -582,134 +594,118 @@ def _run_solver_profiling() -> None:
 
 def _render_template_controls() -> None:
     with st.container(border=True):
-        st.markdown("### Каталог шаблонов конструкции")
-        render_small_note(
-            "Выберите тип конструкции, класс сложности и типовую глубину. "
-            "Шаблоны соответствуют вашей таблице классификации и ускоряют старт настройки."
-        )
-        h1, h2, h3 = st.columns([3.8, 1.2, 1.2], gap="small")
-        with h1:
-            with st.popover("Как выбирать шаблон", icon=":material/help:"):
-                st.markdown(
-                    "- `Прямое/Обратное` определяет базовый тип конструкции.\n"
-                    "- `Класс сложности` ориентируется на референсные границы по отходу и HOLD.\n"
-                    "- `Типовая ГВ t1` ограничивает каталог по глубине.\n"
-                    "- Если точного совпадения нет, будет предложен ближайший вариант."
-                )
-        with h2:
-            if st.button(
-                "Применить шаблон",
-                icon=":material/check_circle:",
-                type="primary",
-                width="stretch",
-            ):
-                _apply_scenario(st.session_state["scenario_name"])
-                st.rerun()
-        with h3:
-            if st.button(
-                "Очистить результат", icon=":material/delete:", width="stretch"
-            ):
-                _clear_result()
-                st.rerun()
-        f1, f2, f3, f4 = st.columns([1.2, 1.8, 1.8, 2.8], gap="small")
-        with f1:
-            st.selectbox(
-                "Типовая ГВ t1",
-                options=list(DEPTH_FILTER_OPTIONS),
-                key="template_depth_filter",
-                format_func=_depth_filter_label,
-            )
-        selected_depth_filter = st.session_state["template_depth_filter"]
-        available_trajectory = _available_trajectory_options(
-            depth_filter=selected_depth_filter
-        )
-        if (
-            str(st.session_state["template_trajectory_type"])
-            not in available_trajectory
-        ):
-            st.session_state["template_trajectory_type"] = available_trajectory[0]
-        with f2:
-            st.segmented_control(
-                "Тип конструкции",
-                options=available_trajectory,
-                key="template_trajectory_type",
-                format_func=lambda code: TRAJECTORY_SELECTOR_LABELS[str(code)],
-                selection_mode="single",
-                help="Тип строящейся конструкции относительно направления на t1.",
-            )
-        selected_trajectory = str(st.session_state["template_trajectory_type"])
-        available_complexity = _available_complexity_options(
-            depth_filter=selected_depth_filter,
-            trajectory_type=selected_trajectory,
-        )
-        if not available_complexity:
-            available_complexity = list(COMPLEXITY_OPTIONS)
-        if str(st.session_state["template_complexity"]) not in available_complexity:
-            st.session_state["template_complexity"] = available_complexity[0]
-        with f3:
-            st.segmented_control(
-                "Класс сложности",
-                options=available_complexity,
-                key="template_complexity",
-                format_func=lambda code: COMPLEXITY_SELECTOR_LABELS[str(code)],
-                selection_mode="single",
-                help="Класс из типовой шкалы по глубине, отходу и HOLD.",
-            )
-
-        selected_depth_filter = st.session_state["template_depth_filter"]
-        selected_trajectory = str(st.session_state["template_trajectory_type"])
-        selected_complexity = str(st.session_state["template_complexity"])
-        filtered_names = _filtered_scenario_names(
-            depth_filter=selected_depth_filter,
-            trajectory_type=selected_trajectory,
-            complexity=selected_complexity,
-        )
-        if str(st.session_state["scenario_name"]) not in filtered_names:
-            st.session_state["scenario_name"] = filtered_names[0]
-
-        with f4:
-            st.selectbox(
-                "Шаблон",
-                options=filtered_names,
-                key="scenario_name",
-                help="Показаны шаблоны в выбранном диапазоне глубины и типе конструкции.",
-            )
-
-        selected_name = str(st.session_state["scenario_name"])
-        selected_preset = SCENARIO_BY_NAME[selected_name]
-        if selected_preset.description:
-            st.caption(selected_preset.description)
-
-        offset_t1 = horizontal_offset_m(
-            point=selected_preset.t1,
-            reference=selected_preset.surface,
-        )
-        reverse_window = _preset_reverse_window_label(gv_m=selected_preset.gv_m)
-        m1, m2, m3, m4 = st.columns(4, gap="small")
-        m1.metric("ГВ t1", f"{selected_preset.gv_m:.0f} м")
-        m2.metric("Отход t1", f"{offset_t1:.0f} м")
-        m3.metric("Референс reverse по ГВ", reverse_window)
-        m4.metric("Класс шаблона", complexity_label(selected_preset.complexity))
         with st.expander(
-            "Что такое окно reverse и как оно используется?", expanded=False
+            "Каталог шаблонов конструкции",
+            expanded=False,
+            icon=":material/view_module:",
         ):
-            st.markdown(
-                "- `Окно reverse` — это диапазон **горизонтального отхода t1** (S→t1), "
-                "в котором цель относится к типу `обратное направление`.\n"
+            render_small_note(
+                "Выберите тип конструкции, класс сложности и типовую глубину. "
+                "Шаблоны соответствуют вашей таблице классификации и ускоряют старт настройки."
             )
+            h1, h2, h3 = st.columns([3.8, 1.2, 1.2], gap="small")
+            with h1:
+                with st.popover("Как выбирать шаблон", icon=":material/help:"):
+                    st.markdown(
+                        "- `Прямое/Обратное` определяет базовый тип конструкции.\n"
+                        "- `Класс сложности` ориентируется на референсные границы по отходу и HOLD.\n"
+                        "- `Типовая ГВ t1` ограничивает каталог по глубине.\n"
+                        "- Если точного совпадения нет, будет предложен ближайший вариант."
+                    )
+            with h2:
+                if st.button(
+                    "Применить шаблон",
+                    icon=":material/check_circle:",
+                    type="primary",
+                    width="stretch",
+                ):
+                    _apply_scenario(st.session_state["scenario_name"])
+                    st.rerun()
+            with h3:
+                if st.button(
+                    "Очистить результат", icon=":material/delete:", width="stretch"
+                ):
+                    _clear_result()
+                    st.rerun()
+            f1, f2, f3, f4 = st.columns([1.2, 1.8, 1.8, 2.8], gap="small")
+            with f1:
+                st.selectbox(
+                    "Типовая ГВ t1",
+                    options=list(DEPTH_FILTER_OPTIONS),
+                    key="template_depth_filter",
+                    format_func=_depth_filter_label,
+                )
+            selected_depth_filter = st.session_state["template_depth_filter"]
+            available_trajectory = _available_trajectory_options(
+                depth_filter=selected_depth_filter
+            )
+            if (
+                str(st.session_state["template_trajectory_type"])
+                not in available_trajectory
+            ):
+                st.session_state["template_trajectory_type"] = available_trajectory[0]
+            with f2:
+                st.segmented_control(
+                    "Тип конструкции",
+                    options=available_trajectory,
+                    key="template_trajectory_type",
+                    format_func=lambda code: TRAJECTORY_SELECTOR_LABELS[str(code)],
+                    selection_mode="single",
+                    help="Тип строящейся конструкции относительно направления на t1.",
+                )
+            selected_trajectory = str(st.session_state["template_trajectory_type"])
+            available_complexity = _available_complexity_options(
+                depth_filter=selected_depth_filter,
+                trajectory_type=selected_trajectory,
+            )
+            if not available_complexity:
+                available_complexity = list(COMPLEXITY_OPTIONS)
+            if str(st.session_state["template_complexity"]) not in available_complexity:
+                st.session_state["template_complexity"] = available_complexity[0]
+            with f3:
+                st.segmented_control(
+                    "Класс сложности",
+                    options=available_complexity,
+                    key="template_complexity",
+                    format_func=lambda code: COMPLEXITY_SELECTOR_LABELS[str(code)],
+                    selection_mode="single",
+                    help="Класс из типовой шкалы по глубине, отходу и HOLD.",
+                )
 
-        with st.expander("Покрытие каталога шаблонов", expanded=False):
-            st.dataframe(
-                _template_coverage_frame(),
-                width="stretch",
-                hide_index=True,
+            selected_depth_filter = st.session_state["template_depth_filter"]
+            selected_trajectory = str(st.session_state["template_trajectory_type"])
+            selected_complexity = str(st.session_state["template_complexity"])
+            filtered_names = _filtered_scenario_names(
+                depth_filter=selected_depth_filter,
+                trajectory_type=selected_trajectory,
+                complexity=selected_complexity,
             )
-        with st.expander("Референс классов по типовым глубинам", expanded=False):
-            st.dataframe(
-                arrow_safe_text_dataframe(pd.DataFrame(reference_table_rows())),
-                width="stretch",
-                hide_index=True,
+            if str(st.session_state["scenario_name"]) not in filtered_names:
+                st.session_state["scenario_name"] = filtered_names[0]
+
+            with f4:
+                st.selectbox(
+                    "Шаблон",
+                    options=filtered_names,
+                    key="scenario_name",
+                    help="Показаны шаблоны в выбранном диапазоне глубины и типе конструкции.",
+                )
+
+            selected_name = str(st.session_state["scenario_name"])
+            selected_preset = SCENARIO_BY_NAME[selected_name]
+            if selected_preset.description:
+                st.caption(selected_preset.description)
+
+            offset_t1 = horizontal_offset_m(
+                point=selected_preset.t1,
+                reference=selected_preset.surface,
             )
+            reverse_window = _preset_reverse_window_label(gv_m=selected_preset.gv_m)
+            m1, m2, m3, m4 = st.columns(4, gap="small")
+            m1.metric("ГВ t1", f"{selected_preset.gv_m:.0f} м")
+            m2.metric("Отход t1", f"{offset_t1:.0f} м")
+            m3.metric("Референс reverse по ГВ", reverse_window)
+            m4.metric("Класс шаблона", complexity_label(selected_preset.complexity))
 
 
 def _render_point_config_block() -> None:
@@ -720,16 +716,12 @@ def _render_point_config_block() -> None:
         )
         st.markdown("**Импорт точек из текста (s1, t1, t3)**")
         st.text_area(
-            "Формат: 3 строки `x,y,z` для s1, t1, t3",
+            "Формат: 3 строки __`x y z`__ для S, t1, t3",
             key="points_import_text",
             height=110,
-            placeholder=(
-                "0,0,0\n"
-                "600,800,2400\n"
-                "1500,2000,2500"
-            ),
+            placeholder=("0        0        0\n" "600   800   2400\n" "1500 2000 2500"),
             help=(
-                "Поддерживается как перенос строк, так и литерал \\n. "
+                "Разделитель между координатами: пробел или табуляция (можно вставить из экселя)"
                 "Порядок строк: s1, затем t1, затем t3."
             ),
         )
@@ -753,56 +745,112 @@ def _render_point_config_block() -> None:
                     t3=imported_t3,
                 )
                 st.success("Точки успешно импортированы в поля S/t1/t3.")
-        with st.expander("Фактическая траектория для сравнения (опционально)", expanded=False):
-            st.text_area(
-                "Формат: много строк `x,y,z`",
-                key="actual_trajectory_import_text",
+        with st.expander(
+            "Плановые профили ствола ЦСБ и фактические траектории для сравнения (опционально)",
+            expanded=False,
+        ):
+            p1, p2 = st.columns(2, gap="small")
+            p1.text_area(
+                "План ЦСБ: формат `x y z` (много строк)",
+                key="plan_csb_import_text",
                 height=150,
                 placeholder=(
-                    "0,0,0\n"
-                    "100,140,600\n"
-                    "240,320,1200\n"
-                    "600,800,2400\n"
-                    "1500,2000,2500"
+                    "0      0      0\n"
+                    "100   140   600\n"
+                    "240   320   1200\n"
+                    "600   800   2400\n"
+                    "1500 2000 2500"
                 ),
                 help=(
-                    "Импорт фактических координат ствола для сравнения с расчетом. "
-                    "Поддерживается перенос строк и литерал \\n."
+                    "Плановый профиль ствола ЦСБ для сравнения с расчетной траекторией. "
+                    "Разделитель между координатами: пробел или табуляция."
+                ),
+            )
+            p2.text_area(
+                "Фактический профиль: формат `x y z` (много строк)",
+                key="actual_profile_import_text",
+                height=150,
+                placeholder=(
+                    "0      0      0\n"
+                    "96    136   590\n"
+                    "233   309   1180\n"
+                    "594   791   2387\n"
+                    "1490 1987   2488"
+                ),
+                help=(
+                    "Фактическая траектория скважины для визуального сравнения. "
+                    "Разделитель между координатами: пробел или табуляция."
                 ),
             )
             a1, a2 = st.columns(2, gap="small")
-            import_actual_clicked = a1.form_submit_button(
-                "Импортировать фактическую траекторию",
+            import_profiles_clicked = a1.form_submit_button(
+                "Импортировать профили",
                 type="secondary",
                 icon=":material/polyline:",
                 width="stretch",
             )
-            clear_actual_clicked = a2.form_submit_button(
-                "Очистить фактическую траекторию",
+            clear_profiles_clicked = a2.form_submit_button(
+                "Очистить профили",
                 type="secondary",
                 icon=":material/delete_sweep:",
                 width="stretch",
             )
-            if import_actual_clicked:
-                try:
-                    actual_df = _parse_actual_trajectory_import_text(
-                        str(st.session_state.get("actual_trajectory_import_text", ""))
+            if import_profiles_clicked:
+                import_errors: list[str] = []
+                plan_text = str(st.session_state.get("plan_csb_import_text", "")).strip()
+                fact_text = str(
+                    st.session_state.get("actual_profile_import_text", "")
+                ).strip()
+                if plan_text:
+                    try:
+                        plan_df = _parse_plan_csb_import_text(plan_text)
+                    except ValueError as exc:
+                        import_errors.append(f"План ЦСБ: {exc}")
+                    else:
+                        st.session_state["plan_csb_df"] = plan_df
+                if fact_text:
+                    try:
+                        actual_df = _parse_actual_trajectory_import_text(fact_text)
+                    except ValueError as exc:
+                        import_errors.append(f"Фактический профиль: {exc}")
+                    else:
+                        st.session_state["actual_profile_df"] = actual_df
+                if not plan_text and not fact_text:
+                    import_errors.append(
+                        "Заполните хотя бы одно поле: План ЦСБ или Фактический профиль."
                     )
-                except ValueError as exc:
-                    st.error(f"Импорт фактической траектории не выполнен: {exc}")
-                else:
-                    st.session_state["actual_trajectory_df"] = actual_df
-                    st.success(
-                        f"Фактическая траектория загружена: {len(actual_df)} точек."
-                    )
-            if clear_actual_clicked:
-                st.session_state["actual_trajectory_df"] = None
-                st.success("Фактическая траектория очищена.")
-            actual_loaded = st.session_state.get("actual_trajectory_df")
-            if isinstance(actual_loaded, pd.DataFrame) and len(actual_loaded) > 0:
-                st.caption(
-                    f"Загружено точек фактической траектории: {len(actual_loaded)}."
+                for error_message in import_errors:
+                    st.error(f"Импорт не выполнен: {error_message}")
+            if clear_profiles_clicked:
+                st.session_state["plan_csb_df"] = None
+                st.session_state["actual_profile_df"] = None
+                st.session_state["plan_csb_import_text"] = ""
+                st.session_state["actual_profile_import_text"] = ""
+                st.session_state["actual_trajectory_import_text"] = ""
+                st.success("Профили очищены.")
+
+            plan_loaded = st.session_state.get("plan_csb_df")
+            fact_loaded = st.session_state.get("actual_profile_df")
+            plan_count = (
+                len(plan_loaded)
+                if isinstance(plan_loaded, pd.DataFrame) and len(plan_loaded) > 0
+                else 0
+            )
+            fact_count = (
+                len(fact_loaded)
+                if isinstance(fact_loaded, pd.DataFrame) and len(fact_loaded) > 0
+                else 0
+            )
+            if plan_count and fact_count:
+                st.success(
+                    f"Загружено точек: План ЦСБ — {plan_count}, Фактический профиль — {fact_count}."
                 )
+            elif plan_count:
+                st.success(f"Загружено точек План ЦСБ: {plan_count}.")
+            elif fact_count:
+                st.success(f"Загружено точек Фактического профиля: {fact_count}.")
+            else:
+                st.caption("Профили не загружены.")
         c1, c2, c3 = st.columns(3, gap="small", border=True, vertical_alignment="top")
         with c1:
             st.markdown("**Устье S**")
@@ -996,8 +1044,18 @@ def _render_calculation_feedback() -> None:
     render_run_log_panel(st.session_state.get("last_run_log_lines"))
 
 
-def _build_single_well_result_view(last_result: dict[str, object]) -> SingleWellResultView:
-    actual_stations = st.session_state.get("actual_trajectory_df")
+def _build_single_well_result_view(
+    last_result: dict[str, object],
+) -> SingleWellResultView:
+    plan_csb_stations = st.session_state.get("plan_csb_df")
+    plan_csb_df = (
+        plan_csb_stations
+        if isinstance(plan_csb_stations, pd.DataFrame) and len(plan_csb_stations) > 0
+        else None
+    )
+    actual_stations = st.session_state.get("actual_profile_df")
+    if actual_stations is None:
+        actual_stations = st.session_state.get("actual_trajectory_df")
     actual_df = (
         actual_stations
         if isinstance(actual_stations, pd.DataFrame) and len(actual_stations) > 0
@@ -1014,6 +1072,7 @@ def _build_single_well_result_view(last_result: dict[str, object]) -> SingleWell
         azimuth_deg=float(last_result["azimuth_deg"]),
         md_t1_m=float(last_result["md_t1_m"]),
         runtime_s=st.session_state.get("last_runtime_s"),
+        plan_csb_stations=plan_csb_df,
         actual_stations=actual_df,
     )
 
