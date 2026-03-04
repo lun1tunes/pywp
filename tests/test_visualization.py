@@ -156,3 +156,51 @@ def test_section_view_includes_non_overlapping_unique_inc_labels() -> None:
     labels = [str(value) for value in inc_text_trace.text]
     assert labels
     assert len(labels) == len(set(labels))
+
+
+def test_actual_trajectory_overlay_is_rendered_on_3d_and_2d_views() -> None:
+    df = _sample_df()
+    actual_df = pd.DataFrame(
+        {
+            "X_m": [0.0, 15.0, 45.0, 90.0, 130.0],
+            "Y_m": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "Z_m": [0.0, 60.0, 130.0, 190.0, 205.0],
+        }
+    )
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(35.0, 0.0, 85.0)
+    t3 = Point3D(120.0, 0.0, 85.0)
+
+    fig3d = trajectory_3d_figure(
+        df,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        actual_df=actual_df,
+    )
+    fig_plan = plan_view_figure(
+        df,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        actual_df=actual_df,
+    )
+    fig_section = section_view_figure(
+        df,
+        surface=surface,
+        azimuth_deg=90.0,
+        t1=t1,
+        t3=t3,
+        actual_df=actual_df,
+    )
+
+    actual_3d = [trace for trace in fig3d.data if str(trace.name) == "Фактическая траектория"]
+    actual_plan = [trace for trace in fig_plan.data if str(trace.name) == "Фактическая траектория"]
+    actual_section = [trace for trace in fig_section.data if str(trace.name) == "Фактическая траектория"]
+
+    assert len(actual_3d) == 1
+    assert len(actual_plan) == 1
+    assert len(actual_section) == 1
+    assert actual_3d[0].mode == "lines"
+    assert actual_plan[0].mode == "lines"
+    assert actual_section[0].mode == "lines"

@@ -73,3 +73,13 @@ def test_parse_actual_trajectory_import_text_supports_literal_backslash_n() -> N
 def test_parse_actual_trajectory_import_text_rejects_too_few_rows() -> None:
     with pytest.raises(ValueError, match="минимум 2 строки"):
         app._parse_actual_trajectory_import_text("0,0,0")
+
+
+def test_parse_actual_trajectory_import_text_rejects_invalid_columns() -> None:
+    with pytest.raises(ValueError, match="3 значения через запятую"):
+        app._parse_actual_trajectory_import_text("0,0\n100,100,100")
+
+
+def test_parse_actual_trajectory_import_text_rejects_non_numeric_values() -> None:
+    with pytest.raises(ValueError, match="не удалось распознать числа"):
+        app._parse_actual_trajectory_import_text("0,0,0\nx,100,200")
