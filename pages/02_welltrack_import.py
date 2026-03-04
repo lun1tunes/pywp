@@ -1143,7 +1143,8 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
             "Скважина": st.column_config.TextColumn("Скважина"),
             "Точек": st.column_config.NumberColumn("Точек", format="%d"),
             "Статус": st.column_config.TextColumn("Статус"),
-            "Тип траектории": st.column_config.TextColumn("Тип траектории"),
+            "Модель траектории": st.column_config.TextColumn("Модель траектории"),
+            "Классификация целей": st.column_config.TextColumn("Классификация целей"),
             "Сложность": st.column_config.TextColumn("Сложность"),
             "Горизонтальный отход t1, м": st.column_config.NumberColumn(
                 "Отход t1, м",

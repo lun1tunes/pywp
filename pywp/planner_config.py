@@ -11,6 +11,7 @@ from pywp.models import (
     TURN_SOLVER_DE_HYBRID,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
+    build_segment_dls_limits_deg_per_30m,
 )
 
 CFG_DEFAULTS = TrajectoryConfig()
@@ -43,17 +44,9 @@ def normalize_build_dls_bounds(
 
 
 def build_segment_dls_limits(build_dls_max_deg_per_30m: float) -> dict[str, float]:
-    build_limit = float(max(build_dls_max_deg_per_30m, 0.0))
-    return {
-        "VERTICAL": 1.0,
-        "BUILD_REV": build_limit,
-        "HOLD_REV": 2.0,
-        "DROP_REV": build_limit,
-        "BUILD1": build_limit,
-        "HOLD": 2.0,
-        "BUILD2": build_limit,
-        "HORIZONTAL": 2.0,
-    }
+    return build_segment_dls_limits_deg_per_30m(
+        build_dls_max_deg_per_30m=build_dls_max_deg_per_30m
+    )
 
 
 def build_trajectory_config(
@@ -83,10 +76,9 @@ def build_trajectory_config(
     profile_cache_enabled: bool = True,
     max_total_md_postcheck_m: float = 6500.0,
 ) -> TrajectoryConfig:
-    min_build, max_build = normalize_build_dls_bounds(
-        dls_build_min_deg_per_30m=dls_build_min_deg_per_30m,
-        dls_build_max_deg_per_30m=dls_build_max_deg_per_30m,
-    )
+    _ = float(dls_build_min_deg_per_30m)
+    min_build = 0.0
+    max_build = float(max(dls_build_max_deg_per_30m, 0.0))
     return TrajectoryConfig(
         md_step_m=float(md_step_m),
         md_step_control_m=float(md_step_control_m),

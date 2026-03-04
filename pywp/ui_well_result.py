@@ -16,7 +16,8 @@ from pywp.ui_well_panels import (
 )
 
 SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
-    ("trajectory_type", "Тип траектории"),
+    ("trajectory_type", "Модель траектории"),
+    ("trajectory_target_direction", "Классификация целей"),
     ("well_complexity", "Класс сложности"),
     ("entry_inc_deg", "Угол входа в пласт, deg"),
     ("hold_inc_deg", "ЗУ секции HOLD, deg"),
@@ -145,7 +146,11 @@ def render_key_metrics(
             objective_applied,
         )
         metrics_rows = [
-            {"Показатель": "Тип траектории", "Значение": str(summary["trajectory_type"])},
+            {"Показатель": "Модель траектории", "Значение": str(summary["trajectory_type"])},
+            {
+                "Показатель": "Классификация целей",
+                "Значение": str(summary.get("trajectory_target_direction", "—")),
+            },
             {"Показатель": "Класс сложности", "Значение": str(summary["well_complexity"])},
             {"Показатель": "INC на t1", "Значение": f"{float(summary['entry_inc_deg']):.2f} deg"},
             {"Показатель": "ЗУ HOLD", "Значение": f"{float(summary['hold_inc_deg']):.2f} deg"},
@@ -187,7 +192,7 @@ def render_key_metrics(
             metrics_rows.insert(
                 2,
                 {
-                    "Показатель": "Профиль same-direction",
+                    "Показатель": "Тип профиля",
                     "Значение": profile_label,
                 },
             )

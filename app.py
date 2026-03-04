@@ -559,8 +559,11 @@ def _run_solver_profiling() -> None:
                         "Промах t1, м": f"{float(result.summary['distance_t1_m']):.4f}",
                         "Промах t3, м": f"{float(result.summary['distance_t3_m']):.4f}",
                         "TURN, deg": f"{float(result.summary.get('azimuth_turn_deg', 0.0)):.2f}",
-                        "Тип траектории": str(
+                        "Модель траектории": str(
                             result.summary.get("trajectory_type", "—")
+                        ),
+                        "Классификация целей": str(
+                            result.summary.get("trajectory_target_direction", "—")
                         ),
                     }
                 )
@@ -575,7 +578,8 @@ def _run_solver_profiling() -> None:
                         "Промах t1, м": "—",
                         "Промах t3, м": "—",
                         "TURN, deg": "—",
-                        "Тип траектории": "—",
+                        "Модель траектории": "—",
+                        "Классификация целей": "—",
                         "Причина": str(exc),
                     }
                 )

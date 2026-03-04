@@ -39,7 +39,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
     at.session_state["wt_cfg___calc_param_defaults_signature__"] = tuple(
         (key, defaults[key]) for key in sorted(defaults.keys())
     )
-    at.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 3
+    at.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 4
 
     at.run()
     parse_buttons = [button for button in at.button if button.label == "Прочитать WELLTRACK"]
@@ -54,7 +54,6 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         "Целевой INC на t1, deg": "entry_inc_target",
         "Допуск INC на t1, deg": "entry_inc_tol",
         "Макс INC по стволу, deg": "max_inc",
-        "Мин ПИ BUILD, deg/10m": "dls_build_min",
         "Макс ПИ BUILD, deg/10m": "dls_build_max",
         "Мин VERTICAL до KOP, м": "kop_min_vertical",
         "Макс итоговая MD (постпроверка), м": "max_total_md_postcheck",
@@ -68,7 +67,10 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
             f"Для '{label}' ожидалось {expected}, получено {actual}."
         )
 
-    profile_actual = _selectbox_value(at, "Профиль для целей в одном направлении")
+    profile_actual = _selectbox_value(
+        at,
+        "Тип профиля (J Profile + Continious Build)",
+    )
     assert profile_actual is not None, "Поле профиля same-direction не найдено."
     assert profile_actual == str(defaults["same_direction_profile_mode"])
 

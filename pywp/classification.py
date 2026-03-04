@@ -17,6 +17,20 @@ _COMPLEXITY_RANK = {
 
 
 @dataclass(frozen=True)
+class DepthClassificationRule:
+    """Single source of truth for business classification rows."""
+
+    gv_m: float
+    reverse_min_m: float
+    reverse_max_m: float
+    reverse_allowed: bool
+    ordinary_offset_max_m: float | None
+    complex_offset_max_m: float | None
+    hold_ordinary_max_deg: float | None
+    hold_complex_max_deg: float | None
+
+
+@dataclass(frozen=True)
 class DepthClassificationAnchor:
     gv_m: float
     reverse_min_m: float
@@ -49,50 +63,106 @@ class WellClassification:
     limits: InterpolatedLimits
 
 
-CLASSIFICATION_ANCHORS: tuple[DepthClassificationAnchor, ...] = (
-    # GV=1000: explicit business rule says only same-direction targets are allowed.
-    # Offset and HOLD complexity thresholds for GV=1000 are not specified in source rules.
-    # We keep the same thresholds as GV=2000 to avoid artificial discontinuity in interpolation.
-    DepthClassificationAnchor(
+CLASSIFICATION_RULES: tuple[DepthClassificationRule, ...] = (
+    DepthClassificationRule(
         gv_m=1000.0,
         reverse_min_m=0.0,
         reverse_max_m=0.0,
-        ordinary_offset_max_m=1250.0,
-        complex_offset_max_m=1900.0,
-        hold_ordinary_max_deg=37.0,
-        hold_complex_max_deg=55.0,
         reverse_allowed=False,
+        ordinary_offset_max_m=None,
+        complex_offset_max_m=None,
+        hold_ordinary_max_deg=None,
+        hold_complex_max_deg=None,
     ),
-    DepthClassificationAnchor(
+    DepthClassificationRule(
         gv_m=2000.0,
         reverse_min_m=120.0,
         reverse_max_m=550.0,
+        reverse_allowed=True,
         ordinary_offset_max_m=1250.0,
         complex_offset_max_m=1900.0,
         hold_ordinary_max_deg=37.0,
         hold_complex_max_deg=55.0,
-        reverse_allowed=True,
     ),
-    DepthClassificationAnchor(
+    DepthClassificationRule(
         gv_m=3000.0,
         reverse_min_m=0.0,
         reverse_max_m=700.0,
+        reverse_allowed=True,
         ordinary_offset_max_m=2000.0,
         complex_offset_max_m=3200.0,
         hold_ordinary_max_deg=37.0,
         hold_complex_max_deg=55.0,
-        reverse_allowed=True,
     ),
-    DepthClassificationAnchor(
+    DepthClassificationRule(
         gv_m=3600.0,
         reverse_min_m=0.0,
         reverse_max_m=700.0,
+        reverse_allowed=True,
         ordinary_offset_max_m=2300.0,
         complex_offset_max_m=3500.0,
         hold_ordinary_max_deg=35.0,
         hold_complex_max_deg=50.0,
-        reverse_allowed=True,
     ),
+)
+
+
+def _optional_rule_value(rule: DepthClassificationRule, field_name: str) -> float | None:
+    return getattr(rule, field_name)
+
+
+def _resolve_rule_column(field_name: str) -> list[float]:
+    resolved: list[float] = []
+    for idx, rule in enumerate(CLASSIFICATION_RULES):
+        value = _optional_rule_value(rule, field_name)
+        if value is not None:
+            resolved.append(float(value))
+            continue
+
+        fallback: float | None = None
+        for right in CLASSIFICATION_RULES[idx + 1 :]:
+            candidate = _optional_rule_value(right, field_name)
+            if candidate is not None:
+                fallback = float(candidate)
+                break
+        if fallback is None:
+            for left in reversed(CLASSIFICATION_RULES[:idx]):
+                candidate = _optional_rule_value(left, field_name)
+                if candidate is not None:
+                    fallback = float(candidate)
+                    break
+        if fallback is None:
+            raise ValueError(
+                f"Field '{field_name}' has no defined value in CLASSIFICATION_RULES."
+            )
+        resolved.append(fallback)
+    return resolved
+
+
+def _build_classification_anchors() -> tuple[DepthClassificationAnchor, ...]:
+    ordinary_offset_values = _resolve_rule_column("ordinary_offset_max_m")
+    complex_offset_values = _resolve_rule_column("complex_offset_max_m")
+    hold_ordinary_values = _resolve_rule_column("hold_ordinary_max_deg")
+    hold_complex_values = _resolve_rule_column("hold_complex_max_deg")
+    anchors: list[DepthClassificationAnchor] = []
+    for idx, rule in enumerate(CLASSIFICATION_RULES):
+        anchors.append(
+            DepthClassificationAnchor(
+                gv_m=float(rule.gv_m),
+                reverse_min_m=float(rule.reverse_min_m),
+                reverse_max_m=float(rule.reverse_max_m),
+                ordinary_offset_max_m=float(ordinary_offset_values[idx]),
+                complex_offset_max_m=float(complex_offset_values[idx]),
+                hold_ordinary_max_deg=float(hold_ordinary_values[idx]),
+                hold_complex_max_deg=float(hold_complex_values[idx]),
+                reverse_allowed=bool(rule.reverse_allowed),
+            )
+        )
+    return tuple(anchors)
+
+
+CLASSIFICATION_ANCHORS: tuple[DepthClassificationAnchor, ...] = (
+    _build_classification_anchors()
 )
 
 
@@ -198,37 +268,26 @@ def complexity_label(code: str) -> str:
 
 
 def reference_table_rows() -> list[dict[str, str | float]]:
-    return [
-        {
-            "ГВ, м": 1000.0,
-            "Отход t1 для обратного направления, м": "Не допускается",
-            "Отход t1: Обычная (до), м": "—",
-            "Отход t1: Сложная (до), м": "—",
-            "ЗУ HOLD: Обычная (до), deg": "—",
-            "ЗУ HOLD: Сложная (до), deg": "—",
-        },
-        {
-            "ГВ, м": 2000.0,
-            "Отход t1 для обратного направления, м": "120-550",
-            "Отход t1: Обычная (до), м": 1250.0,
-            "Отход t1: Сложная (до), м": 1900.0,
-            "ЗУ HOLD: Обычная (до), deg": 37.0,
-            "ЗУ HOLD: Сложная (до), deg": 55.0,
-        },
-        {
-            "ГВ, м": 3000.0,
-            "Отход t1 для обратного направления, м": "0-700",
-            "Отход t1: Обычная (до), м": 2000.0,
-            "Отход t1: Сложная (до), м": 3200.0,
-            "ЗУ HOLD: Обычная (до), deg": 37.0,
-            "ЗУ HOLD: Сложная (до), deg": 55.0,
-        },
-        {
-            "ГВ, м": 3600.0,
-            "Отход t1 для обратного направления, м": "0-700",
-            "Отход t1: Обычная (до), м": 2300.0,
-            "Отход t1: Сложная (до), м": 3500.0,
-            "ЗУ HOLD: Обычная (до), deg": 35.0,
-            "ЗУ HOLD: Сложная (до), deg": 50.0,
-        },
-    ]
+    def _display(value: float | None) -> str | float:
+        if value is None:
+            return "—"
+        return float(value)
+
+    rows: list[dict[str, str | float]] = []
+    for rule in CLASSIFICATION_RULES:
+        reverse_window = (
+            "Не допускается"
+            if not rule.reverse_allowed
+            else f"{float(rule.reverse_min_m):.0f}-{float(rule.reverse_max_m):.0f}"
+        )
+        rows.append(
+            {
+                "ГВ, м": float(rule.gv_m),
+                "Отход t1 для обратного направления, м": reverse_window,
+                "Отход t1: Обычная (до), м": _display(rule.ordinary_offset_max_m),
+                "Отход t1: Сложная (до), м": _display(rule.complex_offset_max_m),
+                "ЗУ HOLD: Обычная (до), deg": _display(rule.hold_ordinary_max_deg),
+                "ЗУ HOLD: Сложная (до), deg": _display(rule.hold_complex_max_deg),
+            }
+        )
+    return rows

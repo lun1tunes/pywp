@@ -76,10 +76,6 @@ def _translate_title_ru(text: str) -> str:
         return "Не найдено допустимое решение профиля VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL."
     if "No valid TURN solution found for non-coplanar targets" in source:
         return "Не найдено допустимое TURN-решение для некомпланарных целей."
-    if "No valid reverse-direction profile found" in source:
-        return "Не найдено допустимое решение профиля «цели в обратном направлении»."
-    if "No valid reverse TURN solution found" in source:
-        return "Не найдено допустимое reverse TURN-решение."
     if "With current global max INC the t1->t3 geometry is infeasible without overbend" in source:
         return "Геометрия t1->t3 небурима при текущем max INC без overbend."
     if "Entry INC target exceeds configured max INC" in source:
@@ -254,23 +250,6 @@ def _item_from_text(line: str) -> DiagnosticItem:
         )
 
     match = re.search(
-        rf"Reverse mode selected by classification: t1 offset=({_RE_FLOAT}) m is inside reverse range \[({_RE_FLOAT}), ({_RE_FLOAT})\] m",
-        text,
-    )
-    if match:
-        offset, left, right = match.group(1), match.group(2), match.group(3)
-        return DiagnosticItem(
-            reason_ru=(
-                f"По классификации выбран reverse-режим: отход t1={offset} м попадает "
-                f"в диапазон [{left}, {right}] м."
-            ),
-            action_ru=(
-                "Если нужен профиль «цели в одном направлении», увеличьте отход до t1 "
-                "выше верхней границы reverse-диапазона."
-            ),
-        )
-
-    match = re.search(
         rf"Total MD exceeds configured post-check limit.*Calculated total MD=({_RE_FLOAT}) m, limit=({_RE_FLOAT}) m",
         text,
     )
@@ -285,29 +264,6 @@ def _item_from_text(line: str) -> DiagnosticItem:
                 "Скважина получается слишком длинной для текущего лимита MD. "
                 "Увеличьте порог «Макс итоговая MD (постпроверка), м» или упростите геометрию целей."
             ),
-        )
-
-    match = re.search(
-        rf"To force same-direction trajectory.*offset above about ({_RE_FLOAT}) m",
-        text,
-    )
-    if match:
-        target = match.group(1)
-        return DiagnosticItem(
-            reason_ru="Текущая цель t1 слишком близка для same-direction классификации.",
-            action_ru=f"Увеличьте горизонтальный отход до t1 выше ~{target} м.",
-        )
-
-    if "Reverse INC bounds are too narrow" in text:
-        return DiagnosticItem(
-            reason_ru="Диапазон reverse INC слишком узкий для поиска решения.",
-            action_ru="Расширьте границы reverse INC: уменьшите min и/или увеличьте max.",
-        )
-
-    if "If reverse profile stays infeasible" in text:
-        return DiagnosticItem(
-            reason_ru="Reverse-профиль не сходится в текущих ограничениях.",
-            action_ru="Увеличьте BUILD max ПИ, поднимите reverse_inc_max_deg или уменьшите kop_min_vertical_m.",
         )
 
     match = re.search(

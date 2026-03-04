@@ -94,7 +94,8 @@ class WelltrackBatchPlanner:
             "Скважина": record.name,
             "Точек": len(record.points),
             "Статус": "Не рассчитана",
-            "Тип траектории": "—",
+            "Модель траектории": "—",
+            "Классификация целей": "—",
             "Сложность": "—",
             "Горизонтальный отход t1, м": "—",
             "Длина HORIZONTAL, м": "—",
@@ -147,7 +148,8 @@ class WelltrackBatchPlanner:
         row.update(
             {
                 "Статус": "OK",
-                "Тип траектории": str(summary.get("trajectory_type", "—")),
+                "Модель траектории": str(summary.get("trajectory_type", "—")),
+                "Классификация целей": str(summary.get("trajectory_target_direction", "—")),
                 "Сложность": str(summary.get("well_complexity", "—")),
                 "Горизонтальный отход t1, м": f"{t1_offset:.2f}",
                 "Длина HORIZONTAL, м": f"{float(summary.get('horizontal_length_m', 0.0)):.2f}",

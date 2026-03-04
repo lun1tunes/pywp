@@ -140,15 +140,12 @@ def test_plotly_xy_ranges_support_large_absolute_coordinates() -> None:
     )
 
 
-def test_dls_limit_annotations_hide_rev_for_same_direction_profile() -> None:
+def test_dls_limit_annotations_include_only_present_segments() -> None:
     df = _sample_df()
     fig_dls = dls_figure(
         df,
         dls_limits={
             "VERTICAL": 1.0,
-            "BUILD_REV": 3.0,
-            "HOLD_REV": 2.0,
-            "DROP_REV": 3.0,
             "BUILD1": 3.0,
             "HOLD": 2.0,
             "BUILD2": 3.0,
@@ -159,7 +156,7 @@ def test_dls_limit_annotations_hide_rev_for_same_direction_profile() -> None:
     annotations = fig_dls.layout.annotations or ()
     annotation_texts = [str(item.text) for item in annotations]
     assert annotation_texts
-    assert all("REV" not in text for text in annotation_texts)
+    assert all("BUILD_REV" not in text for text in annotation_texts)
 
 
 def test_section_view_includes_non_overlapping_unique_inc_labels() -> None:

@@ -53,7 +53,6 @@ def _expected_calc_defaults() -> dict[str, float]:
         "Целевой INC на t1, deg": float(cfg.entry_inc_target_deg),
         "Допуск INC на t1, deg": float(cfg.entry_inc_tolerance_deg),
         "Макс INC по стволу, deg": float(cfg.max_inc_deg),
-        "Мин ПИ BUILD, deg/10m": float(dls_to_pi(cfg.dls_build_min_deg_per_30m)),
         "Макс ПИ BUILD, deg/10m": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
         "Мин VERTICAL до KOP, м": float(cfg.kop_min_vertical_m),
         "Макс итоговая MD (постпроверка), м": float(cfg.max_total_md_postcheck_m),
@@ -89,9 +88,8 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
             errors.append(
                 f"app.py: '{label}'={actual} but expected {expected_value}."
             )
-    app_profile = _find_selectbox_value(
-        app_at, "Профиль для целей в одном направлении"
-    )
+    profile_label = "Тип профиля (J Profile + Continious Build)"
+    app_profile = _find_selectbox_value(app_at, profile_label)
     if app_profile is None:
         errors.append("app.py: profile selectbox not found.")
     elif app_profile != expected_profile:
@@ -119,9 +117,7 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
                 "pages/02_welltrack_import.py: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
-    wt_profile = _find_selectbox_value(
-        wt_at, "Профиль для целей в одном направлении"
-    )
+    wt_profile = _find_selectbox_value(wt_at, profile_label)
     if wt_profile is None:
         errors.append(
             "pages/02_welltrack_import.py: profile selectbox not found after parse."
@@ -168,9 +164,7 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
                 "pages/02_welltrack_import.py legacy recovery: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
-    legacy_profile = _find_selectbox_value(
-        wt_legacy, "Профиль для целей в одном направлении"
-    )
+    legacy_profile = _find_selectbox_value(wt_legacy, profile_label)
     if legacy_profile is None:
         errors.append(
             "pages/02_welltrack_import.py: profile selectbox not found (legacy check)."

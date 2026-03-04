@@ -33,6 +33,40 @@ ALLOWED_SAME_DIRECTION_PROFILE_MODES = (
 )
 SameDirectionProfileMode = Literal["auto", "classic", "j_curve"]
 
+DEFAULT_BUILD_DLS_MAX_DEG_PER_30M = 3.0
+
+_SEGMENT_DLS_ORDER: tuple[str, ...] = (
+    "VERTICAL",
+    "BUILD1",
+    "HOLD",
+    "BUILD2",
+    "HORIZONTAL",
+)
+_SEGMENT_DLS_FIXED_LIMITS: dict[str, float] = {
+    "VERTICAL": 1.0,
+    "HOLD": 2.0,
+    "HORIZONTAL": 2.0,
+}
+_SEGMENT_DLS_BUILD_CONTROLLED: set[str] = {
+    "BUILD1",
+    "BUILD2",
+}
+
+
+def build_segment_dls_limits_deg_per_30m(
+    build_dls_max_deg_per_30m: float,
+) -> Dict[str, float]:
+    """Build default segment DLS limits from a single BUILD max value."""
+
+    build_limit = float(max(build_dls_max_deg_per_30m, 0.0))
+    limits: Dict[str, float] = {}
+    for segment_name in _SEGMENT_DLS_ORDER:
+        if segment_name in _SEGMENT_DLS_BUILD_CONTROLLED:
+            limits[segment_name] = build_limit
+        else:
+            limits[segment_name] = float(_SEGMENT_DLS_FIXED_LIMITS[segment_name])
+    return limits
+
 
 @dataclass(frozen=True)
 class Point3D:
@@ -52,13 +86,10 @@ class TrajectoryConfig:
     entry_inc_tolerance_deg: float = 2.0
     max_inc_deg: float = 95.0
 
-    dls_build_min_deg_per_30m: float = 0.1
-    dls_build_max_deg_per_30m: float = 3.0
+    dls_build_min_deg_per_30m: float = 0.0
+    dls_build_max_deg_per_30m: float = DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     kop_min_vertical_m: float = 550.0
     kop_search_grid_size: int = 81
-    reverse_inc_min_deg: float = 8.0
-    reverse_inc_max_deg: float = 80.0
-    reverse_inc_grid_size: int = 49
     adaptive_grid_initial_size: int = 11
     adaptive_grid_refine_levels: int = 2
     adaptive_grid_top_k: int = 6
@@ -84,16 +115,9 @@ class TrajectoryConfig:
     min_structural_segment_m: float = 30.0
 
     dls_limits_deg_per_30m: Dict[str, float] = field(
-        default_factory=lambda: {
-            "VERTICAL": 1.0,
-            "BUILD_REV": 3.0,
-            "HOLD_REV": 2.0,
-            "DROP_REV": 3.0,
-            "BUILD1": 3.0,
-            "HOLD": 2.0,
-            "BUILD2": 3.0,
-            "HORIZONTAL": 2.0,
-        }
+        default_factory=lambda: build_segment_dls_limits_deg_per_30m(
+            DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+        )
     )
 
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pywp.models import (
+    DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
     OBJECTIVE_MAXIMIZE_HOLD,
     OBJECTIVE_MINIMIZE_AZIMUTH_TURN,
     OBJECTIVE_MINIMIZE_TOTAL_MD,
     SAME_DIRECTION_PROFILE_AUTO,
     SAME_DIRECTION_PROFILE_J_CURVE,
     TURN_SOLVER_LEAST_SQUARES,
+    TrajectoryConfig,
+    build_segment_dls_limits_deg_per_30m,
 )
 from pywp.planner_config import (
     CFG_DEFAULTS,
@@ -36,8 +39,6 @@ def test_normalize_build_dls_bounds_orders_values() -> None:
 
 def test_build_segment_dls_limits_applies_shared_build_limit() -> None:
     limits = build_segment_dls_limits(2.75)
-    assert limits["BUILD_REV"] == 2.75
-    assert limits["DROP_REV"] == 2.75
     assert limits["BUILD1"] == 2.75
     assert limits["BUILD2"] == 2.75
     assert limits["VERTICAL"] == 1.0
@@ -45,7 +46,16 @@ def test_build_segment_dls_limits_applies_shared_build_limit() -> None:
     assert limits["HORIZONTAL"] == 2.0
 
 
-def test_build_trajectory_config_reuses_normalized_bounds_and_limits() -> None:
+def test_trajectory_config_defaults_use_shared_segment_limit_builder() -> None:
+    cfg = TrajectoryConfig()
+    expected = build_segment_dls_limits_deg_per_30m(
+        DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+    )
+    assert cfg.dls_build_max_deg_per_30m == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+    assert cfg.dls_limits_deg_per_30m == expected
+
+
+def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits() -> None:
     config = build_trajectory_config(
         md_step_m=CFG_DEFAULTS.md_step_m,
         md_step_control_m=CFG_DEFAULTS.md_step_control_m,
@@ -63,10 +73,10 @@ def test_build_trajectory_config_reuses_normalized_bounds_and_limits() -> None:
         turn_solver_local_starts=CFG_DEFAULTS.turn_solver_local_starts,
     )
 
-    assert config.dls_build_min_deg_per_30m == 0.8
-    assert config.dls_build_max_deg_per_30m == 3.2
-    assert config.dls_limits_deg_per_30m["BUILD1"] == 3.2
-    assert config.dls_limits_deg_per_30m["BUILD2"] == 3.2
+    assert config.dls_build_min_deg_per_30m == 0.0
+    assert config.dls_build_max_deg_per_30m == 0.8
+    assert config.dls_limits_deg_per_30m["BUILD1"] == 0.8
+    assert config.dls_limits_deg_per_30m["BUILD2"] == 0.8
     assert config.adaptive_dense_check_enabled is True
     assert config.same_direction_profile_mode == CFG_DEFAULTS.same_direction_profile_mode
     assert config.objective_auto_switch_to_turn is CFG_DEFAULTS.objective_auto_switch_to_turn

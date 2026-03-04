@@ -22,7 +22,6 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "entry_inc_tol",
     "max_inc",
     "max_total_md_postcheck",
-    "dls_build_min",
     "dls_build_max",
     "kop_min_vertical",
     "objective_auto_turn_threshold",
@@ -59,7 +58,6 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "entry_inc_tol": float(cfg.entry_inc_tolerance_deg),
         "max_inc": float(cfg.max_inc_deg),
         "max_total_md_postcheck": float(cfg.max_total_md_postcheck_m),
-        "dls_build_min": float(dls_to_pi(cfg.dls_build_min_deg_per_30m)),
         "dls_build_max": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
         "kop_min_vertical": float(cfg.kop_min_vertical_m),
         "objective_mode": str(cfg.objective_mode),
@@ -81,7 +79,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 3
+_DEFAULTS_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -199,7 +197,7 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         entry_inc_tolerance_deg=float(_state_value(prefix, "entry_inc_tol")),
         max_inc_deg=float(_state_value(prefix, "max_inc")),
         max_total_md_postcheck_m=float(_state_value(prefix, "max_total_md_postcheck")),
-        dls_build_min_deg_per_30m=pi_to_dls(float(_state_value(prefix, "dls_build_min"))),
+        dls_build_min_deg_per_30m=0.0,
         dls_build_max_deg_per_30m=pi_to_dls(float(_state_value(prefix, "dls_build_max"))),
         kop_min_vertical_m=float(_state_value(prefix, "kop_min_vertical")),
         objective_mode=str(_state_value(prefix, "objective_mode")),
@@ -286,18 +284,8 @@ def render_calc_params_block(
         help="Глобальное ограничение по зенитному углу по всей траектории.",
     )
 
-    d1, d2, d3, d4 = st.columns(4, gap="small")
+    d1, d2, d3 = st.columns(3, gap="small")
     d1.number_input(
-        "Мин ПИ BUILD, deg/10m",
-        key=_state_key(prefix, "dls_build_min"),
-        min_value=0.0,
-        step=0.1,
-        help=(
-            "Нижняя граница поиска ПИ на BUILD-сегментах. "
-            "Внутри решателя автоматически переводится во внутренние единицы."
-        ),
-    )
-    d2.number_input(
         "Макс ПИ BUILD, deg/10m",
         key=_state_key(prefix, "dls_build_max"),
         min_value=0.1,
@@ -307,14 +295,14 @@ def render_calc_params_block(
             "Внутри решателя автоматически переводится во внутренние единицы."
         ),
     )
-    d3.number_input(
+    d2.number_input(
         "Мин VERTICAL до KOP, м",
         key=_state_key(prefix, "kop_min_vertical"),
         min_value=0.0,
         step=10.0,
         help="Минимальный вертикальный участок от S до начала BUILD1.",
     )
-    d4.number_input(
+    d3.number_input(
         "Макс итоговая MD (постпроверка), м",
         key=_state_key(prefix, "max_total_md_postcheck"),
         min_value=100.0,
@@ -330,12 +318,12 @@ def render_calc_params_block(
             with st.popover("Что означают параметры солвера", icon=":material/tune:"):
                 st.markdown(
                     "- `Целевая функция` задает критерий выбора из допустимых профилей.\n"
-                    "- `Профиль для целей в одном направлении` включает/форсирует J-профиль (1 BUILD до t1).\n"
-                    "- `Минимизировать азимутальный доворот` полезно для сглаживания траектории после reverse-участка.\n"
+                    "- `Тип профиля` управляет вариантом единой модели `J Profile + Continious Build`.\n"
+                    "- `Минимизировать азимутальный доворот` полезно для сглаживания траектории в сложной геометрии.\n"
                     "- `Автопереключение objective` (для режима максимизации HOLD) переводит выбор на минимизацию доворота, если найден «конский» TURN выше порога.\n"
                     "- `Минимизировать итоговую MD` уменьшает проходку и объем бурения.\n"
                     "- `TURN` параметры влияют только на некомпланарные случаи.\n"
-                    "- `Сетка поиска` — это набор пробных значений KOP и reverse INC.\n"
+                    "- `Сетка поиска` — это набор пробных значений KOP и BUILD ПИ.\n"
                     "- `Adaptive` сначала считает по редкой сетке, затем уплотняет ее около лучших решений.\n"
                     "- `Dense-check` — финальная проверка на полной сетке после adaptive-фаз.\n"
                     "- `Parallel jobs` использует процессы в coplanar-поиске.\n"
@@ -351,7 +339,7 @@ def render_calc_params_block(
             help=(
                 "Определяет приоритет среди допустимых решений. "
                 "«Минимизировать азимутальный доворот» уменьшает резкие повороты "
-                "в некомпланарных reverse-кейсах. "
+                "в некомпланарных кейсах. "
                 "«Минимизировать итоговую MD» уменьшает длину проходки."
             ),
         )
@@ -376,7 +364,7 @@ def render_calc_params_block(
             ),
         )
         e4.selectbox(
-            "Профиль для целей в одном направлении",
+            "Тип профиля (J Profile + Continious Build)",
             options=list(SAME_DIRECTION_PROFILE_OPTIONS.keys()),
             key=_state_key(prefix, "same_direction_profile_mode"),
             format_func=lambda key: SAME_DIRECTION_PROFILE_OPTIONS[str(key)],

@@ -31,9 +31,6 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["max_total_md_postcheck"] == float(
         cfg.max_total_md_postcheck_m
     )
-    assert defaults["dls_build_min"] == float(
-        dls_to_pi(cfg.dls_build_min_deg_per_30m)
-    )
     assert defaults["dls_build_max"] == float(
         dls_to_pi(cfg.dls_build_max_deg_per_30m)
     )
@@ -113,7 +110,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
 
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
-    assert int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 3
+    assert int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 4
 
 
 def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
@@ -136,7 +133,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
-        int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 3
+        int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 4
     )
 
 
