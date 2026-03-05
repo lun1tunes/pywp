@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from pywp.ui_calc_params import calc_param_defaults
+
+pytestmark = pytest.mark.integration
 
 
 LEGACY_MIN_VALUES: dict[str, float] = {

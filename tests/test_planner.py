@@ -13,6 +13,8 @@ from pywp.models import (
 )
 from pywp.planner import PlanningError, TrajectoryPlanner
 
+pytestmark = pytest.mark.integration
+
 
 def _fast_config(**overrides: object) -> TrajectoryConfig:
     # Keep planner tests deterministic and fast: narrow search controls and skip
@@ -95,6 +97,7 @@ def test_planner_finds_solution_for_reference_scenarios(
     assert set(result.stations["segment"]) == {"VERTICAL", "BUILD1", "HOLD", "BUILD2", "HORIZONTAL"}
 
 
+@pytest.mark.slow
 def test_planner_supports_turn_for_non_planar_geometry() -> None:
     planner = TrajectoryPlanner()
     config = _fast_config(pos_tolerance_m=1.0)
@@ -202,6 +205,7 @@ def test_same_direction_forced_j_rejects_non_coplanar_case() -> None:
         )
 
 
+@pytest.mark.slow
 def test_planner_supports_turn_in_build_for_non_planar_same_direction_geometry() -> None:
     planner = TrajectoryPlanner()
     config = _fast_config(
@@ -234,6 +238,7 @@ def test_planner_supports_turn_in_build_for_non_planar_same_direction_geometry()
     assert float(build2["AZI_deg"].max() - build2["AZI_deg"].min()) > 1.0
 
 
+@pytest.mark.slow
 def test_non_planar_turn_respects_objective_mode_for_build_dls() -> None:
     planner = TrajectoryPlanner()
     base_kwargs = dict(
@@ -521,6 +526,7 @@ def test_planner_validates_adaptive_and_parallel_controls() -> None:
 
 
 @pytest.mark.parametrize("objective_mode", ["maximize_hold", "minimize_build_dls"])
+@pytest.mark.slow
 def test_adaptive_search_objective_is_not_worse_than_dense_baseline(
     objective_mode: str,
 ) -> None:
@@ -640,6 +646,7 @@ def test_parallel_fallback_is_reported_in_summary(monkeypatch: pytest.MonkeyPatc
     )
 
 
+@pytest.mark.slow
 def test_turn_summary_uses_configured_turn_solver_depth_without_hidden_minima() -> None:
     planner = TrajectoryPlanner()
     config = _fast_config(
@@ -661,6 +668,7 @@ def test_turn_summary_uses_configured_turn_solver_depth_without_hidden_minima() 
     assert float(result.summary["solver_turn_local_starts"]) == pytest.approx(1.0)
 
 
+@pytest.mark.slow
 def test_turn_single_start_uses_azimuth_jitter_for_stability() -> None:
     planner = TrajectoryPlanner()
     config = _fast_config(
@@ -683,6 +691,7 @@ def test_turn_single_start_uses_azimuth_jitter_for_stability() -> None:
     assert 0.0 <= float(result.summary["azimuth_turn_deg"]) <= 180.0
 
 
+@pytest.mark.slow
 def test_objective_mode_minimize_build_dls_not_higher_than_maximize_hold() -> None:
     planner = TrajectoryPlanner()
     base_kwargs = dict(
@@ -719,6 +728,7 @@ def test_objective_mode_minimize_build_dls_not_higher_than_maximize_hold() -> No
     )
 
 
+@pytest.mark.slow
 def test_objective_mode_minimize_azimuth_turn_prefers_smaller_turn() -> None:
     planner = TrajectoryPlanner()
     base_kwargs = dict(
@@ -752,6 +762,7 @@ def test_objective_mode_minimize_azimuth_turn_prefers_smaller_turn() -> None:
     ) + 1e-6
 
 
+@pytest.mark.slow
 def test_objective_mode_minimize_total_md_prefers_shorter_well_path() -> None:
     planner = TrajectoryPlanner()
     base_kwargs = dict(
@@ -941,6 +952,7 @@ def test_planner_raises_when_kop_min_vertical_exceeds_t1_depth() -> None:
         )
 
 
+@pytest.mark.slow
 def test_planner_uses_unified_profile_for_reverse_classification() -> None:
     planner = TrajectoryPlanner()
     config = _fast_config(
@@ -1014,6 +1026,7 @@ def test_planner_raises_when_build_segment_limits_conflict_with_global_min() -> 
         )
 
 
+@pytest.mark.slow
 def test_unified_profile_is_feasible_for_back_direction_geometry() -> None:
     planner = TrajectoryPlanner()
     surface = Point3D(0.0, 0.0, 0.0)
@@ -1039,6 +1052,7 @@ def test_unified_profile_is_feasible_for_back_direction_geometry() -> None:
     assert float(result.summary["distance_t3_m"]) <= 2.0 + 1e-6
 
 
+@pytest.mark.slow
 def test_unified_profile_keeps_non_degenerate_forward_structure() -> None:
     planner = TrajectoryPlanner()
     config = _fast_config(

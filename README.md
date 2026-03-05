@@ -20,8 +20,20 @@ streamlit run app.py
 ## Tests
 
 ```bash
+# Быстрый прогон (по умолчанию исключает @slow)
 pytest -q
+
+# Явные профили:
+python scripts/run_tests.py unit
+python scripts/run_tests.py fast
+python scripts/run_tests.py integration
+python scripts/run_tests.py slow
+python scripts/run_tests.py full
 ```
+
+Маркерная сегментация:
+- `integration`: e2e-потоки с реальным планировщиком/батч-расчетом.
+- `slow`: самые дорогие по времени сценарии (dense/adaptive baseline и сложные TURN-кейсы).
 
 ## Notes
 
