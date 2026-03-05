@@ -363,6 +363,15 @@ def _parse_actual_trajectory_import_text(raw_text: str) -> pd.DataFrame:
     return _parse_trajectory_import_text(raw_text, profile_label="фактического профиля")
 
 
+def _clear_profile_import_state() -> None:
+    st.session_state["plan_csb_df"] = None
+    st.session_state["actual_profile_df"] = None
+    st.session_state["actual_trajectory_df"] = None
+    st.session_state["plan_csb_import_text"] = ""
+    st.session_state["actual_profile_import_text"] = ""
+    st.session_state["actual_trajectory_import_text"] = ""
+
+
 def _init_state() -> None:
     default_scenario = next(iter(SCENARIOS.keys()))
     st.session_state.setdefault("scenario_name", default_scenario)
@@ -798,6 +807,7 @@ def _render_point_config_block() -> None:
                 type="secondary",
                 icon=":material/delete_sweep:",
                 width="stretch",
+                on_click=_clear_profile_import_state,
             )
             if import_profiles_clicked:
                 import_errors: list[str] = []
@@ -826,11 +836,6 @@ def _render_point_config_block() -> None:
                 for error_message in import_errors:
                     st.error(f"Импорт не выполнен: {error_message}")
             if clear_profiles_clicked:
-                st.session_state["plan_csb_df"] = None
-                st.session_state["actual_profile_df"] = None
-                st.session_state["plan_csb_import_text"] = ""
-                st.session_state["actual_profile_import_text"] = ""
-                st.session_state["actual_trajectory_import_text"] = ""
                 st.success("Профили очищены.")
 
             plan_loaded = st.session_state.get("plan_csb_df")
