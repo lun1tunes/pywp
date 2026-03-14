@@ -56,6 +56,7 @@ def _expected_calc_defaults() -> dict[str, float]:
         "Макс ПИ BUILD, deg/10m": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
         "Мин VERTICAL до KOP, м": float(cfg.kop_min_vertical_m),
         "Макс итоговая MD (постпроверка), м": float(cfg.max_total_md_postcheck_m),
+        "Макс рестартов решателя": float(cfg.turn_solver_max_restarts),
     }
 
 
@@ -76,7 +77,7 @@ def _find_selectbox_value(at: AppTest, label: str) -> str | None:
 def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
     expected = _expected_calc_defaults()
     errors: list[str] = []
-    expected_profile = str(TrajectoryConfig().same_direction_profile_mode)
+    expected_turn_solver = str(TrajectoryConfig().turn_solver_mode)
 
     app_at = AppTest.from_file(str(project_root / "app.py")).run()
     for label, expected_value in expected.items():
@@ -88,14 +89,14 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
             errors.append(
                 f"app.py: '{label}'={actual} but expected {expected_value}."
             )
-    profile_label = "Тип профиля (J Profile + Continious Build)"
-    app_profile = _find_selectbox_value(app_at, profile_label)
-    if app_profile is None:
-        errors.append("app.py: profile selectbox not found.")
-    elif app_profile != expected_profile:
+    turn_solver_label = "Метод решателя"
+    app_turn_solver = _find_selectbox_value(app_at, turn_solver_label)
+    if app_turn_solver is None:
+        errors.append("app.py: solver method selectbox not found.")
+    elif app_turn_solver != expected_turn_solver:
         errors.append(
             "app.py: "
-            f"profile mode is '{app_profile}' but expected '{expected_profile}'."
+            f"solver method is '{app_turn_solver}' but expected '{expected_turn_solver}'."
         )
 
     wt_at = AppTest.from_file(str(project_root / "pages" / "02_welltrack_import.py")).run()
@@ -117,15 +118,15 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
                 "pages/02_welltrack_import.py: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
-    wt_profile = _find_selectbox_value(wt_at, profile_label)
-    if wt_profile is None:
+    wt_turn_solver = _find_selectbox_value(wt_at, turn_solver_label)
+    if wt_turn_solver is None:
         errors.append(
-            "pages/02_welltrack_import.py: profile selectbox not found after parse."
+            "pages/02_welltrack_import.py: solver method selectbox not found after parse."
         )
-    elif wt_profile != expected_profile:
+    elif wt_turn_solver != expected_turn_solver:
         errors.append(
             "pages/02_welltrack_import.py: "
-            f"profile mode is '{wt_profile}' but expected '{expected_profile}'."
+            f"solver method is '{wt_turn_solver}' but expected '{expected_turn_solver}'."
         )
 
     # Regression check: even with stale legacy keys in state, defaults must recover
@@ -164,15 +165,15 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
                 "pages/02_welltrack_import.py legacy recovery: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
-    legacy_profile = _find_selectbox_value(wt_legacy, profile_label)
-    if legacy_profile is None:
+    legacy_turn_solver = _find_selectbox_value(wt_legacy, turn_solver_label)
+    if legacy_turn_solver is None:
         errors.append(
-            "pages/02_welltrack_import.py: profile selectbox not found (legacy check)."
+            "pages/02_welltrack_import.py: solver method selectbox not found (legacy check)."
         )
-    elif legacy_profile != expected_profile:
+    elif legacy_turn_solver != expected_turn_solver:
         errors.append(
             "pages/02_welltrack_import.py legacy recovery: "
-            f"profile mode is '{legacy_profile}' but expected '{expected_profile}'."
+            f"solver method is '{legacy_turn_solver}' but expected '{expected_turn_solver}'."
         )
     return errors
 

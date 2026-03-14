@@ -152,6 +152,10 @@ def render_key_metrics(
                 "Значение": str(summary.get("trajectory_target_direction", "—")),
             },
             {"Показатель": "Класс сложности", "Значение": str(summary["well_complexity"])},
+            {
+                "Показатель": "Поворот по азимуту",
+                "Значение": f"{float(summary.get('azimuth_turn_deg', 0.0)):.2f} deg",
+            },
             {"Показатель": "INC на t1", "Значение": f"{float(summary['entry_inc_deg']):.2f} deg"},
             {"Показатель": "ЗУ HOLD", "Значение": f"{float(summary['hold_inc_deg']):.2f} deg"},
             {"Показатель": "Отход t1", "Значение": format_distance(t1_horizontal_offset_m)},
@@ -183,17 +187,6 @@ def render_key_metrics(
                 {
                     "Показатель": "Целевая функция (запрошено/применено)",
                     "Значение": objective_value,
-                },
-            )
-        profile_label = str(
-            summary.get("same_direction_profile_mode_applied_label", "")
-        ).strip()
-        if profile_label:
-            metrics_rows.insert(
-                2,
-                {
-                    "Показатель": "Тип профиля",
-                    "Значение": profile_label,
                 },
             )
         st.dataframe(

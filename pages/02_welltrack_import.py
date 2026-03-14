@@ -53,7 +53,7 @@ from pywp.well_pad import (
 )
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
-DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS.INC")
+DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS3.INC")
 WT_UI_DEFAULTS_VERSION = 12
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
@@ -230,7 +230,9 @@ def _all_wells_3d_figure(
                     [
                         stations["MD_m"].to_numpy(dtype=float),
                         dls_to_pi(
-                            stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
+                            stations["DLS_deg_per_30m"]
+                            .fillna(0.0)
+                            .to_numpy(dtype=float)
                         ),
                     ]
                 ),
@@ -356,7 +358,9 @@ def _all_wells_plan_figure(
                         stations["Z_m"].to_numpy(dtype=float),
                         stations["MD_m"].to_numpy(dtype=float),
                         dls_to_pi(
-                            stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
+                            stations["DLS_deg_per_30m"]
+                            .fillna(0.0)
+                            .to_numpy(dtype=float)
                         ),
                     ]
                 ),
@@ -449,7 +453,7 @@ def _render_source_input() -> str:
         source_path = st.text_input(
             "Путь к файлу WELLTRACK",
             key="wt_source_path",
-            placeholder="tests/test_data/WELLTRACKS.INC",
+            placeholder="tests/test_data/WELLTRACKS3.INC",
         )
         return _read_welltrack_file(source_path)
 
@@ -508,11 +512,19 @@ def _render_import_controls() -> tuple[str, bool, bool, bool]:
                 "значениям. Импортированный WELLTRACK и выбранные скважины не удаляются."
             ),
         )
-    return source_text, bool(parse_clicked), bool(clear_clicked), bool(reset_params_clicked)
+    return (
+        source_text,
+        bool(parse_clicked),
+        bool(clear_clicked),
+        bool(reset_params_clicked),
+    )
 
 
 def _handle_import_actions(
-    source_text: str, parse_clicked: bool, clear_clicked: bool, reset_params_clicked: bool
+    source_text: str,
+    parse_clicked: bool,
+    clear_clicked: bool,
+    reset_params_clicked: bool,
 ) -> None:
     if reset_params_clicked:
         _apply_profile_defaults(force=True)
@@ -655,9 +667,7 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
                 well_names=target_names,
             )
             _clear_results()
-            st.toast(
-                f"Порядок t1/t3 исправлен для {len(target_names)} скважин."
-            )
+            st.toast(f"Порядок t1/t3 исправлен для {len(target_names)} скважин.")
             st.rerun()
         st.caption(
             "Исправление меняет местами координаты `t1` и `t3`, но сохраняет MD "
@@ -760,9 +770,13 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         pad_ids = [str(pad.pad_id) for pad in pads]
         st.selectbox("Выберите куст", options=pad_ids, key="wt_pad_selected_id")
         selected_id = str(st.session_state.get("wt_pad_selected_id", pad_ids[0]))
-        selected_pad = next((pad for pad in pads if str(pad.pad_id) == selected_id), pads[0])
+        selected_pad = next(
+            (pad for pad in pads if str(pad.pad_id) == selected_id), pads[0]
+        )
         config_map = st.session_state.get("wt_pad_configs", {})
-        selected_cfg = dict(config_map.get(selected_id, _pad_config_defaults(selected_pad)))
+        selected_cfg = dict(
+            config_map.get(selected_id, _pad_config_defaults(selected_pad))
+        )
 
         widget_keys = {
             "spacing_m": f"wt_pad_cfg_spacing_m_{selected_id}",
@@ -831,8 +845,12 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                     "Скважина": str(well.name),
                     "Середина t1-t3 X, м": float(well.midpoint_x),
                     "Середина t1-t3 Y, м": float(well.midpoint_y),
-                    "Новое S X, м": float(selected_cfg["first_surface_x"] + shift_m * ux),
-                    "Новое S Y, м": float(selected_cfg["first_surface_y"] + shift_m * uy),
+                    "Новое S X, м": float(
+                        selected_cfg["first_surface_x"] + shift_m * ux
+                    ),
+                    "Новое S Y, м": float(
+                        selected_cfg["first_surface_y"] + shift_m * uy
+                    ),
                     "Новое S Z, м": float(selected_cfg["first_surface_z"]),
                 }
             )
@@ -985,9 +1003,7 @@ def _run_batch_if_clicked(
                     "Активна раскладка устьев по кустам: перед расчетом применены "
                     "текущие координаты S из блока 'Кусты и расчет устьев'."
                 )
-            set_phase(
-                f"Старт расчета набора. Выбрано скважин: {len(selected_set)}."
-            )
+            set_phase(f"Старт расчета набора. Выбрано скважин: {len(selected_set)}.")
             progress_state: dict[str, int] = {"value": 0}
             last_stage_by_well: dict[str, str] = {}
 
@@ -1154,8 +1170,12 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
                 "HORIZONTAL, м",
                 format="%.2f",
             ),
-            "INC в t1, deg": st.column_config.NumberColumn("INC t1, deg", format="%.2f"),
-            "ЗУ HOLD, deg": st.column_config.NumberColumn("ЗУ HOLD, deg", format="%.2f"),
+            "INC в t1, deg": st.column_config.NumberColumn(
+                "INC t1, deg", format="%.2f"
+            ),
+            "ЗУ HOLD, deg": st.column_config.NumberColumn(
+                "ЗУ HOLD, deg", format="%.2f"
+            ),
             "Макс ПИ, deg/10m": st.column_config.NumberColumn(
                 "Макс ПИ, deg/10m",
                 format="%.2f",
@@ -1181,7 +1201,9 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
 def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
     tab_single, tab_all = st.tabs(["Отдельная скважина", "Все скважины"])
     with tab_single:
-        selected_name = st.selectbox("Скважина", options=[item.name for item in successes])
+        selected_name = st.selectbox(
+            "Скважина", options=[item.name for item in successes]
+        )
         selected = next(item for item in successes if item.name == selected_name)
         well_view = SingleWellResultView(
             well_name=str(selected.name),

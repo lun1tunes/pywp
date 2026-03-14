@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from pywp.models import (
     DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
-    OBJECTIVE_MAXIMIZE_HOLD,
-    OBJECTIVE_MINIMIZE_AZIMUTH_TURN,
     OBJECTIVE_MINIMIZE_TOTAL_MD,
-    SAME_DIRECTION_PROFILE_AUTO,
-    SAME_DIRECTION_PROFILE_J_CURVE,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
     build_segment_dls_limits_deg_per_30m,
@@ -14,7 +10,6 @@ from pywp.models import (
 from pywp.planner_config import (
     CFG_DEFAULTS,
     OBJECTIVE_OPTIONS,
-    SAME_DIRECTION_PROFILE_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_segment_dls_limits,
     build_trajectory_config,
@@ -23,12 +18,8 @@ from pywp.planner_config import (
 
 
 def test_option_dictionaries_cover_supported_modes() -> None:
-    assert OBJECTIVE_MAXIMIZE_HOLD in OBJECTIVE_OPTIONS
-    assert OBJECTIVE_MINIMIZE_AZIMUTH_TURN in OBJECTIVE_OPTIONS
     assert OBJECTIVE_MINIMIZE_TOTAL_MD in OBJECTIVE_OPTIONS
     assert TURN_SOLVER_LEAST_SQUARES in TURN_SOLVER_OPTIONS
-    assert SAME_DIRECTION_PROFILE_AUTO in SAME_DIRECTION_PROFILE_OPTIONS
-    assert SAME_DIRECTION_PROFILE_J_CURVE in SAME_DIRECTION_PROFILE_OPTIONS
 
 
 def test_normalize_build_dls_bounds_orders_values() -> None:
@@ -55,6 +46,12 @@ def test_trajectory_config_defaults_use_shared_segment_limit_builder() -> None:
     assert cfg.dls_limits_deg_per_30m == expected
 
 
+def test_trajectory_config_auto_syncs_segment_limits_when_build_max_overridden() -> None:
+    cfg = TrajectoryConfig(dls_build_max_deg_per_30m=5.5)
+    assert cfg.dls_limits_deg_per_30m["BUILD1"] == 5.5
+    assert cfg.dls_limits_deg_per_30m["BUILD2"] == 5.5
+
+
 def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits() -> None:
     config = build_trajectory_config(
         md_step_m=CFG_DEFAULTS.md_step_m,
@@ -63,24 +60,15 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
         entry_inc_target_deg=CFG_DEFAULTS.entry_inc_target_deg,
         entry_inc_tolerance_deg=CFG_DEFAULTS.entry_inc_tolerance_deg,
         max_inc_deg=CFG_DEFAULTS.max_inc_deg,
-        dls_build_min_deg_per_30m=3.2,
         dls_build_max_deg_per_30m=0.8,
         kop_min_vertical_m=CFG_DEFAULTS.kop_min_vertical_m,
-        objective_mode=CFG_DEFAULTS.objective_mode,
         turn_solver_mode=CFG_DEFAULTS.turn_solver_mode,
-        same_direction_profile_mode=CFG_DEFAULTS.same_direction_profile_mode,
-        turn_solver_qmc_samples=CFG_DEFAULTS.turn_solver_qmc_samples,
-        turn_solver_local_starts=CFG_DEFAULTS.turn_solver_local_starts,
+        turn_solver_max_restarts=CFG_DEFAULTS.turn_solver_max_restarts,
     )
 
     assert config.dls_build_min_deg_per_30m == 0.0
     assert config.dls_build_max_deg_per_30m == 0.8
     assert config.dls_limits_deg_per_30m["BUILD1"] == 0.8
     assert config.dls_limits_deg_per_30m["BUILD2"] == 0.8
-    assert config.adaptive_dense_check_enabled is True
-    assert config.same_direction_profile_mode == CFG_DEFAULTS.same_direction_profile_mode
-    assert config.objective_auto_switch_to_turn is CFG_DEFAULTS.objective_auto_switch_to_turn
-    assert (
-        config.objective_auto_turn_threshold_deg
-        == CFG_DEFAULTS.objective_auto_turn_threshold_deg
-    )
+    assert config.objective_mode == OBJECTIVE_MINIMIZE_TOTAL_MD
+    assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts

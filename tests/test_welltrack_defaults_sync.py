@@ -60,7 +60,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         "Макс ПИ BUILD, deg/10m": "dls_build_max",
         "Мин VERTICAL до KOP, м": "kop_min_vertical",
         "Макс итоговая MD (постпроверка), м": "max_total_md_postcheck",
-        "Порог TURN для автопереключения, deg": "objective_auto_turn_threshold",
+        "Макс рестартов решателя": "turn_solver_max_restarts",
     }
     for label, suffix in label_to_suffix.items():
         actual = _number_input_value(at, label)
@@ -70,12 +70,9 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
             f"Для '{label}' ожидалось {expected}, получено {actual}."
         )
 
-    profile_actual = _selectbox_value(
-        at,
-        "Тип профиля (J Profile + Continious Build)",
-    )
-    assert profile_actual is not None, "Поле профиля same-direction не найдено."
-    assert profile_actual == str(defaults["same_direction_profile_mode"])
+    turn_solver_actual = _selectbox_value(at, "Метод решателя")
+    assert turn_solver_actual is not None, "Поле метода решателя не найдено."
+    assert turn_solver_actual == str(defaults["turn_solver_mode"])
 
     for key in LEGACY_MIN_VALUES:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"

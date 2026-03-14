@@ -537,9 +537,9 @@ def _run_solver_profiling() -> None:
         for solver_mode in tuple(TURN_SOLVER_OPTIONS.keys())
     ]
     total_items = len(run_items)
-    progress = st.progress(0, text="Профилирование TURN-методов...")
+    progress = st.progress(0, text="Профилирование методов решателя...")
     with st.status(
-        "Выполняется профилирование TURN-решателей...", expanded=True
+        "Выполняется профилирование методов решателя...", expanded=True
     ) as status:
         for index, (scenario_name, scenario_points, solver_mode) in enumerate(
             run_items, start=1
@@ -562,12 +562,12 @@ def _run_solver_profiling() -> None:
                 rows.append(
                     {
                         "Шаблон": scenario_name,
-                        "TURN solver": TURN_SOLVER_OPTIONS[solver_mode],
+                        "Метод решателя": TURN_SOLVER_OPTIONS[solver_mode],
                         "Статус": "OK",
                         "Время, с": f"{elapsed_s:.3f}",
                         "Промах t1, м": f"{float(result.summary['distance_t1_m']):.4f}",
                         "Промах t3, м": f"{float(result.summary['distance_t3_m']):.4f}",
-                        "TURN, deg": f"{float(result.summary.get('azimuth_turn_deg', 0.0)):.2f}",
+                        "Поворот по азимуту, deg": f"{float(result.summary.get('azimuth_turn_deg', 0.0)):.2f}",
                         "Модель траектории": str(
                             result.summary.get("trajectory_type", "—")
                         ),
@@ -581,12 +581,12 @@ def _run_solver_profiling() -> None:
                 rows.append(
                     {
                         "Шаблон": scenario_name,
-                        "TURN solver": TURN_SOLVER_OPTIONS[solver_mode],
+                        "Метод решателя": TURN_SOLVER_OPTIONS[solver_mode],
                         "Статус": "Ошибка",
                         "Время, с": f"{elapsed_s:.3f}",
                         "Промах t1, м": "—",
                         "Промах t3, м": "—",
-                        "TURN, deg": "—",
+                        "Поворот по азимуту, deg": "—",
                         "Модель траектории": "—",
                         "Классификация целей": "—",
                         "Причина": str(exc),
@@ -948,7 +948,7 @@ def _render_input_form() -> bool:
 
 
 def _render_solver_profiling_panel() -> None:
-    with st.expander("Профилирование TURN-методов", expanded=False):
+    with st.expander("Профилирование методов решателя", expanded=False):
         st.caption("Сравнение методов на типовых шаблонах текущего проекта.")
         if st.button(
             "Запустить профилирование", icon=":material/speed:", width="content"

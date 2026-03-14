@@ -17,7 +17,12 @@ def test_parse_welltracks_sample_file() -> None:
     text = Path("tests/test_data/WELLTRACKS.INC").read_text(encoding="utf-8")
     records = parse_welltrack_text(text)
 
-    assert [record.name for record in records] == ["PROD-01", "PROD-02", "PROD-03", "PROD-04"]
+    assert [record.name for record in records] == [
+        "PROD-01",
+        "PROD-02",
+        "PROD-03",
+        "PROD-04",
+    ]
     assert all(len(record.points) == 3 for record in records)
     assert records[0].points[1].x == pytest.approx(600.0)
     assert records[1].points[2].md == pytest.approx(4500.0)

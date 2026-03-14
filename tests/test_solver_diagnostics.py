@@ -57,3 +57,15 @@ def test_parse_solver_error_handles_postcheck_md_limit_message() -> None:
     assert "7120.45 м" in rows[0]["Причина"]
     assert "6500.00 м" in rows[0]["Причина"]
     assert "слишком длинной" in rows[0]["Что изменить"].lower()
+
+
+def test_parse_solver_error_recommends_turn_restarts_for_turn_miss() -> None:
+    text = (
+        "No valid trajectory solution found within configured limits. Closest miss to t1 is 7.87 m.\n"
+        "Reasons and actions:\n"
+        "- Solver endpoint miss to t1 after optimization is 7.87 m (tolerance 2.00 m).\n"
+    )
+    rows = diagnostics_rows_ru(text)
+    assert rows
+    assert "7.87 м" in rows[0]["Причина"]
+    assert "рестартов решателя" in rows[0]["Что изменить"]

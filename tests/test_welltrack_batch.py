@@ -16,15 +16,7 @@ def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
         "md_step_m": 10.0,
         "md_step_control_m": 2.0,
         "pos_tolerance_m": 2.0,
-        "kop_search_grid_size": 21,
-        "adaptive_grid_enabled": True,
-        "adaptive_dense_check_enabled": False,
-        "adaptive_grid_initial_size": 5,
-        "adaptive_grid_refine_levels": 1,
-        "adaptive_grid_top_k": 2,
-        "parallel_jobs": 1,
-        "turn_solver_qmc_samples": 0,
-        "turn_solver_local_starts": 1,
+        "turn_solver_max_restarts": 0,
     }
     base.update(overrides)
     return TrajectoryConfig(**base)
@@ -54,7 +46,7 @@ class _StubPlanner:
             }
         )
         summary: dict[str, float | str] = {
-            "trajectory_type": "J Profile + Continious Build",
+            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
             "trajectory_target_direction": "Цели в одном направлении",
             "well_complexity": "Обычная",
             "horizontal_length_m": 1000.0,

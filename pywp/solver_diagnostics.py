@@ -74,8 +74,8 @@ def _translate_title_ru(text: str) -> str:
         return "Ошибка расчета траектории."
     if "No valid VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL solution" in source:
         return "Не найдено допустимое решение профиля VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL."
-    if "No valid TURN solution found for non-coplanar targets" in source:
-        return "Не найдено допустимое TURN-решение для некомпланарных целей."
+    if "No valid trajectory solution found within configured limits" in source:
+        return "Не найдено допустимое решение траектории."
     if "With current global max INC the t1->t3 geometry is infeasible without overbend" in source:
         return "Геометрия t1->t3 небурима при текущем max INC без overbend."
     if "Entry INC target exceeds configured max INC" in source:
@@ -130,8 +130,8 @@ def _item_from_text(line: str) -> DiagnosticItem:
         return DiagnosticItem(
             reason_ru=f"Цель не достигнута в допуске: промах {miss} м при допуске {tol} м.",
             action_ru=(
-                "Увеличьте глубину поиска солвера (TURN samples/starts), "
-                "ослабьте допуск или скорректируйте геометрию целей."
+                "Увеличьте допустимое число рестартов решателя; "
+                "также можно ослабить допуск или скорректировать геометрию целей."
             ),
         )
 
@@ -267,15 +267,15 @@ def _item_from_text(line: str) -> DiagnosticItem:
         )
 
     match = re.search(
-        rf"TURN endpoint miss to t1 after optimization is ({_RE_FLOAT}) m \(tolerance ({_RE_FLOAT}) m\)",
+        rf"Solver endpoint miss to t1 after optimization is ({_RE_FLOAT}) m \(tolerance ({_RE_FLOAT}) m\)",
         text,
     )
     if match:
         miss, tol = match.group(1), match.group(2)
         return DiagnosticItem(
-            reason_ru=f"После оптимизации TURN промах по t1 составил {miss} м (допуск {tol} м).",
+            reason_ru=f"После оптимизации решателя промах по t1 составил {miss} м (допуск {tol} м).",
             action_ru=(
-                "Увеличьте TURN QMC samples / TURN local starts, ослабьте допуск по позиции "
+                "Увеличьте допустимое число рестартов решателя, ослабьте допуск по позиции "
                 "или скорректируйте геометрию целей."
             ),
         )
