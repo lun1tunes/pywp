@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 import pandas as pd
 import streamlit as st
 
-from pywp.models import Point3D, TrajectoryConfig
+from pywp.models import Point3D, SummaryValue, TrajectoryConfig
 from pywp.planner_config import OBJECTIVE_OPTIONS
+from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.ui_utils import arrow_safe_text_dataframe, dls_to_pi, format_distance
 from pywp.ui_well_panels import (
     render_plan_section_panel,
@@ -32,14 +32,13 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
 )
 
 
-@dataclass(frozen=True)
-class SingleWellResultView:
+class SingleWellResultView(FrozenArbitraryModel):
     well_name: str
     surface: Point3D
     t1: Point3D
     t3: Point3D
     stations: pd.DataFrame
-    summary: Mapping[str, float | str]
+    summary: Mapping[str, SummaryValue]
     config: TrajectoryConfig
     azimuth_deg: float
     md_t1_m: float

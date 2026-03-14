@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 
+from pywp.pydantic_base import FrozenModel
 
-@dataclass(frozen=True)
-class DiagnosticItem:
+
+class DiagnosticItem(FrozenModel):
     reason_ru: str
     action_ru: str
 
 
-@dataclass(frozen=True)
-class ParsedSolverError:
+class ParsedSolverError(FrozenModel):
     title_ru: str
     items: tuple[DiagnosticItem, ...]
     raw_message: str

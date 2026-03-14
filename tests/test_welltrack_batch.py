@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 import pandas as pd
@@ -233,7 +232,7 @@ def test_batch_planner_keeps_success_when_md_postcheck_exceeded() -> None:
             ),
         ),
     ]
-    cfg = replace(_fast_batch_config(), max_total_md_postcheck_m=100.0)
+    cfg = _fast_batch_config().validated_copy(max_total_md_postcheck_m=100.0)
     rows, successes = WelltrackBatchPlanner().evaluate(
         records=records,
         selected_names={"WELL-MD"},

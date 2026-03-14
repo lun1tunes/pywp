@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 from datetime import datetime
 from time import perf_counter
 from typing import Callable
@@ -24,6 +23,7 @@ from pywp.planner import PlanningError
 from pywp.planner_config import (
     TURN_SOLVER_OPTIONS,
 )
+from pywp.pydantic_base import FrozenModel
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_calc_params import (
@@ -44,8 +44,7 @@ from pywp.ui_well_result import (
 )
 
 
-@dataclass(frozen=True)
-class ScenarioPreset:
+class ScenarioPreset(FrozenModel):
     name: str
     gv_m: float
     trajectory_type: str
@@ -554,7 +553,7 @@ def _run_solver_profiling() -> None:
             surface = scenario_points["surface"]
             t1 = scenario_points["t1"]
             t3 = scenario_points["t3"]
-            config = replace(base_config, turn_solver_mode=solver_mode)
+            config = base_config.validated_copy(turn_solver_mode=solver_mode)
             started = perf_counter()
             try:
                 result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)

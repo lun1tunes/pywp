@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 from typing import Iterable
 
@@ -12,12 +11,12 @@ from pywp.eclipse_welltrack import (
     welltrack_points_to_targets,
 )
 from pywp.models import Point3D
+from pywp.pydantic_base import FrozenModel
 
 _EPS = 1e-9
 
 
-@dataclass(frozen=True)
-class PadWell:
+class PadWell(FrozenModel):
     name: str
     record_index: int
     midpoint_x: float
@@ -25,16 +24,14 @@ class PadWell:
     midpoint_z: float
 
 
-@dataclass(frozen=True)
-class WellPad:
+class WellPad(FrozenModel):
     pad_id: str
     surface: Point3D
     wells: tuple[PadWell, ...]
     auto_nds_azimuth_deg: float
 
 
-@dataclass(frozen=True)
-class PadLayoutPlan:
+class PadLayoutPlan(FrozenModel):
     pad_id: str
     first_surface_x: float
     first_surface_y: float
@@ -233,4 +230,3 @@ def _vector_to_azimuth_deg(*, dx: float, dy: float) -> float:
     if abs(float(dx)) <= _EPS and abs(float(dy)) <= _EPS:
         return 0.0
     return float(math.degrees(math.atan2(float(dx), float(dy))) % 360.0)
-

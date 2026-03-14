@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 import numpy as np
 import pandas as pd
 
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
-from pywp.models import Point3D, TrajectoryConfig
+from pywp.models import Point3D, SummaryDict, TrajectoryConfig
 from pywp.planner import PlanningError, TrajectoryPlanner
+from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.ui_utils import dls_to_pi
 
@@ -17,14 +17,13 @@ SolverProgressCallback = Callable[[int, int, str, str, float], None]
 RecordDoneCallback = Callable[[int, int, str, dict[str, Any]], None]
 
 
-@dataclass(frozen=True)
-class SuccessfulWellPlan:
+class SuccessfulWellPlan(FrozenArbitraryModel):
     name: str
     surface: Point3D
     t1: Point3D
     t3: Point3D
     stations: pd.DataFrame
-    summary: dict[str, float | str]
+    summary: SummaryDict
     azimuth_deg: float
     md_t1_m: float
     config: TrajectoryConfig

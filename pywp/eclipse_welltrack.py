@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import re
 from typing import Callable, Literal
 
 from pywp.models import Point3D
+from pywp.pydantic_base import FrozenModel
 
 _WELLTRACK_RE = re.compile(r"^\s*WELLTRACK\b(.*)$", flags=re.IGNORECASE)
 DEFAULT_WELLTRACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp1251", "latin-1")
@@ -16,16 +16,14 @@ class WelltrackParseError(ValueError):
     pass
 
 
-@dataclass(frozen=True)
-class WelltrackPoint:
+class WelltrackPoint(FrozenModel):
     x: float
     y: float
     z: float
     md: float
 
 
-@dataclass(frozen=True)
-class WelltrackRecord:
+class WelltrackRecord(FrozenModel):
     name: str
     points: tuple[WelltrackPoint, ...]
 

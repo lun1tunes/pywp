@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from pywp.models import (
     DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
     OBJECTIVE_MINIMIZE_TOTAL_MD,
@@ -50,6 +53,18 @@ def test_trajectory_config_auto_syncs_segment_limits_when_build_max_overridden()
     cfg = TrajectoryConfig(dls_build_max_deg_per_30m=5.5)
     assert cfg.dls_limits_deg_per_30m["BUILD1"] == 5.5
     assert cfg.dls_limits_deg_per_30m["BUILD2"] == 5.5
+
+
+def test_trajectory_config_validated_copy_revalidates_and_syncs_limits() -> None:
+    cfg = TrajectoryConfig()
+    updated = cfg.validated_copy(dls_build_max_deg_per_30m=4.5)
+
+    assert updated.dls_build_max_deg_per_30m == 4.5
+    assert updated.dls_limits_deg_per_30m["BUILD1"] == 4.5
+    assert updated.dls_limits_deg_per_30m["BUILD2"] == 4.5
+
+    with pytest.raises(ValidationError, match="least_squares|de_hybrid"):
+        cfg.validated_copy(turn_solver_mode="unsupported_turn_solver")
 
 
 def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits() -> None:

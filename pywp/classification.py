@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from pywp.pydantic_base import FrozenModel
 
 TRAJECTORY_SAME_DIRECTION = "same_direction"
 TRAJECTORY_REVERSE_DIRECTION = "reverse_direction"
@@ -16,8 +16,7 @@ _COMPLEXITY_RANK = {
 }
 
 
-@dataclass(frozen=True)
-class DepthClassificationRule:
+class DepthClassificationRule(FrozenModel):
     """Single source of truth for business classification rows."""
 
     gv_m: float
@@ -30,8 +29,7 @@ class DepthClassificationRule:
     hold_complex_max_deg: float | None
 
 
-@dataclass(frozen=True)
-class DepthClassificationAnchor:
+class DepthClassificationAnchor(FrozenModel):
     gv_m: float
     reverse_min_m: float
     reverse_max_m: float
@@ -42,8 +40,7 @@ class DepthClassificationAnchor:
     reverse_allowed: bool
 
 
-@dataclass(frozen=True)
-class InterpolatedLimits:
+class InterpolatedLimits(FrozenModel):
     gv_m: float
     reverse_min_m: float
     reverse_max_m: float
@@ -54,8 +51,7 @@ class InterpolatedLimits:
     reverse_allowed: bool
 
 
-@dataclass(frozen=True)
-class WellClassification:
+class WellClassification(FrozenModel):
     trajectory_type: str
     complexity: str
     complexity_by_offset: str

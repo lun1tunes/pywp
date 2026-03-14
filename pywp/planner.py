@@ -1064,16 +1064,33 @@ def _solve_post_entry_section(
     radius_m = _radius_from_dls(dls_deg_per_30m)
     tolerance = 1e-3
 
+    def arc_displacement(inc_from_rad: float, inc_to_rad: float) -> tuple[float, float]:
+        delta_rad = float(inc_to_rad - inc_from_rad)
+        if abs(delta_rad) <= SMALL:
+            return 0.0, 0.0
+        direction = 1.0 if delta_rad > 0.0 else -1.0
+        ds_arc = float(
+            radius_m * (np.cos(inc_from_rad) - np.cos(inc_to_rad)) / direction
+        )
+        dz_arc = float(
+            radius_m * (np.sin(inc_to_rad) - np.sin(inc_from_rad)) / direction
+        )
+        return ds_arc, dz_arc
+
     def residual(inc_hold_rad: float) -> float:
-        ds_arc = radius_m * (np.cos(inc_entry_rad) - np.cos(inc_hold_rad))
-        dz_arc = radius_m * (np.sin(inc_hold_rad) - np.sin(inc_entry_rad))
+        ds_arc, dz_arc = arc_displacement(
+            inc_from_rad=inc_entry_rad,
+            inc_to_rad=inc_hold_rad,
+        )
         ds_rem = ds_m - ds_arc
         dz_rem = dz_m - dz_arc
         return float(ds_rem * np.cos(inc_hold_rad) - dz_rem * np.sin(inc_hold_rad))
 
     def build_candidate(inc_hold_rad: float) -> PostEntrySection | None:
-        ds_arc = radius_m * (np.cos(inc_entry_rad) - np.cos(inc_hold_rad))
-        dz_arc = radius_m * (np.sin(inc_hold_rad) - np.sin(inc_entry_rad))
+        ds_arc, dz_arc = arc_displacement(
+            inc_from_rad=inc_entry_rad,
+            inc_to_rad=inc_hold_rad,
+        )
         ds_rem = ds_m - ds_arc
         dz_rem = dz_m - dz_arc
         hold_length_m = float(ds_rem * np.sin(inc_hold_rad) + dz_rem * np.cos(inc_hold_rad))

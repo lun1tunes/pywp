@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Dict, Literal
+
+import pandas as pd
+from pydantic import Field, field_validator, model_validator
+
+from pywp.pydantic_base import FrozenArbitraryModel, FrozenModel
 
 OBJECTIVE_MINIMIZE_TOTAL_MD = "minimize_total_md"
 ALLOWED_OBJECTIVE_MODES = (OBJECTIVE_MINIMIZE_TOTAL_MD,)
@@ -29,6 +33,8 @@ _SEGMENT_DLS_BUILD_CONTROLLED: set[str] = {
     "BUILD1",
     "BUILD2",
 }
+SummaryValue = float | int | str | bool
+SummaryDict = dict[str, SummaryValue]
 
 
 def build_segment_dls_limits_deg_per_30m(
@@ -46,17 +52,18 @@ def build_segment_dls_limits_deg_per_30m(
     return limits
 
 
-@dataclass(frozen=True)
-class Point3D:
+class Point3D(FrozenModel):
     """Cartesian point in meters: X=East, Y=North, Z=TVD (positive down)."""
 
     x: float
     y: float
     z: float
 
+    def __init__(self, x: float, y: float, z: float):
+        super().__init__(x=x, y=y, z=z)
 
-@dataclass(frozen=True)
-class TrajectoryConfig:
+
+class TrajectoryConfig(FrozenModel):
     md_step_m: float = 10.0
     md_step_control_m: float = 2.0
     pos_tolerance_m: float = 2.0
@@ -78,19 +85,28 @@ class TrajectoryConfig:
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: float = 30.0
 
-    dls_limits_deg_per_30m: Dict[str, float] = field(
+    dls_limits_deg_per_30m: Dict[str, float] = Field(
         default_factory=lambda: build_segment_dls_limits_deg_per_30m(
             DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
         )
     )
 
-    def __post_init__(self) -> None:
+    @field_validator("dls_limits_deg_per_30m", mode="before")
+    @classmethod
+    def _normalize_dls_limits(cls, value: object) -> Dict[str, float]:
+        if value is None:
+            return build_segment_dls_limits_deg_per_30m(
+                DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+            )
+        limits = dict(value)  # type: ignore[arg-type]
+        return {str(key): float(raw_value) for key, raw_value in limits.items()}
+
+    @model_validator(mode="after")
+    def _sync_build_limits(self) -> "TrajectoryConfig":
         default_limits = build_segment_dls_limits_deg_per_30m(
             DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
         )
-        current_limits = {
-            str(key): float(value) for key, value in self.dls_limits_deg_per_30m.items()
-        }
+        current_limits = dict(self.dls_limits_deg_per_30m)
         if (
             current_limits == default_limits
             and abs(
@@ -106,11 +122,11 @@ class TrajectoryConfig:
                     float(self.dls_build_max_deg_per_30m)
                 ),
             )
+        return self
 
 
-@dataclass(frozen=True)
-class PlannerResult:
-    stations: "pandas.DataFrame"
-    summary: Dict[str, float | str]
+class PlannerResult(FrozenArbitraryModel):
+    stations: pd.DataFrame
+    summary: SummaryDict
     azimuth_deg: float
     md_t1_m: float

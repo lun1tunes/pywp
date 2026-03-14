@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 from typing import Iterable
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.pydantic_base import FrozenModel
 
 
-@dataclass(frozen=True)
-class T1T3OrderIssue:
+class T1T3OrderIssue(FrozenModel):
     well_name: str
     t1_offset_m: float
     t3_offset_m: float

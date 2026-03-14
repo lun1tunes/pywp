@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 from pywp.models import (
     TURN_SOLVER_DE_HYBRID,
@@ -108,6 +109,22 @@ def test_non_planar_turn_solver_least_squares_hits_targets() -> None:
     assert str(result.summary["solver_turn_mode"]) == TURN_SOLVER_LEAST_SQUARES
     assert int(result.summary["solver_turn_max_restarts"]) == int(config.turn_solver_max_restarts)
     assert int(result.summary["solver_turn_restarts_used"]) >= 0
+
+
+def test_non_planar_solver_handles_post_entry_inc_drop_with_default_limits() -> None:
+    config = TrajectoryConfig(turn_solver_max_restarts=0)
+    result = TrajectoryPlanner().plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(900.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["horizontal_inc_deg"]) < float(result.summary["entry_inc_deg"])
+    assert int(result.summary["solver_turn_restarts_used"]) == 0
+    assert float(result.summary["azimuth_turn_deg"]) > 1.0
 
 
 @pytest.mark.slow
@@ -248,13 +265,5 @@ def test_planner_validates_supported_entry_inc_target_range() -> None:
 
 
 def test_planner_rejects_unknown_turn_solver_mode() -> None:
-    planner = TrajectoryPlanner()
-    config = _fast_config(turn_solver_mode="unsupported_turn_solver")  # type: ignore[arg-type]
-
-    with pytest.raises(PlanningError, match="turn_solver_mode must be one of"):
-        planner.plan(
-            surface=Point3D(0.0, 0.0, 0.0),
-            t1=Point3D(600.0, 800.0, 2400.0),
-            t3=Point3D(1500.0, 2000.0, 2500.0),
-            config=config,
-        )
+    with pytest.raises(ValidationError, match="least_squares|de_hybrid"):
+        _fast_config(turn_solver_mode="unsupported_turn_solver")  # type: ignore[arg-type]
