@@ -24,10 +24,11 @@ def render_run_log_panel(
     if not run_log_lines:
         return
 
+    expander_title = title or "Лог расчета"
+
     def _render_body() -> None:
-        if title:
-            st.markdown(f"### {title}")
-        st.code("\n".join(run_log_lines), language="text")
+        with st.expander(expander_title, expanded=False):
+            st.code("\n".join(run_log_lines), language="text")
 
     if border:
         with st.container(border=True):
