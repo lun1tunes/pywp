@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import pandas as pd
+from pydantic import BaseModel
+
 from pywp.models import Point3D
 from pywp.ui_well_result import (
+    SUMMARY_TECH_HIDDEN_METRICS,
+    SingleWellResultView,
+    build_target_validation_rows,
     collect_issue_messages,
     horizontal_offset_m,
     md_postcheck_issue_message,
@@ -35,3 +41,87 @@ def test_horizontal_offset_m_uses_xy_distance_only() -> None:
     surface = Point3D(1000.0, 2000.0, 0.0)
     t1 = Point3D(1012.0, 2016.0, 3000.0)
     assert horizontal_offset_m(point=t1, reference=surface) == 20.0
+
+
+def test_build_target_validation_rows_formats_exact_and_control_metrics() -> None:
+    summary = {
+        "distance_t1_m": 0.1234,
+        "distance_t3_m": 1.75,
+        "distance_t1_control_m": 0.4567,
+        "distance_t3_control_m": 1.95,
+        "control_gap_t1_m": 0.02,
+        "control_gap_t3_m": 0.08,
+        "entry_inc_deg": 86.0,
+        "entry_inc_control_deg": 85.94,
+        "t1_miss_dx_m": 0.10,
+        "t1_miss_dy_m": -0.20,
+        "t1_miss_dz_m": 0.30,
+        "t3_miss_dx_m": 1.10,
+        "t3_miss_dy_m": 0.20,
+        "t3_miss_dz_m": -0.40,
+    }
+
+    rows = build_target_validation_rows(summary)
+    assert rows[0] == {"Показатель": "Промах t1 (аналитический)", "Значение": "0.1234 m"}
+    assert rows[1] == {"Показатель": "Промах t3 (аналитический)", "Значение": "1.75 m"}
+    assert rows[6]["Показатель"] == "Компоненты промаха t1 (dX / dY / dZ)"
+    assert rows[6]["Значение"] == "0.10 / -0.20 / 0.30 м"
+    assert rows[-1] == {
+        "Показатель": "INC на t1: analytic / control-grid",
+        "Значение": "86.00 / 85.94 deg",
+    }
+
+
+def test_summary_tech_hidden_metrics_cover_raw_validation_fields() -> None:
+    assert "distance_t1_m" in SUMMARY_TECH_HIDDEN_METRICS
+    assert "distance_t3_control_m" in SUMMARY_TECH_HIDDEN_METRICS
+    assert "t1_exact_x_m" in SUMMARY_TECH_HIDDEN_METRICS
+    assert "t3_miss_dz_m" in SUMMARY_TECH_HIDDEN_METRICS
+
+
+def test_single_well_result_view_accepts_model_like_inputs_from_stale_session_state() -> None:
+    class LegacyPoint(BaseModel):
+        x: float
+        y: float
+        z: float
+
+    class LegacyConfig(BaseModel):
+        md_step_m: float = 10.0
+        md_step_control_m: float = 2.0
+        pos_tolerance_m: float = 2.0
+        entry_inc_target_deg: float = 86.0
+        entry_inc_tolerance_deg: float = 2.0
+        max_inc_deg: float = 95.0
+        dls_build_min_deg_per_30m: float = 0.0
+        dls_build_max_deg_per_30m: float = 3.0
+        kop_min_vertical_m: float = 550.0
+        max_total_md_m: float = 12000.0
+        max_total_md_postcheck_m: float = 6500.0
+        objective_mode: str = "minimize_total_md"
+        turn_solver_mode: str = "least_squares"
+        turn_solver_max_restarts: int = 2
+        min_structural_segment_m: float = 30.0
+        dls_limits_deg_per_30m: dict[str, float] = {
+            "VERTICAL": 1.0,
+            "BUILD1": 3.0,
+            "HOLD": 2.0,
+            "BUILD2": 3.0,
+            "HORIZONTAL": 2.0,
+        }
+
+    view = SingleWellResultView(
+        well_name="single_well",
+        surface=LegacyPoint(x=0.0, y=0.0, z=0.0),
+        t1=LegacyPoint(x=600.0, y=800.0, z=2400.0),
+        t3=LegacyPoint(x=1500.0, y=2000.0, z=2500.0),
+        stations=pd.DataFrame({"MD_m": [0.0], "X_m": [0.0], "Y_m": [0.0], "Z_m": [0.0]}),
+        summary={"trajectory_type": "Unified J Profile + Build + Azimuth Turn"},
+        config=LegacyConfig(),
+        azimuth_deg=0.0,
+        md_t1_m=1000.0,
+    )
+
+    assert isinstance(view.surface, Point3D)
+    assert isinstance(view.t1, Point3D)
+    assert isinstance(view.t3, Point3D)
+    assert view.config.turn_solver_mode == "least_squares"

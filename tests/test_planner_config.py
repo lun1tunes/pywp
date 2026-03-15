@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 from pydantic import ValidationError
 
 from pywp.models import (
     DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
     OBJECTIVE_MINIMIZE_TOTAL_MD,
+    Point3D,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
     build_segment_dls_limits_deg_per_30m,
@@ -65,6 +68,50 @@ def test_trajectory_config_validated_copy_revalidates_and_syncs_limits() -> None
 
     with pytest.raises(ValidationError, match="least_squares|de_hybrid"):
         cfg.validated_copy(turn_solver_mode="unsupported_turn_solver")
+
+
+def test_trajectory_config_rejects_cross_field_invalid_values_at_model_boundary() -> None:
+    with pytest.raises(ValidationError, match="entry_inc_target_deg cannot exceed max_inc_deg"):
+        TrajectoryConfig(entry_inc_target_deg=85.0, max_inc_deg=80.0)
+
+    with pytest.raises(
+        ValidationError,
+        match="dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m",
+    ):
+        TrajectoryConfig(dls_build_min_deg_per_30m=4.0, dls_build_max_deg_per_30m=3.0)
+
+    with pytest.raises(
+        ValidationError, match="min_structural_segment_m must be >= md_step_control_m"
+    ):
+        TrajectoryConfig(min_structural_segment_m=1.0, md_step_control_m=2.0)
+
+
+def test_trajectory_config_normalizes_partial_dls_map_and_syncs_build_segments() -> None:
+    cfg = TrajectoryConfig(
+        dls_build_max_deg_per_30m=5.5,
+        dls_limits_deg_per_30m={"HORIZONTAL": 3.5},
+    )
+
+    assert cfg.dls_limits_deg_per_30m == {
+        "VERTICAL": 1.0,
+        "BUILD1": 5.5,
+        "HOLD": 2.0,
+        "BUILD2": 5.5,
+        "HORIZONTAL": 3.5,
+    }
+
+
+def test_trajectory_config_rejects_unknown_dls_segment_names() -> None:
+    with pytest.raises(ValidationError, match="Unsupported DLS segment names"):
+        TrajectoryConfig(dls_limits_deg_per_30m={"BUILD3": 4.0})
+
+
+def test_point3d_rejects_non_finite_coordinates() -> None:
+    with pytest.raises(ValidationError):
+        Point3D(x=math.nan, y=0.0, z=0.0)
+
+    with pytest.raises(ValidationError):
+        Point3D(x=0.0, y=math.inf, z=0.0)
 
 
 def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits() -> None:

@@ -4,11 +4,12 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 import pandas as pd
+from pydantic import field_validator
 
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import Point3D, SummaryDict, TrajectoryConfig
 from pywp.planner import PlanningError, TrajectoryPlanner
-from pywp.pydantic_base import FrozenArbitraryModel
+from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.ui_utils import dls_to_pi
 
@@ -29,6 +30,16 @@ class SuccessfulWellPlan(FrozenArbitraryModel):
     config: TrajectoryConfig
     md_postcheck_exceeded: bool = False
     md_postcheck_message: str = ""
+
+    @field_validator("surface", "t1", "t3", mode="before")
+    @classmethod
+    def _coerce_point3d(cls, value: object) -> Point3D:
+        return coerce_model_like(value, Point3D)
+
+    @field_validator("config", mode="before")
+    @classmethod
+    def _coerce_config(cls, value: object) -> TrajectoryConfig:
+        return coerce_model_like(value, TrajectoryConfig)
 
 
 class WelltrackBatchPlanner:

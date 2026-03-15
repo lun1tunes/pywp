@@ -18,7 +18,8 @@ TRAJECTORY_COLOR_PRIMARY = "#C1121F"
 PLAN_CSB_COLOR = "#0B6E4F"
 ACTUAL_PROFILE_COLOR = "#111111"
 TARGET_COLOR_PRIMARY = "#C1121F"
-INC_LABEL_COLOR = TARGET_COLOR_PRIMARY
+INC_LABEL_TEXT_COLOR = TARGET_COLOR_PRIMARY
+INC_LABEL_TICK_COLOR = "#000000"
 SEGMENT_COLORS = {
     "BUILD1": "#F77F00",
     "HOLD": "#2A9D8F",
@@ -243,7 +244,7 @@ def _add_section_inc_labels(
             y0=y_start,
             x1=x_end,
             y1=y_end,
-            line={"color": INC_LABEL_COLOR, "width": 3},
+            line={"color": INC_LABEL_TICK_COLOR, "width": 3},
         )
 
         label_dx = normal_x_norm * (tick_length_norm + text_gap_norm) * x_span
@@ -278,7 +279,7 @@ def _add_section_inc_labels(
             mode="text",
             text=text_labels,
             textposition=text_positions,
-            textfont={"size": 13, "color": INC_LABEL_COLOR},
+            textfont={"size": 13, "color": INC_LABEL_TEXT_COLOR},
             cliponaxis=False,
             name="INC метки",
             showlegend=False,

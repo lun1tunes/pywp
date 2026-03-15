@@ -63,9 +63,25 @@ def test_parse_solver_error_recommends_turn_restarts_for_turn_miss() -> None:
     text = (
         "No valid trajectory solution found within configured limits. Closest miss to t1 is 7.87 m.\n"
         "Reasons and actions:\n"
-        "- Solver endpoint miss to t1 after optimization is 7.87 m (tolerance 2.00 m).\n"
+        "- Solver endpoint miss to t1 after optimization is 7.87 m (tolerance 2.00 m). "
+        "Best analytical delta: dX=1.00 m, dY=7.50 m, dZ=1.80 m.\n"
     )
     rows = diagnostics_rows_ru(text)
     assert rows
     assert "7.87 м" in rows[0]["Причина"]
+    assert "dX=1.00 м" in rows[0]["Причина"]
     assert "рестартов решателя" in rows[0]["Что изменить"]
+
+
+def test_parse_solver_error_formats_exact_target_delta_for_direct_miss() -> None:
+    text = (
+        "Failed to hit t3 within tolerance. Miss=7.87 m, tolerance=2.00 m. "
+        "Analytical delta: dX=3.51 m, dY=7.02 m, dZ=0.57 m. "
+        "Increase HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
+    )
+    rows = diagnostics_rows_ru(text)
+    assert rows
+    assert "Точка t3" in rows[0]["Причина"]
+    assert "dX=3.51 м" in rows[0]["Причина"]
+    assert "dY=7.02 м" in rows[0]["Причина"]
+    assert "dZ=0.57 м" in rows[0]["Причина"]

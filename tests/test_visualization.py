@@ -178,6 +178,11 @@ def test_section_view_includes_non_overlapping_unique_inc_labels() -> None:
     labels = [str(value) for value in inc_text_trace.text]
     assert labels
     assert len(labels) == len(set(labels))
+    assert str(inc_text_trace.textfont.color) == "#C1121F"
+
+    shapes = fig_section.layout.shapes or ()
+    assert shapes
+    assert all(str(shape.line.color) == "#000000" for shape in shapes)
 
 
 def test_plan_and_actual_overlays_are_rendered_on_3d_and_2d_views() -> None:

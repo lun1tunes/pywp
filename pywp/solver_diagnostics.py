@@ -121,13 +121,20 @@ def _item_from_text(line: str) -> DiagnosticItem:
         )
 
     match = re.search(
-        rf"Failed to hit t[13] within tolerance.*Miss=({_RE_FLOAT}) m, tolerance=({_RE_FLOAT}) m",
+        rf"Failed to hit t([13]) within tolerance.*Miss=({_RE_FLOAT}) m, tolerance=({_RE_FLOAT}) m(?:.*Analytical delta:\s*dX=({_RE_FLOAT}) m,\s*dY=({_RE_FLOAT}) m,\s*dZ=({_RE_FLOAT}) m)?",
         text,
     )
     if match:
-        miss, tol = match.group(1), match.group(2)
+        target_name, miss, tol = match.group(1), match.group(2), match.group(3)
+        dx, dy, dz = match.group(4), match.group(5), match.group(6)
+        delta_suffix = ""
+        if dx is not None and dy is not None and dz is not None:
+            delta_suffix = f" (dX={dx} м, dY={dy} м, dZ={dz} м)"
         return DiagnosticItem(
-            reason_ru=f"Цель не достигнута в допуске: промах {miss} м при допуске {tol} м.",
+            reason_ru=(
+                f"Точка t{target_name} не достигнута в допуске: "
+                f"промах {miss} м при допуске {tol} м{delta_suffix}."
+            ),
             action_ru=(
                 "Увеличьте допустимое число рестартов решателя; "
                 "также можно ослабить допуск или скорректировать геометрию целей."
@@ -266,13 +273,20 @@ def _item_from_text(line: str) -> DiagnosticItem:
         )
 
     match = re.search(
-        rf"Solver endpoint miss to t1 after optimization is ({_RE_FLOAT}) m \(tolerance ({_RE_FLOAT}) m\)",
+        rf"Solver endpoint miss to t1 after optimization is ({_RE_FLOAT}) m \(tolerance ({_RE_FLOAT}) m\)(?:.*Best analytical delta:\s*dX=({_RE_FLOAT}) m,\s*dY=({_RE_FLOAT}) m,\s*dZ=({_RE_FLOAT}) m)?",
         text,
     )
     if match:
         miss, tol = match.group(1), match.group(2)
+        dx, dy, dz = match.group(3), match.group(4), match.group(5)
+        delta_suffix = ""
+        if dx is not None and dy is not None and dz is not None:
+            delta_suffix = f" (dX={dx} м, dY={dy} м, dZ={dz} м)"
         return DiagnosticItem(
-            reason_ru=f"После оптимизации решателя промах по t1 составил {miss} м (допуск {tol} м).",
+            reason_ru=(
+                f"После оптимизации решателя промах по t1 составил {miss} м "
+                f"(допуск {tol} м){delta_suffix}."
+            ),
             action_ru=(
                 "Увеличьте допустимое число рестартов решателя, ослабьте допуск по позиции "
                 "или скорректируйте геометрию целей."

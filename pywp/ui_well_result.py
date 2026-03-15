@@ -4,10 +4,10 @@ from typing import Mapping, Sequence
 
 import pandas as pd
 import streamlit as st
+from pydantic import field_validator
 
 from pywp.models import Point3D, SummaryValue, TrajectoryConfig
-from pywp.planner_config import OBJECTIVE_OPTIONS
-from pywp.pydantic_base import FrozenArbitraryModel
+from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.ui_utils import arrow_safe_text_dataframe, dls_to_pi, format_distance
 from pywp.ui_well_panels import (
     render_plan_section_panel,
@@ -22,6 +22,7 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("entry_inc_deg", "Угол входа в пласт, deg"),
     ("hold_inc_deg", "ЗУ секции HOLD, deg"),
     ("hold_length_m", "Длина HOLD, м"),
+    ("build_dls_selected_deg_per_30m", "Выбранный BUILD ПИ, deg/10m"),
     ("horizontal_length_m", "Длина горизонтального ствола, м"),
     ("kop_md_m", "KOP MD, м"),
     ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
@@ -29,6 +30,30 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("max_inc_deg", "Макс INC лимит, deg"),
     ("md_total_m", "Итоговая MD, м"),
     ("max_total_md_postcheck_m", "Лимит итоговой MD (постпроверка), м"),
+)
+
+SUMMARY_TECH_HIDDEN_METRICS = frozenset(
+    {
+        "distance_t1_m",
+        "distance_t3_m",
+        "distance_t1_control_m",
+        "distance_t3_control_m",
+        "control_gap_t1_m",
+        "control_gap_t3_m",
+        "entry_inc_control_deg",
+        "t1_exact_x_m",
+        "t1_exact_y_m",
+        "t1_exact_z_m",
+        "t3_exact_x_m",
+        "t3_exact_y_m",
+        "t3_exact_z_m",
+        "t1_miss_dx_m",
+        "t1_miss_dy_m",
+        "t1_miss_dz_m",
+        "t3_miss_dx_m",
+        "t3_miss_dy_m",
+        "t3_miss_dz_m",
+    }
 )
 
 
@@ -47,6 +72,16 @@ class SingleWellResultView(FrozenArbitraryModel):
     trajectory_line_dash: str = "solid"
     plan_csb_stations: pd.DataFrame | None = None
     actual_stations: pd.DataFrame | None = None
+
+    @field_validator("surface", "t1", "t3", mode="before")
+    @classmethod
+    def _coerce_point3d(cls, value: object) -> Point3D:
+        return coerce_model_like(value, Point3D)
+
+    @field_validator("config", mode="before")
+    @classmethod
+    def _coerce_config(cls, value: object) -> TrajectoryConfig:
+        return coerce_model_like(value, TrajectoryConfig)
 
 
 def horizontal_offset_m(*, point: Point3D, reference: Point3D) -> float:
@@ -115,6 +150,52 @@ def _format_summary_key(metric_key: str) -> str:
     return key
 
 
+def build_target_validation_rows(
+    summary: Mapping[str, SummaryValue],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+
+    def add_distance_row(label: str, key: str) -> None:
+        value = summary.get(key)
+        if value is None:
+            return
+        rows.append({"Показатель": label, "Значение": format_distance(float(value))})
+
+    def add_vector_row(label: str, dx_key: str, dy_key: str, dz_key: str) -> None:
+        if not all(key in summary for key in (dx_key, dy_key, dz_key)):
+            return
+        rows.append(
+            {
+                "Показатель": label,
+                "Значение": (
+                    f"{float(summary[dx_key]):.2f} / "
+                    f"{float(summary[dy_key]):.2f} / "
+                    f"{float(summary[dz_key]):.2f} м"
+                ),
+            }
+        )
+
+    add_distance_row("Промах t1 (аналитический)", "distance_t1_m")
+    add_distance_row("Промах t3 (аналитический)", "distance_t3_m")
+    add_distance_row("Промах t1 (control-grid)", "distance_t1_control_m")
+    add_distance_row("Промах t3 (control-grid)", "distance_t3_control_m")
+    add_distance_row("Расхождение t1: analytic vs control-grid", "control_gap_t1_m")
+    add_distance_row("Расхождение t3: analytic vs control-grid", "control_gap_t3_m")
+    add_vector_row("Компоненты промаха t1 (dX / dY / dZ)", "t1_miss_dx_m", "t1_miss_dy_m", "t1_miss_dz_m")
+    add_vector_row("Компоненты промаха t3 (dX / dY / dZ)", "t3_miss_dx_m", "t3_miss_dy_m", "t3_miss_dz_m")
+    if "entry_inc_deg" in summary and "entry_inc_control_deg" in summary:
+        rows.append(
+            {
+                "Показатель": "INC на t1: analytic / control-grid",
+                "Значение": (
+                    f"{float(summary['entry_inc_deg']):.2f} / "
+                    f"{float(summary['entry_inc_control_deg']):.2f} deg"
+                ),
+            }
+        )
+    return rows
+
+
 def render_key_metrics(
     *,
     view: SingleWellResultView,
@@ -132,18 +213,6 @@ def render_key_metrics(
     def _render_body() -> None:
         if title:
             st.markdown(f"### {title}")
-        objective_requested = str(summary.get("objective_mode_requested", ""))
-        objective_applied = str(
-            summary.get("objective_mode_applied", objective_requested)
-        )
-        objective_requested_label = OBJECTIVE_OPTIONS.get(
-            objective_requested,
-            objective_requested,
-        )
-        objective_applied_label = OBJECTIVE_OPTIONS.get(
-            objective_applied,
-            objective_applied,
-        )
         metrics_rows = [
             {"Показатель": "Модель траектории", "Значение": str(summary["trajectory_type"])},
             {
@@ -175,19 +244,6 @@ def render_key_metrics(
                 "Значение": "—" if view.runtime_s is None else f"{float(view.runtime_s):.2f} с",
             },
         ]
-        if objective_requested:
-            objective_value = objective_requested_label
-            if objective_applied and objective_applied != objective_requested:
-                objective_value = (
-                    f"{objective_requested_label} -> {objective_applied_label}"
-                )
-            metrics_rows.insert(
-                2,
-                {
-                    "Показатель": "Целевая функция (запрошено/применено)",
-                    "Значение": objective_value,
-                },
-            )
         st.dataframe(
             arrow_safe_text_dataframe(pd.DataFrame(metrics_rows)),
             width="stretch",
@@ -253,11 +309,12 @@ def render_result_tables(
     summary = view.summary
     tab_summary, tab_survey = st.tabs([summary_tab_label, survey_tab_label])
     with tab_summary:
-        hidden_metrics = {"distance_t1_m", "distance_t3_m"}
+        hidden_metrics = SUMMARY_TECH_HIDDEN_METRICS
         summary_visible = {
             key: value for key, value in summary.items() if key not in hidden_metrics
         }
         summary_visible["t1_horizontal_offset_m"] = float(t1_horizontal_offset_m)
+        validation_rows = build_target_validation_rows(summary)
 
         main_rows: list[dict[str, str]] = []
         for key, label in SUMMARY_MAIN_METRICS:
@@ -299,6 +356,17 @@ def render_result_tables(
             width="stretch",
             hide_index=True,
         )
+        if validation_rows:
+            with st.expander("Контроль попадания и точность расчета", expanded=False):
+                st.dataframe(
+                    arrow_safe_text_dataframe(pd.DataFrame(validation_rows)),
+                    width="stretch",
+                    hide_index=True,
+                )
+                st.caption(
+                    "Промахи t1/t3 и INC на входе считаются аналитически по сегментам профиля. "
+                    "Control-grid используется для survey-таблицы, графиков и постконтроля DLS."
+                )
         with st.expander("Технические параметры и диагностика решателя", expanded=False):
             st.dataframe(
                 arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),

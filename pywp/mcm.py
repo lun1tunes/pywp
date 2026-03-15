@@ -31,9 +31,22 @@ def dogleg_angle_rad(
 
 def ratio_factor(beta_rad: np.ndarray | float, eps: float = 1e-12) -> np.ndarray:
     beta = np.asarray(beta_rad, dtype=float)
+    abs_beta = np.abs(beta)
     rf = np.ones_like(beta)
-    mask = np.abs(beta) > eps
-    rf[mask] = (2.0 / beta[mask]) * np.tan(beta[mask] / 2.0)
+    small_mask = (abs_beta > eps) & (abs_beta < 1e-3)
+    large_mask = abs_beta >= 1e-3
+
+    if np.any(small_mask):
+        beta2 = beta[small_mask] * beta[small_mask]
+        # Stable Taylor expansion of tan(beta / 2) / (beta / 2) near zero.
+        rf[small_mask] = (
+            1.0
+            + beta2 / 12.0
+            + (beta2 * beta2) / 120.0
+            + (17.0 * beta2 * beta2 * beta2) / 20160.0
+        )
+    if np.any(large_mask):
+        rf[large_mask] = (2.0 / beta[large_mask]) * np.tan(beta[large_mask] / 2.0)
     return rf
 
 

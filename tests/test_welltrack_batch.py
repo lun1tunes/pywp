@@ -4,10 +4,11 @@ from typing import Any
 
 import pandas as pd
 import pytest
+from pydantic import BaseModel
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import PlannerResult, TrajectoryConfig
-from pywp.welltrack_batch import WelltrackBatchPlanner
+from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 
 def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
@@ -247,3 +248,49 @@ def test_batch_planner_keeps_success_when_md_postcheck_exceeded() -> None:
     assert "Превышен лимит итоговой MD" in str(row["Проблема"])
     assert successes[0].md_postcheck_exceeded is True
     assert "Превышен лимит итоговой MD" in successes[0].md_postcheck_message
+
+
+def test_successful_well_plan_accepts_model_like_inputs() -> None:
+    class LegacyPoint(BaseModel):
+        x: float
+        y: float
+        z: float
+
+    class LegacyConfig(BaseModel):
+        md_step_m: float = 10.0
+        md_step_control_m: float = 2.0
+        pos_tolerance_m: float = 2.0
+        entry_inc_target_deg: float = 86.0
+        entry_inc_tolerance_deg: float = 2.0
+        max_inc_deg: float = 95.0
+        dls_build_min_deg_per_30m: float = 0.0
+        dls_build_max_deg_per_30m: float = 3.0
+        kop_min_vertical_m: float = 550.0
+        max_total_md_m: float = 12000.0
+        max_total_md_postcheck_m: float = 6500.0
+        objective_mode: str = "minimize_total_md"
+        turn_solver_mode: str = "least_squares"
+        turn_solver_max_restarts: int = 2
+        min_structural_segment_m: float = 30.0
+        dls_limits_deg_per_30m: dict[str, float] = {
+            "VERTICAL": 1.0,
+            "BUILD1": 3.0,
+            "HOLD": 2.0,
+            "BUILD2": 3.0,
+            "HORIZONTAL": 2.0,
+        }
+
+    plan = SuccessfulWellPlan(
+        name="WELL-1",
+        surface=LegacyPoint(x=0.0, y=0.0, z=0.0),
+        t1=LegacyPoint(x=600.0, y=800.0, z=2400.0),
+        t3=LegacyPoint(x=1500.0, y=2000.0, z=2500.0),
+        stations=pd.DataFrame({"MD_m": [0.0], "X_m": [0.0], "Y_m": [0.0], "Z_m": [0.0]}),
+        summary={"trajectory_type": "Unified J Profile + Build + Azimuth Turn"},
+        azimuth_deg=0.0,
+        md_t1_m=1000.0,
+        config=LegacyConfig(),
+    )
+
+    assert plan.surface.x == 0.0
+    assert plan.config.turn_solver_mode == "least_squares"

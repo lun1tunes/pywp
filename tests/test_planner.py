@@ -50,6 +50,24 @@ def test_same_direction_reference_case_solves_with_minimum_kop() -> None:
     assert float(result.summary["max_dls_build2_deg_per_30m"]) <= 6.0 + 1e-6
 
 
+def test_translated_surface_coordinates_preserve_exact_endpoint_validation() -> None:
+    config = _fast_config(turn_solver_max_restarts=0)
+    surface = Point3D(598863.0, 7411139.0, 0.0)
+    result = TrajectoryPlanner().plan(
+        surface=surface,
+        t1=Point3D(599463.0, 7411939.0, 2400.0),
+        t3=Point3D(600363.0, 7413139.0, 2500.0),
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["t1_exact_x_m"]) == pytest.approx(599463.0, abs=1e-4)
+    assert float(result.summary["t1_exact_y_m"]) == pytest.approx(7411939.0, abs=1e-4)
+    assert float(result.summary["t3_exact_x_m"]) == pytest.approx(600363.0, abs=1e-4)
+    assert float(result.summary["t3_exact_y_m"]) == pytest.approx(7413139.0, abs=1e-4)
+
+
 def test_higher_min_vertical_pushes_kop_up_deterministically() -> None:
     config_low = _fast_config(kop_min_vertical_m=550.0)
     config_high = _fast_config(kop_min_vertical_m=900.0)
@@ -92,6 +110,49 @@ def test_higher_build_dls_reduces_total_md() -> None:
     )
 
     assert float(result_hard.summary["md_total_m"]) <= float(result_soft.summary["md_total_m"])
+
+
+def test_solver_relaxes_build_dls_below_max_for_reverse_entry_geometry() -> None:
+    config = _fast_config(
+        dls_build_min_deg_per_30m=0.0,
+        dls_build_max_deg_per_30m=3.0,
+        turn_solver_max_restarts=0,
+        max_total_md_m=20000.0,
+        max_total_md_postcheck_m=20000.0,
+    )
+    result = TrajectoryPlanner().plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(2500.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["build_dls_selected_deg_per_30m"]) < float(
+        config.dls_build_max_deg_per_30m
+    )
+    assert 1.5 <= float(result.summary["build_dls_selected_deg_per_30m"]) <= 2.6
+    assert str(result.summary["build_dls_relaxed_from_max"]) == "yes"
+    assert int(result.summary["solver_turn_restarts_used"]) == 0
+
+
+def test_fixed_high_build_dls_reports_reverse_entry_geometry() -> None:
+    config = _fast_config(
+        dls_build_min_deg_per_30m=3.0,
+        dls_build_max_deg_per_30m=3.0,
+        turn_solver_max_restarts=1,
+        max_total_md_m=20000.0,
+        max_total_md_postcheck_m=20000.0,
+    )
+
+    with pytest.raises(PlanningError, match="reverse-entry geometry"):
+        TrajectoryPlanner().plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(2500.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=config,
+        )
 
 
 def test_non_planar_turn_solver_least_squares_hits_targets() -> None:
@@ -172,7 +233,8 @@ def test_turn_solver_retries_with_deeper_search_when_first_attempt_fails(monkeyp
                 "No valid trajectory solution found within configured limits. "
                 "Closest miss to t1 is 7.87 m.\n"
                 "Reasons and actions:\n"
-                "- Solver endpoint miss to t1 after optimization is 7.87 m (tolerance 2.00 m)."
+                "- Solver endpoint miss to t1 after optimization is 7.87 m (tolerance 2.00 m). "
+                "Best analytical delta: dX=1.00 m, dY=7.50 m, dZ=1.80 m."
             )
         return original(*args, **kwargs)
 
@@ -192,16 +254,8 @@ def test_turn_solver_retries_with_deeper_search_when_first_attempt_fails(monkeyp
 
 
 def test_planner_rejects_negative_turn_restart_budget() -> None:
-    planner = TrajectoryPlanner()
-    config = _fast_config(turn_solver_max_restarts=-1)
-
-    with pytest.raises(PlanningError, match="turn_solver_max_restarts must be non-negative"):
-        planner.plan(
-            surface=Point3D(0.0, 0.0, 0.0),
-            t1=Point3D(600.0, 800.0, 2400.0),
-            t3=Point3D(1500.0, 2000.0, 2500.0),
-            config=config,
-        )
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        _fast_config(turn_solver_max_restarts=-1)
 
 
 def test_planner_keeps_solution_when_total_md_exceeds_soft_limit() -> None:
@@ -218,50 +272,68 @@ def test_planner_keeps_solution_when_total_md_exceeds_soft_limit() -> None:
     assert float(result.summary["md_postcheck_excess_m"]) > 0.0
 
 
-def test_planner_validates_negative_build_dls_bounds() -> None:
+def test_exact_endpoint_metrics_are_stable_across_control_grid_density() -> None:
     planner = TrajectoryPlanner()
-    base_kwargs = dict(
+    coarse = _fast_config(md_step_control_m=30.0)
+    fine = _fast_config(md_step_control_m=0.5)
+
+    result_coarse = planner.plan(
         surface=Point3D(0.0, 0.0, 0.0),
-        t1=Point3D(300.0, 0.0, 2500.0),
-        t3=Point3D(1500.0, 0.0, 2600.0),
+        t1=Point3D(300.0, 300.0, 2000.0),
+        t3=Point3D(900.0, 1200.0, 2075.0),
+        config=coarse,
+    )
+    result_fine = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(300.0, 300.0, 2000.0),
+        t3=Point3D(900.0, 1200.0, 2075.0),
+        config=fine,
     )
 
-    with pytest.raises(
-        PlanningError, match="dls_build_min_deg_per_30m cannot be negative"
+    for key in (
+        "distance_t1_m",
+        "distance_t3_m",
+        "entry_inc_deg",
+        "t1_exact_x_m",
+        "t1_exact_y_m",
+        "t1_exact_z_m",
+        "t3_exact_x_m",
+        "t3_exact_y_m",
+        "t3_exact_z_m",
     ):
-        planner.plan(
-            **base_kwargs,
-            config=_fast_config(dls_build_min_deg_per_30m=-0.1),
+        assert float(result_coarse.summary[key]) == pytest.approx(
+            float(result_fine.summary[key]),
+            abs=1e-9,
         )
 
-    with pytest.raises(
-        PlanningError, match="dls_build_max_deg_per_30m cannot be negative"
-    ):
+
+def test_planner_reports_exact_miss_components_in_failure_message() -> None:
+    planner = TrajectoryPlanner()
+    config = _fast_config(pos_tolerance_m=0.0001)
+
+    with pytest.raises(PlanningError, match="Analytical delta: dX=.*dY=.*dZ="):
         planner.plan(
-            **base_kwargs,
-            config=_fast_config(dls_build_max_deg_per_30m=-0.1),
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(300.0, 300.0, 2000.0),
+            t3=Point3D(900.0, 1200.0, 2075.0),
+            config=config,
         )
+
+
+def test_planner_validates_negative_build_dls_bounds() -> None:
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        _fast_config(dls_build_min_deg_per_30m=-0.1)
+
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        _fast_config(dls_build_max_deg_per_30m=-0.1)
 
 
 def test_planner_validates_supported_entry_inc_target_range() -> None:
-    planner = TrajectoryPlanner()
-    base_kwargs = dict(
-        surface=Point3D(0.0, 0.0, 0.0),
-        t1=Point3D(600.0, 800.0, 2400.0),
-        t3=Point3D(1500.0, 2000.0, 2500.0),
-    )
+    with pytest.raises(ValidationError, match="greater than 0"):
+        _fast_config(entry_inc_target_deg=-5.0)
 
-    with pytest.raises(PlanningError, match="entry_inc_target_deg must be in \\(0, 90\\)"):
-        planner.plan(
-            **base_kwargs,
-            config=_fast_config(entry_inc_target_deg=-5.0),
-        )
-
-    with pytest.raises(PlanningError, match="entry_inc_target_deg must be in \\(0, 90\\)"):
-        planner.plan(
-            **base_kwargs,
-            config=_fast_config(entry_inc_target_deg=95.0, max_inc_deg=110.0),
-        )
+    with pytest.raises(ValidationError, match="less than 90"):
+        _fast_config(entry_inc_target_deg=95.0, max_inc_deg=110.0)
 
 
 def test_planner_rejects_unknown_turn_solver_mode() -> None:
