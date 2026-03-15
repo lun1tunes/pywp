@@ -1057,7 +1057,12 @@ def _run_batch_if_clicked(
                     text=f"{index}/{total}: {name} · завершено",
                 )
                 status = str(row.get("Статус", "—"))
-                problem_text = summarize_problem_ru(str(row.get("Проблема", "")))
+                raw_problem_text = str(row.get("Проблема", "")).strip()
+                problem_text = (
+                    summarize_problem_ru(raw_problem_text)
+                    if raw_problem_text
+                    else ""
+                )
                 if status == "OK":
                     if problem_text and problem_text != "ОК":
                         append_log(

@@ -324,6 +324,9 @@ def diagnostics_rows_ru(raw_message: str) -> list[dict[str, str]]:
 
 
 def summarize_problem_ru(raw_message: str) -> str:
+    message = str(raw_message or "").strip()
+    if not message:
+        return ""
     parsed = parse_solver_error(raw_message=raw_message)
     if parsed.items:
         return parsed.items[0].reason_ru

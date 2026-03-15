@@ -37,6 +37,11 @@ def test_summarize_problem_ru_returns_human_readable_reason() -> None:
     assert "геометрия t1->t3" in summary.lower()
 
 
+def test_summarize_problem_ru_returns_empty_string_for_blank_message() -> None:
+    assert summarize_problem_ru("") == ""
+    assert summarize_problem_ru("   ") == ""
+
+
 def test_ui_error_text_converts_dls_units_to_pi_units() -> None:
     text = "BUILD DLS upper bound is insufficient: available max 3.00 deg/30m."
     converted = ui_error_text(text)
