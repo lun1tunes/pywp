@@ -126,6 +126,8 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_records_original", None)
     st.session_state.setdefault("wt_selected_names", [])
     st.session_state.setdefault("wt_retry_selected_names", [])
+    st.session_state.setdefault("wt_pending_selected_names", None)
+    st.session_state.setdefault("wt_pending_retry_selected_names", None)
     st.session_state.setdefault("wt_retry_use_custom_config", False)
     st.session_state.setdefault("wt_loaded_at", "")
     st.session_state.setdefault("wt_pad_configs", {})
@@ -145,6 +147,8 @@ def _clear_results() -> None:
     st.session_state["wt_summary_rows"] = None
     st.session_state["wt_successes"] = None
     st.session_state["wt_retry_selected_names"] = []
+    st.session_state["wt_pending_selected_names"] = None
+    st.session_state["wt_pending_retry_selected_names"] = None
     st.session_state["wt_retry_use_custom_config"] = False
     st.session_state["wt_last_error"] = ""
     st.session_state["wt_last_run_at"] = ""
@@ -938,6 +942,16 @@ def _sync_selection_state(records: list[WelltrackRecord]) -> tuple[list[str], li
         records=records,
         summary_rows=st.session_state.get("wt_summary_rows"),
     )
+    pending_general = st.session_state.pop("wt_pending_selected_names", None)
+    if pending_general is not None:
+        st.session_state["wt_selected_names"] = [
+            name for name in pending_general if name in all_names
+        ]
+    pending_retry = st.session_state.pop("wt_pending_retry_selected_names", None)
+    if pending_retry is not None:
+        st.session_state["wt_retry_selected_names"] = [
+            name for name in pending_retry if name in all_names
+        ]
 
     def _sync_key(key: str) -> None:
         current = [
@@ -1120,8 +1134,8 @@ def _store_merged_batch_results(
         records=records,
         summary_rows=merged_rows,
     )
-    st.session_state["wt_selected_names"] = list(recommended_names)
-    st.session_state["wt_retry_selected_names"] = list(recommended_names)
+    st.session_state["wt_pending_selected_names"] = list(recommended_names)
+    st.session_state["wt_pending_retry_selected_names"] = list(recommended_names)
 
 
 def _run_batch_if_clicked(
@@ -1482,9 +1496,6 @@ def run_page() -> None:
         reset_params_clicked=reset_params_clicked,
     )
 
-    if st.session_state.get("wt_last_error"):
-        render_solver_diagnostics(st.session_state["wt_last_error"])
-
     records = st.session_state.get("wt_records")
     if records is None:
         st.info("Загрузите источник и нажмите «Прочитать WELLTRACK».")
@@ -1501,6 +1512,8 @@ def run_page() -> None:
     requests = _render_batch_run_forms(records=records, all_names=all_names)
     _run_batch_if_clicked(requests=requests, records=records)
     _render_batch_log()
+    if st.session_state.get("wt_last_error"):
+        render_solver_diagnostics(st.session_state["wt_last_error"])
 
     summary_rows = st.session_state.get("wt_summary_rows")
     successes = st.session_state.get("wt_successes")

@@ -44,6 +44,14 @@ def _multiselect_value(at: AppTest, label: str) -> list[str] | None:
     return [str(item) for item in matches[0].value]
 
 
+def _click_button(at: AppTest, label: str) -> None:
+    for widget in at.button:
+        if widget.label == label:
+            widget.click()
+            return
+    raise AssertionError(f"Button not found: {label}")
+
+
 def test_welltrack_page_shows_only_general_run_before_results() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _records()
@@ -107,3 +115,26 @@ def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> Non
     assert _multiselect_value(at, "Скважины для повторного расчета") == expected
     checkbox_labels = [widget.label for widget in at.checkbox]
     assert "Использовать отдельные параметры для повторного расчета" in checkbox_labels
+
+
+def test_welltrack_successful_batch_run_clears_stale_error_and_updates_selection_on_next_run() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_last_error"] = "Batch-расчет завершился ошибкой"
+
+    at.run()
+    _click_button(at, "Рассчитать выбранные скважины")
+    at.run(timeout=120)
+
+    assert [error.value for error in at.error] == []
+    assert at.session_state["wt_last_error"] == ""
+
+    metrics = {widget.label: widget.value for widget in at.metric}
+    assert metrics["Без замечаний"] == "3"
+    assert metrics["Ошибки"] == "0"
+
+    at.run()
+    assert _multiselect_value(at, "Скважины для расчета") == []
+    assert _multiselect_value(at, "Скважины для повторного расчета") == []
