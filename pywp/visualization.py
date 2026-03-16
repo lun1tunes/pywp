@@ -11,7 +11,11 @@ from pywp.plot_axes import (
     linear_tick_values,
     nice_tick_step,
 )
-from pywp.uncertainty import WellUncertaintyOverlay
+from pywp.uncertainty import (
+    WellUncertaintyOverlay,
+    build_uncertainty_tube_mesh,
+    uncertainty_ribbon_polygon,
+)
 from pywp.ui_utils import dls_to_pi
 
 DEG2RAD = np.pi / 180.0
@@ -20,7 +24,8 @@ PLAN_CSB_COLOR = "#0B6E4F"
 ACTUAL_PROFILE_COLOR = "#111111"
 TARGET_COLOR_PRIMARY = "#C1121F"
 UNCERTAINTY_LINE_COLOR = "rgba(33, 33, 33, 0.42)"
-UNCERTAINTY_FILL_COLOR = "rgba(33, 33, 33, 0.08)"
+UNCERTAINTY_FILL_COLOR = "rgba(33, 33, 33, 0.16)"
+UNCERTAINTY_SURFACE_COLOR = "#5A5A5A"
 INC_LABEL_TEXT_COLOR = TARGET_COLOR_PRIMARY
 INC_LABEL_TICK_COLOR = "#000000"
 SEGMENT_COLORS = {
@@ -382,6 +387,22 @@ def _add_uncertainty_plan_or_section_traces(
     overlay: WellUncertaintyOverlay,
     projection: str,
 ) -> None:
+    ribbon = uncertainty_ribbon_polygon(overlay, projection=projection)
+    if len(ribbon) >= 3:
+        fig.add_trace(
+            go.Scatter(
+                x=ribbon[:, 0],
+                y=ribbon[:, 1],
+                mode="lines",
+                name="Конус неопределенности (2σ)",
+                legendgroup="uncertainty_overlay",
+                showlegend=True,
+                line={"width": 0.0, "color": "rgba(0, 0, 0, 0)"},
+                fill="toself",
+                fillcolor=UNCERTAINTY_FILL_COLOR,
+                hoverinfo="skip",
+            )
+        )
     for sample_index, sample in enumerate(overlay.samples):
         points = sample.ring_plan_xy if projection == "plan" else sample.ring_section_xz
         fig.add_trace(
@@ -389,12 +410,12 @@ def _add_uncertainty_plan_or_section_traces(
                 x=points[:, 0],
                 y=points[:, 1],
                 mode="lines",
-                name="Эллипс неопределенности (2σ)",
+                name="Сечение неопределенности",
                 legendgroup="uncertainty_overlay",
-                showlegend=sample_index == 0,
-                line={"width": 1.5, "color": UNCERTAINTY_LINE_COLOR},
+                showlegend=False,
+                line={"width": 1.1, "color": UNCERTAINTY_LINE_COLOR},
                 fill="toself",
-                fillcolor=UNCERTAINTY_FILL_COLOR,
+                fillcolor="rgba(0,0,0,0)",
                 customdata=_uncertainty_hover_customdata(
                     sample.md_m,
                     sample.semi_axis_inc_m,
@@ -407,6 +428,25 @@ def _add_uncertainty_plan_or_section_traces(
 
 
 def _add_uncertainty_3d_traces(fig: go.Figure, *, overlay: WellUncertaintyOverlay) -> None:
+    tube_mesh = build_uncertainty_tube_mesh(overlay)
+    if tube_mesh is not None:
+        fig.add_trace(
+            go.Mesh3d(
+                x=tube_mesh.vertices_xyz[:, 0],
+                y=tube_mesh.vertices_xyz[:, 1],
+                z=tube_mesh.vertices_xyz[:, 2],
+                i=tube_mesh.i,
+                j=tube_mesh.j,
+                k=tube_mesh.k,
+                name="Конус неопределенности (2σ)",
+                legendgroup="uncertainty_overlay",
+                showlegend=True,
+                color=UNCERTAINTY_SURFACE_COLOR,
+                opacity=0.16,
+                flatshading=True,
+                hoverinfo="skip",
+            )
+        )
     for sample_index, sample in enumerate(overlay.samples):
         fig.add_trace(
             go.Scatter3d(
@@ -414,10 +454,10 @@ def _add_uncertainty_3d_traces(fig: go.Figure, *, overlay: WellUncertaintyOverla
                 y=sample.ring_xyz[:, 1],
                 z=sample.ring_xyz[:, 2],
                 mode="lines",
-                name="Эллипс неопределенности (2σ)",
+                name="Сечение неопределенности",
                 legendgroup="uncertainty_overlay",
-                showlegend=sample_index == 0,
-                line={"width": 3, "color": UNCERTAINTY_LINE_COLOR},
+                showlegend=False,
+                line={"width": 2, "color": UNCERTAINTY_LINE_COLOR},
                 customdata=_uncertainty_hover_customdata(
                     sample.md_m,
                     sample.semi_axis_inc_m,

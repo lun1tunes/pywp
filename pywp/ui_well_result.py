@@ -284,20 +284,31 @@ def render_result_plots(
     border: bool = True,
 ) -> None:
     show_uncertainty = st.checkbox(
-        "Показать эллипсы неопределенности",
+        "Показать конус неопределенности",
         key=uncertainty_toggle_key(well_name=view.well_name),
         help=(
-            "Включает planning-level 2σ эллипсы неопределенности для 3D, плана и "
-            "вертикального разреза. Это базовая визуализация по first-order "
+            "Включает planning-level 2σ конус неопределенности для 3D, плана и "
+            "вертикального разреза. Он строится по последовательности эллиптических "
+            "сечений вдоль ствола. Это базовая визуализация по first-order "
             "ошибкам INC/AZI, без полной ISCWSA tool model."
         ),
     )
     uncertainty_overlay = None
     if show_uncertainty:
+        required_md_m = tuple(
+            float(value)
+            for value in (
+                view.summary.get("kop_md_m"),
+                view.md_t1_m,
+                view.summary.get("md_total_m"),
+            )
+            if value is not None
+        )
         uncertainty_overlay = build_uncertainty_overlay(
             stations=view.stations,
             surface=view.surface,
             azimuth_deg=float(view.azimuth_deg),
+            required_md_m=required_md_m,
         )
         st.caption(uncertainty_model_caption(uncertainty_overlay.model))
 

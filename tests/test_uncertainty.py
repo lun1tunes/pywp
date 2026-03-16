@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from pywp.models import Point3D
 from pywp.uncertainty import (
     PlanningUncertaintyModel,
     build_uncertainty_overlay,
+    build_uncertainty_tube_mesh,
     local_uncertainty_axes_xyz,
     station_uncertainty_axes_m,
     station_uncertainty_covariance_xyz,
+    uncertainty_ribbon_polygon,
 )
 
 
@@ -57,7 +60,7 @@ def test_azimuth_uncertainty_axis_vanishes_for_vertical_station() -> None:
     )
 
     assert semi_inc_m > 0.0
-    assert semi_azi_m == 0.0
+    assert semi_azi_m == semi_inc_m
 
 
 def test_build_uncertainty_overlay_returns_projected_rings() -> None:
@@ -80,3 +83,55 @@ def test_build_uncertainty_overlay_returns_projected_rings() -> None:
     assert sample.ring_section_xz.shape[1] == 2
     assert sample.semi_axis_inc_m > 0.0
     assert sample.semi_axis_azi_m > 0.0
+    assert len(sample.center_plan_xy) == 2
+    assert len(sample.center_section_xz) == 2
+
+
+def test_overlay_uses_dense_interpolated_md_samples_and_preserves_required_markers() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=100.0, max_display_ellipses=16)
+    overlay = build_uncertainty_overlay(
+        stations=_sample_df(),
+        surface=Point3D(0.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        model=model,
+        required_md_m=(135.0, 350.0, 900.0),
+    )
+
+    sample_md_values = [sample.md_m for sample in overlay.samples]
+
+    assert len(sample_md_values) > len(_sample_df()) - 1
+    assert any(np.isclose(md_value, 135.0, atol=1e-6) for md_value in sample_md_values)
+    assert any(np.isclose(md_value, 350.0, atol=1e-6) for md_value in sample_md_values)
+    required_sample = next(
+        sample for sample in overlay.samples if np.isclose(sample.md_m, 350.0, atol=1e-6)
+    )
+    assert required_sample.center_xyz[0] == pytest.approx(135.38461538, abs=1e-6)
+    assert required_sample.center_xyz[1] == pytest.approx(157.07692308, abs=1e-6)
+    assert required_sample.center_xyz[2] == pytest.approx(299.23076923, abs=1e-6)
+
+
+def test_default_mwd_proxy_radii_are_in_engineering_range_for_5_to_6km_md() -> None:
+    semi_inc_m, semi_azi_m = station_uncertainty_axes_m(
+        md_m=5500.0,
+        inc_deg=86.0,
+    )
+
+    assert 130.0 <= semi_inc_m <= 170.0
+    assert 150.0 <= semi_azi_m <= 190.0
+
+
+def test_uncertainty_ribbon_and_tube_mesh_are_continuous() -> None:
+    overlay = build_uncertainty_overlay(
+        stations=_sample_df(),
+        surface=Point3D(0.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+    )
+    ribbon = uncertainty_ribbon_polygon(overlay, projection="plan")
+    tube = build_uncertainty_tube_mesh(overlay)
+
+    assert len(ribbon) >= 5
+    assert ribbon.shape[1] == 2
+    assert tube is not None
+    assert tube.vertices_xyz.shape[1] == 3
+    assert len(tube.i) == len(tube.j) == len(tube.k)
+    assert len(tube.i) > 0
