@@ -26,10 +26,12 @@ class PlanningUncertaintyModel:
     sigma_lateral_drift_m_per_1000m: float = 12.0
     confidence_scale: float = 2.0
     sample_step_m: float = 100.0
-    max_display_ellipses: int = 36
+    max_display_ellipses: int = 84
     ellipse_points: int = 36
     min_display_radius_m: float = 0.75
     near_vertical_isotropic_threshold_deg: float = 5.0
+    directional_refine_threshold_deg: float = 5.0
+    min_refined_step_m: float = 50.0
 
     def __post_init__(self) -> None:
         if float(self.sigma_inc_deg) <= 0.0:
@@ -50,6 +52,12 @@ class PlanningUncertaintyModel:
             raise ValueError("min_display_radius_m cannot be negative.")
         if float(self.near_vertical_isotropic_threshold_deg) < 0.0:
             raise ValueError("near_vertical_isotropic_threshold_deg cannot be negative.")
+        if float(self.directional_refine_threshold_deg) <= 0.0:
+            raise ValueError("directional_refine_threshold_deg must be positive.")
+        if float(self.min_refined_step_m) <= 0.0:
+            raise ValueError("min_refined_step_m must be positive.")
+        if float(self.min_refined_step_m) > float(self.sample_step_m):
+            raise ValueError("min_refined_step_m must be <= sample_step_m.")
 
 
 DEFAULT_PLANNING_UNCERTAINTY_MODEL = PlanningUncertaintyModel()
@@ -214,8 +222,11 @@ def build_uncertainty_overlay(
     z_values = stations["Z_m"].to_numpy(dtype=float)
     angles = np.linspace(0.0, 2.0 * np.pi, int(model.ellipse_points), endpoint=False)
     samples: list[UncertaintyEllipseSample] = []
+    previous_ring_open_xyz: np.ndarray | None = None
     for md_m in _display_sample_md_values(
         md_values=md_values,
+        inc_values=inc_values,
+        azi_values_rad=azi_values_rad,
         model=model,
         required_md_m=required_md_m,
     ):
@@ -249,11 +260,17 @@ def build_uncertainty_overlay(
         center = np.array(
             [float(state["x_m"]), float(state["y_m"]), float(state["z_m"])], dtype=float
         )
-        ring_xyz = (
+        ring_open_xyz = (
             center[None, :]
             + np.cos(angles)[:, None] * (semi_inc_m * inc_axis[None, :])
             + np.sin(angles)[:, None] * (semi_azi_m * azi_axis[None, :])
         )
+        ring_open_xyz = _align_ring_for_continuity(
+            ring_open_xyz=ring_open_xyz,
+            previous_ring_open_xyz=previous_ring_open_xyz,
+        )
+        previous_ring_open_xyz = ring_open_xyz
+        ring_xyz = ring_open_xyz
         ring_xyz = np.vstack([ring_xyz, ring_xyz[0]])
         ring_plan_xy = ring_xyz[:, :2].copy()
         ring_section_xz = np.column_stack(
@@ -297,6 +314,8 @@ def build_uncertainty_overlay(
 def _display_sample_md_values(
     *,
     md_values: np.ndarray,
+    inc_values: np.ndarray,
+    azi_values_rad: np.ndarray,
     model: PlanningUncertaintyModel,
     required_md_m: tuple[float, ...] = (),
 ) -> list[float]:
@@ -321,18 +340,22 @@ def _display_sample_md_values(
         if all(abs(float(required_md) - existing) > 1e-6 for existing in sample_values):
             sample_values.append(float(required_md))
     sample_values = sorted(set(round(float(value), 6) for value in sample_values))
+    sample_values = _refine_sample_md_values(
+        md_values=md_values,
+        inc_values=inc_values,
+        azi_values_rad=azi_values_rad,
+        sample_values=sample_values,
+        model=model,
+    )
     if len(sample_values) <= int(model.max_display_ellipses):
         return sample_values
     pinned = {round(float(md_start), 6), round(float(md_end), 6)}
     pinned.update(round(float(value), 6) for value in required_md_values)
-    pick_positions = np.unique(
-        np.linspace(0, len(sample_values) - 1, int(model.max_display_ellipses), dtype=int)
+    return _downsample_sample_md_values(
+        sample_values=sample_values,
+        pinned_values=pinned,
+        max_display_ellipses=int(model.max_display_ellipses),
     )
-    selected = [sample_values[int(pos)] for pos in pick_positions.tolist()]
-    for pinned_value in pinned:
-        if all(abs(float(pinned_value) - existing) > 1e-6 for existing in selected):
-            selected.append(float(pinned_value))
-    return sorted(set(round(float(value), 6) for value in selected))
 
 
 def _required_md_values(
@@ -351,6 +374,101 @@ def _required_md_values(
             continue
         values.append(float(np.clip(md_value, md_start, md_end)))
     return sorted(set(round(float(value), 6) for value in values))
+
+
+def _refine_sample_md_values(
+    *,
+    md_values: np.ndarray,
+    inc_values: np.ndarray,
+    azi_values_rad: np.ndarray,
+    sample_values: list[float],
+    model: PlanningUncertaintyModel,
+) -> list[float]:
+    if len(sample_values) < 2:
+        return sample_values
+
+    tangent_cache: dict[float, np.ndarray] = {}
+
+    def tangent_at(md_m: float) -> np.ndarray:
+        md_key = round(float(md_m), 6)
+        if md_key in tangent_cache:
+            return tangent_cache[md_key]
+        inc_deg = float(np.interp(md_key, md_values, inc_values))
+        azi_deg = float(np.rad2deg(np.interp(md_key, md_values, azi_values_rad)) % 360.0)
+        tangent = tangent_vector_xyz(inc_deg=inc_deg, azi_deg=azi_deg)
+        tangent_cache[md_key] = tangent
+        return tangent
+
+    def angular_change_deg(md_left: float, md_right: float) -> float:
+        tangent_left = tangent_at(md_left)
+        tangent_right = tangent_at(md_right)
+        cosine = float(np.clip(np.dot(tangent_left, tangent_right), -1.0, 1.0))
+        return float(np.degrees(np.arccos(cosine)))
+
+    refined: list[float] = [float(sample_values[0])]
+
+    def refine_interval(md_left: float, md_right: float) -> None:
+        interval_m = float(md_right - md_left)
+        if interval_m <= 1e-6:
+            return
+        if interval_m <= float(model.min_refined_step_m) + 1e-9:
+            refined.append(float(md_right))
+            return
+        if angular_change_deg(md_left, md_right) <= float(model.directional_refine_threshold_deg):
+            refined.append(float(md_right))
+            return
+        midpoint = round(float(0.5 * (md_left + md_right)), 6)
+        if midpoint <= md_left + 1e-6 or midpoint >= md_right - 1e-6:
+            refined.append(float(md_right))
+            return
+        refine_interval(md_left, midpoint)
+        refine_interval(midpoint, md_right)
+
+    for md_left, md_right in zip(sample_values, sample_values[1:]):
+        refine_interval(float(md_left), float(md_right))
+    return sorted(set(round(float(value), 6) for value in refined))
+
+
+def _downsample_sample_md_values(
+    *,
+    sample_values: list[float],
+    pinned_values: set[float],
+    max_display_ellipses: int,
+) -> list[float]:
+    if len(sample_values) <= max_display_ellipses:
+        return sample_values
+
+    selected: set[float] = {
+        round(float(value), 6)
+        for value in sample_values
+        if round(float(value), 6) in pinned_values
+    }
+    if len(selected) >= max_display_ellipses:
+        return sorted(selected)[:max_display_ellipses]
+
+    pick_positions = np.unique(
+        np.linspace(0, len(sample_values) - 1, max_display_ellipses, dtype=int)
+    )
+    for pos in pick_positions.tolist():
+        selected.add(round(float(sample_values[int(pos)]), 6))
+
+    if len(selected) <= max_display_ellipses:
+        return sorted(selected)
+
+    sample_positions = {
+        round(float(value), 6): idx for idx, value in enumerate(sample_values)
+    }
+    ranked = sorted(
+        (float(value) for value in selected if float(value) not in pinned_values),
+        key=lambda value: min(
+            abs(int(sample_positions[round(float(value), 6)]) - int(pos))
+            for pos in pick_positions.tolist()
+        ),
+        reverse=True,
+    )
+    while len(selected) > max_display_ellipses and ranked:
+        selected.remove(round(float(ranked.pop(0)), 6))
+    return sorted(selected)
 
 
 def _interpolate_station_state(
@@ -536,3 +654,29 @@ def _stable_normal_plane_basis(tangent: np.ndarray) -> tuple[np.ndarray, np.ndar
     axis_2 = np.cross(tangent_unit, axis_1)
     axis_2 = axis_2 / float(np.linalg.norm(axis_2))
     return axis_1, axis_2
+
+
+def _align_ring_for_continuity(
+    *,
+    ring_open_xyz: np.ndarray,
+    previous_ring_open_xyz: np.ndarray | None,
+) -> np.ndarray:
+    if previous_ring_open_xyz is None:
+        return np.asarray(ring_open_xyz, dtype=float)
+
+    current = np.asarray(ring_open_xyz, dtype=float)
+    previous = np.asarray(previous_ring_open_xyz, dtype=float)
+    if current.shape != previous.shape or current.ndim != 2 or current.shape[0] < 3:
+        return current
+
+    best_ring = current
+    best_cost = float(np.mean(np.linalg.norm(current - previous, axis=1)))
+
+    for candidate_base in (current, current[::-1]):
+        for shift in range(current.shape[0]):
+            candidate = np.roll(candidate_base, shift=shift, axis=0)
+            candidate_cost = float(np.mean(np.linalg.norm(candidate - previous, axis=1)))
+            if candidate_cost + 1e-9 < best_cost:
+                best_ring = candidate
+                best_cost = candidate_cost
+    return best_ring

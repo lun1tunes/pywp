@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pywp.models import Point3D
+from pywp.models import Point3D, TrajectoryConfig
+from pywp.planner import TrajectoryPlanner
 from pywp.uncertainty import (
     PlanningUncertaintyModel,
     build_uncertainty_overlay,
@@ -135,3 +136,68 @@ def test_uncertainty_ribbon_and_tube_mesh_are_continuous() -> None:
     assert tube.vertices_xyz.shape[1] == 3
     assert len(tube.i) == len(tube.j) == len(tube.k)
     assert len(tube.i) > 0
+
+
+def test_regression_overlay_ring_alignment_avoids_twist_for_build_to_hold_case() -> None:
+    result = TrajectoryPlanner().plan(
+        Point3D(0.0, 0.0, 0.0),
+        Point3D(334.0, 46.0, 3769.0),
+        Point3D(1464.0, 649.0, 3806.0),
+        TrajectoryConfig(),
+    )
+    overlay = build_uncertainty_overlay(
+        stations=result.stations,
+        surface=Point3D(0.0, 0.0, 0.0),
+        azimuth_deg=float(result.azimuth_deg),
+        required_md_m=(
+            float(result.summary["kop_md_m"]),
+            float(result.md_t1_m),
+            float(result.summary["md_total_m"]),
+        ),
+    )
+
+    for prev_sample, current_sample in zip(overlay.samples, overlay.samples[1:]):
+        previous_ring = prev_sample.ring_xyz[:-1]
+        current_ring = current_sample.ring_xyz[:-1]
+        current_cost = float(np.mean(np.linalg.norm(current_ring - previous_ring, axis=1)))
+        best_cost = current_cost
+        for candidate_base in (current_ring, current_ring[::-1]):
+            for shift in range(current_ring.shape[0]):
+                candidate = np.roll(candidate_base, shift=shift, axis=0)
+                candidate_cost = float(
+                    np.mean(np.linalg.norm(candidate - previous_ring, axis=1))
+                )
+                best_cost = min(best_cost, candidate_cost)
+        assert current_cost == pytest.approx(best_cost, abs=1e-9)
+
+
+def test_adaptive_refinement_densifies_curved_build_intervals() -> None:
+    result = TrajectoryPlanner().plan(
+        Point3D(0.0, 0.0, 0.0),
+        Point3D(334.0, 46.0, 3769.0),
+        Point3D(1464.0, 649.0, 3806.0),
+        TrajectoryConfig(),
+    )
+    overlay = build_uncertainty_overlay(
+        stations=result.stations,
+        surface=Point3D(0.0, 0.0, 0.0),
+        azimuth_deg=float(result.azimuth_deg),
+        model=PlanningUncertaintyModel(
+            sample_step_m=200.0,
+            min_refined_step_m=50.0,
+            directional_refine_threshold_deg=5.0,
+            max_display_ellipses=200,
+        ),
+        required_md_m=(
+            float(result.summary["kop_md_m"]),
+            float(result.md_t1_m),
+            float(result.summary["md_total_m"]),
+        ),
+    )
+
+    sample_md_values = [sample.md_m for sample in overlay.samples]
+    curved_window = [value for value in sample_md_values if 3200.0 <= value <= 4000.0]
+    curved_gaps = [right - left for left, right in zip(curved_window, curved_window[1:])]
+
+    assert curved_window
+    assert max(curved_gaps) <= 50.0 + 1e-6

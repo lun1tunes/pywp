@@ -23,7 +23,6 @@ TRAJECTORY_COLOR_PRIMARY = "#C1121F"
 PLAN_CSB_COLOR = "#0B6E4F"
 ACTUAL_PROFILE_COLOR = "#111111"
 TARGET_COLOR_PRIMARY = "#C1121F"
-UNCERTAINTY_LINE_COLOR = "rgba(33, 33, 33, 0.42)"
 UNCERTAINTY_FILL_COLOR = "rgba(33, 33, 33, 0.16)"
 UNCERTAINTY_SURFACE_COLOR = "#5A5A5A"
 INC_LABEL_TEXT_COLOR = TARGET_COLOR_PRIMARY
@@ -52,13 +51,6 @@ HOVER_TEMPLATE_XYZ_MD_DLS = (
     "ПИ: %{customdata[4]} deg/10m"
     "<extra>%{fullData.name}</extra>"
 )
-HOVER_TEMPLATE_UNCERTAINTY = (
-    "MD: %{customdata[0]:.0f} m<br>"
-    "2σ ось INC: %{customdata[1]:.1f} m<br>"
-    "2σ ось AZI: %{customdata[2]:.1f} m"
-    "<extra>%{fullData.name}</extra>"
-)
-
 
 def _segment_blocks(segment_names: np.ndarray) -> list[tuple[int, int, str]]:
     if len(segment_names) == 0:
@@ -371,16 +363,6 @@ def _station_hover_customdata(df: pd.DataFrame) -> np.ndarray:
     )
 
 
-def _uncertainty_hover_customdata(md_m: float, semi_inc_m: float, semi_azi_m: float, count: int) -> np.ndarray:
-    return np.column_stack(
-        [
-            np.full(int(count), float(md_m), dtype=float),
-            np.full(int(count), float(semi_inc_m), dtype=float),
-            np.full(int(count), float(semi_azi_m), dtype=float),
-        ]
-    )
-
-
 def _add_uncertainty_plan_or_section_traces(
     fig: go.Figure,
     *,
@@ -403,28 +385,6 @@ def _add_uncertainty_plan_or_section_traces(
                 hoverinfo="skip",
             )
         )
-    for sample_index, sample in enumerate(overlay.samples):
-        points = sample.ring_plan_xy if projection == "plan" else sample.ring_section_xz
-        fig.add_trace(
-            go.Scatter(
-                x=points[:, 0],
-                y=points[:, 1],
-                mode="lines",
-                name="Сечение неопределенности",
-                legendgroup="uncertainty_overlay",
-                showlegend=False,
-                line={"width": 1.1, "color": UNCERTAINTY_LINE_COLOR},
-                fill="toself",
-                fillcolor="rgba(0,0,0,0)",
-                customdata=_uncertainty_hover_customdata(
-                    sample.md_m,
-                    sample.semi_axis_inc_m,
-                    sample.semi_axis_azi_m,
-                    len(points),
-                ),
-                hovertemplate=HOVER_TEMPLATE_UNCERTAINTY,
-            )
-        )
 
 
 def _add_uncertainty_3d_traces(fig: go.Figure, *, overlay: WellUncertaintyOverlay) -> None:
@@ -445,26 +405,6 @@ def _add_uncertainty_3d_traces(fig: go.Figure, *, overlay: WellUncertaintyOverla
                 opacity=0.16,
                 flatshading=True,
                 hoverinfo="skip",
-            )
-        )
-    for sample_index, sample in enumerate(overlay.samples):
-        fig.add_trace(
-            go.Scatter3d(
-                x=sample.ring_xyz[:, 0],
-                y=sample.ring_xyz[:, 1],
-                z=sample.ring_xyz[:, 2],
-                mode="lines",
-                name="Сечение неопределенности",
-                legendgroup="uncertainty_overlay",
-                showlegend=False,
-                line={"width": 2, "color": UNCERTAINTY_LINE_COLOR},
-                customdata=_uncertainty_hover_customdata(
-                    sample.md_m,
-                    sample.semi_axis_inc_m,
-                    sample.semi_axis_azi_m,
-                    len(sample.ring_xyz),
-                ),
-                hovertemplate=HOVER_TEMPLATE_UNCERTAINTY,
             )
         )
 

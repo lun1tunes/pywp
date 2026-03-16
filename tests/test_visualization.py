@@ -308,15 +308,12 @@ def test_uncertainty_ellipses_are_rendered_on_3d_plan_and_section_views() -> Non
         trace for trace in fig_section.data if str(trace.name) == uncertainty_name
     ]
 
-    assert traces_3d
+    assert not traces_3d
     assert surfaces_3d
-    assert traces_plan
-    assert traces_section
+    assert not traces_plan
+    assert not traces_section
     assert ribbons_plan
     assert ribbons_section
-    assert all(trace.customdata is not None for trace in traces_3d)
-    assert all(trace.customdata is not None for trace in traces_plan)
-    assert all(trace.customdata is not None for trace in traces_section)
     assert str(ribbons_plan[0].fill) == "toself"
     assert float(ribbons_plan[0].line.width) == 0.0
     assert float(ribbons_section[0].line.width) == 0.0
