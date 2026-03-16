@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from pywp.models import Point3D
+from pywp.uncertainty import WellUncertaintyOverlay
 from pywp.ui_utils import dls_to_pi
 from pywp.visualization import (
     dls_figure,
@@ -50,6 +51,7 @@ def render_trajectory_dls_panel(
     trajectory_line_dash: str = "solid",
     plan_csb_stations: pd.DataFrame | None = None,
     actual_stations: pd.DataFrame | None = None,
+    uncertainty_overlay: WellUncertaintyOverlay | None = None,
 ) -> None:
     def _render_body() -> None:
         if title:
@@ -65,6 +67,7 @@ def render_trajectory_dls_panel(
                 trajectory_line_dash=trajectory_line_dash,
                 plan_csb_df=plan_csb_stations,
                 actual_df=actual_stations,
+                uncertainty_overlay=uncertainty_overlay,
             ),
             width="stretch",
         )
@@ -92,6 +95,7 @@ def render_plan_section_panel(
     trajectory_line_dash: str = "solid",
     plan_csb_stations: pd.DataFrame | None = None,
     actual_stations: pd.DataFrame | None = None,
+    uncertainty_overlay: WellUncertaintyOverlay | None = None,
 ) -> None:
     def _render_body() -> None:
         if title:
@@ -106,6 +110,7 @@ def render_plan_section_panel(
                 trajectory_line_dash=trajectory_line_dash,
                 plan_csb_df=plan_csb_stations,
                 actual_df=actual_stations,
+                uncertainty_overlay=uncertainty_overlay,
             ),
             width="stretch",
         )
@@ -119,6 +124,7 @@ def render_plan_section_panel(
                 trajectory_line_dash=trajectory_line_dash,
                 plan_csb_df=plan_csb_stations,
                 actual_df=actual_stations,
+                uncertainty_overlay=uncertainty_overlay,
             ),
             width="stretch",
         )

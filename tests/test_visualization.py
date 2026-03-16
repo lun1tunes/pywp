@@ -5,6 +5,7 @@ import math
 import pandas as pd
 
 from pywp.models import Point3D
+from pywp.uncertainty import build_uncertainty_overlay
 from pywp.visualization import (
     dls_figure,
     plan_view_figure,
@@ -254,3 +255,53 @@ def test_plan_and_actual_overlays_are_rendered_on_3d_and_2d_views() -> None:
     assert actual_section[0].mode == "lines"
     assert str(actual_3d[0].line.color) == "#111111"
     assert str(plan_3d[0].line.color) == "#0B6E4F"
+
+
+def test_uncertainty_ellipses_are_rendered_on_3d_plan_and_section_views() -> None:
+    df = _sample_df()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(35.0, 0.0, 85.0)
+    t3 = Point3D(120.0, 0.0, 85.0)
+    overlay = build_uncertainty_overlay(
+        stations=df,
+        surface=surface,
+        azimuth_deg=90.0,
+    )
+
+    fig3d = trajectory_3d_figure(
+        df,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        uncertainty_overlay=overlay,
+    )
+    fig_plan = plan_view_figure(
+        df,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        uncertainty_overlay=overlay,
+    )
+    fig_section = section_view_figure(
+        df,
+        surface=surface,
+        azimuth_deg=90.0,
+        t1=t1,
+        t3=t3,
+        uncertainty_overlay=overlay,
+    )
+
+    uncertainty_name = "Эллипс неопределенности (2σ)"
+    traces_3d = [trace for trace in fig3d.data if str(trace.name) == uncertainty_name]
+    traces_plan = [trace for trace in fig_plan.data if str(trace.name) == uncertainty_name]
+    traces_section = [
+        trace for trace in fig_section.data if str(trace.name) == uncertainty_name
+    ]
+
+    assert traces_3d
+    assert traces_plan
+    assert traces_section
+    assert all(trace.customdata is not None for trace in traces_3d)
+    assert all(trace.customdata is not None for trace in traces_plan)
+    assert all(trace.customdata is not None for trace in traces_section)
+    assert str(traces_plan[0].fill) == "toself"

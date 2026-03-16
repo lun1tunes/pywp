@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pywp.models import (
-    OBJECTIVE_MINIMIZE_TOTAL_MD,
+    OPTIMIZATION_MINIMIZE_KOP,
+    OPTIMIZATION_MINIMIZE_MD,
+    OPTIMIZATION_NONE,
     TURN_SOLVER_DE_HYBRID,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
@@ -10,8 +12,10 @@ from pywp.models import (
 
 CFG_DEFAULTS = TrajectoryConfig()
 
-OBJECTIVE_OPTIONS = {
-    OBJECTIVE_MINIMIZE_TOTAL_MD: "Минимизировать итоговую MD",
+OPTIMIZATION_OPTIONS = {
+    OPTIMIZATION_NONE: "Без оптимизации",
+    OPTIMIZATION_MINIMIZE_MD: "Минимизация MD",
+    OPTIMIZATION_MINIMIZE_KOP: "Минимизация KOP",
 }
 
 TURN_SOLVER_OPTIONS = {
@@ -45,6 +49,7 @@ def build_trajectory_config(
     max_inc_deg: float,
     dls_build_max_deg_per_30m: float,
     kop_min_vertical_m: float,
+    optimization_mode: str,
     turn_solver_mode: str,
     turn_solver_max_restarts: int,
     max_total_md_postcheck_m: float = 6500.0,
@@ -60,7 +65,7 @@ def build_trajectory_config(
         dls_build_min_deg_per_30m=0.0,
         dls_build_max_deg_per_30m=max_build,
         kop_min_vertical_m=float(kop_min_vertical_m),
-        objective_mode=OBJECTIVE_MINIMIZE_TOTAL_MD,
+        optimization_mode=str(optimization_mode),
         turn_solver_mode=str(turn_solver_mode),
         turn_solver_max_restarts=int(turn_solver_max_restarts),
         max_total_md_postcheck_m=float(max_total_md_postcheck_m),

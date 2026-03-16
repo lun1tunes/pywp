@@ -8,7 +8,12 @@ from pydantic import BaseModel
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import PlannerResult, TrajectoryConfig
-from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
+from pywp.welltrack_batch import (
+    SuccessfulWellPlan,
+    WelltrackBatchPlanner,
+    merge_batch_results,
+    recommended_batch_selection,
+)
 
 
 def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
@@ -294,3 +299,179 @@ def test_successful_well_plan_accepts_model_like_inputs() -> None:
 
     assert plan.surface.x == 0.0
     assert plan.config.turn_solver_mode == "least_squares"
+
+
+def test_merge_batch_results_preserves_other_wells_and_adds_not_calculated_rows() -> None:
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-C",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=700.0, y=760.0, z=2200.0, md=2300.0),
+                WelltrackPoint(x=1600.0, y=1960.0, z=2350.0, md=3350.0),
+            ),
+        ),
+    ]
+    planner = WelltrackBatchPlanner(planner=_StubPlanner())
+    cfg = _fast_batch_config()
+    first_rows, first_successes = planner.evaluate(
+        records=records,
+        selected_names={"WELL-A"},
+        config=cfg,
+    )
+    second_rows = [
+        {
+            "Скважина": "WELL-B",
+            "Точек": 3,
+            "Статус": "Ошибка расчета",
+            "Модель траектории": "—",
+            "Классификация целей": "—",
+            "Сложность": "—",
+            "Горизонтальный отход t1, м": "—",
+            "Длина HORIZONTAL, м": "—",
+            "INC в t1, deg": "—",
+            "ЗУ HOLD, deg": "—",
+            "Макс ПИ, deg/10m": "—",
+            "Макс MD, м": "—",
+            "Проблема": "Solver endpoint miss to t1.",
+        }
+    ]
+
+    merged_rows, merged_successes = merge_batch_results(
+        records=records,
+        existing_rows=first_rows,
+        existing_successes=first_successes,
+        new_rows=second_rows,
+        new_successes=[],
+    )
+
+    assert [row["Скважина"] for row in merged_rows] == ["WELL-A", "WELL-B", "WELL-C"]
+    by_name = {str(row["Скважина"]): row for row in merged_rows}
+    assert by_name["WELL-A"]["Статус"] == "OK"
+    assert by_name["WELL-B"]["Статус"] == "Ошибка расчета"
+    assert by_name["WELL-C"]["Статус"] == "Не рассчитана"
+    assert [item.name for item in merged_successes] == ["WELL-A"]
+
+
+def test_merge_batch_results_replaces_old_success_for_rerun_well() -> None:
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+    planner = WelltrackBatchPlanner(planner=_StubPlanner())
+    cfg = _fast_batch_config()
+    first_rows, first_successes = planner.evaluate(
+        records=records,
+        selected_names={"WELL-A"},
+        config=cfg,
+    )
+    rerun_rows = [
+        {
+            "Скважина": "WELL-A",
+            "Точек": 3,
+            "Статус": "Ошибка расчета",
+            "Модель траектории": "—",
+            "Классификация целей": "—",
+            "Сложность": "—",
+            "Горизонтальный отход t1, м": "—",
+            "Длина HORIZONTAL, м": "—",
+            "INC в t1, deg": "—",
+            "ЗУ HOLD, deg": "—",
+            "Макс ПИ, deg/10m": "—",
+            "Макс MD, м": "—",
+            "Проблема": "Failure on rerun.",
+        }
+    ]
+
+    merged_rows, merged_successes = merge_batch_results(
+        records=records,
+        existing_rows=first_rows,
+        existing_successes=first_successes,
+        new_rows=rerun_rows,
+        new_successes=[],
+    )
+
+    assert merged_rows[0]["Статус"] == "Ошибка расчета"
+    assert merged_successes == []
+
+
+def test_recommended_batch_selection_prefers_unresolved_wells_only() -> None:
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-C",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=700.0, y=760.0, z=2200.0, md=2300.0),
+                WelltrackPoint(x=1600.0, y=1960.0, z=2350.0, md=3350.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-D",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=720.0, y=740.0, z=2180.0, md=2280.0),
+                WelltrackPoint(x=1620.0, y=1940.0, z=2330.0, md=3330.0),
+            ),
+        ),
+    ]
+    summary_rows = [
+        {
+            "Скважина": "WELL-A",
+            "Статус": "OK",
+            "Проблема": "",
+        },
+        {
+            "Скважина": "WELL-B",
+            "Статус": "Ошибка расчета",
+            "Проблема": "Endpoint miss.",
+        },
+        {
+            "Скважина": "WELL-C",
+            "Статус": "OK",
+            "Проблема": "Превышен лимит итоговой MD.",
+        },
+    ]
+
+    initial = recommended_batch_selection(records=records, summary_rows=None)
+    follow_up = recommended_batch_selection(records=records, summary_rows=summary_rows)
+
+    assert initial == ["WELL-A", "WELL-B", "WELL-C", "WELL-D"]
+    assert follow_up == ["WELL-B", "WELL-C", "WELL-D"]

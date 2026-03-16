@@ -11,6 +11,7 @@ from pywp.plot_axes import (
     linear_tick_values,
     nice_tick_step,
 )
+from pywp.uncertainty import WellUncertaintyOverlay
 from pywp.ui_utils import dls_to_pi
 
 DEG2RAD = np.pi / 180.0
@@ -18,6 +19,8 @@ TRAJECTORY_COLOR_PRIMARY = "#C1121F"
 PLAN_CSB_COLOR = "#0B6E4F"
 ACTUAL_PROFILE_COLOR = "#111111"
 TARGET_COLOR_PRIMARY = "#C1121F"
+UNCERTAINTY_LINE_COLOR = "rgba(33, 33, 33, 0.42)"
+UNCERTAINTY_FILL_COLOR = "rgba(33, 33, 33, 0.08)"
 INC_LABEL_TEXT_COLOR = TARGET_COLOR_PRIMARY
 INC_LABEL_TICK_COLOR = "#000000"
 SEGMENT_COLORS = {
@@ -42,6 +45,12 @@ HOVER_TEMPLATE_XYZ_MD_DLS = (
     "Z/TVD: %{customdata[2]} m<br>"
     "MD: %{customdata[3]} m<br>"
     "ПИ: %{customdata[4]} deg/10m"
+    "<extra>%{fullData.name}</extra>"
+)
+HOVER_TEMPLATE_UNCERTAINTY = (
+    "MD: %{customdata[0]:.0f} m<br>"
+    "2σ ось INC: %{customdata[1]:.1f} m<br>"
+    "2σ ось AZI: %{customdata[2]:.1f} m"
     "<extra>%{fullData.name}</extra>"
 )
 
@@ -357,6 +366,69 @@ def _station_hover_customdata(df: pd.DataFrame) -> np.ndarray:
     )
 
 
+def _uncertainty_hover_customdata(md_m: float, semi_inc_m: float, semi_azi_m: float, count: int) -> np.ndarray:
+    return np.column_stack(
+        [
+            np.full(int(count), float(md_m), dtype=float),
+            np.full(int(count), float(semi_inc_m), dtype=float),
+            np.full(int(count), float(semi_azi_m), dtype=float),
+        ]
+    )
+
+
+def _add_uncertainty_plan_or_section_traces(
+    fig: go.Figure,
+    *,
+    overlay: WellUncertaintyOverlay,
+    projection: str,
+) -> None:
+    for sample_index, sample in enumerate(overlay.samples):
+        points = sample.ring_plan_xy if projection == "plan" else sample.ring_section_xz
+        fig.add_trace(
+            go.Scatter(
+                x=points[:, 0],
+                y=points[:, 1],
+                mode="lines",
+                name="Эллипс неопределенности (2σ)",
+                legendgroup="uncertainty_overlay",
+                showlegend=sample_index == 0,
+                line={"width": 1.5, "color": UNCERTAINTY_LINE_COLOR},
+                fill="toself",
+                fillcolor=UNCERTAINTY_FILL_COLOR,
+                customdata=_uncertainty_hover_customdata(
+                    sample.md_m,
+                    sample.semi_axis_inc_m,
+                    sample.semi_axis_azi_m,
+                    len(points),
+                ),
+                hovertemplate=HOVER_TEMPLATE_UNCERTAINTY,
+            )
+        )
+
+
+def _add_uncertainty_3d_traces(fig: go.Figure, *, overlay: WellUncertaintyOverlay) -> None:
+    for sample_index, sample in enumerate(overlay.samples):
+        fig.add_trace(
+            go.Scatter3d(
+                x=sample.ring_xyz[:, 0],
+                y=sample.ring_xyz[:, 1],
+                z=sample.ring_xyz[:, 2],
+                mode="lines",
+                name="Эллипс неопределенности (2σ)",
+                legendgroup="uncertainty_overlay",
+                showlegend=sample_index == 0,
+                line={"width": 3, "color": UNCERTAINTY_LINE_COLOR},
+                customdata=_uncertainty_hover_customdata(
+                    sample.md_m,
+                    sample.semi_axis_inc_m,
+                    sample.semi_axis_azi_m,
+                    len(sample.ring_xyz),
+                ),
+                hovertemplate=HOVER_TEMPLATE_UNCERTAINTY,
+            )
+        )
+
+
 def trajectory_3d_figure(
     df: pd.DataFrame,
     surface: Point3D,
@@ -367,6 +439,7 @@ def trajectory_3d_figure(
     trajectory_line_dash: str = "solid",
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
+    uncertainty_overlay: WellUncertaintyOverlay | None = None,
 ) -> go.Figure:
     fig = go.Figure()
     x_arrays = [
@@ -389,6 +462,11 @@ def trajectory_3d_figure(
         x_arrays.append(actual_df["X_m"].to_numpy(dtype=float))
         y_arrays.append(actual_df["Y_m"].to_numpy(dtype=float))
         z_arrays.append(actual_df["Z_m"].to_numpy(dtype=float))
+    if uncertainty_overlay is not None:
+        for sample in uncertainty_overlay.samples:
+            x_arrays.append(sample.ring_xyz[:, 0])
+            y_arrays.append(sample.ring_xyz[:, 1])
+            z_arrays.append(sample.ring_xyz[:, 2])
     x_values = np.concatenate(x_arrays)
     y_values = np.concatenate(y_arrays)
     z_values = np.concatenate(z_arrays)
@@ -431,6 +509,8 @@ def trajectory_3d_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    if uncertainty_overlay is not None and uncertainty_overlay.samples:
+        _add_uncertainty_3d_traces(fig, overlay=uncertainty_overlay)
     if plan_csb_df is not None and len(plan_csb_df) > 0:
         fig.add_trace(
             go.Scatter3d(
@@ -584,6 +664,7 @@ def plan_view_figure(
     trajectory_line_dash: str = "solid",
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
+    uncertainty_overlay: WellUncertaintyOverlay | None = None,
 ) -> go.Figure:
     x_arrays = [
         df["X_m"].to_numpy(dtype=float),
@@ -599,6 +680,10 @@ def plan_view_figure(
     if actual_df is not None and len(actual_df) > 0:
         x_arrays.append(actual_df["X_m"].to_numpy(dtype=float))
         y_arrays.append(actual_df["Y_m"].to_numpy(dtype=float))
+    if uncertainty_overlay is not None:
+        for sample in uncertainty_overlay.samples:
+            x_arrays.append(sample.ring_plan_xy[:, 0])
+            y_arrays.append(sample.ring_plan_xy[:, 1])
     x_values = np.concatenate(x_arrays)
     y_values = np.concatenate(y_arrays)
     x_range, y_range = equalized_xy_ranges(x_values=x_values, y_values=y_values)
@@ -624,6 +709,12 @@ def plan_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    if uncertainty_overlay is not None and uncertainty_overlay.samples:
+        _add_uncertainty_plan_or_section_traces(
+            fig,
+            overlay=uncertainty_overlay,
+            projection="plan",
+        )
     if plan_csb_df is not None and len(plan_csb_df) > 0:
         fig.add_trace(
             go.Scatter(
@@ -719,6 +810,7 @@ def section_view_figure(
     trajectory_line_dash: str = "solid",
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
+    uncertainty_overlay: WellUncertaintyOverlay | None = None,
 ) -> go.Figure:
     vs = _section_coordinate(df=df, surface=surface, azimuth_deg=azimuth_deg)
 
@@ -790,7 +882,13 @@ def section_view_figure(
                     z_values=actual_df["Z_m"].to_numpy(dtype=float),
                 ),
                 hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
-            )
+        )
+    )
+    if uncertainty_overlay is not None and uncertainty_overlay.samples:
+        _add_uncertainty_plan_or_section_traces(
+            fig,
+            overlay=uncertainty_overlay,
+            projection="section",
         )
     fig.add_trace(
         go.Scatter(

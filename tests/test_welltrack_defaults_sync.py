@@ -70,6 +70,10 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
             f"Для '{label}' ожидалось {expected}, получено {actual}."
         )
 
+    optimization_actual = _selectbox_value(at, "Оптимизация")
+    assert optimization_actual is not None, "Поле оптимизации не найдено."
+    assert optimization_actual == str(defaults["optimization_mode"])
+
     turn_solver_actual = _selectbox_value(at, "Метод решателя")
     assert turn_solver_actual is not None, "Поле метода решателя не найдено."
     assert turn_solver_actual == str(defaults["turn_solver_mode"])

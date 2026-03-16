@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Literal
 
 import pandas as pd
@@ -7,9 +8,15 @@ from pydantic import Field, field_validator, model_validator
 
 from pywp.pydantic_base import FrozenArbitraryModel, FrozenModel
 
-OBJECTIVE_MINIMIZE_TOTAL_MD = "minimize_total_md"
-ALLOWED_OBJECTIVE_MODES = (OBJECTIVE_MINIMIZE_TOTAL_MD,)
-ObjectiveMode = Literal["minimize_total_md"]
+OPTIMIZATION_NONE = "none"
+OPTIMIZATION_MINIMIZE_MD = "minimize_md"
+OPTIMIZATION_MINIMIZE_KOP = "minimize_kop"
+ALLOWED_OPTIMIZATION_MODES = (
+    OPTIMIZATION_NONE,
+    OPTIMIZATION_MINIMIZE_MD,
+    OPTIMIZATION_MINIMIZE_KOP,
+)
+OptimizationMode = Literal["none", "minimize_md", "minimize_kop"]
 TURN_SOLVER_LEAST_SQUARES = "least_squares"
 TURN_SOLVER_DE_HYBRID = "de_hybrid"
 ALLOWED_TURN_SOLVER_MODES = (TURN_SOLVER_LEAST_SQUARES, TURN_SOLVER_DE_HYBRID)
@@ -90,11 +97,10 @@ class TrajectoryConfig(FrozenModel):
     )
     kop_min_vertical_m: NonNegativeFiniteScalar = 550.0
 
-    max_total_md_m: PositiveFiniteScalar = 12000.0
     # Post-processing MD threshold for user-facing validation only.
     # Does not participate in solver search/optimization constraints.
     max_total_md_postcheck_m: PositiveFiniteScalar = 6500.0
-    objective_mode: ObjectiveMode = OBJECTIVE_MINIMIZE_TOTAL_MD
+    optimization_mode: OptimizationMode = OPTIMIZATION_NONE
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_max_restarts: NonNegativeInt = 2
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
@@ -105,6 +111,16 @@ class TrajectoryConfig(FrozenModel):
             DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
         )
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_removed_legacy_fields(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        payload = dict(value)
+        payload.pop("objective_mode", None)
+        payload.pop("max_total_md_m", None)
+        return payload
 
     @field_validator("dls_limits_deg_per_30m", mode="before")
     @classmethod

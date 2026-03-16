@@ -184,3 +184,89 @@ class WelltrackBatchPlanner:
             md_postcheck_message=md_postcheck_message,
         )
         return row, success
+
+
+def merge_batch_results(
+    *,
+    records: Iterable[WelltrackRecord],
+    existing_rows: Iterable[dict[str, Any]] | None,
+    existing_successes: Iterable[SuccessfulWellPlan] | None,
+    new_rows: Iterable[dict[str, Any]],
+    new_successes: Iterable[SuccessfulWellPlan],
+) -> tuple[list[dict[str, Any]], list[SuccessfulWellPlan]]:
+    """Merge a partial batch run with previously stored results.
+
+    Rows are always returned in WELLTRACK order. Missing wells are represented by
+    a "Не рассчитана" base row so the page can show a stable full-table view even
+    after running only a subset of wells.
+    """
+
+    ordered_records = list(records)
+    ordered_names = [str(record.name) for record in ordered_records]
+    ordered_name_set = set(ordered_names)
+
+    rows_by_name: dict[str, dict[str, Any]] = {
+        str(record.name): WelltrackBatchPlanner._base_row(record)
+        for record in ordered_records
+    }
+    for row in existing_rows or ():
+        name = str(row.get("Скважина", "")).strip()
+        if name in ordered_name_set:
+            rows_by_name[name] = dict(row)
+    rerun_names: set[str] = set()
+    for row in new_rows:
+        name = str(row.get("Скважина", "")).strip()
+        if name in ordered_name_set:
+            rows_by_name[name] = dict(row)
+            rerun_names.add(name)
+
+    successes_by_name: dict[str, SuccessfulWellPlan] = {}
+    for success in existing_successes or ():
+        name = str(success.name)
+        if name in ordered_name_set:
+            successes_by_name[name] = success
+    for name in rerun_names:
+        successes_by_name.pop(name, None)
+    for success in new_successes:
+        name = str(success.name)
+        if name in ordered_name_set:
+            successes_by_name[name] = success
+
+    merged_rows = [rows_by_name[name] for name in ordered_names]
+    merged_successes = [
+        successes_by_name[name]
+        for name in ordered_names
+        if name in successes_by_name
+    ]
+    return merged_rows, merged_successes
+
+
+def recommended_batch_selection(
+    *,
+    records: Iterable[WelltrackRecord],
+    summary_rows: Iterable[dict[str, Any]] | None,
+) -> list[str]:
+    """Return wells that still need user attention.
+
+    Before the first run every well is recommended. After that only not-yet-run,
+    failed or warning-bearing wells stay preselected.
+    """
+
+    ordered_names = [str(record.name) for record in records]
+    if summary_rows is None:
+        return ordered_names
+
+    rows_by_name = {
+        str(row.get("Скважина", "")).strip(): row for row in summary_rows
+    }
+    recommended: list[str] = []
+    for name in ordered_names:
+        row = rows_by_name.get(name)
+        if row is None:
+            recommended.append(name)
+            continue
+        status = str(row.get("Статус", "")).strip()
+        problem_text = str(row.get("Проблема", "")).strip()
+        if status != "OK" or problem_text:
+            recommended.append(name)
+    return recommended

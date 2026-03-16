@@ -5,6 +5,8 @@ import pytest
 from pydantic import ValidationError
 
 from pywp.models import (
+    OPTIMIZATION_MINIMIZE_KOP,
+    OPTIMIZATION_MINIMIZE_MD,
     TURN_SOLVER_DE_HYBRID,
     TURN_SOLVER_LEAST_SQUARES,
     Point3D,
@@ -23,7 +25,6 @@ def _fast_config(**overrides: object) -> TrajectoryConfig:
         "entry_inc_target_deg": 86.0,
         "entry_inc_tolerance_deg": 2.0,
         "dls_build_max_deg_per_30m": 6.0,
-        "max_total_md_m": 20000.0,
         "max_total_md_postcheck_m": 20000.0,
         "turn_solver_mode": TURN_SOLVER_LEAST_SQUARES,
     }
@@ -112,12 +113,255 @@ def test_higher_build_dls_reduces_total_md() -> None:
     assert float(result_hard.summary["md_total_m"]) <= float(result_soft.summary["md_total_m"])
 
 
+def test_md_optimization_stops_within_theoretical_gap_when_solution_is_already_short() -> None:
+    planner = TrajectoryPlanner()
+    config_none = _fast_config(kop_min_vertical_m=200.0)
+    config_md = _fast_config(
+        kop_min_vertical_m=200.0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+    )
+
+    result_none = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(300.0, 300.0, 2000.0),
+        t3=Point3D(900.0, 1200.0, 2075.0),
+        config=config_none,
+    )
+    result_md = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(300.0, 300.0, 2000.0),
+        t3=Point3D(900.0, 1200.0, 2075.0),
+        config=config_md,
+    )
+
+    assert float(result_md.summary["distance_t1_m"]) <= config_md.pos_tolerance_m
+    assert float(result_md.summary["distance_t3_m"]) <= config_md.pos_tolerance_m
+    assert float(result_md.summary["md_total_m"]) <= float(result_none.summary["md_total_m"]) + 1e-6
+    assert str(result_md.summary["optimization_mode"]) == OPTIMIZATION_MINIMIZE_MD
+    assert str(result_md.summary["optimization_status"]) == "within_md_theoretical_gap"
+    assert float(result_md.summary["optimization_relative_gap_pct"]) <= 5.0 + 1e-6
+    assert int(result_md.summary["optimization_runs_used"]) == 0
+
+
+def test_md_optimization_seed_policy_adds_build_and_kop_boundary_variants() -> None:
+    import pywp.planner as planner_module
+
+    candidate = planner_module.ProfileParameters(
+        kop_vertical_m=950.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=320.0,
+        hold_length_m=480.0,
+        build2_length_m=210.0,
+        horizontal_length_m=1200.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1090.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    bounds = (
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+
+    seeds = planner_module._collect_optimization_seed_vectors(
+        candidates=[candidate],
+        mode=OPTIMIZATION_MINIMIZE_MD,
+        zero_azimuth_turn=False,
+        lower_dls_deg_per_30m=0.1,
+        upper_dls_deg_per_30m=6.0,
+        bounds=bounds,
+    )
+
+    rounded = [tuple(np.round(seed, decimals=6).tolist()) for seed in seeds]
+    assert len(seeds) >= 5
+    assert any(seed[0] == pytest.approx(1.0) for seed in seeds)
+    assert any(seed[1] == pytest.approx(200.0) for seed in seeds)
+    assert any(
+        seed[0] == pytest.approx(1.0) and seed[1] == pytest.approx(200.0)
+        for seed in seeds
+    )
+    assert len(rounded) == len(set(rounded))
+
+
+def test_md_optimization_boundary_refinement_can_improve_total_md() -> None:
+    planner = TrajectoryPlanner()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(650.8546533242657, 919.0538224668888, 2681.8358083035228)
+    t3 = Point3D(1981.7245876002041, 1405.5328339992557, 2774.652111333409)
+    config_none = _fast_config(
+        kop_min_vertical_m=200.0,
+        optimization_mode="none",
+        max_total_md_postcheck_m=25000.0,
+    )
+    config_md = _fast_config(
+        kop_min_vertical_m=200.0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        max_total_md_postcheck_m=25000.0,
+    )
+
+    result_none = planner.plan(surface=surface, t1=t1, t3=t3, config=config_none)
+    result_md = planner.plan(surface=surface, t1=t1, t3=t3, config=config_md)
+
+    assert float(result_md.summary["distance_t1_m"]) <= config_md.pos_tolerance_m
+    assert float(result_md.summary["distance_t3_m"]) <= config_md.pos_tolerance_m
+    assert float(result_md.summary["md_total_m"]) + 100.0 < float(result_none.summary["md_total_m"])
+    assert str(result_md.summary["optimization_status"]) == "within_md_theoretical_gap_after_boundary"
+    assert int(result_md.summary["optimization_runs_used"]) >= 6
+
+
+def test_md_optimization_2d_refinement_can_improve_total_md_when_boundary_stage_is_unavailable(
+    monkeypatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    monkeypatch.setattr(
+        planner_module,
+        "_boundary_refine_md_candidates",
+        lambda **kwargs: ([], 0),
+    )
+
+    planner = TrajectoryPlanner()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(650.8546533242657, 919.0538224668888, 2681.8358083035228)
+    t3 = Point3D(1981.7245876002041, 1405.5328339992557, 2774.652111333409)
+    config_none = _fast_config(
+        kop_min_vertical_m=200.0,
+        optimization_mode="none",
+        max_total_md_postcheck_m=25000.0,
+    )
+    config_md = _fast_config(
+        kop_min_vertical_m=200.0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        max_total_md_postcheck_m=25000.0,
+    )
+
+    result_none = planner.plan(surface=surface, t1=t1, t3=t3, config=config_none)
+    result_md = planner.plan(surface=surface, t1=t1, t3=t3, config=config_md)
+
+    assert float(result_md.summary["distance_t1_m"]) <= config_md.pos_tolerance_m
+    assert float(result_md.summary["distance_t3_m"]) <= config_md.pos_tolerance_m
+    assert float(result_md.summary["md_total_m"]) + 100.0 < float(result_none.summary["md_total_m"])
+    assert str(result_md.summary["optimization_status"]) == "within_md_theoretical_gap_after_2d"
+    assert int(result_md.summary["optimization_runs_used"]) >= 4
+
+
+def test_removed_legacy_max_total_md_does_not_create_hidden_solver_limit() -> None:
+    config = TrajectoryConfig.model_validate(
+        {
+            "turn_solver_max_restarts": 0,
+            "max_total_md_m": 100.0,
+            "max_total_md_postcheck_m": 20000.0,
+        }
+    )
+    result = TrajectoryPlanner().plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
+    assert float(result.summary["md_total_m"]) > 100.0
+
+
+def test_recover_profile_from_build_and_kop_is_deterministic_for_reference_order() -> None:
+    import pywp.planner as planner_module
+
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(650.8546533242657, 919.0538224668888, 2681.8358083035228)
+    t3 = Point3D(1981.7245876002041, 1405.5328339992557, 2774.652111333409)
+    config = _fast_config(
+        kop_min_vertical_m=200.0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        max_total_md_postcheck_m=25000.0,
+    )
+    geometry = planner_module._build_section_geometry(surface, t1, t3, config)
+    post_entry = planner_module._solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=planner_module._resolve_horizontal_dls(config),
+        max_inc_deg=float(config.max_inc_deg),
+    )
+    assert post_entry is not None
+    zero_azimuth_turn = planner_module._is_zero_azimuth_turn_geometry(
+        geometry=geometry,
+        target_direction=planner_module.classify_trajectory_type(
+            gv_m=float(geometry.z1_m),
+            horizontal_offset_t1_m=planner_module._horizontal_offset(surface=surface, point=t1),
+        ),
+        tolerance_m=config.pos_tolerance_m,
+    )
+    assert zero_azimuth_turn is False
+
+    md_params = planner_module._solve_turn_profile(
+        geometry=geometry,
+        config=config,
+        zero_azimuth_turn=zero_azimuth_turn,
+        search_settings=planner_module._turn_search_settings(0),
+    ).params
+    kop_params = planner_module._solve_turn_profile(
+        geometry=geometry,
+        config=_fast_config(
+            kop_min_vertical_m=200.0,
+            optimization_mode=OPTIMIZATION_MINIMIZE_KOP,
+            max_total_md_postcheck_m=25000.0,
+        ),
+        zero_azimuth_turn=zero_azimuth_turn,
+        search_settings=planner_module._turn_search_settings(0),
+    ).params
+
+    build_dls = 0.5 * (
+        float(md_params.dls_build1_deg_per_30m)
+        + float(kop_params.dls_build1_deg_per_30m)
+    )
+    kop_vertical_m = 0.5 * (
+        float(md_params.kop_vertical_m)
+        + float(kop_params.kop_vertical_m)
+    )
+
+    profile_a = planner_module._recover_profile_from_build_and_kop(
+        geometry=geometry,
+        build_dls_deg_per_30m=build_dls,
+        kop_vertical_m=kop_vertical_m,
+        min_build_segment_m=float(config.min_structural_segment_m),
+        post_entry=post_entry,
+        zero_azimuth_turn=zero_azimuth_turn,
+        reference_candidates=(md_params, kop_params),
+    )
+    profile_b = planner_module._recover_profile_from_build_and_kop(
+        geometry=geometry,
+        build_dls_deg_per_30m=build_dls,
+        kop_vertical_m=kop_vertical_m,
+        min_build_segment_m=float(config.min_structural_segment_m),
+        post_entry=post_entry,
+        zero_azimuth_turn=zero_azimuth_turn,
+        reference_candidates=(kop_params, md_params),
+    )
+
+    assert profile_a is not None
+    assert profile_b is not None
+    assert profile_a.md_total_m == pytest.approx(profile_b.md_total_m, abs=1e-6)
+    assert profile_a.inc_hold_deg == pytest.approx(profile_b.inc_hold_deg, abs=1e-6)
+    assert profile_a.hold_length_m == pytest.approx(profile_b.hold_length_m, abs=1e-6)
+    assert profile_a.azimuth_hold_deg == pytest.approx(profile_b.azimuth_hold_deg, abs=1e-6)
+
+
 def test_solver_relaxes_build_dls_below_max_for_reverse_entry_geometry() -> None:
     config = _fast_config(
         dls_build_min_deg_per_30m=0.0,
         dls_build_max_deg_per_30m=3.0,
         turn_solver_max_restarts=0,
-        max_total_md_m=20000.0,
         max_total_md_postcheck_m=20000.0,
     )
     result = TrajectoryPlanner().plan(
@@ -137,12 +381,51 @@ def test_solver_relaxes_build_dls_below_max_for_reverse_entry_geometry() -> None
     assert int(result.summary["solver_turn_restarts_used"]) == 0
 
 
+def test_kop_optimization_reduces_kop_for_reverse_entry_geometry() -> None:
+    planner = TrajectoryPlanner()
+    config_none = _fast_config(
+        dls_build_min_deg_per_30m=0.0,
+        dls_build_max_deg_per_30m=6.0,
+        kop_min_vertical_m=200.0,
+        optimization_mode="none",
+        turn_solver_max_restarts=0,
+        max_total_md_postcheck_m=20000.0,
+    )
+    config_kop = _fast_config(
+        dls_build_min_deg_per_30m=0.0,
+        dls_build_max_deg_per_30m=6.0,
+        kop_min_vertical_m=200.0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_KOP,
+        turn_solver_max_restarts=0,
+        max_total_md_postcheck_m=20000.0,
+    )
+
+    result_none = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(2500.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config_none,
+    )
+    result_kop = planner.plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(2500.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config_kop,
+    )
+
+    assert float(result_kop.summary["distance_t1_m"]) <= config_kop.pos_tolerance_m
+    assert float(result_kop.summary["distance_t3_m"]) <= config_kop.pos_tolerance_m
+    assert float(result_kop.summary["kop_md_m"]) + 1.0 < float(result_none.summary["kop_md_m"])
+    assert str(result_kop.summary["optimization_mode"]) == OPTIMIZATION_MINIMIZE_KOP
+    assert str(result_kop.summary["optimization_status"]) == "refined"
+    assert int(result_kop.summary["optimization_runs_used"]) > 0
+
+
 def test_fixed_high_build_dls_reports_reverse_entry_geometry() -> None:
     config = _fast_config(
         dls_build_min_deg_per_30m=3.0,
         dls_build_max_deg_per_30m=3.0,
         turn_solver_max_restarts=1,
-        max_total_md_m=20000.0,
         max_total_md_postcheck_m=20000.0,
     )
 

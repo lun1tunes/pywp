@@ -11,6 +11,7 @@ from pywp.ui_well_result import (
     collect_issue_messages,
     horizontal_offset_m,
     md_postcheck_issue_message,
+    uncertainty_toggle_key,
 )
 
 
@@ -125,3 +126,7 @@ def test_single_well_result_view_accepts_model_like_inputs_from_stale_session_st
     assert isinstance(view.t1, Point3D)
     assert isinstance(view.t3, Point3D)
     assert view.config.turn_solver_mode == "least_squares"
+
+
+def test_uncertainty_toggle_key_is_stable_per_well_name() -> None:
+    assert uncertainty_toggle_key(well_name="WELL-1") == "show_uncertainty_ellipses::WELL-1"

@@ -243,10 +243,10 @@ def _item_from_text(line: str) -> DiagnosticItem:
         md_req, md_lim = match.group(1), match.group(2)
         return DiagnosticItem(
             reason_ru=(
-                f"Ограничение по общей длине ствола слишком жесткое: "
+                f"В legacy-конфигурации было слишком жесткое ограничение по общей длине ствола: "
                 f"минимально нужно ~{md_req} м, установлен лимит {md_lim} м."
             ),
-            action_ru="Увеличьте max_total_md_m или упростите геометрию целей.",
+            action_ru="Упростите геометрию целей или обновите конфигурацию до текущей схемы без hard-limit по MD.",
         )
 
     if "BUILD DLS interval is empty after constraints" in text:

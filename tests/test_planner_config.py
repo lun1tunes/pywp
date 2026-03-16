@@ -7,7 +7,8 @@ from pydantic import ValidationError
 
 from pywp.models import (
     DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
-    OBJECTIVE_MINIMIZE_TOTAL_MD,
+    OPTIMIZATION_NONE,
+    OPTIMIZATION_MINIMIZE_MD,
     Point3D,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
@@ -15,7 +16,7 @@ from pywp.models import (
 )
 from pywp.planner_config import (
     CFG_DEFAULTS,
-    OBJECTIVE_OPTIONS,
+    OPTIMIZATION_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_segment_dls_limits,
     build_trajectory_config,
@@ -24,7 +25,8 @@ from pywp.planner_config import (
 
 
 def test_option_dictionaries_cover_supported_modes() -> None:
-    assert OBJECTIVE_MINIMIZE_TOTAL_MD in OBJECTIVE_OPTIONS
+    assert OPTIMIZATION_NONE in OPTIMIZATION_OPTIONS
+    assert OPTIMIZATION_MINIMIZE_MD in OPTIMIZATION_OPTIONS
     assert TURN_SOLVER_LEAST_SQUARES in TURN_SOLVER_OPTIONS
 
 
@@ -106,6 +108,22 @@ def test_trajectory_config_rejects_unknown_dls_segment_names() -> None:
         TrajectoryConfig(dls_limits_deg_per_30m={"BUILD3": 4.0})
 
 
+def test_trajectory_config_strips_removed_legacy_fields_for_backward_compatibility() -> None:
+    cfg = TrajectoryConfig.model_validate(
+        {
+            "objective_mode": "minimize_total_md",
+            "max_total_md_m": 100.0,
+        }
+    )
+    assert cfg.optimization_mode == OPTIMIZATION_NONE
+    assert cfg.max_total_md_postcheck_m == CFG_DEFAULTS.max_total_md_postcheck_m
+
+
+def test_trajectory_config_rejects_unknown_optimization_mode() -> None:
+    with pytest.raises(ValidationError, match="none|minimize_md|minimize_kop"):
+        TrajectoryConfig(optimization_mode="unsupported_optimization")  # type: ignore[arg-type]
+
+
 def test_point3d_rejects_non_finite_coordinates() -> None:
     with pytest.raises(ValidationError):
         Point3D(x=math.nan, y=0.0, z=0.0)
@@ -124,6 +142,7 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
         max_inc_deg=CFG_DEFAULTS.max_inc_deg,
         dls_build_max_deg_per_30m=0.8,
         kop_min_vertical_m=CFG_DEFAULTS.kop_min_vertical_m,
+        optimization_mode=OPTIMIZATION_NONE,
         turn_solver_mode=CFG_DEFAULTS.turn_solver_mode,
         turn_solver_max_restarts=CFG_DEFAULTS.turn_solver_max_restarts,
     )
@@ -132,5 +151,5 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
     assert config.dls_build_max_deg_per_30m == 0.8
     assert config.dls_limits_deg_per_30m["BUILD1"] == 0.8
     assert config.dls_limits_deg_per_30m["BUILD2"] == 0.8
-    assert config.objective_mode == OBJECTIVE_MINIMIZE_TOTAL_MD
+    assert config.optimization_mode == OPTIMIZATION_NONE
     assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts

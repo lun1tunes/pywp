@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -51,10 +52,15 @@ from pywp.well_pad import (
     detect_well_pads,
     ordered_pad_wells,
 )
-from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
+from pywp.welltrack_batch import (
+    SuccessfulWellPlan,
+    WelltrackBatchPlanner,
+    merge_batch_results,
+    recommended_batch_selection,
+)
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS3.INC")
-WT_UI_DEFAULTS_VERSION = 12
+WT_UI_DEFAULTS_VERSION = 13
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
 WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
@@ -84,7 +90,16 @@ _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_kop_min_vertical_m": "wt_cfg_kop_min_vertical",
 }
 WT_CALC_PARAMS = CalcParamBinding(prefix="wt_cfg_")
+WT_RETRY_CALC_PARAMS = CalcParamBinding(prefix="wt_retry_cfg_")
 DEFAULT_PAD_SPACING_M = 20.0
+
+
+@dataclass(frozen=True)
+class _BatchRunRequest:
+    selected_names: list[str]
+    config: TrajectoryConfig
+    run_clicked: bool
+    run_kind: str
 
 
 def _well_color(index: int) -> str:
@@ -110,6 +125,8 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_records", None)
     st.session_state.setdefault("wt_records_original", None)
     st.session_state.setdefault("wt_selected_names", [])
+    st.session_state.setdefault("wt_retry_selected_names", [])
+    st.session_state.setdefault("wt_retry_use_custom_config", False)
     st.session_state.setdefault("wt_loaded_at", "")
     st.session_state.setdefault("wt_pad_configs", {})
     st.session_state.setdefault("wt_pad_selected_id", "")
@@ -127,6 +144,8 @@ def _init_state() -> None:
 def _clear_results() -> None:
     st.session_state["wt_summary_rows"] = None
     st.session_state["wt_successes"] = None
+    st.session_state["wt_retry_selected_names"] = []
+    st.session_state["wt_retry_use_custom_config"] = False
     st.session_state["wt_last_error"] = ""
     st.session_state["wt_last_run_at"] = ""
     st.session_state["wt_last_runtime_s"] = None
@@ -144,8 +163,10 @@ def _clear_pad_state() -> None:
 
 def _apply_profile_defaults(force: bool) -> None:
     WT_CALC_PARAMS.preserve_state()
+    WT_RETRY_CALC_PARAMS.preserve_state()
     legacy_found = _migrate_legacy_calc_param_keys()
     WT_CALC_PARAMS.apply_defaults(force=bool(force or legacy_found))
+    WT_RETRY_CALC_PARAMS.apply_defaults(force=bool(force))
 
 
 def _migrate_legacy_calc_param_keys() -> bool:
@@ -435,9 +456,13 @@ def _all_wells_plan_figure(
     return fig
 
 
-def _build_config_form() -> TrajectoryConfig:
-    WT_CALC_PARAMS.render_block()
-    return WT_CALC_PARAMS.build_config()
+def _build_config_form(
+    binding: CalcParamBinding = WT_CALC_PARAMS,
+    *,
+    title: str = "Параметры расчета",
+) -> TrajectoryConfig:
+    binding.render_block(title=title)
+    return binding.build_config()
 
 
 def _render_source_input() -> str:
@@ -477,13 +502,15 @@ def _render_source_input() -> str:
 
 
 def _store_parsed_records(records: list[WelltrackRecord]) -> None:
+    all_names = [record.name for record in records]
     st.session_state["wt_records"] = list(records)
     st.session_state["wt_records_original"] = list(records)
     st.session_state["wt_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state["wt_selected_names"] = [record.name for record in records]
     _clear_pad_state()
     st.session_state["wt_last_error"] = ""
     _clear_results()
+    st.session_state["wt_selected_names"] = list(all_names)
+    st.session_state["wt_retry_selected_names"] = list(all_names)
 
 
 def _render_import_controls() -> tuple[str, bool, bool, bool]:
@@ -508,8 +535,9 @@ def _render_import_controls() -> tuple[str, bool, bool, bool]:
             icon=":material/restart_alt:",
             width="stretch",
             help=(
-                "Сбрасывает только параметры расчета и солвера к рекомендованным "
-                "значениям. Импортированный WELLTRACK и выбранные скважины не удаляются."
+                "Сбрасывает общие и отдельные параметры расчета/солвера к "
+                "рекомендованным значениям. Импортированный WELLTRACK и выбранные "
+                "скважины не удаляются."
             ),
         )
     return (
@@ -904,22 +932,95 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             )
 
 
-def _sync_selected_names(records: list[WelltrackRecord]) -> list[str]:
+def _sync_selection_state(records: list[WelltrackRecord]) -> tuple[list[str], list[str]]:
     all_names = [record.name for record in records]
-    selected_names = [
-        name
-        for name in st.session_state.get("wt_selected_names", [])
-        if name in all_names
-    ]
-    if not selected_names:
-        selected_names = all_names
-        st.session_state["wt_selected_names"] = selected_names
-    return all_names
+    recommended_names = recommended_batch_selection(
+        records=records,
+        summary_rows=st.session_state.get("wt_summary_rows"),
+    )
+
+    def _sync_key(key: str) -> None:
+        current = [
+            name for name in st.session_state.get(key, []) if name in all_names
+        ]
+        if current != st.session_state.get(key, []):
+            st.session_state[key] = list(current)
+        if not current and recommended_names:
+            st.session_state[key] = list(recommended_names)
+
+    _sync_key("wt_selected_names")
+    _sync_key("wt_retry_selected_names")
+    return all_names, recommended_names
 
 
-def _render_batch_run_form(all_names: list[str]) -> tuple[TrajectoryConfig, bool]:
+def _render_batch_selection_status(
+    records: list[WelltrackRecord], summary_rows: list[dict[str, object]] | None
+) -> None:
+    all_names = [record.name for record in records]
+    rows_by_name = {
+        str(row.get("Скважина", "")).strip(): row for row in (summary_rows or [])
+    }
+    ok_count = 0
+    warning_count = 0
+    error_count = 0
+    not_run_count = 0
+    for name in all_names:
+        row = rows_by_name.get(name)
+        if row is None:
+            not_run_count += 1
+            continue
+        status = str(row.get("Статус", "")).strip()
+        problem_text = str(row.get("Проблема", "")).strip()
+        if status == "OK":
+            if problem_text:
+                warning_count += 1
+            else:
+                ok_count += 1
+            continue
+        if status == "Не рассчитана":
+            not_run_count += 1
+        else:
+            error_count += 1
+
+    c1, c2, c3, c4 = st.columns(4, gap="small")
+    c1.metric("Без замечаний", f"{ok_count}")
+    c2.metric("С предупреждениями", f"{warning_count}")
+    c3.metric("С ошибками", f"{error_count}")
+    c4.metric("Не рассчитаны", f"{not_run_count}")
+    if summary_rows:
+        st.caption(
+            "Результаты по невыбранным скважинам сохраняются. По умолчанию для "
+            "следующего запуска выделяются нерассчитанные, ошибочные и warning-кейсы."
+        )
+    else:
+        st.caption(
+            "До первого запуска предвыбраны все скважины. Затем страница будет "
+            "автоматически фокусироваться на нерассчитанных и проблемных скважинах."
+        )
+
+
+def _render_batch_run_forms(
+    *,
+    records: list[WelltrackRecord],
+    all_names: list[str],
+) -> list[_BatchRunRequest]:
+    st.markdown("### Пакетный расчет")
+    summary_rows = st.session_state.get("wt_summary_rows")
+    _render_batch_selection_status(records=records, summary_rows=summary_rows)
+    st.radio(
+        "Детализация лога расчета",
+        options=list(WT_LOG_LEVEL_OPTIONS),
+        key="wt_log_verbosity",
+        horizontal=True,
+        help=(
+            "`Краткий` — только ключевые события по каждой скважине. "
+            "`Подробный` — все стадии солвера в реальном времени."
+        ),
+    )
+
+    requests: list[_BatchRunRequest] = []
     with st.form("welltrack_run_form", clear_on_submit=False):
-        st.markdown("### Выбор скважин и запуск расчета")
+        st.markdown("#### Общий запуск")
         st.multiselect(
             "Скважины для расчета",
             options=all_names,
@@ -927,34 +1028,109 @@ def _render_batch_run_form(all_names: list[str]) -> tuple[TrajectoryConfig, bool
             help="Для каждой скважины ожидается ровно 3 точки: S, t1, t3.",
         )
         st.caption(
-            "Точки `S/t1/t3` подставляются автоматически из входного WELLTRACK. "
-            "Ниже задаются универсальные параметры расчета и солвера."
+            "Этот запуск использует общие параметры расчета ниже. "
+            "Результаты остальных скважин не будут затронуты."
         )
-        st.radio(
-            "Детализация лога расчета",
-            options=list(WT_LOG_LEVEL_OPTIONS),
-            key="wt_log_verbosity",
-            horizontal=True,
-            help=(
-                "`Краткий` — только ключевые события по каждой скважине. "
-                "`Подробный` — все стадии солвера в реальном времени."
-            ),
+        config = _build_config_form(
+            binding=WT_CALC_PARAMS,
+            title="Общие параметры расчета",
         )
-        config = _build_config_form()
         run_clicked = st.form_submit_button(
             "Рассчитать выбранные скважины",
             type="primary",
             icon=":material/play_arrow:",
         )
-    return config, bool(run_clicked)
+    requests.append(
+        _BatchRunRequest(
+            selected_names=list(st.session_state.get("wt_selected_names", [])),
+            config=config,
+            run_clicked=bool(run_clicked),
+            run_kind="general",
+        )
+    )
+
+    if summary_rows:
+        with st.expander(
+            "Повторный расчет выбранных скважин",
+            expanded=False,
+        ):
+            st.multiselect(
+                "Скважины для повторного расчета",
+                options=all_names,
+                key="wt_retry_selected_names",
+                help=(
+                    "Подходит для ошибок, warning-кейсов и локального пересчета "
+                    "части набора без потери уже готовых результатов."
+                ),
+            )
+            st.checkbox(
+                "Использовать отдельные параметры для повторного расчета",
+                key="wt_retry_use_custom_config",
+                help=(
+                    "Если включено, выбранные скважины будут пересчитаны с "
+                    "собственным набором параметров, не меняя общий профиль batch-расчета."
+                ),
+            )
+            if bool(st.session_state.get("wt_retry_use_custom_config", False)):
+                retry_config = _build_config_form(
+                    binding=WT_RETRY_CALC_PARAMS,
+                    title="Отдельные параметры для повторного расчета",
+                )
+            else:
+                st.caption(
+                    "Если отдельные параметры не включены, повторный запуск "
+                    "использует текущие общие параметры расчета."
+                )
+                retry_config = WT_CALC_PARAMS.build_config()
+            rerun_clicked = st.button(
+                "Пересчитать выбранные скважины",
+                type="secondary",
+                icon=":material/replay:",
+                width="stretch",
+            )
+            requests.append(
+                _BatchRunRequest(
+                    selected_names=list(
+                        st.session_state.get("wt_retry_selected_names", [])
+                    ),
+                    config=retry_config,
+                    run_clicked=bool(rerun_clicked),
+                    run_kind="retry",
+                )
+            )
+    return requests
+
+
+def _store_merged_batch_results(
+    *,
+    records: list[WelltrackRecord],
+    new_rows: list[dict[str, object]],
+    new_successes: list[SuccessfulWellPlan],
+) -> None:
+    merged_rows, merged_successes = merge_batch_results(
+        records=records,
+        existing_rows=st.session_state.get("wt_summary_rows"),
+        existing_successes=st.session_state.get("wt_successes"),
+        new_rows=new_rows,
+        new_successes=new_successes,
+    )
+    st.session_state["wt_summary_rows"] = merged_rows
+    st.session_state["wt_successes"] = merged_successes
+    recommended_names = recommended_batch_selection(
+        records=records,
+        summary_rows=merged_rows,
+    )
+    st.session_state["wt_selected_names"] = list(recommended_names)
+    st.session_state["wt_retry_selected_names"] = list(recommended_names)
 
 
 def _run_batch_if_clicked(
-    run_clicked: bool, records: list[WelltrackRecord], config: TrajectoryConfig
+    requests: list[_BatchRunRequest], records: list[WelltrackRecord]
 ) -> None:
-    if not run_clicked:
+    request = next((item for item in requests if item.run_clicked), None)
+    if request is None:
         return
-    selected_set = set(st.session_state.get("wt_selected_names", []))
+    selected_set = set(request.selected_names)
     if not selected_set:
         st.warning("Выберите минимум одну скважину для расчета.")
         return
@@ -994,10 +1170,26 @@ def _run_batch_if_clicked(
     try:
         with st.spinner("Выполняется расчет WELLTRACK-набора...", show_time=True):
             started = perf_counter()
+            run_title = (
+                "Повторный batch-расчет"
+                if request.run_kind == "retry"
+                else "Старт batch-расчета"
+            )
             append_log(
-                f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}. "
+                f"{run_title}. Выбрано скважин: {len(selected_set)}. "
                 f"Детализация лога: {log_verbosity}."
             )
+            if request.run_kind == "retry":
+                if bool(st.session_state.get("wt_retry_use_custom_config", False)):
+                    append_log(
+                        "Для повторного расчета используются отдельные параметры "
+                        "только для выбранных скважин."
+                    )
+                else:
+                    append_log(
+                        "Повторный расчет использует текущие общие параметры "
+                        "без изменения сохраненных результатов остальных скважин."
+                    )
             if pad_layout_active:
                 append_log(
                     "Активна раскладка устьев по кустам: перед расчетом применены "
@@ -1079,15 +1271,18 @@ def _run_batch_if_clicked(
             summary_rows, successes = batch.evaluate(
                 records=records_for_run,
                 selected_names=selected_set,
-                config=config,
+                config=request.config,
                 progress_callback=on_progress,
                 solver_progress_callback=on_solver_progress,
                 record_done_callback=on_record_done,
             )
             elapsed_s = perf_counter() - started
             progress.progress(100, text="Batch-расчет завершен.")
-            st.session_state["wt_summary_rows"] = summary_rows
-            st.session_state["wt_successes"] = successes
+            _store_merged_batch_results(
+                records=records_for_run,
+                new_rows=summary_rows,
+                new_successes=successes,
+            )
             st.session_state["wt_last_error"] = ""
             st.session_state["wt_last_run_at"] = datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -1127,18 +1322,36 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
     if not summary_df.empty:
         summary_df = arrow_safe_text_dataframe(summary_df)
 
-    ok_count = (
-        int((summary_df["Статус"] == "OK").sum())
-        if not summary_df.empty and "Статус" in summary_df
-        else 0
-    )
-    err_count = int(len(summary_df) - ok_count) if not summary_df.empty else 0
-    p1, p2, p3, p4 = st.columns(4, gap="small")
+    ok_count = 0
+    warning_count = 0
+    err_count = 0
+    not_run_count = 0
+    if not summary_df.empty and {"Статус", "Проблема"}.issubset(summary_df.columns):
+        for _, row in summary_df.iterrows():
+            status = str(row["Статус"]).strip()
+            problem_text = str(row["Проблема"]).strip()
+            if status == "OK":
+                if problem_text and problem_text != "—":
+                    warning_count += 1
+                else:
+                    ok_count += 1
+            elif status == "Не рассчитана":
+                not_run_count += 1
+            else:
+                err_count += 1
+
+    p1, p2, p3, p4, p5 = st.columns(5, gap="small")
     p1.metric("Строк в отчете", f"{len(summary_df)}")
-    p2.metric("Успешно", f"{ok_count}")
-    p3.metric("Ошибки", f"{err_count}")
+    p2.metric("Без замечаний", f"{ok_count}")
+    p3.metric("С предупреждениями", f"{warning_count}")
+    p4.metric("Ошибки", f"{err_count}")
     run_time = st.session_state.get("wt_last_runtime_s")
-    p4.metric("Время расчета", "—" if run_time is None else f"{float(run_time):.2f} с")
+    p5.metric("Время расчета", "—" if run_time is None else f"{float(run_time):.2f} с")
+    if not_run_count:
+        st.caption(
+            f"Не рассчитаны: {not_run_count}. Это нормально для partial batch-расчета: "
+            "строки остаются в отчете до отдельного запуска по этим скважинам."
+        )
     render_small_note(
         f"Последний запуск: {st.session_state.get('wt_last_run_at', '—')}"
     )
@@ -1284,9 +1497,9 @@ def run_page() -> None:
     _render_raw_records_table(records=records)
     _render_t1_t3_order_panel(records=records)
     _render_pad_layout_panel(records=records)
-    all_names = _sync_selected_names(records=records)
-    config, run_clicked = _render_batch_run_form(all_names=all_names)
-    _run_batch_if_clicked(run_clicked=run_clicked, records=records, config=config)
+    all_names, _ = _sync_selection_state(records=records)
+    requests = _render_batch_run_forms(records=records, all_names=all_names)
+    _run_batch_if_clicked(requests=requests, records=records)
     _render_batch_log()
 
     summary_rows = st.session_state.get("wt_summary_rows")

@@ -7,6 +7,7 @@ import streamlit as st
 
 from pywp import TrajectoryConfig
 from pywp.planner_config import (
+    OPTIMIZATION_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_trajectory_config,
 )
@@ -24,7 +25,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "kop_min_vertical",
 )
 _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
-_STR_SUFFIXES: tuple[str, ...] = ("turn_solver_mode",)
+_STR_SUFFIXES: tuple[str, ...] = ("optimization_mode", "turn_solver_mode")
 _BOOL_SUFFIXES: tuple[str, ...] = ()
 
 def calc_param_defaults() -> dict[str, float | int | str | bool]:
@@ -41,6 +42,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "max_total_md_postcheck": float(cfg.max_total_md_postcheck_m),
         "dls_build_max": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
         "kop_min_vertical": float(cfg.kop_min_vertical_m),
+        "optimization_mode": str(cfg.optimization_mode),
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
         "turn_solver_mode": str(cfg.turn_solver_mode),
     }
@@ -48,7 +50,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 6
+_DEFAULTS_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,7 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         max_total_md_postcheck_m=float(_state_value(prefix, "max_total_md_postcheck")),
         dls_build_max_deg_per_30m=pi_to_dls(float(_state_value(prefix, "dls_build_max"))),
         kop_min_vertical_m=float(_state_value(prefix, "kop_min_vertical")),
+        optimization_mode=str(_state_value(prefix, "optimization_mode")),
         turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
         turn_solver_mode=str(_state_value(prefix, "turn_solver_mode")),
     )
@@ -267,6 +270,9 @@ def render_calc_params_block(
                     "- При наличии нескольких допустимых решений решатель предпочитает меньшую итоговую `MD`.\n"
                     "- На первом быстром проходе поиск начинается от максимально допустимого `ПИ BUILD`; при более сложной геометрии решатель может уйти на меньший `ПИ BUILD`, если это улучшает достижимость целей.\n"
                     "- `Мин VERTICAL до KOP` работает как нижняя граница: KOP выбирается минимально возможным из допустимых.\n"
+                    "- `Оптимизация` запускает второй локальный этап поверх уже найденной допустимой траектории; по умолчанию этот этап отключен.\n"
+                    "- Для `Минимизации MD` используется ранняя остановка, если решение уже близко к теоретическому нижнему пределу по длине ствола.\n"
+                    "- Для `Минимизации KOP` решатель стремится опустить KOP к нижней допустимой границе без нарушения геометрических ограничений.\n"
                     "- Солвер всегда использует единую схему с азимутальным поворотом; для копланарных кейсов поворот по азимуту просто равен `0`.\n"
                     "- При неуспехе решатель автоматически перезапускается с более глубокой дискретизацией поиска.\n"
                     "- Метод решателя сильнее всего влияет на сложную геометрию и кейсы с ненулевым поворотом по азимуту."
@@ -274,8 +280,19 @@ def render_calc_params_block(
 
         st.caption(
             "Текущий режим расчета ориентирован на поиск допустимой траектории. "
-            "При наличии нескольких допустимых решений солвер предпочитает меньшую итоговую MD. "
+            "Оптимизация включается отдельно и работает как второй этап локального улучшения уже найденного профиля. "
             "Пользователь выбирает метод решателя и допустимое число авто-рестартов."
+        )
+        st.selectbox(
+            "Оптимизация",
+            options=list(OPTIMIZATION_OPTIONS.keys()),
+            key=_state_key(prefix, "optimization_mode"),
+            format_func=lambda key: OPTIMIZATION_OPTIONS[str(key)],
+            help=(
+                "Без оптимизации — только поиск допустимой траектории. "
+                "Минимизация MD — локально уменьшает итоговую MD. "
+                "Минимизация KOP — локально уменьшает глубину KOP."
+            ),
         )
         st.selectbox(
             "Метод решателя",

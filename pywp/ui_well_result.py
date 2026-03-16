@@ -7,7 +7,12 @@ import streamlit as st
 from pydantic import field_validator
 
 from pywp.models import Point3D, SummaryValue, TrajectoryConfig
+from pywp.planner_config import OPTIMIZATION_OPTIONS
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
+from pywp.uncertainty import (
+    build_uncertainty_overlay,
+    uncertainty_model_caption,
+)
 from pywp.ui_utils import arrow_safe_text_dataframe, dls_to_pi, format_distance
 from pywp.ui_well_panels import (
     render_plan_section_panel,
@@ -82,6 +87,10 @@ class SingleWellResultView(FrozenArbitraryModel):
     @classmethod
     def _coerce_config(cls, value: object) -> TrajectoryConfig:
         return coerce_model_like(value, TrajectoryConfig)
+
+
+def uncertainty_toggle_key(*, well_name: str) -> str:
+    return f"show_uncertainty_ellipses::{str(well_name)}"
 
 
 def horizontal_offset_m(*, point: Point3D, reference: Point3D) -> float:
@@ -213,8 +222,11 @@ def render_key_metrics(
     def _render_body() -> None:
         if title:
             st.markdown(f"### {title}")
+        optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
+        optimization_label = OPTIMIZATION_OPTIONS.get(optimization_mode, optimization_mode)
         metrics_rows = [
             {"Показатель": "Модель траектории", "Значение": str(summary["trajectory_type"])},
+            {"Показатель": "Оптимизация", "Значение": optimization_label},
             {
                 "Показатель": "Классификация целей",
                 "Значение": str(summary.get("trajectory_target_direction", "—")),
@@ -271,6 +283,24 @@ def render_result_plots(
     title_plan: str | None,
     border: bool = True,
 ) -> None:
+    show_uncertainty = st.checkbox(
+        "Показать эллипсы неопределенности",
+        key=uncertainty_toggle_key(well_name=view.well_name),
+        help=(
+            "Включает planning-level 2σ эллипсы неопределенности для 3D, плана и "
+            "вертикального разреза. Это базовая визуализация по first-order "
+            "ошибкам INC/AZI, без полной ISCWSA tool model."
+        ),
+    )
+    uncertainty_overlay = None
+    if show_uncertainty:
+        uncertainty_overlay = build_uncertainty_overlay(
+            stations=view.stations,
+            surface=view.surface,
+            azimuth_deg=float(view.azimuth_deg),
+        )
+        st.caption(uncertainty_model_caption(uncertainty_overlay.model))
+
     render_trajectory_dls_panel(
         stations=view.stations,
         surface=view.surface,
@@ -283,6 +313,7 @@ def render_result_plots(
         trajectory_line_dash=view.trajectory_line_dash,
         plan_csb_stations=view.plan_csb_stations,
         actual_stations=view.actual_stations,
+        uncertainty_overlay=uncertainty_overlay,
     )
     render_plan_section_panel(
         stations=view.stations,
@@ -295,6 +326,7 @@ def render_result_plots(
         trajectory_line_dash=view.trajectory_line_dash,
         plan_csb_stations=view.plan_csb_stations,
         actual_stations=view.actual_stations,
+        uncertainty_overlay=uncertainty_overlay,
     )
 
 
@@ -307,6 +339,8 @@ def render_result_tables(
     survey_file_name: str = "well_survey.csv",
 ) -> None:
     summary = view.summary
+    optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
+    optimization_label = OPTIMIZATION_OPTIONS.get(optimization_mode, optimization_mode)
     tab_summary, tab_survey = st.tabs([summary_tab_label, survey_tab_label])
     with tab_summary:
         hidden_metrics = SUMMARY_TECH_HIDDEN_METRICS
@@ -326,9 +360,16 @@ def render_result_tables(
                     "Значение": _format_summary_value(key, summary_visible[key]),
                 }
             )
+        main_rows.insert(
+            1,
+            {
+                "Показатель": "Оптимизация",
+                "Значение": optimization_label,
+            },
+        )
         if "t1_horizontal_offset_m" in summary_visible:
             main_rows.insert(
-                4,
+                5,
                 {
                     "Показатель": "Горизонтальный отход t1, м",
                     "Значение": _format_summary_value(
