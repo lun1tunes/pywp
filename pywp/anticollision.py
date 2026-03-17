@@ -10,9 +10,11 @@ from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     PlanningUncertaintyModel,
     UncertaintyEllipseSample,
+    UncertaintyStationSample,
     UncertaintyTubeMesh,
     WellUncertaintyOverlay,
     build_uncertainty_overlay,
+    build_uncertainty_station_samples,
 )
 
 TARGET_NONE = ""
@@ -151,24 +153,40 @@ def build_anti_collision_well(
     azimuth_deg: float,
     md_t1_m: float,
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+    include_display_geometry: bool = True,
 ) -> AntiCollisionWell:
     md_t3_m = float(stations["MD_m"].iloc[-1]) if len(stations) else 0.0
-    overlay = build_uncertainty_overlay(
-        stations=stations,
-        surface=surface,
-        azimuth_deg=azimuth_deg,
-        model=model,
-        required_md_m=(float(md_t1_m), float(md_t3_m)),
-    )
-    samples = tuple(
-        _build_collision_sample(
-            sample=sample,
-            confidence_scale=float(model.confidence_scale),
-            md_t1_m=float(md_t1_m),
-            md_t3_m=float(md_t3_m),
+    if include_display_geometry:
+        overlay = build_uncertainty_overlay(
+            stations=stations,
+            surface=surface,
+            azimuth_deg=azimuth_deg,
+            model=model,
+            required_md_m=(float(md_t1_m), float(md_t3_m)),
         )
-        for sample in overlay.samples
-    )
+        samples = tuple(
+            _build_collision_sample(
+                sample=sample,
+                confidence_scale=float(model.confidence_scale),
+                md_t1_m=float(md_t1_m),
+                md_t3_m=float(md_t3_m),
+            )
+            for sample in overlay.samples
+        )
+    else:
+        overlay = WellUncertaintyOverlay(samples=(), model=model)
+        samples = tuple(
+            _build_collision_sample_from_station_sample(
+                sample=sample,
+                md_t1_m=float(md_t1_m),
+                md_t3_m=float(md_t3_m),
+            )
+            for sample in build_uncertainty_station_samples(
+                stations=stations,
+                model=model,
+                required_md_m=(float(md_t1_m), float(md_t3_m)),
+            )
+        )
     return AntiCollisionWell(
         name=str(name),
         color=str(color),
@@ -185,6 +203,8 @@ def build_anti_collision_well(
 
 def analyze_anti_collision(
     wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
+    *,
+    build_overlap_geometry: bool = True,
 ) -> AntiCollisionAnalysis:
     ordered_wells = tuple(wells)
     corridors: list[AntiCollisionCorridor] = []
@@ -196,6 +216,7 @@ def analyze_anti_collision(
             pair_corridors = _pair_overlap_corridors(
                 well_a=ordered_wells[left_index],
                 well_b=ordered_wells[right_index],
+                build_overlap_geometry=build_overlap_geometry,
             )
             corridors.extend(pair_corridors)
             zones.extend(_corridor_summary_zone(corridor) for corridor in pair_corridors)
@@ -479,6 +500,24 @@ def _build_collision_sample(
     )
 
 
+def _build_collision_sample_from_station_sample(
+    *,
+    sample: UncertaintyStationSample,
+    md_t1_m: float,
+    md_t3_m: float,
+) -> AntiCollisionSample:
+    return AntiCollisionSample(
+        md_m=float(sample.md_m),
+        center_xyz=tuple(float(value) for value in sample.center_xyz),
+        covariance_xyz=np.asarray(sample.covariance_xyz, dtype=float),
+        target_label=_target_label(
+            md_m=float(sample.md_m),
+            md_t1_m=float(md_t1_m),
+            md_t3_m=float(md_t3_m),
+        ),
+    )
+
+
 def _covariance_from_ring(
     *,
     ring_xyz: np.ndarray,
@@ -508,6 +547,7 @@ def _pair_overlap_corridors(
     *,
     well_a: AntiCollisionWell,
     well_b: AntiCollisionWell,
+    build_overlap_geometry: bool,
 ) -> list[AntiCollisionCorridor]:
     if not well_a.samples or not well_b.samples:
         return []
@@ -595,6 +635,7 @@ def _pair_overlap_corridors(
         pairs=sorted(matched_pairs),
         distance=distance,
         combined_radius=combined_radius,
+        build_overlap_geometry=build_overlap_geometry,
     )
 
 
@@ -605,6 +646,7 @@ def _build_pair_corridors(
     pairs: list[tuple[int, int]],
     distance: np.ndarray,
     combined_radius: np.ndarray,
+    build_overlap_geometry: bool,
 ) -> list[AntiCollisionCorridor]:
     corridors: list[AntiCollisionCorridor] = []
     current_pairs: list[tuple[int, int]] = []
@@ -642,6 +684,7 @@ def _build_pair_corridors(
                 pairs=current_pairs,
                 distance=distance,
                 combined_radius=combined_radius,
+                build_overlap_geometry=build_overlap_geometry,
             )
         )
         current_pairs = [(int(index_a), int(index_b))]
@@ -654,6 +697,7 @@ def _build_pair_corridors(
                 pairs=current_pairs,
                 distance=distance,
                 combined_radius=combined_radius,
+                build_overlap_geometry=build_overlap_geometry,
             )
         )
     return corridors
@@ -688,6 +732,7 @@ def _build_single_corridor(
     pairs: list[tuple[int, int]],
     distance: np.ndarray,
     combined_radius: np.ndarray,
+    build_overlap_geometry: bool,
 ) -> AntiCollisionCorridor:
     ordered_pairs = sorted(pairs, key=lambda pair: (pair[0], pair[1]))
     midpoint_points: list[np.ndarray] = []
@@ -720,20 +765,21 @@ def _build_single_corridor(
             )
         )
         core_radii.append(_overlap_core_radius_m(overlap_depth_m=overlap_depth_m))
-        overlap_rings_xyz.append(
-            _overlap_ring_between_samples(
-                ring_a_xyz=np.asarray(
-                    well_a.overlay.samples[int(index_a)].ring_xyz,
-                    dtype=float,
-                ),
-                ring_b_xyz=np.asarray(
-                    well_b.overlay.samples[int(index_b)].ring_xyz,
-                    dtype=float,
-                ),
-                center_xyz=midpoint_points[-1],
-                fallback_radius_m=core_radii[-1],
+        if build_overlap_geometry:
+            overlap_rings_xyz.append(
+                _overlap_ring_between_samples(
+                    ring_a_xyz=np.asarray(
+                        well_a.overlay.samples[int(index_a)].ring_xyz,
+                        dtype=float,
+                    ),
+                    ring_b_xyz=np.asarray(
+                        well_b.overlay.samples[int(index_b)].ring_xyz,
+                        dtype=float,
+                    ),
+                    center_xyz=midpoint_points[-1],
+                    fallback_radius_m=core_radii[-1],
+                )
             )
-        )
         sf_values.append(sf)
         overlap_depth_values.append(overlap_depth_m)
         priority_rank = _classify_pair_labels(

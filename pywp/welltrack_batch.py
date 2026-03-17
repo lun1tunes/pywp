@@ -2,26 +2,51 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Mapping
 from time import perf_counter
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from pydantic import field_validator
 
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
-from pywp.models import Point3D, SummaryDict, TrajectoryConfig
 from pywp.anticollision_optimization import (
     AntiCollisionOptimizationContext,
     build_anti_collision_reference_path,
 )
+from pywp.anticollision_rerun import (
+    DYNAMIC_CLUSTER_PLAN_ACTIVE,
+    DYNAMIC_CLUSTER_PLAN_BLOCKED,
+    DYNAMIC_CLUSTER_PLAN_RESOLVED,
+    DynamicClusterExecutionPlan,
+    build_dynamic_cluster_execution_plan,
+)
+from pywp.models import Point3D, SummaryDict, TrajectoryConfig
 from pywp.optimization_reference import compute_unoptimized_reference
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.solver_diagnostics import summarize_problem_ru
+from pywp.uncertainty import PlanningUncertaintyModel
 from pywp.ui_utils import dls_to_pi
 
 ProgressCallback = Callable[[int, int, str], None]
 SolverProgressCallback = Callable[[int, int, str, str, float], None]
 RecordDoneCallback = Callable[[int, int, str, dict[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class DynamicClusterExecutionContext:
+    target_well_names: tuple[str, ...]
+    uncertainty_model: PlanningUncertaintyModel
+    initial_successes: tuple["SuccessfulWellPlan", ...]
+
+
+@dataclass(frozen=True)
+class BatchEvaluationMetadata:
+    executed_well_names: tuple[str, ...] = ()
+    skipped_selected_names: tuple[str, ...] = ()
+    cluster_resolved_early: bool = False
+    cluster_blocked: bool = False
+    cluster_blocking_reason: str | None = None
 
 
 class SuccessfulWellPlan(FrozenArbitraryModel):
@@ -124,6 +149,11 @@ def ensure_successful_plan_baseline(
 class WelltrackBatchPlanner:
     def __init__(self, planner: TrajectoryPlanner | None = None):
         self._planner = planner or TrajectoryPlanner()
+        self._last_evaluation_metadata = BatchEvaluationMetadata()
+
+    @property
+    def last_evaluation_metadata(self) -> BatchEvaluationMetadata:
+        return self._last_evaluation_metadata
 
     def evaluate(
         self,
@@ -133,6 +163,7 @@ class WelltrackBatchPlanner:
         selected_order: list[str] | None = None,
         config_by_name: dict[str, TrajectoryConfig] | None = None,
         optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None = None,
+        dynamic_cluster_context: DynamicClusterExecutionContext | None = None,
         progress_callback: ProgressCallback | None = None,
         solver_progress_callback: SolverProgressCallback | None = None,
         record_done_callback: RecordDoneCallback | None = None,
@@ -145,9 +176,55 @@ class WelltrackBatchPlanner:
             selected_order=selected_order,
         )
         total = len(selected_records)
+        selected_records_by_name = {
+            str(record.name): record for record in selected_records
+        }
+        remaining_selected_names = [
+            str(record.name) for record in selected_records
+        ]
         recalculated_success_by_name: dict[str, SuccessfulWellPlan] = {}
+        executed_well_names: list[str] = []
+        skipped_selected_names: list[str] = []
+        cluster_resolved_early = False
+        cluster_blocked = False
+        cluster_blocking_reason: str | None = None
 
-        for index, record in enumerate(selected_records, start=1):
+        while remaining_selected_names:
+            dynamic_cluster_plan, pruned_names = self._refresh_dynamic_cluster_plan(
+                remaining_selected_names=remaining_selected_names,
+                dynamic_cluster_context=dynamic_cluster_context,
+                recalculated_success_by_name=recalculated_success_by_name,
+            )
+            if pruned_names:
+                skipped_selected_names.extend(
+                    name for name in pruned_names if name not in skipped_selected_names
+                )
+                if dynamic_cluster_plan is not None:
+                    resolution_state = str(dynamic_cluster_plan.resolution_state).strip()
+                    if resolution_state == DYNAMIC_CLUSTER_PLAN_RESOLVED:
+                        cluster_resolved_early = True
+                    elif resolution_state == DYNAMIC_CLUSTER_PLAN_BLOCKED:
+                        cluster_blocked = True
+                        cluster_blocking_reason = (
+                            str(dynamic_cluster_plan.blocking_reason).strip()
+                            if dynamic_cluster_plan.blocking_reason is not None
+                            else None
+                        )
+            if not remaining_selected_names:
+                break
+            index = len(executed_well_names) + 1
+            record, runtime_override = self._next_record_for_evaluation(
+                selected_records_by_name=selected_records_by_name,
+                remaining_selected_names=remaining_selected_names,
+                selected_order=selected_order,
+                base_config=config,
+                config_by_name=config_by_name,
+                optimization_context_by_name=optimization_context_by_name,
+                dynamic_cluster_plan=dynamic_cluster_plan,
+                recalculated_success_by_name=recalculated_success_by_name,
+            )
+            remaining_selected_names.remove(str(record.name))
+            executed_well_names.append(str(record.name))
             if progress_callback is not None:
                 progress_callback(index, total, record.name)
 
@@ -170,11 +247,8 @@ class WelltrackBatchPlanner:
 
             row, success = self._evaluate_record(
                 record=record,
-                config=(config_by_name or {}).get(str(record.name), config),
-                optimization_context=self._resolve_optimization_context(
-                    context=(optimization_context_by_name or {}).get(str(record.name)),
-                    recalculated_success_by_name=recalculated_success_by_name,
-                ),
+                config=runtime_override["config"],
+                optimization_context=runtime_override["optimization_context"],
                 planner_progress_callback=planner_progress_callback,
             )
             summary_rows.append(row)
@@ -184,6 +258,13 @@ class WelltrackBatchPlanner:
             if record_done_callback is not None:
                 record_done_callback(index, total, record.name, row)
 
+        self._last_evaluation_metadata = BatchEvaluationMetadata(
+            executed_well_names=tuple(executed_well_names),
+            skipped_selected_names=tuple(skipped_selected_names),
+            cluster_resolved_early=bool(cluster_resolved_early),
+            cluster_blocked=bool(cluster_blocked),
+            cluster_blocking_reason=cluster_blocking_reason,
+        )
         return summary_rows, successes
 
     @staticmethod
@@ -248,6 +329,127 @@ class WelltrackBatchPlanner:
             resolved.append(record)
             seen.add(well_name)
         return resolved
+
+    def _next_record_for_evaluation(
+        self,
+        *,
+        selected_records_by_name: dict[str, WelltrackRecord],
+        remaining_selected_names: list[str],
+        selected_order: list[str] | None,
+        base_config: TrajectoryConfig,
+        config_by_name: dict[str, TrajectoryConfig] | None,
+        optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None,
+        dynamic_cluster_plan: DynamicClusterExecutionPlan | None,
+        recalculated_success_by_name: dict[str, SuccessfulWellPlan],
+    ) -> tuple[WelltrackRecord, dict[str, object]]:
+        runtime_override = self._runtime_override_for_next_record(
+            base_config=base_config,
+            config_by_name=config_by_name,
+            optimization_context_by_name=optimization_context_by_name,
+            dynamic_cluster_plan=dynamic_cluster_plan,
+            recalculated_success_by_name=recalculated_success_by_name,
+        )
+        if runtime_override is not None:
+            record_name = str(runtime_override["well_name"])
+            record = selected_records_by_name[record_name]
+            return record, runtime_override
+        ordered_names = [
+            str(name)
+            for name in (selected_order or remaining_selected_names)
+            if str(name) in set(remaining_selected_names)
+        ]
+        next_name = ordered_names[0] if ordered_names else str(remaining_selected_names[0])
+        record = selected_records_by_name[next_name]
+        context = self._resolve_optimization_context(
+            context=(optimization_context_by_name or {}).get(str(record.name)),
+            recalculated_success_by_name=recalculated_success_by_name,
+        )
+        config = (config_by_name or {}).get(str(record.name), base_config)
+        return record, {
+            "well_name": str(record.name),
+            "config": config,
+            "optimization_context": context,
+        }
+
+    def _runtime_override_for_next_record(
+        self,
+        *,
+        base_config: TrajectoryConfig,
+        config_by_name: dict[str, TrajectoryConfig] | None,
+        optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None,
+        dynamic_cluster_plan: DynamicClusterExecutionPlan | None,
+        recalculated_success_by_name: dict[str, SuccessfulWellPlan],
+    ) -> dict[str, object] | None:
+        if (
+            dynamic_cluster_plan is None
+            or str(dynamic_cluster_plan.resolution_state).strip()
+            != DYNAMIC_CLUSTER_PLAN_ACTIVE
+            or not dynamic_cluster_plan.ordered_well_names
+        ):
+            return None
+        well_name = str(dynamic_cluster_plan.ordered_well_names[0])
+        payload = dict(dynamic_cluster_plan.prepared_by_well.get(well_name, {}))
+        update_fields = dict(payload.get("update_fields", {}))
+        config = (
+            base_config.validated_copy(**update_fields)
+            if update_fields
+            else (config_by_name or {}).get(well_name, base_config)
+        )
+        context = payload.get("optimization_context")
+        if isinstance(context, AntiCollisionOptimizationContext):
+            context = self._resolve_optimization_context(
+                context=context,
+                recalculated_success_by_name=recalculated_success_by_name,
+            )
+        elif context is None:
+            context = self._resolve_optimization_context(
+                context=(optimization_context_by_name or {}).get(well_name),
+                recalculated_success_by_name=recalculated_success_by_name,
+            )
+        return {
+            "well_name": well_name,
+            "config": config,
+            "optimization_context": context,
+            "cluster_plan": dynamic_cluster_plan,
+        }
+
+    @staticmethod
+    def _refresh_dynamic_cluster_plan(
+        *,
+        remaining_selected_names: list[str],
+        dynamic_cluster_context: DynamicClusterExecutionContext | None,
+        recalculated_success_by_name: dict[str, SuccessfulWellPlan],
+    ) -> tuple[DynamicClusterExecutionPlan | None, tuple[str, ...]]:
+        if dynamic_cluster_context is None or not remaining_selected_names:
+            return None, ()
+        cluster_scoped_remaining = tuple(
+            str(name)
+            for name in remaining_selected_names
+            if str(name) in set(dynamic_cluster_context.target_well_names)
+        )
+        if not cluster_scoped_remaining:
+            return None, ()
+        current_success_by_name = {
+            str(item.name): item for item in dynamic_cluster_context.initial_successes
+        }
+        current_success_by_name.update(recalculated_success_by_name)
+        plan = build_dynamic_cluster_execution_plan(
+            successes=list(current_success_by_name.values()),
+            selected_names=set(str(name) for name in remaining_selected_names),
+            target_well_names=dynamic_cluster_context.target_well_names,
+            uncertainty_model=dynamic_cluster_context.uncertainty_model,
+        )
+        if plan is None:
+            return None, ()
+        resolution_state = str(plan.resolution_state).strip()
+        if resolution_state in {
+            DYNAMIC_CLUSTER_PLAN_RESOLVED,
+            DYNAMIC_CLUSTER_PLAN_BLOCKED,
+        }:
+            for name in cluster_scoped_remaining:
+                remaining_selected_names.remove(str(name))
+            return plan, cluster_scoped_remaining
+        return plan, ()
 
     @staticmethod
     def _resolve_optimization_context(

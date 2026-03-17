@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from pathlib import Path
 from time import perf_counter
 
@@ -16,8 +17,6 @@ from pywp.anticollision import (
     anti_collision_method_caption,
     anti_collision_report_events,
     anti_collision_report_rows,
-    analyze_anti_collision,
-    build_anti_collision_well,
     collision_corridor_plan_polygon,
     collision_corridor_point_sphere_mesh,
     collision_corridor_tube_mesh,
@@ -37,6 +36,13 @@ from pywp.anticollision_recommendations import (
     build_anti_collision_recommendations,
     cluster_display_label,
     recommendation_display_label,
+)
+from pywp.anticollision_rerun import (
+    build_anti_collision_analysis_for_successes as build_anti_collision_analysis_for_successes_shared,
+    build_anticollision_well_contexts as build_anticollision_well_contexts_shared,
+    build_cluster_prepared_overrides as build_cluster_prepared_overrides_shared,
+    build_prepared_optimization_context as build_prepared_optimization_context_shared,
+    recommendation_intervals_for_moving_well as recommendation_intervals_for_moving_well_shared,
 )
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
@@ -97,6 +103,7 @@ from pywp.well_pad import (
     ordered_pad_wells,
 )
 from pywp.welltrack_batch import (
+    DynamicClusterExecutionContext,
     ensure_successful_plan_baseline,
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
@@ -255,21 +262,115 @@ def _build_anti_collision_analysis(
     model: PlanningUncertaintyModel,
     name_to_color: dict[str, str] | None = None,
 ) -> AntiCollisionAnalysis:
-    wells = [
-        build_anti_collision_well(
-            name=item.name,
-            color=(name_to_color or {}).get(str(item.name), _well_color(index)),
-            stations=item.stations,
-            surface=item.surface,
-            t1=item.t1,
-            t3=item.t3,
-            azimuth_deg=float(item.azimuth_deg),
-            md_t1_m=float(item.md_t1_m),
-            model=model,
-        )
+    color_map = {
+        str(item.name): (name_to_color or {}).get(str(item.name), _well_color(index))
         for index, item in enumerate(successes)
-    ]
-    return analyze_anti_collision(wells)
+    }
+    return build_anti_collision_analysis_for_successes_shared(
+        successes,
+        model=model,
+        name_to_color=color_map,
+    )
+
+
+def _anti_collision_cache_key(
+    *,
+    successes: list[SuccessfulWellPlan],
+    model: PlanningUncertaintyModel,
+    name_to_color: dict[str, str] | None,
+) -> str:
+    digest = hashlib.blake2b(digest_size=20)
+    digest.update(
+        np.asarray(
+            [
+                float(model.sigma_inc_deg),
+                float(model.sigma_azi_deg),
+                float(model.sigma_lateral_drift_m_per_1000m),
+                float(model.confidence_scale),
+                float(model.sample_step_m),
+                float(model.min_refined_step_m),
+                float(model.directional_refine_threshold_deg),
+            ],
+            dtype=np.float64,
+        ).tobytes()
+    )
+    for well_name, color in sorted((name_to_color or {}).items()):
+        digest.update(str(well_name).encode("utf-8"))
+        digest.update(str(color).encode("utf-8"))
+    ordered_successes = sorted(successes, key=lambda item: str(item.name))
+    for success in ordered_successes:
+        digest.update(str(success.name).encode("utf-8"))
+        digest.update(
+            np.asarray(
+                [
+                    float(success.surface.x),
+                    float(success.surface.y),
+                    float(success.surface.z),
+                    float(success.t1.x),
+                    float(success.t1.y),
+                    float(success.t1.z),
+                    float(success.t3.x),
+                    float(success.t3.y),
+                    float(success.t3.z),
+                    float(success.azimuth_deg),
+                    float(success.md_t1_m),
+                ],
+                dtype=np.float64,
+            ).tobytes()
+        )
+        stations_subset = success.stations.loc[
+            :,
+            [column for column in ("MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m") if column in success.stations.columns],
+        ]
+        digest.update(str(tuple(stations_subset.columns)).encode("utf-8"))
+        digest.update(stations_subset.to_numpy(dtype=np.float64, copy=True).tobytes())
+    return digest.hexdigest()
+
+
+def _cached_anti_collision_view_model(
+    *,
+    successes: list[SuccessfulWellPlan],
+    uncertainty_model: PlanningUncertaintyModel,
+    records: list[WelltrackRecord],
+) -> tuple[
+    AntiCollisionAnalysis,
+    tuple[AntiCollisionRecommendation, ...],
+    tuple[AntiCollisionRecommendationCluster, ...],
+]:
+    color_map = _well_color_map(records) if records else {}
+    cache_key = _anti_collision_cache_key(
+        successes=successes,
+        model=uncertainty_model,
+        name_to_color=color_map,
+    )
+    cache = dict(st.session_state.get("wt_anticollision_analysis_cache") or {})
+    if str(cache.get("key", "")) == cache_key:
+        analysis = cache.get("analysis")
+        recommendations = cache.get("recommendations")
+        clusters = cache.get("clusters")
+        if (
+            isinstance(analysis, AntiCollisionAnalysis)
+            and isinstance(recommendations, tuple)
+            and isinstance(clusters, tuple)
+        ):
+            return analysis, recommendations, clusters
+    analysis = _build_anti_collision_analysis(
+        successes,
+        model=uncertainty_model,
+        name_to_color=color_map,
+    )
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=_build_anticollision_well_contexts(successes),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+    st.session_state["wt_anticollision_analysis_cache"] = {
+        "key": cache_key,
+        "analysis": analysis,
+        "recommendations": recommendations,
+        "clusters": clusters,
+    }
+    return analysis, recommendations, clusters
 
 
 def _trajectory_interval_points(
@@ -1318,10 +1419,10 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
     )
     uncertainty_model = planning_uncertainty_model_for_preset(selected_preset)
     records = list(st.session_state.get("wt_records") or [])
-    analysis = _build_anti_collision_analysis(
-        successes,
-        model=uncertainty_model,
-        name_to_color=_well_color_map(records) if records else None,
+    analysis, recommendations, clusters = _cached_anti_collision_view_model(
+        successes=successes,
+        uncertainty_model=uncertainty_model,
+        records=records,
     )
     st.caption(
         f"Пресет: {uncertainty_preset_label(selected_preset)}. "
@@ -1390,11 +1491,6 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         },
     )
 
-    recommendations = build_anti_collision_recommendations(
-        analysis,
-        well_context_by_name=_build_anticollision_well_contexts(successes),
-    )
-    clusters = build_anti_collision_recommendation_clusters(recommendations)
     recommendation_df = arrow_safe_text_dataframe(
         pd.DataFrame(anti_collision_recommendation_rows(recommendations))
     )
@@ -1686,25 +1782,7 @@ def _selected_execution_order(selected_names: list[str]) -> list[str]:
 def _build_anticollision_well_contexts(
     successes: list[SuccessfulWellPlan],
 ) -> dict[str, AntiCollisionWellContext]:
-    contexts: dict[str, AntiCollisionWellContext] = {}
-    for success in successes:
-        summary = dict(success.summary)
-        kop_md_raw = summary.get("kop_md_m")
-        kop_md_m = None
-        if kop_md_raw is not None:
-            try:
-                kop_md_m = float(kop_md_raw)
-            except (TypeError, ValueError):
-                kop_md_m = None
-        contexts[str(success.name)] = AntiCollisionWellContext(
-            well_name=str(success.name),
-            kop_md_m=kop_md_m,
-            kop_min_vertical_m=float(success.config.kop_min_vertical_m),
-            md_t1_m=float(success.md_t1_m),
-            md_total_m=float(summary.get("md_total_m", 0.0)),
-            optimization_mode=str(success.config.optimization_mode),
-        )
-    return contexts
+    return build_anticollision_well_contexts_shared(successes)
 
 
 def _recommendation_snapshot(
@@ -1932,25 +2010,47 @@ def _build_last_anticollision_resolution(
     success_by_name = {str(item.name): item for item in successes}
     kind = str(data.get("kind", "recommendation")).strip() or "recommendation"
     if kind == "cluster":
-        raw_items = tuple(data.get("items", ()) or ())
-        resolved_items = [
-            item
-            for item in (
-                _build_pair_anticollision_resolution_item(
-                    snapshot=dict(raw_item),
-                    success_by_name=success_by_name,
-                    uncertainty_model=uncertainty_model,
-                )
-                for raw_item in raw_items
+        before_sf = float(data.get("before_sf", 0.0))
+        before_overlap_m = max(
+            float(dict(item).get("before_overlap_m", 0.0))
+            for item in tuple(data.get("items", ()) or ())
+        ) if tuple(data.get("items", ()) or ()) else 0.0
+        target_wells = _resolution_snapshot_well_names(data)
+        current_clusters = _clusters_touching_resolution_snapshot(
+            target_wells=target_wells,
+            successes=successes,
+            uncertainty_model=uncertainty_model,
+        )
+        if current_clusters:
+            after_sf = min(float(item.worst_separation_factor) for item in current_clusters)
+            after_overlap_m = max(
+                float(recommendation.max_overlap_depth_m)
+                for cluster in current_clusters
+                for recommendation in cluster.recommendations
             )
-            if item is not None
-        ]
-        if not resolved_items:
-            return None
-        before_sf = min(float(item["before_sf"]) for item in resolved_items)
-        after_sf = min(float(item["after_sf"]) for item in resolved_items)
-        before_overlap_m = max(float(item.get("before_overlap_m", 0.0)) for item in resolved_items)
-        after_overlap_m = max(float(item.get("after_overlap_m", 0.0)) for item in resolved_items)
+            active_items = tuple(
+                {
+                    "cluster_id": str(cluster.cluster_id),
+                    "cluster_label": cluster_display_label(cluster),
+                    "well_a": str(recommendation.well_a),
+                    "well_b": str(recommendation.well_b),
+                    "action_label": str(recommendation.action_label),
+                    "expected_maneuver": str(recommendation.expected_maneuver),
+                    "area_label": str(recommendation.area_label),
+                    "md_a_start_m": float(recommendation.md_a_start_m),
+                    "md_a_end_m": float(recommendation.md_a_end_m),
+                    "md_b_start_m": float(recommendation.md_b_start_m),
+                    "md_b_end_m": float(recommendation.md_b_end_m),
+                    "current_sf": float(recommendation.min_separation_factor),
+                    "current_overlap_m": float(recommendation.max_overlap_depth_m),
+                }
+                for cluster in current_clusters
+                for recommendation in cluster.recommendations
+            )
+        else:
+            after_sf = 1.0
+            after_overlap_m = 0.0
+            active_items = ()
         resolved = dict(data)
         resolved.update(
             {
@@ -1964,7 +2064,11 @@ def _build_last_anticollision_resolution(
                     after_sf=float(after_sf),
                     after_overlap_m=float(after_overlap_m),
                 ),
-                "items": tuple(resolved_items),
+                "current_cluster_count": int(len(current_clusters)),
+                "current_cluster_labels": tuple(
+                    cluster_display_label(cluster) for cluster in current_clusters
+                ),
+                "items": active_items,
                 "uncertainty_preset": str(uncertainty_preset),
             }
         )
@@ -1981,6 +2085,51 @@ def _build_last_anticollision_resolution(
     return resolved_item
 
 
+def _resolution_snapshot_well_names(snapshot: dict[str, object]) -> tuple[str, ...]:
+    explicit_wells = tuple(str(name) for name in snapshot.get("well_names", ()) or ())
+    if explicit_wells:
+        return explicit_wells
+    affected_wells = tuple(str(name) for name in snapshot.get("affected_wells", ()) or ())
+    if affected_wells:
+        return affected_wells
+    derived: list[str] = []
+    for raw_item in tuple(snapshot.get("items", ()) or ()):
+        item = dict(raw_item)
+        for key in ("well_a", "well_b"):
+            well_name = str(item.get(key, "")).strip()
+            if well_name and well_name not in derived:
+                derived.append(well_name)
+    return tuple(derived)
+
+
+def _clusters_touching_resolution_snapshot(
+    *,
+    target_wells: tuple[str, ...],
+    successes: list[SuccessfulWellPlan],
+    uncertainty_model: PlanningUncertaintyModel,
+) -> tuple[AntiCollisionRecommendationCluster, ...]:
+    target_set = {str(name) for name in target_wells if str(name).strip()}
+    if not target_set or len(successes) < 2:
+        return ()
+    analysis = build_anti_collision_analysis_for_successes_shared(
+        successes,
+        model=uncertainty_model,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=_build_anticollision_well_contexts(successes),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+    relevant = [
+        cluster
+        for cluster in clusters
+        if target_set.intersection(str(name) for name in cluster.well_names)
+    ]
+    return tuple(relevant)
+
+
 def _render_last_anticollision_resolution(*, current_preset: str) -> None:
     resolution = dict(st.session_state.get("wt_last_anticollision_resolution") or {})
     if not resolution:
@@ -1989,9 +2138,10 @@ def _render_last_anticollision_resolution(*, current_preset: str) -> None:
     st.markdown("### Результат последнего anti-collision пересчета")
     if resolution_kind == "cluster":
         caption = (
-            "Сравнение выполнено по всем pairwise событиям подготовленного кластера "
-            "на исходных конфликтных окнах и текущем planning-level пресете "
-            "неопределенности."
+            "После пересчета выполнен полный повторный anti-collision scan по текущему "
+            "набору скважин. Метрика 'SF после' и статус считаются по всем актуальным "
+            "cluster-level событиям, которые сейчас затрагивают исходные скважины "
+            "подготовленного плана."
         )
     else:
         caption = (
@@ -2020,12 +2170,30 @@ def _render_last_anticollision_resolution(*, current_preset: str) -> None:
             ),
         )
         m4.metric("Статус", str(resolution.get("status", "—")))
+        current_cluster_labels = tuple(resolution.get("current_cluster_labels", ()) or ())
+        if current_cluster_labels:
+            st.caption(
+                "Актуальные кластеры после пересчета: "
+                + "; ".join(str(label) for label in current_cluster_labels)
+            )
+        else:
+            st.caption(
+                "После полного повторного scan активных anti-collision кластеров "
+                "для исходных скважин не осталось."
+            )
         items = list(resolution.get("items", ()) or ())
+        if not items:
+            st.success(
+                "Повторный cluster-level scan не обнаружил оставшихся collision-событий "
+                "для затронутых скважин."
+            )
+            return
         st.dataframe(
             arrow_safe_text_dataframe(
                 pd.DataFrame(
                     [
                         {
+                            "Кластер после": str(item.get("cluster_id", "—")),
                             "Пара": f"{item.get('well_a', '—')} ↔ {item.get('well_b', '—')}",
                             "Тип": str(item.get("action_label", "—")),
                             "Ожидаемый маневр": str(item.get("expected_maneuver", "—")),
@@ -2038,11 +2206,8 @@ def _render_last_anticollision_resolution(*, current_preset: str) -> None:
                                 float(item.get("md_b_start_m", 0.0)),
                                 float(item.get("md_b_end_m", 0.0)),
                             ),
-                            "SF до": _format_sf_value(item.get("before_sf")),
-                            "SF после": _format_sf_value(item.get("after_sf")),
-                            "Overlap до, м": _format_overlap_value(item.get("before_overlap_m")),
-                            "Overlap после, м": _format_overlap_value(item.get("after_overlap_m")),
-                            "Статус": str(item.get("status", "—")),
+                            "SF сейчас": _format_sf_value(item.get("current_sf")),
+                            "Overlap сейчас, м": _format_overlap_value(item.get("current_overlap_m")),
                         }
                         for item in items
                     ]
@@ -2159,24 +2324,10 @@ def _recommendation_intervals_for_moving_well(
     recommendation: AntiCollisionRecommendation,
     moving_well_name: str,
 ) -> tuple[str, float, float, float, float] | None:
-    moving_name = str(moving_well_name)
-    if moving_name == str(recommendation.well_a):
-        return (
-            str(recommendation.well_b),
-            float(recommendation.md_a_start_m),
-            float(recommendation.md_a_end_m),
-            float(recommendation.md_b_start_m),
-            float(recommendation.md_b_end_m),
-        )
-    if moving_name == str(recommendation.well_b):
-        return (
-            str(recommendation.well_a),
-            float(recommendation.md_b_start_m),
-            float(recommendation.md_b_end_m),
-            float(recommendation.md_a_start_m),
-            float(recommendation.md_a_end_m),
-        )
-    return None
+    return recommendation_intervals_for_moving_well_shared(
+        recommendation=recommendation,
+        moving_well_name=moving_well_name,
+    )
 
 
 def _build_prepared_optimization_context(
@@ -2186,36 +2337,11 @@ def _build_prepared_optimization_context(
     reference_success: SuccessfulWellPlan | None,
     uncertainty_model: PlanningUncertaintyModel,
 ) -> AntiCollisionOptimizationContext | None:
-    if moving_success is None or reference_success is None:
-        return None
-    intervals = _recommendation_intervals_for_moving_well(
+    return build_prepared_optimization_context_shared(
         recommendation=recommendation,
-        moving_well_name=str(moving_success.name),
-    )
-    if intervals is None:
-        return None
-    (
-        _reference_name,
-        candidate_md_start_m,
-        candidate_md_end_m,
-        reference_md_start_m,
-        reference_md_end_m,
-    ) = intervals
-    reference_path = build_anti_collision_reference_path(
-        well_name=str(reference_success.name),
-        stations=reference_success.stations,
-        md_start_m=reference_md_start_m,
-        md_end_m=reference_md_end_m,
-        sample_step_m=50.0,
-        model=uncertainty_model,
-    )
-    return AntiCollisionOptimizationContext(
-        candidate_md_start_m=float(candidate_md_start_m),
-        candidate_md_end_m=float(candidate_md_end_m),
-        sf_target=1.0,
-        sample_step_m=50.0,
+        moving_success=moving_success,
+        reference_success=reference_success,
         uncertainty_model=uncertainty_model,
-        references=(reference_path,),
     )
 
 
@@ -2225,141 +2351,11 @@ def _build_cluster_prepared_overrides(
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
-    success_by_name = {str(item.name): item for item in successes}
-    trajectory_specs: dict[str, dict[str, object]] = {}
-    vertical_specs: dict[str, list[str]] = {}
-    skipped_wells: list[str] = []
-
-    for recommendation in cluster.recommendations:
-        for suggestion in recommendation.override_suggestions:
-            well_name = str(suggestion.well_name)
-            update_fields = dict(suggestion.config_updates)
-            optimization_mode = str(update_fields.get("optimization_mode", "")).strip()
-            if optimization_mode == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE:
-                intervals = _recommendation_intervals_for_moving_well(
-                    recommendation=recommendation,
-                    moving_well_name=well_name,
-                )
-                moving_success = success_by_name.get(well_name)
-                if intervals is None or moving_success is None:
-                    skipped_wells.append(well_name)
-                    continue
-                (
-                    reference_name,
-                    candidate_md_start_m,
-                    candidate_md_end_m,
-                    reference_md_start_m,
-                    reference_md_end_m,
-                ) = intervals
-                reference_success = success_by_name.get(reference_name)
-                if reference_success is None:
-                    skipped_wells.append(well_name)
-                    continue
-                entry = trajectory_specs.setdefault(
-                    well_name,
-                    {
-                        "candidate_md_start_m": float(candidate_md_start_m),
-                        "candidate_md_end_m": float(candidate_md_end_m),
-                        "reference_windows": {},
-                        "reasons": [],
-                        "prefer_lower_kop": False,
-                    },
-                )
-                entry["candidate_md_start_m"] = min(
-                    float(entry["candidate_md_start_m"]),
-                    float(candidate_md_start_m),
-                )
-                entry["candidate_md_end_m"] = max(
-                    float(entry["candidate_md_end_m"]),
-                    float(candidate_md_end_m),
-                )
-                reference_windows = dict(entry["reference_windows"])
-                current_window = reference_windows.get(str(reference_name))
-                if current_window is None:
-                    reference_windows[str(reference_name)] = (
-                        float(reference_md_start_m),
-                        float(reference_md_end_m),
-                    )
-                else:
-                    reference_windows[str(reference_name)] = (
-                        min(float(current_window[0]), float(reference_md_start_m)),
-                        max(float(current_window[1]), float(reference_md_end_m)),
-                    )
-                entry["reference_windows"] = reference_windows
-                reasons = list(entry["reasons"])
-                reasons.append(str(suggestion.reason))
-                entry["reasons"] = reasons
-                continue
-
-            if optimization_mode == OPTIMIZATION_MINIMIZE_KOP:
-                vertical_specs.setdefault(well_name, []).append(str(suggestion.reason))
-                entry = trajectory_specs.get(well_name)
-                if entry is not None:
-                    entry["prefer_lower_kop"] = True
-
-    prepared: dict[str, dict[str, object]] = {}
-    source_label = cluster_display_label(cluster)
-    ordered_wells = [
-        str(step.well_name)
-        for step in cluster.action_steps
-        if str(step.well_name) in trajectory_specs or str(step.well_name) in vertical_specs
-    ]
-    fallback_wells = sorted(
-        set(trajectory_specs).union(vertical_specs).difference(ordered_wells)
+    return build_cluster_prepared_overrides_shared(
+        cluster,
+        successes=successes,
+        uncertainty_model=uncertainty_model,
     )
-    for well_name in [*ordered_wells, *fallback_wells]:
-        if well_name in trajectory_specs:
-            spec = dict(trajectory_specs[well_name])
-            references: list[object] = []
-            for reference_name, window in sorted(
-                dict(spec.get("reference_windows", {})).items()
-            ):
-                reference_success = success_by_name.get(str(reference_name))
-                if reference_success is None:
-                    skipped_wells.append(well_name)
-                    references = []
-                    break
-                references.append(
-                    build_anti_collision_reference_path(
-                        well_name=str(reference_success.name),
-                        stations=reference_success.stations,
-                        md_start_m=float(window[0]),
-                        md_end_m=float(window[1]),
-                        sample_step_m=50.0,
-                        model=uncertainty_model,
-                    )
-                )
-            if not references:
-                continue
-            combined_reasons = list(spec["reasons"])
-            combined_reasons.extend(vertical_specs.get(well_name, []))
-            context = AntiCollisionOptimizationContext(
-                candidate_md_start_m=float(spec["candidate_md_start_m"]),
-                candidate_md_end_m=float(spec["candidate_md_end_m"]),
-                sf_target=1.0,
-                sample_step_m=50.0,
-                uncertainty_model=uncertainty_model,
-                references=tuple(references),
-                prefer_lower_kop=bool(spec.get("prefer_lower_kop")) or bool(vertical_specs.get(well_name)),
-            )
-            prepared[well_name] = {
-                "update_fields": {
-                    "optimization_mode": OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
-                },
-                "source": source_label,
-                "reason": " | ".join(dict.fromkeys(str(item) for item in combined_reasons)),
-                "optimization_context": context,
-            }
-            continue
-
-        reasons = vertical_specs.get(well_name, [])
-        prepared[well_name] = {
-            "update_fields": {"optimization_mode": OPTIMIZATION_MINIMIZE_KOP},
-            "source": source_label,
-            "reason": " | ".join(dict.fromkeys(str(item) for item in reasons)),
-            "optimization_context": None,
-        }
-    return prepared, sorted(set(str(name) for name in skipped_wells))
 
 
 def _prepare_rerun_from_cluster(
@@ -3174,13 +3170,29 @@ def _run_batch_if_clicked(
     prepared_snapshot = dict(
         st.session_state.get("wt_prepared_recommendation_snapshot") or {}
     )
+    dynamic_cluster_context = None
+    if str(prepared_snapshot.get("kind", "")).strip() == "cluster":
+        target_well_names = _resolution_snapshot_well_names(prepared_snapshot)
+        if target_well_names:
+            dynamic_cluster_context = DynamicClusterExecutionContext(
+                target_well_names=tuple(target_well_names),
+                uncertainty_model=planning_uncertainty_model_for_preset(
+                    normalize_uncertainty_preset(
+                        st.session_state.get(
+                            "wt_anticollision_uncertainty_preset",
+                            DEFAULT_UNCERTAINTY_PRESET,
+                        )
+                    )
+                ),
+                initial_successes=tuple(st.session_state.get("wt_successes") or ()),
+            )
     missing_anticollision_context = sorted(
         well_name
         for well_name, cfg in config_by_name.items()
         if str(cfg.optimization_mode) == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
         and well_name not in optimization_context_by_name
     )
-    if missing_anticollision_context:
+    if missing_anticollision_context and dynamic_cluster_context is None:
         st.session_state["wt_last_error"] = (
             "Не удалось запустить anti-collision пересчет: отсутствует контекст "
             "конфликтного окна для скважин "
@@ -3221,7 +3233,13 @@ def _run_batch_if_clicked(
                     "Для части выбранных скважин активирован anti-collision avoidance "
                     "mode на конфликтном окне."
                 )
-            if len(selected_execution_order) > 1 and selected_execution_order != selected_names:
+            if dynamic_cluster_context is not None:
+                append_log(
+                    "Включена iterative cluster-aware execution policy: "
+                    "порядок шагов и anti-collision overrides будут пересчитываться "
+                    "после каждого успешного шага по текущей topology кластера."
+                )
+            elif len(selected_execution_order) > 1 and selected_execution_order != selected_names:
                 append_log(
                     "Cluster-aware execution order: "
                     + " -> ".join(selected_execution_order)
@@ -3326,10 +3344,42 @@ def _run_batch_if_clicked(
                 config=request.config,
                 config_by_name=config_by_name,
                 optimization_context_by_name=optimization_context_by_name,
+                dynamic_cluster_context=dynamic_cluster_context,
                 progress_callback=on_progress,
                 solver_progress_callback=on_solver_progress,
                 record_done_callback=on_record_done,
             )
+            batch_metadata = batch.last_evaluation_metadata
+            skipped_policy_count = int(len(batch_metadata.skipped_selected_names))
+            if dynamic_cluster_context is not None:
+                skipped_names = tuple(
+                    str(name)
+                    for name in batch_metadata.skipped_selected_names
+                    if str(name).strip()
+                )
+                if skipped_names:
+                    if bool(batch_metadata.cluster_blocked):
+                        blocking_reason = (
+                            str(batch_metadata.cluster_blocking_reason).strip()
+                            if batch_metadata.cluster_blocking_reason
+                            else "cluster-level пересчет перешел в advisory-only режим."
+                        )
+                        append_log(
+                            "Iterative cluster-aware execution остановлен: "
+                            + blocking_reason
+                            + " Без дополнительного пересчета оставлены: "
+                            + ", ".join(skipped_names)
+                            + "."
+                        )
+                    elif bool(batch_metadata.cluster_resolved_early):
+                        append_log(
+                            "Iterative cluster-aware execution завершился досрочно: "
+                            "после очередного шага дополнительные пересчеты для "
+                            "оставшихся скважин не потребовались. Без повторного "
+                            "пересчета оставлены: "
+                            + ", ".join(skipped_names)
+                            + "."
+                        )
             elapsed_s = perf_counter() - started
             progress.progress(100, text="Batch-расчет завершен.")
             _store_merged_batch_results(
@@ -3374,12 +3424,23 @@ def _run_batch_if_clicked(
             st.session_state["wt_prepared_recommendation_snapshot"] = None
             append_log(
                 f"Batch-расчет завершен. Успешно: {len(successes)}, "
-                f"ошибок: {len(summary_rows) - len(successes)}. "
+                f"ошибок: {len(summary_rows) - len(successes)}"
+                + (
+                    f", без дополнительного пересчета оставлено: {skipped_policy_count}"
+                    if skipped_policy_count > 0
+                    else ""
+                )
+                + ". "
                 f"Затраченное время: {elapsed_s:.2f} с.",
             )
             if successes:
                 phase_placeholder.success(
                     f"Расчет завершен за {elapsed_s:.2f} с. Успешно: {len(successes)}"
+                    + (
+                        f", без дополнительного пересчета оставлено: {skipped_policy_count}"
+                        if skipped_policy_count > 0
+                        else ""
+                    )
                 )
             else:
                 phase_placeholder.error(

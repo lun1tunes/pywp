@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
@@ -17,6 +18,7 @@ from pywp.anticollision import (
     collision_zone_plan_polygon,
     collision_zone_sphere_mesh,
 )
+from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
 from pywp.anticollision_recommendations import (
     RECOMMENDATION_REDUCE_KOP,
     RECOMMENDATION_TARGET_SPACING,
@@ -27,6 +29,7 @@ from pywp.anticollision_recommendations import (
     AntiCollisionWellContext,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, Point3D
+from pywp.welltrack_batch import SuccessfulWellPlan
 
 
 def _straight_stations(*, y_offset_m: float) -> pd.DataFrame:
@@ -173,6 +176,136 @@ def test_collision_corridor_geometry_and_well_segments_are_built() -> None:
     assert tube_mesh is not None
     assert tube_mesh.vertices_xyz.shape[1] == 3
     assert {segment.well_name for segment in analysis.well_segments} == {"WELL-A", "WELL-B"}
+
+
+def test_lightweight_runtime_analysis_matches_full_report_events_and_recommendations() -> None:
+    stations_a = _vertical_build_stations(
+        y_offset_m=0.0,
+        lateral_y_t1_m=60.0,
+        lateral_y_end_m=280.0,
+    )
+    stations_b = _vertical_build_stations(
+        y_offset_m=5.0,
+        lateral_y_t1_m=140.0,
+        lateral_y_end_m=340.0,
+    )
+    success_a = SuccessfulWellPlan(
+        name="WELL-A",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(50.0, 60.0, 1450.0),
+        t3=Point3D(320.0, 280.0, 1775.0),
+        stations=stations_a,
+        summary={"kop_md_m": 820.0},
+        azimuth_deg=90.0,
+        md_t1_m=1500.0,
+        config={"optimization_mode": "none", "kop_min_vertical_m": 550.0},
+    )
+    success_b = SuccessfulWellPlan(
+        name="WELL-B",
+        surface=Point3D(0.0, 5.0, 0.0),
+        t1=Point3D(50.0, 140.0, 1450.0),
+        t3=Point3D(320.0, 340.0, 1775.0),
+        stations=stations_b,
+        summary={"kop_md_m": 780.0},
+        azimuth_deg=90.0,
+        md_t1_m=1500.0,
+        config={"optimization_mode": "none", "kop_min_vertical_m": 550.0},
+    )
+    full_analysis = analyze_anti_collision(
+        [
+            build_anti_collision_well(
+                name="WELL-A",
+                color="#0B6E4F",
+                stations=stations_a,
+                surface=success_a.surface,
+                t1=success_a.t1,
+                t3=success_a.t3,
+                azimuth_deg=90.0,
+                md_t1_m=1500.0,
+            ),
+            build_anti_collision_well(
+                name="WELL-B",
+                color="#D1495B",
+                stations=stations_b,
+                surface=success_b.surface,
+                t1=success_b.t1,
+                t3=success_b.t3,
+                azimuth_deg=90.0,
+                md_t1_m=1500.0,
+            ),
+        ]
+    )
+    runtime_analysis = build_anti_collision_analysis_for_successes(
+        [success_a, success_b],
+        model=full_analysis.wells[0].overlay.model,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+    contexts = {
+        "WELL-A": AntiCollisionWellContext(
+            well_name="WELL-A",
+            kop_md_m=820.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=1500.0,
+            md_total_m=2000.0,
+            optimization_mode="none",
+        ),
+        "WELL-B": AntiCollisionWellContext(
+            well_name="WELL-B",
+            kop_md_m=780.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=1500.0,
+            md_total_m=2000.0,
+            optimization_mode="none",
+        ),
+    }
+
+    assert runtime_analysis.zones
+    assert all(len(corridor.overlap_rings_xyz) == 0 for corridor in runtime_analysis.corridors)
+    runtime_events = anti_collision_report_events(runtime_analysis)
+    full_events = anti_collision_report_events(full_analysis)
+    assert len(runtime_events) == len(full_events)
+    for runtime_event, full_event in zip(runtime_events, full_events):
+        assert runtime_event.well_a == full_event.well_a
+        assert runtime_event.well_b == full_event.well_b
+        assert runtime_event.classification == full_event.classification
+        assert runtime_event.priority_rank == full_event.priority_rank
+        assert runtime_event.label_a == full_event.label_a
+        assert runtime_event.label_b == full_event.label_b
+        assert runtime_event.md_a_start_m == full_event.md_a_start_m
+        assert runtime_event.md_a_end_m == full_event.md_a_end_m
+        assert runtime_event.md_b_start_m == full_event.md_b_start_m
+        assert runtime_event.md_b_end_m == full_event.md_b_end_m
+        assert runtime_event.min_separation_factor == pytest.approx(
+            full_event.min_separation_factor
+        )
+        assert runtime_event.max_overlap_depth_m == pytest.approx(
+            full_event.max_overlap_depth_m
+        )
+
+    runtime_recommendations = build_anti_collision_recommendations(
+        runtime_analysis,
+        well_context_by_name=contexts,
+    )
+    full_recommendations = build_anti_collision_recommendations(
+        full_analysis,
+        well_context_by_name=contexts,
+    )
+    assert len(runtime_recommendations) == len(full_recommendations)
+    for runtime_item, full_item in zip(runtime_recommendations, full_recommendations):
+        assert runtime_item.category == full_item.category
+        assert runtime_item.summary == full_item.summary
+        assert runtime_item.detail == full_item.detail
+        assert runtime_item.expected_maneuver == full_item.expected_maneuver
+        assert runtime_item.action_label == full_item.action_label
+        assert runtime_item.can_prepare_rerun == full_item.can_prepare_rerun
+        assert runtime_item.affected_wells == full_item.affected_wells
+        assert runtime_item.min_separation_factor == pytest.approx(
+            full_item.min_separation_factor
+        )
+        assert runtime_item.max_overlap_depth_m == pytest.approx(
+            full_item.max_overlap_depth_m
+        )
 
 
 def test_overlap_ring_is_not_reduced_to_uniform_circle_for_offset_wells() -> None:

@@ -111,6 +111,16 @@ class WellUncertaintyOverlay:
 
 
 @dataclass(frozen=True)
+class UncertaintyStationSample:
+    station_index: int
+    md_m: float
+    inc_deg: float
+    azi_deg: float
+    center_xyz: tuple[float, float, float]
+    covariance_xyz: np.ndarray
+
+
+@dataclass(frozen=True)
 class UncertaintyTubeMesh:
     vertices_xyz: np.ndarray
     i: np.ndarray
@@ -222,27 +232,99 @@ def station_uncertainty_covariance_xyz(
     azi_deg: float,
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> np.ndarray:
-    tangent, inc_axis, azi_axis = local_uncertainty_axes_xyz(
-        inc_deg=inc_deg,
-        azi_deg=azi_deg,
+    return np.asarray(
+        station_uncertainty_covariance_xyz_many(
+            md_m=np.asarray([float(md_m)], dtype=float),
+            inc_deg=np.asarray([float(inc_deg)], dtype=float),
+            azi_deg=np.asarray([float(azi_deg)], dtype=float),
+            model=model,
+        )[0],
+        dtype=float,
     )
-    semi_inc_m, semi_azi_m = station_uncertainty_axes_m(
-        md_m=md_m,
-        inc_deg=inc_deg,
-        model=model,
+
+
+def station_uncertainty_covariance_xyz_many(
+    *,
+    md_m: np.ndarray,
+    inc_deg: np.ndarray,
+    azi_deg: np.ndarray,
+    model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+) -> np.ndarray:
+    md_values, inc_values, azi_values = np.broadcast_arrays(
+        np.asarray(md_m, dtype=float),
+        np.asarray(inc_deg, dtype=float),
+        np.asarray(azi_deg, dtype=float),
     )
-    scale = float(model.confidence_scale)
-    sigma_inc_m = semi_inc_m / scale
-    sigma_azi_m = semi_azi_m / scale
-    if abs(float(inc_deg)) < float(model.near_vertical_isotropic_threshold_deg):
-        axis_1, axis_2 = _stable_normal_plane_basis(tangent)
-        return sigma_inc_m * sigma_inc_m * (
-            np.outer(axis_1, axis_1) + np.outer(axis_2, axis_2)
+    md_nonnegative = np.maximum(md_values, 0.0)
+    inc_rad = inc_values * DEG2RAD
+    azi_rad = azi_values * DEG2RAD
+    sin_inc = np.sin(inc_rad)
+    cos_inc = np.cos(inc_rad)
+    sin_azi = np.sin(azi_rad)
+    cos_azi = np.cos(azi_rad)
+
+    tangent = np.stack(
+        [
+            sin_inc * sin_azi,
+            sin_inc * cos_azi,
+            cos_inc,
+        ],
+        axis=-1,
+    )
+    inc_axis = np.stack(
+        [
+            cos_inc * sin_azi,
+            cos_inc * cos_azi,
+            -sin_inc,
+        ],
+        axis=-1,
+    )
+    azi_axis = np.stack(
+        [
+            cos_azi,
+            -sin_azi,
+            np.zeros_like(cos_azi),
+        ],
+        axis=-1,
+    )
+
+    lateral_exposure = np.abs(sin_inc)
+    sigma_drift_m = (
+        (md_nonnegative / 1000.0)
+        * float(model.sigma_lateral_drift_m_per_1000m)
+        * lateral_exposure
+    )
+    sigma_inc_angle_m = md_nonnegative * float(model.sigma_inc_deg) * DEG2RAD
+    sigma_inc_m = np.hypot(sigma_inc_angle_m, sigma_drift_m)
+    sigma_azi_angle_m = (
+        md_nonnegative * lateral_exposure * float(model.sigma_azi_deg) * DEG2RAD
+    )
+    sigma_azi_m = np.hypot(sigma_azi_angle_m, sigma_drift_m)
+
+    covariance = np.zeros(md_values.shape + (3, 3), dtype=float)
+    sigma_inc2 = sigma_inc_m * sigma_inc_m
+    sigma_azi2 = sigma_azi_m * sigma_azi_m
+
+    near_vertical_mask = np.abs(inc_values) < float(
+        model.near_vertical_isotropic_threshold_deg
+    )
+    if np.any(near_vertical_mask):
+        projector = (
+            np.eye(3, dtype=float)
+            - tangent[..., :, None] * tangent[..., None, :]
         )
-    return (
-        sigma_inc_m * sigma_inc_m * np.outer(inc_axis, inc_axis)
-        + sigma_azi_m * sigma_azi_m * np.outer(azi_axis, azi_axis)
-    )
+        covariance[near_vertical_mask] = (
+            sigma_inc2[near_vertical_mask, None, None]
+            * projector[near_vertical_mask]
+        )
+    if np.any(~near_vertical_mask):
+        covariance[~near_vertical_mask] = (
+            sigma_inc2[~near_vertical_mask, None, None]
+            * (inc_axis[~near_vertical_mask, :, None] * inc_axis[~near_vertical_mask, None, :])
+            + sigma_azi2[~near_vertical_mask, None, None]
+            * (azi_axis[~near_vertical_mask, :, None] * azi_axis[~near_vertical_mask, None, :])
+        )
+    return covariance
 
 
 def build_uncertainty_overlay(
@@ -358,6 +440,80 @@ def build_uncertainty_overlay(
             )
         )
     return WellUncertaintyOverlay(samples=tuple(samples), model=model)
+
+
+def build_uncertainty_station_samples(
+    *,
+    stations: pd.DataFrame,
+    model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+    required_md_m: tuple[float, ...] = (),
+) -> tuple[UncertaintyStationSample, ...]:
+    missing_cols = sorted(_REQUIRED_STATION_COLUMNS.difference(stations.columns))
+    if missing_cols:
+        raise ValueError(
+            "stations are missing required columns for uncertainty samples: "
+            + ", ".join(missing_cols)
+        )
+    if len(stations) == 0:
+        return ()
+
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    azi_values_deg = stations["AZI_deg"].to_numpy(dtype=float)
+    azi_values_rad = np.unwrap(np.deg2rad(azi_values_deg))
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    z_values = stations["Z_m"].to_numpy(dtype=float)
+
+    sample_md_values = _display_sample_md_values(
+        md_values=md_values,
+        inc_values=inc_values,
+        azi_values_rad=azi_values_rad,
+        model=model,
+        required_md_m=required_md_m,
+    )
+    if not sample_md_values:
+        return ()
+
+    sample_md = np.asarray(sample_md_values, dtype=float)
+    sample_inc_deg = np.interp(sample_md, md_values, inc_values)
+    sample_azi_rad = np.interp(sample_md, md_values, azi_values_rad)
+    sample_azi_deg = np.rad2deg(sample_azi_rad) % 360.0
+    sample_x = np.interp(sample_md, md_values, x_values)
+    sample_y = np.interp(sample_md, md_values, y_values)
+    sample_z = np.interp(sample_md, md_values, z_values)
+    covariance_xyz = station_uncertainty_covariance_xyz_many(
+        md_m=sample_md,
+        inc_deg=sample_inc_deg,
+        azi_deg=sample_azi_deg,
+        model=model,
+    )
+
+    samples: list[UncertaintyStationSample] = []
+    for index, md_m in enumerate(sample_md.tolist()):
+        semi_inc_m, semi_azi_m = station_uncertainty_axes_m(
+            md_m=float(md_m),
+            inc_deg=float(sample_inc_deg[index]),
+            model=model,
+        )
+        if max(semi_inc_m, semi_azi_m) < float(model.min_display_radius_m):
+            continue
+        station_index = int(np.argmin(np.abs(md_values - float(md_m))))
+        samples.append(
+            UncertaintyStationSample(
+                station_index=station_index,
+                md_m=float(md_m),
+                inc_deg=float(sample_inc_deg[index]),
+                azi_deg=float(sample_azi_deg[index]),
+                center_xyz=(
+                    float(sample_x[index]),
+                    float(sample_y[index]),
+                    float(sample_z[index]),
+                ),
+                covariance_xyz=np.asarray(covariance_xyz[index], dtype=float),
+            )
+        )
+    return tuple(samples)
 
 
 def _display_sample_md_values(

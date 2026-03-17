@@ -106,9 +106,27 @@ def test_reference_path_sampling_interpolates_azimuth_across_north_without_180_d
     assert float(sampled["AZI_deg"].iloc[1]) == pytest.approx(0.0, abs=1.0)
 
 
-def test_clearance_uses_local_progress_alignment_instead_of_full_cross_product() -> None:
-    candidate_stations = _line_stations(x_values=[0.0, 1000.0], y_offset_m=0.0)
-    reference_stations = _line_stations(x_values=[1000.0, 2000.0], y_offset_m=0.0)
+def test_clearance_detects_skewed_window_crossing_via_continuous_closest_approach() -> None:
+    candidate_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "INC_deg": [90.0, 90.0],
+            "AZI_deg": [90.0, 90.0],
+            "X_m": [0.0, 1000.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+        }
+    )
+    reference_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "INC_deg": [90.0, 90.0],
+            "AZI_deg": [180.0, 180.0],
+            "X_m": [250.0, 250.0],
+            "Y_m": [1000.0, -1000.0],
+            "Z_m": [0.0, 0.0],
+        }
+    )
 
     reference_path = build_anti_collision_reference_path(
         well_name="REF",
@@ -132,5 +150,5 @@ def test_clearance_uses_local_progress_alignment_instead_of_full_cross_product()
         context=context,
     )
 
-    assert evaluation.min_separation_factor > 1.0
-    assert evaluation.max_overlap_depth_m == pytest.approx(0.0, abs=1e-9)
+    assert evaluation.min_separation_factor == pytest.approx(0.0, abs=1e-9)
+    assert evaluation.max_overlap_depth_m > 0.0

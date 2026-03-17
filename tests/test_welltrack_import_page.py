@@ -633,6 +633,53 @@ def test_build_last_anticollision_resolution_reports_sf_after() -> None:
     assert str(resolution["uncertainty_preset"]) == DEFAULT_UNCERTAINTY_PRESET
 
 
+def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(monkeypatch) -> None:
+    page = _load_welltrack_page_module()
+    calls = {"analysis": 0}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    monkeypatch.setattr(
+        page,
+        "_build_anti_collision_analysis",
+        lambda successes, *, model, name_to_color=None: (
+            calls.__setitem__("analysis", calls["analysis"] + 1) or analysis
+        ),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+
+    first = page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        records=[],
+    )
+    second = page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        records=[],
+    )
+
+    assert first[0] is analysis
+    assert second[0] is analysis
+    assert calls["analysis"] == 1
+
+
 def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> None:
     page = _load_welltrack_page_module()
     analysis = AntiCollisionAnalysis(
@@ -1094,10 +1141,77 @@ def test_build_last_anticollision_resolution_supports_cluster_snapshot() -> None
 
     assert resolution is not None
     assert str(resolution["kind"]) == "cluster"
-    assert float(resolution["after_sf"]) > 1.0
+    assert float(resolution["after_sf"]) >= 1.0
     assert str(resolution["status"]) == "Конфликт снят"
-    assert len(tuple(resolution["items"])) == 2
-    assert all(float(item["after_sf"]) > 1.0 for item in tuple(resolution["items"]))
+    assert int(resolution["current_cluster_count"]) == 0
+    assert tuple(resolution["items"]) == ()
+
+
+def test_build_last_anticollision_resolution_cluster_rescans_current_conflicts_beyond_snapshot_windows() -> None:
+    page = _load_welltrack_page_module()
+    resolution = page._build_last_anticollision_resolution(
+        snapshot={
+            "kind": "cluster",
+            "cluster_id": "ac-cluster-001",
+            "source_label": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
+            "before_sf": 0.71,
+            "well_names": ("WELL-A", "WELL-B", "WELL-C"),
+            "items": (
+                {
+                    "kind": "recommendation",
+                    "well_a": "WELL-A",
+                    "well_b": "WELL-C",
+                    "source_label": "WELL-A ↔ WELL-C · Траектория / review · SF 0.74",
+                    "action_label": "Подготовить anti-collision пересчет",
+                    "expected_maneuver": "Сместить post-entry / HORIZONTAL",
+                    "area_label": "траектория ↔ траектория",
+                    "before_sf": 0.74,
+                    "before_overlap_m": 8.0,
+                    "md_a_start_m": 1000.0,
+                    "md_a_end_m": 2000.0,
+                    "md_b_start_m": 1000.0,
+                    "md_b_end_m": 2000.0,
+                },
+                {
+                    "kind": "recommendation",
+                    "well_a": "WELL-B",
+                    "well_b": "WELL-C",
+                    "source_label": "WELL-B ↔ WELL-C · Траектория / review · SF 0.71",
+                    "action_label": "Подготовить anti-collision пересчет",
+                    "expected_maneuver": "Сместить post-entry / HORIZONTAL",
+                    "area_label": "траектория ↔ траектория",
+                    "before_sf": 0.71,
+                    "before_overlap_m": 10.0,
+                    "md_a_start_m": 1000.0,
+                    "md_a_end_m": 2000.0,
+                    "md_b_start_m": 1000.0,
+                    "md_b_end_m": 2000.0,
+                },
+            ),
+        },
+        successes=[
+            _successful_plan(name="WELL-A", y_offset_m=0.0),
+            _successful_plan(name="WELL-B", y_offset_m=300.0),
+            _successful_plan(name="WELL-C", y_offset_m=600.0),
+            _successful_plan(name="WELL-D", y_offset_m=5.0),
+        ],
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_preset=DEFAULT_UNCERTAINTY_PRESET,
+    )
+
+    assert resolution is not None
+    assert str(resolution["kind"]) == "cluster"
+    assert float(resolution["after_sf"]) < 1.0
+    assert str(resolution["status"]) != "Конфликт снят"
+    assert int(resolution["current_cluster_count"]) >= 1
+    assert any(
+        {
+            str(item.get("well_a")),
+            str(item.get("well_b")),
+        }
+        == {"WELL-A", "WELL-D"}
+        for item in tuple(resolution["items"])
+    )
 
 
 def test_prepare_rerun_from_recommendation_skips_trajectory_override_without_context() -> None:

@@ -18,6 +18,7 @@ from pywp.uncertainty import (
     normalize_uncertainty_preset,
     station_uncertainty_axes_m,
     station_uncertainty_covariance_xyz,
+    station_uncertainty_covariance_xyz_many,
     uncertainty_preset_label,
     uncertainty_ribbon_polygon,
 )
@@ -58,6 +59,32 @@ def test_station_uncertainty_covariance_is_positive_semidefinite() -> None:
     assert cov.shape == (3, 3)
     assert np.allclose(cov, cov.T, atol=1e-12)
     assert float(np.min(eigenvalues)) >= -1e-9
+
+
+def test_vectorized_station_uncertainty_covariance_matches_scalar_formulation() -> None:
+    md_values = np.array([550.0, 1800.0, 4200.0], dtype=float)
+    inc_values = np.array([0.0, 42.0, 86.0], dtype=float)
+    azi_values = np.array([5.0, 125.0, 270.0], dtype=float)
+
+    vectorized = station_uncertainty_covariance_xyz_many(
+        md_m=md_values,
+        inc_deg=inc_values,
+        azi_deg=azi_values,
+    )
+    scalar = np.stack(
+        [
+            station_uncertainty_covariance_xyz(
+                md_m=float(md_m),
+                inc_deg=float(inc_deg),
+                azi_deg=float(azi_deg),
+            )
+            for md_m, inc_deg, azi_deg in zip(md_values, inc_values, azi_values)
+        ],
+        axis=0,
+    )
+
+    assert vectorized.shape == (3, 3, 3)
+    assert np.allclose(vectorized, scalar, atol=1e-12)
 
 
 def test_azimuth_uncertainty_axis_vanishes_for_vertical_station() -> None:

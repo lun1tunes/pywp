@@ -12,10 +12,11 @@ from pywp.planner_validation import _build_trajectory
 from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     PlanningUncertaintyModel,
-    station_uncertainty_covariance_xyz,
+    station_uncertainty_covariance_xyz_many,
 )
 
 SMALL = 1e-9
+AntiCollisionSegment = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class AntiCollisionReferencePath:
     sample_md_m: np.ndarray
     xyz_m: np.ndarray
     covariance_xyz: np.ndarray
+    segments: tuple[AntiCollisionSegment, ...]
 
 
 @dataclass(frozen=True)
@@ -65,17 +67,11 @@ def build_anti_collision_reference_path(
         sample_step_m=sample_step_m,
     )
     xyz_m = sampled[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float)
-    covariance_xyz = np.stack(
-        [
-            station_uncertainty_covariance_xyz(
-                md_m=float(row.MD_m),
-                inc_deg=float(row.INC_deg),
-                azi_deg=float(row.AZI_deg),
-                model=model,
-            )
-            for row in sampled.itertuples(index=False)
-        ],
-        axis=0,
+    covariance_xyz = station_uncertainty_covariance_xyz_many(
+        md_m=sampled["MD_m"].to_numpy(dtype=float),
+        inc_deg=sampled["INC_deg"].to_numpy(dtype=float),
+        azi_deg=sampled["AZI_deg"].to_numpy(dtype=float),
+        model=model,
     )
     return AntiCollisionReferencePath(
         well_name=str(well_name),
@@ -84,6 +80,12 @@ def build_anti_collision_reference_path(
         sample_md_m=sampled["MD_m"].to_numpy(dtype=float),
         xyz_m=np.asarray(xyz_m, dtype=float),
         covariance_xyz=np.asarray(covariance_xyz, dtype=float),
+        segments=tuple(
+            _polyline_segments(
+                xyz=np.asarray(xyz_m, dtype=float),
+                covariance=np.asarray(covariance_xyz, dtype=float),
+            )
+        ),
     )
 
 
@@ -117,23 +119,15 @@ def evaluate_stations_anti_collision_clearance(
         md_end_m=float(context.candidate_md_end_m),
         sample_step_m=float(context.sample_step_m),
     )
-    candidate_md_m = sampled_candidate["MD_m"].to_numpy(dtype=float)
     candidate_xyz = sampled_candidate[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float)
-    candidate_covariance = np.stack(
-        [
-            station_uncertainty_covariance_xyz(
-                md_m=float(row.MD_m),
-                inc_deg=float(row.INC_deg),
-                azi_deg=float(row.AZI_deg),
-                model=context.uncertainty_model,
-            )
-            for row in sampled_candidate.itertuples(index=False)
-        ],
-        axis=0,
+    candidate_covariance = station_uncertainty_covariance_xyz_many(
+        md_m=sampled_candidate["MD_m"].to_numpy(dtype=float),
+        inc_deg=sampled_candidate["INC_deg"].to_numpy(dtype=float),
+        azi_deg=sampled_candidate["AZI_deg"].to_numpy(dtype=float),
+        model=context.uncertainty_model,
     )
     confidence_scale = float(max(context.uncertainty_model.confidence_scale, SMALL))
-    return _clearance_from_pairwise_samples(
-        candidate_md_m=candidate_md_m,
+    return _clearance_from_continuous_segment_pairs(
         candidate_xyz=candidate_xyz,
         candidate_covariance=candidate_covariance,
         references=context.references,
@@ -141,9 +135,8 @@ def evaluate_stations_anti_collision_clearance(
     )
 
 
-def _clearance_from_pairwise_samples(
+def _clearance_from_continuous_segment_pairs(
     *,
-    candidate_md_m: np.ndarray,
     candidate_xyz: np.ndarray,
     candidate_covariance: np.ndarray,
     references: tuple[AntiCollisionReferencePath, ...],
@@ -151,64 +144,18 @@ def _clearance_from_pairwise_samples(
 ) -> AntiCollisionClearanceEvaluation:
     min_sf = float("inf")
     max_overlap = 0.0
+    candidate_segments = _polyline_segments(
+        xyz=candidate_xyz,
+        covariance=candidate_covariance,
+    )
     for reference in references:
-        sample_count = max(len(candidate_md_m), len(reference.sample_md_m))
-        progress_grid = np.linspace(0.0, 1.0, num=max(sample_count, 1), dtype=float)
-        candidate_progress = _progress_parameter(candidate_md_m)
-        reference_progress = _progress_parameter(reference.sample_md_m)
-        candidate_xyz_aligned = _interp_rows_by_progress(
-            values=candidate_xyz,
-            source_progress=candidate_progress,
-            target_progress=progress_grid,
+        pair_evaluation = _continuous_polyline_clearance(
+            candidate_segments=candidate_segments,
+            reference_segments=list(reference.segments),
+            confidence_scale=confidence_scale,
         )
-        candidate_covariance_aligned = _interp_covariance_by_progress(
-            values=candidate_covariance,
-            source_progress=candidate_progress,
-            target_progress=progress_grid,
-        )
-        reference_xyz_aligned = _interp_rows_by_progress(
-            values=reference.xyz_m,
-            source_progress=reference_progress,
-            target_progress=progress_grid,
-        )
-        reference_covariance_aligned = _interp_covariance_by_progress(
-            values=reference.covariance_xyz,
-            source_progress=reference_progress,
-            target_progress=progress_grid,
-        )
-        delta_xyz = candidate_xyz_aligned - reference_xyz_aligned
-        distance = np.linalg.norm(delta_xyz, axis=1)
-        direction = np.zeros((len(progress_grid), 3), dtype=float)
-        np.divide(
-            delta_xyz,
-            distance[:, None],
-            out=direction,
-            where=distance[:, None] > SMALL,
-        )
-        zero_mask = distance <= SMALL
-        if np.any(zero_mask):
-            direction[zero_mask] = np.array([1.0, 0.0, 0.0], dtype=float)
-        combined_sigma2 = np.einsum(
-            "ai,aij,aj->a",
-            direction,
-            candidate_covariance_aligned,
-            direction,
-        ) + np.einsum(
-            "ai,aij,aj->a",
-            direction,
-            reference_covariance_aligned,
-            direction,
-        )
-        combined_radius = confidence_scale * np.sqrt(np.clip(combined_sigma2, 0.0, None))
-        sf = np.divide(
-            distance,
-            np.maximum(combined_radius, SMALL),
-            out=np.full_like(distance, np.inf, dtype=float),
-            where=combined_radius > SMALL,
-        )
-        overlap_depth = np.maximum(combined_radius - distance, 0.0)
-        min_sf = min(min_sf, float(np.min(sf)))
-        max_overlap = max(max_overlap, float(np.max(overlap_depth)))
+        min_sf = min(min_sf, float(pair_evaluation.min_separation_factor))
+        max_overlap = max(max_overlap, float(pair_evaluation.max_overlap_depth_m))
     if not np.isfinite(min_sf):
         min_sf = 1e6
     return AntiCollisionClearanceEvaluation(
@@ -217,59 +164,355 @@ def _clearance_from_pairwise_samples(
     )
 
 
-def _progress_parameter(sample_md_m: np.ndarray) -> np.ndarray:
-    md_values = np.asarray(sample_md_m, dtype=float)
-    if len(md_values) <= 1:
-        return np.zeros(len(md_values), dtype=float)
-    start = float(md_values[0])
-    end = float(md_values[-1])
-    span = max(end - start, SMALL)
-    return np.clip((md_values - start) / span, 0.0, 1.0)
-
-
-def _interp_rows_by_progress(
+def _polyline_segments(
     *,
-    values: np.ndarray,
-    source_progress: np.ndarray,
-    target_progress: np.ndarray,
-) -> np.ndarray:
-    source = np.asarray(values, dtype=float)
-    if len(source) == 0:
-        return np.zeros((len(target_progress), 3), dtype=float)
-    if len(source) == 1:
-        return np.repeat(source, repeats=len(target_progress), axis=0)
-    return np.column_stack(
-        [
-            np.interp(
-                target_progress,
-                source_progress,
-                source[:, column_index],
+    xyz: np.ndarray,
+    covariance: np.ndarray,
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]]:
+    points = np.asarray(xyz, dtype=float)
+    covariances = np.asarray(covariance, dtype=float)
+    if len(points) == 0:
+        return []
+    if len(points) == 1:
+        sigma2_upper = float(np.trace(covariances[0]))
+        return [(points[0], points[0], covariances[0], covariances[0], sigma2_upper)]
+    return [
+        (
+            points[index],
+            points[index + 1],
+            covariances[index],
+            covariances[index + 1],
+            float(
+                max(
+                    float(np.trace(covariances[index])),
+                    float(np.trace(covariances[index + 1])),
+                )
+            ),
+        )
+        for index in range(len(points) - 1)
+    ]
+
+
+def _continuous_polyline_clearance(
+    *,
+    candidate_segments: list[AntiCollisionSegment],
+    reference_segments: list[AntiCollisionSegment],
+    confidence_scale: float,
+) -> AntiCollisionClearanceEvaluation:
+    min_sf = float("inf")
+    max_overlap = 0.0
+    for candidate_segment in candidate_segments:
+        for reference_segment in reference_segments:
+            (
+                closest_candidate,
+                closest_reference,
+                centerline_distance_m,
+            ) = _segment_pair_closest_probe(
+                candidate_segment=candidate_segment,
+                reference_segment=reference_segment,
             )
-            for column_index in range(source.shape[1])
-        ]
+            combined_radius_upper_m = _segment_pair_combined_radius_upper_bound(
+                candidate_segment=candidate_segment,
+                reference_segment=reference_segment,
+                confidence_scale=confidence_scale,
+            )
+            sf_lower_bound = float(
+                centerline_distance_m / max(combined_radius_upper_m, SMALL)
+            )
+            overlap_upper_bound = float(
+                max(combined_radius_upper_m - centerline_distance_m, 0.0)
+            )
+            if (
+                sf_lower_bound >= float(min_sf)
+                and overlap_upper_bound <= float(max_overlap) + SMALL
+            ):
+                continue
+            for candidate_param, reference_param in _segment_pair_probe_parameters(
+                candidate_segment=candidate_segment,
+                reference_segment=reference_segment,
+                closest_candidate=closest_candidate,
+                closest_reference=closest_reference,
+            ):
+                separation_factor, overlap_depth_m = _evaluate_segment_pair_probe(
+                    candidate_segment=candidate_segment,
+                    reference_segment=reference_segment,
+                    candidate_param=float(candidate_param),
+                    reference_param=float(reference_param),
+                    confidence_scale=confidence_scale,
+                )
+                min_sf = min(min_sf, float(separation_factor))
+                max_overlap = max(max_overlap, float(overlap_depth_m))
+    if not np.isfinite(min_sf):
+        min_sf = 1e6
+    return AntiCollisionClearanceEvaluation(
+        min_separation_factor=float(min_sf),
+        max_overlap_depth_m=float(max_overlap),
     )
 
 
-def _interp_covariance_by_progress(
+def _segment_pair_probe_parameters(
     *,
-    values: np.ndarray,
-    source_progress: np.ndarray,
-    target_progress: np.ndarray,
+    candidate_segment: AntiCollisionSegment,
+    reference_segment: AntiCollisionSegment,
+    closest_candidate: float,
+    closest_reference: float,
+) -> tuple[tuple[float, float], ...]:
+    candidate_start, candidate_end, _, _, _ = candidate_segment
+    reference_start, reference_end, _, _, _ = reference_segment
+    probe_pairs = [
+        (closest_candidate, closest_reference),
+        (
+            0.0,
+            _closest_parameter_on_segment_to_point(
+                point=candidate_start,
+                segment_start=reference_start,
+                segment_end=reference_end,
+            ),
+        ),
+        (
+            1.0,
+            _closest_parameter_on_segment_to_point(
+                point=candidate_end,
+                segment_start=reference_start,
+                segment_end=reference_end,
+            ),
+        ),
+        (
+            _closest_parameter_on_segment_to_point(
+                point=reference_start,
+                segment_start=candidate_start,
+                segment_end=candidate_end,
+            ),
+            0.0,
+        ),
+        (
+            _closest_parameter_on_segment_to_point(
+                point=reference_end,
+                segment_start=candidate_start,
+                segment_end=candidate_end,
+            ),
+            1.0,
+        ),
+    ]
+    deduped: list[tuple[float, float]] = []
+    seen: set[tuple[float, float]] = set()
+    for candidate_param, reference_param in probe_pairs:
+        key = (
+            round(float(np.clip(candidate_param, 0.0, 1.0)), 8),
+            round(float(np.clip(reference_param, 0.0, 1.0)), 8),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return tuple(deduped)
+
+
+def _evaluate_segment_pair_probe(
+    *,
+    candidate_segment: AntiCollisionSegment,
+    reference_segment: AntiCollisionSegment,
+    candidate_param: float,
+    reference_param: float,
+    confidence_scale: float,
+) -> tuple[float, float]:
+    candidate_start, candidate_end, candidate_cov_start, candidate_cov_end, _ = candidate_segment
+    reference_start, reference_end, reference_cov_start, reference_cov_end, _ = reference_segment
+    candidate_point = _interpolate_segment_point(
+        start=candidate_start,
+        end=candidate_end,
+        parameter=candidate_param,
+    )
+    reference_point = _interpolate_segment_point(
+        start=reference_start,
+        end=reference_end,
+        parameter=reference_param,
+    )
+    candidate_covariance = _interpolate_segment_covariance(
+        start_covariance=candidate_cov_start,
+        end_covariance=candidate_cov_end,
+        parameter=candidate_param,
+    )
+    reference_covariance = _interpolate_segment_covariance(
+        start_covariance=reference_cov_start,
+        end_covariance=reference_cov_end,
+        parameter=reference_param,
+    )
+    delta_xyz = candidate_point - reference_point
+    distance_m = float(np.linalg.norm(delta_xyz))
+    combined_covariance = candidate_covariance + reference_covariance
+    if distance_m <= SMALL:
+        max_sigma2 = float(np.max(np.linalg.eigvalsh(combined_covariance)))
+        combined_radius_m = float(
+            confidence_scale * np.sqrt(max(max_sigma2, 0.0))
+        )
+        return 0.0, float(max(combined_radius_m, 0.0))
+    direction = delta_xyz / distance_m
+    combined_sigma2 = float(direction @ combined_covariance @ direction)
+    combined_radius_m = float(
+        confidence_scale * np.sqrt(max(combined_sigma2, 0.0))
+    )
+    separation_factor = float(distance_m / max(combined_radius_m, SMALL))
+    overlap_depth_m = float(max(combined_radius_m - distance_m, 0.0))
+    return separation_factor, overlap_depth_m
+
+
+def _segment_pair_closest_probe(
+    *,
+    candidate_segment: AntiCollisionSegment,
+    reference_segment: AntiCollisionSegment,
+) -> tuple[float, float, float]:
+    candidate_start, candidate_end, _, _, _ = candidate_segment
+    reference_start, reference_end, _, _, _ = reference_segment
+    closest_candidate, closest_reference = _closest_parameters_on_segments(
+        candidate_start,
+        candidate_end,
+        reference_start,
+        reference_end,
+    )
+    candidate_point = _interpolate_segment_point(
+        start=candidate_start,
+        end=candidate_end,
+        parameter=closest_candidate,
+    )
+    reference_point = _interpolate_segment_point(
+        start=reference_start,
+        end=reference_end,
+        parameter=closest_reference,
+    )
+    distance_m = float(np.linalg.norm(candidate_point - reference_point))
+    return float(closest_candidate), float(closest_reference), float(distance_m)
+
+
+def _segment_pair_combined_radius_upper_bound(
+    *,
+    candidate_segment: AntiCollisionSegment,
+    reference_segment: AntiCollisionSegment,
+    confidence_scale: float,
+) -> float:
+    candidate_sigma2_upper = float(candidate_segment[4])
+    reference_sigma2_upper = float(reference_segment[4])
+    return float(
+        confidence_scale
+        * np.sqrt(max(candidate_sigma2_upper + reference_sigma2_upper, 0.0))
+    )
+
+
+def _closest_parameter_on_segment_to_point(
+    *,
+    point: np.ndarray,
+    segment_start: np.ndarray,
+    segment_end: np.ndarray,
+) -> float:
+    direction = np.asarray(segment_end, dtype=float) - np.asarray(segment_start, dtype=float)
+    denom = float(direction @ direction)
+    if denom <= SMALL:
+        return 0.0
+    parameter = float((np.asarray(point, dtype=float) - np.asarray(segment_start, dtype=float)) @ direction / denom)
+    return float(np.clip(parameter, 0.0, 1.0))
+
+
+def _closest_parameters_on_segments(
+    candidate_start: np.ndarray,
+    candidate_end: np.ndarray,
+    reference_start: np.ndarray,
+    reference_end: np.ndarray,
+) -> tuple[float, float]:
+    p0 = np.asarray(candidate_start, dtype=float)
+    p1 = np.asarray(candidate_end, dtype=float)
+    q0 = np.asarray(reference_start, dtype=float)
+    q1 = np.asarray(reference_end, dtype=float)
+    u = p1 - p0
+    v = q1 - q0
+    w = p0 - q0
+    a = float(u @ u)
+    b = float(u @ v)
+    c = float(v @ v)
+    d = float(u @ w)
+    e = float(v @ w)
+    if a <= SMALL and c <= SMALL:
+        return 0.0, 0.0
+    if a <= SMALL:
+        return 0.0, _closest_parameter_on_segment_to_point(
+            point=p0,
+            segment_start=q0,
+            segment_end=q1,
+        )
+    if c <= SMALL:
+        return _closest_parameter_on_segment_to_point(
+            point=q0,
+            segment_start=p0,
+            segment_end=p1,
+        ), 0.0
+
+    denominator = a * c - b * b
+    s_numerator = 0.0
+    s_denominator = denominator
+    t_numerator = 0.0
+    t_denominator = denominator
+
+    if denominator <= SMALL:
+        s_numerator = 0.0
+        s_denominator = 1.0
+        t_numerator = e
+        t_denominator = c
+    else:
+        s_numerator = b * e - c * d
+        t_numerator = a * e - b * d
+        if s_numerator < 0.0:
+            s_numerator = 0.0
+            t_numerator = e
+            t_denominator = c
+        elif s_numerator > s_denominator:
+            s_numerator = s_denominator
+            t_numerator = e + b
+            t_denominator = c
+
+    if t_numerator < 0.0:
+        t_numerator = 0.0
+        if -d < 0.0:
+            s_numerator = 0.0
+        elif -d > a:
+            s_numerator = s_denominator
+        else:
+            s_numerator = -d
+            s_denominator = a
+    elif t_numerator > t_denominator:
+        t_numerator = t_denominator
+        if -d + b < 0.0:
+            s_numerator = 0.0
+        elif -d + b > a:
+            s_numerator = s_denominator
+        else:
+            s_numerator = -d + b
+            s_denominator = a
+
+    candidate_param = 0.0 if abs(s_numerator) <= SMALL else s_numerator / max(s_denominator, SMALL)
+    reference_param = 0.0 if abs(t_numerator) <= SMALL else t_numerator / max(t_denominator, SMALL)
+    return float(np.clip(candidate_param, 0.0, 1.0)), float(np.clip(reference_param, 0.0, 1.0))
+
+
+def _interpolate_segment_point(
+    *,
+    start: np.ndarray,
+    end: np.ndarray,
+    parameter: float,
 ) -> np.ndarray:
-    source = np.asarray(values, dtype=float)
-    if len(source) == 0:
-        return np.zeros((len(target_progress), 3, 3), dtype=float)
-    if len(source) == 1:
-        return np.repeat(source, repeats=len(target_progress), axis=0)
-    result = np.empty((len(target_progress), source.shape[1], source.shape[2]), dtype=float)
-    for row_index in range(source.shape[1]):
-        for column_index in range(source.shape[2]):
-            result[:, row_index, column_index] = np.interp(
-                target_progress,
-                source_progress,
-                source[:, row_index, column_index],
-            )
-    return result
+    alpha = float(np.clip(parameter, 0.0, 1.0))
+    return (1.0 - alpha) * np.asarray(start, dtype=float) + alpha * np.asarray(end, dtype=float)
+
+
+def _interpolate_segment_covariance(
+    *,
+    start_covariance: np.ndarray,
+    end_covariance: np.ndarray,
+    parameter: float,
+) -> np.ndarray:
+    alpha = float(np.clip(parameter, 0.0, 1.0))
+    return (
+        (1.0 - alpha) * np.asarray(start_covariance, dtype=float)
+        + alpha * np.asarray(end_covariance, dtype=float)
+    )
 
 
 def sample_stations_in_md_window(
