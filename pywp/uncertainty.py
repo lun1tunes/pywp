@@ -9,6 +9,15 @@ from pywp.models import Point3D
 
 DEG2RAD = np.pi / 180.0
 _REQUIRED_STATION_COLUMNS = frozenset({"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"})
+UNCERTAINTY_PRESET_OPTIMISTIC = "optimistic"
+UNCERTAINTY_PRESET_ORDINARY_MWD = "ordinary_mwd"
+UNCERTAINTY_PRESET_CONSERVATIVE = "conservative"
+DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_ORDINARY_MWD
+UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
+    UNCERTAINTY_PRESET_OPTIMISTIC: "Оптимистичный",
+    UNCERTAINTY_PRESET_ORDINARY_MWD: "Обычный MWD",
+    UNCERTAINTY_PRESET_CONSERVATIVE: "Консервативный",
+}
 
 
 @dataclass(frozen=True)
@@ -59,8 +68,26 @@ class PlanningUncertaintyModel:
         if float(self.min_refined_step_m) > float(self.sample_step_m):
             raise ValueError("min_refined_step_m must be <= sample_step_m.")
 
-
-DEFAULT_PLANNING_UNCERTAINTY_MODEL = PlanningUncertaintyModel()
+PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
+    UNCERTAINTY_PRESET_OPTIMISTIC: PlanningUncertaintyModel(
+        sigma_inc_deg=0.20,
+        sigma_azi_deg=0.40,
+        sigma_lateral_drift_m_per_1000m=6.0,
+    ),
+    UNCERTAINTY_PRESET_ORDINARY_MWD: PlanningUncertaintyModel(
+        sigma_inc_deg=0.30,
+        sigma_azi_deg=0.60,
+        sigma_lateral_drift_m_per_1000m=12.0,
+    ),
+    UNCERTAINTY_PRESET_CONSERVATIVE: PlanningUncertaintyModel(
+        sigma_inc_deg=0.45,
+        sigma_azi_deg=0.90,
+        sigma_lateral_drift_m_per_1000m=18.0,
+    ),
+}
+DEFAULT_PLANNING_UNCERTAINTY_MODEL = PLANNING_UNCERTAINTY_PRESET_MODELS[
+    DEFAULT_UNCERTAINTY_PRESET
+]
 
 
 @dataclass(frozen=True)
@@ -91,6 +118,22 @@ class UncertaintyTubeMesh:
     k: np.ndarray
 
 
+def normalize_uncertainty_preset(preset: object) -> str:
+    preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
+    if preset_key in PLANNING_UNCERTAINTY_PRESET_MODELS:
+        return preset_key
+    return DEFAULT_UNCERTAINTY_PRESET
+
+
+def planning_uncertainty_model_for_preset(preset: object) -> PlanningUncertaintyModel:
+    return PLANNING_UNCERTAINTY_PRESET_MODELS[normalize_uncertainty_preset(preset)]
+
+
+def uncertainty_preset_label(preset: object) -> str:
+    preset_key = normalize_uncertainty_preset(preset)
+    return UNCERTAINTY_PRESET_OPTIONS[preset_key]
+
+
 def uncertainty_model_caption(
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> str:
@@ -99,7 +142,8 @@ def uncertainty_model_caption(
         "эллиптическим сечениям в плоскости, нормальной к стволу. "
         "Базовая модель ordinary MWD proxy: first-order по ошибкам "
         f"INC/AZI = {float(model.sigma_inc_deg):.2f}°/{float(model.sigma_azi_deg):.2f}° "
-        f"(1σ) + lateral drift {float(model.sigma_lateral_drift_m_per_1000m):.1f} м/1000м (1σ). "
+        f"(1σ) + lateral drift {float(model.sigma_lateral_drift_m_per_1000m):.1f} м/1000м (1σ), "
+        "взвешенный по латеральной экспозиции sin(INC). "
         "Это визуализация для планирования, не полноценная ISCWSA tool model."
     )
 
@@ -150,7 +194,12 @@ def station_uncertainty_axes_m(
 ) -> tuple[float, float]:
     md_value = max(float(md_m), 0.0)
     inc_rad = float(inc_deg) * DEG2RAD
-    sigma_drift_m = (md_value / 1000.0) * float(model.sigma_lateral_drift_m_per_1000m)
+    lateral_exposure = abs(float(np.sin(inc_rad)))
+    sigma_drift_m = (
+        (md_value / 1000.0)
+        * float(model.sigma_lateral_drift_m_per_1000m)
+        * lateral_exposure
+    )
     sigma_inc_angle_m = md_value * float(model.sigma_inc_deg) * DEG2RAD
     sigma_inc_m = float(np.hypot(sigma_inc_angle_m, sigma_drift_m))
     if abs(float(inc_deg)) < float(model.near_vertical_isotropic_threshold_deg):

@@ -4,8 +4,9 @@ import math
 import re
 from typing import Callable, Literal
 
+from pydantic import field_validator
 from pywp.models import Point3D
-from pywp.pydantic_base import FrozenModel
+from pywp.pydantic_base import FrozenModel, coerce_model_like
 
 _WELLTRACK_RE = re.compile(r"^\s*WELLTRACK\b(.*)$", flags=re.IGNORECASE)
 DEFAULT_WELLTRACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp1251", "latin-1")
@@ -26,6 +27,19 @@ class WelltrackPoint(FrozenModel):
 class WelltrackRecord(FrozenModel):
     name: str
     points: tuple[WelltrackPoint, ...]
+
+    @field_validator("points", mode="before")
+    @classmethod
+    def _coerce_points(
+        cls,
+        value: object,
+    ) -> tuple[WelltrackPoint, ...]:
+        if value is None:
+            raise ValueError("points are required for WelltrackRecord.")
+        return tuple(
+            coerce_model_like(point, WelltrackPoint)
+            for point in tuple(value)
+        )
 
 
 def decode_welltrack_bytes(

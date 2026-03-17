@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from pywp.models import Point3D
+from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.plot_axes import (
     equalized_axis_ranges,
     equalized_xy_ranges,
@@ -51,6 +52,31 @@ HOVER_TEMPLATE_XYZ_MD_DLS = (
     "ПИ: %{customdata[4]} deg/10m"
     "<extra>%{fullData.name}</extra>"
 )
+
+
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    color = str(hex_color).strip().lstrip("#")
+    if len(color) != 6:
+        return f"rgba(90, 90, 90, {float(alpha):.3f})"
+    red = int(color[0:2], 16)
+    green = int(color[2:4], 16)
+    blue = int(color[4:6], 16)
+    return f"rgba({red}, {green}, {blue}, {float(alpha):.3f})"
+
+
+def _lighten_hex(hex_color: str, blend_with_white: float = 0.38) -> str:
+    color = str(hex_color).strip().lstrip("#")
+    if len(color) != 6:
+        return "#A0A0A0"
+    blend = float(np.clip(blend_with_white, 0.0, 1.0))
+    red = int(color[0:2], 16)
+    green = int(color[2:4], 16)
+    blue = int(color[4:6], 16)
+    red = int(round(red + (255 - red) * blend))
+    green = int(round(green + (255 - green) * blend))
+    blue = int(round(blue + (255 - blue) * blend))
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
 
 def _segment_blocks(segment_names: np.ndarray) -> list[tuple[int, int, str]]:
     if len(segment_names) == 0:
@@ -387,7 +413,12 @@ def _add_uncertainty_plan_or_section_traces(
         )
 
 
-def _add_uncertainty_3d_traces(fig: go.Figure, *, overlay: WellUncertaintyOverlay) -> None:
+def _add_uncertainty_3d_traces(
+    fig: go.Figure,
+    *,
+    overlay: WellUncertaintyOverlay,
+    terminal_boundary_color: str | None = None,
+) -> None:
     tube_mesh = build_uncertainty_tube_mesh(overlay)
     if tube_mesh is not None:
         fig.add_trace(
@@ -404,6 +435,23 @@ def _add_uncertainty_3d_traces(fig: go.Figure, *, overlay: WellUncertaintyOverla
                 color=UNCERTAINTY_SURFACE_COLOR,
                 opacity=0.16,
                 flatshading=True,
+                hoverinfo="skip",
+            )
+        )
+    if overlay.samples and terminal_boundary_color:
+        terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
+        fig.add_trace(
+            go.Scatter3d(
+                x=terminal_ring[:, 0],
+                y=terminal_ring[:, 1],
+                z=terminal_ring[:, 2],
+                mode="lines",
+                name="Граница конуса неопределенности",
+                showlegend=False,
+                line={
+                    "width": 1.5,
+                    "color": _lighten_hex(str(terminal_boundary_color)),
+                },
                 hoverinfo="skip",
             )
         )
@@ -490,7 +538,11 @@ def trajectory_3d_figure(
         )
     )
     if uncertainty_overlay is not None and uncertainty_overlay.samples:
-        _add_uncertainty_3d_traces(fig, overlay=uncertainty_overlay)
+        _add_uncertainty_3d_traces(
+            fig,
+            overlay=uncertainty_overlay,
+            terminal_boundary_color=TRAJECTORY_COLOR_PRIMARY,
+        )
     if plan_csb_df is not None and len(plan_csb_df) > 0:
         fig.add_trace(
             go.Scatter3d(
@@ -605,6 +657,7 @@ def trajectory_3d_figure(
             "xaxis_title": "X / Восток (м)",
             "yaxis_title": "Y / Север (м)",
             "zaxis_title": "Z / TVD (m)",
+            "camera": DEFAULT_3D_CAMERA,
             "xaxis": {
                 "range": x_range,
                 "tickvals": x_tickvals,

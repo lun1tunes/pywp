@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from pywp.models import Point3D
+from pywp.plotly_config import trajectory_plotly_chart_config
 from pywp.uncertainty import WellUncertaintyOverlay
 from pywp.ui_utils import dls_to_pi
 from pywp.visualization import (
@@ -69,6 +70,7 @@ def render_trajectory_dls_panel(
                 actual_df=actual_stations,
                 uncertainty_overlay=uncertainty_overlay,
             ),
+            config=trajectory_plotly_chart_config(),
             width="stretch",
         )
         row1_col2.plotly_chart(

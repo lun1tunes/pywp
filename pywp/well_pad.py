@@ -14,6 +14,7 @@ from pywp.models import Point3D
 from pywp.pydantic_base import FrozenModel
 
 _EPS = 1e-9
+_PCA_AXIS_DOMINANCE_RATIO_MIN = 1.05
 
 
 class PadWell(FrozenModel):
@@ -114,6 +115,16 @@ def estimate_pad_nds_azimuth_deg(
     surface_x: float,
     surface_y: float,
 ) -> float:
+    """Estimate rig walking/skidding azimuth for a pad from target geometry.
+
+    The primary heuristic is the dominant principal axis of the midpoint cloud
+    ((t1 + t3) / 2 in XY). This is a reasonable geometric seed when wells have a
+    clear elongated spread and the goal is to order them along the dominant pad
+    direction. If the cloud is close to isotropic, the principal axis becomes
+    numerically weak, so we fall back to the centroid direction from the pad
+    surface. If that is also degenerate, no geometry-driven NDS exists and the
+    function returns 0° as a stable default.
+    """
     if not wells:
         return 0.0
     if len(wells) == 1:
@@ -127,7 +138,18 @@ def estimate_pad_nds_azimuth_deg(
     covariance = centered.T @ centered
     try:
         eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-        direction = eigenvectors[:, int(np.argmax(eigenvalues))]
+        eigenvalues = np.asarray(eigenvalues, dtype=float)
+        principal_index = int(np.argmax(eigenvalues))
+        principal_value = float(eigenvalues[principal_index])
+        minor_value = float(np.min(eigenvalues))
+        if principal_value <= _EPS:
+            direction = centroid - np.array([surface_x, surface_y], dtype=float)
+        else:
+            dominance_ratio = principal_value / max(minor_value, _EPS)
+            if dominance_ratio < _PCA_AXIS_DOMINANCE_RATIO_MIN:
+                direction = centroid - np.array([surface_x, surface_y], dtype=float)
+            else:
+                direction = eigenvectors[:, principal_index]
     except np.linalg.LinAlgError:
         direction = np.array([1.0, 0.0], dtype=float)
 

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import math
 
+from pydantic import BaseModel
+
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.well_pad import (
     PadLayoutPlan,
     apply_pad_layout,
     detect_well_pads,
+    estimate_pad_nds_azimuth_deg,
     ordered_pad_wells,
 )
 
@@ -175,3 +178,114 @@ def test_apply_pad_layout_rewrites_surface_points() -> None:
     assert math.isclose(float(s1.z), 5.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(s2.z), 5.0, rel_tol=0.0, abs_tol=1e-9)
 
+
+def test_apply_pad_layout_accepts_model_like_points_from_stale_session_state() -> None:
+    class LegacyPoint(BaseModel):
+        x: float
+        y: float
+        z: float
+        md: float
+
+    class LegacyRecord(BaseModel):
+        name: str
+        points: tuple[LegacyPoint, ...]
+
+    records = [
+        LegacyRecord(
+            name="W1",
+            points=(
+                LegacyPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                LegacyPoint(x=100.0, y=0.0, z=2000.0, md=1000.0),
+                LegacyPoint(x=200.0, y=0.0, z=2100.0, md=2000.0),
+            ),
+        ),
+        LegacyRecord(
+            name="W2",
+            points=(
+                LegacyPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                LegacyPoint(x=300.0, y=0.0, z=2000.0, md=1000.0),
+                LegacyPoint(x=400.0, y=0.0, z=2100.0, md=2000.0),
+            ),
+        ),
+    ]
+    pads = detect_well_pads(records)
+    plan = PadLayoutPlan(
+        pad_id=str(pads[0].pad_id),
+        first_surface_x=1000.0,
+        first_surface_y=500.0,
+        first_surface_z=5.0,
+        spacing_m=20.0,
+        nds_azimuth_deg=90.0,
+    )
+
+    updated = apply_pad_layout(
+        records=records,
+        pads=pads,
+        plan_by_pad_id={str(pads[0].pad_id): plan},
+    )
+
+    assert isinstance(updated[0], WelltrackRecord)
+    assert all(isinstance(point, WelltrackPoint) for point in updated[0].points)
+    assert math.isclose(float(updated[1].points[0].x), 1020.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_estimate_pad_nds_azimuth_deg_uses_stable_fallback_for_isotropic_cloud() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=-100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=-200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W3",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=0.0,
+            t1y=100.0,
+            t1z=2000.0,
+            t3x=0.0,
+            t3y=200.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W4",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=0.0,
+            t1y=-100.0,
+            t1z=2000.0,
+            t3x=0.0,
+            t3y=-200.0,
+            t3z=2100.0,
+        ),
+    ]
+    pad = detect_well_pads(records)[0]
+
+    azimuth_deg = estimate_pad_nds_azimuth_deg(
+        wells=pad.wells,
+        surface_x=0.0,
+        surface_y=0.0,
+    )
+
+    assert math.isclose(float(azimuth_deg), 0.0, rel_tol=0.0, abs_tol=1e-9)

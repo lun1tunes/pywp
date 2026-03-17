@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pywp.models import (
+    OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
     OPTIMIZATION_NONE,
@@ -18,10 +19,24 @@ OPTIMIZATION_OPTIONS = {
     OPTIMIZATION_MINIMIZE_KOP: "Минимизация KOP",
 }
 
+_INTERNAL_OPTIMIZATION_DISPLAY_OPTIONS = {
+    OPTIMIZATION_ANTI_COLLISION_AVOIDANCE: "Anti-collision avoidance",
+}
+
 TURN_SOLVER_OPTIONS = {
     TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF, рекомендуется)",
     TURN_SOLVER_DE_HYBRID: "DE Hybrid (глобальный + локальный)",
 }
+
+
+def optimization_display_label(mode: str) -> str:
+    text = str(mode).strip()
+    if not text:
+        return "—"
+    return OPTIMIZATION_OPTIONS.get(
+        text,
+        _INTERNAL_OPTIMIZATION_DISPLAY_OPTIONS.get(text, text),
+    )
 
 
 def normalize_build_dls_bounds(

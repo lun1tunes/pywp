@@ -5,6 +5,7 @@ import math
 import pandas as pd
 
 from pywp.models import Point3D
+from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.uncertainty import build_uncertainty_overlay
 from pywp.visualization import (
     dls_figure,
@@ -299,6 +300,12 @@ def test_uncertainty_ellipses_are_rendered_on_3d_plan_and_section_views() -> Non
         if str(trace.type) == "mesh3d"
         and str(trace.name) == uncertainty_name
     ]
+    terminal_boundaries_3d = [
+        trace
+        for trace in fig3d.data
+        if str(trace.type) == "scatter3d"
+        and str(trace.name) == "Граница конуса неопределенности"
+    ]
     traces_plan = [trace for trace in fig_plan.data if str(trace.name) == "Сечение неопределенности"]
     traces_section = [
         trace for trace in fig_section.data if str(trace.name) == "Сечение неопределенности"
@@ -310,6 +317,10 @@ def test_uncertainty_ellipses_are_rendered_on_3d_plan_and_section_views() -> Non
 
     assert not traces_3d
     assert surfaces_3d
+    assert len(terminal_boundaries_3d) == 1
+    assert str(terminal_boundaries_3d[0].line.color) == "#D96C74"
+    assert float(terminal_boundaries_3d[0].line.width) == 1.5
+    assert fig3d.layout.scene.camera.to_plotly_json() == DEFAULT_3D_CAMERA
     assert not traces_plan
     assert not traces_section
     assert ribbons_plan

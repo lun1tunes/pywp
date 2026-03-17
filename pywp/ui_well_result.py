@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import pandas as pd
 import streamlit as st
 from pydantic import field_validator
 
-from pywp.models import Point3D, SummaryValue, TrajectoryConfig
-from pywp.planner_config import OPTIMIZATION_OPTIONS
+from pywp.models import OPTIMIZATION_NONE, Point3D, SummaryValue, TrajectoryConfig
+from pywp.planner_config import OPTIMIZATION_OPTIONS, optimization_display_label
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.uncertainty import (
+    DEFAULT_UNCERTAINTY_PRESET,
+    UNCERTAINTY_PRESET_OPTIONS,
     build_uncertainty_overlay,
+    normalize_uncertainty_preset,
+    planning_uncertainty_model_for_preset,
     uncertainty_model_caption,
+    uncertainty_preset_label,
 )
 from pywp.ui_utils import arrow_safe_text_dataframe, dls_to_pi, format_distance
 from pywp.ui_well_panels import (
@@ -73,6 +78,8 @@ class SingleWellResultView(FrozenArbitraryModel):
     azimuth_deg: float
     md_t1_m: float
     runtime_s: float | None = None
+    baseline_summary: Mapping[str, SummaryValue] | None = None
+    baseline_runtime_s: float | None = None
     issue_messages: tuple[str, ...] = ()
     trajectory_line_dash: str = "solid"
     plan_csb_stations: pd.DataFrame | None = None
@@ -91,6 +98,10 @@ class SingleWellResultView(FrozenArbitraryModel):
 
 def uncertainty_toggle_key(*, well_name: str) -> str:
     return f"show_uncertainty_ellipses::{str(well_name)}"
+
+
+def uncertainty_preset_key(*, well_name: str) -> str:
+    return f"uncertainty_preset::{str(well_name)}"
 
 
 def horizontal_offset_m(*, point: Point3D, reference: Point3D) -> float:
@@ -159,6 +170,201 @@ def _format_summary_key(metric_key: str) -> str:
     return key
 
 
+def _format_metric_text(metric_value: object, *, missing_text: str = "-") -> str:
+    if metric_value is None:
+        return missing_text
+    text = str(metric_value).strip()
+    return missing_text if not text else text
+
+
+def _format_issues_text(
+    *,
+    summary: Mapping[str, SummaryValue],
+    extra_messages: Sequence[str] = (),
+    missing_text: str = "-",
+) -> str:
+    messages = collect_issue_messages(summary=summary, extra_messages=extra_messages)
+    if not messages:
+        return missing_text
+    return " | ".join(messages)
+
+
+def _format_runtime_text(runtime_s: float | None, *, missing_text: str = "-") -> str:
+    if runtime_s is None:
+        return missing_text
+    return f"{float(runtime_s):.2f} с"
+
+
+def _format_solver_restart_text(
+    summary: Mapping[str, SummaryValue],
+    *,
+    missing_text: str = "-",
+) -> str:
+    used_raw = summary.get("solver_turn_restarts_used")
+    max_raw = summary.get("solver_turn_max_restarts")
+    if used_raw is None and max_raw is None:
+        return missing_text
+    try:
+        used = int(float(0.0 if used_raw is None else used_raw))
+    except (TypeError, ValueError):
+        return missing_text
+    if max_raw is None:
+        return str(used)
+    try:
+        max_restarts = int(float(max_raw))
+    except (TypeError, ValueError):
+        return str(used)
+    return f"{used} / {max_restarts}"
+
+
+def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
+    summary = view.summary
+    baseline_summary = view.baseline_summary
+    has_baseline = baseline_summary is not None
+    t1_horizontal_offset_m = horizontal_offset_m(point=view.t1, reference=view.surface)
+
+    optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
+    optimization_label = optimization_display_label(optimization_mode)
+    baseline_optimization_label = (
+        OPTIMIZATION_OPTIONS.get(OPTIMIZATION_NONE, "Без оптимизации")
+        if has_baseline
+        else "-"
+    )
+
+    def baseline_value(formatter: Callable[[Mapping[str, SummaryValue]], str]) -> str:
+        if baseline_summary is None:
+            return "-"
+        return formatter(baseline_summary)
+
+    rows = [
+        {
+            "Показатель": "Модель траектории",
+            "Значение": _format_metric_text(summary.get("trajectory_type")),
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: _format_metric_text(candidate.get("trajectory_type"))
+            ),
+        },
+        {
+            "Показатель": "Оптимизация",
+            "Значение": optimization_label,
+            "Значение без оптимизации": baseline_optimization_label,
+        },
+        {
+            "Показатель": "Цели / сложность",
+            "Значение": (
+                f"{_format_metric_text(summary.get('trajectory_target_direction'))} / "
+                f"{_format_metric_text(summary.get('well_complexity'))}"
+            ),
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: (
+                    f"{_format_metric_text(candidate.get('trajectory_target_direction'))} / "
+                    f"{_format_metric_text(candidate.get('well_complexity'))}"
+                )
+            ),
+        },
+        {
+            "Показатель": "Поворот по азимуту",
+            "Значение": f"{float(summary.get('azimuth_turn_deg', 0.0)):.2f} deg",
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: f"{float(candidate.get('azimuth_turn_deg', 0.0)):.2f} deg"
+            ),
+        },
+        {
+            "Показатель": "Отход t1",
+            "Значение": format_distance(t1_horizontal_offset_m),
+            "Значение без оптимизации": (
+                format_distance(t1_horizontal_offset_m) if has_baseline else "-"
+            ),
+        },
+        {
+            "Показатель": "INC t1 / ЗУ HOLD",
+            "Значение": (
+                f"{float(summary['entry_inc_deg']):.2f} / "
+                f"{float(summary['hold_inc_deg']):.2f} deg"
+            ),
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: (
+                    f"{float(candidate.get('entry_inc_deg', 0.0)):.2f} / "
+                    f"{float(candidate.get('hold_inc_deg', 0.0)):.2f} deg"
+                )
+            ),
+        },
+        {
+            "Показатель": "BUILD ПИ / Макс ПИ",
+            "Значение": (
+                f"{dls_to_pi(float(summary.get('build_dls_selected_deg_per_30m', 0.0))):.2f} / "
+                f"{dls_to_pi(float(summary['max_dls_total_deg_per_30m'])):.2f} deg/10m"
+            ),
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: (
+                    f"{dls_to_pi(float(candidate.get('build_dls_selected_deg_per_30m', 0.0))):.2f} / "
+                    f"{dls_to_pi(float(candidate.get('max_dls_total_deg_per_30m', 0.0))):.2f} deg/10m"
+                )
+            ),
+        },
+        {
+            "Показатель": "KOP MD",
+            "Значение": format_distance(float(summary["kop_md_m"])),
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: format_distance(float(candidate.get("kop_md_m", 0.0)))
+            ),
+        },
+        {
+            "Показатель": "Длина HORIZONTAL",
+            "Значение": format_distance(float(summary["horizontal_length_m"])),
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: format_distance(float(candidate.get("horizontal_length_m", 0.0)))
+            ),
+        },
+        {
+            "Показатель": "Макс INC факт / лимит",
+            "Значение": (
+                f"{float(summary['max_inc_actual_deg']):.2f} / "
+                f"{float(summary['max_inc_deg']):.2f} deg"
+            ),
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: (
+                    f"{float(candidate.get('max_inc_actual_deg', 0.0)):.2f} / "
+                    f"{float(candidate.get('max_inc_deg', 0.0)):.2f} deg"
+                )
+            ),
+        },
+        {
+            "Показатель": "Итоговая MD",
+            "Значение": format_distance(float(summary["md_total_m"])),
+            "Значение без оптимизации": baseline_value(
+                lambda candidate: format_distance(float(candidate.get("md_total_m", 0.0)))
+            ),
+        },
+        {
+            "Показатель": "Рестарты решателя",
+            "Значение": _format_solver_restart_text(summary),
+            "Значение без оптимизации": baseline_value(_format_solver_restart_text),
+        },
+        {
+            "Показатель": "Проблемы",
+            "Значение": _format_issues_text(
+                summary=summary,
+                extra_messages=view.issue_messages,
+            ),
+            "Значение без оптимизации": (
+                _format_issues_text(summary=baseline_summary)
+                if baseline_summary is not None
+                else "-"
+            ),
+        },
+        {
+            "Показатель": "Время расчета",
+            "Значение": _format_runtime_text(view.runtime_s),
+            "Значение без оптимизации": _format_runtime_text(view.baseline_runtime_s),
+        },
+    ]
+    if optimization_mode == OPTIMIZATION_NONE:
+        for row in rows:
+            row["Значение без оптимизации"] = "-"
+    return rows
+
+
 def build_target_validation_rows(
     summary: Mapping[str, SummaryValue],
 ) -> list[dict[str, str]]:
@@ -217,49 +423,13 @@ def render_key_metrics(
         summary=summary,
         extra_messages=view.issue_messages,
     )
-    problem_text = "ОК" if not issue_messages else " | ".join(issue_messages)
 
     def _render_body() -> None:
         if title:
             st.markdown(f"### {title}")
-        optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
-        optimization_label = OPTIMIZATION_OPTIONS.get(optimization_mode, optimization_mode)
-        metrics_rows = [
-            {"Показатель": "Модель траектории", "Значение": str(summary["trajectory_type"])},
-            {"Показатель": "Оптимизация", "Значение": optimization_label},
-            {
-                "Показатель": "Классификация целей",
-                "Значение": str(summary.get("trajectory_target_direction", "—")),
-            },
-            {"Показатель": "Класс сложности", "Значение": str(summary["well_complexity"])},
-            {
-                "Показатель": "Поворот по азимуту",
-                "Значение": f"{float(summary.get('azimuth_turn_deg', 0.0)):.2f} deg",
-            },
-            {"Показатель": "INC на t1", "Значение": f"{float(summary['entry_inc_deg']):.2f} deg"},
-            {"Показатель": "ЗУ HOLD", "Значение": f"{float(summary['hold_inc_deg']):.2f} deg"},
-            {"Показатель": "Отход t1", "Значение": format_distance(t1_horizontal_offset_m)},
-            {"Показатель": "KOP MD", "Значение": format_distance(float(summary["kop_md_m"]))},
-            {"Показатель": "Длина HORIZONTAL", "Значение": format_distance(float(summary["horizontal_length_m"]))},
-            {
-                "Показатель": "Макс INC факт/лимит",
-                "Значение": f"{float(summary['max_inc_actual_deg']):.2f}/{float(summary['max_inc_deg']):.2f} deg",
-            },
-            {
-                "Показатель": "Макс ПИ",
-                "Значение": f"{dls_to_pi(float(summary['max_dls_total_deg_per_30m'])):.2f} deg/10m",
-            },
-            {"Показатель": "Итоговая MD", "Значение": format_distance(float(summary["md_total_m"]))},
-            {"Показатель": "Проблемы", "Значение": problem_text},
-            {
-                "Показатель": "Время расчета",
-                "Значение": "—" if view.runtime_s is None else f"{float(view.runtime_s):.2f} с",
-            },
-        ]
-        st.dataframe(
-            arrow_safe_text_dataframe(pd.DataFrame(metrics_rows)),
-            width="stretch",
-            hide_index=True,
+        metrics_rows = build_key_metrics_rows(view)
+        st.table(
+            arrow_safe_text_dataframe(pd.DataFrame(metrics_rows))
         )
         for message in issue_messages:
             st.warning(message)
@@ -295,6 +465,24 @@ def render_result_plots(
     )
     uncertainty_overlay = None
     if show_uncertainty:
+        preset_key = uncertainty_preset_key(well_name=view.well_name)
+        st.session_state[preset_key] = normalize_uncertainty_preset(
+            st.session_state.get(preset_key, DEFAULT_UNCERTAINTY_PRESET)
+        )
+        selected_preset = st.selectbox(
+            "Пресет неопределенности",
+            options=list(UNCERTAINTY_PRESET_OPTIONS.keys()),
+            index=list(UNCERTAINTY_PRESET_OPTIONS.keys()).index(
+                st.session_state[preset_key]
+            ),
+            format_func=uncertainty_preset_label,
+            key=preset_key,
+            help=(
+                "Определяет уровень консерватизма planning-level модели неопределенности. "
+                "Обычный MWD подходит как базовый режим, оптимистичный уменьшает конус, "
+                "консервативный увеличивает его."
+            ),
+        )
         required_md_m = tuple(
             float(value)
             for value in (
@@ -304,13 +492,18 @@ def render_result_plots(
             )
             if value is not None
         )
+        model = planning_uncertainty_model_for_preset(selected_preset)
         uncertainty_overlay = build_uncertainty_overlay(
             stations=view.stations,
             surface=view.surface,
             azimuth_deg=float(view.azimuth_deg),
+            model=model,
             required_md_m=required_md_m,
         )
-        st.caption(uncertainty_model_caption(uncertainty_overlay.model))
+        st.caption(
+            f"Пресет: {uncertainty_preset_label(selected_preset)}. "
+            f"{uncertainty_model_caption(uncertainty_overlay.model)}"
+        )
 
     render_trajectory_dls_panel(
         stations=view.stations,
@@ -351,7 +544,7 @@ def render_result_tables(
 ) -> None:
     summary = view.summary
     optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
-    optimization_label = OPTIMIZATION_OPTIONS.get(optimization_mode, optimization_mode)
+    optimization_label = optimization_display_label(optimization_mode)
     tab_summary, tab_survey = st.tabs([summary_tab_label, survey_tab_label])
     with tab_summary:
         hidden_metrics = SUMMARY_TECH_HIDDEN_METRICS

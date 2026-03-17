@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Iterable
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,8 @@ from pydantic import field_validator
 
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import Point3D, SummaryDict, TrajectoryConfig
+from pywp.anticollision_optimization import AntiCollisionOptimizationContext
+from pywp.optimization_reference import compute_unoptimized_reference
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.solver_diagnostics import summarize_problem_ru
@@ -28,6 +31,9 @@ class SuccessfulWellPlan(FrozenArbitraryModel):
     azimuth_deg: float
     md_t1_m: float
     config: TrajectoryConfig
+    runtime_s: float | None = None
+    baseline_summary: SummaryDict | None = None
+    baseline_runtime_s: float | None = None
     md_postcheck_exceeded: bool = False
     md_postcheck_message: str = ""
 
@@ -51,6 +57,8 @@ class WelltrackBatchPlanner:
         records: Iterable[WelltrackRecord],
         selected_names: set[str],
         config: TrajectoryConfig,
+        config_by_name: dict[str, TrajectoryConfig] | None = None,
+        optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None = None,
         progress_callback: ProgressCallback | None = None,
         solver_progress_callback: SolverProgressCallback | None = None,
         record_done_callback: RecordDoneCallback | None = None,
@@ -83,7 +91,8 @@ class WelltrackBatchPlanner:
 
             row, success = self._evaluate_record(
                 record=record,
-                config=config,
+                config=(config_by_name or {}).get(str(record.name), config),
+                optimization_context=(optimization_context_by_name or {}).get(str(record.name)),
                 planner_progress_callback=planner_progress_callback,
             )
             summary_rows.append(row)
@@ -99,15 +108,27 @@ class WelltrackBatchPlanner:
         return pd.DataFrame(rows)
 
     @staticmethod
+    def _summary_target_direction_label(value: object) -> str:
+        text = str(value).strip()
+        if not text or text == "—":
+            return "—"
+        text_lower = text.lower()
+        if "обрат" in text_lower:
+            return "В обратном направлении"
+        return "В прямом направлении"
+
+    @staticmethod
     def _base_row(record: WelltrackRecord) -> dict[str, Any]:
         return {
             "Скважина": record.name,
             "Точек": len(record.points),
             "Статус": "Не рассчитана",
+            "Рестарты решателя": "—",
             "Модель траектории": "—",
             "Классификация целей": "—",
             "Сложность": "—",
             "Горизонтальный отход t1, м": "—",
+            "KOP MD, м": "—",
             "Длина HORIZONTAL, м": "—",
             "INC в t1, deg": "—",
             "ЗУ HOLD, deg": "—",
@@ -120,6 +141,7 @@ class WelltrackBatchPlanner:
         self,
         record: WelltrackRecord,
         config: TrajectoryConfig,
+        optimization_context: AntiCollisionOptimizationContext | None = None,
         planner_progress_callback: Callable[[str, float], None] | None = None,
     ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
         row = self._base_row(record=record)
@@ -130,17 +152,29 @@ class WelltrackBatchPlanner:
 
         try:
             surface, t1, t3 = welltrack_points_to_targets(record.points)
-            result = self._planner.plan(
-                surface=surface,
-                t1=t1,
-                t3=t3,
-                config=config,
-                progress_callback=planner_progress_callback,
-            )
+            started = perf_counter()
+            plan_kwargs: dict[str, Any] = {
+                "surface": surface,
+                "t1": t1,
+                "t3": t3,
+                "config": config,
+                "progress_callback": planner_progress_callback,
+            }
+            if optimization_context is not None:
+                plan_kwargs["optimization_context"] = optimization_context
+            result = self._planner.plan(**plan_kwargs)
+            runtime_s = float(perf_counter() - started)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
             row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
+        reference = compute_unoptimized_reference(
+            planner=self._planner,
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            config=config,
+        )
 
         t1_offset = float(np.hypot(t1.x - surface.x, t1.y - surface.y))
         summary = result.summary
@@ -158,10 +192,16 @@ class WelltrackBatchPlanner:
         row.update(
             {
                 "Статус": "OK",
+                "Рестарты решателя": str(
+                    int(float(summary.get("solver_turn_restarts_used", 0.0)))
+                ),
                 "Модель траектории": str(summary.get("trajectory_type", "—")),
-                "Классификация целей": str(summary.get("trajectory_target_direction", "—")),
+                "Классификация целей": self._summary_target_direction_label(
+                    summary.get("trajectory_target_direction", "—")
+                ),
                 "Сложность": str(summary.get("well_complexity", "—")),
                 "Горизонтальный отход t1, м": f"{t1_offset:.2f}",
+                "KOP MD, м": f"{float(summary.get('kop_md_m', 0.0)):.2f}",
                 "Длина HORIZONTAL, м": f"{float(summary.get('horizontal_length_m', 0.0)):.2f}",
                 "INC в t1, deg": f"{float(summary.get('entry_inc_deg', 0.0)):.2f}",
                 "ЗУ HOLD, deg": f"{float(summary.get('hold_inc_deg', 0.0)):.2f}",
@@ -180,6 +220,9 @@ class WelltrackBatchPlanner:
             azimuth_deg=result.azimuth_deg,
             md_t1_m=result.md_t1_m,
             config=config,
+            runtime_s=runtime_s,
+            baseline_summary=None if reference is None else reference.summary,
+            baseline_runtime_s=None if reference is None else reference.runtime_s,
             md_postcheck_exceeded=md_postcheck_exceeded,
             md_postcheck_message=md_postcheck_message,
         )

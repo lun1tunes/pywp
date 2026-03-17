@@ -11,12 +11,37 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from pywp import TrajectoryConfig, TrajectoryPlanner
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    anti_collision_method_caption,
+    anti_collision_report_events,
+    anti_collision_report_rows,
+    analyze_anti_collision,
+    build_anti_collision_well,
+    collision_corridor_plan_polygon,
+    collision_corridor_point_sphere_mesh,
+    collision_corridor_tube_mesh,
+)
+from pywp.anticollision_optimization import (
+    AntiCollisionOptimizationContext,
+    build_anti_collision_reference_path,
+)
+from pywp.anticollision_recommendations import (
+    AntiCollisionRecommendation,
+    AntiCollisionWellContext,
+    anti_collision_recommendation_rows,
+    build_anti_collision_recommendations,
+    recommendation_display_label,
+)
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackRecord,
     decode_welltrack_bytes,
     parse_welltrack_text,
+    welltrack_points_to_targets,
 )
+from pywp.plotly_config import DEFAULT_3D_CAMERA, trajectory_plotly_chart_config
+from pywp.planner_config import optimization_display_label
 from pywp.plot_axes import (
     equalized_axis_ranges,
     equalized_xy_ranges,
@@ -25,6 +50,16 @@ from pywp.plot_axes import (
 )
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
+from pywp.uncertainty import (
+    DEFAULT_UNCERTAINTY_PRESET,
+    UNCERTAINTY_PRESET_OPTIONS,
+    PlanningUncertaintyModel,
+    build_uncertainty_tube_mesh,
+    normalize_uncertainty_preset,
+    planning_uncertainty_model_for_preset,
+    uncertainty_ribbon_polygon,
+    uncertainty_preset_label,
+)
 from pywp.ui_calc_params import (
     CalcParamBinding,
 )
@@ -67,17 +102,17 @@ WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
 WT_T1T3_MIN_DELTA_M = 0.5
 WELL_COLOR_PALETTE: tuple[str, ...] = (
     "#0B6E4F",
-    "#D1495B",
+    "#3A86FF",
     "#00798C",
-    "#FF9F1C",
+    "#FFB703",
     "#6A4C93",
     "#1F7A8C",
     "#3D5A80",
-    "#E76F51",
+    "#F4A261",
     "#2A9D8F",
     "#4D908E",
     "#577590",
-    "#BC4749",
+    "#8E9AAF",
 )
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
@@ -90,8 +125,30 @@ _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_kop_min_vertical_m": "wt_cfg_kop_min_vertical",
 }
 WT_CALC_PARAMS = CalcParamBinding(prefix="wt_cfg_")
-WT_RETRY_CALC_PARAMS = CalcParamBinding(prefix="wt_retry_cfg_")
 DEFAULT_PAD_SPACING_M = 20.0
+_BATCH_SUMMARY_RENAME_COLUMNS: dict[str, str] = {
+    "Рестарты решателя": "Рестарты",
+    "Классификация целей": "Цели",
+    "Горизонтальный отход t1, м": "Отход t1, м",
+    "Длина HORIZONTAL, м": "HORIZONTAL, м",
+}
+_BATCH_SUMMARY_DISPLAY_ORDER: tuple[str, ...] = (
+    "Скважина",
+    "Точек",
+    "Цели",
+    "Сложность",
+    "Отход t1, м",
+    "KOP MD, м",
+    "HORIZONTAL, м",
+    "INC в t1, deg",
+    "ЗУ HOLD, deg",
+    "Макс ПИ, deg/10m",
+    "Макс MD, м",
+    "Рестарты",
+    "Статус",
+    "Проблема",
+    "Модель траектории",
+)
 
 
 @dataclass(frozen=True)
@@ -99,11 +156,185 @@ class _BatchRunRequest:
     selected_names: list[str]
     config: TrajectoryConfig
     run_clicked: bool
-    run_kind: str
+
+
+@dataclass(frozen=True)
+class _TargetOnlyWell:
+    name: str
+    surface: Point3D
+    t1: Point3D
+    t3: Point3D
+    status: str
+    problem: str
 
 
 def _well_color(index: int) -> str:
     return WELL_COLOR_PALETTE[index % len(WELL_COLOR_PALETTE)]
+
+
+def _well_color_map(records: list[WelltrackRecord]) -> dict[str, str]:
+    return {
+        str(record.name): _well_color(index)
+        for index, record in enumerate(records)
+    }
+
+
+def _failed_target_only_wells(
+    *,
+    records: list[WelltrackRecord],
+    summary_rows: list[dict[str, object]],
+) -> list[_TargetOnlyWell]:
+    rows_by_name = {
+        str(row.get("Скважина", "")).strip(): row
+        for row in summary_rows
+        if str(row.get("Скважина", "")).strip()
+    }
+    target_only_wells: list[_TargetOnlyWell] = []
+    for record in records:
+        row = rows_by_name.get(str(record.name))
+        if row is None:
+            continue
+        status = str(row.get("Статус", "")).strip()
+        if status in {"OK", "Не рассчитана"}:
+            continue
+        try:
+            surface, t1, t3 = welltrack_points_to_targets(record.points)
+        except ValueError:
+            continue
+        target_only_wells.append(
+            _TargetOnlyWell(
+                name=str(record.name),
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                status=status or "Ошибка расчета",
+                problem=str(row.get("Проблема", "")).strip(),
+            )
+        )
+    return target_only_wells
+
+
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    color = str(hex_color).strip().lstrip("#")
+    if len(color) != 6:
+        return f"rgba(90, 90, 90, {float(alpha):.3f})"
+    red = int(color[0:2], 16)
+    green = int(color[2:4], 16)
+    blue = int(color[4:6], 16)
+    return f"rgba({red}, {green}, {blue}, {float(alpha):.3f})"
+
+
+def _lighten_hex(hex_color: str, blend_with_white: float = 0.38) -> str:
+    color = str(hex_color).strip().lstrip("#")
+    if len(color) != 6:
+        return "#A0A0A0"
+    blend = float(np.clip(blend_with_white, 0.0, 1.0))
+    red = int(color[0:2], 16)
+    green = int(color[2:4], 16)
+    blue = int(color[4:6], 16)
+    red = int(round(red + (255 - red) * blend))
+    green = int(round(green + (255 - green) * blend))
+    blue = int(round(blue + (255 - blue) * blend))
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def _build_anti_collision_analysis(
+    successes: list[SuccessfulWellPlan],
+    *,
+    model: PlanningUncertaintyModel,
+    name_to_color: dict[str, str] | None = None,
+) -> AntiCollisionAnalysis:
+    wells = [
+        build_anti_collision_well(
+            name=item.name,
+            color=(name_to_color or {}).get(str(item.name), _well_color(index)),
+            stations=item.stations,
+            surface=item.surface,
+            t1=item.t1,
+            t3=item.t3,
+            azimuth_deg=float(item.azimuth_deg),
+            md_t1_m=float(item.md_t1_m),
+            model=model,
+        )
+        for index, item in enumerate(successes)
+    ]
+    return analyze_anti_collision(wells)
+
+
+def _trajectory_interval_points(
+    stations: pd.DataFrame,
+    *,
+    md_start_m: float,
+    md_end_m: float,
+) -> pd.DataFrame | None:
+    if len(stations) == 0:
+        return None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    if len(md_values) == 0:
+        return None
+    start_md = float(np.clip(md_start_m, float(md_values[0]), float(md_values[-1])))
+    end_md = float(np.clip(md_end_m, float(md_values[0]), float(md_values[-1])))
+    if end_md <= start_md + 1e-9:
+        return None
+
+    interior_mask = (md_values > start_md + 1e-9) & (md_values < end_md - 1e-9)
+    segment_md = np.concatenate(
+        [
+            np.array([start_md], dtype=float),
+            md_values[interior_mask],
+            np.array([end_md], dtype=float),
+        ]
+    )
+    if len(segment_md) < 2:
+        return None
+    return pd.DataFrame(
+        {
+            "MD_m": segment_md,
+            "X_m": np.interp(segment_md, md_values, stations["X_m"].to_numpy(dtype=float)),
+            "Y_m": np.interp(segment_md, md_values, stations["Y_m"].to_numpy(dtype=float)),
+            "Z_m": np.interp(segment_md, md_values, stations["Z_m"].to_numpy(dtype=float)),
+        }
+    )
+
+
+def _trajectory_hover_customdata(stations: pd.DataFrame) -> np.ndarray:
+    dls_pi_values = dls_to_pi(
+        stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
+    )
+    segment_values = (
+        stations["segment"].astype(str).to_numpy(dtype=object)
+        if "segment" in stations.columns
+        else np.full(len(stations), "—", dtype=object)
+    )
+    customdata = np.empty((len(stations), 3), dtype=object)
+    customdata[:, 0] = stations["MD_m"].to_numpy(dtype=float)
+    customdata[:, 1] = dls_pi_values
+    customdata[:, 2] = segment_values
+    return customdata
+
+
+def _hover_proxy_trace_3d(
+    *,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    z_values: np.ndarray,
+    customdata: np.ndarray,
+    hovertemplate: str,
+) -> go.Scatter3d:
+    return go.Scatter3d(
+        x=x_values,
+        y=y_values,
+        z=z_values,
+        mode="markers",
+        showlegend=False,
+        marker={
+            "size": 6,
+            "color": "rgba(0, 0, 0, 0.001)",
+        },
+        customdata=customdata,
+        hovertemplate=hovertemplate,
+        hoverlabel={"namelength": -1},
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -125,14 +356,12 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_records", None)
     st.session_state.setdefault("wt_records_original", None)
     st.session_state.setdefault("wt_selected_names", [])
-    st.session_state.setdefault("wt_retry_selected_names", [])
     st.session_state.setdefault("wt_pending_selected_names", None)
-    st.session_state.setdefault("wt_pending_retry_selected_names", None)
-    st.session_state.setdefault("wt_retry_use_custom_config", False)
     st.session_state.setdefault("wt_loaded_at", "")
     st.session_state.setdefault("wt_pad_configs", {})
     st.session_state.setdefault("wt_pad_selected_id", "")
     st.session_state.setdefault("wt_pad_last_applied_at", "")
+    st.session_state.setdefault("wt_pad_auto_applied_on_import", False)
 
     st.session_state.setdefault("wt_summary_rows", None)
     st.session_state.setdefault("wt_successes", None)
@@ -141,25 +370,32 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_runtime_s", None)
     st.session_state.setdefault("wt_last_run_log_lines", [])
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
+    st.session_state.setdefault(
+        "wt_anticollision_uncertainty_preset", DEFAULT_UNCERTAINTY_PRESET
+    )
+    st.session_state.setdefault("wt_prepared_well_overrides", {})
+    st.session_state.setdefault("wt_prepared_override_message", "")
+    st.session_state.setdefault("wt_prepared_recommendation_id", "")
 
 
 def _clear_results() -> None:
     st.session_state["wt_summary_rows"] = None
     st.session_state["wt_successes"] = None
-    st.session_state["wt_retry_selected_names"] = []
     st.session_state["wt_pending_selected_names"] = None
-    st.session_state["wt_pending_retry_selected_names"] = None
-    st.session_state["wt_retry_use_custom_config"] = False
     st.session_state["wt_last_error"] = ""
     st.session_state["wt_last_run_at"] = ""
     st.session_state["wt_last_runtime_s"] = None
     st.session_state["wt_last_run_log_lines"] = []
+    st.session_state["wt_prepared_well_overrides"] = {}
+    st.session_state["wt_prepared_override_message"] = ""
+    st.session_state["wt_prepared_recommendation_id"] = ""
 
 
 def _clear_pad_state() -> None:
     st.session_state["wt_pad_configs"] = {}
     st.session_state["wt_pad_selected_id"] = ""
     st.session_state["wt_pad_last_applied_at"] = ""
+    st.session_state["wt_pad_auto_applied_on_import"] = False
     for key in list(st.session_state.keys()):
         if str(key).startswith("wt_pad_cfg_"):
             del st.session_state[key]
@@ -167,10 +403,8 @@ def _clear_pad_state() -> None:
 
 def _apply_profile_defaults(force: bool) -> None:
     WT_CALC_PARAMS.preserve_state()
-    WT_RETRY_CALC_PARAMS.preserve_state()
     legacy_found = _migrate_legacy_calc_param_keys()
     WT_CALC_PARAMS.apply_defaults(force=bool(force or legacy_found))
-    WT_RETRY_CALC_PARAMS.apply_defaults(force=bool(force))
 
 
 def _migrate_legacy_calc_param_keys() -> bool:
@@ -229,14 +463,22 @@ def _read_welltrack_file(path_text: str) -> str:
 
 
 def _all_wells_3d_figure(
-    successes: list[SuccessfulWellPlan], height: int = 620
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_only_wells: list[_TargetOnlyWell] | None = None,
+    name_to_color: dict[str, str] | None = None,
+    height: int = 620,
 ) -> go.Figure:
     fig = go.Figure()
     x_arrays: list[np.ndarray] = []
     y_arrays: list[np.ndarray] = []
     z_arrays: list[np.ndarray] = []
+    color_map = name_to_color or {
+        str(item.name): _well_color(index)
+        for index, item in enumerate(successes)
+    }
     for index, item in enumerate(successes):
-        line_color = _well_color(index)
+        line_color = color_map.get(str(item.name), _well_color(index))
         line_dash = "dash" if bool(item.md_postcheck_exceeded) else "solid"
         name = item.name
         stations = item.stations
@@ -294,6 +536,57 @@ def _all_wells_3d_figure(
             )
         )
 
+    for target_only in target_only_wells or ():
+        line_color = color_map.get(str(target_only.name), "#6B7280")
+        marker_x = np.array(
+            [target_only.surface.x, target_only.t1.x, target_only.t3.x],
+            dtype=float,
+        )
+        marker_y = np.array(
+            [target_only.surface.y, target_only.t1.y, target_only.t3.y],
+            dtype=float,
+        )
+        marker_z = np.array(
+            [target_only.surface.z, target_only.t1.z, target_only.t3.z],
+            dtype=float,
+        )
+        x_arrays.append(marker_x)
+        y_arrays.append(marker_y)
+        z_arrays.append(marker_z)
+        customdata = np.array(
+            [
+                ["S", target_only.status, target_only.problem or "—"],
+                ["t1", target_only.status, target_only.problem or "—"],
+                ["t3", target_only.status, target_only.problem or "—"],
+            ],
+            dtype=object,
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                x=marker_x,
+                y=marker_y,
+                z=marker_z,
+                mode="markers",
+                name=f"{target_only.name}: цели (без траектории)",
+                legendgroup=str(target_only.name),
+                marker={
+                    "size": 6,
+                    "color": "rgba(255,255,255,0.65)",
+                    "line": {"width": 2, "color": line_color},
+                },
+                customdata=customdata,
+                hovertemplate=(
+                    "Точка: %{customdata[0]}<br>"
+                    "Статус: %{customdata[1]}<br>"
+                    "Проблема: %{customdata[2]}<br>"
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
+                    "Z/TVD: %{z:.2f} m"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+
     x_values = np.concatenate(x_arrays) if x_arrays else np.array([0.0], dtype=float)
     y_values = np.concatenate(y_arrays) if y_arrays else np.array([0.0], dtype=float)
     z_values = np.concatenate(z_arrays) if z_arrays else np.array([0.0], dtype=float)
@@ -328,6 +621,7 @@ def _all_wells_3d_figure(
             "xaxis_title": "X / Восток (м)",
             "yaxis_title": "Y / Север (м)",
             "zaxis_title": "Z / TVD (м)",
+            "camera": DEFAULT_3D_CAMERA,
             "xaxis": {
                 "range": x_range,
                 "tickvals": x_tickvals,
@@ -359,13 +653,21 @@ def _all_wells_3d_figure(
 
 
 def _all_wells_plan_figure(
-    successes: list[SuccessfulWellPlan], height: int = 560
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_only_wells: list[_TargetOnlyWell] | None = None,
+    name_to_color: dict[str, str] | None = None,
+    height: int = 560,
 ) -> go.Figure:
     fig = go.Figure()
     x_arrays: list[np.ndarray] = []
     y_arrays: list[np.ndarray] = []
+    color_map = name_to_color or {
+        str(item.name): _well_color(index)
+        for index, item in enumerate(successes)
+    }
     for index, item in enumerate(successes):
-        line_color = _well_color(index)
+        line_color = color_map.get(str(item.name), _well_color(index))
         line_dash = "dash" if bool(item.md_postcheck_exceeded) else "solid"
         name = item.name
         stations = item.stations
@@ -395,6 +697,48 @@ def _all_wells_plan_figure(
                     "Z/TVD: %{customdata[0]:.2f} m<br>"
                     "MD: %{customdata[1]:.2f} m<br>"
                     "ПИ: %{customdata[2]:.2f} deg/10m"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+    for target_only in target_only_wells or ():
+        line_color = color_map.get(str(target_only.name), "#6B7280")
+        marker_x = np.array(
+            [target_only.surface.x, target_only.t1.x, target_only.t3.x],
+            dtype=float,
+        )
+        marker_y = np.array(
+            [target_only.surface.y, target_only.t1.y, target_only.t3.y],
+            dtype=float,
+        )
+        x_arrays.append(marker_x)
+        y_arrays.append(marker_y)
+        customdata = np.array(
+            [
+                ["S", target_only.status, target_only.problem or "—"],
+                ["t1", target_only.status, target_only.problem or "—"],
+                ["t3", target_only.status, target_only.problem or "—"],
+            ],
+            dtype=object,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=marker_x,
+                y=marker_y,
+                mode="markers",
+                name=f"{target_only.name}: цели (без траектории)",
+                marker={
+                    "size": 8,
+                    "color": "rgba(255,255,255,0.70)",
+                    "line": {"width": 2, "color": line_color},
+                },
+                customdata=customdata,
+                hovertemplate=(
+                    "Точка: %{customdata[0]}<br>"
+                    "Статус: %{customdata[1]}<br>"
+                    "Проблема: %{customdata[2]}<br>"
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m"
                     "<extra>%{fullData.name}</extra>"
                 ),
             )
@@ -460,6 +804,659 @@ def _all_wells_plan_figure(
     return fig
 
 
+def _all_wells_anticollision_3d_figure(
+    analysis: AntiCollisionAnalysis, height: int = 660
+) -> go.Figure:
+    fig = go.Figure()
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
+    z_arrays: list[np.ndarray] = []
+    well_lookup = {str(well.name): well for well in analysis.wells}
+
+    for well in analysis.wells:
+        overlay = well.overlay
+        tube_mesh = build_uncertainty_tube_mesh(overlay)
+        if tube_mesh is not None:
+            x_arrays.append(tube_mesh.vertices_xyz[:, 0])
+            y_arrays.append(tube_mesh.vertices_xyz[:, 1])
+            z_arrays.append(tube_mesh.vertices_xyz[:, 2])
+            fig.add_trace(
+                go.Mesh3d(
+                    x=tube_mesh.vertices_xyz[:, 0],
+                    y=tube_mesh.vertices_xyz[:, 1],
+                    z=tube_mesh.vertices_xyz[:, 2],
+                    i=tube_mesh.i,
+                    j=tube_mesh.j,
+                    k=tube_mesh.k,
+                    name=f"{well.name} cone",
+                    legendgroup=str(well.name),
+                    showlegend=False,
+                    color=str(well.color),
+                    opacity=0.12,
+                    flatshading=True,
+                    hoverinfo="skip",
+                )
+            )
+        if overlay.samples:
+            terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
+            x_arrays.append(terminal_ring[:, 0])
+            y_arrays.append(terminal_ring[:, 1])
+            z_arrays.append(terminal_ring[:, 2])
+            fig.add_trace(
+                go.Scatter3d(
+                    x=terminal_ring[:, 0],
+                    y=terminal_ring[:, 1],
+                    z=terminal_ring[:, 2],
+                    mode="lines",
+                    name=f"{well.name}: граница конуса",
+                    legendgroup=str(well.name),
+                    showlegend=False,
+                    line={
+                        "width": 1.5,
+                        "color": _lighten_hex(str(well.color)),
+                    },
+                    hoverinfo="skip",
+                )
+            )
+
+        stations = well.stations
+        x_values = stations["X_m"].to_numpy(dtype=float)
+        y_values = stations["Y_m"].to_numpy(dtype=float)
+        z_values = stations["Z_m"].to_numpy(dtype=float)
+        md_values = stations["MD_m"].to_numpy(dtype=float)
+        x_arrays.append(x_values)
+        y_arrays.append(y_values)
+        z_arrays.append(z_values)
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=x_values,
+                y=y_values,
+                z=z_values,
+                mode="lines",
+                name=str(well.name),
+                legendgroup=str(well.name),
+                line={"width": 5, "color": str(well.color)},
+                hovertemplate=(
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
+                    "Z/TVD: %{z:.2f} m<br>"
+                    "MD: %{customdata[0]:.2f} m<br>"
+                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
+                    "Сегмент: %{customdata[2]}"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+                customdata=_trajectory_hover_customdata(stations),
+            )
+        )
+        fig.add_trace(
+            _hover_proxy_trace_3d(
+                x_values=x_values,
+                y_values=y_values,
+                z_values=z_values,
+                customdata=_trajectory_hover_customdata(stations),
+                hovertemplate=(
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
+                    "Z/TVD: %{z:.2f} m<br>"
+                    "MD: %{customdata[0]:.2f} m<br>"
+                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
+                    "Сегмент: %{customdata[2]}"
+                    f"<extra>{well.name}</extra>"
+                ),
+            )
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                x=[well.surface.x, well.t1.x, well.t3.x],
+                y=[well.surface.y, well.t1.y, well.t3.y],
+                z=[well.surface.z, well.t1.z, well.t3.z],
+                mode="markers",
+                name=f"{well.name}: цели",
+                legendgroup=str(well.name),
+                showlegend=False,
+                marker={
+                    "size": 5,
+                    "color": str(well.color),
+                    "line": {"width": 1, "color": "rgba(255,255,255,0.9)"},
+                },
+                customdata=np.array([["S"], ["t1"], ["t3"]], dtype=object),
+                hovertemplate=(
+                    "Точка: %{customdata[0]}<br>"
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
+                    "Z/TVD: %{z:.2f} m<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+        x_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
+        y_arrays.append(np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float))
+        z_arrays.append(np.array([well.surface.z, well.t1.z, well.t3.z], dtype=float))
+
+    overlap_legend_added = False
+    for corridor in analysis.corridors:
+        mesh = collision_corridor_tube_mesh(corridor)
+        if mesh is not None:
+            x_arrays.append(mesh.vertices_xyz[:, 0])
+            y_arrays.append(mesh.vertices_xyz[:, 1])
+            z_arrays.append(mesh.vertices_xyz[:, 2])
+            fig.add_trace(
+                go.Mesh3d(
+                    x=mesh.vertices_xyz[:, 0],
+                    y=mesh.vertices_xyz[:, 1],
+                    z=mesh.vertices_xyz[:, 2],
+                    i=mesh.i,
+                    j=mesh.j,
+                    k=mesh.k,
+                    name="Общая зона overlap",
+                    legendgroup="collision_overlap",
+                    showlegend=not overlap_legend_added,
+                    color="rgb(198, 40, 40)",
+                    opacity=0.42,
+                    flatshading=True,
+                    hoverinfo="skip",
+                    hovertemplate=None,
+                )
+            )
+        else:
+            sphere_x, sphere_y, sphere_z = collision_corridor_point_sphere_mesh(corridor)
+            x_arrays.append(sphere_x.reshape(-1))
+            y_arrays.append(sphere_y.reshape(-1))
+            z_arrays.append(sphere_z.reshape(-1))
+            fig.add_trace(
+                go.Surface(
+                    x=sphere_x,
+                    y=sphere_y,
+                    z=sphere_z,
+                    surfacecolor=np.ones_like(sphere_x, dtype=float),
+                    colorscale=[
+                        [0.0, "rgb(198, 40, 40)"],
+                        [1.0, "rgb(198, 40, 40)"],
+                    ],
+                    cmin=0.0,
+                    cmax=1.0,
+                    showscale=False,
+                    opacity=0.42,
+                    hoverinfo="skip",
+                    hovertemplate=None,
+                    name="Общая зона overlap",
+                    showlegend=not overlap_legend_added,
+                    legendgroup="collision_overlap",
+                )
+            )
+        overlap_legend_added = True
+
+    segment_legend_added = False
+    for segment in analysis.well_segments:
+        well = well_lookup.get(str(segment.well_name))
+        if well is None:
+            continue
+        interval_points = _trajectory_interval_points(
+            well.stations,
+            md_start_m=float(segment.md_start_m),
+            md_end_m=float(segment.md_end_m),
+        )
+        if interval_points is None:
+            continue
+        x_segment = interval_points["X_m"].to_numpy(dtype=float)
+        y_segment = interval_points["Y_m"].to_numpy(dtype=float)
+        z_segment = interval_points["Z_m"].to_numpy(dtype=float)
+        md_segment = interval_points["MD_m"].to_numpy(dtype=float)
+        dls_segment = np.interp(
+            md_segment,
+            well.stations["MD_m"].to_numpy(dtype=float),
+            dls_to_pi(
+                well.stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
+            ),
+        )
+        conflict_customdata = np.column_stack([md_segment, dls_segment])
+        x_arrays.append(x_segment)
+        y_arrays.append(y_segment)
+        z_arrays.append(z_segment)
+        fig.add_trace(
+            go.Scatter3d(
+                x=x_segment,
+                y=y_segment,
+                z=z_segment,
+                mode="lines",
+                name="Конфликтный участок ствола",
+                legendgroup="collision_path",
+                showlegend=not segment_legend_added,
+                line={"width": 8, "color": "rgb(198, 40, 40)"},
+                customdata=conflict_customdata,
+                hovertemplate=(
+                    f"{segment.well_name}<br>"
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
+                    "Z/TVD: %{z:.2f} m<br>"
+                    "MD: %{customdata[0]:.2f} м<br>"
+                    "ПИ: %{customdata[1]:.2f} deg/10m"
+                    "<extra>Конфликтный участок ствола</extra>"
+                ),
+            )
+        )
+        fig.add_trace(
+            _hover_proxy_trace_3d(
+                x_values=x_segment,
+                y_values=y_segment,
+                z_values=z_segment,
+                customdata=conflict_customdata,
+                hovertemplate=(
+                    f"{segment.well_name}<br>"
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
+                    "Z/TVD: %{z:.2f} m<br>"
+                    "MD: %{customdata[0]:.2f} м<br>"
+                    "ПИ: %{customdata[1]:.2f} deg/10m"
+                    "<extra>Конфликтный участок ствола</extra>"
+                ),
+            )
+        )
+        segment_legend_added = True
+
+    x_values = np.concatenate(x_arrays) if x_arrays else np.array([0.0], dtype=float)
+    y_values = np.concatenate(y_arrays) if y_arrays else np.array([0.0], dtype=float)
+    z_values = np.concatenate(z_arrays) if z_arrays else np.array([0.0], dtype=float)
+    x_range, y_range, z_range = equalized_axis_ranges(
+        x_values=x_values,
+        y_values=y_values,
+        z_values=z_values,
+    )
+    xy_span = max(x_range[1] - x_range[0], y_range[1] - y_range[0])
+    xy_dtick = nice_tick_step(xy_span, target_ticks=6)
+    x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
+    y_tickvals = linear_tick_values(axis_range=y_range, step=xy_dtick)
+    xy_axis_style = {
+        "tickmode": "array",
+        "tickformat": ".0f",
+        "showexponent": "none",
+        "exponentformat": "none",
+        "showgrid": True,
+        "gridcolor": "rgba(0, 0, 0, 0.15)",
+        "gridwidth": 1,
+        "zeroline": True,
+        "zerolinecolor": "rgba(0, 0, 0, 0.65)",
+        "zerolinewidth": 2,
+        "showline": True,
+        "linecolor": "rgba(0, 0, 0, 0.65)",
+        "linewidth": 1.5,
+    }
+
+    fig.update_layout(
+        title="Anti-collision: 3D конусы неопределенности",
+        scene={
+            "xaxis_title": "X / Восток (м)",
+            "yaxis_title": "Y / Север (м)",
+            "zaxis_title": "Z / TVD (м)",
+            "camera": DEFAULT_3D_CAMERA,
+            "xaxis": {"range": x_range, "tickvals": x_tickvals, **xy_axis_style},
+            "yaxis": {"range": y_range, "tickvals": y_tickvals, **xy_axis_style},
+            "zaxis": {
+                "range": z_range,
+                "tickformat": ".0f",
+                "showexponent": "none",
+                "exponentformat": "none",
+                "showgrid": True,
+                "gridcolor": "rgba(0, 0, 0, 0.12)",
+                "gridwidth": 1,
+                "zeroline": True,
+                "zerolinecolor": "rgba(0, 0, 0, 0.45)",
+                "zerolinewidth": 1,
+            },
+            "aspectmode": "cube",
+        },
+        height=height,
+        margin={"l": 0, "r": 0, "t": 40, "b": 0},
+    )
+    return fig
+
+
+def _all_wells_anticollision_plan_figure(
+    analysis: AntiCollisionAnalysis, height: int = 620
+) -> go.Figure:
+    fig = go.Figure()
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
+    well_lookup = {str(well.name): well for well in analysis.wells}
+
+    for well in analysis.wells:
+        overlay = well.overlay
+        ribbon = uncertainty_ribbon_polygon(overlay, projection="plan")
+        if len(ribbon) >= 3:
+            fig.add_trace(
+                go.Scatter(
+                    x=ribbon[:, 0],
+                    y=ribbon[:, 1],
+                    mode="lines",
+                    name=f"{well.name} cone",
+                    legendgroup=str(well.name),
+                    showlegend=False,
+                    line={"width": 0.0, "color": "rgba(0, 0, 0, 0)"},
+                    fill="toself",
+                    fillcolor=_hex_to_rgba(well.color, 0.14),
+                    hoverinfo="skip",
+                )
+            )
+            x_arrays.append(ribbon[:, 0])
+            y_arrays.append(ribbon[:, 1])
+
+        stations = well.stations
+        x_values = stations["X_m"].to_numpy(dtype=float)
+        y_values = stations["Y_m"].to_numpy(dtype=float)
+        md_values = stations["MD_m"].to_numpy(dtype=float)
+        fig.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=y_values,
+                mode="lines",
+                name=str(well.name),
+                legendgroup=str(well.name),
+                line={"width": 4, "color": str(well.color)},
+                hovertemplate=(
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
+                    "MD: %{customdata[0]:.2f} m"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+                customdata=np.column_stack([md_values]),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[well.surface.x, well.t1.x, well.t3.x],
+                y=[well.surface.y, well.t1.y, well.t3.y],
+                mode="markers",
+                name=f"{well.name}: цели",
+                legendgroup=str(well.name),
+                showlegend=False,
+                marker={
+                    "size": 7,
+                    "color": str(well.color),
+                    "line": {"width": 1, "color": "rgba(255,255,255,0.9)"},
+                },
+                hovertemplate="X: %{x:.2f} m<br>Y: %{y:.2f} m<extra>%{fullData.name}</extra>",
+            )
+        )
+        x_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
+        y_arrays.append(np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float))
+
+    overlap_legend_added = False
+    for corridor in analysis.corridors:
+        polygon = collision_corridor_plan_polygon(corridor)
+        if len(polygon) < 3:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=polygon[:, 0],
+                y=polygon[:, 1],
+                mode="lines",
+                name="Общая зона overlap",
+                legendgroup="collision_overlap",
+                showlegend=not overlap_legend_added,
+                line={"width": 0.0, "color": "rgba(0, 0, 0, 0)"},
+                fill="toself",
+                fillcolor="rgba(198, 40, 40, 0.42)",
+                hoverinfo="skip",
+            )
+        )
+        overlap_legend_added = True
+        x_arrays.append(polygon[:, 0])
+        y_arrays.append(polygon[:, 1])
+
+    segment_legend_added = False
+    for segment in analysis.well_segments:
+        well = well_lookup.get(str(segment.well_name))
+        if well is None:
+            continue
+        interval_points = _trajectory_interval_points(
+            well.stations,
+            md_start_m=float(segment.md_start_m),
+            md_end_m=float(segment.md_end_m),
+        )
+        if interval_points is None:
+            continue
+        x_segment = interval_points["X_m"].to_numpy(dtype=float)
+        y_segment = interval_points["Y_m"].to_numpy(dtype=float)
+        md_segment = interval_points["MD_m"].to_numpy(dtype=float)
+        fig.add_trace(
+            go.Scatter(
+                x=x_segment,
+                y=y_segment,
+                mode="lines",
+                name="Конфликтный участок ствола",
+                legendgroup="collision_path",
+                showlegend=not segment_legend_added,
+                line={"width": 7, "color": "rgb(198, 40, 40)"},
+                customdata=np.column_stack([md_segment]),
+                hovertemplate=(
+                    f"{segment.well_name}<br>"
+                    "MD: %{customdata[0]:.2f} м"
+                    "<extra>Конфликтный участок ствола</extra>"
+                ),
+            )
+        )
+        x_arrays.append(x_segment)
+        y_arrays.append(y_segment)
+        segment_legend_added = True
+
+    x_values = np.concatenate(x_arrays) if x_arrays else np.array([0.0], dtype=float)
+    y_values = np.concatenate(y_arrays) if y_arrays else np.array([0.0], dtype=float)
+    x_range, y_range = equalized_xy_ranges(x_values=x_values, y_values=y_values)
+    xy_dtick = nice_tick_step(
+        max(x_range[1] - x_range[0], y_range[1] - y_range[0]), target_ticks=6
+    )
+    x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
+    y_tickvals = linear_tick_values(axis_range=y_range, step=xy_dtick)
+    fig.update_layout(
+        title="Anti-collision: план E-N с конусами неопределенности",
+        xaxis_title="X / Восток (м)",
+        yaxis_title="Y / Север (м)",
+        xaxis={
+            "range": x_range,
+            "tickmode": "array",
+            "tickvals": x_tickvals,
+            "tickformat": ".0f",
+            "showexponent": "none",
+            "exponentformat": "none",
+        },
+        yaxis={
+            "range": y_range,
+            "tickmode": "array",
+            "tickvals": y_tickvals,
+            "tickformat": ".0f",
+            "showexponent": "none",
+            "exponentformat": "none",
+            "scaleanchor": "x",
+            "scaleratio": 1,
+        },
+        height=height,
+        margin={"l": 20, "r": 20, "t": 40, "b": 20},
+    )
+    return fig
+
+
+def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
+    if len(successes) < 2:
+        st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
+        return
+
+    st.session_state["wt_anticollision_uncertainty_preset"] = normalize_uncertainty_preset(
+        st.session_state.get(
+            "wt_anticollision_uncertainty_preset",
+            DEFAULT_UNCERTAINTY_PRESET,
+        )
+    )
+    selected_preset = st.selectbox(
+        "Пресет неопределенности для anti-collision",
+        options=list(UNCERTAINTY_PRESET_OPTIONS.keys()),
+        index=list(UNCERTAINTY_PRESET_OPTIONS.keys()).index(
+            st.session_state["wt_anticollision_uncertainty_preset"]
+        ),
+        format_func=uncertainty_preset_label,
+        key="wt_anticollision_uncertainty_preset",
+        help=(
+            "Определяет уровень консерватизма planning-level конусов неопределенности "
+            "для batch anti-collision анализа."
+        ),
+    )
+    uncertainty_model = planning_uncertainty_model_for_preset(selected_preset)
+    records = list(st.session_state.get("wt_records") or [])
+    analysis = _build_anti_collision_analysis(
+        successes,
+        model=uncertainty_model,
+        name_to_color=_well_color_map(records) if records else None,
+    )
+    st.caption(
+        f"Пресет: {uncertainty_preset_label(selected_preset)}. "
+        f"{anti_collision_method_caption(uncertainty_model)}"
+    )
+
+    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
+    m2.metric("Пар с overlap", f"{int(analysis.overlapping_pair_count)}")
+    m3.metric("Пересечения в t1/t3", f"{int(analysis.target_overlap_pair_count)}")
+    worst_sf = analysis.worst_separation_factor
+    m4.metric("Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}")
+
+    chart_col1, chart_col2 = st.columns(2, gap="medium")
+    chart_col1.plotly_chart(
+        _all_wells_anticollision_3d_figure(analysis),
+        width="stretch",
+    )
+    chart_col2.plotly_chart(
+        _all_wells_anticollision_plan_figure(analysis),
+        width="stretch",
+    )
+
+    if not analysis.zones:
+        st.success(
+            "Пересечения 2σ конусов неопределенности не обнаружены для рассчитанного набора."
+        )
+        return
+
+    target_zones = [zone for zone in analysis.zones if int(zone.priority_rank) < 2]
+    if target_zones:
+        st.warning(
+            "Найдены пересечения, затрагивающие точки целей t1/t3. Они вынесены "
+            "в начало отчета и должны разбираться в первую очередь."
+        )
+    else:
+        st.warning(
+            "Найдены пересечения 2σ конусов неопределенности по траекториям."
+        )
+
+    report_events = anti_collision_report_events(analysis)
+    report_df = arrow_safe_text_dataframe(pd.DataFrame(anti_collision_report_rows(analysis)))
+    st.markdown("### Отчет по anti-collision")
+    st.caption(
+        "Смежные и пересекающиеся corridor-интервалы одной и той же collision природы "
+        f"в отчете объединяются в одно событие. Всего событий: {len(report_events)}."
+    )
+    st.dataframe(
+        report_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Приоритет": st.column_config.TextColumn("Приоритет"),
+            "Скважина A": st.column_config.TextColumn("Скважина A"),
+            "Скважина B": st.column_config.TextColumn("Скважина B"),
+            "Область": st.column_config.TextColumn("Область"),
+            "Интервал A, м": st.column_config.TextColumn("Интервал A, м"),
+            "Интервал B, м": st.column_config.TextColumn("Интервал B, м"),
+            "SF min": st.column_config.NumberColumn("SF min", format="%.2f"),
+            "Overlap max, м": st.column_config.NumberColumn(
+                "Overlap max, м",
+                format="%.2f",
+            ),
+            "Смежных зон": st.column_config.NumberColumn("Смежных зон", format="%d"),
+        },
+    )
+
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=_build_anticollision_well_contexts(successes),
+    )
+    recommendation_df = arrow_safe_text_dataframe(
+        pd.DataFrame(anti_collision_recommendation_rows(recommendations))
+    )
+    st.markdown("### Рекомендации")
+    st.caption(
+        "Рекомендации делят конфликты на три класса: цели, vertical-участки и "
+        "прочие траекторные пересечения. Автоподготовка пересчета сейчас включена "
+        "для vertical-кейсов и для pairwise trajectory-collision rerun одной "
+        "скважины относительно фиксированной reference-траектории."
+    )
+    st.dataframe(
+        recommendation_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Приоритет": st.column_config.TextColumn("Приоритет"),
+            "Скважина A": st.column_config.TextColumn("Скважина A"),
+            "Скважина B": st.column_config.TextColumn("Скважина B"),
+            "Тип действия": st.column_config.TextColumn("Тип действия"),
+            "Область": st.column_config.TextColumn("Область"),
+            "Интервал A, м": st.column_config.TextColumn("Интервал A, м"),
+            "Интервал B, м": st.column_config.TextColumn("Интервал B, м"),
+            "SF min": st.column_config.NumberColumn("SF min", format="%.2f"),
+            "Overlap max, м": st.column_config.NumberColumn("Overlap max, м", format="%.2f"),
+            "Spacing t1, м": st.column_config.TextColumn("Spacing t1, м"),
+            "Spacing t3, м": st.column_config.TextColumn("Spacing t3, м"),
+            "Рекомендация": st.column_config.TextColumn("Рекомендация"),
+            "Подготовка пересчета": st.column_config.TextColumn("Подготовка пересчета"),
+        },
+    )
+
+    actionable_recommendations = [
+        item for item in recommendations if bool(item.can_prepare_rerun)
+    ]
+    if actionable_recommendations:
+        actionable_ids = [item.recommendation_id for item in actionable_recommendations]
+        if str(st.session_state.get("wt_anticollision_prepared_recommendation_id", "")) not in actionable_ids:
+            st.session_state["wt_anticollision_prepared_recommendation_id"] = actionable_ids[0]
+        action_col, button_col = st.columns([6.0, 1.8], gap="small")
+        with action_col:
+            selected_recommendation_id = st.selectbox(
+                "Подготовить пересчет по anti-collision рекомендации",
+                options=actionable_ids,
+                format_func=lambda value: recommendation_display_label(
+                    next(
+                        item
+                        for item in actionable_recommendations
+                        if str(item.recommendation_id) == str(value)
+                    )
+                ),
+                key="wt_anticollision_prepared_recommendation_id",
+            )
+        with button_col:
+            if st.button(
+                "Подготовить пересчет",
+                type="primary",
+                icon=":material/build:",
+                width="stretch",
+            ):
+                selected_recommendation = next(
+                    item
+                    for item in actionable_recommendations
+                    if str(item.recommendation_id) == str(selected_recommendation_id)
+                )
+                _prepare_rerun_from_recommendation(
+                    selected_recommendation,
+                    successes=successes,
+                    uncertainty_model=uncertainty_model,
+                )
+                st.toast(
+                    "План пересчета подготовлен. В блоке пакетного расчета уже "
+                    "предвыбраны затронутые скважины и overrides."
+                )
+                st.rerun()
+    else:
+        st.caption(
+            "Для текущего набора доступны только advisory-рекомендации: target spacing "
+            "или ожидание dedicated anti-collision optimization mode."
+        )
+
+
 def _build_config_form(
     binding: CalcParamBinding = WT_CALC_PARAMS,
     *,
@@ -467,6 +1464,158 @@ def _build_config_form(
 ) -> TrajectoryConfig:
     binding.render_block(title=title)
     return binding.build_config()
+
+
+def _prepared_override_rows() -> list[dict[str, object]]:
+    prepared = st.session_state.get("wt_prepared_well_overrides", {}) or {}
+    rows: list[dict[str, object]] = []
+    for well_name in sorted(str(name) for name in prepared.keys()):
+        payload = dict(prepared.get(well_name, {}))
+        update_fields = dict(payload.get("update_fields", {}))
+        optimization_mode = str(update_fields.get("optimization_mode", "")).strip()
+        optimization_label = optimization_display_label(optimization_mode)
+        rows.append(
+            {
+                "Скважина": str(well_name),
+                "Оптимизация": optimization_label,
+                "Источник": str(payload.get("source", "—")).strip() or "—",
+                "Причина": str(payload.get("reason", "—")).strip() or "—",
+            }
+        )
+    return rows
+
+
+def _build_selected_override_configs(
+    *,
+    base_config: TrajectoryConfig,
+    selected_names: set[str],
+) -> dict[str, TrajectoryConfig]:
+    prepared = st.session_state.get("wt_prepared_well_overrides", {}) or {}
+    config_map: dict[str, TrajectoryConfig] = {}
+    for well_name in sorted(str(name) for name in selected_names):
+        payload = dict(prepared.get(well_name, {}))
+        update_fields = dict(payload.get("update_fields", {}))
+        if not update_fields:
+            continue
+        config_map[well_name] = base_config.validated_copy(**update_fields)
+    return config_map
+
+
+def _build_selected_optimization_contexts(
+    *,
+    selected_names: set[str],
+) -> dict[str, AntiCollisionOptimizationContext]:
+    prepared = st.session_state.get("wt_prepared_well_overrides", {}) or {}
+    context_map: dict[str, AntiCollisionOptimizationContext] = {}
+    for well_name in sorted(str(name) for name in selected_names):
+        payload = dict(prepared.get(well_name, {}))
+        optimization_context = payload.get("optimization_context")
+        if isinstance(optimization_context, AntiCollisionOptimizationContext):
+            context_map[well_name] = optimization_context
+    return context_map
+
+
+def _build_anticollision_well_contexts(
+    successes: list[SuccessfulWellPlan],
+) -> dict[str, AntiCollisionWellContext]:
+    contexts: dict[str, AntiCollisionWellContext] = {}
+    for success in successes:
+        summary = dict(success.summary)
+        kop_md_raw = summary.get("kop_md_m")
+        kop_md_m = None
+        if kop_md_raw is not None:
+            try:
+                kop_md_m = float(kop_md_raw)
+            except (TypeError, ValueError):
+                kop_md_m = None
+        contexts[str(success.name)] = AntiCollisionWellContext(
+            well_name=str(success.name),
+            kop_md_m=kop_md_m,
+            kop_min_vertical_m=float(success.config.kop_min_vertical_m),
+            md_total_m=float(summary.get("md_total_m", 0.0)),
+            optimization_mode=str(success.config.optimization_mode),
+        )
+    return contexts
+
+
+def _prepare_rerun_from_recommendation(
+    recommendation: AntiCollisionRecommendation,
+    *,
+    successes: list[SuccessfulWellPlan],
+    uncertainty_model: PlanningUncertaintyModel,
+) -> None:
+    prepared: dict[str, dict[str, object]] = {}
+    success_by_name = {str(item.name): item for item in successes}
+    for suggestion in recommendation.override_suggestions:
+        reference_name = (
+            str(recommendation.well_b)
+            if str(suggestion.well_name) == str(recommendation.well_a)
+            else str(recommendation.well_a)
+        )
+        optimization_context = _build_prepared_optimization_context(
+            recommendation=recommendation,
+            moving_success=success_by_name.get(str(suggestion.well_name)),
+            reference_success=success_by_name.get(reference_name),
+            uncertainty_model=uncertainty_model,
+        )
+        prepared[str(suggestion.well_name)] = {
+            "update_fields": dict(suggestion.config_updates),
+            "source": recommendation_display_label(recommendation),
+            "reason": str(suggestion.reason),
+            "optimization_context": optimization_context,
+        }
+    st.session_state["wt_prepared_well_overrides"] = prepared
+    st.session_state["wt_prepared_override_message"] = str(recommendation.summary)
+    st.session_state["wt_prepared_recommendation_id"] = str(recommendation.recommendation_id)
+    st.session_state["wt_pending_selected_names"] = list(recommendation.affected_wells)
+
+
+def _build_prepared_optimization_context(
+    *,
+    recommendation: AntiCollisionRecommendation,
+    moving_success: SuccessfulWellPlan | None,
+    reference_success: SuccessfulWellPlan | None,
+    uncertainty_model: PlanningUncertaintyModel,
+) -> AntiCollisionOptimizationContext | None:
+    if moving_success is None or reference_success is None:
+        return None
+    moving_is_a = str(moving_success.name) == str(recommendation.well_a)
+    candidate_md_start_m = (
+        float(recommendation.md_a_start_m)
+        if moving_is_a
+        else float(recommendation.md_b_start_m)
+    )
+    candidate_md_end_m = (
+        float(recommendation.md_a_end_m)
+        if moving_is_a
+        else float(recommendation.md_b_end_m)
+    )
+    reference_md_start_m = (
+        float(recommendation.md_b_start_m)
+        if moving_is_a
+        else float(recommendation.md_a_start_m)
+    )
+    reference_md_end_m = (
+        float(recommendation.md_b_end_m)
+        if moving_is_a
+        else float(recommendation.md_a_end_m)
+    )
+    reference_path = build_anti_collision_reference_path(
+        well_name=str(reference_success.name),
+        stations=reference_success.stations,
+        md_start_m=reference_md_start_m,
+        md_end_m=reference_md_end_m,
+        sample_step_m=50.0,
+        model=uncertainty_model,
+    )
+    return AntiCollisionOptimizationContext(
+        candidate_md_start_m=float(candidate_md_start_m),
+        candidate_md_end_m=float(candidate_md_end_m),
+        sf_target=1.0,
+        sample_step_m=50.0,
+        uncertainty_model=uncertainty_model,
+        references=(reference_path,),
+    )
 
 
 def _render_source_input() -> str:
@@ -505,7 +1654,7 @@ def _render_source_input() -> str:
     )
 
 
-def _store_parsed_records(records: list[WelltrackRecord]) -> None:
+def _store_parsed_records(records: list[WelltrackRecord]) -> bool:
     all_names = [record.name for record in records]
     st.session_state["wt_records"] = list(records)
     st.session_state["wt_records_original"] = list(records)
@@ -513,8 +1662,36 @@ def _store_parsed_records(records: list[WelltrackRecord]) -> None:
     _clear_pad_state()
     st.session_state["wt_last_error"] = ""
     _clear_results()
+    auto_layout_applied = _auto_apply_pad_layout_if_shared_surface(records=list(records))
     st.session_state["wt_selected_names"] = list(all_names)
-    st.session_state["wt_retry_selected_names"] = list(all_names)
+    return auto_layout_applied
+
+
+def _auto_apply_pad_layout_if_shared_surface(records: list[WelltrackRecord]) -> bool:
+    pads = detect_well_pads(records)
+    well_count_with_surface = sum(1 for record in records if record.points)
+    if well_count_with_surface <= 1:
+        return False
+    if len(pads) != 1:
+        return False
+    if len(pads[0].wells) != well_count_with_surface:
+        return False
+
+    pads = _ensure_pad_configs(base_records=list(records))
+    plan_map = _build_pad_plan_map(pads)
+    updated_records = apply_pad_layout(
+        records=list(records),
+        pads=pads,
+        plan_by_pad_id=plan_map,
+    )
+    if updated_records == list(records):
+        return False
+    st.session_state["wt_records"] = list(updated_records)
+    st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    st.session_state["wt_pad_auto_applied_on_import"] = True
+    return True
 
 
 def _render_import_controls() -> tuple[str, bool, bool, bool]:
@@ -581,8 +1758,14 @@ def _handle_import_actions(
         try:
             status.write("Проверка структуры WELLTRACK-блоков.")
             records = _parse_welltrack_cached(source_text)
-            _store_parsed_records(records=records)
+            auto_layout_applied = _store_parsed_records(records=records)
             status.write(f"Найдено блоков WELLTRACK: {len(records)}.")
+            if auto_layout_applied:
+                status.write(
+                    "Обнаружен общий исходный устьевой S: устья автоматически "
+                    "разведены по параметрам блока 'Кусты и расчет устьев'. "
+                    "При необходимости можно нажать 'Вернуть исходные устья'."
+                )
             elapsed = perf_counter() - started
             status.update(
                 label=f"Импорт завершен за {elapsed:.2f} с",
@@ -780,8 +1963,19 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         st.markdown("### Кусты и расчет устьев")
         st.caption(
             "Куст определяется по совпадающим координатам устья S при импорте. "
-            "Последовательность бурения строится по проекции середины (t1+t3)/2 вдоль НДС."
+            "Последовательность бурения строится по проекции середины (t1+t3)/2 вдоль НДС. "
+            "Авто НДС — это стартовая геометрическая оценка по главной оси облака "
+            "midpoint(t1, t3); для почти изотропных кустов она деградирует до "
+            "стабильного fallback по направлению S→центроид и должна считаться "
+            "рекомендацией, а не жестким инженерным решением."
         )
+        if bool(st.session_state.get("wt_pad_auto_applied_on_import", False)):
+            st.info(
+                "После импорта исходные устья совпадали, поэтому текущие координаты S "
+                "были автоматически скорректированы по параметрам этого блока. "
+                "Если нужно вернуться к исходному WELLTRACK, нажмите "
+                "'Вернуть исходные устья'."
+            )
         pad_rows = [
             {
                 "Куст": str(pad.pad_id),
@@ -920,6 +2114,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S"
             )
+            st.session_state["wt_pad_auto_applied_on_import"] = False
             _clear_results()
             st.toast("Координаты устьев обновлены по параметрам кустов.")
             st.rerun()
@@ -927,6 +2122,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         if reset_clicked:
             st.session_state["wt_records"] = list(base_records)
             st.session_state["wt_pad_last_applied_at"] = ""
+            st.session_state["wt_pad_auto_applied_on_import"] = False
             _clear_results()
             st.rerun()
 
@@ -947,11 +2143,6 @@ def _sync_selection_state(records: list[WelltrackRecord]) -> tuple[list[str], li
         st.session_state["wt_selected_names"] = [
             name for name in pending_general if name in all_names
         ]
-    pending_retry = st.session_state.pop("wt_pending_retry_selected_names", None)
-    if pending_retry is not None:
-        st.session_state["wt_retry_selected_names"] = [
-            name for name in pending_retry if name in all_names
-        ]
 
     def _sync_key(key: str) -> None:
         current = [
@@ -963,13 +2154,19 @@ def _sync_selection_state(records: list[WelltrackRecord]) -> tuple[list[str], li
             st.session_state[key] = list(recommended_names)
 
     _sync_key("wt_selected_names")
-    _sync_key("wt_retry_selected_names")
     return all_names, recommended_names
 
 
 def _render_batch_selection_status(
     records: list[WelltrackRecord], summary_rows: list[dict[str, object]] | None
 ) -> None:
+    if summary_rows:
+        st.caption(
+            "Результаты по невыбранным скважинам сохраняются. Для следующего запуска "
+            "по умолчанию выделяются нерассчитанные, ошибочные и warning-кейсы."
+        )
+        return
+
     all_names = [record.name for record in records]
     rows_by_name = {
         str(row.get("Скважина", "")).strip(): row for row in (summary_rows or [])
@@ -1001,16 +2198,10 @@ def _render_batch_selection_status(
     c2.metric("С предупреждениями", f"{warning_count}")
     c3.metric("С ошибками", f"{error_count}")
     c4.metric("Не рассчитаны", f"{not_run_count}")
-    if summary_rows:
-        st.caption(
-            "Результаты по невыбранным скважинам сохраняются. По умолчанию для "
-            "следующего запуска выделяются нерассчитанные, ошибочные и warning-кейсы."
-        )
-    else:
-        st.caption(
-            "До первого запуска предвыбраны все скважины. Затем страница будет "
-            "автоматически фокусироваться на нерассчитанных и проблемных скважинах."
-        )
+    st.caption(
+        "До первого запуска предвыбраны все скважины. Затем страница будет "
+        "автоматически фокусироваться на нерассчитанных и проблемных скважинах."
+    )
 
 
 def _render_batch_run_forms(
@@ -1021,6 +2212,41 @@ def _render_batch_run_forms(
     st.markdown("### Пакетный расчет")
     summary_rows = st.session_state.get("wt_summary_rows")
     _render_batch_selection_status(records=records, summary_rows=summary_rows)
+    prepared_rows = _prepared_override_rows()
+    if prepared_rows:
+        info_col, action_col = st.columns([6.0, 1.4], gap="small")
+        with info_col:
+            st.info(
+                str(
+                    st.session_state.get("wt_prepared_override_message", "")
+                    or "Подготовлен пересчет по anti-collision рекомендации."
+                )
+            )
+        with action_col:
+            if st.button(
+                "Очистить план",
+                icon=":material/close:",
+                width="stretch",
+            ):
+                st.session_state["wt_prepared_well_overrides"] = {}
+                st.session_state["wt_prepared_override_message"] = ""
+                st.session_state["wt_prepared_recommendation_id"] = ""
+                st.rerun()
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(prepared_rows)),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Скважина": st.column_config.TextColumn("Скважина"),
+                "Оптимизация": st.column_config.TextColumn("Оптимизация"),
+                "Источник": st.column_config.TextColumn("Источник"),
+                "Причина": st.column_config.TextColumn("Причина"),
+            },
+        )
+        st.caption(
+            "Этот план пересчета будет применен только к выбранным ниже скважинам. "
+            "Остальные скважины используют общие параметры без overrides."
+        )
     st.radio(
         "Детализация лога расчета",
         options=list(WT_LOG_LEVEL_OPTIONS),
@@ -1034,84 +2260,49 @@ def _render_batch_run_forms(
 
     requests: list[_BatchRunRequest] = []
     with st.form("welltrack_run_form", clear_on_submit=False):
-        st.markdown("#### Общий запуск")
-        st.multiselect(
-            "Скважины для расчета",
-            options=all_names,
-            key="wt_selected_names",
-            help="Для каждой скважины ожидается ровно 3 точки: S, t1, t3.",
+        st.markdown("#### Запуск / пересчет выбранных скважин")
+        select_col, action_col = st.columns(
+            [6.0, 1.4],
+            gap="small",
+            vertical_alignment="bottom",
         )
+        with select_col:
+            st.multiselect(
+                "Скважины для расчета",
+                options=all_names,
+                key="wt_selected_names",
+                help="Для каждой скважины ожидается ровно 3 точки: S, t1, t3.",
+            )
+        with action_col:
+            select_all_clicked = st.form_submit_button(
+                "Выбрать все",
+                icon=":material/done_all:",
+                width="stretch",
+            )
         st.caption(
-            "Этот запуск использует общие параметры расчета ниже. "
-            "Результаты остальных скважин не будут затронуты."
+            "Используйте этот блок и для первого расчета набора, и для пересчета "
+            "любой выбранной части скважин. Применяются параметры расчета ниже, "
+            "а результаты остальных скважин не будут затронуты."
         )
         config = _build_config_form(
             binding=WT_CALC_PARAMS,
             title="Общие параметры расчета",
         )
         run_clicked = st.form_submit_button(
-            "Рассчитать выбранные скважины",
+            "Запустить / пересчитать выбранные скважины",
             type="primary",
             icon=":material/play_arrow:",
         )
+    if select_all_clicked:
+        st.session_state["wt_pending_selected_names"] = list(all_names)
+        st.rerun()
     requests.append(
         _BatchRunRequest(
             selected_names=list(st.session_state.get("wt_selected_names", [])),
             config=config,
             run_clicked=bool(run_clicked),
-            run_kind="general",
         )
     )
-
-    if summary_rows:
-        with st.expander(
-            "Повторный расчет выбранных скважин",
-            expanded=False,
-        ):
-            st.multiselect(
-                "Скважины для повторного расчета",
-                options=all_names,
-                key="wt_retry_selected_names",
-                help=(
-                    "Подходит для ошибок, warning-кейсов и локального пересчета "
-                    "части набора без потери уже готовых результатов."
-                ),
-            )
-            st.checkbox(
-                "Использовать отдельные параметры для повторного расчета",
-                key="wt_retry_use_custom_config",
-                help=(
-                    "Если включено, выбранные скважины будут пересчитаны с "
-                    "собственным набором параметров, не меняя общий профиль batch-расчета."
-                ),
-            )
-            if bool(st.session_state.get("wt_retry_use_custom_config", False)):
-                retry_config = _build_config_form(
-                    binding=WT_RETRY_CALC_PARAMS,
-                    title="Отдельные параметры для повторного расчета",
-                )
-            else:
-                st.caption(
-                    "Если отдельные параметры не включены, повторный запуск "
-                    "использует текущие общие параметры расчета."
-                )
-                retry_config = WT_CALC_PARAMS.build_config()
-            rerun_clicked = st.button(
-                "Пересчитать выбранные скважины",
-                type="secondary",
-                icon=":material/replay:",
-                width="stretch",
-            )
-            requests.append(
-                _BatchRunRequest(
-                    selected_names=list(
-                        st.session_state.get("wt_retry_selected_names", [])
-                    ),
-                    config=retry_config,
-                    run_clicked=bool(rerun_clicked),
-                    run_kind="retry",
-                )
-            )
     return requests
 
 
@@ -1135,7 +2326,6 @@ def _store_merged_batch_results(
         summary_rows=merged_rows,
     )
     st.session_state["wt_pending_selected_names"] = list(recommended_names)
-    st.session_state["wt_pending_retry_selected_names"] = list(recommended_names)
 
 
 def _run_batch_if_clicked(
@@ -1166,6 +2356,13 @@ def _run_batch_if_clicked(
     batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
     log_verbosity = str(st.session_state.get("wt_log_verbosity", WT_LOG_COMPACT))
     verbose_log_enabled = log_verbosity == WT_LOG_VERBOSE
+    config_by_name = _build_selected_override_configs(
+        base_config=request.config,
+        selected_names=selected_set,
+    )
+    optimization_context_by_name = _build_selected_optimization_contexts(
+        selected_names=selected_set,
+    )
     run_started_s = perf_counter()
     log_lines: list[str] = []
     progress = st.progress(0, text="Подготовка batch-расчета...")
@@ -1184,26 +2381,20 @@ def _run_batch_if_clicked(
     try:
         with st.spinner("Выполняется расчет WELLTRACK-набора...", show_time=True):
             started = perf_counter()
-            run_title = (
-                "Повторный batch-расчет"
-                if request.run_kind == "retry"
-                else "Старт batch-расчета"
-            )
             append_log(
-                f"{run_title}. Выбрано скважин: {len(selected_set)}. "
+                f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}. "
                 f"Детализация лога: {log_verbosity}."
             )
-            if request.run_kind == "retry":
-                if bool(st.session_state.get("wt_retry_use_custom_config", False)):
-                    append_log(
-                        "Для повторного расчета используются отдельные параметры "
-                        "только для выбранных скважин."
-                    )
-                else:
-                    append_log(
-                        "Повторный расчет использует текущие общие параметры "
-                        "без изменения сохраненных результатов остальных скважин."
-                    )
+            if config_by_name:
+                append_log(
+                    "Для части выбранных скважин активны подготовленные anti-collision "
+                    "overrides."
+                )
+            if optimization_context_by_name:
+                append_log(
+                    "Для части выбранных скважин активирован anti-collision avoidance "
+                    "mode на конфликтном окне."
+                )
             if pad_layout_active:
                 append_log(
                     "Активна раскладка устьев по кустам: перед расчетом применены "
@@ -1269,13 +2460,26 @@ def _run_batch_if_clicked(
                     if raw_problem_text
                     else ""
                 )
+                restart_count = 0
+                try:
+                    restart_count = int(float(row.get("Рестарты решателя", 0)))
+                except (TypeError, ValueError):
+                    restart_count = 0
+                restart_suffix = (
+                    f" Использовано рестартов решателя: {restart_count}."
+                    if restart_count > 0
+                    else ""
+                )
                 if status == "OK":
                     if problem_text and problem_text != "ОК":
                         append_log(
                             f"{name}: расчет завершен с предупреждением. {problem_text}"
+                            f"{restart_suffix}"
                         )
                     else:
-                        append_log(f"{name}: расчет завершен успешно.")
+                        append_log(
+                            f"{name}: расчет завершен успешно.{restart_suffix}"
+                        )
                     return
                 if problem_text and problem_text != "ОК":
                     append_log(f"{name}: {status}. {problem_text}")
@@ -1286,6 +2490,8 @@ def _run_batch_if_clicked(
                 records=records_for_run,
                 selected_names=selected_set,
                 config=request.config,
+                config_by_name=config_by_name,
+                optimization_context_by_name=optimization_context_by_name,
                 progress_callback=on_progress,
                 solver_progress_callback=on_solver_progress,
                 record_done_callback=on_record_done,
@@ -1302,6 +2508,9 @@ def _run_batch_if_clicked(
                 "%Y-%m-%d %H:%M:%S"
             )
             st.session_state["wt_last_runtime_s"] = float(elapsed_s)
+            st.session_state["wt_prepared_well_overrides"] = {}
+            st.session_state["wt_prepared_override_message"] = ""
+            st.session_state["wt_prepared_recommendation_id"] = ""
             append_log(
                 f"Batch-расчет завершен. Успешно: {len(successes)}, "
                 f"ошибок: {len(summary_rows) - len(successes)}. "
@@ -1383,45 +2592,75 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
             )
 
     st.markdown("### Сводка расчета")
+    display_df = _batch_summary_display_df(summary_df)
+    display_payload: pd.DataFrame | pd.io.formats.style.Styler
+    if display_df.empty:
+        display_payload = display_df
+    else:
+        display_payload = display_df.style.set_table_styles(
+            [
+                {
+                    "selector": "th",
+                    "props": [("font-size", "0.92rem")],
+                },
+                {
+                    "selector": "td",
+                    "props": [("font-size", "0.90rem")],
+                },
+            ]
+        )
     st.dataframe(
-        summary_df,
+        display_payload,
         width="stretch",
         hide_index=True,
         column_config={
-            "Скважина": st.column_config.TextColumn("Скважина"),
-            "Точек": st.column_config.NumberColumn("Точек", format="%d"),
-            "Статус": st.column_config.TextColumn("Статус"),
-            "Модель траектории": st.column_config.TextColumn("Модель траектории"),
-            "Классификация целей": st.column_config.TextColumn("Классификация целей"),
-            "Сложность": st.column_config.TextColumn("Сложность"),
-            "Горизонтальный отход t1, м": st.column_config.NumberColumn(
+            "Скважина": st.column_config.TextColumn("Скважина", width="small"),
+            "Точек": st.column_config.NumberColumn("Точек", format="%d", width="small"),
+            "Цели": st.column_config.TextColumn("Цели", width="small"),
+            "Сложность": st.column_config.TextColumn("Сложность", width="small"),
+            "Отход t1, м": st.column_config.NumberColumn(
                 "Отход t1, м",
                 format="%.2f",
+                width="small",
             ),
-            "Длина HORIZONTAL, м": st.column_config.NumberColumn(
+            "KOP MD, м": st.column_config.NumberColumn(
+                "KOP MD, м",
+                format="%.2f",
+                width="small",
+            ),
+            "HORIZONTAL, м": st.column_config.NumberColumn(
                 "HORIZONTAL, м",
                 format="%.2f",
+                width="small",
             ),
             "INC в t1, deg": st.column_config.NumberColumn(
-                "INC t1, deg", format="%.2f"
+                "INC t1, deg", format="%.2f", width="small"
             ),
             "ЗУ HOLD, deg": st.column_config.NumberColumn(
-                "ЗУ HOLD, deg", format="%.2f"
+                "ЗУ HOLD, deg", format="%.2f", width="small"
             ),
             "Макс ПИ, deg/10m": st.column_config.NumberColumn(
                 "Макс ПИ, deg/10m",
                 format="%.2f",
+                width="small",
             ),
             "Макс MD, м": st.column_config.NumberColumn(
                 "Макс MD, м",
                 format="%.2f",
+                width="small",
             ),
-            "Проблема": st.column_config.TextColumn("Проблема"),
+            "Рестарты": st.column_config.TextColumn("Рестарты", width="small"),
+            "Статус": st.column_config.TextColumn("Статус", width="small"),
+            "Проблема": st.column_config.TextColumn("Проблема", width="medium"),
+            "Модель траектории": st.column_config.TextColumn(
+                "Модель траектории",
+                width="medium",
+            ),
         },
     )
     st.download_button(
         "Скачать сводку (CSV)",
-        data=summary_df.to_csv(index=False).encode("utf-8"),
+        data=display_df.to_csv(index=False).encode("utf-8"),
         file_name="welltrack_summary.csv",
         mime="text/csv",
         icon=":material/download:",
@@ -1430,7 +2669,26 @@ def _render_batch_summary(summary_rows: list[dict[str, object]]) -> pd.DataFrame
     return summary_df
 
 
-def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
+def _batch_summary_display_df(summary_df: pd.DataFrame) -> pd.DataFrame:
+    if summary_df.empty:
+        return summary_df
+    display_df = summary_df.rename(columns=_BATCH_SUMMARY_RENAME_COLUMNS).copy()
+    ordered = [column for column in _BATCH_SUMMARY_DISPLAY_ORDER if column in display_df.columns]
+    trailing = [column for column in display_df.columns if column not in ordered]
+    return display_df[ordered + trailing]
+
+
+def _render_success_tabs(
+    *,
+    successes: list[SuccessfulWellPlan],
+    records: list[WelltrackRecord],
+    summary_rows: list[dict[str, object]],
+) -> None:
+    name_to_color = _well_color_map(records)
+    target_only_wells = _failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
     tab_single, tab_all = st.tabs(["Отдельная скважина", "Все скважины"])
     with tab_single:
         selected_name = st.selectbox(
@@ -1447,6 +2705,9 @@ def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
             config=selected.config,
             azimuth_deg=float(selected.azimuth_deg),
             md_t1_m=float(selected.md_t1_m),
+            runtime_s=selected.runtime_s,
+            baseline_summary=selected.baseline_summary,
+            baseline_runtime_s=selected.baseline_runtime_s,
             issue_messages=(
                 (str(selected.md_postcheck_message),)
                 if str(selected.md_postcheck_message).strip()
@@ -1476,9 +2737,33 @@ def _render_success_tabs(successes: list[SuccessfulWellPlan]) -> None:
         )
 
     with tab_all:
-        c1, c2 = st.columns(2, gap="medium")
-        c1.plotly_chart(_all_wells_3d_figure(successes), width="stretch")
-        c2.plotly_chart(_all_wells_plan_figure(successes), width="stretch")
+        overview_tab, anticollision_tab = st.tabs(["Траектории", "Anti-collision"])
+        with overview_tab:
+            if target_only_wells:
+                st.caption(
+                    "Для непростроенных скважин на обзорных графиках показаны только "
+                    "точки S/t1/t3, без траектории."
+                )
+            c1, c2 = st.columns(2, gap="medium")
+            c1.plotly_chart(
+                _all_wells_3d_figure(
+                    successes,
+                    target_only_wells=target_only_wells,
+                    name_to_color=name_to_color,
+                ),
+                config=trajectory_plotly_chart_config(),
+                width="stretch",
+            )
+            c2.plotly_chart(
+                _all_wells_plan_figure(
+                    successes,
+                    target_only_wells=target_only_wells,
+                    name_to_color=name_to_color,
+                ),
+                width="stretch",
+            )
+        with anticollision_tab:
+            _render_anticollision_panel(successes)
 
 
 def run_page() -> None:
@@ -1524,7 +2809,11 @@ def run_page() -> None:
     if not successes:
         st.warning("Все выбранные скважины завершились ошибками расчета.")
         return
-    _render_success_tabs(successes=successes)
+    _render_success_tabs(
+        successes=successes,
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
 
 
 if __name__ == "__main__":

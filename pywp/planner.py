@@ -6,6 +6,11 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import differential_evolution, least_squares, minimize
 
+from pywp.anticollision_optimization import (
+    AntiCollisionClearanceEvaluation,
+    AntiCollisionOptimizationContext,
+    evaluate_candidate_anti_collision_clearance,
+)
 from pywp.classification import classify_trajectory_type
 from pywp.mcm import add_dls, compute_positions_min_curv, dogleg_angle_rad, minimum_curvature_increment
 from pywp.planner_geometry import (
@@ -47,6 +52,7 @@ from pywp.planner_validation import (
 )
 from pywp.models import (
     ALLOWED_TURN_SOLVER_MODES,
+    OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
     OPTIMIZATION_NONE,
@@ -71,9 +77,16 @@ OPTIMIZATION_MAX_SEEDS = 4
 OPTIMIZATION_IMPROVEMENT_TOLERANCE = 1e-6
 MD_BOUNDARY_REFINEMENT_MAX_BASE_CANDIDATES = 2
 MD_BOUNDARY_REFINEMENT_MAX_NFEV_FACTOR = 0.18
+KOP_BOUNDARY_REFINEMENT_MAX_BASE_CANDIDATES = 2
+KOP_BOUNDARY_REFINEMENT_MAX_NFEV_FACTOR = 0.18
 MD_2D_REFINEMENT_MAX_BASE_CANDIDATES = 2
 MD_2D_REFINEMENT_MAX_SEEDS = 8
 MD_2D_REFINEMENT_MAXITER = 36
+MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE = 1e-6
+MD_BOUNDARY_EXTREMUM_KOP_TOLERANCE_M = 1e-3
+ANTI_COLLISION_SF_TOLERANCE = 1e-3
+ANTI_COLLISION_OBJECTIVE_PENALTY = 1_000.0
+ANTI_COLLISION_SAMPLE_STEP_M = 50.0
 
 
 class TrajectoryPlanner:
@@ -84,6 +97,7 @@ class TrajectoryPlanner:
         t3: Point3D,
         config: TrajectoryConfig,
         progress_callback: ProgressCallback | None = None,
+        optimization_context: AntiCollisionOptimizationContext | None = None,
     ) -> PlannerResult:
         _emit_progress(progress_callback, "Планировщик: проверка конфигурации.", 0.03)
         _validate_config(config)
@@ -122,6 +136,7 @@ class TrajectoryPlanner:
             geometry=geometry,
                 horizontal_offset_t1_m=horizontal_offset_t1_m,
                 config=config,
+                optimization_context=optimization_context,
                 zero_azimuth_turn=zero_azimuth_turn,
                 progress_callback=_scaled_progress_callback(
                     progress_callback=progress_callback,
@@ -258,6 +273,7 @@ def _solve_turn_with_restarts(
     geometry: SectionGeometry,
     horizontal_offset_t1_m: float,
     config: TrajectoryConfig,
+    optimization_context: AntiCollisionOptimizationContext | None,
     zero_azimuth_turn: bool,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[
@@ -293,6 +309,8 @@ def _solve_turn_with_restarts(
             solve_result = _solve_turn_profile(
                 geometry=geometry,
                 config=config,
+                surface=surface,
+                optimization_context=optimization_context,
                 zero_azimuth_turn=zero_azimuth_turn,
                 search_settings=search_settings,
                 progress_callback=attempt_progress,
@@ -371,6 +389,8 @@ def _is_retryable_solver_error(message: str) -> bool:
 def _solve_turn_profile(
     geometry: SectionGeometry,
     config: TrajectoryConfig,
+    surface: Point3D,
+    optimization_context: AntiCollisionOptimizationContext | None,
     zero_azimuth_turn: bool,
     search_settings: TurnSearchSettings,
     progress_callback: ProgressCallback | None = None,
@@ -653,9 +673,11 @@ def _solve_turn_profile(
         _emit_progress(progress_callback, "Солвер: найден допустимый профиль.", 1.00)
         return _select_feasible_candidate(
             candidates=candidates,
+            surface=surface,
             geometry=geometry,
             post_entry=post_entry,
             config=config,
+            optimization_context=optimization_context,
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=build_dls_lower,
             upper_dls_deg_per_30m=build_dls_upper,
@@ -837,6 +859,301 @@ def _optimization_target_reached(
     )
 
 
+def _is_md_boundary_extremum_candidate(
+    *,
+    candidate: ProfileParameters,
+    build_dls_upper_deg_per_30m: float,
+    kop_lower_m: float,
+) -> bool:
+    return bool(
+        abs(float(candidate.dls_build1_deg_per_30m) - float(build_dls_upper_deg_per_30m))
+        <= MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE
+        and abs(float(candidate.dls_build2_deg_per_30m) - float(build_dls_upper_deg_per_30m))
+        <= MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE
+        and abs(float(candidate.kop_vertical_m) - float(kop_lower_m))
+        <= MD_BOUNDARY_EXTREMUM_KOP_TOLERANCE_M
+    )
+
+
+def _select_anti_collision_candidate(
+    *,
+    candidates: list[ProfileParameters],
+    surface: Point3D,
+    config: TrajectoryConfig,
+    optimization_context: AntiCollisionOptimizationContext,
+    zero_azimuth_turn: bool,
+    lower_dls_deg_per_30m: float,
+    upper_dls_deg_per_30m: float,
+    bounds: tuple[tuple[float, float], ...],
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    target_point: np.ndarray,
+    search_settings: TurnSearchSettings,
+    progress_callback: ProgressCallback | None = None,
+) -> TurnSolveResult:
+    baseline = min(candidates, key=_default_candidate_sort_key)
+    baseline_vector = _candidate_to_search_vector(
+        candidate=baseline,
+        zero_azimuth_turn=zero_azimuth_turn,
+        lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+        upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        bounds=bounds,
+    )
+    clearance_cache: dict[tuple[float, ...], AntiCollisionClearanceEvaluation] = {}
+
+    def candidate_key(candidate: ProfileParameters) -> tuple[float, ...]:
+        vector = _candidate_to_search_vector(
+            candidate=candidate,
+            zero_azimuth_turn=zero_azimuth_turn,
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            bounds=bounds,
+        )
+        return tuple(np.round(vector, decimals=8).tolist())
+
+    def clearance_for_candidate(candidate: ProfileParameters) -> AntiCollisionClearanceEvaluation:
+        key = candidate_key(candidate)
+        if key not in clearance_cache:
+            clearance_cache[key] = evaluate_candidate_anti_collision_clearance(
+                candidate=candidate,
+                surface=surface,
+                context=optimization_context,
+            )
+        return clearance_cache[key]
+
+    def anti_collision_sort_key(candidate: ProfileParameters) -> tuple[float, float, float, float, float]:
+        clearance = clearance_for_candidate(candidate)
+        return (
+            max(float(optimization_context.sf_target) - float(clearance.min_separation_factor), 0.0),
+            _candidate_vector_distance(
+                candidate=candidate,
+                baseline_vector=baseline_vector,
+                zero_azimuth_turn=zero_azimuth_turn,
+                lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+                upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+                bounds=bounds,
+            ),
+            float(candidate.md_total_m),
+            float(candidate.kop_vertical_m),
+            _candidate_turn_deg(candidate),
+        )
+
+    ranked = sorted(candidates, key=anti_collision_sort_key)
+    best_seed = ranked[0]
+    best_seed_clearance = clearance_for_candidate(best_seed)
+    if float(best_seed_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
+        return TurnSolveResult(
+            params=best_seed,
+            optimization=OptimizationOutcome(
+                mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+                status="sf_target_reached",
+                objective_value=max(
+                    float(optimization_context.sf_target)
+                    - float(best_seed_clearance.min_separation_factor),
+                    0.0,
+                ),
+                theoretical_lower_bound=0.0,
+                absolute_gap_value=max(
+                    float(optimization_context.sf_target)
+                    - float(best_seed_clearance.min_separation_factor),
+                    0.0,
+                ),
+                relative_gap_pct=0.0,
+                seeds_used=len(ranked),
+                runs_used=0,
+            ),
+        )
+
+    seed_vectors = [
+        _candidate_to_search_vector(
+            candidate=item,
+            zero_azimuth_turn=zero_azimuth_turn,
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            bounds=bounds,
+        )
+        for item in ranked[:OPTIMIZATION_MAX_SEEDS]
+    ]
+    seed_vectors.extend(
+        _collect_optimization_seed_vectors(
+            candidates=ranked,
+            mode=OPTIMIZATION_MINIMIZE_MD,
+            zero_azimuth_turn=zero_azimuth_turn,
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            bounds=bounds,
+        )
+    )
+    optimization_seed_vectors = _dedupe_seed_vectors(seed_vectors)
+    optimized_candidates: list[ProfileParameters] = list(ranked)
+    runs_used = 0
+
+    last_values: tuple[float, ...] | None = None
+    last_eval: CandidateOptimizationEvaluation | None = None
+    last_clearance: AntiCollisionClearanceEvaluation | None = None
+
+    def evaluate(values: np.ndarray) -> tuple[CandidateOptimizationEvaluation, AntiCollisionClearanceEvaluation | None]:
+        nonlocal last_values, last_eval, last_clearance
+        vector = tuple(np.asarray(values, dtype=float).tolist())
+        if last_values == vector and last_eval is not None:
+            return last_eval, last_clearance
+        last_values = vector
+        last_eval = _evaluate_candidate_for_optimization(
+            values=np.asarray(values, dtype=float),
+            profile_builder=profile_builder,
+            target_point=target_point,
+            config=config,
+        )
+        if last_eval.feasible and last_eval.candidate is not None:
+            last_clearance = evaluate_candidate_anti_collision_clearance(
+                candidate=last_eval.candidate,
+                surface=surface,
+                context=optimization_context,
+            )
+        else:
+            last_clearance = None
+        return last_eval, last_clearance
+
+    def objective(values: np.ndarray) -> float:
+        base_eval, clearance = evaluate(values)
+        if not base_eval.feasible or base_eval.candidate is None or clearance is None:
+            return 1e12
+        deficit = max(
+            float(optimization_context.sf_target) - float(clearance.min_separation_factor),
+            0.0,
+        )
+        deviation = _search_vector_distance(
+            values=np.asarray(values, dtype=float),
+            baseline_vector=baseline_vector,
+            bounds=bounds,
+        )
+        return (
+            ANTI_COLLISION_OBJECTIVE_PENALTY * deficit * deficit
+            + deviation
+            + 1e-4 * float(base_eval.md_total_m)
+        )
+
+    constraints = [
+        {"type": "ineq", "fun": lambda values: evaluate(values)[0].t1_margin_m},
+        {"type": "ineq", "fun": lambda values: evaluate(values)[0].build1_margin_m},
+        {"type": "ineq", "fun": lambda values: evaluate(values)[0].build2_margin_m},
+        {"type": "ineq", "fun": lambda values: evaluate(values)[0].max_inc_margin_deg},
+        {
+            "type": "ineq",
+            "fun": lambda values: evaluate(values)[0].horizontal_dls_margin_deg_per_30m,
+        },
+    ]
+    maxiter = max(36, min(120, int(round(0.24 * float(search_settings.local_max_nfev)))))
+    if progress_callback is not None:
+        _emit_progress(
+            progress_callback,
+            (
+                "Оптимизация: anti-collision avoidance, "
+                f"локальные старты {len(optimization_seed_vectors)}."
+            ),
+            0.97,
+        )
+    for seed_vector in optimization_seed_vectors:
+        seed = _clip_to_bounds(seed_vector, bounds=bounds)
+        runs_used += 1
+        result = minimize(
+            fun=objective,
+            x0=seed,
+            method="SLSQP",
+            bounds=list(bounds),
+            constraints=constraints,
+            options={
+                "maxiter": int(maxiter),
+                "ftol": 1e-8,
+                "disp": False,
+            },
+        )
+        probes = [seed]
+        if np.all(np.isfinite(result.x)):
+            probes.append(_clip_to_bounds(np.asarray(result.x, dtype=float), bounds=bounds))
+        for probe in probes:
+            base_eval, clearance = evaluate(probe)
+            if not base_eval.feasible or base_eval.candidate is None or clearance is None:
+                continue
+            optimized_candidates.append(base_eval.candidate)
+            clearance_cache[candidate_key(base_eval.candidate)] = clearance
+
+        current_best = min(optimized_candidates, key=anti_collision_sort_key)
+        current_clearance = clearance_for_candidate(current_best)
+        if float(current_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
+            break
+
+    selected = min(optimized_candidates, key=anti_collision_sort_key)
+    selected_clearance = clearance_for_candidate(selected)
+    seed_key = anti_collision_sort_key(best_seed)
+    selected_key = anti_collision_sort_key(selected)
+    improved = bool(selected_key < seed_key)
+    objective_gap = max(
+        float(optimization_context.sf_target) - float(selected_clearance.min_separation_factor),
+        0.0,
+    )
+    return TurnSolveResult(
+        params=selected,
+        optimization=OptimizationOutcome(
+            mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+            status=(
+                "sf_target_reached"
+                if float(selected_clearance.min_separation_factor)
+                >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE
+                else ("clearance_improved" if improved else "seed_selected")
+            ),
+            objective_value=float(objective_gap),
+            theoretical_lower_bound=0.0,
+            absolute_gap_value=float(objective_gap),
+            relative_gap_pct=(
+                float(100.0 * objective_gap / max(float(optimization_context.sf_target), 1.0))
+                if objective_gap > 0.0
+                else 0.0
+            ),
+            seeds_used=len(optimization_seed_vectors),
+            runs_used=int(runs_used),
+        ),
+    )
+
+
+def _candidate_vector_distance(
+    *,
+    candidate: ProfileParameters,
+    baseline_vector: np.ndarray,
+    zero_azimuth_turn: bool,
+    lower_dls_deg_per_30m: float,
+    upper_dls_deg_per_30m: float,
+    bounds: tuple[tuple[float, float], ...],
+) -> float:
+    values = _candidate_to_search_vector(
+        candidate=candidate,
+        zero_azimuth_turn=zero_azimuth_turn,
+        lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+        upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        bounds=bounds,
+    )
+    return _search_vector_distance(
+        values=values,
+        baseline_vector=baseline_vector,
+        bounds=bounds,
+    )
+
+
+def _search_vector_distance(
+    *,
+    values: np.ndarray,
+    baseline_vector: np.ndarray,
+    bounds: tuple[tuple[float, float], ...],
+) -> float:
+    vector = np.asarray(values, dtype=float)
+    baseline = np.asarray(baseline_vector, dtype=float)
+    spans = np.array(
+        [max(float(upper - lower), 1.0) for lower, upper in bounds],
+        dtype=float,
+    )
+    normalized = (vector - baseline) / spans
+    return float(np.linalg.norm(normalized))
+
+
 def _candidate_to_search_vector(
     *,
     candidate: ProfileParameters,
@@ -992,13 +1309,29 @@ def _collect_optimization_seed_vectors(
         seed_vectors.extend(md_boundary_variants)
     if mode == OPTIMIZATION_MINIMIZE_KOP and seed_vectors:
         kop_lower = float(bounds[1][0])
+        build_upper = float(bounds[0][1])
         lowered_variants: list[np.ndarray] = []
-        for seed in seed_vectors[: min(2, len(seed_vectors))]:
+        for seed in seed_vectors[: min(3, len(seed_vectors))]:
             midpoint_seed = np.asarray(seed, dtype=float).copy()
             midpoint_seed[1] = float(0.5 * (midpoint_seed[1] + kop_lower))
             lower_bound_seed = np.asarray(seed, dtype=float).copy()
             lower_bound_seed[1] = kop_lower
-            lowered_variants.extend([midpoint_seed, lower_bound_seed])
+            lower_bound_build_upper_seed = np.asarray(seed, dtype=float).copy()
+            lower_bound_build_upper_seed[0] = build_upper
+            lower_bound_build_upper_seed[1] = kop_lower
+
+            build_upper_midpoint_seed = np.asarray(seed, dtype=float).copy()
+            build_upper_midpoint_seed[0] = float(0.5 * (build_upper_midpoint_seed[0] + build_upper))
+            build_upper_midpoint_seed[1] = kop_lower
+
+            lowered_variants.extend(
+                [
+                    midpoint_seed,
+                    lower_bound_seed,
+                    lower_bound_build_upper_seed,
+                    build_upper_midpoint_seed,
+                ]
+            )
         seed_vectors.extend(lowered_variants)
     return _dedupe_seed_vectors(seed_vectors)
 
@@ -1099,6 +1432,60 @@ def _boundary_refine_md_candidates(
     kop_lower = float(bounds[1][0])
     boundary_specs = (
         {0: build_upper},
+        {1: kop_lower},
+        {0: build_upper, 1: kop_lower},
+    )
+
+    refined: list[ProfileParameters] = []
+    runs_used = 0
+    for candidate in base_candidates:
+        seed_vector = _candidate_to_search_vector(
+            candidate=candidate,
+            zero_azimuth_turn=zero_azimuth_turn,
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            bounds=bounds,
+        )
+        for fixed_components in boundary_specs:
+            runs_used += 1
+            refined.extend(
+                _refine_profile_with_fixed_components(
+                    seed_vector=seed_vector,
+                    fixed_components=fixed_components,
+                    bounds=bounds,
+                    profile_builder=profile_builder,
+                    target_point=target_point,
+                    config=config,
+                    max_nfev=max_nfev,
+                )
+            )
+    return refined, int(runs_used)
+
+
+def _boundary_refine_kop_candidates(
+    *,
+    candidates: list[ProfileParameters],
+    zero_azimuth_turn: bool,
+    lower_dls_deg_per_30m: float,
+    upper_dls_deg_per_30m: float,
+    bounds: tuple[tuple[float, float], ...],
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+    search_settings: TurnSearchSettings,
+) -> tuple[list[ProfileParameters], int]:
+    if not candidates:
+        return [], 0
+
+    ranked = sorted(candidates, key=lambda candidate: _optimization_candidate_sort_key(candidate, OPTIMIZATION_MINIMIZE_KOP))
+    base_candidates = ranked[:KOP_BOUNDARY_REFINEMENT_MAX_BASE_CANDIDATES]
+    max_nfev = max(
+        40,
+        int(round(KOP_BOUNDARY_REFINEMENT_MAX_NFEV_FACTOR * float(search_settings.local_max_nfev))),
+    )
+    build_upper = float(bounds[0][1])
+    kop_lower = float(bounds[1][0])
+    boundary_specs = (
         {1: kop_lower},
         {0: build_upper, 1: kop_lower},
     )
@@ -1497,9 +1884,11 @@ def _two_dimensional_md_refine_candidates(
 def _select_feasible_candidate(
     *,
     candidates: list[ProfileParameters],
+    surface: Point3D,
     geometry: SectionGeometry,
     post_entry: PostEntrySection,
     config: TrajectoryConfig,
+    optimization_context: AntiCollisionOptimizationContext | None,
     zero_azimuth_turn: bool,
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
@@ -1520,6 +1909,25 @@ def _select_feasible_candidate(
         raise PlanningError("No feasible candidate available for final selection.")
 
     optimization_mode = str(config.optimization_mode)
+    if optimization_mode == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE:
+        if optimization_context is None:
+            raise PlanningError(
+                "Anti-collision optimization mode requires an optimization context."
+            )
+        return _select_anti_collision_candidate(
+            candidates=deduped_candidates,
+            surface=surface,
+            config=config,
+            optimization_context=optimization_context,
+            zero_azimuth_turn=zero_azimuth_turn,
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            bounds=bounds,
+            profile_builder=profile_builder,
+            target_point=target_point,
+            search_settings=search_settings,
+            progress_callback=progress_callback,
+        )
     if optimization_mode == OPTIMIZATION_NONE:
         selected = min(deduped_candidates, key=_default_candidate_sort_key)
         return TurnSolveResult(
@@ -1588,6 +1996,7 @@ def _select_feasible_candidate(
     )
     optimized_candidates: list[ProfileParameters] = list(ranked)
     runs_used = 0
+    kop_lower_bound = float(bounds[1][0])
 
     if optimization_mode == OPTIMIZATION_MINIMIZE_MD:
         boundary_candidates, boundary_runs_used = _boundary_refine_md_candidates(
@@ -1665,6 +2074,38 @@ def _select_feasible_candidate(
             current_best_after_2d,
             optimization_mode,
         )
+        if _is_md_boundary_extremum_candidate(
+            candidate=current_best_after_2d,
+            build_dls_upper_deg_per_30m=upper_dls_deg_per_30m,
+            kop_lower_m=kop_lower_bound,
+        ):
+            improved = bool(
+                _optimization_candidate_sort_key(current_best_after_2d, optimization_mode)
+                < seed_sort_key
+            )
+            return TurnSolveResult(
+                params=current_best_after_2d,
+                optimization=OptimizationOutcome(
+                    mode=optimization_mode,
+                    status=(
+                        "at_md_boundary_extremum"
+                        if improved
+                        else "seed_selected"
+                    ),
+                    objective_value=current_best_objective,
+                    theoretical_lower_bound=lower_bound,
+                    absolute_gap_value=_optimization_absolute_gap(
+                        objective_value=current_best_objective,
+                        theoretical_lower_bound=lower_bound,
+                    ),
+                    relative_gap_pct=_optimization_relative_gap_pct(
+                        objective_value=current_best_objective,
+                        theoretical_lower_bound=lower_bound,
+                    ),
+                    seeds_used=len(optimization_seed_vectors),
+                    runs_used=int(runs_used),
+                ),
+            )
         if _optimization_target_reached(
             objective_value=current_best_objective,
             theoretical_lower_bound=lower_bound,
@@ -1683,6 +2124,53 @@ def _select_feasible_candidate(
                         if improved
                         else "within_md_theoretical_gap"
                     ),
+                    objective_value=current_best_objective,
+                    theoretical_lower_bound=lower_bound,
+                    absolute_gap_value=_optimization_absolute_gap(
+                        objective_value=current_best_objective,
+                        theoretical_lower_bound=lower_bound,
+                    ),
+                    relative_gap_pct=_optimization_relative_gap_pct(
+                        objective_value=current_best_objective,
+                        theoretical_lower_bound=lower_bound,
+                    ),
+                    seeds_used=len(optimization_seed_vectors),
+                    runs_used=int(runs_used),
+                ),
+            )
+
+    if optimization_mode == OPTIMIZATION_MINIMIZE_KOP:
+        boundary_candidates, boundary_runs_used = _boundary_refine_kop_candidates(
+            candidates=ranked,
+            zero_azimuth_turn=zero_azimuth_turn,
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            bounds=bounds,
+            profile_builder=profile_builder,
+            target_point=target_point,
+            config=config,
+            search_settings=search_settings,
+        )
+        optimized_candidates.extend(boundary_candidates)
+        runs_used += int(boundary_runs_used)
+        current_best_after_boundary = min(
+            optimized_candidates,
+            key=lambda candidate: _optimization_candidate_sort_key(candidate, optimization_mode),
+        )
+        current_best_objective = _optimization_objective_value(
+            current_best_after_boundary,
+            optimization_mode,
+        )
+        if _optimization_target_reached(
+            objective_value=current_best_objective,
+            theoretical_lower_bound=lower_bound,
+            mode=optimization_mode,
+        ):
+            return TurnSolveResult(
+                params=current_best_after_boundary,
+                optimization=OptimizationOutcome(
+                    mode=optimization_mode,
+                    status="at_min_kop_limit",
                     objective_value=current_best_objective,
                     theoretical_lower_bound=lower_bound,
                     absolute_gap_value=_optimization_absolute_gap(

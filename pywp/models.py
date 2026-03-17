@@ -11,12 +11,19 @@ from pywp.pydantic_base import FrozenArbitraryModel, FrozenModel
 OPTIMIZATION_NONE = "none"
 OPTIMIZATION_MINIMIZE_MD = "minimize_md"
 OPTIMIZATION_MINIMIZE_KOP = "minimize_kop"
+OPTIMIZATION_ANTI_COLLISION_AVOIDANCE = "anti_collision_avoidance"
 ALLOWED_OPTIMIZATION_MODES = (
     OPTIMIZATION_NONE,
     OPTIMIZATION_MINIMIZE_MD,
     OPTIMIZATION_MINIMIZE_KOP,
+    OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
 )
-OptimizationMode = Literal["none", "minimize_md", "minimize_kop"]
+OptimizationMode = Literal[
+    "none",
+    "minimize_md",
+    "minimize_kop",
+    "anti_collision_avoidance",
+]
 TURN_SOLVER_LEAST_SQUARES = "least_squares"
 TURN_SOLVER_DE_HYBRID = "de_hybrid"
 ALLOWED_TURN_SOLVER_MODES = (TURN_SOLVER_LEAST_SQUARES, TURN_SOLVER_DE_HYBRID)

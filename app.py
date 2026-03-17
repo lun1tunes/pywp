@@ -20,9 +20,7 @@ from pywp.classification import (
     trajectory_type_label,
 )
 from pywp.planner import PlanningError
-from pywp.planner_config import (
-    TURN_SOLVER_OPTIONS,
-)
+from pywp.optimization_reference import compute_unoptimized_reference
 from pywp.pydantic_base import FrozenModel
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
@@ -408,8 +406,6 @@ def _init_state() -> None:
     st.session_state.setdefault("last_built_at", "")
     st.session_state.setdefault("last_runtime_s", None)
     st.session_state.setdefault("last_input_signature", None)
-    st.session_state.setdefault("solver_profile_rows", None)
-    st.session_state.setdefault("solver_profile_at", "")
     st.session_state.setdefault("last_run_log_lines", [])
     st.session_state.setdefault("points_import_text", "")
     st.session_state.setdefault("plan_csb_import_text", "")
@@ -508,6 +504,13 @@ def _run_planner(
         config=config,
         progress_callback=progress_callback,
     )
+    reference = compute_unoptimized_reference(
+        planner=planner,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=config,
+    )
 
     st.session_state["last_result"] = {
         "surface": surface,
@@ -518,90 +521,12 @@ def _run_planner(
         "summary": result.summary,
         "azimuth_deg": result.azimuth_deg,
         "md_t1_m": result.md_t1_m,
+        "baseline_summary": None if reference is None else reference.summary,
+        "baseline_runtime_s": None if reference is None else reference.runtime_s,
     }
     st.session_state["last_error"] = ""
     st.session_state["last_built_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["last_input_signature"] = _current_input_signature()
-
-
-def _run_solver_profiling() -> None:
-    planner = TrajectoryPlanner()
-    base_config = _build_config_from_state()
-
-    started_total = perf_counter()
-    rows: list[dict[str, str]] = []
-    run_items = [
-        (scenario_name, scenario_points, solver_mode)
-        for scenario_name, scenario_points in SCENARIOS.items()
-        for solver_mode in tuple(TURN_SOLVER_OPTIONS.keys())
-    ]
-    total_items = len(run_items)
-    progress = st.progress(0, text="Профилирование методов решателя...")
-    with st.status(
-        "Выполняется профилирование методов решателя...", expanded=True
-    ) as status:
-        for index, (scenario_name, scenario_points, solver_mode) in enumerate(
-            run_items, start=1
-        ):
-            progress.progress(
-                int(((index - 1) / max(total_items, 1)) * 100),
-                text=f"{index}/{total_items}: {scenario_name}",
-            )
-            status.write(
-                f"[{index}/{total_items}] {scenario_name} · {TURN_SOLVER_OPTIONS[solver_mode]}"
-            )
-            surface = scenario_points["surface"]
-            t1 = scenario_points["t1"]
-            t3 = scenario_points["t3"]
-            config = base_config.validated_copy(turn_solver_mode=solver_mode)
-            started = perf_counter()
-            try:
-                result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
-                elapsed_s = perf_counter() - started
-                rows.append(
-                    {
-                        "Шаблон": scenario_name,
-                        "Метод решателя": TURN_SOLVER_OPTIONS[solver_mode],
-                        "Статус": "OK",
-                        "Время, с": f"{elapsed_s:.3f}",
-                        "Промах t1, м": f"{float(result.summary['distance_t1_m']):.4f}",
-                        "Промах t3, м": f"{float(result.summary['distance_t3_m']):.4f}",
-                        "Поворот по азимуту, deg": f"{float(result.summary.get('azimuth_turn_deg', 0.0)):.2f}",
-                        "Модель траектории": str(
-                            result.summary.get("trajectory_type", "—")
-                        ),
-                        "Классификация целей": str(
-                            result.summary.get("trajectory_target_direction", "—")
-                        ),
-                    }
-                )
-            except PlanningError as exc:
-                elapsed_s = perf_counter() - started
-                rows.append(
-                    {
-                        "Шаблон": scenario_name,
-                        "Метод решателя": TURN_SOLVER_OPTIONS[solver_mode],
-                        "Статус": "Ошибка",
-                        "Время, с": f"{elapsed_s:.3f}",
-                        "Промах t1, м": "—",
-                        "Промах t3, м": "—",
-                        "Поворот по азимуту, deg": "—",
-                        "Модель траектории": "—",
-                        "Классификация целей": "—",
-                        "Причина": str(exc),
-                    }
-                )
-
-        elapsed_total_s = perf_counter() - started_total
-        progress.progress(100, text="Профилирование завершено.")
-        status.update(
-            label=f"Профилирование завершено за {elapsed_total_s:.2f} с",
-            state="complete",
-            expanded=False,
-        )
-    progress.empty()
-    st.session_state["solver_profile_rows"] = rows
-    st.session_state["solver_profile_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _render_template_controls() -> None:
@@ -946,25 +871,6 @@ def _render_input_form() -> bool:
     return bool(build_clicked)
 
 
-def _render_solver_profiling_panel() -> None:
-    with st.expander("Профилирование методов решателя", expanded=False):
-        st.caption("Сравнение методов на типовых шаблонах текущего проекта.")
-        if st.button(
-            "Запустить профилирование", icon=":material/speed:", width="content"
-        ):
-            _run_solver_profiling()
-        profile_rows = st.session_state.get("solver_profile_rows")
-        if st.session_state.get("solver_profile_at"):
-            st.caption(
-                f"Последнее профилирование: {st.session_state['solver_profile_at']}"
-            )
-        if profile_rows:
-            profile_df = pd.DataFrame(profile_rows)
-            st.dataframe(
-                arrow_safe_text_dataframe(profile_df), width="stretch", hide_index=True
-            )
-
-
 def _run_planner_if_clicked(
     build_clicked: bool,
     preflight_errors: list[str],
@@ -1080,6 +986,8 @@ def _build_single_well_result_view(
         azimuth_deg=float(last_result["azimuth_deg"]),
         md_t1_m=float(last_result["md_t1_m"]),
         runtime_s=st.session_state.get("last_runtime_s"),
+        baseline_summary=last_result.get("baseline_summary"),
+        baseline_runtime_s=last_result.get("baseline_runtime_s"),
         plan_csb_stations=plan_csb_df,
         actual_stations=actual_df,
     )
@@ -1138,7 +1046,6 @@ def run_app() -> None:
         st.warning(
             "Предварительная проверка параметров:\n- " + "\n- ".join(preflight_errors)
         )
-    _render_solver_profiling_panel()
     _run_planner_if_clicked(
         build_clicked=build_clicked,
         preflight_errors=preflight_errors,

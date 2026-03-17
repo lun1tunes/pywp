@@ -4,11 +4,20 @@ import app
 import pandas as pd
 import pytest
 from pywp import Point3D
+from streamlit.testing.v1 import AppTest
 from pywp.ui_utils import arrow_safe_text_dataframe, format_run_log_line
 
 
 def test_streamlit_entrypoint_exists() -> None:
     assert callable(app.run_app)
+
+
+def test_app_page_does_not_render_solver_profiling_expander() -> None:
+    at = AppTest.from_file("app.py")
+    at.run(timeout=120)
+
+    expander_labels = [str(widget.label) for widget in at.expander]
+    assert "Профилирование методов решателя" not in expander_labels
 
 
 def test_arrow_safe_text_dataframe_converts_mixed_object_columns_to_strings() -> None:

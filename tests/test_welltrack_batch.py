@@ -61,6 +61,8 @@ class _StubPlanner:
             "md_total_m": 2200.0,
             "max_total_md_postcheck_m": float(config.max_total_md_postcheck_m),
             "md_postcheck_excess_m": 0.0,
+            "solver_turn_restarts_used": 0.0,
+            "solver_turn_max_restarts": float(config.turn_solver_max_restarts),
         }
         return PlannerResult(stations=stations, summary=summary, azimuth_deg=0.0, md_t1_m=1000.0)
 
@@ -94,7 +96,11 @@ def test_batch_planner_evaluates_success_and_format_error() -> None:
     assert len(rows) == 2
     by_name = {row["Скважина"]: row for row in rows}
     assert by_name["OK-1"]["Статус"] == "OK"
+    assert by_name["OK-1"]["Рестарты решателя"] == "0"
+    assert by_name["OK-1"]["Классификация целей"] == "В прямом направлении"
+    assert by_name["OK-1"]["KOP MD, м"] == "550.00"
     assert by_name["BAD-2"]["Статус"] == "Ошибка формата"
+    assert by_name["BAD-2"]["Рестарты решателя"] == "—"
     assert len(successes) == 1
     assert successes[0].name == "OK-1"
 
@@ -182,6 +188,219 @@ def test_batch_planner_reports_solver_stages_and_record_done_callbacks() -> None
     assert max(fractions) <= 1.0
     stage_names = [item[3] for item in solver_seen]
     assert any("Планировщик" in stage for stage in stage_names)
+
+
+def test_batch_planner_writes_restart_count_from_solver_summary() -> None:
+    class _RestartStubPlanner(_StubPlanner):
+        def plan(
+            self,
+            *,
+            surface: Any,
+            t1: Any,
+            t3: Any,
+            config: TrajectoryConfig,
+            progress_callback: Any = None,
+        ) -> PlannerResult:
+            result = super().plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                progress_callback=progress_callback,
+            )
+            summary = dict(result.summary)
+            summary["solver_turn_restarts_used"] = 1.0
+            summary["solver_turn_max_restarts"] = float(config.turn_solver_max_restarts)
+            return PlannerResult(
+                stations=result.stations,
+                summary=summary,
+                azimuth_deg=result.azimuth_deg,
+                md_t1_m=result.md_t1_m,
+            )
+
+    records = [
+        WelltrackRecord(
+            name="WELL-R",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+
+    rows, _ = WelltrackBatchPlanner(planner=_RestartStubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-R"},
+        config=_fast_batch_config(turn_solver_max_restarts=2),
+    )
+
+    assert rows[0]["Статус"] == "OK"
+    assert rows[0]["Рестарты решателя"] == "1"
+
+
+def test_batch_planner_maps_reverse_target_direction_to_short_report_label() -> None:
+    class _ReverseDirectionStubPlanner(_StubPlanner):
+        def plan(
+            self,
+            *,
+            surface: Any,
+            t1: Any,
+            t3: Any,
+            config: TrajectoryConfig,
+            progress_callback: Any = None,
+        ) -> PlannerResult:
+            result = super().plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                progress_callback=progress_callback,
+            )
+            summary = dict(result.summary)
+            summary["trajectory_target_direction"] = "Цели в обратном направлении"
+            summary["kop_md_m"] = 725.0
+            return PlannerResult(
+                stations=result.stations,
+                summary=summary,
+                azimuth_deg=result.azimuth_deg,
+                md_t1_m=result.md_t1_m,
+            )
+
+    records = [
+        WelltrackRecord(
+            name="WELL-REV",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+
+    rows, _ = WelltrackBatchPlanner(planner=_ReverseDirectionStubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-REV"},
+        config=_fast_batch_config(),
+    )
+
+    assert rows[0]["Классификация целей"] == "В обратном направлении"
+    assert rows[0]["KOP MD, м"] == "725.00"
+
+
+def test_batch_planner_applies_per_well_config_overrides() -> None:
+    class _ConfigCapturePlanner(_StubPlanner):
+        def __init__(self) -> None:
+            self.optimization_by_target_x: dict[float, list[str]] = {}
+
+        def plan(
+            self,
+            *,
+            surface: Any,
+            t1: Any,
+            t3: Any,
+            config: TrajectoryConfig,
+            progress_callback: Any = None,
+        ) -> PlannerResult:
+            self.optimization_by_target_x.setdefault(float(t1.x), []).append(
+                str(config.optimization_mode)
+            )
+            return super().plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                progress_callback=progress_callback,
+            )
+
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+    planner = _ConfigCapturePlanner()
+    base_config = _fast_batch_config()
+    override_config = base_config.validated_copy(optimization_mode="minimize_kop")
+
+    rows, successes = WelltrackBatchPlanner(planner=planner).evaluate(
+        records=records,
+        selected_names={"WELL-A", "WELL-B"},
+        config=base_config,
+        config_by_name={"WELL-B": override_config},
+    )
+
+    assert len(rows) == 2
+    assert len(successes) == 2
+    assert planner.optimization_by_target_x[600.0] == ["none"]
+    assert "minimize_kop" in planner.optimization_by_target_x[650.0]
+
+
+def test_batch_planner_keeps_runtime_and_unoptimized_reference_for_optimized_mode() -> None:
+    class _OptimizationStubPlanner(_StubPlanner):
+        def plan(
+            self,
+            *,
+            surface: Any,
+            t1: Any,
+            t3: Any,
+            config: TrajectoryConfig,
+            progress_callback: Any = None,
+        ) -> PlannerResult:
+            result = super().plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                progress_callback=progress_callback,
+            )
+            summary = dict(result.summary)
+            summary["optimization_mode"] = str(config.optimization_mode)
+            summary["md_total_m"] = 2100.0 if str(config.optimization_mode) != "none" else 2200.0
+            return PlannerResult(
+                stations=result.stations,
+                summary=summary,
+                azimuth_deg=result.azimuth_deg,
+                md_t1_m=result.md_t1_m,
+            )
+
+    records = [
+        WelltrackRecord(
+            name="WELL-OPT",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+
+    rows, successes = WelltrackBatchPlanner(planner=_OptimizationStubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-OPT"},
+        config=_fast_batch_config(optimization_mode="minimize_md"),
+    )
+
+    assert len(rows) == 1
+    assert len(successes) == 1
+    success = successes[0]
+    assert success.runtime_s is not None
+    assert success.baseline_runtime_s is not None
+    assert success.baseline_summary is not None
+    assert float(success.summary["md_total_m"]) == 2100.0
+    assert float(success.baseline_summary["md_total_m"]) == 2200.0
 
 
 @pytest.mark.integration
