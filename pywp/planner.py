@@ -86,6 +86,7 @@ MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE = 1e-6
 MD_BOUNDARY_EXTREMUM_KOP_TOLERANCE_M = 1e-3
 ANTI_COLLISION_SF_TOLERANCE = 1e-3
 ANTI_COLLISION_OBJECTIVE_PENALTY = 1_000.0
+ANTI_COLLISION_KOP_PREFERENCE_WEIGHT = 0.25
 ANTI_COLLISION_SAMPLE_STEP_M = 50.0
 
 
@@ -920,18 +921,25 @@ def _select_anti_collision_candidate(
             )
         return clearance_cache[key]
 
-    def anti_collision_sort_key(candidate: ProfileParameters) -> tuple[float, float, float, float, float]:
+    def anti_collision_sort_key(candidate: ProfileParameters) -> tuple[float, float, float, float, float, float]:
         clearance = clearance_for_candidate(candidate)
+        kop_rank = (
+            float(candidate.kop_vertical_m)
+            if bool(optimization_context.prefer_lower_kop)
+            else 0.0
+        )
+        deviation_rank = _candidate_vector_distance(
+            candidate=candidate,
+            baseline_vector=baseline_vector,
+            zero_azimuth_turn=zero_azimuth_turn,
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            bounds=bounds,
+        )
         return (
             max(float(optimization_context.sf_target) - float(clearance.min_separation_factor), 0.0),
-            _candidate_vector_distance(
-                candidate=candidate,
-                baseline_vector=baseline_vector,
-                zero_azimuth_turn=zero_azimuth_turn,
-                lower_dls_deg_per_30m=lower_dls_deg_per_30m,
-                upper_dls_deg_per_30m=upper_dls_deg_per_30m,
-                bounds=bounds,
-            ),
+            kop_rank,
+            deviation_rank,
             float(candidate.md_total_m),
             float(candidate.kop_vertical_m),
             _candidate_turn_deg(candidate),
@@ -1026,8 +1034,17 @@ def _select_anti_collision_candidate(
             baseline_vector=baseline_vector,
             bounds=bounds,
         )
+        kop_preference = 0.0
+        if bool(optimization_context.prefer_lower_kop):
+            kop_span = max(float(bounds[1][1]) - float(bounds[1][0]), 1.0)
+            kop_preference = (
+                ANTI_COLLISION_KOP_PREFERENCE_WEIGHT
+                * max(float(base_eval.kop_vertical_m) - float(bounds[1][0]), 0.0)
+                / kop_span
+            )
         return (
             ANTI_COLLISION_OBJECTIVE_PENALTY * deficit * deficit
+            + kop_preference
             + deviation
             + 1e-4 * float(base_eval.md_total_m)
         )

@@ -7,10 +7,17 @@ import pytest
 import sys
 from streamlit.testing.v1 import AppTest
 
-from pywp.anticollision import AntiCollisionAnalysis, AntiCollisionCorridor
-from pywp.anticollision_recommendations import build_anti_collision_recommendations
+from pywp.anticollision import AntiCollisionAnalysis, AntiCollisionCorridor, build_anti_collision_well
+from pywp.anticollision_optimization import (
+    AntiCollisionOptimizationContext,
+    build_anti_collision_reference_path,
+)
+from pywp.anticollision_recommendations import (
+    build_anti_collision_recommendation_clusters,
+    build_anti_collision_recommendations,
+)
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.models import TrajectoryConfig
+from pywp.models import Point3D, TrajectoryConfig
 from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
@@ -522,6 +529,635 @@ def test_build_prepared_trajectory_optimization_context_uses_pair_intervals() ->
     assert context.references[0].well_name == "WELL-A"
     assert context.references[0].md_start_m == pytest.approx(1100.0)
     assert context.references[0].md_end_m == pytest.approx(1700.0)
+
+
+def test_prepared_override_rows_include_sf_before() -> None:
+    page = _load_welltrack_page_module()
+    page.st.session_state["wt_prepared_well_overrides"] = {
+        "WELL-B": {
+            "update_fields": {"optimization_mode": "anti_collision_avoidance"},
+            "source": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
+            "reason": "Prepared pairwise anti-collision rerun.",
+        }
+    }
+    page.st.session_state["wt_prepared_recommendation_snapshot"] = {
+        "before_sf": 0.69,
+        "affected_wells": ("WELL-B",),
+        "expected_maneuver": "Pre-entry azimuth turn / сдвиг HOLD до t1",
+    }
+
+    rows = page._prepared_override_rows()
+
+    assert rows == [
+        {
+            "Порядок": "1",
+            "Скважина": "WELL-B",
+            "Маневр": "Pre-entry azimuth turn / сдвиг HOLD до t1",
+            "Оптимизация": "Anti-collision avoidance",
+            "SF до": "0.69",
+            "Источник": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
+            "Причина": "Prepared pairwise anti-collision rerun.",
+        }
+    ]
+
+
+def test_prepared_override_rows_follow_cluster_action_step_order() -> None:
+    page = _load_welltrack_page_module()
+    page.st.session_state["wt_prepared_well_overrides"] = {
+        "WELL-C": {
+            "update_fields": {"optimization_mode": "anti_collision_avoidance"},
+            "source": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
+            "reason": "Trajectory collision against WELL-A.",
+        },
+        "WELL-B": {
+            "update_fields": {"optimization_mode": "minimize_kop"},
+            "source": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
+            "reason": "Vertical collision: опустить KOP.",
+        },
+    }
+    page.st.session_state["wt_prepared_recommendation_snapshot"] = {
+        "kind": "cluster",
+        "before_sf": 0.71,
+        "action_steps": (
+            {
+                "order_rank": 1,
+                "well_name": "WELL-C",
+                "expected_maneuver": "Сместить post-entry / HORIZONTAL",
+            },
+            {
+                "order_rank": 2,
+                "well_name": "WELL-B",
+                "expected_maneuver": "Раньше начать набор / уменьшить KOP",
+            },
+        ),
+    }
+
+    rows = page._prepared_override_rows()
+
+    assert [row["Скважина"] for row in rows] == ["WELL-C", "WELL-B"]
+    assert [row["Порядок"] for row in rows] == ["1", "2"]
+    assert [row["Маневр"] for row in rows] == [
+        "Сместить post-entry / HORIZONTAL",
+        "Раньше начать набор / уменьшить KOP",
+    ]
+
+
+def test_build_last_anticollision_resolution_reports_sf_after() -> None:
+    page = _load_welltrack_page_module()
+    resolution = page._build_last_anticollision_resolution(
+        snapshot={
+            "well_a": "WELL-A",
+            "well_b": "WELL-B",
+            "source_label": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
+            "action_label": "Подготовить anti-collision пересчет",
+            "area_label": "траектория ↔ траектория",
+            "before_sf": 0.69,
+            "before_overlap_m": 8.0,
+            "md_a_start_m": 1000.0,
+            "md_a_end_m": 2000.0,
+            "md_b_start_m": 1000.0,
+            "md_b_end_m": 2000.0,
+        },
+        successes=[
+            _successful_plan(name="WELL-A", y_offset_m=0.0),
+            _successful_plan(name="WELL-B", y_offset_m=400.0),
+        ],
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_preset=DEFAULT_UNCERTAINTY_PRESET,
+    )
+
+    assert resolution is not None
+    assert float(resolution["after_sf"]) > 1.0
+    assert float(resolution["delta_sf"]) > 0.0
+    assert str(resolution["status"]) == "Конфликт снят"
+    assert str(resolution["uncertainty_preset"]) == DEFAULT_UNCERTAINTY_PRESET
+
+
+def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> None:
+    page = _load_welltrack_page_module()
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-C",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=1200.0,
+                md_a_end_m=1700.0,
+                md_b_start_m=1250.0,
+                md_b_end_m=1750.0,
+                md_a_values_m=np.array([1200.0, 1700.0], dtype=float),
+                md_b_values_m=np.array([1250.0, 1750.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+                separation_factor_values=np.array([0.78, 0.74], dtype=float),
+                overlap_depth_values_m=np.array([7.0, 8.0], dtype=float),
+            ),
+            AntiCollisionCorridor(
+                well_a="WELL-B",
+                well_b="WELL-C",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=1850.0,
+                md_a_end_m=2300.0,
+                md_b_start_m=1800.0,
+                md_b_end_m=2250.0,
+                md_a_values_m=np.array([1850.0, 2300.0], dtype=float),
+                md_b_values_m=np.array([1800.0, 2250.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [30.0, 0.0, 0.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+                separation_factor_values=np.array([0.76, 0.71], dtype=float),
+                overlap_depth_values_m=np.array([9.0, 10.0], dtype=float),
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=2,
+        overlapping_pair_count=2,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.71,
+    )
+    successes = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0, kop_md_m=650.0),
+        _successful_plan(name="WELL-B", y_offset_m=150.0, kop_md_m=700.0),
+        _successful_plan(name="WELL-C", y_offset_m=5.0, kop_md_m=900.0),
+    ]
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(successes),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+
+    page._prepare_rerun_from_cluster(
+        clusters[0],
+        successes=successes,
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+
+    prepared = page.st.session_state["wt_prepared_well_overrides"]
+    assert list(prepared.keys()) == ["WELL-C"]
+    payload = dict(prepared["WELL-C"])
+    context = payload["optimization_context"]
+    assert context is not None
+    assert float(context.candidate_md_start_m) == pytest.approx(1250.0)
+    assert float(context.candidate_md_end_m) == pytest.approx(2250.0)
+    assert {str(item.well_name) for item in context.references} == {"WELL-A", "WELL-B"}
+    assert str(payload["source"]).startswith("ac-cluster-")
+    assert page.st.session_state["wt_pending_selected_names"] == ["WELL-C"]
+    snapshot = dict(page.st.session_state["wt_prepared_recommendation_snapshot"])
+    assert str(snapshot["kind"]) == "cluster"
+    assert len(tuple(snapshot["items"])) == 2
+
+
+def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() -> None:
+    page = _load_welltrack_page_module()
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-B",
+                classification="target-target",
+                priority_rank=1,
+                label_a="t1",
+                label_b="t1",
+                md_a_start_m=2400.0,
+                md_a_end_m=2400.0,
+                md_b_start_m=2350.0,
+                md_b_end_m=2350.0,
+                md_a_values_m=np.array([2400.0], dtype=float),
+                md_b_values_m=np.array([2350.0], dtype=float),
+                label_a_values=("t1",),
+                label_b_values=("t1",),
+                midpoint_xyz=np.array([[0.0, 0.0, 2400.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([8.0], dtype=float),
+                separation_factor_values=np.array([0.63], dtype=float),
+                overlap_depth_values_m=np.array([12.0], dtype=float),
+            ),
+            AntiCollisionCorridor(
+                well_a="WELL-B",
+                well_b="WELL-C",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=1800.0,
+                md_a_end_m=2250.0,
+                md_b_start_m=1750.0,
+                md_b_end_m=2200.0,
+                md_a_values_m=np.array([1800.0, 2250.0], dtype=float),
+                md_b_values_m=np.array([1750.0, 2200.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+                separation_factor_values=np.array([0.79, 0.74], dtype=float),
+                overlap_depth_values_m=np.array([7.0, 9.0], dtype=float),
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=2,
+        overlapping_pair_count=2,
+        target_overlap_pair_count=1,
+        worst_separation_factor=0.63,
+    )
+    successes = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0, kop_md_m=650.0),
+        _successful_plan(name="WELL-B", y_offset_m=150.0, kop_md_m=700.0),
+        _successful_plan(name="WELL-C", y_offset_m=5.0, kop_md_m=900.0),
+    ]
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(successes),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+
+    page._prepare_rerun_from_cluster(
+        clusters[0],
+        successes=successes,
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+
+    assert page.st.session_state["wt_prepared_well_overrides"] == {}
+    assert page.st.session_state["wt_prepared_recommendation_snapshot"] is None
+    assert page.st.session_state["wt_pending_selected_names"] is None
+    assert "Cluster-level пересчет недоступен" in str(
+        page.st.session_state["wt_prepared_override_message"]
+    )
+    assert "spacing целей" in str(page.st.session_state["wt_prepared_override_message"])
+
+
+def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_well_plan() -> None:
+    page = _load_welltrack_page_module()
+    well_a_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 500.0, 1000.0, 1500.0, 2000.0],
+            "INC_deg": [0.0, 0.0, 0.0, 20.0, 50.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0],
+            "X_m": [0.0, 0.0, 0.0, 50.0, 320.0],
+            "Y_m": [0.0, 0.0, 0.0, 30.0, 120.0],
+            "Z_m": [0.0, 500.0, 1000.0, 1450.0, 1775.0],
+            "segment": ["VERTICAL", "VERTICAL", "VERTICAL", "BUILD1", "BUILD1"],
+        }
+    )
+    well_b_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 500.0, 1000.0, 1500.0, 2000.0],
+            "INC_deg": [0.0, 0.0, 0.0, 20.0, 50.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0],
+            "X_m": [0.0, 0.0, 0.0, 50.0, 320.0],
+            "Y_m": [10.0, 10.0, 10.0, 40.0, 150.0],
+            "Z_m": [0.0, 500.0, 1000.0, 1450.0, 1775.0],
+            "segment": ["VERTICAL", "VERTICAL", "VERTICAL", "BUILD1", "BUILD1"],
+        }
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            build_anti_collision_well(
+                name="WELL-A",
+                color="#0B6E4F",
+                stations=well_a_stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(50.0, 30.0, 1450.0),
+                t3=Point3D(320.0, 120.0, 1775.0),
+                azimuth_deg=90.0,
+                md_t1_m=1500.0,
+            ),
+            build_anti_collision_well(
+                name="WELL-B",
+                color="#3A86FF",
+                stations=well_b_stations,
+                surface=Point3D(0.0, 10.0, 0.0),
+                t1=Point3D(50.0, 40.0, 1450.0),
+                t3=Point3D(320.0, 150.0, 1775.0),
+                azimuth_deg=90.0,
+                md_t1_m=1500.0,
+            ),
+            build_anti_collision_well(
+                name="WELL-C",
+                color="#00798C",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 1000.0, 2000.0],
+                        "INC_deg": [0.0, 90.0, 90.0],
+                        "AZI_deg": [0.0, 90.0, 90.0],
+                        "X_m": [0.0, 1000.0, 2000.0],
+                        "Y_m": [0.0, 0.0, 0.0],
+                        "Z_m": [0.0, 0.0, 0.0],
+                        "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+                    }
+                ),
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(1000.0, 0.0, 0.0),
+                t3=Point3D(2000.0, 0.0, 0.0),
+                azimuth_deg=90.0,
+                md_t1_m=1000.0,
+            ),
+        ),
+        corridors=(
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-B",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=400.0,
+                md_a_end_m=700.0,
+                md_b_start_m=410.0,
+                md_b_end_m=710.0,
+                md_a_values_m=np.array([400.0, 700.0], dtype=float),
+                md_b_values_m=np.array([410.0, 710.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
+                separation_factor_values=np.array([0.82, 0.78], dtype=float),
+                overlap_depth_values_m=np.array([5.0, 7.0], dtype=float),
+            ),
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-C",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=1750.0,
+                md_a_end_m=2050.0,
+                md_b_start_m=1700.0,
+                md_b_end_m=2000.0,
+                md_a_values_m=np.array([1750.0, 2050.0], dtype=float),
+                md_b_values_m=np.array([1700.0, 2000.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+                separation_factor_values=np.array([0.76, 0.73], dtype=float),
+                overlap_depth_values_m=np.array([7.0, 9.0], dtype=float),
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=2,
+        overlapping_pair_count=2,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.73,
+    )
+    successes = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0, kop_md_m=700.0, stations=well_a_stations),
+        _successful_plan(name="WELL-B", y_offset_m=10.0, kop_md_m=900.0, stations=well_b_stations),
+        _successful_plan(name="WELL-C", y_offset_m=0.0, kop_md_m=650.0),
+    ]
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(successes),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+
+    page._prepare_rerun_from_cluster(
+        clusters[0],
+        successes=successes,
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+
+    prepared = page.st.session_state["wt_prepared_well_overrides"]
+    assert "WELL-A" in prepared
+    payload = dict(prepared["WELL-A"])
+    context = payload["optimization_context"]
+    assert context is not None
+    assert bool(context.prefer_lower_kop) is True
+    assert str(payload["update_fields"]["optimization_mode"]) == "anti_collision_avoidance"
+    assert "опустить KOP" in str(payload["reason"])
+    assert "anti-collision avoidance rerun" in str(payload["reason"])
+
+
+def test_build_selected_optimization_contexts_rebuilds_prepared_context_from_current_successes() -> None:
+    page = _load_welltrack_page_module()
+    legacy_reference_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "INC_deg": [0.0, 45.0, 90.0],
+            "AZI_deg": [0.0, 90.0, 90.0],
+            "X_m": [999.0, 999.0, 999.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 1000.0, 2000.0],
+        }
+    )
+    stale_context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=1000.0,
+        candidate_md_end_m=2000.0,
+        sf_target=1.0,
+        sample_step_m=50.0,
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        references=(
+            build_anti_collision_reference_path(
+                well_name="WELL-A",
+                stations=legacy_reference_stations,
+                md_start_m=1000.0,
+                md_end_m=2000.0,
+                sample_step_m=50.0,
+                model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+            ),
+        ),
+    )
+    page.st.session_state["wt_prepared_well_overrides"] = {
+        "WELL-B": {
+            "update_fields": {"optimization_mode": "anti_collision_avoidance"},
+            "source": "prepared",
+            "reason": "stale reference",
+            "optimization_context": stale_context,
+        }
+    }
+
+    contexts = page._build_selected_optimization_contexts(
+        selected_names={"WELL-B"},
+        current_successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+    )
+
+    assert "WELL-B" in contexts
+    rebuilt_context = contexts["WELL-B"]
+    assert float(rebuilt_context.references[0].xyz_m[-1, 0]) == pytest.approx(2000.0)
+    stored_context = page.st.session_state["wt_prepared_well_overrides"]["WELL-B"]["optimization_context"]
+    assert isinstance(stored_context, AntiCollisionOptimizationContext)
+    assert float(stored_context.references[0].xyz_m[-1, 0]) == pytest.approx(2000.0)
+
+
+def test_ensure_selected_success_baseline_populates_lazy_reference_and_caches_it(monkeypatch) -> None:
+    page = _load_welltrack_page_module()
+    optimized = _successful_plan(
+        name="WELL-OPT",
+        y_offset_m=0.0,
+        optimization_mode="minimize_md",
+    )
+    page.st.session_state["wt_successes"] = [optimized]
+    monkeypatch.setattr(
+        page,
+        "ensure_successful_plan_baseline",
+        lambda *, success: success.validated_copy(
+            baseline_summary={"md_total_m": 2200.0},
+            baseline_runtime_s=0.42,
+        ),
+    )
+
+    selected = page._ensure_selected_success_baseline(
+        selected_name="WELL-OPT",
+        successes=[optimized],
+    )
+
+    assert selected.baseline_summary is not None
+    assert selected.baseline_runtime_s is not None
+    cached = page.st.session_state["wt_successes"][0]
+    assert cached.baseline_summary is not None
+    assert cached.baseline_runtime_s is not None
+
+
+def test_selected_execution_order_prioritizes_cluster_action_steps() -> None:
+    page = _load_welltrack_page_module()
+    page.st.session_state["wt_prepared_recommendation_snapshot"] = {
+        "kind": "cluster",
+        "action_steps": (
+            {"order_rank": 1, "well_name": "WELL-C"},
+            {"order_rank": 2, "well_name": "WELL-A"},
+        ),
+    }
+
+    order = page._selected_execution_order(["WELL-A", "WELL-B", "WELL-C"])
+
+    assert order == ["WELL-C", "WELL-A", "WELL-B"]
+
+
+def test_build_last_anticollision_resolution_supports_cluster_snapshot() -> None:
+    page = _load_welltrack_page_module()
+    resolution = page._build_last_anticollision_resolution(
+        snapshot={
+            "kind": "cluster",
+            "cluster_id": "ac-cluster-001",
+            "source_label": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
+            "before_sf": 0.71,
+            "items": (
+                {
+                    "kind": "recommendation",
+                    "well_a": "WELL-A",
+                    "well_b": "WELL-C",
+                    "source_label": "WELL-A ↔ WELL-C · Траектория / review · SF 0.74",
+                    "action_label": "Подготовить anti-collision пересчет",
+                    "expected_maneuver": "Сместить post-entry / HORIZONTAL",
+                    "area_label": "траектория ↔ траектория",
+                    "before_sf": 0.74,
+                    "before_overlap_m": 8.0,
+                    "md_a_start_m": 1000.0,
+                    "md_a_end_m": 2000.0,
+                    "md_b_start_m": 1000.0,
+                    "md_b_end_m": 2000.0,
+                },
+                {
+                    "kind": "recommendation",
+                    "well_a": "WELL-B",
+                    "well_b": "WELL-C",
+                    "source_label": "WELL-B ↔ WELL-C · Траектория / review · SF 0.71",
+                    "action_label": "Подготовить anti-collision пересчет",
+                    "expected_maneuver": "Сместить post-entry / HORIZONTAL",
+                    "area_label": "траектория ↔ траектория",
+                    "before_sf": 0.71,
+                    "before_overlap_m": 10.0,
+                    "md_a_start_m": 1000.0,
+                    "md_a_end_m": 2000.0,
+                    "md_b_start_m": 1000.0,
+                    "md_b_end_m": 2000.0,
+                },
+            ),
+        },
+        successes=[
+            _successful_plan(name="WELL-A", y_offset_m=0.0),
+            _successful_plan(name="WELL-B", y_offset_m=300.0),
+            _successful_plan(name="WELL-C", y_offset_m=600.0),
+        ],
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_preset=DEFAULT_UNCERTAINTY_PRESET,
+    )
+
+    assert resolution is not None
+    assert str(resolution["kind"]) == "cluster"
+    assert float(resolution["after_sf"]) > 1.0
+    assert str(resolution["status"]) == "Конфликт снят"
+    assert len(tuple(resolution["items"])) == 2
+    assert all(float(item["after_sf"]) > 1.0 for item in tuple(resolution["items"]))
+
+
+def test_prepare_rerun_from_recommendation_skips_trajectory_override_without_context() -> None:
+    page = _load_welltrack_page_module()
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-B",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=1100.0,
+                md_a_end_m=1700.0,
+                md_b_start_m=1200.0,
+                md_b_end_m=1750.0,
+                md_a_values_m=np.array([1100.0, 1700.0], dtype=float),
+                md_b_values_m=np.array([1200.0, 1750.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
+                overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+                separation_factor_values=np.array([0.72, 0.69], dtype=float),
+                overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=1,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.69,
+    )
+    successes = [_successful_plan(name="WELL-B", y_offset_m=5.0, kop_md_m=900.0)]
+    recommendation = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name={
+            "WELL-B": page._build_anticollision_well_contexts(successes)["WELL-B"],
+        },
+    )[0]
+
+    page.st.session_state["wt_prepared_well_overrides"] = {"OLD": {"update_fields": {}}}
+    page.st.session_state["wt_prepared_override_message"] = ""
+    page.st.session_state["wt_prepared_recommendation_id"] = ""
+    page.st.session_state["wt_pending_selected_names"] = ["OLD"]
+    page._prepare_rerun_from_recommendation(
+        recommendation,
+        successes=successes,
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+
+    assert page.st.session_state["wt_prepared_well_overrides"] == {}
+    assert "контекст" in str(page.st.session_state["wt_prepared_override_message"]).lower()
+    assert page.st.session_state["wt_pending_selected_names"] is None
 
 
 def test_anticollision_3d_figure_draws_terminal_cone_boundaries_per_well() -> None:

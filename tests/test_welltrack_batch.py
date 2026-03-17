@@ -6,9 +6,15 @@ import pandas as pd
 import pytest
 from pydantic import BaseModel
 
+from pywp.anticollision_optimization import (
+    AntiCollisionOptimizationContext,
+    build_anti_collision_reference_path,
+)
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.models import PlannerResult, TrajectoryConfig
+from pywp.models import PlannerResult, Point3D, TrajectoryConfig
+from pywp.uncertainty import DEFAULT_PLANNING_UNCERTAINTY_MODEL
 from pywp.welltrack_batch import (
+    ensure_successful_plan_baseline,
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
     merge_batch_results,
@@ -35,6 +41,7 @@ class _StubPlanner:
         t1: Any,
         t3: Any,
         config: TrajectoryConfig,
+        optimization_context: Any = None,
         progress_callback: Any = None,
     ) -> PlannerResult:
         if progress_callback is not None:
@@ -44,6 +51,8 @@ class _StubPlanner:
         stations = pd.DataFrame(
             {
                 "MD_m": [0.0, 1000.0, 2000.0],
+                "INC_deg": [0.0, 45.0, 90.0],
+                "AZI_deg": [0.0, 90.0, 90.0],
                 "X_m": [surface.x, t1.x, t3.x],
                 "Y_m": [surface.y, t1.y, t3.y],
                 "Z_m": [surface.z, t1.z, t3.z],
@@ -348,7 +357,153 @@ def test_batch_planner_applies_per_well_config_overrides() -> None:
     assert "minimize_kop" in planner.optimization_by_target_x[650.0]
 
 
-def test_batch_planner_keeps_runtime_and_unoptimized_reference_for_optimized_mode() -> None:
+def test_batch_planner_respects_selected_execution_order() -> None:
+    class _OrderCapturePlanner(_StubPlanner):
+        def __init__(self) -> None:
+            self.seen_names: list[float] = []
+
+        def plan(
+            self,
+            *,
+            surface: Any,
+            t1: Any,
+            t3: Any,
+            config: TrajectoryConfig,
+            optimization_context: Any = None,
+            progress_callback: Any = None,
+        ) -> PlannerResult:
+            self.seen_names.append(float(t1.x))
+            return super().plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                optimization_context=optimization_context,
+                progress_callback=progress_callback,
+            )
+
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+    planner = _OrderCapturePlanner()
+
+    rows, successes = WelltrackBatchPlanner(planner=planner).evaluate(
+        records=records,
+        selected_names={"WELL-A", "WELL-B"},
+        selected_order=["WELL-B", "WELL-A"],
+        config=_fast_batch_config(),
+    )
+
+    assert len(rows) == 2
+    assert len(successes) == 2
+    assert planner.seen_names == [650.0, 600.0]
+
+
+def test_batch_planner_rebuilds_reference_paths_from_recalculated_earlier_steps() -> None:
+    class _ReferenceCapturePlanner(_StubPlanner):
+        def __init__(self) -> None:
+            self.reference_terminal_x_by_target_x: dict[float, list[float]] = {}
+
+        def plan(
+            self,
+            *,
+            surface: Any,
+            t1: Any,
+            t3: Any,
+            config: TrajectoryConfig,
+            optimization_context: Any = None,
+            progress_callback: Any = None,
+        ) -> PlannerResult:
+            if optimization_context is not None:
+                terminal_x = float(optimization_context.references[0].xyz_m[-1, 0])
+                self.reference_terminal_x_by_target_x.setdefault(float(t1.x), []).append(
+                    terminal_x
+                )
+            return super().plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                optimization_context=optimization_context,
+                progress_callback=progress_callback,
+            )
+
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+    legacy_reference_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "INC_deg": [0.0, 45.0, 90.0],
+            "AZI_deg": [0.0, 90.0, 90.0],
+            "X_m": [999.0, 999.0, 999.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 1000.0, 2000.0],
+        }
+    )
+    base_context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=1000.0,
+        candidate_md_end_m=2000.0,
+        sf_target=1.0,
+        sample_step_m=50.0,
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        references=(
+            build_anti_collision_reference_path(
+                well_name="WELL-A",
+                stations=legacy_reference_stations,
+                md_start_m=1000.0,
+                md_end_m=2000.0,
+                sample_step_m=50.0,
+                model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+            ),
+        ),
+    )
+    planner = _ReferenceCapturePlanner()
+
+    rows, successes = WelltrackBatchPlanner(planner=planner).evaluate(
+        records=records,
+        selected_names={"WELL-A", "WELL-B"},
+        selected_order=["WELL-A", "WELL-B"],
+        config=_fast_batch_config(),
+        optimization_context_by_name={"WELL-B": base_context},
+    )
+
+    assert len(rows) == 2
+    assert len(successes) == 2
+    assert planner.reference_terminal_x_by_target_x[650.0] == [1500.0]
+
+
+def test_batch_planner_defers_unoptimized_reference_for_optimized_mode() -> None:
     class _OptimizationStubPlanner(_StubPlanner):
         def plan(
             self,
@@ -397,10 +552,64 @@ def test_batch_planner_keeps_runtime_and_unoptimized_reference_for_optimized_mod
     assert len(successes) == 1
     success = successes[0]
     assert success.runtime_s is not None
-    assert success.baseline_runtime_s is not None
-    assert success.baseline_summary is not None
+    assert success.baseline_runtime_s is None
+    assert success.baseline_summary is None
     assert float(success.summary["md_total_m"]) == 2100.0
-    assert float(success.baseline_summary["md_total_m"]) == 2200.0
+
+
+def test_ensure_successful_plan_baseline_computes_reference_lazily() -> None:
+    class _OptimizationStubPlanner(_StubPlanner):
+        def plan(
+            self,
+            *,
+            surface: Any,
+            t1: Any,
+            t3: Any,
+            config: TrajectoryConfig,
+            progress_callback: Any = None,
+        ) -> PlannerResult:
+            result = super().plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                progress_callback=progress_callback,
+            )
+            summary = dict(result.summary)
+            summary["optimization_mode"] = str(config.optimization_mode)
+            summary["md_total_m"] = 2100.0 if str(config.optimization_mode) != "none" else 2200.0
+            return PlannerResult(
+                stations=result.stations,
+                summary=summary,
+                azimuth_deg=result.azimuth_deg,
+                md_t1_m=result.md_t1_m,
+            )
+
+    success = SuccessfulWellPlan(
+        name="WELL-OPT",
+        surface={"x": 0.0, "y": 0.0, "z": 0.0},
+        t1={"x": 600.0, "y": 800.0, "z": 2400.0},
+        t3={"x": 1500.0, "y": 2000.0, "z": 2500.0},
+        stations=_StubPlanner().plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=_fast_batch_config(optimization_mode="minimize_md"),
+        ).stations,
+        summary={"md_total_m": 2100.0, "optimization_mode": "minimize_md"},
+        azimuth_deg=0.0,
+        md_t1_m=1000.0,
+        config=_fast_batch_config(optimization_mode="minimize_md"),
+    )
+
+    updated = ensure_successful_plan_baseline(
+        success=success,
+        planner=_OptimizationStubPlanner(),
+    )
+
+    assert updated.baseline_runtime_s is not None
+    assert updated.baseline_summary is not None
+    assert float(updated.baseline_summary["md_total_m"]) == 2200.0
 
 
 @pytest.mark.integration

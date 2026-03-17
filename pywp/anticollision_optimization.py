@@ -36,6 +36,7 @@ class AntiCollisionOptimizationContext:
     sample_step_m: float
     uncertainty_model: PlanningUncertaintyModel
     references: tuple[AntiCollisionReferencePath, ...]
+    prefer_lower_kop: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,7 @@ def evaluate_stations_anti_collision_clearance(
         md_end_m=float(context.candidate_md_end_m),
         sample_step_m=float(context.sample_step_m),
     )
+    candidate_md_m = sampled_candidate["MD_m"].to_numpy(dtype=float)
     candidate_xyz = sampled_candidate[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float)
     candidate_covariance = np.stack(
         [
@@ -131,6 +133,7 @@ def evaluate_stations_anti_collision_clearance(
     )
     confidence_scale = float(max(context.uncertainty_model.confidence_scale, SMALL))
     return _clearance_from_pairwise_samples(
+        candidate_md_m=candidate_md_m,
         candidate_xyz=candidate_xyz,
         candidate_covariance=candidate_covariance,
         references=context.references,
@@ -140,6 +143,7 @@ def evaluate_stations_anti_collision_clearance(
 
 def _clearance_from_pairwise_samples(
     *,
+    candidate_md_m: np.ndarray,
     candidate_xyz: np.ndarray,
     candidate_covariance: np.ndarray,
     references: tuple[AntiCollisionReferencePath, ...],
@@ -148,29 +152,51 @@ def _clearance_from_pairwise_samples(
     min_sf = float("inf")
     max_overlap = 0.0
     for reference in references:
-        distance = np.linalg.norm(
-            candidate_xyz[:, None, :] - reference.xyz_m[None, :, :],
-            axis=2,
+        sample_count = max(len(candidate_md_m), len(reference.sample_md_m))
+        progress_grid = np.linspace(0.0, 1.0, num=max(sample_count, 1), dtype=float)
+        candidate_progress = _progress_parameter(candidate_md_m)
+        reference_progress = _progress_parameter(reference.sample_md_m)
+        candidate_xyz_aligned = _interp_rows_by_progress(
+            values=candidate_xyz,
+            source_progress=candidate_progress,
+            target_progress=progress_grid,
         )
-        direction = np.zeros((len(candidate_xyz), len(reference.xyz_m), 3), dtype=float)
+        candidate_covariance_aligned = _interp_covariance_by_progress(
+            values=candidate_covariance,
+            source_progress=candidate_progress,
+            target_progress=progress_grid,
+        )
+        reference_xyz_aligned = _interp_rows_by_progress(
+            values=reference.xyz_m,
+            source_progress=reference_progress,
+            target_progress=progress_grid,
+        )
+        reference_covariance_aligned = _interp_covariance_by_progress(
+            values=reference.covariance_xyz,
+            source_progress=reference_progress,
+            target_progress=progress_grid,
+        )
+        delta_xyz = candidate_xyz_aligned - reference_xyz_aligned
+        distance = np.linalg.norm(delta_xyz, axis=1)
+        direction = np.zeros((len(progress_grid), 3), dtype=float)
         np.divide(
-            candidate_xyz[:, None, :] - reference.xyz_m[None, :, :],
-            distance[:, :, None],
+            delta_xyz,
+            distance[:, None],
             out=direction,
-            where=distance[:, :, None] > SMALL,
+            where=distance[:, None] > SMALL,
         )
         zero_mask = distance <= SMALL
         if np.any(zero_mask):
             direction[zero_mask] = np.array([1.0, 0.0, 0.0], dtype=float)
         combined_sigma2 = np.einsum(
-            "abi,aij,abj->ab",
+            "ai,aij,aj->a",
             direction,
-            candidate_covariance,
+            candidate_covariance_aligned,
             direction,
         ) + np.einsum(
-            "abi,bij,abj->ab",
+            "ai,aij,aj->a",
             direction,
-            reference.covariance_xyz,
+            reference_covariance_aligned,
             direction,
         )
         combined_radius = confidence_scale * np.sqrt(np.clip(combined_sigma2, 0.0, None))
@@ -189,6 +215,61 @@ def _clearance_from_pairwise_samples(
         min_separation_factor=float(min_sf),
         max_overlap_depth_m=float(max_overlap),
     )
+
+
+def _progress_parameter(sample_md_m: np.ndarray) -> np.ndarray:
+    md_values = np.asarray(sample_md_m, dtype=float)
+    if len(md_values) <= 1:
+        return np.zeros(len(md_values), dtype=float)
+    start = float(md_values[0])
+    end = float(md_values[-1])
+    span = max(end - start, SMALL)
+    return np.clip((md_values - start) / span, 0.0, 1.0)
+
+
+def _interp_rows_by_progress(
+    *,
+    values: np.ndarray,
+    source_progress: np.ndarray,
+    target_progress: np.ndarray,
+) -> np.ndarray:
+    source = np.asarray(values, dtype=float)
+    if len(source) == 0:
+        return np.zeros((len(target_progress), 3), dtype=float)
+    if len(source) == 1:
+        return np.repeat(source, repeats=len(target_progress), axis=0)
+    return np.column_stack(
+        [
+            np.interp(
+                target_progress,
+                source_progress,
+                source[:, column_index],
+            )
+            for column_index in range(source.shape[1])
+        ]
+    )
+
+
+def _interp_covariance_by_progress(
+    *,
+    values: np.ndarray,
+    source_progress: np.ndarray,
+    target_progress: np.ndarray,
+) -> np.ndarray:
+    source = np.asarray(values, dtype=float)
+    if len(source) == 0:
+        return np.zeros((len(target_progress), 3, 3), dtype=float)
+    if len(source) == 1:
+        return np.repeat(source, repeats=len(target_progress), axis=0)
+    result = np.empty((len(target_progress), source.shape[1], source.shape[2]), dtype=float)
+    for row_index in range(source.shape[1]):
+        for column_index in range(source.shape[2]):
+            result[:, row_index, column_index] = np.interp(
+                target_progress,
+                source_progress,
+                source[:, row_index, column_index],
+            )
+    return result
 
 
 def sample_stations_in_md_window(
@@ -218,12 +299,34 @@ def sample_stations_in_md_window(
         {
             "MD_m": grid,
             "INC_deg": np.interp(grid, md_values, stations["INC_deg"].to_numpy(dtype=float)),
-            "AZI_deg": np.interp(grid, md_values, stations["AZI_deg"].to_numpy(dtype=float)),
+            "AZI_deg": _interp_azimuth_deg(
+                grid=grid,
+                md_values=md_values,
+                azimuth_deg=stations["AZI_deg"].to_numpy(dtype=float),
+            ),
             "X_m": np.interp(grid, md_values, stations["X_m"].to_numpy(dtype=float)),
             "Y_m": np.interp(grid, md_values, stations["Y_m"].to_numpy(dtype=float)),
             "Z_m": np.interp(grid, md_values, stations["Z_m"].to_numpy(dtype=float)),
         }
     )
+
+
+def _interp_azimuth_deg(
+    *,
+    grid: np.ndarray,
+    md_values: np.ndarray,
+    azimuth_deg: np.ndarray,
+) -> np.ndarray:
+    source = np.asarray(azimuth_deg, dtype=float)
+    if len(source) <= 1:
+        return np.full(len(grid), float(source[0] % 360.0 if len(source) else 0.0), dtype=float)
+    unwrapped_rad = np.unwrap(np.radians(source))
+    interpolated_rad = np.interp(
+        np.asarray(grid, dtype=float),
+        np.asarray(md_values, dtype=float),
+        unwrapped_rad,
+    )
+    return np.mod(np.degrees(interpolated_rad), 360.0)
 
 
 def sample_profile_stations_in_md_window(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from time import perf_counter
 
 import numpy as np
@@ -9,7 +9,10 @@ from pydantic import field_validator
 
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import Point3D, SummaryDict, TrajectoryConfig
-from pywp.anticollision_optimization import AntiCollisionOptimizationContext
+from pywp.anticollision_optimization import (
+    AntiCollisionOptimizationContext,
+    build_anti_collision_reference_path,
+)
 from pywp.optimization_reference import compute_unoptimized_reference
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
@@ -48,6 +51,76 @@ class SuccessfulWellPlan(FrozenArbitraryModel):
         return coerce_model_like(value, TrajectoryConfig)
 
 
+def rebuild_optimization_context(
+    *,
+    context: AntiCollisionOptimizationContext | None,
+    reference_success_by_name: Mapping[str, SuccessfulWellPlan],
+    strict_missing_references: bool = False,
+) -> AntiCollisionOptimizationContext | None:
+    if context is None:
+        return None
+    references = []
+    changed = False
+    for reference in context.references:
+        success = reference_success_by_name.get(str(reference.well_name))
+        if success is None:
+            if strict_missing_references:
+                return None
+            references.append(reference)
+            continue
+        try:
+            updated_reference = build_anti_collision_reference_path(
+                well_name=str(success.name),
+                stations=success.stations,
+                md_start_m=float(reference.md_start_m),
+                md_end_m=float(reference.md_end_m),
+                sample_step_m=float(context.sample_step_m),
+                model=context.uncertainty_model,
+            )
+        except ValueError:
+            if strict_missing_references:
+                return None
+            references.append(reference)
+            continue
+        references.append(updated_reference)
+        changed = True
+    if not changed:
+        return context
+    return AntiCollisionOptimizationContext(
+        candidate_md_start_m=float(context.candidate_md_start_m),
+        candidate_md_end_m=float(context.candidate_md_end_m),
+        sf_target=float(context.sf_target),
+        sample_step_m=float(context.sample_step_m),
+        uncertainty_model=context.uncertainty_model,
+        references=tuple(references),
+        prefer_lower_kop=bool(context.prefer_lower_kop),
+    )
+
+
+def ensure_successful_plan_baseline(
+    *,
+    success: SuccessfulWellPlan,
+    planner: TrajectoryPlanner | None = None,
+) -> SuccessfulWellPlan:
+    if success.baseline_summary is not None:
+        return success
+    if str(success.config.optimization_mode) == "none":
+        return success
+    reference = compute_unoptimized_reference(
+        planner=planner or TrajectoryPlanner(),
+        surface=success.surface,
+        t1=success.t1,
+        t3=success.t3,
+        config=success.config,
+    )
+    if reference is None:
+        return success
+    return success.validated_copy(
+        baseline_summary=reference.summary,
+        baseline_runtime_s=reference.runtime_s,
+    )
+
+
 class WelltrackBatchPlanner:
     def __init__(self, planner: TrajectoryPlanner | None = None):
         self._planner = planner or TrajectoryPlanner()
@@ -57,6 +130,7 @@ class WelltrackBatchPlanner:
         records: Iterable[WelltrackRecord],
         selected_names: set[str],
         config: TrajectoryConfig,
+        selected_order: list[str] | None = None,
         config_by_name: dict[str, TrajectoryConfig] | None = None,
         optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None = None,
         progress_callback: ProgressCallback | None = None,
@@ -65,8 +139,13 @@ class WelltrackBatchPlanner:
     ) -> tuple[list[dict[str, Any]], list[SuccessfulWellPlan]]:
         summary_rows: list[dict[str, Any]] = []
         successes: list[SuccessfulWellPlan] = []
-        selected_records = [record for record in records if record.name in selected_names]
+        selected_records = self._selected_records_in_order(
+            records=records,
+            selected_names=selected_names,
+            selected_order=selected_order,
+        )
         total = len(selected_records)
+        recalculated_success_by_name: dict[str, SuccessfulWellPlan] = {}
 
         for index, record in enumerate(selected_records, start=1):
             if progress_callback is not None:
@@ -92,12 +171,16 @@ class WelltrackBatchPlanner:
             row, success = self._evaluate_record(
                 record=record,
                 config=(config_by_name or {}).get(str(record.name), config),
-                optimization_context=(optimization_context_by_name or {}).get(str(record.name)),
+                optimization_context=self._resolve_optimization_context(
+                    context=(optimization_context_by_name or {}).get(str(record.name)),
+                    recalculated_success_by_name=recalculated_success_by_name,
+                ),
                 planner_progress_callback=planner_progress_callback,
             )
             summary_rows.append(row)
             if success is not None:
                 successes.append(success)
+                recalculated_success_by_name[str(success.name)] = success
             if record_done_callback is not None:
                 record_done_callback(index, total, record.name, row)
 
@@ -137,6 +220,47 @@ class WelltrackBatchPlanner:
             "Проблема": "",
         }
 
+    @staticmethod
+    def _selected_records_in_order(
+        *,
+        records: Iterable[WelltrackRecord],
+        selected_names: set[str],
+        selected_order: list[str] | None,
+    ) -> list[WelltrackRecord]:
+        ordered_records = list(records)
+        selected_name_set = {str(name) for name in selected_names}
+        by_name = {str(record.name): record for record in ordered_records}
+        resolved: list[WelltrackRecord] = []
+        seen: set[str] = set()
+        for name in selected_order or ():
+            well_name = str(name)
+            if well_name not in selected_name_set or well_name in seen:
+                continue
+            record = by_name.get(well_name)
+            if record is None:
+                continue
+            resolved.append(record)
+            seen.add(well_name)
+        for record in ordered_records:
+            well_name = str(record.name)
+            if well_name not in selected_name_set or well_name in seen:
+                continue
+            resolved.append(record)
+            seen.add(well_name)
+        return resolved
+
+    @staticmethod
+    def _resolve_optimization_context(
+        *,
+        context: AntiCollisionOptimizationContext | None,
+        recalculated_success_by_name: dict[str, SuccessfulWellPlan],
+    ) -> AntiCollisionOptimizationContext | None:
+        return rebuild_optimization_context(
+            context=context,
+            reference_success_by_name=recalculated_success_by_name,
+            strict_missing_references=False,
+        )
+
     def _evaluate_record(
         self,
         record: WelltrackRecord,
@@ -168,14 +292,6 @@ class WelltrackBatchPlanner:
             row["Статус"] = "Ошибка расчета"
             row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
-        reference = compute_unoptimized_reference(
-            planner=self._planner,
-            surface=surface,
-            t1=t1,
-            t3=t3,
-            config=config,
-        )
-
         t1_offset = float(np.hypot(t1.x - surface.x, t1.y - surface.y))
         summary = result.summary
         md_total_m = float(summary.get("md_total_m", 0.0))
@@ -221,8 +337,8 @@ class WelltrackBatchPlanner:
             md_t1_m=result.md_t1_m,
             config=config,
             runtime_s=runtime_s,
-            baseline_summary=None if reference is None else reference.summary,
-            baseline_runtime_s=None if reference is None else reference.runtime_s,
+            baseline_summary=None,
+            baseline_runtime_s=None,
             md_postcheck_exceeded=md_postcheck_exceeded,
             md_postcheck_message=md_postcheck_message,
         )

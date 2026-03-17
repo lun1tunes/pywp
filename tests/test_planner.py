@@ -368,6 +368,92 @@ def test_md_optimization_boundary_refinement_can_improve_total_md() -> None:
     assert int(result_md.summary["optimization_runs_used"]) >= 6
 
 
+def test_anti_collision_candidate_can_prefer_lower_kop_for_mixed_maneuver_context(
+    monkeypatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    lower_kop_candidate = ProfileParameters(
+        kop_vertical_m=600.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=50.0,
+        dls_build1_deg_per_30m=4.4,
+        dls_build2_deg_per_30m=4.4,
+        build1_length_m=300.0,
+        hold_length_m=420.0,
+        build2_length_m=240.0,
+        horizontal_length_m=1210.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1100.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=38.0,
+        azimuth_entry_deg=67.0,
+    )
+    baseline_candidate = ProfileParameters(
+        kop_vertical_m=820.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=50.0,
+        dls_build1_deg_per_30m=4.4,
+        dls_build2_deg_per_30m=4.4,
+        build1_length_m=300.0,
+        hold_length_m=420.0,
+        build2_length_m=240.0,
+        horizontal_length_m=1210.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1100.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=38.0,
+        azimuth_entry_deg=67.0,
+    )
+    config = _fast_config(optimization_mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE)
+    bounds = (
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+    context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=1200.0,
+        candidate_md_end_m=2200.0,
+        sf_target=1.0,
+        sample_step_m=50.0,
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        references=(),
+        prefer_lower_kop=True,
+    )
+
+    monkeypatch.setattr(
+        planner_module,
+        "evaluate_candidate_anti_collision_clearance",
+        lambda **kwargs: AntiCollisionClearanceEvaluation(
+            min_separation_factor=1.05,
+            max_overlap_depth_m=0.0,
+        ),
+    )
+
+    result = planner_module._select_anti_collision_candidate(
+        candidates=[baseline_candidate, lower_kop_candidate],
+        surface=Point3D(0.0, 0.0, 0.0),
+        config=config,
+        optimization_context=context,
+        zero_azimuth_turn=False,
+        lower_dls_deg_per_30m=0.1,
+        upper_dls_deg_per_30m=6.0,
+        bounds=bounds,
+        profile_builder=lambda values: None,
+        target_point=np.zeros(3, dtype=float),
+        search_settings=planner_module._turn_search_settings(0),
+    )
+
+    assert result.params == lower_kop_candidate
+    assert result.optimization.status == "sf_target_reached"
+
+
 def test_md_optimization_2d_refinement_can_improve_total_md_when_boundary_stage_is_unavailable(
     monkeypatch,
 ) -> None:

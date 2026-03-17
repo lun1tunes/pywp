@@ -22,12 +22,21 @@ RECOMMENDATION_TARGET_SPACING = "target_spacing"
 RECOMMENDATION_REDUCE_KOP = "reduce_kop"
 RECOMMENDATION_TRAJECTORY_REVIEW = "trajectory_review"
 
+MANEUVER_TARGET_SPACING = "Сместить цели / увеличить spacing"
+MANEUVER_EARLIER_KOP = "Раньше начать набор / уменьшить KOP"
+MANEUVER_PREENTRY_TURN = "Pre-entry azimuth turn / сдвиг HOLD до t1"
+MANEUVER_ENTRY_WINDOW_TURN = "Сдвиг входа и turn в окне t1"
+MANEUVER_POSTENTRY_TURN = "Сместить post-entry / HORIZONTAL"
+MANEUVER_KOP_AND_TRAJECTORY = "Сначала уменьшить KOP, затем локально отвести ствол"
+MANEUVER_CLUSTER_MIXED = "Комбинированный cluster-level маневр"
+
 
 @dataclass(frozen=True)
 class AntiCollisionWellContext:
     well_name: str
     kop_md_m: float | None
     kop_min_vertical_m: float | None
+    md_t1_m: float | None = None
     md_total_m: float | None = None
     optimization_mode: str = OPTIMIZATION_NONE
 
@@ -48,6 +57,7 @@ class AntiCollisionRecommendation:
     category: str
     summary: str
     detail: str
+    expected_maneuver: str
     action_label: str
     can_prepare_rerun: bool
     affected_wells: tuple[str, ...]
@@ -62,6 +72,41 @@ class AntiCollisionRecommendation:
     max_overlap_depth_m: float
     required_spacing_t1_m: float | None = None
     required_spacing_t3_m: float | None = None
+
+
+@dataclass(frozen=True)
+class AntiCollisionRecommendationCluster:
+    cluster_id: str
+    well_names: tuple[str, ...]
+    recommendations: tuple[AntiCollisionRecommendation, ...]
+    recommendation_count: int
+    target_conflict_count: int
+    vertical_conflict_count: int
+    trajectory_conflict_count: int
+    worst_separation_factor: float
+    summary: str
+    detail: str
+    expected_maneuver: str
+    blocking_advisory: str | None
+    rerun_order_label: str
+    first_rerun_well: str | None
+    first_rerun_maneuver: str | None
+    action_steps: tuple["AntiCollisionClusterActionStep", ...]
+    can_prepare_rerun: bool
+    affected_wells: tuple[str, ...]
+    action_label: str
+
+
+@dataclass(frozen=True)
+class AntiCollisionClusterActionStep:
+    order_rank: int
+    well_name: str
+    category: str
+    optimization_mode: str
+    expected_maneuver: str
+    reason: str
+    related_recommendation_count: int
+    worst_separation_factor: float
 
 
 def build_anti_collision_recommendations(
@@ -104,7 +149,173 @@ def anti_collision_recommendation_rows(
                 "Overlap max, м": float(item.max_overlap_depth_m),
                 "Spacing t1, м": _nullable_float(item.required_spacing_t1_m),
                 "Spacing t3, м": _nullable_float(item.required_spacing_t3_m),
+                "Ожидаемый маневр": item.expected_maneuver,
                 "Рекомендация": item.summary,
+                "Подготовка пересчета": item.action_label,
+            }
+        )
+    return rows
+
+
+def build_anti_collision_recommendation_clusters(
+    recommendations: tuple[AntiCollisionRecommendation, ...]
+    | list[AntiCollisionRecommendation],
+) -> tuple[AntiCollisionRecommendationCluster, ...]:
+    items = tuple(recommendations)
+    if not items:
+        return ()
+    by_well: dict[str, set[str]] = {}
+    for item in items:
+        by_well.setdefault(str(item.well_a), set()).add(str(item.well_b))
+        by_well.setdefault(str(item.well_b), set()).add(str(item.well_a))
+
+    visited: set[str] = set()
+    components: list[tuple[str, ...]] = []
+    for well_name in sorted(by_well):
+        if well_name in visited:
+            continue
+        stack = [well_name]
+        component: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            component.add(current)
+            stack.extend(sorted(by_well.get(current, ())))
+        components.append(tuple(sorted(component)))
+
+    clusters: list[AntiCollisionRecommendationCluster] = []
+    for index, component in enumerate(components, start=1):
+        component_set = set(component)
+        member_recommendations = tuple(
+            item
+            for item in items
+            if str(item.well_a) in component_set and str(item.well_b) in component_set
+        )
+        if not member_recommendations:
+            continue
+        target_count = sum(
+            1 for item in member_recommendations if item.category == RECOMMENDATION_TARGET_SPACING
+        )
+        vertical_count = sum(
+            1 for item in member_recommendations if item.category == RECOMMENDATION_REDUCE_KOP
+        )
+        trajectory_count = sum(
+            1 for item in member_recommendations if item.category == RECOMMENDATION_TRAJECTORY_REVIEW
+        )
+        affected_wells = tuple(
+            sorted(
+                {
+                    str(well_name)
+                    for item in member_recommendations
+                    for well_name in item.affected_wells
+                }
+            )
+        )
+        has_unresolved_target_conflicts = bool(target_count > 0)
+        can_prepare = bool(
+            not has_unresolved_target_conflicts
+            and any(bool(item.can_prepare_rerun) for item in member_recommendations)
+        )
+        worst_sf = min(float(item.min_separation_factor) for item in member_recommendations)
+        action_steps = _cluster_action_steps(member_recommendations)
+        blocking_advisory = (
+            "Сначала решить spacing целей."
+            if has_unresolved_target_conflicts
+            else None
+        )
+        rerun_order_label = (
+            " → ".join(step.well_name for step in action_steps)
+            if action_steps
+            else "—"
+        )
+        first_rerun_well = action_steps[0].well_name if action_steps else None
+        first_rerun_maneuver = action_steps[0].expected_maneuver if action_steps else None
+        expected_maneuver = _cluster_expected_maneuver(
+            target_count=target_count,
+            vertical_count=vertical_count,
+            trajectory_count=trajectory_count,
+        )
+        summary = (
+            f"Кластер {', '.join(component)}: событий {len(member_recommendations)}, "
+            f"worst SF {worst_sf:.2f}."
+        )
+        if affected_wells:
+            detail = (
+                "К пересчету в текущем плане: " + ", ".join(affected_wells) + "."
+            )
+        else:
+            detail = "Для этого кластера пока доступны только advisory-рекомендации."
+        if blocking_advisory is not None:
+            detail += " " + blocking_advisory
+        if first_rerun_well is not None and first_rerun_maneuver is not None:
+            detail += (
+                f" Первый рекомендуемый маневр: {first_rerun_well} "
+                f"({first_rerun_maneuver})."
+            )
+        clusters.append(
+            AntiCollisionRecommendationCluster(
+                cluster_id=f"ac-cluster-{index:03d}",
+                well_names=component,
+                recommendations=member_recommendations,
+                recommendation_count=len(member_recommendations),
+                target_conflict_count=target_count,
+                vertical_conflict_count=vertical_count,
+                trajectory_conflict_count=trajectory_count,
+                worst_separation_factor=float(worst_sf),
+                summary=summary,
+                detail=detail,
+                expected_maneuver=expected_maneuver,
+                blocking_advisory=blocking_advisory,
+                rerun_order_label=rerun_order_label,
+                first_rerun_well=first_rerun_well,
+                first_rerun_maneuver=first_rerun_maneuver,
+                action_steps=action_steps,
+                can_prepare_rerun=can_prepare,
+                affected_wells=affected_wells,
+                action_label=(
+                    "Подготовить cluster-level пересчет"
+                    if can_prepare
+                    else "Только advisory"
+                ),
+            )
+        )
+    return tuple(
+        sorted(
+            clusters,
+            key=lambda item: (
+                float(item.worst_separation_factor),
+                -int(item.recommendation_count),
+                item.well_names,
+            ),
+        )
+    )
+
+
+def anti_collision_cluster_rows(
+    clusters: tuple[AntiCollisionRecommendationCluster, ...]
+    | list[AntiCollisionRecommendationCluster],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in clusters:
+        rows.append(
+            {
+                "Кластер": item.cluster_id,
+                "Скважины": ", ".join(item.well_names),
+                "Событий": int(item.recommendation_count),
+                "Цели": int(item.target_conflict_count),
+                "VERTICAL": int(item.vertical_conflict_count),
+                "Траектория": int(item.trajectory_conflict_count),
+                "SF min": float(item.worst_separation_factor),
+                "Ожидаемый маневр": item.expected_maneuver,
+                "Стартовый шаг": (
+                    f"{item.first_rerun_well}: {item.first_rerun_maneuver}"
+                    if item.first_rerun_well and item.first_rerun_maneuver
+                    else (item.blocking_advisory or "—")
+                ),
+                "Порядок": item.rerun_order_label,
+                "К пересчету": ", ".join(item.affected_wells) if item.affected_wells else "—",
                 "Подготовка пересчета": item.action_label,
             }
         )
@@ -116,6 +327,20 @@ def recommendation_display_label(recommendation: AntiCollisionRecommendation) ->
         f"{recommendation.well_a} ↔ {recommendation.well_b} · "
         f"{_recommendation_category_label(recommendation.category)} · "
         f"SF {float(recommendation.min_separation_factor):.2f}"
+    )
+
+
+def cluster_display_label(cluster: AntiCollisionRecommendationCluster) -> str:
+    wells_label = ", ".join(cluster.well_names)
+    first_step = (
+        f" · старт: {cluster.first_rerun_well}"
+        if cluster.first_rerun_well is not None
+        else ""
+    )
+    return (
+        f"{cluster.cluster_id} · {wells_label} · "
+        f"событий {int(cluster.recommendation_count)} · "
+        f"SF {float(cluster.worst_separation_factor):.2f}{first_step}"
     )
 
 
@@ -154,6 +379,7 @@ def _build_single_recommendation(
             category=RECOMMENDATION_TARGET_SPACING,
             summary=summary,
             detail=detail,
+            expected_maneuver=MANEUVER_TARGET_SPACING,
             action_label="Только рекомендация по целям",
             can_prepare_rerun=False,
             affected_wells=(),
@@ -229,6 +455,7 @@ def _build_single_recommendation(
             category=RECOMMENDATION_REDUCE_KOP,
             summary=summary,
             detail=detail,
+            expected_maneuver=MANEUVER_EARLIER_KOP,
             action_label=action_label,
             can_prepare_rerun=can_prepare,
             affected_wells=affected_wells,
@@ -266,6 +493,11 @@ def _build_single_recommendation(
             detail=(
                 "Для первого этапа используется controlled rerun одной скважины "
                 "с objective на улучшение separation factor на конфликтном окне."
+            ),
+            expected_maneuver=_expected_trajectory_maneuver(
+                event=event,
+                moving_well=str(movable_well),
+                well_context_by_name=well_context_by_name,
             ),
             action_label="Подготовить anti-collision пересчет",
             can_prepare_rerun=True,
@@ -305,6 +537,7 @@ def _build_single_recommendation(
         detail=(
             "Автоматическая подготовка пересчета для этого случая пока не включена."
         ),
+        expected_maneuver=MANEUVER_CLUSTER_MIXED,
         action_label="Ожидает anti-collision optimization",
         can_prepare_rerun=False,
         affected_wells=(),
@@ -410,6 +643,155 @@ def _select_movable_well_for_trajectory_event(
         ),
     )
     return str(ranked[0].well_name)
+
+
+def _expected_trajectory_maneuver(
+    *,
+    event: AntiCollisionReportEvent,
+    moving_well: str,
+    well_context_by_name: Mapping[str, AntiCollisionWellContext],
+) -> str:
+    moving_context = well_context_by_name.get(str(moving_well))
+    if moving_context is None or moving_context.md_t1_m is None:
+        return MANEUVER_CLUSTER_MIXED
+    moving_is_a = str(moving_well) == str(event.well_a)
+    md_start = float(event.md_a_start_m if moving_is_a else event.md_b_start_m)
+    md_end = float(event.md_a_end_m if moving_is_a else event.md_b_end_m)
+    t1_md = float(moving_context.md_t1_m)
+    tolerance_m = 75.0
+    if md_end <= t1_md - tolerance_m:
+        return MANEUVER_PREENTRY_TURN
+    if md_start >= t1_md + tolerance_m:
+        return MANEUVER_POSTENTRY_TURN
+    return MANEUVER_ENTRY_WINDOW_TURN
+
+
+def _cluster_expected_maneuver(
+    *,
+    target_count: int,
+    vertical_count: int,
+    trajectory_count: int,
+) -> str:
+    if target_count > 0 and vertical_count == 0 and trajectory_count == 0:
+        return MANEUVER_TARGET_SPACING
+    if target_count > 0 and (vertical_count > 0 or trajectory_count > 0):
+        return "Сначала spacing целей, затем локальный пересчет"
+    if vertical_count > 0 and trajectory_count == 0:
+        return MANEUVER_EARLIER_KOP
+    if trajectory_count > 0 and vertical_count == 0:
+        return "Локальный anti-collision отвод стволов"
+    return MANEUVER_CLUSTER_MIXED
+
+
+def _cluster_action_steps(
+    recommendations: tuple[AntiCollisionRecommendation, ...],
+) -> tuple[AntiCollisionClusterActionStep, ...]:
+    per_well: dict[str, list[AntiCollisionRecommendation]] = {}
+    for recommendation in recommendations:
+        for well_name in recommendation.affected_wells:
+            per_well.setdefault(str(well_name), []).append(recommendation)
+    ranked_items: list[tuple[str, tuple[AntiCollisionRecommendation, ...]]] = [
+        (well_name, tuple(items)) for well_name, items in per_well.items() if items
+    ]
+    ranked_items.sort(
+        key=lambda item: _cluster_action_sort_key(item[0], item[1]),
+    )
+    steps: list[AntiCollisionClusterActionStep] = []
+    for order_rank, (well_name, items) in enumerate(ranked_items, start=1):
+        primary = min(items, key=lambda recommendation: float(recommendation.min_separation_factor))
+        has_trajectory = any(
+            str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW for item in items
+        )
+        has_vertical = any(
+            str(item.category) == RECOMMENDATION_REDUCE_KOP for item in items
+        )
+        steps.append(
+            AntiCollisionClusterActionStep(
+                order_rank=int(order_rank),
+                well_name=str(well_name),
+                category=(
+                    "mixed"
+                    if has_trajectory and has_vertical
+                    else str(primary.category)
+                ),
+                optimization_mode=_override_mode_for_well(well_name, items),
+                expected_maneuver=_step_expected_maneuver(items),
+                reason=" | ".join(
+                    dict.fromkeys(str(recommendation.summary) for recommendation in items)
+                ),
+                related_recommendation_count=len(items),
+                worst_separation_factor=min(
+                    float(recommendation.min_separation_factor) for recommendation in items
+                ),
+            )
+        )
+    return tuple(steps)
+
+
+def _cluster_action_sort_key(
+    well_name: str,
+    recommendations: tuple[AntiCollisionRecommendation, ...],
+) -> tuple[float, int, int, int, str]:
+    has_trajectory = any(
+        str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW for item in recommendations
+    )
+    has_vertical = any(
+        str(item.category) == RECOMMENDATION_REDUCE_KOP for item in recommendations
+    )
+    category_rank = 0 if has_trajectory else (1 if has_vertical else 2)
+    worst_sf = min(float(item.min_separation_factor) for item in recommendations)
+    trajectory_count = sum(
+        1 for item in recommendations if str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW
+    )
+    vertical_count = sum(
+        1 for item in recommendations if str(item.category) == RECOMMENDATION_REDUCE_KOP
+    )
+    return (
+        float(worst_sf),
+        int(category_rank),
+        -int(trajectory_count),
+        -int(vertical_count),
+        str(well_name),
+    )
+
+
+def _override_mode_for_well(
+    well_name: str,
+    recommendations: tuple[AntiCollisionRecommendation, ...],
+) -> str:
+    has_anti_collision = False
+    has_minimize_kop = False
+    for recommendation in recommendations:
+        for suggestion in recommendation.override_suggestions:
+            if str(suggestion.well_name) != str(well_name):
+                continue
+            optimization_mode = str(
+                suggestion.config_updates.get("optimization_mode", "")
+            ).strip()
+            if optimization_mode == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE:
+                has_anti_collision = True
+            elif optimization_mode == OPTIMIZATION_MINIMIZE_KOP:
+                has_minimize_kop = True
+    if has_anti_collision:
+        return OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+    if has_minimize_kop:
+        return OPTIMIZATION_MINIMIZE_KOP
+    return OPTIMIZATION_NONE
+
+
+def _step_expected_maneuver(
+    recommendations: tuple[AntiCollisionRecommendation, ...],
+) -> str:
+    has_trajectory = any(
+        str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW for item in recommendations
+    )
+    has_vertical = any(
+        str(item.category) == RECOMMENDATION_REDUCE_KOP for item in recommendations
+    )
+    if has_trajectory and has_vertical:
+        return MANEUVER_KOP_AND_TRAJECTORY
+    primary = min(recommendations, key=lambda recommendation: float(recommendation.min_separation_factor))
+    return str(primary.expected_maneuver)
 
 
 def _md_interval_label(md_start_m: float, md_end_m: float) -> str:
