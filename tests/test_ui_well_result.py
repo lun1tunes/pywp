@@ -154,6 +154,8 @@ def test_build_key_metrics_rows_uses_dash_for_no_problem_and_no_baseline() -> No
             "entry_inc_deg": 86.0,
             "hold_inc_deg": 84.0,
             "build_dls_selected_deg_per_30m": 3.0,
+            "build1_dls_selected_deg_per_30m": 3.0,
+            "build2_dls_selected_deg_per_30m": 3.0,
             "max_dls_total_deg_per_30m": 3.0,
             "kop_md_m": 560.0,
             "horizontal_length_m": 1200.0,
@@ -180,6 +182,7 @@ def test_build_key_metrics_rows_uses_dash_for_no_problem_and_no_baseline() -> No
     assert by_label["Рестарты решателя"]["Значение без оптимизации"] == "-"
     assert by_label["Время расчета"]["Значение"] == "1.23 с"
     assert by_label["Время расчета"]["Значение без оптимизации"] == "-"
+    assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение"] == "1.00 / 1.00 / 1.00 deg/10m"
 
 
 def test_build_key_metrics_rows_shows_reference_without_optimization_when_available() -> None:
@@ -198,6 +201,8 @@ def test_build_key_metrics_rows_shows_reference_without_optimization_when_availa
             "entry_inc_deg": 86.0,
             "hold_inc_deg": 84.0,
             "build_dls_selected_deg_per_30m": 3.0,
+            "build1_dls_selected_deg_per_30m": 3.0,
+            "build2_dls_selected_deg_per_30m": 2.4,
             "max_dls_total_deg_per_30m": 3.0,
             "kop_md_m": 560.0,
             "horizontal_length_m": 1200.0,
@@ -218,6 +223,8 @@ def test_build_key_metrics_rows_shows_reference_without_optimization_when_availa
             "entry_inc_deg": 86.0,
             "hold_inc_deg": 82.0,
             "build_dls_selected_deg_per_30m": 2.7,
+            "build1_dls_selected_deg_per_30m": 2.7,
+            "build2_dls_selected_deg_per_30m": 2.7,
             "max_dls_total_deg_per_30m": 2.7,
             "kop_md_m": 610.0,
             "horizontal_length_m": 1230.0,
@@ -246,3 +253,5 @@ def test_build_key_metrics_rows_shows_reference_without_optimization_when_availa
     assert by_label["Рестарты решателя"]["Значение"] == "1 / 2"
     assert by_label["Рестарты решателя"]["Значение без оптимизации"] == "0 / 2"
     assert by_label["Время расчета"]["Значение без оптимизации"] == "0.41 с"
+    assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение"] == "1.00 / 0.80 / 1.00 deg/10m"
+    assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение без оптимизации"] == "0.90 / 0.90 / 0.90 deg/10m"

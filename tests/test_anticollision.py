@@ -20,6 +20,7 @@ from pywp.anticollision import (
 )
 from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
 from pywp.anticollision_recommendations import (
+    MANEUVER_BUILD2_ENTRY,
     RECOMMENDATION_REDUCE_KOP,
     RECOMMENDATION_TARGET_SPACING,
     RECOMMENDATION_TRAJECTORY_REVIEW,
@@ -501,6 +502,191 @@ def test_recommendations_prepare_minimize_kop_for_vertical_collision() -> None:
         suggestion.config_updates.get("optimization_mode") == "minimize_kop"
         for suggestion in recommendation.override_suggestions
     )
+
+
+def test_pre_kop_trajectory_conflict_is_reclassified_to_minimize_kop() -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_vertical_build_stations(
+            y_offset_m=0.0,
+            lateral_y_t1_m=60.0,
+            lateral_y_end_m=280.0,
+        ),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(50.0, 60.0, 1450.0),
+        t3=Point3D(320.0, 280.0, 1775.0),
+        azimuth_deg=90.0,
+        md_t1_m=1500.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=_vertical_build_stations(
+            y_offset_m=5.0,
+            lateral_y_t1_m=140.0,
+            lateral_y_end_m=340.0,
+        ),
+        surface=Point3D(0.0, 5.0, 0.0),
+        t1=Point3D(50.0, 140.0, 1450.0),
+        t3=Point3D(320.0, 340.0, 1775.0),
+        azimuth_deg=90.0,
+        md_t1_m=1500.0,
+        include_display_geometry=False,
+    )
+    corridor = AntiCollisionCorridor(
+        well_a="WELL-A",
+        well_b="WELL-B",
+        classification="trajectory",
+        priority_rank=2,
+        label_a="",
+        label_b="",
+        md_a_start_m=100.0,
+        md_a_end_m=1450.0,
+        md_b_start_m=100.0,
+        md_b_end_m=1450.0,
+        md_a_values_m=np.array([100.0, 1450.0], dtype=float),
+        md_b_values_m=np.array([100.0, 1450.0], dtype=float),
+        label_a_values=("", ""),
+        label_b_values=("", ""),
+        midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
+        overlap_rings_xyz=(),
+        overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+        separation_factor_values=np.array([0.6, 0.55], dtype=float),
+        overlap_depth_values_m=np.array([10.0, 12.0], dtype=float),
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(well_a, well_b),
+        corridors=(corridor,),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=1,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.55,
+    )
+    contexts = {
+        "WELL-A": AntiCollisionWellContext(
+            well_name="WELL-A",
+            kop_md_m=820.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=1500.0,
+            md_total_m=2000.0,
+            optimization_mode="none",
+        ),
+        "WELL-B": AntiCollisionWellContext(
+            well_name="WELL-B",
+            kop_md_m=780.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=1500.0,
+            md_total_m=2000.0,
+            optimization_mode="none",
+        ),
+    }
+
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=contexts,
+    )
+
+    assert recommendations
+    assert recommendations[0].category == RECOMMENDATION_REDUCE_KOP
+    assert recommendations[0].action_label == "Подготовить пересчет с minimize_kop"
+
+
+def test_build2_trajectory_conflict_reports_build2_maneuver() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [3600.0, 4000.0, 4300.0, 4580.0, 4680.0],
+            "INC_deg": [40.0, 50.0, 70.0, 86.0, 90.0],
+            "AZI_deg": [150.0, 180.0, 220.0, 238.3, 238.3],
+            "X_m": [0.0, 200.0, 600.0, 950.0, 1050.0],
+            "Y_m": [0.0, 120.0, 360.0, 520.0, 580.0],
+            "Z_m": [2200.0, 2500.0, 3000.0, 3400.0, 3420.0],
+            "segment": ["BUILD2", "BUILD2", "BUILD2", "BUILD2", "HORIZONTAL"],
+        }
+    )
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=stations,
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(950.0, 520.0, 3400.0),
+        t3=Point3D(1050.0, 580.0, 3420.0),
+        azimuth_deg=90.0,
+        md_t1_m=4580.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=stations.assign(Y_m=stations["Y_m"] + 20.0),
+        surface=Point3D(0.0, 20.0, 0.0),
+        t1=Point3D(950.0, 540.0, 3400.0),
+        t3=Point3D(1050.0, 600.0, 3420.0),
+        azimuth_deg=90.0,
+        md_t1_m=4580.0,
+        include_display_geometry=False,
+    )
+    corridor = AntiCollisionCorridor(
+        well_a="WELL-A",
+        well_b="WELL-B",
+        classification="trajectory",
+        priority_rank=2,
+        label_a="",
+        label_b="",
+        md_a_start_m=4075.0,
+        md_a_end_m=4275.0,
+        md_b_start_m=3975.0,
+        md_b_end_m=4225.0,
+        md_a_values_m=np.array([4075.0, 4275.0], dtype=float),
+        md_b_values_m=np.array([3975.0, 4225.0], dtype=float),
+        label_a_values=("", ""),
+        label_b_values=("", ""),
+        midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
+        overlap_rings_xyz=(),
+        overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+        separation_factor_values=np.array([0.7, 0.65], dtype=float),
+        overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(well_a, well_b),
+        corridors=(corridor,),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=1,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.65,
+    )
+    contexts = {
+        "WELL-A": AntiCollisionWellContext(
+            well_name="WELL-A",
+            kop_md_m=2000.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=4580.0,
+            md_total_m=5000.0,
+            optimization_mode="none",
+        ),
+        "WELL-B": AntiCollisionWellContext(
+            well_name="WELL-B",
+            kop_md_m=1900.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=4580.0,
+            md_total_m=5000.0,
+            optimization_mode="none",
+        ),
+    }
+
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=contexts,
+    )
+
+    assert recommendations
+    assert recommendations[0].category == RECOMMENDATION_TRAJECTORY_REVIEW
+    assert recommendations[0].expected_maneuver == MANEUVER_BUILD2_ENTRY
 
 
 def test_recommendations_prepare_pairwise_anti_collision_rerun_for_trajectory_collision() -> None:

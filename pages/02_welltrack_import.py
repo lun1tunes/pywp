@@ -5,6 +5,7 @@ from datetime import datetime
 import hashlib
 from pathlib import Path
 from time import perf_counter
+from typing import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -484,6 +485,12 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault(
         "wt_anticollision_uncertainty_preset", DEFAULT_UNCERTAINTY_PRESET
+    )
+    st.session_state["wt_anticollision_uncertainty_preset"] = normalize_uncertainty_preset(
+        st.session_state.get(
+            "wt_anticollision_uncertainty_preset",
+            DEFAULT_UNCERTAINTY_PRESET,
+        )
     )
     st.session_state.setdefault("wt_prepared_well_overrides", {})
     st.session_state.setdefault("wt_prepared_override_message", "")
@@ -1398,18 +1405,9 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
         return
 
-    st.session_state["wt_anticollision_uncertainty_preset"] = normalize_uncertainty_preset(
-        st.session_state.get(
-            "wt_anticollision_uncertainty_preset",
-            DEFAULT_UNCERTAINTY_PRESET,
-        )
-    )
     selected_preset = st.selectbox(
         "Пресет неопределенности для anti-collision",
         options=list(UNCERTAINTY_PRESET_OPTIONS.keys()),
-        index=list(UNCERTAINTY_PRESET_OPTIONS.keys()).index(
-            st.session_state["wt_anticollision_uncertainty_preset"]
-        ),
         format_func=uncertainty_preset_label,
         key="wt_anticollision_uncertainty_preset",
         help=(
@@ -1435,6 +1433,8 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
     m3.metric("Пересечения в t1/t3", f"{int(analysis.target_overlap_pair_count)}")
     worst_sf = analysis.worst_separation_factor
     m4.metric("Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}")
+    with st.expander("Что такое SF?", expanded=False):
+        st.markdown(_sf_help_markdown())
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     chart_col1.plotly_chart(
@@ -1553,6 +1553,14 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         },
     )
 
+    st.info(
+        "Как использовать подготовку пересчета: "
+        "`Подготовить одно событие` применяйте для локального отдельного конфликта. "
+        "`Подготовить весь кластер` применяйте, когда одна и та же скважина участвует "
+        "в нескольких связанных конфликтах. В каждый момент активен только один "
+        "подготовленный план: новая подготовка заменяет предыдущую."
+    )
+
     actionable_clusters = [item for item in clusters if bool(item.can_prepare_rerun)]
     if actionable_clusters:
         cluster_ids = [item.cluster_id for item in actionable_clusters]
@@ -1561,7 +1569,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         cluster_select_col, cluster_button_col = st.columns([6.0, 1.8], gap="small")
         with cluster_select_col:
             selected_cluster_id = st.selectbox(
-                "Подготовить cluster-level пересчет",
+                "Подготовить пересчет для всего связанного кластера",
                 options=cluster_ids,
                 format_func=lambda value: cluster_display_label(
                     next(
@@ -1574,7 +1582,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
             )
         with cluster_button_col:
             if st.button(
-                "Подготовить кластер",
+                "Подготовить весь кластер",
                 type="primary",
                 icon=":material/hub:",
                 width="stretch",
@@ -1584,14 +1592,15 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
                     for item in actionable_clusters
                     if str(item.cluster_id) == str(selected_cluster_id)
                 )
-                _prepare_rerun_from_cluster(
-                    selected_cluster,
-                    successes=successes,
-                    uncertainty_model=uncertainty_model,
-                )
+                with st.spinner("Подготовка cluster-level плана пересчета..."):
+                    _prepare_rerun_from_cluster(
+                        selected_cluster,
+                        successes=successes,
+                        uncertainty_model=uncertainty_model,
+                    )
                 st.toast(
-                    "Cluster-level план пересчета подготовлен. В пакетном запуске "
-                    "уже предвыбраны затронутые скважины и aggregated overrides."
+                    "Подготовлен план пересчета для всего связанного кластера. "
+                    "Он заменил предыдущий prepared plan."
                 )
                 st.rerun()
 
@@ -1605,7 +1614,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         action_col, button_col = st.columns([6.0, 1.8], gap="small")
         with action_col:
             selected_recommendation_id = st.selectbox(
-                "Подготовить пересчет по anti-collision рекомендации",
+                "Подготовить пересчет по одному anti-collision событию",
                 options=actionable_ids,
                 format_func=lambda value: recommendation_display_label(
                     next(
@@ -1618,7 +1627,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
             )
         with button_col:
             if st.button(
-                "Подготовить пересчет",
+                "Подготовить одно событие",
                 type="primary",
                 icon=":material/build:",
                 width="stretch",
@@ -1628,14 +1637,15 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
                     for item in actionable_recommendations
                     if str(item.recommendation_id) == str(selected_recommendation_id)
                 )
-                _prepare_rerun_from_recommendation(
-                    selected_recommendation,
-                    successes=successes,
-                    uncertainty_model=uncertainty_model,
-                )
+                with st.spinner("Подготовка pairwise плана пересчета..."):
+                    _prepare_rerun_from_recommendation(
+                        selected_recommendation,
+                        successes=successes,
+                        uncertainty_model=uncertainty_model,
+                    )
                 st.toast(
-                    "План пересчета подготовлен. В блоке пакетного расчета уже "
-                    "предвыбраны затронутые скважины и overrides."
+                    "Подготовлен план пересчета по одному событию. "
+                    "Он заменил предыдущий prepared plan."
                 )
                 st.rerun()
     else:
@@ -1708,6 +1718,44 @@ def _prepared_override_rows() -> list[dict[str, object]]:
                 "Причина": str(payload.get("reason", "—")).strip() or "—",
             }
         )
+    return rows
+
+
+def _prepared_plan_kind_label(snapshot: Mapping[str, object] | None) -> str:
+    kind = str((snapshot or {}).get("kind", "")).strip()
+    if kind == "cluster":
+        return "весь связанный anti-collision кластер"
+    if kind == "recommendation":
+        return "одно anti-collision событие"
+    return "локальный anti-collision план"
+
+
+def _format_prepared_override_scope(
+    *,
+    selected_names: Iterable[str],
+) -> list[dict[str, object]]:
+    prepared = st.session_state.get("wt_prepared_well_overrides", {}) or {}
+    rows: list[dict[str, object]] = []
+    for well_name in list(dict.fromkeys(str(name) for name in selected_names)):
+        payload = dict(prepared.get(well_name, {}))
+        update_fields = dict(payload.get("update_fields", {}))
+        if not update_fields:
+            continue
+        optimization_mode = str(update_fields.get("optimization_mode", "")).strip()
+        rows.append(
+            {
+                "Скважина": str(well_name),
+                "Локальный режим": optimization_display_label(optimization_mode),
+                "Источник": str(payload.get("source", "—")).strip() or "—",
+                "Маневр": "—",
+            }
+        )
+    maneuver_by_well = {
+        str(row.get("Скважина", "")).strip(): str(row.get("Маневр", "—")).strip() or "—"
+        for row in _prepared_override_rows()
+    }
+    for row in rows:
+        row["Маневр"] = maneuver_by_well.get(str(row["Скважина"]), "—")
     return rows
 
 
@@ -1879,6 +1927,27 @@ def _format_overlap_value(value: object) -> str:
     except (TypeError, ValueError):
         return "—"
     return f"{numeric:.2f}"
+
+
+def _md_interval_label(md_start_m: float, md_end_m: float) -> str:
+    start = float(md_start_m)
+    end = float(md_end_m)
+    if abs(end - start) <= 1e-6:
+        return f"{start:.0f}"
+    return f"{start:.0f}-{end:.0f}"
+
+
+def _sf_help_markdown() -> str:
+    return (
+        "**Что такое SF**\n\n"
+        "SF (`Separation Factor`) показывает запас расстояния между двумя "
+        "скважинами с учетом суммарной неопределенности их конусов.\n\n"
+        "- `SF < 1` — конусы неопределенности overlap, это collision-risk.\n"
+        "- `SF ≈ 1` — граничное состояние, запас почти исчерпан.\n"
+        "- `SF > 1` — есть запас по разнесению; чем больше число, тем комфортнее ситуация.\n\n"
+        "В текущем WELLTRACK это planning-level индикатор для сравнения вариантов, "
+        "а не абсолютная гарантия безопасности."
+    )
 
 
 def _evaluate_pair_interval_clearance(
@@ -3010,6 +3079,10 @@ def _render_batch_run_forms(
     _render_batch_selection_status(records=records, summary_rows=summary_rows)
     prepared_rows = _prepared_override_rows()
     if prepared_rows:
+        prepared_snapshot = dict(
+            st.session_state.get("wt_prepared_recommendation_snapshot") or {}
+        )
+        prepared_kind_label = _prepared_plan_kind_label(prepared_snapshot)
         info_col, action_col = st.columns([6.0, 1.4], gap="small")
         with info_col:
             st.info(
@@ -3017,6 +3090,11 @@ def _render_batch_run_forms(
                     st.session_state.get("wt_prepared_override_message", "")
                     or "Подготовлен пересчет по anti-collision рекомендации."
                 )
+            )
+            st.caption(
+                "Сейчас активен prepared plan: "
+                f"{prepared_kind_label}. При запуске ниже он будет применен только "
+                "к отмеченным скважинам из таблицы overrides."
             )
         with action_col:
             if st.button(
@@ -3045,8 +3123,9 @@ def _render_batch_run_forms(
             },
         )
         st.caption(
-            "Этот план пересчета будет применен только к выбранным ниже скважинам. "
-            "Остальные скважины используют общие параметры без overrides."
+            "Новая подготовка pairwise/cluster всегда заменяет текущий plan. "
+            "Скважины вне этого списка пойдут по общим параметрам расчета без "
+            "локальных anti-collision overrides."
         )
     st.radio(
         "Детализация лога расчета",
@@ -3085,6 +3164,30 @@ def _render_batch_run_forms(
             "любой выбранной части скважин. Применяются параметры расчета ниже, "
             "а результаты остальных скважин не будут затронуты."
         )
+        selected_now = list(st.session_state.get("wt_selected_names", []))
+        prepared_scope_rows = _format_prepared_override_scope(
+            selected_names=selected_now,
+        )
+        if prepared_scope_rows:
+            st.warning(
+                "Для части выбранных скважин будут применены локальные anti-collision "
+                "overrides поверх общих параметров ниже."
+            )
+            st.dataframe(
+                arrow_safe_text_dataframe(pd.DataFrame(prepared_scope_rows)),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Скважина": st.column_config.TextColumn("Скважина"),
+                    "Локальный режим": st.column_config.TextColumn("Локальный режим"),
+                    "Маневр": st.column_config.TextColumn("Маневр"),
+                    "Источник": st.column_config.TextColumn("Источник"),
+                },
+            )
+            st.caption(
+                "Если нужен обычный batch без локальных anti-collision настроек, "
+                "сначала нажмите `Очистить план` выше."
+            )
         config = _build_config_form(
             binding=WT_CALC_PARAMS,
             title="Общие параметры расчета",
@@ -3216,6 +3319,10 @@ def _run_batch_if_clicked(
     def set_phase(message: str) -> None:
         phase_placeholder.caption(message)
 
+    prepared_scope_rows = _format_prepared_override_scope(
+        selected_names=selected_names,
+    )
+
     try:
         with st.spinner("Выполняется расчет WELLTRACK-набора...", show_time=True):
             started = perf_counter()
@@ -3223,10 +3330,16 @@ def _run_batch_if_clicked(
                 f"Старт batch-расчета. Выбрано скважин: {len(selected_set)}. "
                 f"Детализация лога: {log_verbosity}."
             )
-            if config_by_name:
+            if prepared_scope_rows:
                 append_log(
-                    "Для части выбранных скважин активны подготовленные anti-collision "
-                    "overrides."
+                    "Активен prepared anti-collision plan ("
+                    + _prepared_plan_kind_label(prepared_snapshot)
+                    + "). Локальные overrides будут применены к "
+                    + ", ".join(
+                        f"{row['Скважина']} ({row['Локальный режим']})"
+                        for row in prepared_scope_rows
+                    )
+                    + "."
                 )
             if optimization_context_by_name:
                 append_log(

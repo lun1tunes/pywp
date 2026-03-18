@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from pywp.anticollision import (
@@ -25,10 +26,14 @@ RECOMMENDATION_TRAJECTORY_REVIEW = "trajectory_review"
 MANEUVER_TARGET_SPACING = "Сместить цели / увеличить spacing"
 MANEUVER_EARLIER_KOP = "Раньше начать набор / уменьшить KOP"
 MANEUVER_PREENTRY_TURN = "Pre-entry azimuth turn / сдвиг HOLD до t1"
+MANEUVER_BUILD2_ENTRY = "Скорректировать BUILD2 перед t1"
 MANEUVER_ENTRY_WINDOW_TURN = "Сдвиг входа и turn в окне t1"
 MANEUVER_POSTENTRY_TURN = "Сместить post-entry / HORIZONTAL"
 MANEUVER_KOP_AND_TRAJECTORY = "Сначала уменьшить KOP, затем локально отвести ствол"
 MANEUVER_CLUSTER_MIXED = "Комбинированный cluster-level маневр"
+
+_PRE_KOP_SEGMENTS = {"VERTICAL", "BUILD1"}
+_EVENT_SEGMENT_TOLERANCE_M = 25.0
 
 
 @dataclass(frozen=True)
@@ -396,7 +401,11 @@ def _build_single_recommendation(
             required_spacing_t3_m=spacing_t3_m,
         )
 
-    if _event_is_vertical_trajectory(event=event, analysis=analysis):
+    if _event_prefers_kop_adjustment(
+        event=event,
+        analysis=analysis,
+        well_context_by_name=well_context_by_name,
+    ):
         suggestions: list[AntiCollisionWellOverrideSuggestion] = []
         detail_parts: list[str] = []
         for well_name in (str(event.well_a), str(event.well_b)):
@@ -490,14 +499,15 @@ def _build_single_recommendation(
                 f"Конфликт на криволинейном участке: подготовить pairwise anti-collision "
                 f"пересчет для {movable_well} относительно {reference_well}."
             ),
-            detail=(
-                "Для первого этапа используется controlled rerun одной скважины "
-                "с objective на улучшение separation factor на конфликтном окне."
+        detail=(
+            "Для первого этапа используется controlled rerun одной скважины "
+            "с objective на улучшение separation factor на конфликтном окне."
             ),
             expected_maneuver=_expected_trajectory_maneuver(
                 event=event,
                 moving_well=str(movable_well),
                 well_context_by_name=well_context_by_name,
+                analysis=analysis,
             ),
             action_label="Подготовить anti-collision пересчет",
             can_prepare_rerun=True,
@@ -553,23 +563,60 @@ def _build_single_recommendation(
     )
 
 
-def _event_is_vertical_trajectory(
+def _event_prefers_kop_adjustment(
     *,
     event: AntiCollisionReportEvent,
     analysis: AntiCollisionAnalysis,
+    well_context_by_name: Mapping[str, AntiCollisionWellContext],
 ) -> bool:
     well_by_name = {str(well.name): well for well in analysis.wells}
     well_a = well_by_name.get(str(event.well_a))
     well_b = well_by_name.get(str(event.well_b))
     if well_a is None or well_b is None:
         return False
-    tolerance_m = float(max((well.overlay.model.sample_step_m for well in analysis.wells), default=100.0) * 1.05)
-    vertical_limit_a = _well_vertical_end_md(well_a.stations)
-    vertical_limit_b = _well_vertical_end_md(well_b.stations)
-    return bool(
-        float(event.md_a_end_m) <= vertical_limit_a + tolerance_m
-        and float(event.md_b_end_m) <= vertical_limit_b + tolerance_m
+    tolerance_m = float(
+        max((well.overlay.model.sample_step_m for well in analysis.wells), default=100.0)
+        * 1.05
     )
+    left_context = well_context_by_name.get(str(event.well_a))
+    right_context = well_context_by_name.get(str(event.well_b))
+    return bool(
+        _well_interval_prefers_kop(
+            stations=well_a.stations,
+            md_start_m=float(event.md_a_start_m),
+            md_end_m=float(event.md_a_end_m),
+            kop_md_m=None if left_context is None else left_context.kop_md_m,
+            tolerance_m=tolerance_m,
+        )
+        and _well_interval_prefers_kop(
+            stations=well_b.stations,
+            md_start_m=float(event.md_b_start_m),
+            md_end_m=float(event.md_b_end_m),
+            kop_md_m=None if right_context is None else right_context.kop_md_m,
+            tolerance_m=tolerance_m,
+        )
+    )
+
+
+def _well_interval_prefers_kop(
+    *,
+    stations: pd.DataFrame,
+    md_start_m: float,
+    md_end_m: float,
+    kop_md_m: float | None,
+    tolerance_m: float,
+) -> bool:
+    dominant_segment = _well_dominant_segment_for_interval(
+        stations=stations,
+        md_start_m=float(md_start_m),
+        md_end_m=float(md_end_m),
+    )
+    if dominant_segment in _PRE_KOP_SEGMENTS:
+        return True
+    if kop_md_m is None:
+        return False
+    midpoint_md = 0.5 * (float(md_start_m) + float(md_end_m))
+    return bool(midpoint_md <= float(kop_md_m) + float(tolerance_m))
 
 
 def _well_vertical_end_md(stations: pd.DataFrame) -> float:
@@ -584,6 +631,39 @@ def _well_vertical_end_md(stations: pd.DataFrame) -> float:
     if len(vertical_rows) == 0:
         return float(stations["MD_m"].iloc[0])
     return float(vertical_rows.max())
+
+
+def _well_dominant_segment_for_interval(
+    *,
+    stations: pd.DataFrame,
+    md_start_m: float,
+    md_end_m: float,
+) -> str:
+    if len(stations) == 0 or "MD_m" not in stations.columns or "segment" not in stations.columns:
+        return ""
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    segment_values = stations["segment"].astype(str).to_numpy()
+    start_md = float(min(md_start_m, md_end_m))
+    end_md = float(max(md_start_m, md_end_m))
+    window_mask = (
+        (md_values >= start_md - _EVENT_SEGMENT_TOLERANCE_M)
+        & (md_values <= end_md + _EVENT_SEGMENT_TOLERANCE_M)
+    )
+    if not np.any(window_mask):
+        center_md = 0.5 * (start_md + end_md)
+        nearest_index = int(np.argmin(np.abs(md_values - center_md)))
+        return str(segment_values[nearest_index]).strip().upper()
+    window_segments = [str(value).strip().upper() for value in segment_values[window_mask]]
+    if not window_segments:
+        return ""
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for segment in window_segments:
+        if segment not in counts:
+            counts[segment] = 0
+            order.append(segment)
+        counts[segment] += 1
+    return max(order, key=lambda segment: (int(counts[segment]), -order.index(segment)))
 
 
 def _priority_label(priority_rank: int) -> str:
@@ -650,13 +730,22 @@ def _expected_trajectory_maneuver(
     event: AntiCollisionReportEvent,
     moving_well: str,
     well_context_by_name: Mapping[str, AntiCollisionWellContext],
+    analysis: AntiCollisionAnalysis,
 ) -> str:
     moving_context = well_context_by_name.get(str(moving_well))
-    if moving_context is None or moving_context.md_t1_m is None:
-        return MANEUVER_CLUSTER_MIXED
     moving_is_a = str(moving_well) == str(event.well_a)
     md_start = float(event.md_a_start_m if moving_is_a else event.md_b_start_m)
     md_end = float(event.md_a_end_m if moving_is_a else event.md_b_end_m)
+    dominant_segment = _event_interval_segment_for_well(
+        analysis=analysis,
+        well_name=str(moving_well),
+        md_start_m=md_start,
+        md_end_m=md_end,
+    )
+    if dominant_segment == "BUILD2":
+        return MANEUVER_BUILD2_ENTRY
+    if moving_context is None or moving_context.md_t1_m is None:
+        return MANEUVER_CLUSTER_MIXED
     t1_md = float(moving_context.md_t1_m)
     tolerance_m = 75.0
     if md_end <= t1_md - tolerance_m:
@@ -664,6 +753,24 @@ def _expected_trajectory_maneuver(
     if md_start >= t1_md + tolerance_m:
         return MANEUVER_POSTENTRY_TURN
     return MANEUVER_ENTRY_WINDOW_TURN
+
+
+def _event_interval_segment_for_well(
+    *,
+    analysis: AntiCollisionAnalysis,
+    well_name: str,
+    md_start_m: float,
+    md_end_m: float,
+) -> str:
+    for well in analysis.wells:
+        if str(well.name) != str(well_name):
+            continue
+        return _well_dominant_segment_for_interval(
+            stations=well.stations,
+            md_start_m=float(md_start_m),
+            md_end_m=float(md_end_m),
+        )
+    return ""
 
 
 def _cluster_expected_maneuver(

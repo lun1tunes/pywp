@@ -393,6 +393,64 @@ def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> 
     assert "Пресет неопределенности для anti-collision" in selectbox_labels
 
 
+def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()[:2]
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {
+            "Скважина": "WELL-A",
+            "Точек": 3,
+            "Статус": "OK",
+            "Модель траектории": "Unified J Profile + Build + Azimuth Turn",
+            "Классификация целей": "—",
+            "Сложность": "—",
+            "Горизонтальный отход t1, м": "—",
+            "Длина HORIZONTAL, м": "—",
+            "INC в t1, deg": "—",
+            "ЗУ HOLD, deg": "—",
+            "Макс ПИ, deg/10m": "—",
+            "Макс MD, м": "—",
+            "Проблема": "",
+        },
+        {
+            "Скважина": "WELL-B",
+            "Точек": 3,
+            "Статус": "OK",
+            "Модель траектории": "Unified J Profile + Build + Azimuth Turn",
+            "Классификация целей": "—",
+            "Сложность": "—",
+            "Горизонтальный отход t1, м": "—",
+            "Длина HORIZONTAL, м": "—",
+            "INC в t1, deg": "—",
+            "ЗУ HOLD, deg": "—",
+            "Макс ПИ, deg/10m": "—",
+            "Макс MD, м": "—",
+            "Проблема": "",
+        },
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0),
+    ]
+    at.session_state["wt_anticollision_uncertainty_preset"] = "invalid_preset"
+
+    at.run(timeout=120)
+
+    preset_widgets = [
+        widget
+        for widget in at.selectbox
+        if widget.label == "Пресет неопределенности для anti-collision"
+    ]
+    assert preset_widgets
+    assert str(preset_widgets[0].value) == DEFAULT_UNCERTAINTY_PRESET
+    assert (
+        str(at.session_state["wt_anticollision_uncertainty_preset"])
+        == DEFAULT_UNCERTAINTY_PRESET
+    )
+
+
 def test_welltrack_page_prepares_vertical_anticollision_rerun_plan() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _records()[:2]
@@ -454,9 +512,9 @@ def test_welltrack_page_prepares_vertical_anticollision_rerun_plan() -> None:
     at.run(timeout=120)
 
     selectbox_labels = [widget.label for widget in at.selectbox]
-    assert "Подготовить пересчет по anti-collision рекомендации" in selectbox_labels
+    assert "Подготовить пересчет по одному anti-collision событию" in selectbox_labels
 
-    _click_button(at, "Подготовить пересчет")
+    _click_button(at, "Подготовить одно событие")
     at.run(timeout=120)
 
     assert _multiselect_value(at, "Скважины для расчета") == ["WELL-A", "WELL-B"]
@@ -559,6 +617,64 @@ def test_prepared_override_rows_include_sf_before() -> None:
             "Причина": "Prepared pairwise anti-collision rerun.",
         }
     ]
+
+
+def test_format_prepared_override_scope_shows_local_mode_for_selected_wells() -> None:
+    page = _load_welltrack_page_module()
+    page.st.session_state["wt_prepared_well_overrides"] = {
+        "WELL-B": {
+            "update_fields": {"optimization_mode": "anti_collision_avoidance"},
+            "source": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
+            "reason": "Prepared pairwise anti-collision rerun.",
+        },
+        "WELL-C": {
+            "update_fields": {"optimization_mode": "minimize_kop"},
+            "source": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
+            "reason": "Vertical collision: опустить KOP.",
+        },
+    }
+    page.st.session_state["wt_prepared_recommendation_snapshot"] = {
+        "kind": "cluster",
+        "action_steps": (
+            {
+                "order_rank": 1,
+                "well_name": "WELL-B",
+                "expected_maneuver": "Сместить post-entry / HORIZONTAL",
+            },
+            {
+                "order_rank": 2,
+                "well_name": "WELL-C",
+                "expected_maneuver": "Раньше начать набор / уменьшить KOP",
+            },
+        ),
+    }
+
+    rows = page._format_prepared_override_scope(selected_names=["WELL-A", "WELL-B", "WELL-C"])
+
+    assert rows == [
+        {
+            "Скважина": "WELL-B",
+            "Локальный режим": "Anti-collision avoidance",
+            "Источник": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
+            "Маневр": "Сместить post-entry / HORIZONTAL",
+        },
+        {
+            "Скважина": "WELL-C",
+            "Локальный режим": "Минимизация KOP",
+            "Источник": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
+            "Маневр": "Раньше начать набор / уменьшить KOP",
+        },
+    ]
+
+
+def test_sf_help_markdown_explains_thresholds() -> None:
+    page = _load_welltrack_page_module()
+
+    text = page._sf_help_markdown()
+
+    assert "Separation Factor" in text
+    assert "SF < 1" in text
+    assert "SF > 1" in text
 
 
 def test_prepared_override_rows_follow_cluster_action_step_order() -> None:

@@ -495,31 +495,15 @@ def _solve_turn_profile(
             if j_candidate is not None:
                 preferred_profiles.append(j_candidate)
 
-    def profile_builder(values: np.ndarray) -> ProfileParameters | None:
-        values_list = values.tolist()
-        build_dls = _decode_build_dls_from_unit(
-            unit_value=float(values_list[0]),
-            lower_dls_deg_per_30m=build_dls_lower,
-            upper_dls_deg_per_30m=build_dls_upper,
-        )
-        kop_vertical_m = float(values_list[1])
-        inc_hold_deg = float(values_list[2])
-        hold_length_m = float(values_list[3])
-        azimuth_hold_deg = (
-            float(geometry.azimuth_entry_deg)
-            if zero_azimuth_turn
-            else float(values_list[4])
-        )
-        return _profile_same_direction_with_turn(
-            geometry=geometry,
-            dls_build_deg_per_30m=build_dls,
-            kop_vertical_m=kop_vertical_m,
-            inc_hold_deg=inc_hold_deg,
-            hold_length_m=hold_length_m,
-            azimuth_hold_deg=azimuth_hold_deg,
-            min_build_segment_m=float(config.min_structural_segment_m),
-            post_entry=post_entry,
-        )
+    profile_builder = _make_turn_profile_builder(
+        geometry=geometry,
+        zero_azimuth_turn=zero_azimuth_turn,
+        lower_dls_deg_per_30m=build_dls_lower,
+        upper_dls_deg_per_30m=build_dls_upper,
+        min_build_segment_m=float(config.min_structural_segment_m),
+        post_entry=post_entry,
+        split_build=False,
+    )
 
     seed_vectors = _turn_seed_vectors(
         geometry=geometry,
@@ -764,11 +748,69 @@ def _preferred_build_dls_values(
     return (upper, mid, lower)
 
 
+def _split_build_optimization_bounds(
+    *,
+    bounds: tuple[tuple[float, float], ...],
+) -> tuple[tuple[float, float], ...]:
+    build_bounds = (float(bounds[0][0]), float(bounds[0][1]))
+    return (build_bounds, build_bounds, *bounds[1:])
+
+
+def _make_turn_profile_builder(
+    *,
+    geometry: SectionGeometry,
+    zero_azimuth_turn: bool,
+    lower_dls_deg_per_30m: float,
+    upper_dls_deg_per_30m: float,
+    min_build_segment_m: float,
+    post_entry: PostEntrySection,
+    split_build: bool,
+) -> Callable[[np.ndarray], ProfileParameters | None]:
+    def builder(values: np.ndarray) -> ProfileParameters | None:
+        values_list = values.tolist()
+        build1_dls = _decode_build_dls_from_unit(
+            unit_value=float(values_list[0]),
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        )
+        if split_build:
+            build2_dls = _decode_build_dls_from_unit(
+                unit_value=float(values_list[1]),
+                lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+                upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            )
+            kop_index = 2
+        else:
+            build2_dls = build1_dls
+            kop_index = 1
+        kop_vertical_m = float(values_list[kop_index])
+        inc_hold_deg = float(values_list[kop_index + 1])
+        hold_length_m = float(values_list[kop_index + 2])
+        azimuth_hold_deg = (
+            float(geometry.azimuth_entry_deg)
+            if zero_azimuth_turn
+            else float(values_list[kop_index + 3])
+        )
+        return _profile_same_direction_with_turn(
+            geometry=geometry,
+            dls_build1_deg_per_30m=build1_dls,
+            dls_build2_deg_per_30m=build2_dls,
+            kop_vertical_m=kop_vertical_m,
+            inc_hold_deg=inc_hold_deg,
+            hold_length_m=hold_length_m,
+            azimuth_hold_deg=azimuth_hold_deg,
+            min_build_segment_m=min_build_segment_m,
+            post_entry=post_entry,
+        )
+
+    return builder
+
+
 def _default_candidate_sort_key(candidate: ProfileParameters) -> tuple[float, float, float]:
     return (
         candidate.md_total_m,
         _candidate_turn_deg(candidate),
-        -candidate.dls_build1_deg_per_30m,
+        -max(candidate.dls_build1_deg_per_30m, candidate.dls_build2_deg_per_30m),
     )
 
 
@@ -789,13 +831,19 @@ def _optimization_candidate_sort_key(
             float(candidate.kop_vertical_m),
             float(candidate.md_total_m),
             _candidate_turn_deg(candidate),
-            -float(candidate.dls_build1_deg_per_30m),
+            -max(
+                float(candidate.dls_build1_deg_per_30m),
+                float(candidate.dls_build2_deg_per_30m),
+            ),
         )
     return (
         float(candidate.md_total_m),
         float(candidate.kop_vertical_m),
         _candidate_turn_deg(candidate),
-        -float(candidate.dls_build1_deg_per_30m),
+        -max(
+            float(candidate.dls_build1_deg_per_30m),
+            float(candidate.dls_build2_deg_per_30m),
+        ),
     )
 
 
@@ -889,15 +937,22 @@ def _select_anti_collision_candidate(
     profile_builder: Callable[[np.ndarray], ProfileParameters | None],
     target_point: np.ndarray,
     search_settings: TurnSearchSettings,
+    optimization_bounds: tuple[tuple[float, float], ...] | None = None,
+    optimization_profile_builder: Callable[[np.ndarray], ProfileParameters | None] | None = None,
+    split_build: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> TurnSolveResult:
+    active_bounds = optimization_bounds or bounds
+    active_profile_builder = optimization_profile_builder or profile_builder
+    kop_bound_index = 2 if split_build else 1
     baseline = min(candidates, key=_default_candidate_sort_key)
     baseline_vector = _candidate_to_search_vector(
         candidate=baseline,
         zero_azimuth_turn=zero_azimuth_turn,
         lower_dls_deg_per_30m=lower_dls_deg_per_30m,
         upper_dls_deg_per_30m=upper_dls_deg_per_30m,
-        bounds=bounds,
+        bounds=active_bounds,
+        split_build=split_build,
     )
     clearance_cache: dict[tuple[float, ...], AntiCollisionClearanceEvaluation] = {}
 
@@ -907,7 +962,8 @@ def _select_anti_collision_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
-            bounds=bounds,
+            bounds=active_bounds,
+            split_build=split_build,
         )
         return tuple(np.round(vector, decimals=8).tolist())
 
@@ -934,7 +990,8 @@ def _select_anti_collision_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
-            bounds=bounds,
+            bounds=active_bounds,
+            split_build=split_build,
         )
         return (
             max(float(optimization_context.sf_target) - float(clearance.min_separation_factor), 0.0),
@@ -977,7 +1034,8 @@ def _select_anti_collision_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
-            bounds=bounds,
+            bounds=active_bounds,
+            split_build=split_build,
         )
         for item in ranked[:OPTIMIZATION_MAX_SEEDS]
     ]
@@ -988,38 +1046,44 @@ def _select_anti_collision_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
-            bounds=bounds,
+            bounds=active_bounds,
+            split_build=split_build,
         )
     )
     optimization_seed_vectors = _dedupe_seed_vectors(seed_vectors)
     optimized_candidates: list[ProfileParameters] = list(ranked)
     runs_used = 0
 
-    last_values: tuple[float, ...] | None = None
-    last_eval: CandidateOptimizationEvaluation | None = None
-    last_clearance: AntiCollisionClearanceEvaluation | None = None
+    eval_cache: dict[
+        tuple[float, ...],
+        tuple[CandidateOptimizationEvaluation, AntiCollisionClearanceEvaluation | None],
+    ] = {}
 
     def evaluate(values: np.ndarray) -> tuple[CandidateOptimizationEvaluation, AntiCollisionClearanceEvaluation | None]:
-        nonlocal last_values, last_eval, last_clearance
         vector = tuple(np.asarray(values, dtype=float).tolist())
-        if last_values == vector and last_eval is not None:
-            return last_eval, last_clearance
-        last_values = vector
-        last_eval = _evaluate_candidate_for_optimization(
+        cached = eval_cache.get(vector)
+        if cached is not None:
+            return cached
+        base_eval = _evaluate_candidate_for_optimization(
             values=np.asarray(values, dtype=float),
-            profile_builder=profile_builder,
+            profile_builder=active_profile_builder,
             target_point=target_point,
             config=config,
         )
-        if last_eval.feasible and last_eval.candidate is not None:
-            last_clearance = evaluate_candidate_anti_collision_clearance(
-                candidate=last_eval.candidate,
-                surface=surface,
-                context=optimization_context,
-            )
+        clearance: AntiCollisionClearanceEvaluation | None = None
+        if base_eval.feasible and base_eval.candidate is not None:
+            clearance = clearance_cache.get(candidate_key(base_eval.candidate))
+            if clearance is None:
+                clearance = evaluate_candidate_anti_collision_clearance(
+                    candidate=base_eval.candidate,
+                    surface=surface,
+                    context=optimization_context,
+                )
+                clearance_cache[candidate_key(base_eval.candidate)] = clearance
         else:
-            last_clearance = None
-        return last_eval, last_clearance
+            clearance = None
+        eval_cache[vector] = (base_eval, clearance)
+        return base_eval, clearance
 
     def objective(values: np.ndarray) -> float:
         base_eval, clearance = evaluate(values)
@@ -1032,14 +1096,22 @@ def _select_anti_collision_candidate(
         deviation = _search_vector_distance(
             values=np.asarray(values, dtype=float),
             baseline_vector=baseline_vector,
-            bounds=bounds,
+            bounds=active_bounds,
         )
         kop_preference = 0.0
         if bool(optimization_context.prefer_lower_kop):
-            kop_span = max(float(bounds[1][1]) - float(bounds[1][0]), 1.0)
+            kop_span = max(
+                float(active_bounds[kop_bound_index][1])
+                - float(active_bounds[kop_bound_index][0]),
+                1.0,
+            )
             kop_preference = (
                 ANTI_COLLISION_KOP_PREFERENCE_WEIGHT
-                * max(float(base_eval.kop_vertical_m) - float(bounds[1][0]), 0.0)
+                * max(
+                    float(base_eval.kop_vertical_m)
+                    - float(active_bounds[kop_bound_index][0]),
+                    0.0,
+                )
                 / kop_span
             )
         return (
@@ -1070,13 +1142,13 @@ def _select_anti_collision_candidate(
             0.97,
         )
     for seed_vector in optimization_seed_vectors:
-        seed = _clip_to_bounds(seed_vector, bounds=bounds)
+        seed = _clip_to_bounds(seed_vector, bounds=active_bounds)
         runs_used += 1
         result = minimize(
             fun=objective,
             x0=seed,
             method="SLSQP",
-            bounds=list(bounds),
+            bounds=list(active_bounds),
             constraints=constraints,
             options={
                 "maxiter": int(maxiter),
@@ -1086,7 +1158,9 @@ def _select_anti_collision_candidate(
         )
         probes = [seed]
         if np.all(np.isfinite(result.x)):
-            probes.append(_clip_to_bounds(np.asarray(result.x, dtype=float), bounds=bounds))
+            probes.append(
+                _clip_to_bounds(np.asarray(result.x, dtype=float), bounds=active_bounds)
+            )
         for probe in probes:
             base_eval, clearance = evaluate(probe)
             if not base_eval.feasible or base_eval.candidate is None or clearance is None:
@@ -1140,6 +1214,7 @@ def _candidate_vector_distance(
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
     bounds: tuple[tuple[float, float], ...],
+    split_build: bool = False,
 ) -> float:
     values = _candidate_to_search_vector(
         candidate=candidate,
@@ -1147,6 +1222,7 @@ def _candidate_vector_distance(
         lower_dls_deg_per_30m=lower_dls_deg_per_30m,
         upper_dls_deg_per_30m=upper_dls_deg_per_30m,
         bounds=bounds,
+        split_build=split_build,
     )
     return _search_vector_distance(
         values=values,
@@ -1178,6 +1254,7 @@ def _candidate_to_search_vector(
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
     bounds: tuple[tuple[float, float], ...],
+    split_build: bool = False,
 ) -> np.ndarray:
     vector = [
         _encode_build_dls_to_unit(
@@ -1185,10 +1262,22 @@ def _candidate_to_search_vector(
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
         ),
-        float(candidate.kop_vertical_m),
-        float(candidate.inc_hold_deg),
-        float(candidate.hold_length_m),
     ]
+    if split_build:
+        vector.append(
+            _encode_build_dls_to_unit(
+                build_dls_deg_per_30m=float(candidate.dls_build2_deg_per_30m),
+                lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+                upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            )
+        )
+    vector.extend(
+        [
+            float(candidate.kop_vertical_m),
+            float(candidate.inc_hold_deg),
+            float(candidate.hold_length_m),
+        ]
+    )
     if not zero_azimuth_turn:
         vector.append(float(_normalize_azimuth_deg(candidate.azimuth_hold_deg)))
     return _clip_to_bounds(np.asarray(vector, dtype=float), bounds=bounds)
@@ -1277,6 +1366,7 @@ def _collect_optimization_seed_vectors(
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
     bounds: tuple[tuple[float, float], ...],
+    split_build: bool = False,
 ) -> list[np.ndarray]:
     if not candidates:
         return []
@@ -1293,62 +1383,119 @@ def _collect_optimization_seed_vectors(
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
             bounds=bounds,
+            split_build=split_build,
         )
         for candidate in seed_candidates
     ]
     if mode == OPTIMIZATION_MINIMIZE_MD and seed_vectors:
-        build_upper = float(bounds[0][1])
-        kop_lower = float(bounds[1][0])
+        build1_upper = float(bounds[0][1])
+        build2_upper = float(bounds[1][1]) if split_build else build1_upper
+        kop_index = 2 if split_build else 1
+        kop_lower = float(bounds[kop_index][0])
         md_boundary_variants: list[np.ndarray] = []
         for seed in seed_vectors[: min(3, len(seed_vectors))]:
-            build_upper_seed = np.asarray(seed, dtype=float).copy()
-            build_upper_seed[0] = build_upper
-
             kop_lower_seed = np.asarray(seed, dtype=float).copy()
-            kop_lower_seed[1] = kop_lower
-
-            combined_seed = np.asarray(seed, dtype=float).copy()
-            combined_seed[0] = build_upper
-            combined_seed[1] = kop_lower
-
-            midpoint_seed = np.asarray(seed, dtype=float).copy()
-            midpoint_seed[0] = float(0.5 * (midpoint_seed[0] + build_upper))
-            midpoint_seed[1] = float(0.5 * (midpoint_seed[1] + kop_lower))
-
-            md_boundary_variants.extend(
-                [
-                    build_upper_seed,
-                    kop_lower_seed,
-                    combined_seed,
-                    midpoint_seed,
-                ]
-            )
+            kop_lower_seed[kop_index] = kop_lower
+            if split_build:
+                build1_upper_seed = np.asarray(seed, dtype=float).copy()
+                build1_upper_seed[0] = build1_upper
+                build2_upper_seed = np.asarray(seed, dtype=float).copy()
+                build2_upper_seed[1] = build2_upper
+                combined_seed = np.asarray(seed, dtype=float).copy()
+                combined_seed[0] = build1_upper
+                combined_seed[1] = build2_upper
+                combined_kop_seed = np.asarray(combined_seed, dtype=float).copy()
+                combined_kop_seed[kop_index] = kop_lower
+                midpoint_seed = np.asarray(seed, dtype=float).copy()
+                midpoint_seed[0] = float(0.5 * (midpoint_seed[0] + build1_upper))
+                midpoint_seed[1] = float(0.5 * (midpoint_seed[1] + build2_upper))
+                midpoint_seed[kop_index] = float(
+                    0.5 * (midpoint_seed[kop_index] + kop_lower)
+                )
+                md_boundary_variants.extend(
+                    [
+                        build1_upper_seed,
+                        build2_upper_seed,
+                        combined_seed,
+                        kop_lower_seed,
+                        combined_kop_seed,
+                        midpoint_seed,
+                    ]
+                )
+            else:
+                build_upper_seed = np.asarray(seed, dtype=float).copy()
+                build_upper_seed[0] = build1_upper
+                combined_seed = np.asarray(seed, dtype=float).copy()
+                combined_seed[0] = build1_upper
+                combined_seed[kop_index] = kop_lower
+                midpoint_seed = np.asarray(seed, dtype=float).copy()
+                midpoint_seed[0] = float(0.5 * (midpoint_seed[0] + build1_upper))
+                midpoint_seed[kop_index] = float(
+                    0.5 * (midpoint_seed[kop_index] + kop_lower)
+                )
+                md_boundary_variants.extend(
+                    [
+                        build_upper_seed,
+                        kop_lower_seed,
+                        combined_seed,
+                        midpoint_seed,
+                    ]
+                )
         seed_vectors.extend(md_boundary_variants)
     if mode == OPTIMIZATION_MINIMIZE_KOP and seed_vectors:
-        kop_lower = float(bounds[1][0])
-        build_upper = float(bounds[0][1])
+        kop_index = 2 if split_build else 1
+        kop_lower = float(bounds[kop_index][0])
+        build1_upper = float(bounds[0][1])
+        build2_upper = float(bounds[1][1]) if split_build else build1_upper
         lowered_variants: list[np.ndarray] = []
         for seed in seed_vectors[: min(3, len(seed_vectors))]:
             midpoint_seed = np.asarray(seed, dtype=float).copy()
-            midpoint_seed[1] = float(0.5 * (midpoint_seed[1] + kop_lower))
-            lower_bound_seed = np.asarray(seed, dtype=float).copy()
-            lower_bound_seed[1] = kop_lower
-            lower_bound_build_upper_seed = np.asarray(seed, dtype=float).copy()
-            lower_bound_build_upper_seed[0] = build_upper
-            lower_bound_build_upper_seed[1] = kop_lower
-
-            build_upper_midpoint_seed = np.asarray(seed, dtype=float).copy()
-            build_upper_midpoint_seed[0] = float(0.5 * (build_upper_midpoint_seed[0] + build_upper))
-            build_upper_midpoint_seed[1] = kop_lower
-
-            lowered_variants.extend(
-                [
-                    midpoint_seed,
-                    lower_bound_seed,
-                    lower_bound_build_upper_seed,
-                    build_upper_midpoint_seed,
-                ]
+            midpoint_seed[kop_index] = float(
+                0.5 * (midpoint_seed[kop_index] + kop_lower)
             )
+            lower_bound_seed = np.asarray(seed, dtype=float).copy()
+            lower_bound_seed[kop_index] = kop_lower
+            if split_build:
+                lower_bound_build_upper_seed = np.asarray(seed, dtype=float).copy()
+                lower_bound_build_upper_seed[0] = build1_upper
+                lower_bound_build_upper_seed[1] = build2_upper
+                lower_bound_build_upper_seed[kop_index] = kop_lower
+                build1_upper_midpoint_seed = np.asarray(seed, dtype=float).copy()
+                build1_upper_midpoint_seed[0] = float(
+                    0.5 * (build1_upper_midpoint_seed[0] + build1_upper)
+                )
+                build1_upper_midpoint_seed[kop_index] = kop_lower
+                build2_upper_midpoint_seed = np.asarray(seed, dtype=float).copy()
+                build2_upper_midpoint_seed[1] = float(
+                    0.5 * (build2_upper_midpoint_seed[1] + build2_upper)
+                )
+                build2_upper_midpoint_seed[kop_index] = kop_lower
+                lowered_variants.extend(
+                    [
+                        midpoint_seed,
+                        lower_bound_seed,
+                        lower_bound_build_upper_seed,
+                        build1_upper_midpoint_seed,
+                        build2_upper_midpoint_seed,
+                    ]
+                )
+            else:
+                lower_bound_build_upper_seed = np.asarray(seed, dtype=float).copy()
+                lower_bound_build_upper_seed[0] = build1_upper
+                lower_bound_build_upper_seed[kop_index] = kop_lower
+                build_upper_midpoint_seed = np.asarray(seed, dtype=float).copy()
+                build_upper_midpoint_seed[0] = float(
+                    0.5 * (build_upper_midpoint_seed[0] + build1_upper)
+                )
+                build_upper_midpoint_seed[kop_index] = kop_lower
+                lowered_variants.extend(
+                    [
+                        midpoint_seed,
+                        lower_bound_seed,
+                        lower_bound_build_upper_seed,
+                        build_upper_midpoint_seed,
+                    ]
+                )
         seed_vectors.extend(lowered_variants)
     return _dedupe_seed_vectors(seed_vectors)
 
@@ -1671,7 +1818,8 @@ def _recover_turn_profile_from_build_and_kop(
 
         candidate = _profile_same_direction_with_turn(
             geometry=geometry,
-            dls_build_deg_per_30m=build_dls_deg_per_30m,
+            dls_build1_deg_per_30m=build_dls_deg_per_30m,
+            dls_build2_deg_per_30m=build_dls_deg_per_30m,
             kop_vertical_m=kop_vertical_m,
             inc_hold_deg=inc_hold,
             hold_length_m=float(max(hold_length_m, 0.0)),
@@ -1931,6 +2079,16 @@ def _select_feasible_candidate(
             raise PlanningError(
                 "Anti-collision optimization mode requires an optimization context."
             )
+        optimization_bounds = _split_build_optimization_bounds(bounds=bounds)
+        optimization_profile_builder = _make_turn_profile_builder(
+            geometry=geometry,
+            zero_azimuth_turn=zero_azimuth_turn,
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            min_build_segment_m=float(config.min_structural_segment_m),
+            post_entry=post_entry,
+            split_build=True,
+        )
         return _select_anti_collision_candidate(
             candidates=deduped_candidates,
             surface=surface,
@@ -1943,6 +2101,9 @@ def _select_feasible_candidate(
             profile_builder=profile_builder,
             target_point=target_point,
             search_settings=search_settings,
+            optimization_bounds=optimization_bounds,
+            optimization_profile_builder=optimization_profile_builder,
+            split_build=True,
             progress_callback=progress_callback,
         )
     if optimization_mode == OPTIMIZATION_NONE:
@@ -2003,13 +2164,24 @@ def _select_feasible_candidate(
             ),
         )
 
+    optimization_bounds = _split_build_optimization_bounds(bounds=bounds)
+    optimization_profile_builder = _make_turn_profile_builder(
+        geometry=geometry,
+        zero_azimuth_turn=zero_azimuth_turn,
+        lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+        upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        min_build_segment_m=float(config.min_structural_segment_m),
+        post_entry=post_entry,
+        split_build=True,
+    )
     optimization_seed_vectors = _collect_optimization_seed_vectors(
         candidates=ranked,
         mode=optimization_mode,
         zero_azimuth_turn=zero_azimuth_turn,
         lower_dls_deg_per_30m=lower_dls_deg_per_30m,
         upper_dls_deg_per_30m=upper_dls_deg_per_30m,
-        bounds=bounds,
+        bounds=optimization_bounds,
+        split_build=True,
     )
     optimized_candidates: list[ProfileParameters] = list(ranked)
     runs_used = 0
@@ -2208,7 +2380,7 @@ def _select_feasible_candidate(
             progress_callback,
             (
                 f"Оптимизация: режим `{optimization_mode}`, "
-                f"локальные старты {len(optimization_seed_vectors)}."
+                f"локальные старты {len(optimization_seed_vectors)} с независимыми BUILD1/BUILD2."
             ),
             0.97,
         )
@@ -2224,7 +2396,7 @@ def _select_feasible_candidate(
         last_values = vector
         last_eval = _evaluate_candidate_for_optimization(
             values=np.asarray(values, dtype=float),
-            profile_builder=profile_builder,
+            profile_builder=optimization_profile_builder,
             target_point=target_point,
             config=config,
         )
@@ -2251,13 +2423,13 @@ def _select_feasible_candidate(
 
     maxiter = max(40, min(140, int(round(0.30 * float(search_settings.local_max_nfev)))))
     for seed_vector in optimization_seed_vectors:
-        seed = _clip_to_bounds(seed_vector, bounds=bounds)
+        seed = _clip_to_bounds(seed_vector, bounds=optimization_bounds)
         runs_used += 1
         result = minimize(
             fun=objective,
             x0=seed,
             method="SLSQP",
-            bounds=list(bounds),
+            bounds=list(optimization_bounds),
             constraints=constraints,
             options={
                 "maxiter": int(maxiter),
@@ -2267,7 +2439,12 @@ def _select_feasible_candidate(
         )
         probes = [seed]
         if bool(result.success) and np.all(np.isfinite(result.x)):
-            probes.append(_clip_to_bounds(np.asarray(result.x, dtype=float), bounds=bounds))
+            probes.append(
+                _clip_to_bounds(
+                    np.asarray(result.x, dtype=float),
+                    bounds=optimization_bounds,
+                )
+            )
         for probe in probes:
             evaluation = evaluate(probe)
             if not evaluation.feasible or evaluation.candidate is None:
@@ -2618,7 +2795,8 @@ def _build_profile_from_effective_targets(
 
 def _profile_same_direction_with_turn(
     geometry: SectionGeometry,
-    dls_build_deg_per_30m: float,
+    dls_build1_deg_per_30m: float,
+    dls_build2_deg_per_30m: float,
     kop_vertical_m: float,
     inc_hold_deg: float,
     hold_length_m: float,
@@ -2626,7 +2804,7 @@ def _profile_same_direction_with_turn(
     min_build_segment_m: float,
     post_entry: PostEntrySection,
 ) -> ProfileParameters | None:
-    if dls_build_deg_per_30m <= SMALL or kop_vertical_m < 0.0:
+    if dls_build1_deg_per_30m <= SMALL or dls_build2_deg_per_30m <= SMALL or kop_vertical_m < 0.0:
         return None
     if hold_length_m < -SMALL:
         return None
@@ -2634,7 +2812,8 @@ def _profile_same_direction_with_turn(
         return None
 
     min_build = max(float(min_build_segment_m), SMALL)
-    radius_m = _radius_from_dls(dls_build_deg_per_30m)
+    radius_build1_m = _radius_from_dls(dls_build1_deg_per_30m)
+    radius_build2_m = _radius_from_dls(dls_build2_deg_per_30m)
     build1_dogleg_rad = float(
         dogleg_angle_rad(0.0, azimuth_hold_deg, inc_hold_deg, azimuth_hold_deg)
     )
@@ -2646,8 +2825,8 @@ def _profile_same_direction_with_turn(
             geometry.azimuth_entry_deg,
         )
     )
-    build1_length_m = float(radius_m * build1_dogleg_rad)
-    build2_length_m = float(radius_m * build2_dogleg_rad)
+    build1_length_m = float(radius_build1_m * build1_dogleg_rad)
+    build2_length_m = float(radius_build2_m * build2_dogleg_rad)
     if build1_length_m < min_build - SMALL or build2_length_m < min_build - SMALL:
         return None
 
@@ -2656,8 +2835,8 @@ def _profile_same_direction_with_turn(
         inc_entry_deg=float(geometry.inc_entry_deg),
         inc_required_t1_t3_deg=float(geometry.inc_required_t1_t3_deg),
         inc_hold_deg=float(inc_hold_deg),
-        dls_build1_deg_per_30m=float(dls_build_deg_per_30m),
-        dls_build2_deg_per_30m=float(dls_build_deg_per_30m),
+        dls_build1_deg_per_30m=float(dls_build1_deg_per_30m),
+        dls_build2_deg_per_30m=float(dls_build2_deg_per_30m),
         build1_length_m=build1_length_m,
         hold_length_m=float(max(hold_length_m, 0.0)),
         build2_length_m=build2_length_m,

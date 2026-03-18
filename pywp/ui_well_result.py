@@ -32,7 +32,8 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("entry_inc_deg", "Угол входа в пласт, deg"),
     ("hold_inc_deg", "ЗУ секции HOLD, deg"),
     ("hold_length_m", "Длина HOLD, м"),
-    ("build_dls_selected_deg_per_30m", "Выбранный BUILD ПИ, deg/10m"),
+    ("build1_dls_selected_deg_per_30m", "Выбранный BUILD1 ПИ, deg/10m"),
+    ("build2_dls_selected_deg_per_30m", "Выбранный BUILD2 ПИ, deg/10m"),
     ("horizontal_length_m", "Длина горизонтального ствола, м"),
     ("kop_md_m", "KOP MD, м"),
     ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
@@ -290,14 +291,16 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
             ),
         },
         {
-            "Показатель": "BUILD ПИ / Макс ПИ",
+            "Показатель": "BUILD1 / BUILD2 / Макс ПИ",
             "Значение": (
-                f"{dls_to_pi(float(summary.get('build_dls_selected_deg_per_30m', 0.0))):.2f} / "
+                f"{dls_to_pi(float(summary.get('build1_dls_selected_deg_per_30m', summary.get('build_dls_selected_deg_per_30m', 0.0)))):.2f} / "
+                f"{dls_to_pi(float(summary.get('build2_dls_selected_deg_per_30m', summary.get('build_dls_selected_deg_per_30m', 0.0)))):.2f} / "
                 f"{dls_to_pi(float(summary['max_dls_total_deg_per_30m'])):.2f} deg/10m"
             ),
             "Значение без оптимизации": baseline_value(
                 lambda candidate: (
-                    f"{dls_to_pi(float(candidate.get('build_dls_selected_deg_per_30m', 0.0))):.2f} / "
+                    f"{dls_to_pi(float(candidate.get('build1_dls_selected_deg_per_30m', candidate.get('build_dls_selected_deg_per_30m', 0.0)))):.2f} / "
+                    f"{dls_to_pi(float(candidate.get('build2_dls_selected_deg_per_30m', candidate.get('build_dls_selected_deg_per_30m', 0.0)))):.2f} / "
                     f"{dls_to_pi(float(candidate.get('max_dls_total_deg_per_30m', 0.0))):.2f} deg/10m"
                 )
             ),
