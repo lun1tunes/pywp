@@ -87,7 +87,12 @@ MD_BOUNDARY_EXTREMUM_KOP_TOLERANCE_M = 1e-3
 ANTI_COLLISION_SF_TOLERANCE = 1e-3
 ANTI_COLLISION_OBJECTIVE_PENALTY = 1_000.0
 ANTI_COLLISION_KOP_PREFERENCE_WEIGHT = 0.25
+ANTI_COLLISION_BUILD1_PREFERENCE_WEIGHT = 0.20
 ANTI_COLLISION_SAMPLE_STEP_M = 50.0
+ANTI_COLLISION_MAX_STARTS = 12
+ANTI_COLLISION_MAXITER = 72
+EARLY_ANTI_COLLISION_MAX_STARTS = 8
+EARLY_ANTI_COLLISION_MAXITER = 48
 
 
 class TrajectoryPlanner:
@@ -977,11 +982,18 @@ def _select_anti_collision_candidate(
             )
         return clearance_cache[key]
 
-    def anti_collision_sort_key(candidate: ProfileParameters) -> tuple[float, float, float, float, float, float]:
+    def anti_collision_sort_key(
+        candidate: ProfileParameters,
+    ) -> tuple[float, float, float, float, float, float, float]:
         clearance = clearance_for_candidate(candidate)
         kop_rank = (
             float(candidate.kop_vertical_m)
             if bool(optimization_context.prefer_lower_kop)
+            else 0.0
+        )
+        build1_rank = (
+            -float(candidate.dls_build1_deg_per_30m)
+            if bool(optimization_context.prefer_higher_build1)
             else 0.0
         )
         deviation_rank = _candidate_vector_distance(
@@ -996,6 +1008,7 @@ def _select_anti_collision_candidate(
         return (
             max(float(optimization_context.sf_target) - float(clearance.min_separation_factor), 0.0),
             kop_rank,
+            build1_rank,
             deviation_rank,
             float(candidate.md_total_m),
             float(candidate.kop_vertical_m),
@@ -1005,6 +1018,10 @@ def _select_anti_collision_candidate(
     ranked = sorted(candidates, key=anti_collision_sort_key)
     best_seed = ranked[0]
     best_seed_clearance = clearance_for_candidate(best_seed)
+    early_anti_collision_stage = bool(
+        optimization_context.prefer_lower_kop
+        and optimization_context.prefer_higher_build1
+    )
     if float(best_seed_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
         return TurnSolveResult(
             params=best_seed,
@@ -1051,6 +1068,10 @@ def _select_anti_collision_candidate(
         )
     )
     optimization_seed_vectors = _dedupe_seed_vectors(seed_vectors)
+    if early_anti_collision_stage:
+        optimization_seed_vectors = optimization_seed_vectors[:EARLY_ANTI_COLLISION_MAX_STARTS]
+    else:
+        optimization_seed_vectors = optimization_seed_vectors[:ANTI_COLLISION_MAX_STARTS]
     optimized_candidates: list[ProfileParameters] = list(ranked)
     runs_used = 0
 
@@ -1114,9 +1135,21 @@ def _select_anti_collision_candidate(
                 )
                 / kop_span
             )
+        build1_preference = 0.0
+        if bool(optimization_context.prefer_higher_build1):
+            build1_span = max(
+                float(active_bounds[0][1]) - float(active_bounds[0][0]),
+                1e-6,
+            )
+            build1_preference = (
+                ANTI_COLLISION_BUILD1_PREFERENCE_WEIGHT
+                * max(float(active_bounds[0][1]) - float(values[0]), 0.0)
+                / build1_span
+            )
         return (
             ANTI_COLLISION_OBJECTIVE_PENALTY * deficit * deficit
             + kop_preference
+            + build1_preference
             + deviation
             + 1e-4 * float(base_eval.md_total_m)
         )
@@ -1132,6 +1165,10 @@ def _select_anti_collision_candidate(
         },
     ]
     maxiter = max(36, min(120, int(round(0.24 * float(search_settings.local_max_nfev)))))
+    if early_anti_collision_stage:
+        maxiter = min(maxiter, EARLY_ANTI_COLLISION_MAXITER)
+    else:
+        maxiter = min(maxiter, ANTI_COLLISION_MAXITER)
     if progress_callback is not None:
         _emit_progress(
             progress_callback,

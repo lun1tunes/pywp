@@ -16,6 +16,9 @@ from pywp.anticollision_recommendations import (
     AntiCollisionRecommendation,
     AntiCollisionRecommendationCluster,
     AntiCollisionWellContext,
+    MANEUVER_KOP_AND_TRAJECTORY,
+    RECOMMENDATION_REDUCE_KOP,
+    RECOMMENDATION_TRAJECTORY_REVIEW,
     build_anti_collision_recommendation_clusters,
     build_anti_collision_recommendations,
 )
@@ -29,6 +32,9 @@ if TYPE_CHECKING:
 DYNAMIC_CLUSTER_PLAN_ACTIVE = "active"
 DYNAMIC_CLUSTER_PLAN_RESOLVED = "resolved"
 DYNAMIC_CLUSTER_PLAN_BLOCKED = "blocked"
+_CLUSTER_REFERENCE_WINDOW_MARGIN_M = 100.0
+_ANTI_COLLISION_RUNTIME_SAMPLE_STEP_M = 75.0
+_EARLY_ANTI_COLLISION_RUNTIME_SAMPLE_STEP_M = 100.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +93,10 @@ def build_anticollision_well_contexts(
             well_name=str(success.name),
             kop_md_m=kop_md_m,
             kop_min_vertical_m=float(success.config.kop_min_vertical_m),
+            build1_dls_deg_per_30m=float(
+                summary.get("build1_dls_selected_deg_per_30m", 0.0)
+            ),
+            build_dls_max_deg_per_30m=float(success.config.dls_build_max_deg_per_30m),
             md_t1_m=float(success.md_t1_m),
             md_total_m=float(summary.get("md_total_m", 0.0)),
             optimization_mode=str(success.config.optimization_mode),
@@ -269,21 +279,32 @@ def build_prepared_optimization_context(
         reference_md_start_m,
         reference_md_end_m,
     ) = intervals
+    runtime_sample_step_m = (
+        _EARLY_ANTI_COLLISION_RUNTIME_SAMPLE_STEP_M
+        if str(recommendation.category) == RECOMMENDATION_REDUCE_KOP
+        else _ANTI_COLLISION_RUNTIME_SAMPLE_STEP_M
+    )
     reference_path = build_anti_collision_reference_path(
         well_name=str(reference_success.name),
         stations=reference_success.stations,
         md_start_m=reference_md_start_m,
         md_end_m=reference_md_end_m,
-        sample_step_m=50.0,
+        sample_step_m=runtime_sample_step_m,
         model=uncertainty_model,
     )
     return AntiCollisionOptimizationContext(
         candidate_md_start_m=float(candidate_md_start_m),
         candidate_md_end_m=float(candidate_md_end_m),
         sf_target=1.0,
-        sample_step_m=50.0,
+        sample_step_m=runtime_sample_step_m,
         uncertainty_model=uncertainty_model,
         references=(reference_path,),
+        prefer_lower_kop=bool(
+            str(recommendation.category) == RECOMMENDATION_REDUCE_KOP
+        ),
+        prefer_higher_build1=bool(
+            str(recommendation.category) == RECOMMENDATION_REDUCE_KOP
+        ),
     )
 
 
@@ -294,6 +315,11 @@ def build_cluster_prepared_overrides(
     uncertainty_model: PlanningUncertaintyModel,
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
     success_by_name = {str(item.name): item for item in successes}
+    step_by_well = {
+        str(step.well_name): step
+        for step in cluster.action_steps
+        if str(step.well_name).strip()
+    }
     trajectory_specs: dict[str, dict[str, object]] = {}
     vertical_specs: dict[str, list[str]] = {}
     skipped_wells: list[str] = []
@@ -301,6 +327,24 @@ def build_cluster_prepared_overrides(
     for recommendation in cluster.recommendations:
         for suggestion in recommendation.override_suggestions:
             well_name = str(suggestion.well_name)
+            step = step_by_well.get(well_name)
+            if step is not None:
+                if (
+                    str(step.category) == "mixed"
+                    and str(step.expected_maneuver) == MANEUVER_KOP_AND_TRAJECTORY
+                    and str(recommendation.category) != RECOMMENDATION_REDUCE_KOP
+                ):
+                    continue
+                if (
+                    str(step.category) == RECOMMENDATION_REDUCE_KOP
+                    and str(recommendation.category) != RECOMMENDATION_REDUCE_KOP
+                ):
+                    continue
+                if (
+                    str(step.category) == RECOMMENDATION_TRAJECTORY_REVIEW
+                    and str(recommendation.category) != RECOMMENDATION_TRAJECTORY_REVIEW
+                ):
+                    continue
             update_fields = dict(suggestion.config_updates)
             optimization_mode = str(update_fields.get("optimization_mode", "")).strip()
             if optimization_mode == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE:
@@ -330,6 +374,8 @@ def build_cluster_prepared_overrides(
                         "candidate_md_end_m": float(candidate_md_end_m),
                         "reference_windows": {},
                         "reasons": [],
+                        "prefer_lower_kop": False,
+                        "prefer_higher_build1": False,
                     },
                 )
                 entry["candidate_md_start_m"] = min(
@@ -351,11 +397,14 @@ def build_cluster_prepared_overrides(
                     reference_windows[str(reference_name)] = (
                         min(float(current_window[0]), float(reference_md_start_m)),
                         max(float(current_window[1]), float(reference_md_end_m)),
-                    )
+                )
                 entry["reference_windows"] = reference_windows
                 reasons = list(entry["reasons"])
                 reasons.append(str(suggestion.reason))
                 entry["reasons"] = reasons
+                if str(recommendation.category) == "reduce_kop":
+                    entry["prefer_lower_kop"] = True
+                    entry["prefer_higher_build1"] = True
                 continue
 
             if optimization_mode == OPTIMIZATION_MINIMIZE_KOP:
@@ -377,10 +426,46 @@ def build_cluster_prepared_overrides(
     for well_name in [*ordered_wells, *fallback_wells]:
         if well_name in trajectory_specs:
             spec = dict(trajectory_specs[well_name])
+            runtime_sample_step_m = (
+                _EARLY_ANTI_COLLISION_RUNTIME_SAMPLE_STEP_M
+                if bool(spec.get("prefer_lower_kop", False))
+                and bool(spec.get("prefer_higher_build1", False))
+                else _ANTI_COLLISION_RUNTIME_SAMPLE_STEP_M
+            )
             references: list[object] = []
-            for reference_name, window in sorted(
-                dict(spec.get("reference_windows", {})).items()
-            ):
+            reference_windows = {
+                str(reference_name): (
+                    float(window[0]),
+                    float(window[1]),
+                )
+                for reference_name, window in dict(spec.get("reference_windows", {})).items()
+            }
+            for reference_name, reference_success in success_by_name.items():
+                if str(reference_name) == well_name or str(reference_name) in reference_windows:
+                    continue
+                if reference_success.stations.empty:
+                    continue
+                md_values = reference_success.stations["MD_m"].to_numpy(dtype=float)
+                if len(md_values) == 0:
+                    continue
+                candidate_start_m = float(spec["candidate_md_start_m"])
+                candidate_end_m = float(spec["candidate_md_end_m"])
+                reference_start_m = max(
+                    float(md_values[0]),
+                    candidate_start_m - _CLUSTER_REFERENCE_WINDOW_MARGIN_M,
+                )
+                reference_end_m = min(
+                    float(md_values[-1]),
+                    candidate_end_m + _CLUSTER_REFERENCE_WINDOW_MARGIN_M,
+                )
+                if reference_end_m <= reference_start_m + 1e-6:
+                    reference_start_m = float(md_values[0])
+                    reference_end_m = float(md_values[-1])
+                reference_windows[str(reference_name)] = (
+                    float(reference_start_m),
+                    float(reference_end_m),
+                )
+            for reference_name, window in sorted(reference_windows.items()):
                 reference_success = success_by_name.get(str(reference_name))
                 if reference_success is None:
                     skipped_wells.append(well_name)
@@ -392,7 +477,7 @@ def build_cluster_prepared_overrides(
                         stations=reference_success.stations,
                         md_start_m=float(window[0]),
                         md_end_m=float(window[1]),
-                        sample_step_m=50.0,
+                        sample_step_m=runtime_sample_step_m,
                         model=uncertainty_model,
                     )
                 )
@@ -404,10 +489,11 @@ def build_cluster_prepared_overrides(
                 candidate_md_start_m=float(spec["candidate_md_start_m"]),
                 candidate_md_end_m=float(spec["candidate_md_end_m"]),
                 sf_target=1.0,
-                sample_step_m=50.0,
+                sample_step_m=runtime_sample_step_m,
                 uncertainty_model=uncertainty_model,
                 references=tuple(references),
-                prefer_lower_kop=False,
+                prefer_lower_kop=bool(spec.get("prefer_lower_kop", False)),
+                prefer_higher_build1=bool(spec.get("prefer_higher_build1", False)),
             )
             prepared[well_name] = {
                 "update_fields": {

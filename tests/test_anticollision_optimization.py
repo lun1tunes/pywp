@@ -7,8 +7,13 @@ from pywp.anticollision_optimization import (
     AntiCollisionOptimizationContext,
     build_anti_collision_reference_path,
     evaluate_stations_anti_collision_clearance,
+    sample_profile_stations_in_md_window,
     sample_stations_in_md_window,
 )
+from pywp.mcm import compute_positions_min_curv
+from pywp.models import Point3D
+from pywp.planner_types import ProfileParameters
+from pywp.planner_validation import _build_trajectory
 from pywp.uncertainty import DEFAULT_PLANNING_UNCERTAINTY_MODEL
 
 
@@ -152,3 +157,53 @@ def test_clearance_detects_skewed_window_crossing_via_continuous_closest_approac
 
     assert evaluation.min_separation_factor == pytest.approx(0.0, abs=1e-9)
     assert evaluation.max_overlap_depth_m > 0.0
+
+
+def test_sample_profile_stations_in_md_window_matches_full_trajectory_reference() -> None:
+    candidate = ProfileParameters(
+        kop_vertical_m=550.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=90.0,
+        build1_length_m=1600.0,
+        hold_length_m=300.0,
+        build2_length_m=900.0,
+        horizontal_length_m=720.0,
+        horizontal_adjust_length_m=120.0,
+        horizontal_hold_length_m=600.0,
+        inc_hold_deg=48.0,
+        horizontal_inc_deg=90.0,
+        azimuth_hold_deg=22.0,
+        azimuth_entry_deg=41.0,
+        dls_build1_deg_per_30m=2.5,
+        dls_build2_deg_per_30m=1.7,
+        horizontal_dls_deg_per_30m=2.0,
+    )
+    surface = Point3D(10.0, -15.0, 5.0)
+    md_start_m = 900.0
+    md_end_m = 3150.0
+    sample_step_m = 75.0
+
+    sampled = sample_profile_stations_in_md_window(
+        candidate=candidate,
+        surface=surface,
+        md_start_m=md_start_m,
+        md_end_m=md_end_m,
+        sample_step_m=sample_step_m,
+    )
+
+    full_stations = compute_positions_min_curv(
+        _build_trajectory(params=candidate).stations(md_step_m=sample_step_m),
+        start=surface,
+    )
+    reference = sample_stations_in_md_window(
+        stations=full_stations,
+        md_start_m=md_start_m,
+        md_end_m=md_end_m,
+        sample_step_m=sample_step_m,
+    )
+
+    pd.testing.assert_series_equal(sampled["MD_m"], reference["MD_m"], check_names=False)
+    for column in ("INC_deg", "AZI_deg"):
+        assert sampled[column].tolist() == pytest.approx(reference[column].tolist(), abs=0.5)
+    for column in ("X_m", "Y_m", "Z_m"):
+        assert sampled[column].tolist() == pytest.approx(reference[column].tolist(), abs=1.0)

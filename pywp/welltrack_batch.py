@@ -126,6 +126,7 @@ def rebuild_optimization_context(
         uncertainty_model=context.uncertainty_model,
         references=tuple(references),
         prefer_lower_kop=bool(context.prefer_lower_kop),
+        prefer_higher_build1=bool(context.prefer_higher_build1),
     )
 
 

@@ -98,6 +98,8 @@ def _successful_plan(
     name: str,
     y_offset_m: float,
     kop_md_m: float = 0.0,
+    build1_dls_deg_per_30m: float = 0.0,
+    build_dls_max_deg_per_30m: float = 3.0,
     optimization_mode: str = "none",
     stations: pd.DataFrame | None = None,
 ) -> SuccessfulWellPlan:
@@ -130,6 +132,7 @@ def _successful_plan(
             "entry_inc_deg": 90.0,
             "hold_inc_deg": 90.0,
             "build_dls_selected_deg_per_30m": 0.0,
+            "build1_dls_selected_deg_per_30m": build1_dls_deg_per_30m,
             "max_dls_total_deg_per_30m": 0.0,
             "kop_md_m": kop_md_m,
             "max_inc_actual_deg": 90.0,
@@ -140,7 +143,10 @@ def _successful_plan(
         },
         azimuth_deg=90.0,
         md_t1_m=1000.0,
-        config=TrajectoryConfig(optimization_mode=optimization_mode),
+        config=TrajectoryConfig(
+            optimization_mode=optimization_mode,
+            dls_build_max_deg_per_30m=build_dls_max_deg_per_30m,
+        ),
     )
 
 
@@ -576,11 +582,12 @@ def test_welltrack_page_prepares_vertical_anticollision_rerun_plan() -> None:
 
     assert _multiselect_value(at, "Скважины для расчета") == ["WELL-A", "WELL-B"]
     override_message = at.session_state["wt_prepared_override_message"]
-    assert "vertical" in str(override_message).lower()
+    assert "kop/build1" in str(override_message).lower()
     prepared = dict(at.session_state["wt_prepared_well_overrides"])
     assert set(prepared.keys()) == {"WELL-A", "WELL-B"}
     assert all(
-        dict(value).get("update_fields", {}).get("optimization_mode") == "minimize_kop"
+        dict(value).get("update_fields", {}).get("optimization_mode")
+        == "anti_collision_avoidance"
         for value in prepared.values()
     )
 
@@ -685,9 +692,9 @@ def test_format_prepared_override_scope_shows_local_mode_for_selected_wells() ->
             "reason": "Prepared pairwise anti-collision rerun.",
         },
         "WELL-C": {
-            "update_fields": {"optimization_mode": "minimize_kop"},
+            "update_fields": {"optimization_mode": "anti_collision_avoidance"},
             "source": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
-            "reason": "Vertical collision: опустить KOP.",
+            "reason": "Early collision: cone-aware rerun по KOP/BUILD1.",
         },
     }
     page.st.session_state["wt_prepared_recommendation_snapshot"] = {
@@ -701,7 +708,7 @@ def test_format_prepared_override_scope_shows_local_mode_for_selected_wells() ->
             {
                 "order_rank": 2,
                 "well_name": "WELL-C",
-                "expected_maneuver": "Раньше начать набор / уменьшить KOP",
+                "expected_maneuver": "Сместить ранний уход: KOP / BUILD1",
             },
         ),
     }
@@ -717,9 +724,9 @@ def test_format_prepared_override_scope_shows_local_mode_for_selected_wells() ->
         },
         {
             "Скважина": "WELL-C",
-            "Локальный режим": "Минимизация KOP",
+            "Локальный режим": "Anti-collision avoidance",
             "Источник": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
-            "Маневр": "Раньше начать набор / уменьшить KOP",
+            "Маневр": "Сместить ранний уход: KOP / BUILD1",
         },
     ]
 
@@ -743,9 +750,9 @@ def test_prepared_override_rows_follow_cluster_action_step_order() -> None:
             "reason": "Trajectory collision against WELL-A.",
         },
         "WELL-B": {
-            "update_fields": {"optimization_mode": "minimize_kop"},
+            "update_fields": {"optimization_mode": "anti_collision_avoidance"},
             "source": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
-            "reason": "Vertical collision: опустить KOP.",
+            "reason": "Early collision: cone-aware rerun по KOP/BUILD1.",
         },
     }
     page.st.session_state["wt_prepared_recommendation_snapshot"] = {
@@ -760,7 +767,7 @@ def test_prepared_override_rows_follow_cluster_action_step_order() -> None:
             {
                 "order_rank": 2,
                 "well_name": "WELL-B",
-                "expected_maneuver": "Раньше начать набор / уменьшить KOP",
+                "expected_maneuver": "Сместить ранний уход: KOP / BUILD1",
             },
         ),
     }
@@ -771,7 +778,7 @@ def test_prepared_override_rows_follow_cluster_action_step_order() -> None:
     assert [row["Порядок"] for row in rows] == ["1", "2"]
     assert [row["Маневр"] for row in rows] == [
         "Сместить post-entry / HORIZONTAL",
-        "Раньше начать набор / уменьшить KOP",
+        "Сместить ранний уход: KOP / BUILD1",
     ]
 
 
@@ -1161,10 +1168,170 @@ def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_we
     payload = dict(prepared["WELL-A"])
     context = payload["optimization_context"]
     assert context is not None
-    assert bool(context.prefer_lower_kop) is False
+    assert bool(context.prefer_lower_kop) is True
+    assert bool(context.prefer_higher_build1) is True
     assert str(payload["update_fields"]["optimization_mode"]) == "anti_collision_avoidance"
-    assert "опустить KOP" in str(payload["reason"])
+    assert "cone-aware rerun" in str(payload["reason"])
     assert "anti-collision avoidance rerun" in str(payload["reason"])
+
+
+def test_prepare_rerun_from_cluster_stages_mixed_well_to_early_kop_build1_first() -> None:
+    page = _load_welltrack_page_module()
+    well_a_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 500.0, 1000.0, 1500.0, 2000.0],
+            "INC_deg": [0.0, 0.0, 0.0, 20.0, 50.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0],
+            "X_m": [0.0, 0.0, 0.0, 50.0, 320.0],
+            "Y_m": [0.0, 0.0, 0.0, 30.0, 120.0],
+            "Z_m": [0.0, 500.0, 1000.0, 1450.0, 1775.0],
+            "segment": ["VERTICAL", "VERTICAL", "VERTICAL", "BUILD1", "BUILD1"],
+        }
+    )
+    well_b_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 500.0, 1000.0, 1500.0, 2000.0],
+            "INC_deg": [0.0, 0.0, 0.0, 20.0, 50.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0],
+            "X_m": [0.0, 0.0, 0.0, 50.0, 320.0],
+            "Y_m": [10.0, 10.0, 10.0, 40.0, 150.0],
+            "Z_m": [0.0, 500.0, 1000.0, 1450.0, 1775.0],
+            "segment": ["VERTICAL", "VERTICAL", "VERTICAL", "BUILD1", "BUILD1"],
+        }
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            build_anti_collision_well(
+                name="WELL-A",
+                color="#0B6E4F",
+                stations=well_a_stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(50.0, 30.0, 1450.0),
+                t3=Point3D(320.0, 120.0, 1775.0),
+                azimuth_deg=90.0,
+                md_t1_m=1500.0,
+            ),
+            build_anti_collision_well(
+                name="WELL-B",
+                color="#3A86FF",
+                stations=well_b_stations,
+                surface=Point3D(0.0, 10.0, 0.0),
+                t1=Point3D(50.0, 40.0, 1450.0),
+                t3=Point3D(320.0, 150.0, 1775.0),
+                azimuth_deg=90.0,
+                md_t1_m=1500.0,
+            ),
+            build_anti_collision_well(
+                name="WELL-C",
+                color="#00798C",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 1000.0, 2000.0],
+                        "INC_deg": [0.0, 90.0, 90.0],
+                        "AZI_deg": [0.0, 90.0, 90.0],
+                        "X_m": [0.0, 1000.0, 2000.0],
+                        "Y_m": [0.0, 0.0, 0.0],
+                        "Z_m": [0.0, 0.0, 0.0],
+                        "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+                    }
+                ),
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(1000.0, 0.0, 0.0),
+                t3=Point3D(2000.0, 0.0, 0.0),
+                azimuth_deg=90.0,
+                md_t1_m=1000.0,
+            ),
+        ),
+        corridors=(
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-B",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=400.0,
+                md_a_end_m=700.0,
+                md_b_start_m=410.0,
+                md_b_end_m=710.0,
+                md_a_values_m=np.array([400.0, 700.0], dtype=float),
+                md_b_values_m=np.array([410.0, 710.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([6.0, 6.0], dtype=float),
+                separation_factor_values=np.array([0.60, 0.55], dtype=float),
+                overlap_depth_values_m=np.array([6.0, 7.0], dtype=float),
+            ),
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-C",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=1750.0,
+                md_a_end_m=2050.0,
+                md_b_start_m=1700.0,
+                md_b_end_m=2000.0,
+                md_a_values_m=np.array([1750.0, 2050.0], dtype=float),
+                md_b_values_m=np.array([1700.0, 2000.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
+                separation_factor_values=np.array([0.82, 0.80], dtype=float),
+                overlap_depth_values_m=np.array([4.0, 4.0], dtype=float),
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=2,
+        overlapping_pair_count=2,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.55,
+    )
+    successes = [
+        _successful_plan(
+            name="WELL-A",
+            y_offset_m=0.0,
+            kop_md_m=700.0,
+            build1_dls_deg_per_30m=2.0,
+            build_dls_max_deg_per_30m=3.0,
+            stations=well_a_stations,
+        ),
+        _successful_plan(
+            name="WELL-B",
+            y_offset_m=10.0,
+            kop_md_m=900.0,
+            build1_dls_deg_per_30m=2.0,
+            build_dls_max_deg_per_30m=3.0,
+            stations=well_b_stations,
+        ),
+        _successful_plan(name="WELL-C", y_offset_m=0.0),
+    ]
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(successes),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+
+    page._prepare_rerun_from_cluster(
+        clusters[0],
+        successes=successes,
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+
+    payload = dict(page.st.session_state["wt_prepared_well_overrides"]["WELL-A"])
+    context = payload["optimization_context"]
+    assert context is not None
+    assert float(context.candidate_md_start_m) == pytest.approx(400.0)
+    assert float(context.candidate_md_end_m) == pytest.approx(700.0)
+    reference_by_name = {str(item.well_name): item for item in context.references}
+    assert float(reference_by_name["WELL-C"].md_end_m) == pytest.approx(800.0)
+    assert "WELL-C" not in str(payload["reason"])
 
 
 def test_build_selected_optimization_contexts_rebuilds_prepared_context_from_current_successes() -> None:

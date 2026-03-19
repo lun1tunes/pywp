@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from pywp.mcm import compute_positions_min_curv
+from pywp.mcm import minimum_curvature_increment
 from pywp.models import Point3D
 from pywp.planner_types import ProfileParameters
 from pywp.planner_validation import _build_trajectory
@@ -17,6 +17,16 @@ from pywp.uncertainty import (
 
 SMALL = 1e-9
 AntiCollisionSegment = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]
+
+
+@dataclass(frozen=True)
+class _SampledState:
+    md_m: float
+    x_m: float
+    y_m: float
+    z_m: float
+    inc_deg: float
+    azi_deg: float
 
 
 @dataclass(frozen=True)
@@ -39,6 +49,7 @@ class AntiCollisionOptimizationContext:
     uncertainty_model: PlanningUncertaintyModel
     references: tuple[AntiCollisionReferencePath, ...]
     prefer_lower_kop: bool = False
+    prefer_higher_build1: bool = False
 
 
 @dataclass(frozen=True)
@@ -580,17 +591,248 @@ def sample_profile_stations_in_md_window(
     md_end_m: float,
     sample_step_m: float,
 ) -> pd.DataFrame:
+    start_md = float(max(md_start_m, 0.0))
+    end_md = float(max(md_end_m, start_md))
+    sample_step = float(max(sample_step_m, 1.0))
+    segments = tuple(_profile_segment_specs(candidate=candidate))
+    grid = _sample_md_grid(
+        md_start_m=start_md,
+        md_end_m=end_md,
+        sample_step_m=sample_step,
+    )
+    surface_state = _SampledState(
+        md_m=0.0,
+        x_m=float(surface.x),
+        y_m=float(surface.y),
+        z_m=float(surface.z),
+        inc_deg=0.0,
+        azi_deg=float(candidate.azimuth_hold_deg % 360.0),
+    )
+    rows: list[dict[str, float | str]] = []
+    current_state = surface_state
+    segment_index = 0
+    while (
+        segment_index + 1 < len(segments)
+        and float(segments[segment_index]["md_end_m"]) < start_md - 1e-6
+    ):
+        segment = segments[segment_index]
+        current_state = _advance_sampled_state_along_segment(
+            state=current_state,
+            segment=segment,
+            delta_start_m=0.0,
+            delta_end_m=float(segment["length_m"]),
+        )
+        segment_index += 1
+
+    for md_value in grid:
+        while (
+            segment_index + 1 < len(segments)
+            and md_value > float(segments[segment_index]["md_end_m"]) + 1e-6
+        ):
+            segment = segments[segment_index]
+            local_current_m = float(
+                np.clip(current_state.md_m - float(segment["md_start_m"]), 0.0, float(segment["length_m"]))
+            )
+            current_state = _advance_sampled_state_along_segment(
+                state=current_state,
+                segment=segment,
+                delta_start_m=local_current_m,
+                delta_end_m=float(segment["length_m"]),
+            )
+            segment_index += 1
+
+        segment = segments[min(segment_index, len(segments) - 1)]
+        segment_start_md = float(segment["md_start_m"])
+        local_current_m = float(
+            np.clip(current_state.md_m - segment_start_md, 0.0, float(segment["length_m"]))
+        )
+        local_target_m = float(
+            np.clip(md_value - segment_start_md, 0.0, float(segment["length_m"]))
+        )
+        current_state = _advance_sampled_state_along_segment(
+            state=current_state,
+            segment=segment,
+            delta_start_m=local_current_m,
+            delta_end_m=local_target_m,
+        )
+        rows.append(
+            {
+                "MD_m": float(current_state.md_m),
+                "INC_deg": float(current_state.inc_deg),
+                "AZI_deg": float(current_state.azi_deg),
+                "X_m": float(current_state.x_m),
+                "Y_m": float(current_state.y_m),
+                "Z_m": float(current_state.z_m),
+                "segment": str(segment["name"]),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            {
+                "MD_m": [float(start_md)],
+                "INC_deg": [float(surface_state.inc_deg)],
+                "AZI_deg": [float(surface_state.azi_deg)],
+                "X_m": [float(surface_state.x_m)],
+                "Y_m": [float(surface_state.y_m)],
+                "Z_m": [float(surface_state.z_m)],
+                "segment": ["VERTICAL"],
+            }
+        )
+    sampled = pd.DataFrame(rows)
+    sampled = (
+        sampled.drop_duplicates(subset=["MD_m"], keep="last")
+        .sort_values("MD_m", kind="stable")
+        .reset_index(drop=True)
+    )
+    return sampled
+
+
+def _profile_segment_specs(
+    *,
+    candidate: ProfileParameters,
+) -> list[dict[str, float | str]]:
     trajectory = _build_trajectory(params=candidate)
-    stations = compute_positions_min_curv(
-        trajectory.stations(md_step_m=float(sample_step_m)),
-        start=surface,
+    specs: list[dict[str, float | str]] = []
+    md_start = 0.0
+    for segment in trajectory.segments:
+        length_m = float(max(getattr(segment, "length_m", 0.0), 0.0))
+        inc_from_deg = float(getattr(segment, "inc_from_deg", getattr(segment, "inc_deg", 0.0)))
+        inc_to_deg = float(getattr(segment, "inc_to_deg", getattr(segment, "inc_deg", inc_from_deg)))
+        azi_from_deg = float(getattr(segment, "azi_from_deg", getattr(segment, "azi_deg", 0.0)))
+        azi_to_deg = float(getattr(segment, "azi_to_deg", getattr(segment, "azi_deg", azi_from_deg)))
+        specs.append(
+            {
+                "name": str(getattr(segment, "name", "SEGMENT")),
+                "md_start_m": float(md_start),
+                "md_end_m": float(md_start + length_m),
+                "length_m": float(length_m),
+                "inc_from_deg": float(inc_from_deg),
+                "inc_to_deg": float(inc_to_deg),
+                "azi_from_deg": float(azi_from_deg % 360.0),
+                "azi_to_deg": float(azi_to_deg % 360.0),
+            }
+        )
+        md_start += length_m
+    return specs
+
+
+def _advance_sampled_state_along_segment(
+    *,
+    state: _SampledState,
+    segment: dict[str, float | str],
+    delta_start_m: float,
+    delta_end_m: float,
+) -> _SampledState:
+    start_local_m = float(max(delta_start_m, 0.0))
+    end_local_m = float(max(delta_end_m, start_local_m))
+    if end_local_m <= start_local_m + 1e-9:
+        return _SampledState(
+            md_m=float(state.md_m),
+            x_m=float(state.x_m),
+            y_m=float(state.y_m),
+            z_m=float(state.z_m),
+            inc_deg=float(state.inc_deg),
+            azi_deg=float(state.azi_deg),
+        )
+    length_m = float(end_local_m - start_local_m)
+    start_inc_deg, start_azi_deg = _segment_orientation_at(
+        segment=segment,
+        local_md_m=start_local_m,
     )
-    return sample_stations_in_md_window(
-        stations=stations,
-        md_start_m=md_start_m,
-        md_end_m=md_end_m,
-        sample_step_m=sample_step_m,
+    end_inc_deg, end_azi_deg = _segment_orientation_at(
+        segment=segment,
+        local_md_m=end_local_m,
     )
+    dn_m, de_m, dz_m = minimum_curvature_increment(
+        md1_m=0.0,
+        inc1_deg=float(start_inc_deg),
+        azi1_deg=float(start_azi_deg),
+        md2_m=float(length_m),
+        inc2_deg=float(end_inc_deg),
+        azi2_deg=float(end_azi_deg),
+    )
+    return _SampledState(
+        md_m=float(state.md_m + length_m),
+        x_m=float(state.x_m + de_m),
+        y_m=float(state.y_m + dn_m),
+        z_m=float(state.z_m + dz_m),
+        inc_deg=float(end_inc_deg),
+        azi_deg=float(end_azi_deg % 360.0),
+    )
+
+
+def _segment_orientation_at(
+    *,
+    segment: dict[str, float | str],
+    local_md_m: float,
+) -> tuple[float, float]:
+    length_m = float(max(segment["length_m"], 0.0))
+    inc_from_deg = float(segment["inc_from_deg"])
+    inc_to_deg = float(segment["inc_to_deg"])
+    azi_from_deg = float(segment["azi_from_deg"])
+    azi_to_deg = float(segment["azi_to_deg"])
+    if length_m <= 1e-9:
+        return float(inc_to_deg), float(azi_to_deg % 360.0)
+    alpha = float(np.clip(local_md_m / length_m, 0.0, 1.0))
+    start_direction = _direction_vector(
+        inc_deg=inc_from_deg,
+        azi_deg=azi_from_deg,
+    )
+    end_direction = _direction_vector(
+        inc_deg=inc_to_deg,
+        azi_deg=azi_to_deg,
+    )
+    direction = _slerp_single_direction(
+        direction_from=start_direction,
+        direction_to=end_direction,
+        t=alpha,
+    )
+    horizontal = float(np.hypot(direction[0], direction[1]))
+    inc_deg = float(np.degrees(np.arctan2(horizontal, direction[2])))
+    azi_deg = float(np.degrees(np.arctan2(direction[1], direction[0])) % 360.0)
+    return inc_deg, azi_deg
+
+
+def _direction_vector(
+    *,
+    inc_deg: float,
+    azi_deg: float,
+) -> np.ndarray:
+    inc_rad = np.radians(float(inc_deg))
+    azi_rad = np.radians(float(azi_deg))
+    return np.array(
+        [
+            np.sin(inc_rad) * np.cos(azi_rad),
+            np.sin(inc_rad) * np.sin(azi_rad),
+            np.cos(inc_rad),
+        ],
+        dtype=float,
+    )
+
+
+def _slerp_single_direction(
+    *,
+    direction_from: np.ndarray,
+    direction_to: np.ndarray,
+    t: float,
+) -> np.ndarray:
+    start = np.asarray(direction_from, dtype=float)
+    end = np.asarray(direction_to, dtype=float)
+    start = start / max(float(np.linalg.norm(start)), SMALL)
+    end = end / max(float(np.linalg.norm(end)), SMALL)
+    dot = float(np.clip(float(np.dot(start, end)), -1.0, 1.0))
+    theta = float(np.arccos(dot))
+    alpha = float(np.clip(t, 0.0, 1.0))
+    if theta <= 1e-12:
+        direction = start
+    else:
+        sin_theta = float(np.sin(theta))
+        w0 = float(np.sin((1.0 - alpha) * theta) / sin_theta)
+        w1 = float(np.sin(alpha * theta) / sin_theta)
+        direction = w0 * start + w1 * end
+    norm = max(float(np.linalg.norm(direction)), SMALL)
+    return np.asarray(direction / norm, dtype=float)
 
 
 def _sample_md_grid(

@@ -25,6 +25,7 @@ RECOMMENDATION_TRAJECTORY_REVIEW = "trajectory_review"
 
 MANEUVER_TARGET_SPACING = "Сместить цели / увеличить spacing"
 MANEUVER_EARLIER_KOP = "Раньше начать набор / уменьшить KOP"
+MANEUVER_EARLY_KOP_BUILD1 = "Сместить ранний уход: KOP / BUILD1"
 MANEUVER_PREENTRY_TURN = "Pre-entry azimuth turn / сдвиг HOLD до t1"
 MANEUVER_BUILD2_ENTRY = "Скорректировать BUILD2 перед t1"
 MANEUVER_ENTRY_WINDOW_TURN = "Сдвиг входа и turn в окне t1"
@@ -34,6 +35,8 @@ MANEUVER_CLUSTER_MIXED = "Комбинированный cluster-level мане�
 
 _PRE_KOP_SEGMENTS = {"VERTICAL", "BUILD1"}
 _EVENT_SEGMENT_TOLERANCE_M = 25.0
+_KOP_SATURATION_TOLERANCE_M = 1.0
+_BUILD_DLS_SATURATION_TOLERANCE_DEG_PER_30M = 1e-3
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,8 @@ class AntiCollisionWellContext:
     well_name: str
     kop_md_m: float | None
     kop_min_vertical_m: float | None
+    build1_dls_deg_per_30m: float | None = None
+    build_dls_max_deg_per_30m: float | None = None
     md_t1_m: float | None = None
     md_total_m: float | None = None
     optimization_mode: str = OPTIMIZATION_NONE
@@ -414,44 +419,73 @@ def _build_single_recommendation(
                 continue
             current_kop = context.kop_md_m
             kop_floor = context.kop_min_vertical_m
+            current_build1 = context.build1_dls_deg_per_30m
+            build_limit = context.build_dls_max_deg_per_30m
+            can_adjust_early = _well_can_prepare_early_kop_build1(context)
             if current_kop is None or kop_floor is None:
-                continue
-            if float(current_kop) <= float(kop_floor) + 1e-3:
                 detail_parts.append(
-                    f"{well_name}: KOP уже у нижней границы ({float(kop_floor):.1f} м)."
+                    f"{well_name}: нет полного KOP-контекста, но ранний cone-aware "
+                    "пересчет всё равно подготовлен."
                 )
+            else:
+                if not can_adjust_early:
+                    detail_parts.append(
+                        f"{well_name}: ранний уход уже исчерпан "
+                        f"(KOP {float(current_kop):.1f} м, BUILD1 "
+                        f"{float(current_build1 or 0.0):.2f} deg/30m)."
+                    )
+                elif float(current_kop) <= float(kop_floor) + 1e-3:
+                    detail_parts.append(
+                        f"{well_name}: KOP уже у нижней границы ({float(kop_floor):.1f} м), "
+                        "поэтому ранний маневр пойдет через BUILD1."
+                    )
+                else:
+                    detail_parts.append(
+                        f"{well_name}: текущий KOP {float(current_kop):.1f} м, "
+                        f"нижняя граница {float(kop_floor):.1f} м."
+                    )
+                if (
+                    can_adjust_early
+                    and current_build1 is not None
+                    and build_limit is not None
+                    and float(current_build1)
+                    < float(build_limit) - _BUILD_DLS_SATURATION_TOLERANCE_DEG_PER_30M
+                ):
+                    detail_parts.append(
+                        f"{well_name}: BUILD1 {float(current_build1):.2f} из "
+                        f"{float(build_limit):.2f} deg/30m."
+                    )
+            if not can_adjust_early:
                 continue
             suggestions.append(
                 AntiCollisionWellOverrideSuggestion(
                     well_name=well_name,
-                    config_updates={"optimization_mode": OPTIMIZATION_MINIMIZE_KOP},
+                    config_updates={
+                        "optimization_mode": OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+                    },
                     reason=(
-                        f"Vertical collision: опустить KOP с {float(current_kop):.1f} м "
-                        f"к нижней границе {float(kop_floor):.1f} м."
+                        "Early collision: cone-aware rerun по KOP/BUILD1 "
+                        f"для {well_name}."
                     ),
                 )
             )
-            detail_parts.append(
-                f"{well_name}: текущий KOP {float(current_kop):.1f} м, "
-                f"нижняя граница {float(kop_floor):.1f} м."
-            )
         if suggestions:
             summary = (
-                "Конфликт на vertical участке: сначала стоит проверить более ранний KOP "
+                "Конфликт на раннем участке: нужен cone-aware пересчет по KOP/BUILD1 "
                 "для затронутых скважин."
             )
             detail = " ".join(detail_parts)
-            action_label = "Подготовить пересчет с minimize_kop"
+            action_label = "Подготовить anti-collision пересчет (KOP/BUILD1)"
             can_prepare = True
             affected_wells = tuple(suggestion.well_name for suggestion in suggestions)
         else:
             summary = (
-                "Конфликт на vertical участке, но KOP уже находится у нижней "
-                "допустимой границы."
+                "Конфликт на раннем участке, но ранний маневр KOP/BUILD1 "
+                "для этой пары уже исчерпан."
             )
             detail = (
-                "В текущих ограничениях этот конфликт не устраняется только KOP-маневром. "
-                "Нужно проверять spacing устьев или spacing целей."
+                "Нужно переходить к следующему маневру по траектории или "
+                "проверять spacing устьев/целей."
             )
             action_label = "Только рекомендация"
             can_prepare = False
@@ -464,7 +498,7 @@ def _build_single_recommendation(
             category=RECOMMENDATION_REDUCE_KOP,
             summary=summary,
             detail=detail,
-            expected_maneuver=MANEUVER_EARLIER_KOP,
+            expected_maneuver=MANEUVER_EARLY_KOP_BUILD1,
             action_label=action_label,
             can_prepare_rerun=can_prepare,
             affected_wells=affected_wells,
@@ -617,6 +651,23 @@ def _well_interval_prefers_kop(
         return False
     midpoint_md = 0.5 * (float(md_start_m) + float(md_end_m))
     return bool(midpoint_md <= float(kop_md_m) + float(tolerance_m))
+
+
+def _well_can_prepare_early_kop_build1(context: AntiCollisionWellContext) -> bool:
+    current_kop = context.kop_md_m
+    kop_floor = context.kop_min_vertical_m
+    current_build1 = context.build1_dls_deg_per_30m
+    build_limit = context.build_dls_max_deg_per_30m
+    if current_kop is None or kop_floor is None:
+        return True
+    if float(current_kop) > float(kop_floor) + _KOP_SATURATION_TOLERANCE_M:
+        return True
+    if current_build1 is None or build_limit is None:
+        return True
+    return bool(
+        float(current_build1)
+        < float(build_limit) - _BUILD_DLS_SATURATION_TOLERANCE_DEG_PER_30M
+    )
 
 
 def _well_vertical_end_md(stations: pd.DataFrame) -> float:
@@ -811,12 +862,20 @@ def _cluster_action_steps(
     )
     steps: list[AntiCollisionClusterActionStep] = []
     for order_rank, (well_name, items) in enumerate(ranked_items, start=1):
-        primary = min(items, key=lambda recommendation: float(recommendation.min_separation_factor))
+        actionable_items = tuple(
+            item for item in items if bool(item.can_prepare_rerun)
+        ) or items
+        primary = min(
+            actionable_items,
+            key=lambda recommendation: float(recommendation.min_separation_factor),
+        )
         has_trajectory = any(
-            str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW for item in items
+            str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW
+            for item in actionable_items
         )
         has_vertical = any(
-            str(item.category) == RECOMMENDATION_REDUCE_KOP for item in items
+            str(item.category) == RECOMMENDATION_REDUCE_KOP
+            for item in actionable_items
         )
         steps.append(
             AntiCollisionClusterActionStep(
@@ -828,7 +887,7 @@ def _cluster_action_steps(
                     else str(primary.category)
                 ),
                 optimization_mode=_override_mode_for_well(well_name, items),
-                expected_maneuver=_step_expected_maneuver(items),
+                expected_maneuver=_step_expected_maneuver(actionable_items),
                 reason=" | ".join(
                     dict.fromkeys(str(recommendation.summary) for recommendation in items)
                 ),
@@ -845,19 +904,26 @@ def _cluster_action_sort_key(
     well_name: str,
     recommendations: tuple[AntiCollisionRecommendation, ...],
 ) -> tuple[float, int, int, int, str]:
-    has_trajectory = any(
-        str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW for item in recommendations
+    actionable_items = tuple(
+        item for item in recommendations if bool(item.can_prepare_rerun)
+    ) or recommendations
+    primary = min(
+        actionable_items,
+        key=lambda recommendation: float(recommendation.min_separation_factor),
     )
-    has_vertical = any(
-        str(item.category) == RECOMMENDATION_REDUCE_KOP for item in recommendations
+    category_rank = (
+        0
+        if str(primary.category) == RECOMMENDATION_REDUCE_KOP
+        else (1 if str(primary.category) == RECOMMENDATION_TRAJECTORY_REVIEW else 2)
     )
-    category_rank = 0 if has_trajectory else (1 if has_vertical else 2)
-    worst_sf = min(float(item.min_separation_factor) for item in recommendations)
+    worst_sf = float(primary.min_separation_factor)
     trajectory_count = sum(
-        1 for item in recommendations if str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW
+        1
+        for item in actionable_items
+        if str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW
     )
     vertical_count = sum(
-        1 for item in recommendations if str(item.category) == RECOMMENDATION_REDUCE_KOP
+        1 for item in actionable_items if str(item.category) == RECOMMENDATION_REDUCE_KOP
     )
     return (
         float(worst_sf),
@@ -895,21 +961,42 @@ def _override_mode_for_well(
 def _step_expected_maneuver(
     recommendations: tuple[AntiCollisionRecommendation, ...],
 ) -> str:
+    if not recommendations:
+        return MANEUVER_CLUSTER_MIXED
+    actionable_items = tuple(
+        item for item in recommendations if bool(item.can_prepare_rerun)
+    ) or recommendations
     has_trajectory = any(
-        str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW for item in recommendations
+        str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW
+        for item in actionable_items
+    )
+    has_vertical = any(
+        str(item.category) == RECOMMENDATION_REDUCE_KOP
+        for item in actionable_items
+    )
+    if has_trajectory and has_vertical:
+        primary = min(
+            actionable_items,
+            key=lambda recommendation: float(recommendation.min_separation_factor),
+        )
+        if str(primary.category) == RECOMMENDATION_REDUCE_KOP:
+            return MANEUVER_KOP_AND_TRAJECTORY
+    has_trajectory = any(
+        str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW
+        for item in actionable_items
     )
     if has_trajectory:
         primary_trajectory = min(
             (
                 item
-                for item in recommendations
+                for item in actionable_items
                 if str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW
             ),
             key=lambda recommendation: float(recommendation.min_separation_factor),
         )
         return str(primary_trajectory.expected_maneuver)
     primary = min(
-        recommendations,
+        actionable_items,
         key=lambda recommendation: float(recommendation.min_separation_factor),
     )
     return str(primary.expected_maneuver)
