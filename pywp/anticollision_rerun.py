@@ -191,7 +191,28 @@ def build_dynamic_cluster_execution_plan(
     )
     final_order = tuple([*ordered_well_names, *fallback_names])
     if not final_order:
-        return None
+        next_step = cluster.action_steps[0] if cluster.action_steps else None
+        if next_step is not None:
+            blocking_reason = (
+                "Следующий рекомендуемый шаг снова относится к уже пересчитанной "
+                f"скважине {str(next_step.well_name)} "
+                f"({str(next_step.expected_maneuver)}). Текущий cluster-level прогон "
+                "остановлен, чтобы не перетирать остальные скважины базовыми "
+                "настройками."
+            )
+        else:
+            blocking_reason = (
+                "Для оставшихся скважин не осталось актуальных automatic "
+                "cluster-level шагов пересчета."
+            )
+        return DynamicClusterExecutionPlan(
+            cluster=cluster,
+            ordered_well_names=(),
+            prepared_by_well={},
+            skipped_wells=tuple(sorted(set(str(name) for name in selected_names))),
+            resolution_state=DYNAMIC_CLUSTER_PLAN_BLOCKED,
+            blocking_reason=blocking_reason,
+        )
     return DynamicClusterExecutionPlan(
         cluster=cluster,
         ordered_well_names=final_order,
@@ -309,7 +330,6 @@ def build_cluster_prepared_overrides(
                         "candidate_md_end_m": float(candidate_md_end_m),
                         "reference_windows": {},
                         "reasons": [],
-                        "prefer_lower_kop": False,
                     },
                 )
                 entry["candidate_md_start_m"] = min(
@@ -340,9 +360,6 @@ def build_cluster_prepared_overrides(
 
             if optimization_mode == OPTIMIZATION_MINIMIZE_KOP:
                 vertical_specs.setdefault(well_name, []).append(str(suggestion.reason))
-                entry = trajectory_specs.get(well_name)
-                if entry is not None:
-                    entry["prefer_lower_kop"] = True
 
     prepared: dict[str, dict[str, object]] = {}
     source_label = (
@@ -390,7 +407,7 @@ def build_cluster_prepared_overrides(
                 sample_step_m=50.0,
                 uncertainty_model=uncertainty_model,
                 references=tuple(references),
-                prefer_lower_kop=bool(spec.get("prefer_lower_kop")) or bool(vertical_specs.get(well_name)),
+                prefer_lower_kop=False,
             )
             prepared[well_name] = {
                 "update_fields": {

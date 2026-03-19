@@ -714,8 +714,14 @@ def _select_movable_well_for_trajectory_event(
     candidates = [item for item in (left, right) if item is not None]
     if not candidates:
         return None
+    not_yet_optimized = [
+        item
+        for item in candidates
+        if str(item.optimization_mode).strip() != OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+    ]
+    ranked_pool = not_yet_optimized if not_yet_optimized else candidates
     ranked = sorted(
-        candidates,
+        ranked_pool,
         key=lambda item: (
             -float(item.kop_md_m if item.kop_md_m is not None else 0.0),
             -float(item.md_total_m if item.md_total_m is not None else 0.0),
@@ -892,12 +898,20 @@ def _step_expected_maneuver(
     has_trajectory = any(
         str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW for item in recommendations
     )
-    has_vertical = any(
-        str(item.category) == RECOMMENDATION_REDUCE_KOP for item in recommendations
+    if has_trajectory:
+        primary_trajectory = min(
+            (
+                item
+                for item in recommendations
+                if str(item.category) == RECOMMENDATION_TRAJECTORY_REVIEW
+            ),
+            key=lambda recommendation: float(recommendation.min_separation_factor),
+        )
+        return str(primary_trajectory.expected_maneuver)
+    primary = min(
+        recommendations,
+        key=lambda recommendation: float(recommendation.min_separation_factor),
     )
-    if has_trajectory and has_vertical:
-        return MANEUVER_KOP_AND_TRAJECTORY
-    primary = min(recommendations, key=lambda recommendation: float(recommendation.min_separation_factor))
     return str(primary.expected_maneuver)
 
 

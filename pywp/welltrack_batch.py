@@ -12,13 +12,20 @@ from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.anticollision_optimization import (
     AntiCollisionOptimizationContext,
     build_anti_collision_reference_path,
+    evaluate_stations_anti_collision_clearance,
 )
 from pywp.anticollision_rerun import (
     DYNAMIC_CLUSTER_PLAN_ACTIVE,
     DYNAMIC_CLUSTER_PLAN_BLOCKED,
     DYNAMIC_CLUSTER_PLAN_RESOLVED,
     DynamicClusterExecutionPlan,
+    build_anti_collision_analysis_for_successes,
+    build_anticollision_well_contexts,
     build_dynamic_cluster_execution_plan,
+)
+from pywp.anticollision_recommendations import (
+    build_anti_collision_recommendation_clusters,
+    build_anti_collision_recommendations,
 )
 from pywp.models import Point3D, SummaryDict, TrajectoryConfig
 from pywp.optimization_reference import compute_unoptimized_reference
@@ -179,6 +186,14 @@ class WelltrackBatchPlanner:
         selected_records_by_name = {
             str(record.name): record for record in selected_records
         }
+        initial_success_by_name = {
+            str(item.name): item
+            for item in (
+                dynamic_cluster_context.initial_successes
+                if dynamic_cluster_context is not None
+                else ()
+            )
+        }
         remaining_selected_names = [
             str(record.name) for record in selected_records
         ]
@@ -251,6 +266,27 @@ class WelltrackBatchPlanner:
                 optimization_context=runtime_override["optimization_context"],
                 planner_progress_callback=planner_progress_callback,
             )
+            if success is not None:
+                previous_success = recalculated_success_by_name.get(str(record.name))
+                if previous_success is None:
+                    previous_success = initial_success_by_name.get(str(record.name))
+                current_success_by_name = dict(initial_success_by_name)
+                current_success_by_name.update(recalculated_success_by_name)
+                retained_success = self._select_cluster_monotonic_anticollision_success(
+                    candidate_success=success,
+                    existing_success=previous_success,
+                    current_success_by_name=current_success_by_name,
+                    dynamic_cluster_context=dynamic_cluster_context,
+                )
+                if retained_success is None:
+                    retained_success = self._select_monotonic_anticollision_success(
+                        candidate_success=success,
+                        existing_success=previous_success,
+                        optimization_context=runtime_override["optimization_context"],
+                    )
+                if retained_success is not None:
+                    success = retained_success
+                    row = self._row_from_success(record=record, success=retained_success)
             summary_rows.append(row)
             if success is not None:
                 successes.append(success)
@@ -266,6 +302,171 @@ class WelltrackBatchPlanner:
             cluster_blocking_reason=cluster_blocking_reason,
         )
         return summary_rows, successes
+
+    @staticmethod
+    def _cluster_anticollision_score(
+        *,
+        success_by_name: Mapping[str, SuccessfulWellPlan],
+        dynamic_cluster_context: DynamicClusterExecutionContext,
+    ) -> tuple[float, float, int]:
+        successes = list(success_by_name.values())
+        if len(successes) < 2:
+            return 1e6, 0.0, 0
+        analysis = build_anti_collision_analysis_for_successes(
+            successes,
+            model=dynamic_cluster_context.uncertainty_model,
+            include_display_geometry=False,
+            build_overlap_geometry=False,
+        )
+        recommendations = build_anti_collision_recommendations(
+            analysis,
+            well_context_by_name=build_anticollision_well_contexts(successes),
+        )
+        clusters = build_anti_collision_recommendation_clusters(recommendations)
+        target_set = {
+            str(name)
+            for name in dynamic_cluster_context.target_well_names
+            if str(name).strip()
+        }
+        relevant_clusters = [
+            cluster
+            for cluster in clusters
+            if target_set.intersection(str(name) for name in cluster.well_names)
+        ]
+        if not relevant_clusters:
+            return 1e6, 0.0, 0
+        worst_sf = min(float(cluster.worst_separation_factor) for cluster in relevant_clusters)
+        max_overlap = max(
+            float(recommendation.max_overlap_depth_m)
+            for cluster in relevant_clusters
+            for recommendation in cluster.recommendations
+        )
+        recommendation_count = sum(
+            int(cluster.recommendation_count) for cluster in relevant_clusters
+        )
+        return worst_sf, max_overlap, recommendation_count
+
+    @staticmethod
+    def _well_local_anticollision_score(
+        *,
+        success_by_name: Mapping[str, SuccessfulWellPlan],
+        dynamic_cluster_context: DynamicClusterExecutionContext,
+        target_well_name: str,
+    ) -> tuple[float, float, int]:
+        successes = list(success_by_name.values())
+        if len(successes) < 2 or str(target_well_name) not in success_by_name:
+            return 1e6, 0.0, 0
+        analysis = build_anti_collision_analysis_for_successes(
+            successes,
+            model=dynamic_cluster_context.uncertainty_model,
+            include_display_geometry=False,
+            build_overlap_geometry=False,
+        )
+        recommendations = build_anti_collision_recommendations(
+            analysis,
+            well_context_by_name=build_anticollision_well_contexts(successes),
+        )
+        target_set = {
+            str(name)
+            for name in dynamic_cluster_context.target_well_names
+            if str(name).strip()
+        }
+        well_name = str(target_well_name)
+        relevant_recommendations = [
+            recommendation
+            for recommendation in recommendations
+            if well_name in {str(recommendation.well_a), str(recommendation.well_b)}
+            and target_set.intersection(
+                {str(recommendation.well_a), str(recommendation.well_b)}
+            )
+        ]
+        if not relevant_recommendations:
+            return 1e6, 0.0, 0
+        worst_sf = min(
+            float(recommendation.min_separation_factor)
+            for recommendation in relevant_recommendations
+        )
+        max_overlap = max(
+            float(recommendation.max_overlap_depth_m)
+            for recommendation in relevant_recommendations
+        )
+        return worst_sf, max_overlap, len(relevant_recommendations)
+
+    @staticmethod
+    def _select_cluster_monotonic_anticollision_success(
+        *,
+        candidate_success: SuccessfulWellPlan,
+        existing_success: SuccessfulWellPlan | None,
+        current_success_by_name: Mapping[str, SuccessfulWellPlan],
+        dynamic_cluster_context: DynamicClusterExecutionContext | None,
+    ) -> SuccessfulWellPlan | None:
+        if dynamic_cluster_context is None or existing_success is None:
+            return None
+        current_existing = dict(current_success_by_name)
+        current_existing[str(existing_success.name)] = existing_success
+        current_candidate = dict(current_success_by_name)
+        current_candidate[str(candidate_success.name)] = candidate_success
+        target_well_name = str(candidate_success.name)
+        (
+            existing_local_sf,
+            existing_local_overlap,
+            existing_local_count,
+        ) = WelltrackBatchPlanner._well_local_anticollision_score(
+            success_by_name=current_existing,
+            dynamic_cluster_context=dynamic_cluster_context,
+            target_well_name=target_well_name,
+        )
+        (
+            candidate_local_sf,
+            candidate_local_overlap,
+            candidate_local_count,
+        ) = WelltrackBatchPlanner._well_local_anticollision_score(
+            success_by_name=current_candidate,
+            dynamic_cluster_context=dynamic_cluster_context,
+            target_well_name=target_well_name,
+        )
+        existing_sf, existing_overlap, existing_count = (
+            WelltrackBatchPlanner._cluster_anticollision_score(
+                success_by_name=current_existing,
+                dynamic_cluster_context=dynamic_cluster_context,
+            )
+        )
+        candidate_sf, candidate_overlap, candidate_count = (
+            WelltrackBatchPlanner._cluster_anticollision_score(
+                success_by_name=current_candidate,
+                dynamic_cluster_context=dynamic_cluster_context,
+            )
+        )
+        sf_tolerance = 1e-3
+        overlap_tolerance = 1e-3
+        if candidate_local_sf < existing_local_sf - sf_tolerance:
+            return existing_success
+        if (
+            candidate_local_sf <= existing_local_sf + sf_tolerance
+            and candidate_local_overlap > existing_local_overlap + overlap_tolerance
+        ):
+            return existing_success
+        if (
+            abs(candidate_local_sf - existing_local_sf) <= sf_tolerance
+            and abs(candidate_local_overlap - existing_local_overlap)
+            <= overlap_tolerance
+            and candidate_local_count > existing_local_count
+        ):
+            return existing_success
+        if candidate_sf < existing_sf - sf_tolerance:
+            return existing_success
+        if (
+            candidate_sf <= existing_sf + sf_tolerance
+            and candidate_overlap > existing_overlap + overlap_tolerance
+        ):
+            return existing_success
+        if (
+            abs(candidate_sf - existing_sf) <= sf_tolerance
+            and abs(candidate_overlap - existing_overlap) <= overlap_tolerance
+            and candidate_count > existing_count
+        ):
+            return existing_success
+        return None
 
     @staticmethod
     def summary_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -440,7 +641,22 @@ class WelltrackBatchPlanner:
             uncertainty_model=dynamic_cluster_context.uncertainty_model,
         )
         if plan is None:
-            return None, ()
+            blocking_reason = (
+                "Iterative cluster-aware execution не нашел актуальных шагов "
+                "для оставшихся скважин. Текущий прогон остановлен, чтобы не "
+                "пересчитывать их базовыми настройками."
+            )
+            fallback_plan = DynamicClusterExecutionPlan(
+                cluster=None,
+                ordered_well_names=(),
+                prepared_by_well={},
+                skipped_wells=cluster_scoped_remaining,
+                resolution_state=DYNAMIC_CLUSTER_PLAN_BLOCKED,
+                blocking_reason=blocking_reason,
+            )
+            for name in cluster_scoped_remaining:
+                remaining_selected_names.remove(str(name))
+            return fallback_plan, cluster_scoped_remaining
         resolution_state = str(plan.resolution_state).strip()
         if resolution_state in {
             DYNAMIC_CLUSTER_PLAN_RESOLVED,
@@ -462,6 +678,93 @@ class WelltrackBatchPlanner:
             reference_success_by_name=recalculated_success_by_name,
             strict_missing_references=False,
         )
+
+    @staticmethod
+    def _row_from_success(
+        *,
+        record: WelltrackRecord,
+        success: SuccessfulWellPlan,
+    ) -> dict[str, Any]:
+        summary = dict(success.summary)
+        md_total_m = float(summary.get("md_total_m", 0.0))
+        t1_offset = float(
+            np.hypot(success.t1.x - success.surface.x, success.t1.y - success.surface.y)
+        )
+        row = WelltrackBatchPlanner._base_row(record=record)
+        row.update(
+            {
+                "Статус": "OK",
+                "Рестарты решателя": str(
+                    int(float(summary.get("solver_turn_restarts_used", 0.0)))
+                ),
+                "Модель траектории": str(summary.get("trajectory_type", "—")),
+                "Классификация целей": WelltrackBatchPlanner._summary_target_direction_label(
+                    summary.get("trajectory_target_direction", "—")
+                ),
+                "Сложность": str(summary.get("well_complexity", "—")),
+                "Горизонтальный отход t1, м": f"{t1_offset:.2f}",
+                "KOP MD, м": f"{float(summary.get('kop_md_m', 0.0)):.2f}",
+                "Длина HORIZONTAL, м": (
+                    f"{float(summary.get('horizontal_length_m', 0.0)):.2f}"
+                ),
+                "INC в t1, deg": f"{float(summary.get('entry_inc_deg', 0.0)):.2f}",
+                "ЗУ HOLD, deg": f"{float(summary.get('hold_inc_deg', 0.0)):.2f}",
+                "Макс ПИ, deg/10m": (
+                    f"{dls_to_pi(float(summary.get('max_dls_total_deg_per_30m', 0.0))):.2f}"
+                ),
+                "Макс MD, м": f"{md_total_m:.2f}",
+                "Проблема": str(success.md_postcheck_message or ""),
+            }
+        )
+        return row
+
+    @staticmethod
+    def _select_monotonic_anticollision_success(
+        *,
+        candidate_success: SuccessfulWellPlan,
+        existing_success: SuccessfulWellPlan | None,
+        optimization_context: object,
+    ) -> SuccessfulWellPlan | None:
+        if existing_success is None:
+            return None
+        if not isinstance(optimization_context, AntiCollisionOptimizationContext):
+            return None
+        if str(candidate_success.config.optimization_mode).strip() != "anti_collision_avoidance":
+            return None
+        try:
+            existing_clearance = evaluate_stations_anti_collision_clearance(
+                stations=existing_success.stations,
+                context=optimization_context,
+            )
+            candidate_clearance = evaluate_stations_anti_collision_clearance(
+                stations=candidate_success.stations,
+                context=optimization_context,
+            )
+        except ValueError:
+            return None
+
+        sf_tolerance = 1e-3
+        overlap_tolerance = 1e-3
+        existing_sf = float(existing_clearance.min_separation_factor)
+        candidate_sf = float(candidate_clearance.min_separation_factor)
+        existing_overlap = float(existing_clearance.max_overlap_depth_m)
+        candidate_overlap = float(candidate_clearance.max_overlap_depth_m)
+
+        if candidate_sf < existing_sf - sf_tolerance:
+            return existing_success
+        if candidate_sf <= existing_sf + sf_tolerance and (
+            candidate_overlap > existing_overlap + overlap_tolerance
+        ):
+            return existing_success
+        if (
+            abs(candidate_sf - existing_sf) <= sf_tolerance
+            and abs(candidate_overlap - existing_overlap) <= overlap_tolerance
+        ):
+            candidate_md = float(candidate_success.summary.get("md_total_m", 0.0))
+            existing_md = float(existing_success.summary.get("md_total_m", 0.0))
+            if candidate_md > existing_md + 1e-6:
+                return existing_success
+        return None
 
     def _evaluate_record(
         self,
@@ -494,7 +797,6 @@ class WelltrackBatchPlanner:
             row["Статус"] = "Ошибка расчета"
             row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
-        t1_offset = float(np.hypot(t1.x - surface.x, t1.y - surface.y))
         summary = result.summary
         md_total_m = float(summary.get("md_total_m", 0.0))
         md_limit_m = float(summary.get("max_total_md_postcheck_m", 0.0))
@@ -507,27 +809,6 @@ class WelltrackBatchPlanner:
                 f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
             )
 
-        row.update(
-            {
-                "Статус": "OK",
-                "Рестарты решателя": str(
-                    int(float(summary.get("solver_turn_restarts_used", 0.0)))
-                ),
-                "Модель траектории": str(summary.get("trajectory_type", "—")),
-                "Классификация целей": self._summary_target_direction_label(
-                    summary.get("trajectory_target_direction", "—")
-                ),
-                "Сложность": str(summary.get("well_complexity", "—")),
-                "Горизонтальный отход t1, м": f"{t1_offset:.2f}",
-                "KOP MD, м": f"{float(summary.get('kop_md_m', 0.0)):.2f}",
-                "Длина HORIZONTAL, м": f"{float(summary.get('horizontal_length_m', 0.0)):.2f}",
-                "INC в t1, deg": f"{float(summary.get('entry_inc_deg', 0.0)):.2f}",
-                "ЗУ HOLD, deg": f"{float(summary.get('hold_inc_deg', 0.0)):.2f}",
-                "Макс ПИ, deg/10m": f"{dls_to_pi(float(summary.get('max_dls_total_deg_per_30m', 0.0))):.2f}",
-                "Макс MD, м": f"{md_total_m:.2f}",
-                "Проблема": md_postcheck_message,
-            }
-        )
         success = SuccessfulWellPlan(
             name=record.name,
             surface=surface,
@@ -544,6 +825,7 @@ class WelltrackBatchPlanner:
             md_postcheck_exceeded=md_postcheck_exceeded,
             md_postcheck_message=md_postcheck_message,
         )
+        row = self._row_from_success(record=record, success=success)
         return row, success
 
 

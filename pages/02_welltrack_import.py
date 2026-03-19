@@ -483,9 +483,21 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_runtime_s", None)
     st.session_state.setdefault("wt_last_run_log_lines", [])
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
+    st.session_state.setdefault("wt_results_view_mode", "Отдельная скважина")
+    st.session_state.setdefault("wt_results_all_view_mode", "Траектории")
     st.session_state.setdefault(
         "wt_anticollision_uncertainty_preset", DEFAULT_UNCERTAINTY_PRESET
     )
+    if str(st.session_state.get("wt_results_view_mode", "")).strip() not in {
+        "Отдельная скважина",
+        "Все скважины",
+    }:
+        st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+    if str(st.session_state.get("wt_results_all_view_mode", "")).strip() not in {
+        "Траектории",
+        "Anti-collision",
+    }:
+        st.session_state["wt_results_all_view_mode"] = "Траектории"
     st.session_state["wt_anticollision_uncertainty_preset"] = normalize_uncertainty_preset(
         st.session_state.get(
             "wt_anticollision_uncertainty_preset",
@@ -508,12 +520,19 @@ def _clear_results() -> None:
     st.session_state["wt_last_run_at"] = ""
     st.session_state["wt_last_runtime_s"] = None
     st.session_state["wt_last_run_log_lines"] = []
+    st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+    st.session_state["wt_results_all_view_mode"] = "Траектории"
     st.session_state["wt_prepared_well_overrides"] = {}
     st.session_state["wt_prepared_override_message"] = ""
     st.session_state["wt_prepared_recommendation_id"] = ""
     st.session_state["wt_anticollision_prepared_cluster_id"] = ""
     st.session_state["wt_prepared_recommendation_snapshot"] = None
     st.session_state["wt_last_anticollision_resolution"] = None
+
+
+def _focus_all_wells_anticollision_results() -> None:
+    st.session_state["wt_results_view_mode"] = "Все скважины"
+    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
 
 def _clear_pad_state() -> None:
@@ -3523,6 +3542,7 @@ def _run_batch_if_clicked(
                     uncertainty_preset=preset,
                 )
                 st.session_state["wt_last_anticollision_resolution"] = resolution
+                _focus_all_wells_anticollision_results()
             else:
                 st.session_state["wt_last_anticollision_resolution"] = None
             st.session_state["wt_last_error"] = ""
@@ -3739,8 +3759,14 @@ def _render_success_tabs(
         records=records,
         summary_rows=summary_rows,
     )
-    tab_single, tab_all = st.tabs(["Отдельная скважина", "Все скважины"])
-    with tab_single:
+    view_mode = st.radio(
+        "Режим просмотра результатов",
+        options=["Отдельная скважина", "Все скважины"],
+        key="wt_results_view_mode",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if str(view_mode) == "Отдельная скважина":
         selected_name = st.selectbox(
             "Скважина", options=[item.name for item in successes]
         )
@@ -3788,35 +3814,42 @@ def _render_success_tabs(
             survey_tab_label="Инклинометрия",
             survey_file_name=f"{selected_name}_survey.csv",
         )
+        return
 
-    with tab_all:
-        overview_tab, anticollision_tab = st.tabs(["Траектории", "Anti-collision"])
-        with overview_tab:
-            if target_only_wells:
-                st.caption(
-                    "Для непростроенных скважин на обзорных графиках показаны только "
-                    "точки S/t1/t3, без траектории."
-                )
-            c1, c2 = st.columns(2, gap="medium")
-            c1.plotly_chart(
-                _all_wells_3d_figure(
-                    successes,
-                    target_only_wells=target_only_wells,
-                    name_to_color=name_to_color,
-                ),
-                config=trajectory_plotly_chart_config(),
-                width="stretch",
+    all_view_mode = st.radio(
+        "Режим отображения всех скважин",
+        options=["Траектории", "Anti-collision"],
+        key="wt_results_all_view_mode",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if str(all_view_mode) == "Траектории":
+        if target_only_wells:
+            st.caption(
+                "Для непростроенных скважин на обзорных графиках показаны только "
+                "точки S/t1/t3, без траектории."
             )
-            c2.plotly_chart(
-                _all_wells_plan_figure(
-                    successes,
-                    target_only_wells=target_only_wells,
-                    name_to_color=name_to_color,
-                ),
-                width="stretch",
-            )
-        with anticollision_tab:
-            _render_anticollision_panel(successes)
+        c1, c2 = st.columns(2, gap="medium")
+        c1.plotly_chart(
+            _all_wells_3d_figure(
+                successes,
+                target_only_wells=target_only_wells,
+                name_to_color=name_to_color,
+            ),
+            config=trajectory_plotly_chart_config(),
+            width="stretch",
+        )
+        c2.plotly_chart(
+            _all_wells_plan_figure(
+                successes,
+                target_only_wells=target_only_wells,
+                name_to_color=name_to_color,
+            ),
+            width="stretch",
+        )
+        return
+
+    _render_anticollision_panel(successes)
 
 
 def run_page() -> None:

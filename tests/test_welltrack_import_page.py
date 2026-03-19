@@ -383,6 +383,8 @@ def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> 
         _successful_plan(name="WELL-A", y_offset_m=0.0),
         _successful_plan(name="WELL-B", y_offset_m=5.0),
     ]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
     at.run(timeout=120)
 
@@ -435,6 +437,8 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
         _successful_plan(name="WELL-B", y_offset_m=5.0),
     ]
     at.session_state["wt_anticollision_uncertainty_preset"] = "invalid_preset"
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
     at.run(timeout=120)
 
@@ -449,6 +453,57 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
         str(at.session_state["wt_anticollision_uncertainty_preset"])
         == DEFAULT_UNCERTAINTY_PRESET
     )
+
+
+def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
+    page = _load_welltrack_page_module()
+
+    page.st.session_state.clear()
+    page._init_state()
+    page._focus_all_wells_anticollision_results()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+
+
+def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {
+            "Скважина": "WELL-A",
+            "Точек": 3,
+            "Статус": "OK",
+            "Рестарты решателя": "0",
+            "Модель траектории": "Unified J Profile + Build + Azimuth Turn",
+            "Классификация целей": "В прямом направлении",
+            "Сложность": "Обычная",
+            "Горизонтальный отход t1, м": "1000.00",
+            "KOP MD, м": "700.00",
+            "Длина HORIZONTAL, м": "1000.00",
+            "INC в t1, deg": "90.00",
+            "ЗУ HOLD, deg": "90.00",
+            "Макс ПИ, deg/10m": "0.00",
+            "Макс MD, м": "2000.00",
+            "Проблема": "",
+        }
+    ]
+    at.session_state["wt_successes"] = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+
+    at.run()
+
+    result_mode = next(
+        widget for widget in at.radio if widget.label == "Режим просмотра результатов"
+    )
+    all_wells_mode = next(
+        widget for widget in at.radio if widget.label == "Режим отображения всех скважин"
+    )
+    assert str(result_mode.value) == "Все скважины"
+    assert str(all_wells_mode.value) == "Anti-collision"
 
 
 def test_welltrack_page_prepares_vertical_anticollision_rerun_plan() -> None:
@@ -508,6 +563,8 @@ def test_welltrack_page_prepares_vertical_anticollision_rerun_plan() -> None:
             lateral_y_end_m=380.0,
         ),
     ]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
     at.run(timeout=120)
 
@@ -1104,7 +1161,7 @@ def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_we
     payload = dict(prepared["WELL-A"])
     context = payload["optimization_context"]
     assert context is not None
-    assert bool(context.prefer_lower_kop) is True
+    assert bool(context.prefer_lower_kop) is False
     assert str(payload["update_fields"]["optimization_mode"]) == "anti_collision_avoidance"
     assert "опустить KOP" in str(payload["reason"])
     assert "anti-collision avoidance rerun" in str(payload["reason"])

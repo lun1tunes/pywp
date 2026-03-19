@@ -21,6 +21,7 @@ from pywp.anticollision import (
 from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
 from pywp.anticollision_recommendations import (
     MANEUVER_BUILD2_ENTRY,
+    MANEUVER_POSTENTRY_TURN,
     RECOMMENDATION_REDUCE_KOP,
     RECOMMENDATION_TARGET_SPACING,
     RECOMMENDATION_TRAJECTORY_REVIEW,
@@ -758,6 +759,69 @@ def test_recommendations_prepare_pairwise_anti_collision_rerun_for_trajectory_co
     assert rows[0]["Ожидаемый маневр"] == recommendation.expected_maneuver
 
 
+def test_recommendations_switch_movable_well_after_one_side_already_used_anticollision() -> None:
+    corridor = AntiCollisionCorridor(
+        well_a="well_02",
+        well_b="well_05",
+        classification="trajectory",
+        priority_rank=2,
+        label_a="",
+        label_b="",
+        md_a_start_m=4200.0,
+        md_a_end_m=4300.0,
+        md_b_start_m=4100.0,
+        md_b_end_m=4200.0,
+        md_a_values_m=np.array([4200.0, 4300.0], dtype=float),
+        md_b_values_m=np.array([4100.0, 4200.0], dtype=float),
+        label_a_values=("", ""),
+        label_b_values=("", ""),
+        midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
+        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+        separation_factor_values=np.array([0.72, 0.69], dtype=float),
+        overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(corridor,),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=1,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.69,
+    )
+    contexts = {
+        "well_02": AntiCollisionWellContext(
+            well_name="well_02",
+            kop_md_m=2200.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=4500.0,
+            md_total_m=5600.0,
+            optimization_mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+        ),
+        "well_05": AntiCollisionWellContext(
+            well_name="well_05",
+            kop_md_m=900.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=4700.0,
+            md_total_m=6100.0,
+            optimization_mode="minimize_kop",
+        ),
+    }
+
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=contexts,
+    )
+
+    assert recommendations
+    recommendation = recommendations[0]
+    assert recommendation.category == RECOMMENDATION_TRAJECTORY_REVIEW
+    assert recommendation.affected_wells == ("well_05",)
+    assert recommendation.override_suggestions[0].well_name == "well_05"
+
+
 def test_recommendation_clusters_merge_connected_pairs_into_single_cluster() -> None:
     corridor_ab = AntiCollisionCorridor(
         well_a="well_01",
@@ -1085,7 +1149,7 @@ def test_cluster_action_steps_normalize_mixed_vertical_and_trajectory_for_same_w
     step = next(item for item in cluster.action_steps if item.well_name == "well_a")
     assert step.optimization_mode == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
     assert step.category == "mixed"
-    assert step.expected_maneuver == "Сначала уменьшить KOP, затем локально отвести ствол"
+    assert step.expected_maneuver == MANEUVER_POSTENTRY_TURN
 
 
 def test_cluster_action_steps_keep_worst_sf_first_and_preserve_order_label() -> None:
