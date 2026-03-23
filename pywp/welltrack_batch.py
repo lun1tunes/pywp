@@ -47,6 +47,9 @@ class DynamicClusterExecutionContext:
     initial_successes: tuple["SuccessfulWellPlan", ...]
 
 
+_MAX_DYNAMIC_CLUSTER_PASSES = 3
+
+
 @dataclass(frozen=True)
 class BatchEvaluationMetadata:
     executed_well_names: tuple[str, ...] = ()
@@ -127,6 +130,9 @@ def rebuild_optimization_context(
         references=tuple(references),
         prefer_lower_kop=bool(context.prefer_lower_kop),
         prefer_higher_build1=bool(context.prefer_higher_build1),
+        prefer_keep_kop=bool(context.prefer_keep_kop),
+        prefer_keep_build1=bool(context.prefer_keep_build1),
+        prefer_adjust_build2=bool(context.prefer_adjust_build2),
     )
 
 
@@ -184,6 +190,7 @@ class WelltrackBatchPlanner:
             selected_order=selected_order,
         )
         total = len(selected_records)
+        total_planned_steps = int(total)
         selected_records_by_name = {
             str(record.name): record for record in selected_records
         }
@@ -204,8 +211,36 @@ class WelltrackBatchPlanner:
         cluster_resolved_early = False
         cluster_blocked = False
         cluster_blocking_reason: str | None = None
+        dynamic_cluster_pass_count = 1 if dynamic_cluster_context is not None else 0
+        previous_cluster_score = self._initial_cluster_score(dynamic_cluster_context)
 
-        while remaining_selected_names:
+        while remaining_selected_names or dynamic_cluster_context is not None:
+            if not remaining_selected_names:
+                reseed_names, reseed_reason, reseed_resolved, current_cluster_score = (
+                    self._extend_dynamic_cluster_queue(
+                        selected_records_by_name=selected_records_by_name,
+                        dynamic_cluster_context=dynamic_cluster_context,
+                        recalculated_success_by_name=recalculated_success_by_name,
+                        previous_cluster_score=previous_cluster_score,
+                        dynamic_cluster_pass_count=dynamic_cluster_pass_count,
+                    )
+                )
+                if current_cluster_score is not None:
+                    previous_cluster_score = current_cluster_score
+                if reseed_names:
+                    remaining_selected_names.extend(reseed_names)
+                    dynamic_cluster_pass_count += 1
+                    total_planned_steps = max(
+                        int(total_planned_steps),
+                        int(len(executed_well_names) + len(remaining_selected_names)),
+                    )
+                else:
+                    if reseed_resolved:
+                        cluster_resolved_early = True
+                    elif reseed_reason:
+                        cluster_blocked = True
+                        cluster_blocking_reason = str(reseed_reason)
+                    break
             dynamic_cluster_plan, pruned_names = self._refresh_dynamic_cluster_plan(
                 remaining_selected_names=remaining_selected_names,
                 dynamic_cluster_context=dynamic_cluster_context,
@@ -229,6 +264,7 @@ class WelltrackBatchPlanner:
             if not remaining_selected_names:
                 break
             index = len(executed_well_names) + 1
+            total = max(int(total_planned_steps), int(index))
             record, runtime_override = self._next_record_for_evaluation(
                 selected_records_by_name=selected_records_by_name,
                 remaining_selected_names=remaining_selected_names,
@@ -346,6 +382,51 @@ class WelltrackBatchPlanner:
             int(cluster.recommendation_count) for cluster in relevant_clusters
         )
         return worst_sf, max_overlap, recommendation_count
+
+    @staticmethod
+    def _initial_cluster_score(
+        dynamic_cluster_context: DynamicClusterExecutionContext | None,
+    ) -> tuple[float, float, int] | None:
+        if dynamic_cluster_context is None:
+            return None
+        success_by_name = {
+            str(item.name): item for item in dynamic_cluster_context.initial_successes
+        }
+        if not success_by_name:
+            return None
+        return WelltrackBatchPlanner._cluster_anticollision_score(
+            success_by_name=success_by_name,
+            dynamic_cluster_context=dynamic_cluster_context,
+        )
+
+    @staticmethod
+    def _cluster_score_improved(
+        *,
+        current_score: tuple[float, float, int] | None,
+        previous_score: tuple[float, float, int] | None,
+    ) -> bool:
+        if current_score is None:
+            return False
+        if previous_score is None:
+            return True
+        current_sf, current_overlap, current_count = current_score
+        previous_sf, previous_overlap, previous_count = previous_score
+        sf_tolerance = 1e-3
+        overlap_tolerance = 1e-3
+        if current_sf > previous_sf + sf_tolerance:
+            return True
+        if (
+            abs(current_sf - previous_sf) <= sf_tolerance
+            and current_overlap < previous_overlap - overlap_tolerance
+        ):
+            return True
+        if (
+            abs(current_sf - previous_sf) <= sf_tolerance
+            and abs(current_overlap - previous_overlap) <= overlap_tolerance
+            and current_count < previous_count
+        ):
+            return True
+        return False
 
     @staticmethod
     def _well_local_anticollision_score(
@@ -667,6 +748,80 @@ class WelltrackBatchPlanner:
                 remaining_selected_names.remove(str(name))
             return plan, cluster_scoped_remaining
         return plan, ()
+
+    @staticmethod
+    def _extend_dynamic_cluster_queue(
+        *,
+        selected_records_by_name: Mapping[str, WelltrackRecord],
+        dynamic_cluster_context: DynamicClusterExecutionContext | None,
+        recalculated_success_by_name: Mapping[str, SuccessfulWellPlan],
+        previous_cluster_score: tuple[float, float, int] | None,
+        dynamic_cluster_pass_count: int,
+    ) -> tuple[tuple[str, ...], str | None, bool, tuple[float, float, int] | None]:
+        if dynamic_cluster_context is None:
+            return (), None, False, previous_cluster_score
+        if dynamic_cluster_pass_count >= _MAX_DYNAMIC_CLUSTER_PASSES:
+            return (
+                (),
+                (
+                    "Cluster-level anti-collision пересчет достиг лимита проходов "
+                    f"({_MAX_DYNAMIC_CLUSTER_PASSES}). Нужен новый запуск или ручная корректировка."
+                ),
+                False,
+                previous_cluster_score,
+            )
+        current_success_by_name = {
+            str(item.name): item for item in dynamic_cluster_context.initial_successes
+        }
+        current_success_by_name.update(recalculated_success_by_name)
+        current_cluster_score = WelltrackBatchPlanner._cluster_anticollision_score(
+            success_by_name=current_success_by_name,
+            dynamic_cluster_context=dynamic_cluster_context,
+        )
+        if dynamic_cluster_pass_count > 0 and not WelltrackBatchPlanner._cluster_score_improved(
+            current_score=current_cluster_score,
+            previous_score=previous_cluster_score,
+        ):
+            return (
+                (),
+                (
+                    "Следующий cluster-level проход не дал заметного улучшения SF/overlap. "
+                    "Автоматический пересчет остановлен."
+                ),
+                False,
+                current_cluster_score,
+            )
+        plan = build_dynamic_cluster_execution_plan(
+            successes=list(current_success_by_name.values()),
+            selected_names=set(selected_records_by_name),
+            target_well_names=dynamic_cluster_context.target_well_names,
+            uncertainty_model=dynamic_cluster_context.uncertainty_model,
+        )
+        if plan is None:
+            return (), None, False, current_cluster_score
+        resolution_state = str(plan.resolution_state).strip()
+        if resolution_state == DYNAMIC_CLUSTER_PLAN_RESOLVED:
+            return (), None, True, current_cluster_score
+        if resolution_state == DYNAMIC_CLUSTER_PLAN_BLOCKED:
+            return (
+                (),
+                str(plan.blocking_reason).strip() if plan.blocking_reason is not None else None,
+                False,
+                current_cluster_score,
+            )
+        pending_names = tuple(
+            str(name)
+            for name in plan.ordered_well_names
+            if str(name) in selected_records_by_name
+        )
+        if not pending_names:
+            return (
+                (),
+                "Для следующего cluster-level прохода не осталось скважин в текущем наборе выбора.",
+                False,
+                current_cluster_score,
+            )
+        return pending_names, None, False, current_cluster_score
 
     @staticmethod
     def _resolve_optimization_context(

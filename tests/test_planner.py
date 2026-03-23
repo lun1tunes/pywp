@@ -866,7 +866,95 @@ def test_anti_collision_candidate_can_prefer_higher_build1_for_early_maneuver_co
     assert result.params == stronger_build1_candidate
 
 
-def test_anti_collision_early_stage_caps_local_starts(
+def test_anti_collision_candidate_can_keep_early_profile_for_late_maneuver_context(
+    monkeypatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    stable_candidate = ProfileParameters(
+        kop_vertical_m=700.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=50.0,
+        dls_build1_deg_per_30m=4.2,
+        dls_build2_deg_per_30m=2.8,
+        build1_length_m=280.0,
+        hold_length_m=420.0,
+        build2_length_m=210.0,
+        horizontal_length_m=1210.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1100.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=38.0,
+        azimuth_entry_deg=67.0,
+    )
+    drifted_candidate = ProfileParameters(
+        kop_vertical_m=980.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=50.0,
+        dls_build1_deg_per_30m=2.7,
+        dls_build2_deg_per_30m=2.8,
+        build1_length_m=280.0,
+        hold_length_m=420.0,
+        build2_length_m=210.0,
+        horizontal_length_m=1210.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1100.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=38.0,
+        azimuth_entry_deg=67.0,
+    )
+    config = _fast_config(optimization_mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE)
+    bounds = (
+        (0.0, 1.0),
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+    context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=3900.0,
+        candidate_md_end_m=4300.0,
+        sf_target=1.0,
+        sample_step_m=50.0,
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        references=(),
+        prefer_keep_kop=True,
+        prefer_keep_build1=True,
+    )
+
+    monkeypatch.setattr(
+        planner_module,
+        "evaluate_candidate_anti_collision_clearance",
+        lambda **kwargs: AntiCollisionClearanceEvaluation(
+            min_separation_factor=1.05,
+            max_overlap_depth_m=0.0,
+        ),
+    )
+
+    result = planner_module._select_anti_collision_candidate(
+        candidates=[stable_candidate, drifted_candidate],
+        surface=Point3D(0.0, 0.0, 0.0),
+        config=config,
+        optimization_context=context,
+        zero_azimuth_turn=False,
+        lower_dls_deg_per_30m=0.1,
+        upper_dls_deg_per_30m=6.0,
+        bounds=bounds,
+        profile_builder=lambda values: None,
+        target_point=np.zeros(3, dtype=float),
+        search_settings=planner_module._turn_search_settings(0),
+        split_build=True,
+    )
+
+    assert result.params == stable_candidate
+
+
+def test_anti_collision_early_stage_uses_reduced_kop_build1_search(
     monkeypatch,
 ) -> None:
     import pywp.planner as planner_module
@@ -917,14 +1005,6 @@ def test_anti_collision_early_stage_caps_local_starts(
             max_overlap_depth_m=5.0,
         ),
     )
-    monkeypatch.setattr(
-        planner_module,
-        "_collect_optimization_seed_vectors",
-        lambda **kwargs: [
-            np.array([0.1 + 0.01 * index, 0.2 + 0.01 * index, 700.0, 50.0, 400.0, 38.0], dtype=float)
-            for index in range(20)
-        ],
-    )
     minimize_calls: list[np.ndarray] = []
 
     def _fake_minimize(*, fun, x0, method, bounds, constraints, options):
@@ -952,9 +1032,10 @@ def test_anti_collision_early_stage_caps_local_starts(
         split_build=True,
     )
 
-    assert result.optimization.runs_used == planner_module.EARLY_ANTI_COLLISION_MAX_STARTS
-    assert len(minimize_calls) == planner_module.EARLY_ANTI_COLLISION_MAX_STARTS
-    assert result.optimization.status == "seed_selected"
+    assert result.optimization.runs_used == len(minimize_calls)
+    assert 1 <= len(minimize_calls) <= planner_module.EARLY_ANTI_COLLISION_MAX_STARTS
+    assert all(call.shape == (2,) for call in minimize_calls)
+    assert result.optimization.status in {"seed_selected", "clearance_improved"}
 
 
 def test_md_optimization_2d_refinement_can_improve_total_md_when_boundary_stage_is_unavailable(

@@ -88,6 +88,8 @@ ANTI_COLLISION_SF_TOLERANCE = 1e-3
 ANTI_COLLISION_OBJECTIVE_PENALTY = 1_000.0
 ANTI_COLLISION_KOP_PREFERENCE_WEIGHT = 0.25
 ANTI_COLLISION_BUILD1_PREFERENCE_WEIGHT = 0.20
+ANTI_COLLISION_KEEP_KOP_WEIGHT = 0.60
+ANTI_COLLISION_KEEP_BUILD1_WEIGHT = 0.50
 ANTI_COLLISION_SAMPLE_STEP_M = 50.0
 ANTI_COLLISION_MAX_STARTS = 12
 ANTI_COLLISION_MAXITER = 72
@@ -819,6 +821,55 @@ def _default_candidate_sort_key(candidate: ProfileParameters) -> tuple[float, fl
     )
 
 
+def _collect_early_anti_collision_stage_candidates(
+    *,
+    baseline_vector: np.ndarray,
+    bounds: tuple[tuple[float, float], ...],
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+    split_build: bool,
+) -> list[ProfileParameters]:
+    kop_index = 2 if split_build else 1
+    build1_units = (1.0, 0.85, 0.7)
+    kop_fractions = (0.0, 0.15, 0.30, 0.45)
+    kop_lower = float(bounds[kop_index][0])
+    kop_upper = float(bounds[kop_index][1])
+    kop_span = max(kop_upper - kop_lower, 1.0)
+    candidates: list[ProfileParameters] = []
+    seen: set[tuple[float, float, float]] = set()
+    for build1_unit in build1_units:
+        for kop_fraction in kop_fractions:
+            values = np.asarray(baseline_vector, dtype=float).copy()
+            values[0] = float(np.clip(build1_unit, bounds[0][0], bounds[0][1]))
+            values[kop_index] = float(
+                np.clip(
+                    kop_lower + kop_fraction * kop_span,
+                    bounds[kop_index][0],
+                    bounds[kop_index][1],
+                )
+            )
+            evaluation = _evaluate_candidate_for_optimization(
+                values=values,
+                profile_builder=profile_builder,
+                target_point=target_point,
+                config=config,
+            )
+            if not evaluation.feasible or evaluation.candidate is None:
+                continue
+            candidate = evaluation.candidate
+            key = (
+                round(float(candidate.dls_build1_deg_per_30m), 6),
+                round(float(candidate.kop_vertical_m), 6),
+                round(float(candidate.md_total_m), 6),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
+    return candidates
+
+
 def _optimization_objective_value(candidate: ProfileParameters, mode: str) -> float:
     if mode == OPTIMIZATION_MINIMIZE_MD:
         return float(candidate.md_total_m)
@@ -1068,11 +1119,33 @@ def _select_anti_collision_candidate(
         )
     )
     optimization_seed_vectors = _dedupe_seed_vectors(seed_vectors)
+    optimized_candidates: list[ProfileParameters] = list(ranked)
     if early_anti_collision_stage:
-        optimization_seed_vectors = optimization_seed_vectors[:EARLY_ANTI_COLLISION_MAX_STARTS]
+        optimized_candidates.extend(
+            _collect_early_anti_collision_stage_candidates(
+                baseline_vector=baseline_vector,
+                bounds=active_bounds,
+                profile_builder=active_profile_builder,
+                target_point=target_point,
+                config=config,
+                split_build=split_build,
+            )
+        )
+        optimization_seed_vectors = _dedupe_seed_vectors(
+            [
+                _candidate_to_search_vector(
+                    candidate=item,
+                    zero_azimuth_turn=zero_azimuth_turn,
+                    lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+                    upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+                    bounds=active_bounds,
+                    split_build=split_build,
+                )
+                for item in optimized_candidates[: max(OPTIMIZATION_MAX_SEEDS, 1)]
+            ]
+        )[:EARLY_ANTI_COLLISION_MAX_STARTS]
     else:
         optimization_seed_vectors = optimization_seed_vectors[:ANTI_COLLISION_MAX_STARTS]
-    optimized_candidates: list[ProfileParameters] = list(ranked)
     runs_used = 0
 
     eval_cache: dict[
@@ -1146,10 +1219,47 @@ def _select_anti_collision_candidate(
                 * max(float(active_bounds[0][1]) - float(values[0]), 0.0)
                 / build1_span
             )
+        keep_kop_penalty = 0.0
+        if bool(optimization_context.prefer_keep_kop):
+            kop_span = max(
+                float(active_bounds[kop_bound_index][1])
+                - float(active_bounds[kop_bound_index][0]),
+                1.0,
+            )
+            keep_kop_penalty = (
+                ANTI_COLLISION_KEEP_KOP_WEIGHT
+                * (
+                    max(
+                        abs(
+                            float(values[kop_bound_index])
+                            - float(baseline_vector[kop_bound_index])
+                        ),
+                        0.0,
+                    )
+                    / kop_span
+                )
+                ** 2
+            )
+        keep_build1_penalty = 0.0
+        if bool(optimization_context.prefer_keep_build1):
+            build1_span = max(
+                float(active_bounds[0][1]) - float(active_bounds[0][0]),
+                1e-6,
+            )
+            keep_build1_penalty = (
+                ANTI_COLLISION_KEEP_BUILD1_WEIGHT
+                * (
+                    max(abs(float(values[0]) - float(baseline_vector[0])), 0.0)
+                    / build1_span
+                )
+                ** 2
+            )
         return (
             ANTI_COLLISION_OBJECTIVE_PENALTY * deficit * deficit
             + kop_preference
             + build1_preference
+            + keep_kop_penalty
+            + keep_build1_penalty
             + deviation
             + 1e-4 * float(base_eval.md_total_m)
         )
@@ -1178,37 +1288,111 @@ def _select_anti_collision_candidate(
             ),
             0.97,
         )
-    for seed_vector in optimization_seed_vectors:
-        seed = _clip_to_bounds(seed_vector, bounds=active_bounds)
-        runs_used += 1
-        result = minimize(
-            fun=objective,
-            x0=seed,
-            method="SLSQP",
-            bounds=list(active_bounds),
-            constraints=constraints,
-            options={
-                "maxiter": int(maxiter),
-                "ftol": 1e-8,
-                "disp": False,
-            },
-        )
-        probes = [seed]
-        if np.all(np.isfinite(result.x)):
-            probes.append(
-                _clip_to_bounds(np.asarray(result.x, dtype=float), bounds=active_bounds)
+    if early_anti_collision_stage:
+        reduced_bounds = [active_bounds[0], active_bounds[kop_bound_index]]
+        for seed_vector in optimization_seed_vectors:
+            base_seed = _clip_to_bounds(seed_vector, bounds=active_bounds)
+            reduced_seed = np.asarray(
+                [float(base_seed[0]), float(base_seed[kop_bound_index])],
+                dtype=float,
             )
-        for probe in probes:
-            base_eval, clearance = evaluate(probe)
-            if not base_eval.feasible or base_eval.candidate is None or clearance is None:
-                continue
-            optimized_candidates.append(base_eval.candidate)
-            clearance_cache[candidate_key(base_eval.candidate)] = clearance
 
-        current_best = min(optimized_candidates, key=anti_collision_sort_key)
-        current_clearance = clearance_for_candidate(current_best)
-        if float(current_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
-            break
+            def expand_reduced(values_2d: np.ndarray) -> np.ndarray:
+                expanded = np.asarray(base_seed, dtype=float).copy()
+                expanded[0] = float(values_2d[0])
+                expanded[kop_bound_index] = float(values_2d[1])
+                return _clip_to_bounds(expanded, bounds=active_bounds)
+
+            runs_used += 1
+            result = minimize(
+                fun=lambda values_2d: objective(expand_reduced(np.asarray(values_2d, dtype=float))),
+                x0=reduced_seed,
+                method="SLSQP",
+                bounds=list(reduced_bounds),
+                constraints=[
+                    {
+                        "type": "ineq",
+                        "fun": lambda values_2d: evaluate(
+                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        )[0].t1_margin_m,
+                    },
+                    {
+                        "type": "ineq",
+                        "fun": lambda values_2d: evaluate(
+                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        )[0].build1_margin_m,
+                    },
+                    {
+                        "type": "ineq",
+                        "fun": lambda values_2d: evaluate(
+                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        )[0].build2_margin_m,
+                    },
+                    {
+                        "type": "ineq",
+                        "fun": lambda values_2d: evaluate(
+                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        )[0].max_inc_margin_deg,
+                    },
+                    {
+                        "type": "ineq",
+                        "fun": lambda values_2d: evaluate(
+                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        )[0].horizontal_dls_margin_deg_per_30m,
+                    },
+                ],
+                options={
+                    "maxiter": int(maxiter),
+                    "ftol": 1e-8,
+                    "disp": False,
+                },
+            )
+            probes = [expand_reduced(reduced_seed)]
+            if np.all(np.isfinite(result.x)):
+                probes.append(expand_reduced(np.asarray(result.x, dtype=float)))
+            for probe in probes:
+                base_eval, clearance = evaluate(probe)
+                if not base_eval.feasible or base_eval.candidate is None or clearance is None:
+                    continue
+                optimized_candidates.append(base_eval.candidate)
+                clearance_cache[candidate_key(base_eval.candidate)] = clearance
+
+            current_best = min(optimized_candidates, key=anti_collision_sort_key)
+            current_clearance = clearance_for_candidate(current_best)
+            if float(current_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
+                break
+    else:
+        for seed_vector in optimization_seed_vectors:
+            seed = _clip_to_bounds(seed_vector, bounds=active_bounds)
+            runs_used += 1
+            result = minimize(
+                fun=objective,
+                x0=seed,
+                method="SLSQP",
+                bounds=list(active_bounds),
+                constraints=constraints,
+                options={
+                    "maxiter": int(maxiter),
+                    "ftol": 1e-8,
+                    "disp": False,
+                },
+            )
+            probes = [seed]
+            if np.all(np.isfinite(result.x)):
+                probes.append(
+                    _clip_to_bounds(np.asarray(result.x, dtype=float), bounds=active_bounds)
+                )
+            for probe in probes:
+                base_eval, clearance = evaluate(probe)
+                if not base_eval.feasible or base_eval.candidate is None or clearance is None:
+                    continue
+                optimized_candidates.append(base_eval.candidate)
+                clearance_cache[candidate_key(base_eval.candidate)] = clearance
+
+            current_best = min(optimized_candidates, key=anti_collision_sort_key)
+            current_clearance = clearance_for_candidate(current_best)
+            if float(current_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
+                break
 
     selected = min(optimized_candidates, key=anti_collision_sort_key)
     selected_clearance = clearance_for_candidate(selected)

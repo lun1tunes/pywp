@@ -20,6 +20,10 @@ from pywp.anticollision_rerun import (
     build_dynamic_cluster_execution_plan,
 )
 from pywp.anticollision_recommendations import build_anti_collision_recommendations
+from pywp.anticollision_recommendations import (
+    AntiCollisionClusterActionStep,
+    AntiCollisionRecommendationCluster,
+)
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
@@ -568,6 +572,8 @@ def test_batch_planner_dynamic_cluster_context_recomputes_execution_order_per_st
         ),
     ]
 
+    calls = {"count": 0}
+
     def fake_dynamic_plan(
         *,
         successes,
@@ -575,7 +581,8 @@ def test_batch_planner_dynamic_cluster_context_recomputes_execution_order_per_st
         target_well_names,
         uncertainty_model,
     ):
-        if "WELL-A" in selected_names:
+        calls["count"] += 1
+        if calls["count"] == 1:
             return DynamicClusterExecutionPlan(
                 cluster=type("Cluster", (), {"cluster_id": "ac-cluster-001"})(),
                 ordered_well_names=("WELL-A", "WELL-B"),
@@ -591,16 +598,24 @@ def test_batch_planner_dynamic_cluster_context_recomputes_execution_order_per_st
                 },
                 skipped_wells=(),
             )
+        if calls["count"] == 2:
+            return DynamicClusterExecutionPlan(
+                cluster=type("Cluster", (), {"cluster_id": "ac-cluster-001"})(),
+                ordered_well_names=("WELL-B",),
+                prepared_by_well={
+                    "WELL-B": {
+                        "update_fields": {"optimization_mode": "minimize_kop"},
+                        "optimization_context": None,
+                    }
+                },
+                skipped_wells=(),
+            )
         return DynamicClusterExecutionPlan(
-            cluster=type("Cluster", (), {"cluster_id": "ac-cluster-001"})(),
-            ordered_well_names=("WELL-B",),
-            prepared_by_well={
-                "WELL-B": {
-                    "update_fields": {"optimization_mode": "minimize_kop"},
-                    "optimization_context": None,
-                }
-            },
+            cluster=None,
+            ordered_well_names=(),
+            prepared_by_well={},
             skipped_wells=(),
+            resolution_state="resolved",
         )
 
     monkeypatch.setattr(
@@ -721,6 +736,149 @@ def test_build_dynamic_cluster_execution_plan_uses_real_cluster_filtering() -> N
     assert plan.cluster is not None
     assert set(plan.cluster.well_names) == {"WELL-A", "WELL-B"}
     assert set(plan.ordered_well_names).issubset({"WELL-A", "WELL-B"})
+
+
+def test_build_dynamic_cluster_execution_plan_stages_mixed_and_trajectory_frontier(
+    monkeypatch,
+) -> None:
+    import pywp.anticollision_rerun as rerun_module
+
+    successes = [
+        SuccessfulWellPlan(
+            name="well_02",
+            surface={"x": 0.0, "y": 0.0, "z": 0.0},
+            t1={"x": 1000.0, "y": 0.0, "z": 2000.0},
+            t3={"x": 2000.0, "y": 0.0, "z": 2200.0},
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [0.0, 1000.0, 2000.0],
+                    "INC_deg": [0.0, 60.0, 85.0],
+                    "AZI_deg": [0.0, 45.0, 45.0],
+                    "X_m": [0.0, 700.0, 2000.0],
+                    "Y_m": [0.0, 300.0, 0.0],
+                    "Z_m": [0.0, 1800.0, 2200.0],
+                    "segment": ["VERTICAL", "BUILD1", "BUILD2"],
+                }
+            ),
+            summary={"md_total_m": 2200.0, "trajectory_target_direction": "Цели в одном направлении"},
+            azimuth_deg=45.0,
+            md_t1_m=1800.0,
+            config=TrajectoryConfig(),
+        ),
+        SuccessfulWellPlan(
+            name="well_05",
+            surface={"x": 0.0, "y": 0.0, "z": 0.0},
+            t1={"x": 900.0, "y": 100.0, "z": 2000.0},
+            t3={"x": 2100.0, "y": 200.0, "z": 2200.0},
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [0.0, 1000.0, 2000.0],
+                    "INC_deg": [0.0, 55.0, 84.0],
+                    "AZI_deg": [0.0, 42.0, 42.0],
+                    "X_m": [0.0, 650.0, 2100.0],
+                    "Y_m": [0.0, 280.0, 200.0],
+                    "Z_m": [0.0, 1750.0, 2200.0],
+                    "segment": ["VERTICAL", "BUILD1", "BUILD2"],
+                }
+            ),
+            summary={"md_total_m": 2200.0, "trajectory_target_direction": "Цели в одном направлении"},
+            azimuth_deg=42.0,
+            md_t1_m=1750.0,
+            config=TrajectoryConfig(),
+        ),
+    ]
+
+    cluster = AntiCollisionRecommendationCluster(
+        cluster_id="ac-cluster-001",
+        well_names=("well_01", "well_02", "well_03", "well_04", "well_05"),
+        recommendations=(),
+        recommendation_count=4,
+        target_conflict_count=0,
+        vertical_conflict_count=3,
+        trajectory_conflict_count=1,
+        worst_separation_factor=0.29,
+        summary="cluster",
+        detail="detail",
+        expected_maneuver="mixed",
+        blocking_advisory=None,
+        rerun_order_label="well_02 → well_05 → well_04",
+        first_rerun_well="well_02",
+        first_rerun_maneuver="mixed",
+        action_steps=(
+            AntiCollisionClusterActionStep(
+                order_rank=1,
+                well_name="well_02",
+                category="mixed",
+                optimization_mode="anti_collision_avoidance",
+                expected_maneuver="mixed",
+                reason="r1",
+                related_recommendation_count=2,
+                worst_separation_factor=0.29,
+            ),
+            AntiCollisionClusterActionStep(
+                order_rank=2,
+                well_name="well_05",
+                category="trajectory_review",
+                optimization_mode="anti_collision_avoidance",
+                expected_maneuver="build2",
+                reason="r2",
+                related_recommendation_count=1,
+                worst_separation_factor=0.29,
+            ),
+            AntiCollisionClusterActionStep(
+                order_rank=3,
+                well_name="well_04",
+                category="reduce_kop",
+                optimization_mode="minimize_kop",
+                expected_maneuver="kop",
+                reason="r3",
+                related_recommendation_count=1,
+                worst_separation_factor=0.0,
+            ),
+        ),
+        can_prepare_rerun=True,
+        affected_wells=("well_02", "well_05", "well_04"),
+        action_label="prepare",
+    )
+    monkeypatch.setattr(
+        rerun_module,
+        "build_anti_collision_analysis_for_successes",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        rerun_module,
+        "build_anti_collision_recommendations",
+        lambda *args, **kwargs: (),
+    )
+    monkeypatch.setattr(
+        rerun_module,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (cluster,),
+    )
+    monkeypatch.setattr(
+        rerun_module,
+        "build_cluster_prepared_overrides",
+        lambda cluster, **kwargs: (
+            {
+                "well_02": {"update_fields": {"optimization_mode": "anti_collision_avoidance"}},
+                "well_05": {"update_fields": {"optimization_mode": "anti_collision_avoidance"}},
+                "well_04": {"update_fields": {"optimization_mode": "minimize_kop"}},
+            },
+            [],
+        ),
+    )
+
+    plan = build_dynamic_cluster_execution_plan(
+        successes=successes,
+        selected_names={"well_02", "well_05", "well_04"},
+        target_well_names=("well_02", "well_05", "well_04"),
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+    )
+
+    assert plan is not None
+    assert plan.resolution_state == DYNAMIC_CLUSTER_PLAN_ACTIVE
+    assert plan.ordered_well_names == ("well_02", "well_05")
+    assert set(plan.prepared_by_well) == {"well_02", "well_05"}
 
 
 def test_batch_planner_dynamic_cluster_context_stops_when_cluster_resolves_early(
@@ -1044,6 +1202,155 @@ def test_batch_planner_dynamic_cluster_context_stops_when_no_remaining_actionabl
     assert planner.last_evaluation_metadata.cluster_blocked is True
     assert planner.last_evaluation_metadata.skipped_selected_names == ("WELL-B",)
     assert "не нашел актуальных шагов" in str(
+        planner.last_evaluation_metadata.cluster_blocking_reason
+    ).lower()
+
+
+def test_batch_planner_dynamic_cluster_context_reseeds_second_cluster_pass(
+    monkeypatch,
+) -> None:
+    import pywp.welltrack_batch as batch_module
+
+    class _OrderCapturePlanner(_StubPlanner):
+        def __init__(self) -> None:
+            self.seen_names: list[str] = []
+
+        def plan(
+            self,
+            *,
+            surface: Any,
+            t1: Any,
+            t3: Any,
+            config: TrajectoryConfig,
+            optimization_context: Any = None,
+            progress_callback: Any = None,
+        ) -> PlannerResult:
+            self.seen_names.append(str(t1.x))
+            return super().plan(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+                config=config,
+                optimization_context=optimization_context,
+                progress_callback=progress_callback,
+            )
+
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+    calls = {"count": 0}
+
+    def fake_dynamic_plan(
+        *,
+        successes,
+        selected_names,
+        target_well_names,
+        uncertainty_model,
+    ):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return DynamicClusterExecutionPlan(
+                cluster=type("Cluster", (), {"cluster_id": "ac-cluster-001"})(),
+                ordered_well_names=("WELL-A",),
+                prepared_by_well={
+                    "WELL-A": {
+                        "update_fields": {
+                            "optimization_mode": "anti_collision_avoidance"
+                        },
+                        "optimization_context": None,
+                    }
+                },
+                skipped_wells=(),
+            )
+        if calls["count"] == 2:
+            return DynamicClusterExecutionPlan(
+                cluster=type("Cluster", (), {"cluster_id": "ac-cluster-001"})(),
+                ordered_well_names=("WELL-B",),
+                prepared_by_well={
+                    "WELL-B": {
+                        "update_fields": {
+                            "optimization_mode": "anti_collision_avoidance"
+                        },
+                        "optimization_context": None,
+                    }
+                },
+                skipped_wells=(),
+            )
+        if calls["count"] == 3:
+            return DynamicClusterExecutionPlan(
+                cluster=type("Cluster", (), {"cluster_id": "ac-cluster-001"})(),
+                ordered_well_names=("WELL-A",),
+                prepared_by_well={
+                    "WELL-A": {
+                        "update_fields": {
+                            "optimization_mode": "anti_collision_avoidance"
+                        },
+                        "optimization_context": None,
+                    }
+                },
+                skipped_wells=(),
+            )
+        if calls["count"] == 4:
+            return DynamicClusterExecutionPlan(
+                cluster=type("Cluster", (), {"cluster_id": "ac-cluster-001"})(),
+                ordered_well_names=("WELL-A",),
+                prepared_by_well={
+                    "WELL-A": {
+                        "update_fields": {
+                            "optimization_mode": "anti_collision_avoidance"
+                        },
+                        "optimization_context": None,
+                    }
+                },
+                skipped_wells=(),
+            )
+        return DynamicClusterExecutionPlan(
+            cluster=None,
+            ordered_well_names=(),
+            prepared_by_well={},
+            skipped_wells=(),
+            resolution_state="resolved",
+        )
+
+    monkeypatch.setattr(
+        batch_module,
+        "build_dynamic_cluster_execution_plan",
+        fake_dynamic_plan,
+    )
+
+    planner = WelltrackBatchPlanner(planner=_OrderCapturePlanner())
+    rows, successes = planner.evaluate(
+        records=records,
+        selected_names={"WELL-A", "WELL-B"},
+        selected_order=["WELL-A", "WELL-B"],
+        config=_fast_batch_config(),
+        dynamic_cluster_context=DynamicClusterExecutionContext(
+            target_well_names=("WELL-A", "WELL-B"),
+            uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+            initial_successes=(),
+        ),
+    )
+
+    assert len(rows) == 3
+    assert len(successes) == 3
+    assert planner._planner.seen_names == ["600.0", "650.0", "600.0"]
+    assert planner.last_evaluation_metadata.cluster_blocked is True
+    assert "не дал заметного улучшения" in str(
         planner.last_evaluation_metadata.cluster_blocking_reason
     ).lower()
 
@@ -1440,6 +1747,8 @@ def test_cluster_rerun_on_welltracks3_keeps_well02_anticollision_solution() -> N
             uncertainty_model=model,
         )
         assert plan is not None
+        if _ == 0:
+            assert plan.ordered_well_names[:2] == ("well_02", "well_05")
         config_by_name = {
             str(well_name): base_config.validated_copy(
                 **dict(payload.get("update_fields", {}))

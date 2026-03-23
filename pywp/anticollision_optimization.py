@@ -50,6 +50,9 @@ class AntiCollisionOptimizationContext:
     references: tuple[AntiCollisionReferencePath, ...]
     prefer_lower_kop: bool = False
     prefer_higher_build1: bool = False
+    prefer_keep_kop: bool = False
+    prefer_keep_build1: bool = False
+    prefer_adjust_build2: bool = False
 
 
 @dataclass(frozen=True)

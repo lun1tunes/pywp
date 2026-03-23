@@ -43,6 +43,7 @@ from pywp.anticollision_rerun import (
     build_anticollision_well_contexts as build_anticollision_well_contexts_shared,
     build_cluster_prepared_overrides as build_cluster_prepared_overrides_shared,
     build_prepared_optimization_context as build_prepared_optimization_context_shared,
+    build_recommendation_prepared_overrides as build_recommendation_prepared_overrides_shared,
     recommendation_intervals_for_moving_well as recommendation_intervals_for_moving_well_shared,
 )
 from pywp.eclipse_welltrack import (
@@ -510,6 +511,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_anticollision_prepared_cluster_id", "")
     st.session_state.setdefault("wt_prepared_recommendation_snapshot", None)
     st.session_state.setdefault("wt_last_anticollision_resolution", None)
+    st.session_state.setdefault("wt_last_anticollision_previous_successes", {})
 
 
 def _clear_results() -> None:
@@ -528,6 +530,7 @@ def _clear_results() -> None:
     st.session_state["wt_anticollision_prepared_cluster_id"] = ""
     st.session_state["wt_prepared_recommendation_snapshot"] = None
     st.session_state["wt_last_anticollision_resolution"] = None
+    st.session_state["wt_last_anticollision_previous_successes"] = {}
 
 
 def _focus_all_wells_anticollision_results() -> None:
@@ -714,9 +717,10 @@ def _all_wells_3d_figure(
                 name=f"{target_only.name}: цели (без траектории)",
                 legendgroup=str(target_only.name),
                 marker={
-                    "size": 6,
-                    "color": "rgba(255,255,255,0.65)",
-                    "line": {"width": 2, "color": line_color},
+                    "size": 10,
+                    "symbol": "cross",
+                    "color": line_color,
+                    "line": {"width": 3, "color": line_color},
                 },
                 customdata=customdata,
                 hovertemplate=(
@@ -872,9 +876,10 @@ def _all_wells_plan_figure(
                 mode="markers",
                 name=f"{target_only.name}: цели (без траектории)",
                 marker={
-                    "size": 8,
-                    "color": "rgba(255,255,255,0.70)",
-                    "line": {"width": 2, "color": line_color},
+                    "size": 12,
+                    "symbol": "x",
+                    "color": line_color,
+                    "line": {"width": 3, "color": line_color},
                 },
                 customdata=customdata,
                 hovertemplate=(
@@ -949,7 +954,10 @@ def _all_wells_plan_figure(
 
 
 def _all_wells_anticollision_3d_figure(
-    analysis: AntiCollisionAnalysis, height: int = 660
+    analysis: AntiCollisionAnalysis,
+    *,
+    previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    height: int = 660,
 ) -> go.Figure:
     fig = go.Figure()
     x_arrays: list[np.ndarray] = []
@@ -1033,6 +1041,41 @@ def _all_wells_anticollision_3d_figure(
                 customdata=_trajectory_hover_customdata(stations),
             )
         )
+        previous_success = (previous_successes_by_name or {}).get(str(well.name))
+        if previous_success is not None and not previous_success.stations.empty:
+            previous_stations = previous_success.stations
+            previous_x = previous_stations["X_m"].to_numpy(dtype=float)
+            previous_y = previous_stations["Y_m"].to_numpy(dtype=float)
+            previous_z = previous_stations["Z_m"].to_numpy(dtype=float)
+            fig.add_trace(
+                go.Scatter3d(
+                    x=previous_x,
+                    y=previous_y,
+                    z=previous_z,
+                    mode="lines",
+                    name=f"{well.name}: до anti-collision",
+                    legendgroup=str(well.name),
+                    showlegend=False,
+                    line={
+                        "width": 2.0,
+                        "color": _hex_to_rgba(str(well.color), 0.55),
+                        "dash": "dot",
+                    },
+                    customdata=np.column_stack(
+                        [previous_stations["MD_m"].to_numpy(dtype=float)]
+                    ),
+                    hovertemplate=(
+                        "X: %{x:.2f} m<br>"
+                        "Y: %{y:.2f} m<br>"
+                        "Z/TVD: %{z:.2f} m<br>"
+                        "MD: %{customdata[0]:.2f} m"
+                        "<extra>%{fullData.name}</extra>"
+                    ),
+                )
+            )
+            x_arrays.append(previous_x)
+            y_arrays.append(previous_y)
+            z_arrays.append(previous_z)
         fig.add_trace(
             _hover_proxy_trace_3d(
                 x_values=x_values,
@@ -1256,7 +1299,10 @@ def _all_wells_anticollision_3d_figure(
 
 
 def _all_wells_anticollision_plan_figure(
-    analysis: AntiCollisionAnalysis, height: int = 620
+    analysis: AntiCollisionAnalysis,
+    *,
+    previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    height: int = 620,
 ) -> go.Figure:
     fig = go.Figure()
     x_arrays: list[np.ndarray] = []
@@ -1305,6 +1351,37 @@ def _all_wells_anticollision_plan_figure(
                 customdata=np.column_stack([md_values]),
             )
         )
+        previous_success = (previous_successes_by_name or {}).get(str(well.name))
+        if previous_success is not None and not previous_success.stations.empty:
+            previous_stations = previous_success.stations
+            previous_x = previous_stations["X_m"].to_numpy(dtype=float)
+            previous_y = previous_stations["Y_m"].to_numpy(dtype=float)
+            fig.add_trace(
+                go.Scatter(
+                    x=previous_x,
+                    y=previous_y,
+                    mode="lines",
+                    name=f"{well.name}: до anti-collision",
+                    legendgroup=str(well.name),
+                    showlegend=False,
+                    line={
+                        "width": 2,
+                        "color": _hex_to_rgba(str(well.color), 0.55),
+                        "dash": "dot",
+                    },
+                    customdata=np.column_stack(
+                        [previous_stations["MD_m"].to_numpy(dtype=float)]
+                    ),
+                    hovertemplate=(
+                        "X: %{x:.2f} m<br>"
+                        "Y: %{y:.2f} m<br>"
+                        "MD: %{customdata[0]:.2f} m"
+                        "<extra>%{fullData.name}</extra>"
+                    ),
+                )
+            )
+            x_arrays.append(previous_x)
+            y_arrays.append(previous_y)
         fig.add_trace(
             go.Scatter(
                 x=[well.surface.x, well.t1.x, well.t3.x],
@@ -1441,6 +1518,12 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         uncertainty_model=uncertainty_model,
         records=records,
     )
+    previous_successes_by_name = {
+        str(name): value
+        for name, value in (
+            st.session_state.get("wt_last_anticollision_previous_successes") or {}
+        ).items()
+    }
     st.caption(
         f"Пресет: {uncertainty_preset_label(selected_preset)}. "
         f"{anti_collision_method_caption(uncertainty_model)}"
@@ -1457,11 +1540,17 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     chart_col1.plotly_chart(
-        _all_wells_anticollision_3d_figure(analysis),
+        _all_wells_anticollision_3d_figure(
+            analysis,
+            previous_successes_by_name=previous_successes_by_name,
+        ),
         width="stretch",
     )
     chart_col2.plotly_chart(
-        _all_wells_anticollision_plan_figure(analysis),
+        _all_wells_anticollision_plan_figure(
+            analysis,
+            previous_successes_by_name=previous_successes_by_name,
+        ),
         width="stretch",
     )
     _render_last_anticollision_resolution(current_preset=selected_preset)
@@ -1517,8 +1606,8 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
     st.caption(
         "Рекомендации делят конфликты на три класса: цели, vertical-участки и "
         "прочие траекторные пересечения. Автоподготовка пересчета сейчас включена "
-        "для vertical-кейсов и для pairwise trajectory-collision rerun одной "
-        "скважины относительно фиксированной reference-траектории."
+        "для vertical-кейсов и для trajectory-collision rerun обеих проектных "
+        "скважин пары с учетом остальных reference-cones куста."
     )
     st.dataframe(
         recommendation_df,
@@ -2352,36 +2441,19 @@ def _prepare_rerun_from_recommendation(
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
 ) -> None:
-    prepared: dict[str, dict[str, object]] = {}
-    skipped_wells: list[str] = []
-    snapshot = _recommendation_snapshot(recommendation)
-    success_by_name = {str(item.name): item for item in successes}
-    for suggestion in recommendation.override_suggestions:
-        update_fields = dict(suggestion.config_updates)
-        reference_name = (
-            str(recommendation.well_b)
-            if str(suggestion.well_name) == str(recommendation.well_a)
-            else str(recommendation.well_a)
+    prepared, skipped_wells, action_steps = _build_recommendation_prepared_overrides(
+        recommendation,
+        successes=successes,
+        uncertainty_model=uncertainty_model,
+    )
+    snapshot = dict(_recommendation_snapshot(recommendation))
+    if action_steps:
+        snapshot["action_steps"] = action_steps
+        snapshot["affected_wells"] = tuple(
+            str(dict(item).get("well_name", "")).strip()
+            for item in action_steps
+            if str(dict(item).get("well_name", "")).strip()
         )
-        optimization_context = _build_prepared_optimization_context(
-            recommendation=recommendation,
-            moving_success=success_by_name.get(str(suggestion.well_name)),
-            reference_success=success_by_name.get(reference_name),
-            uncertainty_model=uncertainty_model,
-        )
-        if (
-            str(update_fields.get("optimization_mode", "")).strip()
-            == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
-            and optimization_context is None
-        ):
-            skipped_wells.append(str(suggestion.well_name))
-            continue
-        prepared[str(suggestion.well_name)] = {
-            "update_fields": update_fields,
-            "source": recommendation_display_label(recommendation),
-            "reason": str(suggestion.reason),
-            "optimization_context": optimization_context,
-        }
     st.session_state["wt_prepared_well_overrides"] = prepared
     st.session_state["wt_prepared_recommendation_snapshot"] = snapshot if prepared else None
     if prepared:
@@ -2424,12 +2496,14 @@ def _build_prepared_optimization_context(
     moving_success: SuccessfulWellPlan | None,
     reference_success: SuccessfulWellPlan | None,
     uncertainty_model: PlanningUncertaintyModel,
+    all_successes: list[SuccessfulWellPlan] | None = None,
 ) -> AntiCollisionOptimizationContext | None:
     return build_prepared_optimization_context_shared(
         recommendation=recommendation,
         moving_success=moving_success,
         reference_success=reference_success,
         uncertainty_model=uncertainty_model,
+        all_successes=all_successes,
     )
 
 
@@ -2441,6 +2515,19 @@ def _build_cluster_prepared_overrides(
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
     return build_cluster_prepared_overrides_shared(
         cluster,
+        successes=successes,
+        uncertainty_model=uncertainty_model,
+    )
+
+
+def _build_recommendation_prepared_overrides(
+    recommendation: AntiCollisionRecommendation,
+    *,
+    successes: list[SuccessfulWellPlan],
+    uncertainty_model: PlanningUncertaintyModel,
+) -> tuple[dict[str, dict[str, object]], list[str], tuple[dict[str, object], ...]]:
+    return build_recommendation_prepared_overrides_shared(
+        recommendation,
         successes=successes,
         uncertainty_model=uncertainty_model,
     )
@@ -3289,9 +3376,20 @@ def _run_batch_if_clicked(
         selected_names=selected_set,
         current_successes=list(st.session_state.get("wt_successes") or ()),
     )
+    current_success_by_name = {
+        str(item.name): item for item in (st.session_state.get("wt_successes") or ())
+    }
     prepared_snapshot = dict(
         st.session_state.get("wt_prepared_recommendation_snapshot") or {}
     )
+    prepared_override_names = {
+        str(name)
+        for name in (st.session_state.get("wt_prepared_well_overrides") or {}).keys()
+    }
+    previous_anticollision_successes = {
+        str(name): current_success_by_name[str(name)]
+        for name in sorted(prepared_override_names.intersection(current_success_by_name))
+    }
     dynamic_cluster_context = None
     if str(prepared_snapshot.get("kind", "")).strip() == "cluster":
         target_well_names = _resolution_snapshot_well_names(prepared_snapshot)
@@ -3542,9 +3640,13 @@ def _run_batch_if_clicked(
                     uncertainty_preset=preset,
                 )
                 st.session_state["wt_last_anticollision_resolution"] = resolution
+                st.session_state["wt_last_anticollision_previous_successes"] = (
+                    previous_anticollision_successes
+                )
                 _focus_all_wells_anticollision_results()
             else:
                 st.session_state["wt_last_anticollision_resolution"] = None
+                st.session_state["wt_last_anticollision_previous_successes"] = {}
             st.session_state["wt_last_error"] = ""
             st.session_state["wt_last_run_at"] = datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S"

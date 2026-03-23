@@ -756,9 +756,14 @@ def test_recommendations_prepare_pairwise_anti_collision_rerun_for_trajectory_co
     recommendation = recommendations[0]
     assert recommendation.category == RECOMMENDATION_TRAJECTORY_REVIEW
     assert recommendation.can_prepare_rerun is True
-    assert recommendation.affected_wells == ("well_05",)
-    assert recommendation.override_suggestions[0].config_updates["optimization_mode"] == (
-        OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+    assert set(recommendation.affected_wells) == {"well_02", "well_05"}
+    assert len(recommendation.override_suggestions) == 2
+    assert {
+        str(item.well_name) for item in recommendation.override_suggestions
+    } == {"well_02", "well_05"}
+    assert all(
+        item.config_updates["optimization_mode"] == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+        for item in recommendation.override_suggestions
     )
     assert recommendation.expected_maneuver == "Pre-entry azimuth turn / сдвиг HOLD до t1"
     rows = anti_collision_recommendation_rows(recommendations)
@@ -824,7 +829,7 @@ def test_recommendations_switch_movable_well_after_one_side_already_used_anticol
     assert recommendations
     recommendation = recommendations[0]
     assert recommendation.category == RECOMMENDATION_TRAJECTORY_REVIEW
-    assert recommendation.affected_wells == ("well_05",)
+    assert set(recommendation.affected_wells) == {"well_02", "well_05"}
     assert recommendation.override_suggestions[0].well_name == "well_05"
 
 
@@ -920,9 +925,9 @@ def test_recommendation_clusters_merge_connected_pairs_into_single_cluster() -> 
     assert cluster.recommendation_count == 2
     assert cluster.trajectory_conflict_count == 2
     assert cluster.can_prepare_rerun is True
-    assert cluster.affected_wells == ("well_03",)
+    assert cluster.affected_wells == ("well_01", "well_02", "well_03")
     assert cluster.first_rerun_well == "well_03"
-    assert cluster.rerun_order_label == "well_03"
+    assert cluster.rerun_order_label == "well_03 → well_02 → well_01"
     assert cluster.action_steps[0].well_name == "well_03"
     assert cluster.action_steps[0].optimization_mode == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
     rows = cluster.recommendations
@@ -1391,6 +1396,10 @@ def test_cluster_action_steps_keep_worst_sf_first_and_preserve_order_label() -> 
 
     assert len(clusters) == 1
     cluster = clusters[0]
-    assert tuple(step.well_name for step in cluster.action_steps) == ("well_c", "well_a")
-    assert cluster.first_rerun_well == "well_c"
-    assert cluster.rerun_order_label == "well_c → well_a"
+    assert tuple(step.well_name for step in cluster.action_steps) == (
+        "well_a",
+        "well_c",
+        "well_b",
+    )
+    assert cluster.first_rerun_well == "well_a"
+    assert cluster.rerun_order_label == "well_a → well_c → well_b"

@@ -518,10 +518,32 @@ def _build_single_recommendation(
         well_context_by_name=well_context_by_name,
     )
     if movable_well is not None:
-        reference_well = (
+        secondary_well = (
             str(event.well_b)
             if str(movable_well) == str(event.well_a)
             else str(event.well_a)
+        )
+        override_suggestions = (
+            AntiCollisionWellOverrideSuggestion(
+                well_name=str(movable_well),
+                config_updates={
+                    "optimization_mode": OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+                },
+                reason=(
+                    f"Trajectory collision: подготовить anti-collision avoidance rerun "
+                    f"для {movable_well} на конфликтном интервале."
+                ),
+            ),
+            AntiCollisionWellOverrideSuggestion(
+                well_name=str(secondary_well),
+                config_updates={
+                    "optimization_mode": OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+                },
+                reason=(
+                    f"Trajectory collision: подготовить anti-collision avoidance rerun "
+                    f"для {secondary_well} как второй стороны пары."
+                ),
+            ),
         )
         return AntiCollisionRecommendation(
             recommendation_id=recommendation_id,
@@ -530,12 +552,14 @@ def _build_single_recommendation(
             priority_rank=int(event.priority_rank),
             category=RECOMMENDATION_TRAJECTORY_REVIEW,
             summary=(
-                f"Конфликт на криволинейном участке: подготовить pairwise anti-collision "
-                f"пересчет для {movable_well} относительно {reference_well}."
+                "Конфликт на криволинейном участке: подготовить anti-collision "
+                f"пересчет пары {movable_well} ↔ {secondary_well} с учетом "
+                "остальных конусов куста."
             ),
-        detail=(
-            "Для первого этапа используется controlled rerun одной скважины "
-            "с objective на улучшение separation factor на конфликтном окне."
+            detail=(
+                "Для trajectory-collision пересчет готовится сразу для обеих "
+                "проектных скважин пары, а optimization context учитывает "
+                "все актуальные reference-cones остальных скважин."
             ),
             expected_maneuver=_expected_trajectory_maneuver(
                 event=event,
@@ -545,19 +569,8 @@ def _build_single_recommendation(
             ),
             action_label="Подготовить anti-collision пересчет",
             can_prepare_rerun=True,
-            affected_wells=(str(movable_well),),
-            override_suggestions=(
-                AntiCollisionWellOverrideSuggestion(
-                    well_name=str(movable_well),
-                    config_updates={
-                        "optimization_mode": OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
-                    },
-                    reason=(
-                        f"Trajectory collision against {reference_well}: подготовить "
-                        "anti-collision avoidance rerun на конфликтном интервале."
-                    ),
-                ),
-            ),
+            affected_wells=(str(movable_well), str(secondary_well)),
+            override_suggestions=override_suggestions,
             classification=str(event.classification),
             area_label=_event_area_label(event),
             md_a_start_m=float(event.md_a_start_m),
