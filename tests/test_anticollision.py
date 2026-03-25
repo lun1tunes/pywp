@@ -387,6 +387,58 @@ def test_runtime_analysis_supports_reference_trajectory_wells_without_target_ove
     assert analysis.target_overlap_pair_count == 0
 
 
+def test_runtime_analysis_skips_reference_to_reference_pairs() -> None:
+    calculated_well = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    reference_actual = build_anti_collision_well(
+        name="FACT-1",
+        color="#6B7280",
+        stations=_straight_stations(y_offset_m=5.0),
+        surface=Point3D(0.0, 5.0, 0.0),
+        t1=None,
+        t3=None,
+        azimuth_deg=90.0,
+        md_t1_m=None,
+        include_display_geometry=False,
+        well_kind="actual",
+        is_reference_only=True,
+    )
+    reference_approved = build_anti_collision_well(
+        name="APP-1",
+        color="#C62828",
+        stations=_straight_stations(y_offset_m=6.0),
+        surface=Point3D(0.0, 6.0, 0.0),
+        t1=None,
+        t3=None,
+        azimuth_deg=90.0,
+        md_t1_m=None,
+        include_display_geometry=False,
+        well_kind="approved",
+        is_reference_only=True,
+    )
+
+    analysis = analyze_anti_collision(
+        [calculated_well, reference_actual, reference_approved],
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 2
+    compared_pairs = {
+        tuple(sorted((corridor.well_a, corridor.well_b)))
+        for corridor in analysis.corridors
+    }
+    assert ("APP-1", "FACT-1") not in compared_pairs
+
+
 def test_report_merges_adjacent_corridors_into_single_event() -> None:
     corridor_a = AntiCollisionCorridor(
         well_a="well_02",

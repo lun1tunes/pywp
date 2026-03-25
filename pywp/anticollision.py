@@ -228,6 +228,11 @@ def analyze_anti_collision(
     pair_count = 0
     for left_index in range(len(ordered_wells)):
         for right_index in range(left_index + 1, len(ordered_wells)):
+            if not _should_analyze_pair(
+                well_a=ordered_wells[left_index],
+                well_b=ordered_wells[right_index],
+            ):
+                continue
             pair_count += 1
             pair_corridors = _pair_overlap_corridors(
                 well_a=ordered_wells[left_index],
@@ -269,6 +274,13 @@ def analyze_anti_collision(
         overlapping_pair_count=int(len(pair_keys)),
         target_overlap_pair_count=int(len(target_pair_keys)),
         worst_separation_factor=worst_sf,
+    )
+
+
+def _should_analyze_pair(*, well_a: AntiCollisionWell, well_b: AntiCollisionWell) -> bool:
+    return not (
+        bool(well_a.is_reference_only)
+        and bool(well_b.is_reference_only)
     )
 
 
@@ -1293,108 +1305,6 @@ def _classify_pair_labels(*, label_a: str, label_b: str) -> tuple[str, int]:
     if label_a or label_b:
         return "target-trajectory", 1
     return "trajectory", 2
-
-
-def _display_radius_m(*, combined_radius_m: float, overlap_depth_m: float) -> float:
-    return float(
-        max(
-            12.0,
-            min(
-                0.35 * float(combined_radius_m),
-                10.0 + 0.75 * float(overlap_depth_m),
-            ),
-        )
-    )
-
-
-def _condense_pair_overlap_candidates(
-    candidates: list[AntiCollisionZone],
-) -> list[AntiCollisionZone]:
-    if not candidates:
-        return []
-
-    ordered = sorted(
-        candidates,
-        key=lambda zone: (
-            int(zone.priority_rank),
-            float(zone.separation_factor),
-            -float(zone.overlap_depth_m),
-        ),
-    )
-    condensed: list[AntiCollisionZone] = []
-    for priority_rank in (0, 1, 2):
-        group = [zone for zone in ordered if int(zone.priority_rank) == priority_rank]
-        if not group:
-            continue
-        clustered = _cluster_overlap_candidates(group)
-        max_zones = 2 if priority_rank < 2 else 3
-        condensed.extend(_limit_clustered_zones(clustered, max_zones=max_zones))
-    return condensed
-
-
-def _cluster_overlap_candidates(
-    candidates: list[AntiCollisionZone],
-) -> list[AntiCollisionZone]:
-    clustered: list[AntiCollisionZone] = []
-    for candidate in candidates:
-        hotspot = np.asarray(candidate.hotspot_xyz, dtype=float)
-        is_duplicate = False
-        for existing in clustered:
-            existing_hotspot = np.asarray(existing.hotspot_xyz, dtype=float)
-            cluster_radius = max(
-                250.0,
-                1.5 * float(candidate.display_radius_m + existing.display_radius_m),
-            )
-            if float(np.linalg.norm(hotspot - existing_hotspot)) <= float(cluster_radius):
-                is_duplicate = True
-                break
-        if not is_duplicate:
-            clustered.append(candidate)
-    return clustered
-
-
-def _limit_clustered_zones(
-    zones: list[AntiCollisionZone],
-    *,
-    max_zones: int,
-) -> list[AntiCollisionZone]:
-    if len(zones) <= int(max_zones):
-        return list(zones)
-
-    selected: list[AntiCollisionZone] = [zones[0]]
-    remaining = list(zones[1:])
-    while remaining and len(selected) < int(max_zones):
-        next_zone = max(
-            remaining,
-            key=lambda zone: (
-                _min_hotspot_distance(zone, selected),
-                float(zone.overlap_depth_m),
-                -float(zone.separation_factor),
-            ),
-        )
-        selected.append(next_zone)
-        remaining.remove(next_zone)
-    return selected
-
-
-def _min_hotspot_distance(
-    zone: AntiCollisionZone,
-    selected: list[AntiCollisionZone],
-) -> float:
-    hotspot = np.asarray(zone.hotspot_xyz, dtype=float)
-    distances = [
-        float(np.linalg.norm(hotspot - np.asarray(existing.hotspot_xyz, dtype=float)))
-        for existing in selected
-    ]
-    return min(distances) if distances else float("inf")
-
-
-def _priority_label(zone: AntiCollisionZone) -> str:
-    return _priority_label_from_parts(classification=zone.classification)
-
-
-def _zone_location_label(zone: AntiCollisionZone) -> str:
-    return _zone_location_label_from_parts(label_a=zone.label_a, label_b=zone.label_b)
 
 
 def _priority_label_from_parts(*, classification: str) -> str:
