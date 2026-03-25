@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Callable, Literal
+from typing import Callable, Iterable, Literal, Mapping
 
 from pydantic import field_validator
 from pywp.models import Point3D
@@ -11,6 +11,21 @@ from pywp.pydantic_base import FrozenModel, coerce_model_like
 _WELLTRACK_RE = re.compile(r"^\s*WELLTRACK\b(.*)$", flags=re.IGNORECASE)
 DEFAULT_WELLTRACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp1251", "latin-1")
 _MD_EPS = 1e-9
+_TABLE_POINT_ALIASES: dict[str, str] = {
+    "s": "wellhead",
+    "surface": "wellhead",
+    "wellhead": "wellhead",
+    "well_head": "wellhead",
+    "well head": "wellhead",
+    "wh": "wellhead",
+    "t1": "t1",
+    "entry": "t1",
+    "entry point": "t1",
+    "t3": "t3",
+    "target": "t3",
+    "end": "t3",
+}
+_TABLE_POINT_ORDER: tuple[str, ...] = ("wellhead", "t1", "t3")
 
 
 class WelltrackParseError(ValueError):
@@ -127,6 +142,77 @@ def parse_welltrack_text(text: str) -> list[WelltrackRecord]:
     return records
 
 
+def parse_welltrack_points_table(
+    rows: Iterable[Mapping[str, object]],
+) -> list[WelltrackRecord]:
+    grouped_points: dict[str, dict[str, WelltrackPoint]] = {}
+    well_order: list[str] = []
+    has_non_empty_row = False
+
+    for row_no, raw_row in enumerate(rows, start=1):
+        row = {str(key).strip().lower(): value for key, value in dict(raw_row).items()}
+
+        name_raw = _table_row_value(row, "wellname", "well", "name")
+        point_raw = _table_row_value(row, "point", "pointname", "point_name")
+        x_raw = _table_row_value(row, "x")
+        y_raw = _table_row_value(row, "y")
+        z_raw = _table_row_value(row, "z")
+
+        if all(_is_blank_table_value(value) for value in (name_raw, point_raw, x_raw, y_raw, z_raw)):
+            continue
+
+        has_non_empty_row = True
+        well_name = str(name_raw).strip()
+        if not well_name:
+            raise WelltrackParseError(
+                f"Табличный WELLTRACK: пустое имя скважины в строке {row_no}."
+            )
+
+        point_name = _normalize_table_point_name(point_raw, row_no=row_no)
+        x = _coerce_table_float(x_raw, field_name="X", row_no=row_no)
+        y = _coerce_table_float(y_raw, field_name="Y", row_no=row_no)
+        z = _coerce_table_float(z_raw, field_name="Z", row_no=row_no)
+
+        if well_name not in grouped_points:
+            grouped_points[well_name] = {}
+            well_order.append(well_name)
+
+        if point_name in grouped_points[well_name]:
+            raise WelltrackParseError(
+                "Табличный WELLTRACK: дублирующаяся точка "
+                f"'{point_name}' для скважины '{well_name}' в строке {row_no}."
+            )
+
+        md_index = float(_TABLE_POINT_ORDER.index(point_name))
+        grouped_points[well_name][point_name] = WelltrackPoint(
+            x=x,
+            y=y,
+            z=z,
+            md=md_index,
+        )
+
+    if not has_non_empty_row:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK пуст. Вставьте строки в формате "
+            "Wellname / Point / X / Y / Z."
+        )
+
+    records: list[WelltrackRecord] = []
+    for well_name in well_order:
+        points_by_name = grouped_points[well_name]
+        missing = [name for name in _TABLE_POINT_ORDER if name not in points_by_name]
+        if missing:
+            raise WelltrackParseError(
+                "Табличный WELLTRACK: для скважины "
+                f"'{well_name}' отсутствуют точки: {', '.join(missing)}."
+            )
+        ordered_points = tuple(points_by_name[name] for name in _TABLE_POINT_ORDER)
+        _validate_record_md(points=list(ordered_points), well_name=well_name)
+        records.append(WelltrackRecord(name=well_name, points=ordered_points))
+
+    return records
+
+
 def welltrack_points_to_targets(
     points: tuple[WelltrackPoint, ...],
     *,
@@ -169,6 +255,55 @@ def welltrack_points_to_targets(
         z=ordered_points[2].z,
     )
     return surface, t1, t3
+
+
+def _table_row_value(row: Mapping[str, object], *keys: str) -> object:
+    for key in keys:
+        if key in row:
+            return row[key]
+    return None
+
+
+def _is_blank_table_value(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return bool(math.isnan(value)) if isinstance(value, float) else False
+
+
+def _normalize_table_point_name(value: object, *, row_no: int) -> str:
+    if _is_blank_table_value(value):
+        raise WelltrackParseError(
+            f"Табличный WELLTRACK: пустое значение Point в строке {row_no}."
+        )
+    normalized = str(value).strip().lower()
+    point_name = _TABLE_POINT_ALIASES.get(normalized)
+    if point_name is None:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: unsupported Point="
+            f"{value!r} в строке {row_no}. "
+            "Ожидается wellhead, t1 или t3."
+        )
+    return point_name
+
+
+def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float:
+    if _is_blank_table_value(value):
+        raise WelltrackParseError(
+            f"Табличный WELLTRACK: пустое значение {field_name} в строке {row_no}."
+        )
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise WelltrackParseError(
+            f"Табличный WELLTRACK: {field_name} в строке {row_no} не является числом."
+        ) from exc
+    if not math.isfinite(number):
+        raise WelltrackParseError(
+            f"Табличный WELLTRACK: {field_name} в строке {row_no} должно быть конечным числом."
+        )
+    return number
 
 
 def _parse_well_name(rest: str, line_no: int) -> tuple[str, str]:

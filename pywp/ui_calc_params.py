@@ -16,7 +16,8 @@ from pywp.ui_utils import dls_to_pi, pi_to_dls
 _FLOAT_SUFFIXES: tuple[str, ...] = (
     "md_step",
     "md_control",
-    "pos_tol",
+    "lateral_tol",
+    "vertical_tol",
     "entry_inc_target",
     "entry_inc_tol",
     "max_inc",
@@ -35,7 +36,8 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
     return {
         "md_step": float(cfg.md_step_m),
         "md_control": float(cfg.md_step_control_m),
-        "pos_tol": float(cfg.pos_tolerance_m),
+        "lateral_tol": float(cfg.lateral_tolerance_m),
+        "vertical_tol": float(cfg.vertical_tolerance_m),
         "entry_inc_target": float(cfg.entry_inc_target_deg),
         "entry_inc_tol": float(cfg.entry_inc_tolerance_deg),
         "max_inc": float(cfg.max_inc_deg),
@@ -50,7 +52,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 7
+_DEFAULTS_SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,34 @@ def _setdefault_many(
                 st.session_state[key] = default_value
 
 
+def _migrate_legacy_tolerance_keys(prefix: str = "") -> bool:
+    migrated = False
+    legacy_keys = (
+        _state_key(prefix, "pos_tolerance_m"),
+        _state_key(prefix, "pos_tol"),
+    )
+    legacy_value: float | None = None
+    for legacy_key in legacy_keys:
+        if legacy_key in st.session_state:
+            if legacy_value is None:
+                try:
+                    legacy_value = float(st.session_state[legacy_key])
+                except (TypeError, ValueError):
+                    legacy_value = None
+            del st.session_state[legacy_key]
+            migrated = True
+    if legacy_value is not None:
+        lateral_key = _state_key(prefix, "lateral_tol")
+        vertical_key = _state_key(prefix, "vertical_tol")
+        if lateral_key not in st.session_state:
+            st.session_state[lateral_key] = float(legacy_value)
+        if vertical_key not in st.session_state:
+            st.session_state[vertical_key] = float(legacy_value)
+    return migrated
+
+
 def apply_calc_param_defaults(prefix: str = "", *, force: bool = False) -> None:
+    legacy_migrated = _migrate_legacy_tolerance_keys(prefix=prefix)
     defaults = calc_param_defaults()
     signature_key = _state_key(prefix, _DEFAULTS_SIGNATURE_KEY_SUFFIX)
     schema_key = _state_key(prefix, _DEFAULTS_SCHEMA_KEY_SUFFIX)
@@ -127,7 +156,7 @@ def apply_calc_param_defaults(prefix: str = "", *, force: bool = False) -> None:
     schema_changed = int(st.session_state.get(schema_key, 0)) < int(
         _DEFAULTS_SCHEMA_VERSION
     )
-    effective_force = bool(force or signature_changed or schema_changed)
+    effective_force = bool(force or signature_changed or schema_changed or legacy_migrated)
     _setdefault_many(prefixes=(prefix,), force=effective_force, defaults=defaults)
     st.session_state[signature_key] = current_signature
     st.session_state[schema_key] = int(_DEFAULTS_SCHEMA_VERSION)
@@ -163,7 +192,8 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
     return build_trajectory_config(
         md_step_m=float(_state_value(prefix, "md_step")),
         md_step_control_m=float(_state_value(prefix, "md_control")),
-        pos_tolerance_m=float(_state_value(prefix, "pos_tol")),
+        lateral_tolerance_m=float(_state_value(prefix, "lateral_tol")),
+        vertical_tolerance_m=float(_state_value(prefix, "vertical_tol")),
         entry_inc_target_deg=float(_state_value(prefix, "entry_inc_target")),
         entry_inc_tolerance_deg=float(_state_value(prefix, "entry_inc_tol")),
         max_inc_deg=float(_state_value(prefix, "max_inc")),
@@ -186,7 +216,7 @@ def render_calc_params_block(
     apply_calc_param_defaults(prefix=prefix, force=False)
     if title:
         st.markdown(f"### {title}")
-    c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7, gap="small")
     c1.number_input(
         "Шаг MD, м",
         key=_state_key(prefix, "md_step"),
@@ -202,13 +232,20 @@ def render_calc_params_block(
         help="Внутренний шаг проверки ограничений и качества решения.",
     )
     c3.number_input(
-        "Допуск по позиции, м",
-        key=_state_key(prefix, "pos_tol"),
+        "Допуск по латерали, м",
+        key=_state_key(prefix, "lateral_tol"),
         min_value=0.1,
-        step=0.1,
-        help="Максимально допустимый промах по t1 и t3.",
+        step=1.0,
+        help="Максимально допустимый горизонтальный промах по t1 и t3: sqrt(dX² + dY²).",
     )
     c4.number_input(
+        "Допуск по вертикали, м",
+        key=_state_key(prefix, "vertical_tol"),
+        min_value=0.1,
+        step=0.1,
+        help="Максимально допустимый вертикальный промах по t1 и t3: |dZ|.",
+    )
+    c5.number_input(
         "Целевой INC на t1, deg",
         key=_state_key(prefix, "entry_inc_target"),
         min_value=70.0,
@@ -216,7 +253,7 @@ def render_calc_params_block(
         step=0.5,
         help="Плановый угол входа в пласт в точке t1.",
     )
-    c5.number_input(
+    c6.number_input(
         "Допуск INC на t1, deg",
         key=_state_key(prefix, "entry_inc_tol"),
         min_value=0.1,
@@ -224,7 +261,7 @@ def render_calc_params_block(
         step=0.1,
         help="Допустимое отклонение от целевого INC в точке t1.",
     )
-    c6.number_input(
+    c7.number_input(
         "Макс INC по стволу, deg",
         key=_state_key(prefix, "max_inc"),
         min_value=80.0,

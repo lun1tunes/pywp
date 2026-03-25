@@ -8,6 +8,7 @@ from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackParseError,
     decode_welltrack_bytes,
+    parse_welltrack_points_table,
     parse_welltrack_text,
     welltrack_points_to_targets,
 )
@@ -104,3 +105,33 @@ def test_points_to_targets_requires_exactly_three_points() -> None:
     record = parse_welltrack_text(text)[0]
     with pytest.raises(ValueError, match="Expected exactly 3 points"):
         welltrack_points_to_targets(record.points)
+
+
+def test_parse_welltrack_points_table_accepts_tabular_rows() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-A", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "WELL-B", "Point": "s", "X": 10.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-B", "Point": "t1", "X": 620.0, "Y": 780.0, "Z": 2300.0},
+            {"Wellname": "WELL-B", "Point": "target", "X": 1520.0, "Y": 1980.0, "Z": 2400.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["WELL-A", "WELL-B"]
+    assert records[0].points[0].md == pytest.approx(0.0)
+    assert records[0].points[1].md == pytest.approx(1.0)
+    assert records[0].points[2].md == pytest.approx(2.0)
+    assert records[1].points[0].x == pytest.approx(10.0)
+    assert records[1].points[2].z == pytest.approx(2400.0)
+
+
+def test_parse_welltrack_points_table_rejects_missing_required_points() -> None:
+    with pytest.raises(WelltrackParseError, match="отсутствуют точки: t3"):
+        parse_welltrack_points_table(
+            [
+                {"Wellname": "WELL-A", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            ]
+        )

@@ -53,7 +53,8 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
     label_to_suffix = {
         "Шаг MD, м": "md_step",
         "Контрольный шаг MD, м": "md_control",
-        "Допуск по позиции, м": "pos_tol",
+        "Допуск по латерали, м": "lateral_tol",
+        "Допуск по вертикали, м": "vertical_tol",
         "Целевой INC на t1, deg": "entry_inc_target",
         "Допуск INC на t1, deg": "entry_inc_tol",
         "Макс INC по стволу, deg": "max_inc",

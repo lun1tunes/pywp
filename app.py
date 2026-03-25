@@ -332,9 +332,7 @@ def _parse_trajectory_import_text(raw_text: str, *, profile_label: str) -> pd.Da
     normalized = str(raw_text).replace("\\n", "\n").replace("\\r", "\n")
     lines = [line.strip() for line in normalized.splitlines() if line.strip()]
     if len(lines) < 2:
-        raise ValueError(
-            f"Ожидалось минимум 2 строки `x y z` для {profile_label}."
-        )
+        raise ValueError(f"Ожидалось минимум 2 строки `x y z` для {profile_label}.")
 
     rows: list[dict[str, float]] = []
     for line_no, line in enumerate(lines, start=1):
@@ -735,7 +733,9 @@ def _render_point_config_block() -> None:
             )
             if import_profiles_clicked:
                 import_errors: list[str] = []
-                plan_text = str(st.session_state.get("plan_csb_import_text", "")).strip()
+                plan_text = str(
+                    st.session_state.get("plan_csb_import_text", "")
+                ).strip()
                 fact_text = str(
                     st.session_state.get("actual_profile_import_text", "")
                 ).strip()
@@ -1015,8 +1015,8 @@ def _render_last_result() -> None:
     )
     render_result_plots(
         view=well_view,
-        title_trajectory="3D траектория и ПИ",
-        title_plan="План и вертикальный разрез",
+        title_trajectory=None,
+        title_plan=None,
         border=True,
     )
     render_result_tables(

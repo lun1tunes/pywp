@@ -7,8 +7,8 @@ from pydantic import ValidationError
 
 from pywp.models import (
     DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
-    OPTIMIZATION_NONE,
     OPTIMIZATION_MINIMIZE_MD,
+    OPTIMIZATION_NONE,
     Point3D,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
@@ -115,7 +115,7 @@ def test_trajectory_config_strips_removed_legacy_fields_for_backward_compatibili
             "max_total_md_m": 100.0,
         }
     )
-    assert cfg.optimization_mode == OPTIMIZATION_NONE
+    assert cfg.optimization_mode == OPTIMIZATION_MINIMIZE_MD
     assert cfg.max_total_md_postcheck_m == CFG_DEFAULTS.max_total_md_postcheck_m
 
 
@@ -136,7 +136,8 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
     config = build_trajectory_config(
         md_step_m=CFG_DEFAULTS.md_step_m,
         md_step_control_m=CFG_DEFAULTS.md_step_control_m,
-        pos_tolerance_m=CFG_DEFAULTS.pos_tolerance_m,
+        lateral_tolerance_m=CFG_DEFAULTS.lateral_tolerance_m,
+        vertical_tolerance_m=CFG_DEFAULTS.vertical_tolerance_m,
         entry_inc_target_deg=CFG_DEFAULTS.entry_inc_target_deg,
         entry_inc_tolerance_deg=CFG_DEFAULTS.entry_inc_tolerance_deg,
         max_inc_deg=CFG_DEFAULTS.max_inc_deg,

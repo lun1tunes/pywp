@@ -93,7 +93,8 @@ class Point3D(FrozenModel):
 class TrajectoryConfig(FrozenModel):
     md_step_m: PositiveFiniteScalar = 10.0
     md_step_control_m: PositiveFiniteScalar = 2.0
-    pos_tolerance_m: PositiveFiniteScalar = 2.0
+    lateral_tolerance_m: PositiveFiniteScalar = 30.0
+    vertical_tolerance_m: PositiveFiniteScalar = 2.0
     entry_inc_target_deg: EntryIncTargetScalar = 86.0
     entry_inc_tolerance_deg: NonNegativeFiniteScalar = 2.0
     max_inc_deg: MaxIncScalar = 95.0
@@ -107,7 +108,7 @@ class TrajectoryConfig(FrozenModel):
     # Post-processing MD threshold for user-facing validation only.
     # Does not participate in solver search/optimization constraints.
     max_total_md_postcheck_m: PositiveFiniteScalar = 6500.0
-    optimization_mode: OptimizationMode = OPTIMIZATION_NONE
+    optimization_mode: OptimizationMode = OPTIMIZATION_MINIMIZE_MD
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_max_restarts: NonNegativeInt = 2
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
@@ -125,6 +126,12 @@ class TrajectoryConfig(FrozenModel):
         if not isinstance(value, Mapping):
             return value
         payload = dict(value)
+        legacy_pos_tolerance = payload.pop("pos_tolerance_m", None)
+        if legacy_pos_tolerance is not None:
+            if "lateral_tolerance_m" not in payload:
+                payload["lateral_tolerance_m"] = legacy_pos_tolerance
+            if "vertical_tolerance_m" not in payload:
+                payload["vertical_tolerance_m"] = legacy_pos_tolerance
         payload.pop("objective_mode", None)
         payload.pop("max_total_md_m", None)
         return payload
@@ -186,6 +193,15 @@ class TrajectoryConfig(FrozenModel):
             },
         )
         return self
+
+    @property
+    def pos_tolerance_m(self) -> float:
+        """Legacy compatibility alias.
+
+        Prefer the explicit `lateral_tolerance_m` and `vertical_tolerance_m`.
+        """
+
+        return float(max(self.lateral_tolerance_m, self.vertical_tolerance_m))
 
 
 class PlannerResult(FrozenArbitraryModel):

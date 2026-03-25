@@ -32,7 +32,8 @@ def _fast_config(**overrides: object) -> TrajectoryConfig:
     base = {
         "md_step_m": 10.0,
         "md_step_control_m": 2.0,
-        "pos_tolerance_m": 2.0,
+        "lateral_tolerance_m": 30.0,
+        "vertical_tolerance_m": 2.0,
         "entry_inc_target_deg": 86.0,
         "entry_inc_tolerance_deg": 2.0,
         "dls_build_max_deg_per_30m": 6.0,
@@ -954,7 +955,7 @@ def test_anti_collision_candidate_can_keep_early_profile_for_late_maneuver_conte
     assert result.params == stable_candidate
 
 
-def test_anti_collision_early_stage_uses_reduced_kop_build1_search(
+def test_anti_collision_early_stage_uses_fast_seed_selection_without_local_slsqp(
     monkeypatch,
 ) -> None:
     import pywp.planner as planner_module
@@ -1005,15 +1006,10 @@ def test_anti_collision_early_stage_uses_reduced_kop_build1_search(
             max_overlap_depth_m=5.0,
         ),
     )
-    minimize_calls: list[np.ndarray] = []
+    def _unexpected_minimize(*args, **kwargs):
+        raise AssertionError("Early anti-collision stage should not enter local SLSQP.")
 
-    def _fake_minimize(*, fun, x0, method, bounds, constraints, options):
-        minimize_calls.append(np.asarray(x0, dtype=float))
-        class _Result:
-            x = np.asarray(x0, dtype=float)
-        return _Result()
-
-    monkeypatch.setattr(planner_module, "minimize", _fake_minimize)
+    monkeypatch.setattr(planner_module, "minimize", _unexpected_minimize)
 
     result = planner_module._select_anti_collision_candidate(
         candidates=[candidate],
@@ -1032,10 +1028,290 @@ def test_anti_collision_early_stage_uses_reduced_kop_build1_search(
         split_build=True,
     )
 
-    assert result.optimization.runs_used == len(minimize_calls)
-    assert 1 <= len(minimize_calls) <= planner_module.EARLY_ANTI_COLLISION_MAX_STARTS
-    assert all(call.shape == (2,) for call in minimize_calls)
+    assert result.optimization.runs_used == 0
     assert result.optimization.status in {"seed_selected", "clearance_improved"}
+
+
+def test_anti_collision_candidate_can_focus_late_build2_without_moving_early_profile(
+    monkeypatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    baseline_candidate = ProfileParameters(
+        kop_vertical_m=700.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=50.0,
+        dls_build1_deg_per_30m=4.2,
+        dls_build2_deg_per_30m=2.6,
+        build1_length_m=280.0,
+        hold_length_m=420.0,
+        build2_length_m=210.0,
+        horizontal_length_m=1210.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1100.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=38.0,
+        azimuth_entry_deg=67.0,
+    )
+    improved_candidate = ProfileParameters(
+        kop_vertical_m=700.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=49.0,
+        dls_build1_deg_per_30m=4.2,
+        dls_build2_deg_per_30m=5.4,
+        build1_length_m=280.0,
+        hold_length_m=360.0,
+        build2_length_m=290.0,
+        horizontal_length_m=1210.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1100.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=36.0,
+        azimuth_entry_deg=67.0,
+    )
+    wild_candidate = ProfileParameters(
+        kop_vertical_m=1650.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=58.0,
+        dls_build1_deg_per_30m=5.1,
+        dls_build2_deg_per_30m=5.1,
+        build1_length_m=360.0,
+        hold_length_m=240.0,
+        build2_length_m=330.0,
+        horizontal_length_m=1160.0,
+        horizontal_adjust_length_m=90.0,
+        horizontal_hold_length_m=1070.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=44.0,
+        azimuth_entry_deg=67.0,
+    )
+    config = _fast_config(optimization_mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE)
+    bounds = (
+        (0.0, 1.0),
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+    context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=4000.0,
+        candidate_md_end_m=4350.0,
+        sf_target=1.0,
+        sample_step_m=50.0,
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        references=(),
+        prefer_keep_kop=True,
+        prefer_keep_build1=True,
+        prefer_adjust_build2=True,
+    )
+    improved_vector = planner_module._candidate_to_search_vector(
+        candidate=improved_candidate,
+        zero_azimuth_turn=False,
+        lower_dls_deg_per_30m=0.1,
+        upper_dls_deg_per_30m=6.0,
+        bounds=bounds,
+        split_build=True,
+    )
+    minimize_shapes: list[tuple[int, ...]] = []
+
+    def fake_clearance(
+        *,
+        candidate: ProfileParameters,
+        surface: Point3D,
+        context: AntiCollisionOptimizationContext,
+    ) -> AntiCollisionClearanceEvaluation:
+        if candidate == wild_candidate:
+            return AntiCollisionClearanceEvaluation(
+                min_separation_factor=1.12,
+                max_overlap_depth_m=0.0,
+            )
+        if float(candidate.dls_build2_deg_per_30m) >= 5.0:
+            return AntiCollisionClearanceEvaluation(
+                min_separation_factor=1.04,
+                max_overlap_depth_m=0.0,
+            )
+        return AntiCollisionClearanceEvaluation(
+            min_separation_factor=0.42,
+            max_overlap_depth_m=32.0,
+        )
+
+    def fake_evaluate_candidate(
+        *,
+        values: np.ndarray,
+        profile_builder,
+        target_point: np.ndarray,
+        config: TrajectoryConfig,
+    ) -> CandidateOptimizationEvaluation:
+        assert float(values[0]) == pytest.approx(
+            planner_module._candidate_to_search_vector(
+                candidate=baseline_candidate,
+                zero_azimuth_turn=False,
+                lower_dls_deg_per_30m=0.1,
+                upper_dls_deg_per_30m=6.0,
+                bounds=bounds,
+                split_build=True,
+            )[0],
+            abs=1e-9,
+        )
+        assert float(values[2]) == pytest.approx(700.0, abs=1e-9)
+        candidate = (
+            improved_candidate
+            if float(values[1]) > 0.8
+            else baseline_candidate
+        )
+        return CandidateOptimizationEvaluation(
+            candidate=candidate,
+            t1_miss_m=0.25,
+            md_total_m=float(candidate.md_total_m),
+            kop_vertical_m=float(candidate.kop_vertical_m),
+            t1_margin_m=1.75,
+            build1_margin_m=50.0,
+            build2_margin_m=50.0,
+            max_inc_margin_deg=4.0,
+            horizontal_dls_margin_deg_per_30m=0.25,
+        )
+
+    def fake_minimize(*, fun, x0, method, bounds, constraints, options):
+        minimize_shapes.append(np.asarray(x0, dtype=float).shape)
+        assert method == "SLSQP"
+        return SimpleNamespace(success=True, x=np.asarray([1.0, x0[1], x0[2], x0[3]], dtype=float))
+
+    monkeypatch.setattr(
+        planner_module,
+        "evaluate_candidate_anti_collision_clearance",
+        fake_clearance,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_evaluate_candidate_for_optimization",
+        fake_evaluate_candidate,
+    )
+    monkeypatch.setattr(planner_module, "minimize", fake_minimize)
+
+    result = planner_module._select_anti_collision_candidate(
+        candidates=[baseline_candidate, wild_candidate],
+        surface=Point3D(0.0, 0.0, 0.0),
+        config=config,
+        optimization_context=context,
+        zero_azimuth_turn=False,
+        lower_dls_deg_per_30m=0.1,
+        upper_dls_deg_per_30m=6.0,
+        bounds=bounds,
+        optimization_bounds=bounds,
+        profile_builder=lambda values: baseline_candidate,
+        optimization_profile_builder=lambda values: baseline_candidate,
+        target_point=np.zeros(3, dtype=float),
+        search_settings=planner_module._turn_search_settings(0),
+        split_build=True,
+    )
+
+    assert result.params == improved_candidate
+    assert minimize_shapes
+    assert all(shape == (4,) for shape in minimize_shapes)
+
+
+def test_anti_collision_late_build2_stage_raises_clean_error_when_no_preserved_profile_candidate_exists(
+    monkeypatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    wild_candidate = ProfileParameters(
+        kop_vertical_m=1650.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=58.0,
+        dls_build1_deg_per_30m=5.1,
+        dls_build2_deg_per_30m=5.1,
+        build1_length_m=360.0,
+        hold_length_m=240.0,
+        build2_length_m=330.0,
+        horizontal_length_m=1160.0,
+        horizontal_adjust_length_m=90.0,
+        horizontal_hold_length_m=1070.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=44.0,
+        azimuth_entry_deg=67.0,
+    )
+    config = _fast_config(optimization_mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE)
+    bounds = (
+        (0.0, 1.0),
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+    context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=4000.0,
+        candidate_md_end_m=4350.0,
+        sf_target=1.0,
+        sample_step_m=50.0,
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        references=(),
+        prefer_keep_kop=True,
+        prefer_keep_build1=True,
+        prefer_adjust_build2=True,
+        baseline_kop_vertical_m=700.0,
+        baseline_build1_dls_deg_per_30m=4.2,
+    )
+
+    monkeypatch.setattr(
+        planner_module,
+        "evaluate_candidate_anti_collision_clearance",
+        lambda **kwargs: AntiCollisionClearanceEvaluation(
+            min_separation_factor=0.42,
+            max_overlap_depth_m=32.0,
+        ),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_evaluate_candidate_for_optimization",
+        lambda **kwargs: CandidateOptimizationEvaluation(
+            candidate=None,
+            t1_miss_m=1e9,
+            md_total_m=1e9,
+            kop_vertical_m=1e9,
+            t1_margin_m=-1e9,
+            build1_margin_m=-1e9,
+            build2_margin_m=-1e9,
+            max_inc_margin_deg=-1e9,
+            horizontal_dls_margin_deg_per_30m=-1e9,
+        ),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "minimize",
+        lambda **kwargs: SimpleNamespace(success=False, x=np.asarray(kwargs["x0"], dtype=float)),
+    )
+
+    with pytest.raises(
+        PlanningError,
+        match="Late anti-collision BUILD2/HOLD adjustment could not find a valid trajectory",
+    ):
+        planner_module._select_anti_collision_candidate(
+            candidates=[wild_candidate],
+            surface=Point3D(0.0, 0.0, 0.0),
+            config=config,
+            optimization_context=context,
+            zero_azimuth_turn=False,
+            lower_dls_deg_per_30m=0.1,
+            upper_dls_deg_per_30m=6.0,
+            bounds=bounds,
+            optimization_bounds=bounds,
+            profile_builder=lambda values: wild_candidate,
+            optimization_profile_builder=lambda values: wild_candidate,
+            target_point=np.zeros(3, dtype=float),
+            search_settings=planner_module._turn_search_settings(0),
+            split_build=True,
+        )
 
 
 def test_md_optimization_2d_refinement_can_improve_total_md_when_boundary_stage_is_unavailable(
@@ -1184,8 +1460,10 @@ def test_recover_profile_from_build_and_kop_is_deterministic_for_reference_order
     assert profile_a.azimuth_hold_deg == pytest.approx(profile_b.azimuth_hold_deg, abs=1e-6)
 
 
-def test_solver_relaxes_build_dls_below_max_for_reverse_entry_geometry() -> None:
+def test_solver_respects_split_tolerances_for_reverse_entry_geometry() -> None:
     config = _fast_config(
+        lateral_tolerance_m=2.0,
+        vertical_tolerance_m=2.0,
         dls_build_min_deg_per_30m=0.0,
         dls_build_max_deg_per_30m=3.0,
         turn_solver_max_restarts=0,
@@ -1198,13 +1476,16 @@ def test_solver_relaxes_build_dls_below_max_for_reverse_entry_geometry() -> None
         config=config,
     )
 
-    assert float(result.summary["distance_t1_m"]) <= config.pos_tolerance_m
-    assert float(result.summary["distance_t3_m"]) <= config.pos_tolerance_m
-    assert float(result.summary["build_dls_selected_deg_per_30m"]) < float(
+    assert float(result.summary["lateral_distance_t1_m"]) <= config.lateral_tolerance_m
+    assert float(result.summary["vertical_distance_t1_m"]) <= config.vertical_tolerance_m
+    assert float(result.summary["lateral_distance_t3_m"]) <= config.lateral_tolerance_m
+    assert float(result.summary["vertical_distance_t3_m"]) <= config.vertical_tolerance_m
+    assert float(result.summary["build1_dls_selected_deg_per_30m"]) <= float(
         config.dls_build_max_deg_per_30m
-    )
-    assert 1.5 <= float(result.summary["build_dls_selected_deg_per_30m"]) <= 2.6
-    assert str(result.summary["build_dls_relaxed_from_max"]) == "yes"
+    ) + 1e-6
+    assert float(result.summary["build2_dls_selected_deg_per_30m"]) <= float(
+        config.dls_build_max_deg_per_30m
+    ) + 1e-6
     assert int(result.summary["solver_turn_restarts_used"]) == 0
 
 
@@ -1240,8 +1521,10 @@ def test_kop_optimization_reduces_kop_for_reverse_entry_geometry() -> None:
         config=config_kop,
     )
 
-    assert float(result_kop.summary["distance_t1_m"]) <= config_kop.pos_tolerance_m
-    assert float(result_kop.summary["distance_t3_m"]) <= config_kop.pos_tolerance_m
+    assert float(result_kop.summary["lateral_distance_t1_m"]) <= config_kop.lateral_tolerance_m
+    assert float(result_kop.summary["vertical_distance_t1_m"]) <= config_kop.vertical_tolerance_m
+    assert float(result_kop.summary["lateral_distance_t3_m"]) <= config_kop.lateral_tolerance_m
+    assert float(result_kop.summary["vertical_distance_t3_m"]) <= config_kop.vertical_tolerance_m
     assert float(result_kop.summary["kop_md_m"]) + 1.0 < float(result_none.summary["kop_md_m"])
     assert str(result_kop.summary["optimization_mode"]) == OPTIMIZATION_MINIMIZE_KOP
     assert str(result_kop.summary["optimization_status"]) in {"refined", "at_min_kop_limit"}
@@ -1459,14 +1742,14 @@ def test_exact_endpoint_metrics_are_stable_across_control_grid_density() -> None
 
     result_coarse = planner.plan(
         surface=Point3D(0.0, 0.0, 0.0),
-        t1=Point3D(300.0, 300.0, 2000.0),
-        t3=Point3D(900.0, 1200.0, 2075.0),
+        t1=Point3D(500.0, 500.0, 2200.0),
+        t3=Point3D(1200.0, 1500.0, 2300.0),
         config=coarse,
     )
     result_fine = planner.plan(
         surface=Point3D(0.0, 0.0, 0.0),
-        t1=Point3D(300.0, 300.0, 2000.0),
-        t3=Point3D(900.0, 1200.0, 2075.0),
+        t1=Point3D(500.0, 500.0, 2200.0),
+        t3=Point3D(1200.0, 1500.0, 2300.0),
         config=fine,
     )
 
@@ -1489,7 +1772,7 @@ def test_exact_endpoint_metrics_are_stable_across_control_grid_density() -> None
 
 def test_planner_reports_exact_miss_components_in_failure_message() -> None:
     planner = TrajectoryPlanner()
-    config = _fast_config(pos_tolerance_m=0.0001)
+    config = _fast_config(lateral_tolerance_m=1e-6, vertical_tolerance_m=1e-6)
 
     with pytest.raises(PlanningError, match="Analytical delta: dX=.*dY=.*dZ="):
         planner.plan(

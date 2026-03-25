@@ -31,6 +31,7 @@ from pywp.anticollision_recommendations import (
     AntiCollisionWellContext,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, Point3D
+from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 
@@ -338,6 +339,52 @@ def test_overlap_ring_is_not_reduced_to_uniform_circle_for_offset_wells() -> Non
     radial_distances = np.linalg.norm(overlap_ring - center[None, :], axis=1)
 
     assert float(np.std(radial_distances)) > 0.2
+
+
+def test_runtime_analysis_supports_reference_trajectory_wells_without_target_overlap_pollution() -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-A",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config={"optimization_mode": "none", "kop_min_vertical_m": 550.0},
+    )
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-1", "Type": "actual", "X": 0.0, "Y": 5.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-1", "Type": "actual", "X": 1000.0, "Y": 5.0, "Z": 0.0, "MD": 1000.0},
+                {"Wellname": "FACT-1", "Type": "actual", "X": 2000.0, "Y": 5.0, "Z": 0.0, "MD": 2000.0},
+            ]
+        )
+    )
+    reference_model = build_anti_collision_well(
+        name="TMP",
+        color="#000000",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+    ).overlay.model
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=reference_model,
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert len(analysis.wells) == 2
+    assert any(bool(well.is_reference_only) for well in analysis.wells)
+    assert analysis.pair_count == 1
+    assert analysis.target_overlap_pair_count == 0
 
 
 def test_report_merges_adjacent_corridors_into_single_event() -> None:
@@ -831,6 +878,71 @@ def test_recommendations_switch_movable_well_after_one_side_already_used_anticol
     assert recommendation.category == RECOMMENDATION_TRAJECTORY_REVIEW
     assert set(recommendation.affected_wells) == {"well_02", "well_05"}
     assert recommendation.override_suggestions[0].well_name == "well_05"
+
+
+def test_recommendations_disable_repeated_late_trajectory_rerun_after_both_wells_already_used_anticollision() -> None:
+    corridor = AntiCollisionCorridor(
+        well_a="well_02",
+        well_b="well_05",
+        classification="trajectory",
+        priority_rank=2,
+        label_a="",
+        label_b="",
+        md_a_start_m=4200.0,
+        md_a_end_m=4300.0,
+        md_b_start_m=4100.0,
+        md_b_end_m=4200.0,
+        md_a_values_m=np.array([4200.0, 4300.0], dtype=float),
+        md_b_values_m=np.array([4100.0, 4200.0], dtype=float),
+        label_a_values=("", ""),
+        label_b_values=("", ""),
+        midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
+        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+        separation_factor_values=np.array([0.72, 0.69], dtype=float),
+        overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(corridor,),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=1,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.69,
+    )
+    contexts = {
+        "well_02": AntiCollisionWellContext(
+            well_name="well_02",
+            kop_md_m=550.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=4500.0,
+            md_total_m=6800.0,
+            optimization_mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+        ),
+        "well_05": AntiCollisionWellContext(
+            well_name="well_05",
+            kop_md_m=550.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=4700.0,
+            md_total_m=6700.0,
+            optimization_mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+        ),
+    }
+
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=contexts,
+    )
+
+    assert recommendations
+    recommendation = recommendations[0]
+    assert recommendation.category == RECOMMENDATION_TRAJECTORY_REVIEW
+    assert recommendation.can_prepare_rerun is False
+    assert recommendation.override_suggestions == ()
+    assert recommendation.action_label == "Только рекомендация"
+    assert "исчерпан" in recommendation.summary
 
 
 def test_recommendation_clusters_merge_connected_pairs_into_single_cluster() -> None:

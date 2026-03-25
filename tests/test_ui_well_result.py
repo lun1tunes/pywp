@@ -65,8 +65,8 @@ def test_build_target_validation_rows_formats_exact_and_control_metrics() -> Non
     }
 
     rows = build_target_validation_rows(summary)
-    assert rows[0] == {"Показатель": "Промах t1 (аналитический)", "Значение": "0.1234 m"}
-    assert rows[1] == {"Показатель": "Промах t3 (аналитический)", "Значение": "1.75 m"}
+    assert rows[0] == {"Показатель": "Промах t1 (аналитический, 3D)", "Значение": "0.1234 m"}
+    assert rows[1] == {"Показатель": "Промах t3 (аналитический, 3D)", "Значение": "1.75 m"}
     assert rows[6]["Показатель"] == "Компоненты промаха t1 (dX / dY / dZ)"
     assert rows[6]["Значение"] == "0.10 / -0.20 / 0.30 м"
     assert rows[-1] == {

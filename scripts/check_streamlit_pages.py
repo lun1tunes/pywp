@@ -49,7 +49,8 @@ def _expected_calc_defaults() -> dict[str, float]:
     return {
         "Шаг MD, м": float(cfg.md_step_m),
         "Контрольный шаг MD, м": float(cfg.md_step_control_m),
-        "Допуск по позиции, м": float(cfg.pos_tolerance_m),
+        "Допуск по латерали, м": float(cfg.lateral_tolerance_m),
+        "Допуск по вертикали, м": float(cfg.vertical_tolerance_m),
         "Целевой INC на t1, deg": float(cfg.entry_inc_target_deg),
         "Допуск INC на t1, deg": float(cfg.entry_inc_tolerance_deg),
         "Макс INC по стволу, deg": float(cfg.max_inc_deg),

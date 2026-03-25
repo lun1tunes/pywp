@@ -25,6 +25,7 @@ from pywp.anticollision_recommendations import (
     recommendation_display_label,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
+from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_KIND_COLORS
 from pywp.uncertainty import PlanningUncertaintyModel
 
 if TYPE_CHECKING:
@@ -54,6 +55,7 @@ def build_anti_collision_analysis_for_successes(
     *,
     model: PlanningUncertaintyModel,
     name_to_color: Mapping[str, str] | None = None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     include_display_geometry: bool = True,
     build_overlap_geometry: bool = True,
 ) -> AntiCollisionAnalysis:
@@ -69,9 +71,32 @@ def build_anti_collision_analysis_for_successes(
             md_t1_m=float(item.md_t1_m),
             model=model,
             include_display_geometry=include_display_geometry,
+            well_kind="project",
+            is_reference_only=False,
         )
         for item in successes
     ]
+    wells.extend(
+        build_anti_collision_well(
+            name=item.name,
+            color=(name_to_color or {}).get(
+                str(item.name),
+                REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
+            ),
+            stations=item.stations,
+            surface=item.surface,
+            t1=None,
+            t3=None,
+            azimuth_deg=float(item.azimuth_deg),
+            md_t1_m=None,
+            md_t3_m=None,
+            model=model,
+            include_display_geometry=include_display_geometry,
+            well_kind=str(item.kind),
+            is_reference_only=True,
+        )
+        for item in reference_wells
+    )
     return analyze_anti_collision(
         wells,
         build_overlap_geometry=build_overlap_geometry,
@@ -112,6 +137,8 @@ def build_dynamic_cluster_execution_plan(
     selected_names: set[str],
     target_well_names: tuple[str, ...],
     uncertainty_model: PlanningUncertaintyModel,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    prefer_trajectory_stage: bool = False,
 ) -> DynamicClusterExecutionPlan | None:
     if not selected_names:
         return None
@@ -126,6 +153,7 @@ def build_dynamic_cluster_execution_plan(
     analysis = build_anti_collision_analysis_for_successes(
         successes,
         model=uncertainty_model,
+        reference_wells=reference_wells,
         include_display_geometry=False,
         build_overlap_geometry=False,
     )
@@ -176,6 +204,9 @@ def build_dynamic_cluster_execution_plan(
         cluster,
         successes=successes,
         uncertainty_model=uncertainty_model,
+        prefer_trajectory_stage=bool(
+            prefer_trajectory_stage and int(cluster.trajectory_conflict_count) > 0
+        ),
     )
     if not prepared:
         return DynamicClusterExecutionPlan(
@@ -304,8 +335,9 @@ def build_prepared_optimization_context(
     reference_success: SuccessfulWellPlan | None,
     uncertainty_model: PlanningUncertaintyModel,
     all_successes: list[SuccessfulWellPlan] | None = None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
 ) -> AntiCollisionOptimizationContext | None:
-    if moving_success is None or reference_success is None:
+    if moving_success is None:
         return None
     intervals = recommendation_intervals_for_moving_well(
         recommendation=recommendation,
@@ -333,14 +365,21 @@ def build_prepared_optimization_context(
         moving_well_name=str(moving_success.name),
         candidate_md_start_m=float(candidate_md_start_m),
         candidate_md_end_m=float(candidate_md_end_m),
-        primary_reference_name=str(reference_success.name),
+        primary_reference_name=str(_reference_name),
         primary_reference_window=(float(reference_md_start_m), float(reference_md_end_m)),
-        successes=list(all_successes or [moving_success, reference_success]),
+        successes=list(all_successes or [item for item in (moving_success, reference_success) if item is not None]),
+        reference_wells=reference_wells,
         sample_step_m=runtime_sample_step_m,
         uncertainty_model=uncertainty_model,
     )
     if not reference_paths:
         return None
+    moving_summary = dict(moving_success.summary)
+    baseline_kop_vertical_m = moving_summary.get("kop_md_m")
+    baseline_build1_dls_deg_per_30m = moving_summary.get(
+        "build1_dls_selected_deg_per_30m",
+        moving_summary.get("build_dls_selected_deg_per_30m"),
+    )
     return AntiCollisionOptimizationContext(
         candidate_md_start_m=float(candidate_md_start_m),
         candidate_md_end_m=float(candidate_md_end_m),
@@ -364,6 +403,16 @@ def build_prepared_optimization_context(
             str(recommendation.category) == RECOMMENDATION_TRAJECTORY_REVIEW
             and str(expected_maneuver) == MANEUVER_BUILD2_ENTRY
         ),
+        baseline_kop_vertical_m=(
+            float(baseline_kop_vertical_m)
+            if baseline_kop_vertical_m is not None
+            else None
+        ),
+        baseline_build1_dls_deg_per_30m=(
+            float(baseline_build1_dls_deg_per_30m)
+            if baseline_build1_dls_deg_per_30m is not None
+            else None
+        ),
     )
 
 
@@ -375,10 +424,12 @@ def _build_reference_paths_for_candidate_window(
     primary_reference_name: str,
     primary_reference_window: tuple[float, float],
     successes: list[SuccessfulWellPlan],
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
     sample_step_m: float,
     uncertainty_model: PlanningUncertaintyModel,
 ) -> list[object]:
     success_by_name = {str(item.name): item for item in successes}
+    reference_by_name = {str(item.name): item for item in reference_wells}
     reference_windows: dict[str, tuple[float, float]] = {
         str(primary_reference_name): (
             float(primary_reference_window[0]),
@@ -410,15 +461,51 @@ def _build_reference_paths_for_candidate_window(
             float(reference_start_m),
             float(reference_end_m),
         )
+    for reference_name, reference_well in reference_by_name.items():
+        if str(reference_name) == str(moving_well_name) or str(reference_name) in reference_windows:
+            continue
+        if reference_well.stations.empty:
+            continue
+        md_values = reference_well.stations["MD_m"].to_numpy(dtype=float)
+        if len(md_values) == 0:
+            continue
+        reference_start_m = max(
+            float(md_values[0]),
+            float(candidate_md_start_m) - _CLUSTER_REFERENCE_WINDOW_MARGIN_M,
+        )
+        reference_end_m = min(
+            float(md_values[-1]),
+            float(candidate_md_end_m) + _CLUSTER_REFERENCE_WINDOW_MARGIN_M,
+        )
+        if reference_end_m <= reference_start_m + 1e-6:
+            reference_start_m = float(md_values[0])
+            reference_end_m = float(md_values[-1])
+        reference_windows[str(reference_name)] = (
+            float(reference_start_m),
+            float(reference_end_m),
+        )
     references: list[object] = []
     for reference_name, window in sorted(reference_windows.items()):
         reference_success = success_by_name.get(str(reference_name))
-        if reference_success is None:
+        if reference_success is not None:
+            references.append(
+                build_anti_collision_reference_path(
+                    well_name=str(reference_success.name),
+                    stations=reference_success.stations,
+                    md_start_m=float(window[0]),
+                    md_end_m=float(window[1]),
+                    sample_step_m=float(sample_step_m),
+                    model=uncertainty_model,
+                )
+            )
+            continue
+        reference_well = reference_by_name.get(str(reference_name))
+        if reference_well is None:
             continue
         references.append(
             build_anti_collision_reference_path(
-                well_name=str(reference_success.name),
-                stations=reference_success.stations,
+                well_name=str(reference_well.name),
+                stations=reference_well.stations,
                 md_start_m=float(window[0]),
                 md_end_m=float(window[1]),
                 sample_step_m=float(sample_step_m),
@@ -433,6 +520,7 @@ def build_recommendation_prepared_overrides(
     *,
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
 ) -> tuple[dict[str, dict[str, object]], list[str], tuple[dict[str, object], ...]]:
     prepared: dict[str, dict[str, object]] = {}
     skipped_wells: list[str] = []
@@ -460,6 +548,7 @@ def build_recommendation_prepared_overrides(
                 reference_success=success_by_name.get(reference_name),
                 uncertainty_model=uncertainty_model,
                 all_successes=successes,
+                reference_wells=reference_wells,
             )
             if optimization_context is None:
                 skipped_wells.append(str(suggestion.well_name))
@@ -507,8 +596,11 @@ def build_cluster_prepared_overrides(
     *,
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    prefer_trajectory_stage: bool = False,
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
     success_by_name = {str(item.name): item for item in successes}
+    reference_by_name = {str(item.name): item for item in reference_wells}
     step_by_well = {
         str(step.well_name): step
         for step in cluster.action_steps
@@ -526,9 +618,12 @@ def build_cluster_prepared_overrides(
                 if (
                     str(step.category) == "mixed"
                     and str(step.expected_maneuver) == MANEUVER_KOP_AND_TRAJECTORY
-                    and str(recommendation.category) != RECOMMENDATION_REDUCE_KOP
                 ):
-                    continue
+                    if prefer_trajectory_stage:
+                        if str(recommendation.category) != RECOMMENDATION_TRAJECTORY_REVIEW:
+                            continue
+                    elif str(recommendation.category) != RECOMMENDATION_REDUCE_KOP:
+                        continue
                 if (
                     str(step.category) == RECOMMENDATION_REDUCE_KOP
                     and str(recommendation.category) != RECOMMENDATION_REDUCE_KOP
@@ -558,7 +653,7 @@ def build_cluster_prepared_overrides(
                     reference_md_end_m,
                 ) = intervals
                 reference_success = success_by_name.get(reference_name)
-                if reference_success is None:
+                if reference_success is None and reference_by_name.get(reference_name) is None:
                     skipped_wells.append(well_name)
                     continue
                 entry = trajectory_specs.setdefault(
@@ -572,6 +667,7 @@ def build_cluster_prepared_overrides(
                         "prefer_higher_build1": False,
                         "prefer_keep_kop": False,
                         "prefer_keep_build1": False,
+                        "prefer_adjust_build2": False,
                     },
                 )
                 entry["candidate_md_start_m"] = min(
@@ -604,6 +700,14 @@ def build_cluster_prepared_overrides(
                 if str(recommendation.category) == RECOMMENDATION_TRAJECTORY_REVIEW:
                     entry["prefer_keep_kop"] = True
                     entry["prefer_keep_build1"] = True
+                    if (
+                        _expected_trajectory_maneuver_for_prepared_step(
+                            recommendation=recommendation,
+                            moving_well_name=well_name,
+                        )
+                        == MANEUVER_BUILD2_ENTRY
+                    ):
+                        entry["prefer_adjust_build2"] = True
                 continue
 
             if optimization_mode == OPTIMIZATION_MINIMIZE_KOP:
@@ -664,16 +768,54 @@ def build_cluster_prepared_overrides(
                     float(reference_start_m),
                     float(reference_end_m),
                 )
+            for reference_name, reference_well in reference_by_name.items():
+                if str(reference_name) == well_name or str(reference_name) in reference_windows:
+                    continue
+                if reference_well.stations.empty:
+                    continue
+                md_values = reference_well.stations["MD_m"].to_numpy(dtype=float)
+                if len(md_values) == 0:
+                    continue
+                candidate_start_m = float(spec["candidate_md_start_m"])
+                candidate_end_m = float(spec["candidate_md_end_m"])
+                reference_start_m = max(
+                    float(md_values[0]),
+                    candidate_start_m - _CLUSTER_REFERENCE_WINDOW_MARGIN_M,
+                )
+                reference_end_m = min(
+                    float(md_values[-1]),
+                    candidate_end_m + _CLUSTER_REFERENCE_WINDOW_MARGIN_M,
+                )
+                if reference_end_m <= reference_start_m + 1e-6:
+                    reference_start_m = float(md_values[0])
+                    reference_end_m = float(md_values[-1])
+                reference_windows[str(reference_name)] = (
+                    float(reference_start_m),
+                    float(reference_end_m),
+                )
             for reference_name, window in sorted(reference_windows.items()):
                 reference_success = success_by_name.get(str(reference_name))
-                if reference_success is None:
+                if reference_success is not None:
+                    references.append(
+                        build_anti_collision_reference_path(
+                            well_name=str(reference_success.name),
+                            stations=reference_success.stations,
+                            md_start_m=float(window[0]),
+                            md_end_m=float(window[1]),
+                            sample_step_m=runtime_sample_step_m,
+                            model=uncertainty_model,
+                        )
+                    )
+                    continue
+                reference_well = reference_by_name.get(str(reference_name))
+                if reference_well is None:
                     skipped_wells.append(well_name)
                     references = []
                     break
                 references.append(
                     build_anti_collision_reference_path(
-                        well_name=str(reference_success.name),
-                        stations=reference_success.stations,
+                        well_name=str(reference_well.name),
+                        stations=reference_well.stations,
                         md_start_m=float(window[0]),
                         md_end_m=float(window[1]),
                         sample_step_m=runtime_sample_step_m,
@@ -695,6 +837,35 @@ def build_cluster_prepared_overrides(
                 prefer_higher_build1=bool(spec.get("prefer_higher_build1", False)),
                 prefer_keep_kop=bool(spec.get("prefer_keep_kop", False)),
                 prefer_keep_build1=bool(spec.get("prefer_keep_build1", False)),
+                prefer_adjust_build2=bool(spec.get("prefer_adjust_build2", False)),
+                baseline_kop_vertical_m=(
+                    float(success_by_name[well_name].summary.get("kop_md_m"))
+                    if success_by_name.get(well_name) is not None
+                    and success_by_name[well_name].summary.get("kop_md_m") is not None
+                    else None
+                ),
+                baseline_build1_dls_deg_per_30m=(
+                    float(
+                        success_by_name[well_name].summary.get(
+                            "build1_dls_selected_deg_per_30m",
+                            success_by_name[well_name].summary.get(
+                                "build_dls_selected_deg_per_30m"
+                            ),
+                        )
+                    )
+                    if success_by_name.get(well_name) is not None
+                    and (
+                        success_by_name[well_name].summary.get(
+                            "build1_dls_selected_deg_per_30m"
+                        )
+                        is not None
+                        or success_by_name[well_name].summary.get(
+                            "build_dls_selected_deg_per_30m"
+                        )
+                        is not None
+                    )
+                    else None
+                ),
             )
             prepared[well_name] = {
                 "update_fields": {

@@ -19,6 +19,7 @@ from pywp.anticollision_recommendations import (
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.plotly_config import DEFAULT_3D_CAMERA
+from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
     planning_uncertainty_model_for_preset,
@@ -178,6 +179,21 @@ def _vertical_successful_plan(
     )
 
 
+def _reference_wells():
+    return tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-1", "Type": "actual", "X": 0.0, "Y": 25.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-1", "Type": "actual", "X": 900.0, "Y": 25.0, "Z": 300.0, "MD": 950.0},
+                {"Wellname": "FACT-1", "Type": "actual", "X": 1800.0, "Y": 25.0, "Z": 400.0, "MD": 1900.0},
+                {"Wellname": "APP-1", "Type": "approved", "X": 0.0, "Y": -35.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "APP-1", "Type": "approved", "X": 850.0, "Y": -35.0, "Z": 250.0, "MD": 900.0},
+                {"Wellname": "APP-1", "Type": "approved", "X": 1750.0, "Y": -35.0, "Z": 350.0, "MD": 1850.0},
+            ]
+        )
+    )
+
+
 def test_welltrack_page_shows_only_general_run_before_results() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _records()
@@ -211,6 +227,33 @@ def test_welltrack_general_run_select_all_restores_full_selection() -> None:
         "WELL-B",
         "WELL-C",
     ]
+
+
+def test_reference_trajectory_text_import_populates_reference_wells_state() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_reference_source_mode"] = "Вставить текст"
+    at.session_state["wt_reference_source_text"] = "\n".join(
+        [
+            "Wellname Type X Y Z MD",
+            "FACT-1 actual 0 25 0 0",
+            "FACT-1 actual 900 25 300 950",
+            "FACT-1 actual 1800 25 400 1900",
+            "APP-1 approved 0 -35 0 0",
+            "APP-1 approved 850 -35 250 900",
+            "APP-1 approved 1750 -35 350 1850",
+        ]
+    )
+
+    at.run()
+    _click_button(at, "Импортировать из текста / файла")
+    at.run()
+
+    reference_wells = tuple(at.session_state["wt_reference_wells"])
+    assert len(reference_wells) == 2
+    assert [str(item.name) for item in reference_wells] == ["FACT-1", "APP-1"]
 
 
 def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> None:
@@ -346,6 +389,30 @@ def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_res
     assert reset_surfaces == original_surfaces
     assert at.session_state["wt_pad_last_applied_at"] == ""
     assert at.session_state["wt_pad_auto_applied_on_import"] is False
+
+
+def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    at.session_state["wt_source_mode"] = "Вставить таблицу"
+    at.session_state["wt_source_table_df"] = pd.DataFrame(
+        [
+            {"Wellname": "TAB-01", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "TAB-01", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "TAB-01", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "TAB-02", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "TAB-02", "Point": "t1", "X": 650.0, "Y": 780.0, "Z": 2300.0},
+            {"Wellname": "TAB-02", "Point": "t3", "X": 1550.0, "Y": 1980.0, "Z": 2400.0},
+        ]
+    )
+
+    at.run(timeout=120)
+    _click_button(at, "Прочитать WELLTRACK")
+    at.run(timeout=120)
+
+    records = at.session_state["wt_records"]
+    assert [record.name for record in records] == ["TAB-01", "TAB-02"]
+    assert records[0].points[1].x == pytest.approx(600.0)
+    assert records[1].points[2].y == pytest.approx(1980.0)
 
 
 def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> None:
@@ -713,6 +780,66 @@ def test_build_prepared_trajectory_optimization_context_includes_other_well_cone
     assert {str(item.well_name) for item in context.references} == {"WELL-A", "WELL-C"}
 
 
+def test_build_prepared_late_trajectory_context_marks_build2_adjustment() -> None:
+    page = _load_welltrack_page_module()
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-B",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=4075.0,
+                md_a_end_m=4375.0,
+                md_b_start_m=4025.0,
+                md_b_end_m=4275.0,
+                md_a_values_m=np.array([4075.0, 4375.0], dtype=float),
+                md_b_values_m=np.array([4025.0, 4275.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
+                overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+                separation_factor_values=np.array([0.31, 0.29], dtype=float),
+                overlap_depth_values_m=np.array([105.0, 111.0], dtype=float),
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=1,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.29,
+    )
+    successes = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0, kop_md_m=700.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0, kop_md_m=900.0),
+    ]
+    recommendation = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(successes),
+    )[0]
+
+    context = page._build_prepared_optimization_context(
+        recommendation=recommendation,
+        moving_success=successes[0],
+        reference_success=successes[1],
+        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        all_successes=successes,
+    )
+
+    assert context is not None
+    assert context.prefer_keep_kop is True
+    assert context.prefer_keep_build1 is True
+    assert context.prefer_adjust_build2 is True
+
+
 def test_prepared_override_rows_include_sf_before() -> None:
     page = _load_welltrack_page_module()
     page.st.session_state["wt_prepared_well_overrides"] = {
@@ -889,7 +1016,7 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(m
     monkeypatch.setattr(
         page,
         "_build_anti_collision_analysis",
-        lambda successes, *, model, name_to_color=None: (
+        lambda successes, *, model, name_to_color=None, reference_wells=(): (
             calls.__setitem__("analysis", calls["analysis"] + 1) or analysis
         ),
     )
@@ -1873,6 +2000,51 @@ def test_all_wells_overview_figures_show_targets_for_failed_wells_without_fake_t
     assert "Точка: %{customdata[0]}" in str(failed_plan_traces[0].hovertemplate)
     assert str(failed_3d_traces[0].marker.symbol) == "cross"
     assert str(failed_plan_traces[0].marker.symbol) == "x"
+
+
+def test_all_wells_overview_figures_include_reference_trajectories() -> None:
+    page = _load_welltrack_page_module()
+    reference_wells = _reference_wells()
+
+    figure_3d = page._all_wells_3d_figure(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        reference_wells=reference_wells,
+    )
+    figure_plan = page._all_wells_plan_figure(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        reference_wells=reference_wells,
+    )
+
+    trace_names_3d = {str(trace.name) for trace in figure_3d.data}
+    trace_names_plan = {str(trace.name) for trace in figure_plan.data}
+
+    assert "FACT-1 (Фактическая)" in trace_names_3d
+    assert "APP-1 (Проектная утвержденная)" in trace_names_3d
+    assert "FACT-1 (Фактическая)" in trace_names_plan
+    assert "APP-1 (Проектная утвержденная)" in trace_names_plan
+
+    fact_3d = next(trace for trace in figure_3d.data if str(trace.name) == "FACT-1 (Фактическая)")
+    approved_3d = next(trace for trace in figure_3d.data if str(trace.name) == "APP-1 (Проектная утвержденная)")
+    assert str(fact_3d.line.color) == "#6B7280"
+    assert str(approved_3d.line.color) == "#C62828"
+
+
+def test_anticollision_figures_include_reference_trajectory_wells_without_target_markers() -> None:
+    page = _load_welltrack_page_module()
+    reference_wells = _reference_wells()
+    analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        reference_wells=reference_wells,
+    )
+
+    figure_3d = page._all_wells_anticollision_3d_figure(analysis)
+    figure_plan = page._all_wells_anticollision_plan_figure(analysis)
+
+    assert any(str(trace.name) == "FACT-1 (Фактическая)" for trace in figure_3d.data)
+    assert any(str(trace.name) == "APP-1 (Проектная утвержденная)" for trace in figure_3d.data)
+    assert not any("FACT-1 (Фактическая): цели" == str(trace.name) for trace in figure_3d.data)
+    assert not any("APP-1 (Проектная утвержденная): цели" == str(trace.name) for trace in figure_plan.data)
 
 
 def test_batch_summary_display_df_reorders_and_shortens_summary_columns() -> None:

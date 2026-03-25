@@ -47,6 +47,10 @@ SUMMARY_TECH_HIDDEN_METRICS = frozenset(
     {
         "distance_t1_m",
         "distance_t3_m",
+        "lateral_distance_t1_m",
+        "lateral_distance_t3_m",
+        "vertical_distance_t1_m",
+        "vertical_distance_t3_m",
         "distance_t1_control_m",
         "distance_t3_control_m",
         "control_gap_t1_m",
@@ -393,8 +397,12 @@ def build_target_validation_rows(
             }
         )
 
-    add_distance_row("Промах t1 (аналитический)", "distance_t1_m")
-    add_distance_row("Промах t3 (аналитический)", "distance_t3_m")
+    add_distance_row("Промах t1 (аналитический, 3D)", "distance_t1_m")
+    add_distance_row("Промах t3 (аналитический, 3D)", "distance_t3_m")
+    add_distance_row("Промах t1 по латерали", "lateral_distance_t1_m")
+    add_distance_row("Промах t1 по вертикали", "vertical_distance_t1_m")
+    add_distance_row("Промах t3 по латерали", "lateral_distance_t3_m")
+    add_distance_row("Промах t3 по вертикали", "vertical_distance_t3_m")
     add_distance_row("Промах t1 (control-grid)", "distance_t1_control_m")
     add_distance_row("Промах t3 (control-grid)", "distance_t3_control_m")
     add_distance_row("Расхождение t1: analytic vs control-grid", "control_gap_t1_m")

@@ -517,6 +517,50 @@ def _build_single_recommendation(
         event=event,
         well_context_by_name=well_context_by_name,
     )
+    well_a_context = well_context_by_name.get(str(event.well_a))
+    well_b_context = well_context_by_name.get(str(event.well_b))
+    if (
+        well_a_context is not None
+        and well_b_context is not None
+        and str(well_a_context.optimization_mode) == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+        and str(well_b_context.optimization_mode) == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+    ):
+        expected_maneuver = _expected_trajectory_maneuver(
+            event=event,
+            moving_well=str(event.well_a),
+            well_context_by_name=well_context_by_name,
+            analysis=analysis,
+        )
+        return AntiCollisionRecommendation(
+            recommendation_id=recommendation_id,
+            well_a=str(event.well_a),
+            well_b=str(event.well_b),
+            priority_rank=int(event.priority_rank),
+            category=RECOMMENDATION_TRAJECTORY_REVIEW,
+            summary=(
+                "Остаточный конфликт на криволинейном участке: automatic "
+                "late BUILD2/HOLD anti-collision rerun для этой пары уже исчерпан."
+            ),
+            detail=(
+                "Обе проектные скважины пары уже пересчитаны в anti-collision mode, "
+                "но overlap сохраняется. Это признак того, что в текущих пределах "
+                "t1/t3, min KOP и DLS remaining late conflict требует ручной "
+                "корректировки targets/spacing или ослабления ограничений."
+            ),
+            expected_maneuver=str(expected_maneuver),
+            action_label="Только рекомендация",
+            can_prepare_rerun=False,
+            affected_wells=(),
+            override_suggestions=(),
+            classification=str(event.classification),
+            area_label=_event_area_label(event),
+            md_a_start_m=float(event.md_a_start_m),
+            md_a_end_m=float(event.md_a_end_m),
+            md_b_start_m=float(event.md_b_start_m),
+            md_b_end_m=float(event.md_b_end_m),
+            min_separation_factor=float(event.min_separation_factor),
+            max_overlap_depth_m=float(event.max_overlap_depth_m),
+        )
     if movable_well is not None:
         secondary_well = (
             str(event.well_b)

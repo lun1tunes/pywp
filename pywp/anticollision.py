@@ -38,10 +38,12 @@ class AntiCollisionWell:
     samples: tuple[AntiCollisionSample, ...]
     stations: pd.DataFrame
     surface: Point3D
-    t1: Point3D
-    t3: Point3D
-    md_t1_m: float
-    md_t3_m: float
+    t1: Point3D | None
+    t3: Point3D | None
+    md_t1_m: float | None
+    md_t3_m: float | None
+    well_kind: str = "project"
+    is_reference_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,28 +150,40 @@ def build_anti_collision_well(
     color: str,
     stations: pd.DataFrame,
     surface: Point3D,
-    t1: Point3D,
-    t3: Point3D,
+    t1: Point3D | None,
+    t3: Point3D | None,
     azimuth_deg: float,
-    md_t1_m: float,
+    md_t1_m: float | None,
+    md_t3_m: float | None = None,
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     include_display_geometry: bool = True,
+    well_kind: str = "project",
+    is_reference_only: bool = False,
 ) -> AntiCollisionWell:
-    md_t3_m = float(stations["MD_m"].iloc[-1]) if len(stations) else 0.0
+    md_t3_m = (
+        float(md_t3_m)
+        if md_t3_m is not None
+        else (float(stations["MD_m"].iloc[-1]) if len(stations) else None)
+    )
+    required_md_values = tuple(
+        float(value)
+        for value in (md_t1_m, md_t3_m)
+        if value is not None
+    )
     if include_display_geometry:
         overlay = build_uncertainty_overlay(
             stations=stations,
             surface=surface,
             azimuth_deg=azimuth_deg,
             model=model,
-            required_md_m=(float(md_t1_m), float(md_t3_m)),
+            required_md_m=required_md_values,
         )
         samples = tuple(
             _build_collision_sample(
                 sample=sample,
                 confidence_scale=float(model.confidence_scale),
-                md_t1_m=float(md_t1_m),
-                md_t3_m=float(md_t3_m),
+                md_t1_m=None if md_t1_m is None else float(md_t1_m),
+                md_t3_m=None if md_t3_m is None else float(md_t3_m),
             )
             for sample in overlay.samples
         )
@@ -178,13 +192,13 @@ def build_anti_collision_well(
         samples = tuple(
             _build_collision_sample_from_station_sample(
                 sample=sample,
-                md_t1_m=float(md_t1_m),
-                md_t3_m=float(md_t3_m),
+                md_t1_m=_optional_float(md_t1_m),
+                md_t3_m=_optional_float(md_t3_m),
             )
             for sample in build_uncertainty_station_samples(
                 stations=stations,
                 model=model,
-                required_md_m=(float(md_t1_m), float(md_t3_m)),
+                required_md_m=required_md_values,
             )
         )
     return AntiCollisionWell(
@@ -196,8 +210,10 @@ def build_anti_collision_well(
         surface=surface,
         t1=t1,
         t3=t3,
-        md_t1_m=float(md_t1_m),
-        md_t3_m=float(md_t3_m),
+        md_t1_m=None if md_t1_m is None else float(md_t1_m),
+        md_t3_m=None if md_t3_m is None else float(md_t3_m),
+        well_kind=str(well_kind),
+        is_reference_only=bool(is_reference_only),
     )
 
 
@@ -481,8 +497,8 @@ def _build_collision_sample(
     *,
     sample: UncertaintyEllipseSample,
     confidence_scale: float,
-    md_t1_m: float,
-    md_t3_m: float,
+    md_t1_m: float | None,
+    md_t3_m: float | None,
 ) -> AntiCollisionSample:
     return AntiCollisionSample(
         md_m=float(sample.md_m),
@@ -494,8 +510,8 @@ def _build_collision_sample(
         ),
         target_label=_target_label(
             md_m=float(sample.md_m),
-            md_t1_m=float(md_t1_m),
-            md_t3_m=float(md_t3_m),
+            md_t1_m=_optional_float(md_t1_m),
+            md_t3_m=_optional_float(md_t3_m),
         ),
     )
 
@@ -503,8 +519,8 @@ def _build_collision_sample(
 def _build_collision_sample_from_station_sample(
     *,
     sample: UncertaintyStationSample,
-    md_t1_m: float,
-    md_t3_m: float,
+    md_t1_m: float | None,
+    md_t3_m: float | None,
 ) -> AntiCollisionSample:
     return AntiCollisionSample(
         md_m=float(sample.md_m),
@@ -512,8 +528,8 @@ def _build_collision_sample_from_station_sample(
         covariance_xyz=np.asarray(sample.covariance_xyz, dtype=float),
         target_label=_target_label(
             md_m=float(sample.md_m),
-            md_t1_m=float(md_t1_m),
-            md_t3_m=float(md_t3_m),
+            md_t1_m=_optional_float(md_t1_m),
+            md_t3_m=_optional_float(md_t3_m),
         ),
     )
 
@@ -535,12 +551,16 @@ def _covariance_from_ring(
     return 2.0 * np.asarray(boundary_covariance, dtype=float) / (scale * scale)
 
 
-def _target_label(*, md_m: float, md_t1_m: float, md_t3_m: float) -> str:
-    if abs(float(md_m) - float(md_t1_m)) <= 1e-6:
+def _target_label(*, md_m: float, md_t1_m: float | None, md_t3_m: float | None) -> str:
+    if md_t1_m is not None and abs(float(md_m) - float(md_t1_m)) <= 1e-6:
         return TARGET_T1
-    if abs(float(md_m) - float(md_t3_m)) <= 1e-6:
+    if md_t3_m is not None and abs(float(md_m) - float(md_t3_m)) <= 1e-6:
         return TARGET_T3
     return TARGET_NONE
+
+
+def _optional_float(value: float | None) -> float | None:
+    return None if value is None else float(value)
 
 
 def _pair_overlap_corridors(
@@ -749,6 +769,12 @@ def _build_single_corridor(
     for index_a, index_b in ordered_pairs:
         sample_a = well_a.samples[int(index_a)]
         sample_b = well_b.samples[int(index_b)]
+        if bool(well_a.is_reference_only) or bool(well_b.is_reference_only):
+            label_a = TARGET_NONE
+            label_b = TARGET_NONE
+        else:
+            label_a = str(sample_a.target_label)
+            label_b = str(sample_b.target_label)
         combined_radius_m = float(combined_radius[int(index_a), int(index_b)])
         center_distance_m = float(distance[int(index_a), int(index_b)])
         overlap_depth_m = float(max(combined_radius_m - center_distance_m, 0.0))
@@ -783,14 +809,14 @@ def _build_single_corridor(
         sf_values.append(sf)
         overlap_depth_values.append(overlap_depth_m)
         priority_rank = _classify_pair_labels(
-            label_a=sample_a.target_label,
-            label_b=sample_b.target_label,
+            label_a=label_a,
+            label_b=label_b,
         )[1]
-        point_meta.append((int(priority_rank), str(sample_a.target_label), str(sample_b.target_label)))
+        point_meta.append((int(priority_rank), label_a, label_b))
         md_a_values.append(float(sample_a.md_m))
         md_b_values.append(float(sample_b.md_m))
-        label_a_values.append(str(sample_a.target_label))
-        label_b_values.append(str(sample_b.target_label))
+        label_a_values.append(label_a)
+        label_b_values.append(label_b)
 
     best_meta = min(point_meta, key=lambda item: item[0])
     best_priority = int(best_meta[0])

@@ -90,11 +90,74 @@ ANTI_COLLISION_KOP_PREFERENCE_WEIGHT = 0.25
 ANTI_COLLISION_BUILD1_PREFERENCE_WEIGHT = 0.20
 ANTI_COLLISION_KEEP_KOP_WEIGHT = 0.60
 ANTI_COLLISION_KEEP_BUILD1_WEIGHT = 0.50
+ANTI_COLLISION_BUILD2_PREFERENCE_WEIGHT = 0.18
 ANTI_COLLISION_SAMPLE_STEP_M = 50.0
 ANTI_COLLISION_MAX_STARTS = 12
 ANTI_COLLISION_MAXITER = 72
 EARLY_ANTI_COLLISION_MAX_STARTS = 8
 EARLY_ANTI_COLLISION_MAXITER = 48
+LATE_ANTI_COLLISION_BUILD2_MAX_STARTS = 6
+LATE_ANTI_COLLISION_BUILD2_MAXITER = 48
+LATE_ANTI_COLLISION_KEEP_KOP_TOLERANCE_M = 5.0
+LATE_ANTI_COLLISION_KEEP_BUILD1_TOLERANCE_DEG_PER_30M = 0.05
+
+
+def _target_miss_components(
+    endpoint: np.ndarray,
+    target_point: np.ndarray,
+) -> tuple[float, float, float, float, float, float]:
+    dx_m = float(endpoint[0] - target_point[0])
+    dy_m = float(endpoint[1] - target_point[1])
+    dz_m = float(endpoint[2] - target_point[2])
+    lateral_m = float(np.hypot(dx_m, dy_m))
+    vertical_m = float(abs(dz_m))
+    distance_m = float(np.sqrt(dx_m * dx_m + dy_m * dy_m + dz_m * dz_m))
+    return dx_m, dy_m, dz_m, lateral_m, vertical_m, distance_m
+
+
+def _target_miss_within_tolerance(
+    *,
+    lateral_m: float,
+    vertical_m: float,
+    config: TrajectoryConfig,
+    slack_m: float = 0.0,
+) -> bool:
+    slack = max(float(slack_m), 0.0)
+    return bool(
+        float(lateral_m) <= float(config.lateral_tolerance_m) + slack + SMALL
+        and float(vertical_m) <= float(config.vertical_tolerance_m) + slack + SMALL
+    )
+
+
+def _target_miss_margin_m(
+    *,
+    lateral_m: float,
+    vertical_m: float,
+    config: TrajectoryConfig,
+) -> float:
+    return float(
+        min(
+            float(config.lateral_tolerance_m) - float(lateral_m),
+            float(config.vertical_tolerance_m) - float(vertical_m),
+        )
+    )
+
+
+def _normalized_target_miss(
+    *,
+    endpoint: np.ndarray,
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+) -> float:
+    _, _, _, lateral_m, vertical_m, _ = _target_miss_components(endpoint, target_point)
+    lateral_scale = max(float(config.lateral_tolerance_m), 1e-9)
+    vertical_scale = max(float(config.vertical_tolerance_m), 1e-9)
+    return float(
+        np.hypot(
+            float(lateral_m) / lateral_scale,
+            float(vertical_m) / vertical_scale,
+        )
+    )
 
 
 class TrajectoryPlanner:
@@ -121,7 +184,7 @@ class TrajectoryPlanner:
         zero_azimuth_turn = _is_zero_azimuth_turn_geometry(
             geometry=geometry,
             target_direction=target_direction,
-            tolerance_m=config.pos_tolerance_m,
+            tolerance_m=float(config.lateral_tolerance_m),
         )
         solver_mode_text = (
             "Солвер: единая оптимизация траектории (поворот по азимуту = 0)."
@@ -532,16 +595,29 @@ def _solve_turn_profile(
 
     candidates: list[ProfileParameters] = []
     best_miss = np.inf
+    best_lateral_m = np.inf
+    best_vertical_m = np.inf
     best_miss_build_dls = float(build_dls_upper)
     for preferred_profile in preferred_profiles:
         endpoint = np.array(
             _estimate_t1_endpoint_for_profile(preferred_profile), dtype=float
         )
-        miss = float(_distance_3d(*endpoint, *target_point))
+        _, _, _, lateral_m, vertical_m, _ = _target_miss_components(endpoint, target_point)
+        miss = _normalized_target_miss(
+            endpoint=endpoint,
+            target_point=target_point,
+            config=config,
+        )
         best_miss = min(best_miss, miss)
         if miss <= best_miss + SMALL:
             best_miss_build_dls = float(preferred_profile.dls_build1_deg_per_30m)
-        if miss > config.pos_tolerance_m + SMALL:
+            best_lateral_m = float(lateral_m)
+            best_vertical_m = float(vertical_m)
+        if not _target_miss_within_tolerance(
+            lateral_m=lateral_m,
+            vertical_m=vertical_m,
+            config=config,
+        ):
             continue
         if not _is_candidate_feasible(candidate=preferred_profile, config=config):
             continue
@@ -645,11 +721,22 @@ def _solve_turn_profile(
             if candidate is None:
                 continue
             endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
-            miss = float(_distance_3d(*endpoint, *target_point))
+            _, _, _, lateral_m, vertical_m, _ = _target_miss_components(endpoint, target_point)
+            miss = _normalized_target_miss(
+                endpoint=endpoint,
+                target_point=target_point,
+                config=config,
+            )
             if miss < best_miss - SMALL or abs(miss - best_miss) <= SMALL:
                 best_miss = miss
                 best_miss_build_dls = float(candidate.dls_build1_deg_per_30m)
-            if miss > config.pos_tolerance_m + SMALL:
+                best_lateral_m = float(lateral_m)
+                best_vertical_m = float(vertical_m)
+            if not _target_miss_within_tolerance(
+                lateral_m=lateral_m,
+                vertical_m=vertical_m,
+                config=config,
+            ):
                 continue
             if not _is_candidate_feasible(candidate=candidate, config=config):
                 continue
@@ -698,12 +785,14 @@ def _solve_turn_profile(
             f"closest candidate was at {best_miss_build_dls:.2f} deg/30m."
         )
     diagnostics.append(
-        f"Solver endpoint miss to t1 after optimization is {best_miss:.2f} m "
-        f"(tolerance {config.pos_tolerance_m:.2f} m)."
+        "Solver endpoint miss to t1 after optimization is "
+        f"lateral {best_lateral_m:.2f} m / vertical {best_vertical_m:.2f} m "
+        f"(tolerances {config.lateral_tolerance_m:.2f} / {config.vertical_tolerance_m:.2f} m)."
     )
     raise PlanningError(
         "No valid trajectory solution found within configured limits. "
-        f"Closest miss to t1 is {best_miss:.2f} m."
+        "Closest miss to t1 is "
+        f"lateral {best_lateral_m:.2f} m / vertical {best_vertical_m:.2f} m."
         + _format_failure_diagnostics(diagnostics)
     )
 
@@ -849,25 +938,92 @@ def _collect_early_anti_collision_stage_candidates(
                     bounds[kop_index][1],
                 )
             )
-            evaluation = _evaluate_candidate_for_optimization(
-                values=values,
+            refined_candidates = _refine_profile_with_fixed_components(
+                seed_vector=values,
+                fixed_components={
+                    0: float(values[0]),
+                    kop_index: float(values[kop_index]),
+                },
+                bounds=bounds,
                 profile_builder=profile_builder,
                 target_point=target_point,
                 config=config,
+                max_nfev=36,
             )
-            if not evaluation.feasible or evaluation.candidate is None:
-                continue
-            candidate = evaluation.candidate
-            key = (
-                round(float(candidate.dls_build1_deg_per_30m), 6),
-                round(float(candidate.kop_vertical_m), 6),
-                round(float(candidate.md_total_m), 6),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append(candidate)
+            if not refined_candidates:
+                evaluation = _evaluate_candidate_for_optimization(
+                    values=values,
+                    profile_builder=profile_builder,
+                    target_point=target_point,
+                    config=config,
+                )
+                if evaluation.feasible and evaluation.candidate is not None:
+                    refined_candidates = [evaluation.candidate]
+            for candidate in refined_candidates:
+                key = (
+                    round(float(candidate.dls_build1_deg_per_30m), 6),
+                    round(float(candidate.kop_vertical_m), 6),
+                    round(float(candidate.md_total_m), 6),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(candidate)
     return candidates
+
+
+def _collect_late_build2_seed_vectors(
+    *,
+    seed_vectors: list[np.ndarray],
+    baseline_vector: np.ndarray,
+    bounds: tuple[tuple[float, float], ...],
+    kop_bound_index: int,
+) -> list[np.ndarray]:
+    build2_index = 1
+    build2_upper = float(bounds[build2_index][1])
+    build2_lower = float(bounds[build2_index][0])
+    hold_index = kop_bound_index + 2
+    hold_upper = float(bounds[hold_index][1]) if hold_index < len(bounds) else 0.0
+    focused: list[np.ndarray] = []
+    baseline = _clip_to_bounds(np.asarray(baseline_vector, dtype=float), bounds=bounds)
+    focused.append(baseline)
+    build2_upper_seed = baseline.copy()
+    build2_upper_seed[build2_index] = build2_upper
+    focused.append(build2_upper_seed)
+    for seed in seed_vectors[: min(3, len(seed_vectors))]:
+        adjusted = _clip_to_bounds(np.asarray(seed, dtype=float), bounds=bounds)
+        adjusted[0] = float(baseline[0])
+        adjusted[kop_bound_index] = float(baseline[kop_bound_index])
+        focused.append(adjusted.copy())
+        build2_mid_seed = adjusted.copy()
+        build2_mid_seed[build2_index] = float(
+            0.5 * (float(build2_mid_seed[build2_index]) + build2_upper)
+        )
+        focused.append(build2_mid_seed)
+        build2_upper_variant = adjusted.copy()
+        build2_upper_variant[build2_index] = build2_upper
+        focused.append(build2_upper_variant)
+        if hold_index < len(bounds):
+            shorter_hold_variant = build2_upper_variant.copy()
+            shorter_hold_variant[hold_index] = float(
+                max(
+                    hold_upper * 0.25,
+                    float(bounds[hold_index][0]),
+                )
+            )
+            focused.append(shorter_hold_variant)
+            longer_hold_variant = build2_upper_variant.copy()
+            longer_hold_variant[hold_index] = float(
+                max(
+                    float(longer_hold_variant[hold_index]),
+                    hold_upper * 0.75,
+                )
+            )
+            focused.append(longer_hold_variant)
+        build2_lower_variant = adjusted.copy()
+        build2_lower_variant[build2_index] = build2_lower
+        focused.append(build2_lower_variant)
+    return _dedupe_seed_vectors(focused)[:LATE_ANTI_COLLISION_BUILD2_MAX_STARTS]
 
 
 def _optimization_objective_value(candidate: ProfileParameters, mode: str) -> float:
@@ -1010,6 +1166,36 @@ def _select_anti_collision_candidate(
         bounds=active_bounds,
         split_build=split_build,
     )
+    keep_kop_reference = float(baseline_vector[kop_bound_index])
+    if optimization_context.baseline_kop_vertical_m is not None:
+        keep_kop_reference = float(
+            np.clip(
+                float(optimization_context.baseline_kop_vertical_m),
+                float(active_bounds[kop_bound_index][0]),
+                float(active_bounds[kop_bound_index][1]),
+            )
+        )
+    keep_build1_reference = float(baseline_vector[0])
+    if optimization_context.baseline_build1_dls_deg_per_30m is not None:
+        keep_build1_reference = float(
+            np.clip(
+                _encode_build_dls_to_unit(
+                    build_dls_deg_per_30m=float(
+                        optimization_context.baseline_build1_dls_deg_per_30m
+                    ),
+                    lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+                    upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+                ),
+                float(active_bounds[0][0]),
+                float(active_bounds[0][1]),
+            )
+        )
+    constrained_baseline_vector = np.asarray(baseline_vector, dtype=float).copy()
+    constrained_baseline_vector[0] = float(keep_build1_reference)
+    constrained_baseline_vector[kop_bound_index] = float(keep_kop_reference)
+    distance_baseline_vector = (
+        constrained_baseline_vector if bool(optimization_context.prefer_keep_kop or optimization_context.prefer_keep_build1) else baseline_vector
+    )
     clearance_cache: dict[tuple[float, ...], AntiCollisionClearanceEvaluation] = {}
 
     def candidate_key(candidate: ProfileParameters) -> tuple[float, ...]:
@@ -1049,7 +1235,7 @@ def _select_anti_collision_candidate(
         )
         deviation_rank = _candidate_vector_distance(
             candidate=candidate,
-            baseline_vector=baseline_vector,
+            baseline_vector=distance_baseline_vector,
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
@@ -1066,14 +1252,37 @@ def _select_anti_collision_candidate(
             _candidate_turn_deg(candidate),
         )
 
-    ranked = sorted(candidates, key=anti_collision_sort_key)
-    best_seed = ranked[0]
-    best_seed_clearance = clearance_for_candidate(best_seed)
     early_anti_collision_stage = bool(
         optimization_context.prefer_lower_kop
         and optimization_context.prefer_higher_build1
     )
-    if float(best_seed_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
+    late_build2_stage = bool(
+        split_build
+        and optimization_context.prefer_adjust_build2
+        and not early_anti_collision_stage
+    )
+    ranked_all = sorted(candidates, key=anti_collision_sort_key)
+    if late_build2_stage:
+        baseline_build1_dls = optimization_context.baseline_build1_dls_deg_per_30m
+        ranked = [
+            candidate
+            for candidate in ranked_all
+            if abs(float(candidate.kop_vertical_m) - float(keep_kop_reference))
+            <= LATE_ANTI_COLLISION_KEEP_KOP_TOLERANCE_M
+            and (
+                baseline_build1_dls is None
+                or abs(
+                    float(candidate.dls_build1_deg_per_30m)
+                    - float(baseline_build1_dls)
+                )
+                <= LATE_ANTI_COLLISION_KEEP_BUILD1_TOLERANCE_DEG_PER_30M
+            )
+        ]
+    else:
+        ranked = list(ranked_all)
+    best_seed = ranked[0] if ranked else ranked_all[0]
+    best_seed_clearance = clearance_for_candidate(best_seed)
+    if ranked and float(best_seed_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
         return TurnSolveResult(
             params=best_seed,
             optimization=OptimizationOutcome(
@@ -1105,11 +1314,11 @@ def _select_anti_collision_candidate(
             bounds=active_bounds,
             split_build=split_build,
         )
-        for item in ranked[:OPTIMIZATION_MAX_SEEDS]
+        for item in (ranked if ranked else ranked_all)[:OPTIMIZATION_MAX_SEEDS]
     ]
     seed_vectors.extend(
         _collect_optimization_seed_vectors(
-            candidates=ranked,
+            candidates=ranked if ranked else ranked_all,
             mode=OPTIMIZATION_MINIMIZE_MD,
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
@@ -1144,6 +1353,13 @@ def _select_anti_collision_candidate(
                 for item in optimized_candidates[: max(OPTIMIZATION_MAX_SEEDS, 1)]
             ]
         )[:EARLY_ANTI_COLLISION_MAX_STARTS]
+    elif late_build2_stage:
+        optimization_seed_vectors = _collect_late_build2_seed_vectors(
+            seed_vectors=optimization_seed_vectors,
+            baseline_vector=constrained_baseline_vector,
+            bounds=active_bounds,
+            kop_bound_index=kop_bound_index,
+        )
     else:
         optimization_seed_vectors = optimization_seed_vectors[:ANTI_COLLISION_MAX_STARTS]
     runs_used = 0
@@ -1189,7 +1405,7 @@ def _select_anti_collision_candidate(
         )
         deviation = _search_vector_distance(
             values=np.asarray(values, dtype=float),
-            baseline_vector=baseline_vector,
+            baseline_vector=distance_baseline_vector,
             bounds=active_bounds,
         )
         kop_preference = 0.0
@@ -1232,7 +1448,7 @@ def _select_anti_collision_candidate(
                     max(
                         abs(
                             float(values[kop_bound_index])
-                            - float(baseline_vector[kop_bound_index])
+                            - float(keep_kop_reference)
                         ),
                         0.0,
                     )
@@ -1249,10 +1465,21 @@ def _select_anti_collision_candidate(
             keep_build1_penalty = (
                 ANTI_COLLISION_KEEP_BUILD1_WEIGHT
                 * (
-                    max(abs(float(values[0]) - float(baseline_vector[0])), 0.0)
+                    max(abs(float(values[0]) - float(keep_build1_reference)), 0.0)
                     / build1_span
                 )
                 ** 2
+            )
+        build2_preference = 0.0
+        if late_build2_stage:
+            build2_span = max(
+                float(active_bounds[1][1]) - float(active_bounds[1][0]),
+                1e-6,
+            )
+            build2_preference = (
+                ANTI_COLLISION_BUILD2_PREFERENCE_WEIGHT
+                * max(float(active_bounds[1][1]) - float(values[1]), 0.0)
+                / build2_span
             )
         return (
             ANTI_COLLISION_OBJECTIVE_PENALTY * deficit * deficit
@@ -1260,6 +1487,7 @@ def _select_anti_collision_candidate(
             + build1_preference
             + keep_kop_penalty
             + keep_build1_penalty
+            + build2_preference
             + deviation
             + 1e-4 * float(base_eval.md_total_m)
         )
@@ -1277,6 +1505,8 @@ def _select_anti_collision_candidate(
     maxiter = max(36, min(120, int(round(0.24 * float(search_settings.local_max_nfev)))))
     if early_anti_collision_stage:
         maxiter = min(maxiter, EARLY_ANTI_COLLISION_MAXITER)
+    elif late_build2_stage:
+        maxiter = min(maxiter, LATE_ANTI_COLLISION_BUILD2_MAXITER)
     else:
         maxiter = min(maxiter, ANTI_COLLISION_MAXITER)
     if progress_callback is not None:
@@ -1289,55 +1519,103 @@ def _select_anti_collision_candidate(
             0.97,
         )
     if early_anti_collision_stage:
-        reduced_bounds = [active_bounds[0], active_bounds[kop_bound_index]]
+        selected = min(optimized_candidates, key=anti_collision_sort_key)
+        selected_clearance = clearance_for_candidate(selected)
+        seed_key = anti_collision_sort_key(best_seed)
+        selected_key = anti_collision_sort_key(selected)
+        improved = bool(selected_key < seed_key)
+        objective_gap = max(
+            float(optimization_context.sf_target)
+            - float(selected_clearance.min_separation_factor),
+            0.0,
+        )
+        return TurnSolveResult(
+            params=selected,
+            optimization=OptimizationOutcome(
+                mode=OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+                status=(
+                    "sf_target_reached"
+                    if float(selected_clearance.min_separation_factor)
+                    >= float(optimization_context.sf_target)
+                    - ANTI_COLLISION_SF_TOLERANCE
+                    else ("clearance_improved" if improved else "seed_selected")
+                ),
+                objective_value=float(objective_gap),
+                theoretical_lower_bound=0.0,
+                absolute_gap_value=float(objective_gap),
+                relative_gap_pct=(
+                    float(
+                        100.0
+                        * objective_gap
+                        / max(float(optimization_context.sf_target), 1.0)
+                    )
+                    if objective_gap > 0.0
+                    else 0.0
+                ),
+                seeds_used=len(optimization_seed_vectors),
+                runs_used=0,
+            ),
+        )
+    if late_build2_stage:
+        fixed_indices = {0, kop_bound_index}
+        reduced_indices = [
+            index for index in range(len(active_bounds)) if index not in fixed_indices
+        ]
+        reduced_bounds = [active_bounds[index] for index in reduced_indices]
         for seed_vector in optimization_seed_vectors:
             base_seed = _clip_to_bounds(seed_vector, bounds=active_bounds)
+            base_seed[0] = float(keep_build1_reference)
+            base_seed[kop_bound_index] = float(keep_kop_reference)
             reduced_seed = np.asarray(
-                [float(base_seed[0]), float(base_seed[kop_bound_index])],
+                [float(base_seed[index]) for index in reduced_indices],
                 dtype=float,
             )
 
-            def expand_reduced(values_2d: np.ndarray) -> np.ndarray:
+            def expand_reduced(values_reduced: np.ndarray) -> np.ndarray:
                 expanded = np.asarray(base_seed, dtype=float).copy()
-                expanded[0] = float(values_2d[0])
-                expanded[kop_bound_index] = float(values_2d[1])
+                for reduced_index, free_index in enumerate(reduced_indices):
+                    expanded[free_index] = float(values_reduced[reduced_index])
+                expanded[0] = float(keep_build1_reference)
+                expanded[kop_bound_index] = float(keep_kop_reference)
                 return _clip_to_bounds(expanded, bounds=active_bounds)
 
             runs_used += 1
             result = minimize(
-                fun=lambda values_2d: objective(expand_reduced(np.asarray(values_2d, dtype=float))),
+                fun=lambda values_reduced: objective(
+                    expand_reduced(np.asarray(values_reduced, dtype=float))
+                ),
                 x0=reduced_seed,
                 method="SLSQP",
                 bounds=list(reduced_bounds),
                 constraints=[
                     {
                         "type": "ineq",
-                        "fun": lambda values_2d: evaluate(
-                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        "fun": lambda values_reduced: evaluate(
+                            expand_reduced(np.asarray(values_reduced, dtype=float))
                         )[0].t1_margin_m,
                     },
                     {
                         "type": "ineq",
-                        "fun": lambda values_2d: evaluate(
-                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        "fun": lambda values_reduced: evaluate(
+                            expand_reduced(np.asarray(values_reduced, dtype=float))
                         )[0].build1_margin_m,
                     },
                     {
                         "type": "ineq",
-                        "fun": lambda values_2d: evaluate(
-                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        "fun": lambda values_reduced: evaluate(
+                            expand_reduced(np.asarray(values_reduced, dtype=float))
                         )[0].build2_margin_m,
                     },
                     {
                         "type": "ineq",
-                        "fun": lambda values_2d: evaluate(
-                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        "fun": lambda values_reduced: evaluate(
+                            expand_reduced(np.asarray(values_reduced, dtype=float))
                         )[0].max_inc_margin_deg,
                     },
                     {
                         "type": "ineq",
-                        "fun": lambda values_2d: evaluate(
-                            expand_reduced(np.asarray(values_2d, dtype=float))
+                        "fun": lambda values_reduced: evaluate(
+                            expand_reduced(np.asarray(values_reduced, dtype=float))
                         )[0].horizontal_dls_margin_deg_per_30m,
                     },
                 ],
@@ -1349,7 +1627,9 @@ def _select_anti_collision_candidate(
             )
             probes = [expand_reduced(reduced_seed)]
             if np.all(np.isfinite(result.x)):
-                probes.append(expand_reduced(np.asarray(result.x, dtype=float)))
+                probes.append(
+                    expand_reduced(np.asarray(result.x, dtype=float))
+                )
             for probe in probes:
                 base_eval, clearance = evaluate(probe)
                 if not base_eval.feasible or base_eval.candidate is None or clearance is None:
@@ -1357,10 +1637,11 @@ def _select_anti_collision_candidate(
                 optimized_candidates.append(base_eval.candidate)
                 clearance_cache[candidate_key(base_eval.candidate)] = clearance
 
-            current_best = min(optimized_candidates, key=anti_collision_sort_key)
-            current_clearance = clearance_for_candidate(current_best)
-            if float(current_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
-                break
+            if optimized_candidates:
+                current_best = min(optimized_candidates, key=anti_collision_sort_key)
+                current_clearance = clearance_for_candidate(current_best)
+                if float(current_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
+                    break
     else:
         for seed_vector in optimization_seed_vectors:
             seed = _clip_to_bounds(seed_vector, bounds=active_bounds)
@@ -1393,6 +1674,13 @@ def _select_anti_collision_candidate(
             current_clearance = clearance_for_candidate(current_best)
             if float(current_clearance.min_separation_factor) >= float(optimization_context.sf_target) - ANTI_COLLISION_SF_TOLERANCE:
                 break
+
+    if late_build2_stage and not optimized_candidates:
+        raise PlanningError(
+            "Late anti-collision BUILD2/HOLD adjustment could not find a valid "
+            "trajectory within the preserved KOP/BUILD1 profile and current limits. "
+            "Relax t1 tolerance / DLS limits or revise target spacing."
+        )
 
     selected = min(optimized_candidates, key=anti_collision_sort_key)
     selected_clearance = clearance_for_candidate(selected)
@@ -1561,7 +1849,10 @@ def _evaluate_profile_candidate(
         )
 
     endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
-    miss_t1_m = float(_distance_3d(*endpoint, *target_point))
+    _, _, _, miss_t1_lateral_m, miss_t1_vertical_m, miss_t1_m = _target_miss_components(
+        endpoint,
+        target_point,
+    )
     max_inc_actual_deg = float(
         max(candidate.inc_hold_deg, candidate.inc_entry_deg, candidate.horizontal_inc_deg)
     )
@@ -1571,7 +1862,11 @@ def _evaluate_profile_candidate(
         t1_miss_m=miss_t1_m,
         md_total_m=float(candidate.md_total_m),
         kop_vertical_m=float(candidate.kop_vertical_m),
-        t1_margin_m=float(config.pos_tolerance_m - miss_t1_m),
+        t1_margin_m=_target_miss_margin_m(
+            lateral_m=miss_t1_lateral_m,
+            vertical_m=miss_t1_vertical_m,
+            config=config,
+        ),
         build1_margin_m=float(candidate.build1_length_m - config.min_structural_segment_m),
         build2_margin_m=float(candidate.build2_length_m - config.min_structural_segment_m),
         max_inc_margin_deg=float(config.max_inc_deg - max_inc_actual_deg),
@@ -1738,8 +2033,12 @@ def _refine_profile_with_fixed_components(
         candidate = profile_builder(seed)
         if candidate is not None:
             endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
-            miss = float(_distance_3d(*endpoint, *target_point))
-            if miss <= config.pos_tolerance_m + SMALL and _is_candidate_feasible(candidate, config):
+            _, _, _, lateral_m, vertical_m, _ = _target_miss_components(endpoint, target_point)
+            if _target_miss_within_tolerance(
+                lateral_m=lateral_m,
+                vertical_m=vertical_m,
+                config=config,
+            ) and _is_candidate_feasible(candidate, config):
                 return [candidate]
         return []
 
@@ -1783,8 +2082,12 @@ def _refine_profile_with_fixed_components(
         if candidate is None:
             continue
         endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
-        miss = float(_distance_3d(*endpoint, *target_point))
-        if miss > config.pos_tolerance_m + SMALL:
+        _, _, _, lateral_m, vertical_m, _ = _target_miss_components(endpoint, target_point)
+        if not _target_miss_within_tolerance(
+            lateral_m=lateral_m,
+            vertical_m=vertical_m,
+            config=config,
+        ):
             continue
         if not _is_candidate_feasible(candidate, config):
             continue
@@ -2937,12 +3240,13 @@ def _turn_residuals(
         return np.full(3, 1e6, dtype=float)
 
     endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
-    pos_scale = max(float(config.pos_tolerance_m), 1e-9)
+    lateral_scale = max(float(config.lateral_tolerance_m), 1e-9)
+    vertical_scale = max(float(config.vertical_tolerance_m), 1e-9)
     residuals = np.array(
         [
-            (endpoint[0] - target_point[0]) / pos_scale,
-            (endpoint[1] - target_point[1]) / pos_scale,
-            (endpoint[2] - target_point[2]) / pos_scale,
+            (endpoint[0] - target_point[0]) / lateral_scale,
+            (endpoint[1] - target_point[1]) / lateral_scale,
+            (endpoint[2] - target_point[2]) / vertical_scale,
         ],
         dtype=float,
     )
@@ -2959,7 +3263,11 @@ def _turn_scalar_cost(
     if candidate is None:
         return 1e12
     endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
-    miss = float(_distance_3d(*endpoint, *target_point))
+    miss = _normalized_target_miss(
+        endpoint=endpoint,
+        target_point=target_point,
+        config=config,
+    )
     return float(miss * 1e6 + candidate.md_total_m)
 
 
@@ -3382,8 +3690,10 @@ def _resolve_horizontal_dls(config: TrajectoryConfig) -> float:
 def _validate_config(config: TrajectoryConfig) -> None:
     if config.md_step_m <= 0.0 or config.md_step_control_m <= 0.0:
         raise PlanningError("MD steps must be positive.")
-    if config.pos_tolerance_m <= 0.0:
-        raise PlanningError("Position tolerance must be positive.")
+    if config.lateral_tolerance_m <= 0.0:
+        raise PlanningError("lateral_tolerance_m must be positive.")
+    if config.vertical_tolerance_m <= 0.0:
+        raise PlanningError("vertical_tolerance_m must be positive.")
     if config.entry_inc_target_deg <= 0.0 or config.entry_inc_target_deg >= 90.0:
         raise PlanningError("entry_inc_target_deg must be in (0, 90).")
     if config.kop_min_vertical_m < 0.0:

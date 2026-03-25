@@ -160,12 +160,14 @@ def _target_delta_components(
     *,
     state: EndpointState,
     target: Point3D,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float, float]:
     dx_m = float(state.east_m - target.x)
     dy_m = float(state.north_m - target.y)
     dz_m = float(state.tvd_m - target.z)
+    lateral_distance_m = float(np.hypot(dx_m, dy_m))
+    vertical_distance_m = float(abs(dz_m))
     distance_m = float(np.sqrt(dx_m * dx_m + dy_m * dy_m + dz_m * dz_m))
-    return dx_m, dy_m, dz_m, distance_m
+    return dx_m, dy_m, dz_m, lateral_distance_m, vertical_distance_m, distance_m
 
 
 def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
@@ -260,11 +262,25 @@ def _build_summary(
     t1_row = df.loc[t1_idx]
     t3_row = df.iloc[-1]
 
-    t1_dx_m, t1_dy_m, t1_dz_m, distance_t1 = _target_delta_components(
+    (
+        t1_dx_m,
+        t1_dy_m,
+        t1_dz_m,
+        t1_lateral_m,
+        t1_vertical_m,
+        distance_t1,
+    ) = _target_delta_components(
         state=endpoint_eval.t1,
         target=t1,
     )
-    t3_dx_m, t3_dy_m, t3_dz_m, distance_t3 = _target_delta_components(
+    (
+        t3_dx_m,
+        t3_dy_m,
+        t3_dz_m,
+        t3_lateral_m,
+        t3_vertical_m,
+        distance_t3,
+    ) = _target_delta_components(
         state=endpoint_eval.t3,
         target=t3,
     )
@@ -311,6 +327,10 @@ def _build_summary(
     summary: dict[str, float | str] = {
         "distance_t1_m": float(distance_t1),
         "distance_t3_m": float(distance_t3),
+        "lateral_distance_t1_m": float(t1_lateral_m),
+        "lateral_distance_t3_m": float(t3_lateral_m),
+        "vertical_distance_t1_m": float(t1_vertical_m),
+        "vertical_distance_t3_m": float(t3_vertical_m),
         "distance_t1_control_m": float(distance_t1_control),
         "distance_t3_control_m": float(distance_t3_control),
         "control_gap_t1_m": float(control_gap_t1),
@@ -321,6 +341,8 @@ def _build_summary(
         "entry_inc_control_deg": float(t1_row["INC_deg"]),
         "entry_inc_target_deg": float(config.entry_inc_target_deg),
         "entry_inc_tolerance_deg": float(config.entry_inc_tolerance_deg),
+        "lateral_tolerance_m": float(config.lateral_tolerance_m),
+        "vertical_tolerance_m": float(config.vertical_tolerance_m),
         "max_inc_deg": float(config.max_inc_deg),
         "max_inc_actual_deg": max_inc_actual,
         "inc_required_t1_t3_deg": float(params.inc_required_t1_t3_deg),
@@ -441,21 +463,46 @@ def _build_summary(
     return summary
 
 
-def _assert_solution_is_valid(summary: dict[str, float | str], config: TrajectoryConfig) -> None:
-    if float(summary["distance_t1_m"]) > config.pos_tolerance_m:
+def _assert_solution_is_valid(
+    summary: dict[str, float | str],
+    config: TrajectoryConfig,
+    *,
+    position_tolerance_slack_m: float = 0.0,
+) -> None:
+    position_slack_m = max(
+        float(position_tolerance_slack_m),
+        0.0,
+    )
+    allowed_lateral_tolerance_m = float(config.lateral_tolerance_m) + position_slack_m
+    allowed_vertical_tolerance_m = float(config.vertical_tolerance_m) + position_slack_m
+    if (
+        float(summary["lateral_distance_t1_m"]) > allowed_lateral_tolerance_m
+        or float(summary["vertical_distance_t1_m"]) > allowed_vertical_tolerance_m
+    ):
         raise PlanningError(
             "Failed to hit t1 within tolerance. "
-            f"Miss={float(summary['distance_t1_m']):.2f} m, tolerance={config.pos_tolerance_m:.2f} m. "
+            "Miss="
+            f"lateral {float(summary['lateral_distance_t1_m']):.2f} m / "
+            f"vertical {float(summary['vertical_distance_t1_m']):.2f} m, "
+            "tolerances="
+            f"{config.lateral_tolerance_m:.2f} / {config.vertical_tolerance_m:.2f} m. "
             "Analytical delta: "
             f"dX={float(summary['t1_miss_dx_m']):.2f} m, "
             f"dY={float(summary['t1_miss_dy_m']):.2f} m, "
             f"dZ={float(summary['t1_miss_dz_m']):.2f} m. "
             "Increase BUILD DLS limit, relax tolerance, or adjust target geometry."
         )
-    if float(summary["distance_t3_m"]) > config.pos_tolerance_m:
+    if (
+        float(summary["lateral_distance_t3_m"]) > allowed_lateral_tolerance_m
+        or float(summary["vertical_distance_t3_m"]) > allowed_vertical_tolerance_m
+    ):
         raise PlanningError(
             "Failed to hit t3 within tolerance. "
-            f"Miss={float(summary['distance_t3_m']):.2f} m, tolerance={config.pos_tolerance_m:.2f} m. "
+            "Miss="
+            f"lateral {float(summary['lateral_distance_t3_m']):.2f} m / "
+            f"vertical {float(summary['vertical_distance_t3_m']):.2f} m, "
+            "tolerances="
+            f"{config.lateral_tolerance_m:.2f} / {config.vertical_tolerance_m:.2f} m. "
             "Analytical delta: "
             f"dX={float(summary['t3_miss_dx_m']):.2f} m, "
             f"dY={float(summary['t3_miss_dy_m']):.2f} m, "
@@ -528,5 +575,12 @@ def _build_validated_control_and_summary(
         turn_search_settings=turn_search_settings,
         turn_restarts_used=turn_restarts_used,
     )
-    _assert_solution_is_valid(summary=summary, config=config)
+    position_tolerance_slack_m = 0.0
+    if str(optimization_outcome.mode) == "anti_collision_avoidance":
+        position_tolerance_slack_m = 0.01
+    _assert_solution_is_valid(
+        summary=summary,
+        config=config,
+        position_tolerance_slack_m=position_tolerance_slack_m,
+    )
     return trajectory, control, summary

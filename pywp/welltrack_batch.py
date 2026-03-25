@@ -31,6 +31,7 @@ from pywp.models import Point3D, SummaryDict, TrajectoryConfig
 from pywp.optimization_reference import compute_unoptimized_reference
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
+from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.uncertainty import PlanningUncertaintyModel
 from pywp.ui_utils import dls_to_pi
@@ -45,6 +46,7 @@ class DynamicClusterExecutionContext:
     target_well_names: tuple[str, ...]
     uncertainty_model: PlanningUncertaintyModel
     initial_successes: tuple["SuccessfulWellPlan", ...]
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = ()
 
 
 _MAX_DYNAMIC_CLUSTER_PASSES = 3
@@ -133,6 +135,16 @@ def rebuild_optimization_context(
         prefer_keep_kop=bool(context.prefer_keep_kop),
         prefer_keep_build1=bool(context.prefer_keep_build1),
         prefer_adjust_build2=bool(context.prefer_adjust_build2),
+        baseline_kop_vertical_m=(
+            float(context.baseline_kop_vertical_m)
+            if context.baseline_kop_vertical_m is not None
+            else None
+        ),
+        baseline_build1_dls_deg_per_30m=(
+            float(context.baseline_build1_dls_deg_per_30m)
+            if context.baseline_build1_dls_deg_per_30m is not None
+            else None
+        ),
     )
 
 
@@ -213,10 +225,17 @@ class WelltrackBatchPlanner:
         cluster_blocking_reason: str | None = None
         dynamic_cluster_pass_count = 1 if dynamic_cluster_context is not None else 0
         previous_cluster_score = self._initial_cluster_score(dynamic_cluster_context)
+        dynamic_cluster_prefer_trajectory_stage = False
 
         while remaining_selected_names or dynamic_cluster_context is not None:
             if not remaining_selected_names:
-                reseed_names, reseed_reason, reseed_resolved, current_cluster_score = (
+                (
+                    reseed_names,
+                    reseed_reason,
+                    reseed_resolved,
+                    current_cluster_score,
+                    next_prefer_trajectory_stage,
+                ) = (
                     self._extend_dynamic_cluster_queue(
                         selected_records_by_name=selected_records_by_name,
                         dynamic_cluster_context=dynamic_cluster_context,
@@ -224,6 +243,9 @@ class WelltrackBatchPlanner:
                         previous_cluster_score=previous_cluster_score,
                         dynamic_cluster_pass_count=dynamic_cluster_pass_count,
                     )
+                )
+                dynamic_cluster_prefer_trajectory_stage = bool(
+                    next_prefer_trajectory_stage
                 )
                 if current_cluster_score is not None:
                     previous_cluster_score = current_cluster_score
@@ -245,6 +267,7 @@ class WelltrackBatchPlanner:
                 remaining_selected_names=remaining_selected_names,
                 dynamic_cluster_context=dynamic_cluster_context,
                 recalculated_success_by_name=recalculated_success_by_name,
+                prefer_trajectory_stage=dynamic_cluster_prefer_trajectory_stage,
             )
             if pruned_names:
                 skipped_selected_names.extend(
@@ -304,23 +327,32 @@ class WelltrackBatchPlanner:
                 planner_progress_callback=planner_progress_callback,
             )
             if success is not None:
+                optimization_context = runtime_override["optimization_context"]
                 previous_success = recalculated_success_by_name.get(str(record.name))
                 if previous_success is None:
                     previous_success = initial_success_by_name.get(str(record.name))
-                current_success_by_name = dict(initial_success_by_name)
-                current_success_by_name.update(recalculated_success_by_name)
-                retained_success = self._select_cluster_monotonic_anticollision_success(
-                    candidate_success=success,
-                    existing_success=previous_success,
-                    current_success_by_name=current_success_by_name,
-                    dynamic_cluster_context=dynamic_cluster_context,
-                )
-                if retained_success is None:
+                retained_success = None
+                if isinstance(optimization_context, AntiCollisionOptimizationContext):
                     retained_success = self._select_monotonic_anticollision_success(
                         candidate_success=success,
                         existing_success=previous_success,
-                        optimization_context=runtime_override["optimization_context"],
+                        optimization_context=optimization_context,
                     )
+                else:
+                    current_success_by_name = dict(initial_success_by_name)
+                    current_success_by_name.update(recalculated_success_by_name)
+                    retained_success = self._select_cluster_monotonic_anticollision_success(
+                        candidate_success=success,
+                        existing_success=previous_success,
+                        current_success_by_name=current_success_by_name,
+                        dynamic_cluster_context=dynamic_cluster_context,
+                    )
+                    if retained_success is None:
+                        retained_success = self._select_monotonic_anticollision_success(
+                            candidate_success=success,
+                            existing_success=previous_success,
+                            optimization_context=optimization_context,
+                        )
                 if retained_success is not None:
                     success = retained_success
                     row = self._row_from_success(record=record, success=retained_success)
@@ -352,6 +384,7 @@ class WelltrackBatchPlanner:
         analysis = build_anti_collision_analysis_for_successes(
             successes,
             model=dynamic_cluster_context.uncertainty_model,
+            reference_wells=dynamic_cluster_context.reference_wells,
             include_display_geometry=False,
             build_overlap_geometry=False,
         )
@@ -441,6 +474,7 @@ class WelltrackBatchPlanner:
         analysis = build_anti_collision_analysis_for_successes(
             successes,
             model=dynamic_cluster_context.uncertainty_model,
+            reference_wells=dynamic_cluster_context.reference_wells,
             include_display_geometry=False,
             build_overlap_geometry=False,
         )
@@ -702,6 +736,7 @@ class WelltrackBatchPlanner:
         remaining_selected_names: list[str],
         dynamic_cluster_context: DynamicClusterExecutionContext | None,
         recalculated_success_by_name: dict[str, SuccessfulWellPlan],
+        prefer_trajectory_stage: bool = False,
     ) -> tuple[DynamicClusterExecutionPlan | None, tuple[str, ...]]:
         if dynamic_cluster_context is None or not remaining_selected_names:
             return None, ()
@@ -721,6 +756,8 @@ class WelltrackBatchPlanner:
             selected_names=set(str(name) for name in remaining_selected_names),
             target_well_names=dynamic_cluster_context.target_well_names,
             uncertainty_model=dynamic_cluster_context.uncertainty_model,
+            reference_wells=dynamic_cluster_context.reference_wells,
+            prefer_trajectory_stage=bool(prefer_trajectory_stage),
         )
         if plan is None:
             blocking_reason = (
@@ -757,9 +794,15 @@ class WelltrackBatchPlanner:
         recalculated_success_by_name: Mapping[str, SuccessfulWellPlan],
         previous_cluster_score: tuple[float, float, int] | None,
         dynamic_cluster_pass_count: int,
-    ) -> tuple[tuple[str, ...], str | None, bool, tuple[float, float, int] | None]:
+    ) -> tuple[
+        tuple[str, ...],
+        str | None,
+        bool,
+        tuple[float, float, int] | None,
+        bool,
+    ]:
         if dynamic_cluster_context is None:
-            return (), None, False, previous_cluster_score
+            return (), None, False, previous_cluster_score, False
         if dynamic_cluster_pass_count >= _MAX_DYNAMIC_CLUSTER_PASSES:
             return (
                 (),
@@ -769,6 +812,7 @@ class WelltrackBatchPlanner:
                 ),
                 False,
                 previous_cluster_score,
+                False,
             )
         current_success_by_name = {
             str(item.name): item for item in dynamic_cluster_context.initial_successes
@@ -778,9 +822,29 @@ class WelltrackBatchPlanner:
             success_by_name=current_success_by_name,
             dynamic_cluster_context=dynamic_cluster_context,
         )
-        if dynamic_cluster_pass_count > 0 and not WelltrackBatchPlanner._cluster_score_improved(
+        improved_since_previous = WelltrackBatchPlanner._cluster_score_improved(
             current_score=current_cluster_score,
             previous_score=previous_cluster_score,
+        )
+        prefer_trajectory_stage = bool(dynamic_cluster_pass_count >= 1)
+        plan = build_dynamic_cluster_execution_plan(
+            successes=list(current_success_by_name.values()),
+            selected_names=set(selected_records_by_name),
+            target_well_names=dynamic_cluster_context.target_well_names,
+            uncertainty_model=dynamic_cluster_context.uncertainty_model,
+            reference_wells=dynamic_cluster_context.reference_wells,
+            prefer_trajectory_stage=prefer_trajectory_stage,
+        )
+        if plan is None:
+            return (), None, False, current_cluster_score, prefer_trajectory_stage
+        if (
+            dynamic_cluster_pass_count > 0
+            and not improved_since_previous
+            and not (
+                prefer_trajectory_stage
+                and str(plan.resolution_state).strip() == DYNAMIC_CLUSTER_PLAN_ACTIVE
+                and bool(plan.ordered_well_names)
+            )
         ):
             return (
                 (),
@@ -790,24 +854,18 @@ class WelltrackBatchPlanner:
                 ),
                 False,
                 current_cluster_score,
+                prefer_trajectory_stage,
             )
-        plan = build_dynamic_cluster_execution_plan(
-            successes=list(current_success_by_name.values()),
-            selected_names=set(selected_records_by_name),
-            target_well_names=dynamic_cluster_context.target_well_names,
-            uncertainty_model=dynamic_cluster_context.uncertainty_model,
-        )
-        if plan is None:
-            return (), None, False, current_cluster_score
         resolution_state = str(plan.resolution_state).strip()
         if resolution_state == DYNAMIC_CLUSTER_PLAN_RESOLVED:
-            return (), None, True, current_cluster_score
+            return (), None, True, current_cluster_score, prefer_trajectory_stage
         if resolution_state == DYNAMIC_CLUSTER_PLAN_BLOCKED:
             return (
                 (),
                 str(plan.blocking_reason).strip() if plan.blocking_reason is not None else None,
                 False,
                 current_cluster_score,
+                prefer_trajectory_stage,
             )
         pending_names = tuple(
             str(name)
@@ -820,8 +878,9 @@ class WelltrackBatchPlanner:
                 "Для следующего cluster-level прохода не осталось скважин в текущем наборе выбора.",
                 False,
                 current_cluster_score,
+                prefer_trajectory_stage,
             )
-        return pending_names, None, False, current_cluster_score
+        return pending_names, None, False, current_cluster_score, prefer_trajectory_stage
 
     @staticmethod
     def _resolve_optimization_context(

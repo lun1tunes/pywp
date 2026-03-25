@@ -53,6 +53,8 @@ class AntiCollisionOptimizationContext:
     prefer_keep_kop: bool = False
     prefer_keep_build1: bool = False
     prefer_adjust_build2: bool = False
+    baseline_kop_vertical_m: float | None = None
+    baseline_build1_dls_deg_per_30m: float | None = None
 
 
 @dataclass(frozen=True)

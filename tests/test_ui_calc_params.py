@@ -24,7 +24,8 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     cfg = TrajectoryConfig()
     assert defaults["md_step"] == float(cfg.md_step_m)
     assert defaults["md_control"] == float(cfg.md_step_control_m)
-    assert defaults["pos_tol"] == float(cfg.pos_tolerance_m)
+    assert defaults["lateral_tol"] == float(cfg.lateral_tolerance_m)
+    assert defaults["vertical_tol"] == float(cfg.vertical_tolerance_m)
     assert defaults["entry_inc_target"] == float(cfg.entry_inc_target_deg)
     assert defaults["entry_inc_tol"] == float(cfg.entry_inc_tolerance_deg)
     assert defaults["max_inc"] == float(cfg.max_inc_deg)
@@ -83,7 +84,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
 
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
-    assert int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 7
+    assert int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 9
 
 
 def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
@@ -106,7 +107,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
-        int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 7
+        int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 9
     )
 
 
