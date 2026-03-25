@@ -36,10 +36,27 @@ def test_plotly_figures_are_constructed() -> None:
     t1 = Point3D(35.0, 0.0, 85.0)
     t3 = Point3D(120.0, 0.0, 85.0)
 
-    fig3d = trajectory_3d_figure(df, surface=surface, t1=t1, t3=t3)
-    fig_plan = plan_view_figure(df, surface=surface, t1=t1, t3=t3)
+    fig3d = trajectory_3d_figure(
+        df,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        well_name="WELL-01",
+    )
+    fig_plan = plan_view_figure(
+        df,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        well_name="WELL-01",
+    )
     fig_section = section_view_figure(
-        df, surface=surface, azimuth_deg=90.0, t1=t1, t3=t3
+        df,
+        surface=surface,
+        azimuth_deg=90.0,
+        t1=t1,
+        t3=t3,
+        well_name="WELL-01",
     )
     fig_dls = dls_figure(
         df, dls_limits={"BUILD1": 8.0, "BUILD2": 8.0, "HOLD": 2.0, "HORIZONTAL": 2.0}
@@ -86,6 +103,9 @@ def test_plotly_figures_are_constructed() -> None:
     names = [str(trace.name) for trace in fig3d.data]
     assert "X=0 axis" in names
     assert "Y=0 axis" in names
+    assert "WELL-01: t1 label" in names
+    assert any(str(trace.name) == "WELL-01: t1 label" for trace in fig_plan.data)
+    assert any(str(trace.name) == "WELL-01: t1 label" for trace in fig_section.data)
 
     trace3d = next(trace for trace in fig3d.data if str(trace.name) == "Траектория")
     trace_plan = next(

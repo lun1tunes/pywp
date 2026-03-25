@@ -275,6 +275,41 @@ def _lighten_hex(hex_color: str, blend_with_white: float = 0.38) -> str:
     return f"#{red:02X}{green:02X}{blue:02X}"
 
 
+def _t1_name_trace_3d(*, well_name: str, t1: Point3D, color: str) -> go.Scatter3d:
+    return go.Scatter3d(
+        x=[float(t1.x)],
+        y=[float(t1.y)],
+        z=[float(t1.z)],
+        mode="text",
+        text=[str(well_name)],
+        textposition="top center",
+        name=f"{well_name}: t1 label",
+        showlegend=False,
+        textfont={"color": str(color), "size": 12},
+        hoverinfo="skip",
+    )
+
+
+def _t1_name_trace_2d(
+    *,
+    well_name: str,
+    x_value: float,
+    y_value: float,
+    color: str,
+) -> go.Scatter:
+    return go.Scatter(
+        x=[float(x_value)],
+        y=[float(y_value)],
+        mode="text",
+        text=[str(well_name)],
+        textposition="top center",
+        name=f"{well_name}: t1 label",
+        showlegend=False,
+        textfont={"color": str(color), "size": 12},
+        hoverinfo="skip",
+    )
+
+
 def _build_anti_collision_analysis(
     successes: list[SuccessfulWellPlan],
     *,
@@ -824,6 +859,13 @@ def _all_wells_3d_figure(
                 hovertemplate="X: %{x:.2f} m<br>Y: %{y:.2f} m<br>Z/TVD: %{z:.2f} m<extra>%{fullData.name}</extra>",
             )
         )
+        fig.add_trace(
+            _t1_name_trace_3d(
+                well_name=str(name),
+                t1=t1,
+                color=line_color,
+            )
+        )
 
     for reference_well in reference_wells:
         stations = reference_well.stations
@@ -915,6 +957,13 @@ def _all_wells_3d_figure(
                     "Z/TVD: %{z:.2f} m"
                     "<extra>%{fullData.name}</extra>"
                 ),
+            )
+        )
+        fig.add_trace(
+            _t1_name_trace_3d(
+                well_name=str(target_only.name),
+                t1=target_only.t1,
+                color=line_color,
             )
         )
 
@@ -1056,6 +1105,14 @@ def _all_wells_plan_figure(
                 ),
             )
         )
+        fig.add_trace(
+            _t1_name_trace_2d(
+                well_name=str(name),
+                x_value=float(t1.x),
+                y_value=float(t1.y),
+                color=line_color,
+            )
+        )
 
     for reference_well in reference_wells:
         stations = reference_well.stations
@@ -1133,6 +1190,14 @@ def _all_wells_plan_figure(
                     "Y: %{y:.2f} m"
                     "<extra>%{fullData.name}</extra>"
                 ),
+            )
+        )
+        fig.add_trace(
+            _t1_name_trace_2d(
+                well_name=str(target_only.name),
+                x_value=float(target_only.t1.x),
+                y_value=float(target_only.t1.y),
+                color=line_color,
             )
         )
     x_values = np.concatenate(x_arrays) if x_arrays else np.array([0.0], dtype=float)
@@ -1339,6 +1404,13 @@ def _all_wells_anticollision_3d_figure(
                         "Y: %{y:.2f} m<br>"
                         "Z/TVD: %{z:.2f} m<extra>%{fullData.name}</extra>"
                     ),
+                )
+            )
+            fig.add_trace(
+                _t1_name_trace_3d(
+                    well_name=str(well.name),
+                    t1=well.t1,
+                    color=str(well.color),
                 )
             )
             x_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
@@ -1629,6 +1701,14 @@ def _all_wells_anticollision_plan_figure(
                         "line": {"width": 1, "color": "rgba(255,255,255,0.9)"},
                     },
                     hovertemplate="X: %{x:.2f} m<br>Y: %{y:.2f} m<extra>%{fullData.name}</extra>",
+                )
+            )
+            fig.add_trace(
+                _t1_name_trace_2d(
+                    well_name=str(well.name),
+                    x_value=float(well.t1.x),
+                    y_value=float(well.t1.y),
+                    color=str(well.color),
                 )
             )
             x_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))

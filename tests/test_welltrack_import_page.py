@@ -2047,6 +2047,31 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
     assert not any("APP-1 (Проектная утвержденная): цели" == str(trace.name) for trace in figure_plan.data)
 
 
+def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
+    page = _load_welltrack_page_module()
+    successes = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0),
+    ]
+    records = _records()[:2]
+    color_map = page._well_color_map(records)
+
+    overview_3d = page._all_wells_3d_figure(successes, name_to_color=color_map)
+    overview_plan = page._all_wells_plan_figure(successes, name_to_color=color_map)
+    analysis = page._build_anti_collision_analysis(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        name_to_color=color_map,
+    )
+    anticollision_3d = page._all_wells_anticollision_3d_figure(analysis)
+    anticollision_plan = page._all_wells_anticollision_plan_figure(analysis)
+
+    for figure in (overview_3d, overview_plan, anticollision_3d, anticollision_plan):
+        trace_names = {str(trace.name) for trace in figure.data}
+        assert "WELL-A: t1 label" in trace_names
+        assert "WELL-B: t1 label" in trace_names
+
+
 def test_batch_summary_display_df_reorders_and_shortens_summary_columns() -> None:
     page = _load_welltrack_page_module()
     source = pd.DataFrame(

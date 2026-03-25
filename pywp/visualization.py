@@ -54,6 +54,50 @@ HOVER_TEMPLATE_XYZ_MD_DLS = (
 )
 
 
+def _t1_label_trace_3d(
+    *,
+    well_name: str | None,
+    t1: Point3D,
+    color: str,
+) -> go.Scatter3d | None:
+    if not well_name:
+        return None
+    return go.Scatter3d(
+        x=[float(t1.x)],
+        y=[float(t1.y)],
+        z=[float(t1.z)],
+        mode="text",
+        text=[str(well_name)],
+        textposition="top center",
+        name=f"{well_name}: t1 label",
+        showlegend=False,
+        textfont={"color": str(color), "size": 12},
+        hoverinfo="skip",
+    )
+
+
+def _t1_label_trace_2d(
+    *,
+    well_name: str | None,
+    x_value: float,
+    y_value: float,
+    color: str,
+) -> go.Scatter | None:
+    if not well_name:
+        return None
+    return go.Scatter(
+        x=[float(x_value)],
+        y=[float(y_value)],
+        mode="text",
+        text=[str(well_name)],
+        textposition="top center",
+        name=f"{well_name}: t1 label",
+        showlegend=False,
+        textfont={"color": str(color), "size": 12},
+        hoverinfo="skip",
+    )
+
+
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     color = str(hex_color).strip().lstrip("#")
     if len(color) != 6:
@@ -462,6 +506,7 @@ def trajectory_3d_figure(
     surface: Point3D,
     t1: Point3D,
     t3: Point3D,
+    well_name: str | None = None,
     height: int = 560,
     md_t1_m: float | None = None,
     trajectory_line_dash: str = "solid",
@@ -603,6 +648,13 @@ def trajectory_3d_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    t1_label_trace = _t1_label_trace_3d(
+        well_name=well_name,
+        t1=t1,
+        color=TARGET_COLOR_PRIMARY,
+    )
+    if t1_label_trace is not None:
+        fig.add_trace(t1_label_trace)
 
     if md_t1_m is not None:
         t1_idx = int((df["MD_m"] - float(md_t1_m)).abs().idxmin())
@@ -693,6 +745,7 @@ def plan_view_figure(
     surface: Point3D,
     t1: Point3D,
     t3: Point3D,
+    well_name: str | None = None,
     height: int = 460,
     trajectory_line_dash: str = "solid",
     plan_csb_df: pd.DataFrame | None = None,
@@ -804,6 +857,14 @@ def plan_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    t1_label_trace = _t1_label_trace_2d(
+        well_name=well_name,
+        x_value=float(t1.x),
+        y_value=float(t1.y),
+        color=TARGET_COLOR_PRIMARY,
+    )
+    if t1_label_trace is not None:
+        fig.add_trace(t1_label_trace)
 
     fig.update_layout(
         title="План (E-N)",
@@ -839,6 +900,7 @@ def section_view_figure(
     azimuth_deg: float,
     t1: Point3D,
     t3: Point3D,
+    well_name: str | None = None,
     height: int = 460,
     trajectory_line_dash: str = "solid",
     plan_csb_df: pd.DataFrame | None = None,
@@ -940,6 +1002,14 @@ def section_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
+    t1_label_trace = _t1_label_trace_2d(
+        well_name=well_name,
+        x_value=float(t_points.loc[1, "VS_m"]),
+        y_value=float(t_points.loc[1, "Z_m"]),
+        color=TARGET_COLOR_PRIMARY,
+    )
+    if t1_label_trace is not None:
+        fig.add_trace(t1_label_trace)
     _add_section_inc_labels(fig=fig, df=df, section_x=vs)
 
     fig.update_layout(

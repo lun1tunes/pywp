@@ -518,6 +518,7 @@ def render_result_plots(
 
     render_trajectory_dls_panel(
         stations=view.stations,
+        well_name=view.well_name,
         surface=view.surface,
         t1=view.t1,
         t3=view.t3,
@@ -532,6 +533,7 @@ def render_result_plots(
     )
     render_plan_section_panel(
         stations=view.stations,
+        well_name=view.well_name,
         surface=view.surface,
         t1=view.t1,
         t3=view.t3,

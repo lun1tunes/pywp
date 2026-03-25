@@ -42,6 +42,7 @@ def render_run_log_panel(
 def render_trajectory_dls_panel(
     *,
     stations: pd.DataFrame,
+    well_name: str | None = None,
     surface: Point3D,
     t1: Point3D,
     t3: Point3D,
@@ -61,6 +62,7 @@ def render_trajectory_dls_panel(
         row1_col1.plotly_chart(
             trajectory_3d_figure(
                 stations,
+                well_name=well_name,
                 surface=surface,
                 t1=t1,
                 t3=t3,
@@ -88,6 +90,7 @@ def render_trajectory_dls_panel(
 def render_plan_section_panel(
     *,
     stations: pd.DataFrame,
+    well_name: str | None = None,
     surface: Point3D,
     t1: Point3D,
     t3: Point3D,
@@ -106,6 +109,7 @@ def render_plan_section_panel(
         row2_col1.plotly_chart(
             plan_view_figure(
                 stations,
+                well_name=well_name,
                 surface=surface,
                 t1=t1,
                 t3=t3,
@@ -119,6 +123,7 @@ def render_plan_section_panel(
         row2_col2.plotly_chart(
             section_view_figure(
                 stations,
+                well_name=well_name,
                 surface=surface,
                 azimuth_deg=azimuth_deg,
                 t1=t1,
