@@ -13,6 +13,7 @@ from pywp.uncertainty import (
     planning_uncertainty_model_for_preset,
     PlanningUncertaintyModel,
     build_uncertainty_overlay,
+    build_uncertainty_station_samples,
     build_uncertainty_tube_mesh,
     local_uncertainty_axes_xyz,
     normalize_uncertainty_preset,
@@ -282,3 +283,41 @@ def test_adaptive_refinement_densifies_curved_build_intervals() -> None:
 
     assert curved_window
     assert max(curved_gaps) <= 50.0 + 1e-6
+
+
+def test_build_uncertainty_overlay_rejects_non_increasing_md() -> None:
+    df = _sample_df()
+    df.loc[2, "MD_m"] = df.loc[1, "MD_m"]
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        build_uncertainty_overlay(
+            stations=df,
+            surface=Point3D(0.0, 0.0, 0.0),
+            azimuth_deg=90.0,
+        )
+
+
+def test_build_uncertainty_overlay_rejects_out_of_range_inclination() -> None:
+    df = _sample_df()
+    df.loc[1, "INC_deg"] = 181.0
+
+    with pytest.raises(ValueError, match="within \\[0, 180\\]"):
+        build_uncertainty_overlay(
+            stations=df,
+            surface=Point3D(0.0, 0.0, 0.0),
+            azimuth_deg=90.0,
+        )
+
+
+def test_runtime_uncertainty_station_samples_keep_small_radius_sections() -> None:
+    samples = build_uncertainty_station_samples(
+        stations=_sample_df(),
+        model=PlanningUncertaintyModel(
+            sample_step_m=120.0,
+            max_display_ellipses=12,
+            min_display_radius_m=1000.0,
+        ),
+    )
+
+    assert samples
+    assert samples[0].md_m == pytest.approx(0.0, abs=1e-9)

@@ -7,6 +7,7 @@ from pywp.models import Point3D
 
 DEG2RAD = np.pi / 180.0
 RAD2DEG = 180.0 / np.pi
+_DOGLEG_SINGULARITY_TOL_RAD = 1e-3
 
 
 def wrap_azimuth_deg(azi_deg: np.ndarray | float) -> np.ndarray:
@@ -32,6 +33,12 @@ def dogleg_angle_rad(
 def ratio_factor(beta_rad: np.ndarray | float, eps: float = 1e-12) -> np.ndarray:
     beta = np.asarray(beta_rad, dtype=float)
     abs_beta = np.abs(beta)
+    if np.any(~np.isfinite(beta)):
+        raise ValueError("beta_rad must contain only finite values.")
+    if np.any(abs_beta >= (np.pi - _DOGLEG_SINGULARITY_TOL_RAD)):
+        raise ValueError(
+            "dogleg angle is too close to 180 degrees for stable minimum-curvature evaluation."
+        )
     rf = np.ones_like(beta)
     small_mask = (abs_beta > eps) & (abs_beta < 1e-3)
     large_mask = abs_beta >= 1e-3
@@ -75,7 +82,7 @@ def minimum_curvature_increment(
 ) -> tuple[float, float, float]:
     dmd = float(md2_m - md1_m)
     if dmd <= 0.0:
-        return 0.0, 0.0, 0.0
+        raise ValueError("minimum-curvature increment requires md2_m > md1_m.")
 
     i1 = float(inc1_deg) * DEG2RAD
     i2 = float(inc2_deg) * DEG2RAD
@@ -98,6 +105,17 @@ def compute_positions_min_curv(stations: pd.DataFrame, start: Point3D) -> pd.Dat
         raise ValueError(f"stations is missing required columns: {sorted(missing)}")
 
     df = stations.sort_values("MD_m").reset_index(drop=True).copy()
+    md_values = df["MD_m"].to_numpy(dtype=float)
+    inc_values = df["INC_deg"].to_numpy(dtype=float)
+    azi_values = df["AZI_deg"].to_numpy(dtype=float)
+    if not (
+        np.all(np.isfinite(md_values))
+        and np.all(np.isfinite(inc_values))
+        and np.all(np.isfinite(azi_values))
+    ):
+        raise ValueError("minimum-curvature stations require finite MD/INC/AZI values.")
+    if len(md_values) > 1 and np.any(np.diff(md_values) <= 0.0):
+        raise ValueError("minimum-curvature stations require strictly increasing MD.")
     df["AZI_deg"] = wrap_azimuth_deg(df["AZI_deg"].to_numpy())
 
     north = [start.y]

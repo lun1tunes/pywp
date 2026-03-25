@@ -234,26 +234,66 @@ def test_reference_trajectory_text_import_populates_reference_wells_state() -> N
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
-    at.session_state["wt_reference_source_mode"] = "Вставить текст"
-    at.session_state["wt_reference_source_text"] = "\n".join(
+    at.session_state["wt_reference_actual_source_mode"] = "Вставить XYZ/MD текст"
+    at.session_state["wt_reference_actual_source_text"] = "\n".join(
         [
-            "Wellname Type X Y Z MD",
-            "FACT-1 actual 0 25 0 0",
-            "FACT-1 actual 900 25 300 950",
-            "FACT-1 actual 1800 25 400 1900",
-            "APP-1 approved 0 -35 0 0",
-            "APP-1 approved 850 -35 250 900",
-            "APP-1 approved 1750 -35 350 1850",
+            "Wellname X Y Z MD",
+            "FACT-1 0 25 0 0",
+            "FACT-1 900 25 300 950",
+            "FACT-1 1800 25 400 1900",
+        ]
+    )
+    at.session_state["wt_reference_approved_source_mode"] = "Вставить XYZ/MD текст"
+    at.session_state["wt_reference_approved_source_text"] = "\n".join(
+        [
+            "Wellname X Y Z MD",
+            "APP-1 0 -35 0 0",
+            "APP-1 850 -35 250 900",
+            "APP-1 1750 -35 350 1850",
         ]
     )
 
     at.run()
-    _click_button(at, "Импортировать из текста / файла")
+    _click_button(at, "Импортировать фактические скважины")
+    at.run()
+    _click_button(at, "Импортировать проектные утвержденные скважины")
     at.run()
 
     reference_wells = tuple(at.session_state["wt_reference_wells"])
     assert len(reference_wells) == 2
     assert [str(item.name) for item in reference_wells] == ["FACT-1", "APP-1"]
+
+
+def test_reference_trajectory_welltrack_path_import_populates_reference_wells_state(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    welltrack_path = tmp_path / "approved_wells.inc"
+    welltrack_path.write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'APP-1'",
+                "0 -35 0 0",
+                "850 -35 250 900",
+                "1750 -35 350 1850",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    at.session_state["wt_reference_approved_source_mode"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_approved_welltrack_path"] = str(welltrack_path)
+
+    at.run()
+    _click_button(at, "Импортировать проектные утвержденные скважины")
+    at.run(timeout=120)
+
+    approved_wells = tuple(at.session_state["wt_reference_approved_wells"])
+    assert len(approved_wells) == 1
+    assert str(approved_wells[0].name) == "APP-1"
 
 
 def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> None:

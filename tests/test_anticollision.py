@@ -181,6 +181,34 @@ def test_collision_corridor_geometry_and_well_segments_are_built() -> None:
     assert {segment.well_name for segment in analysis.well_segments} == {"WELL-A", "WELL-B"}
 
 
+def test_analyze_anti_collision_rejects_overlap_geometry_without_display_overlay() -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=5.0),
+        surface=Point3D(0.0, 5.0, 0.0),
+        t1=Point3D(1000.0, 5.0, 0.0),
+        t3=Point3D(2000.0, 5.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+
+    with pytest.raises(ValueError, match="display geometry"):
+        analyze_anti_collision([well_a, well_b], build_overlap_geometry=True)
+
+
 def test_lightweight_runtime_analysis_matches_full_report_events_and_recommendations() -> None:
     stations_a = _vertical_build_stations(
         y_offset_m=0.0,

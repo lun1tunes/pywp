@@ -159,8 +159,10 @@ def uncertainty_model_caption(
 
 
 def tangent_vector_xyz(inc_deg: float, azi_deg: float) -> np.ndarray:
-    inc_rad = float(inc_deg) * DEG2RAD
-    azi_rad = float(azi_deg) * DEG2RAD
+    inc_value = _validated_inclination_deg(inc_deg)
+    azi_value = _normalized_azimuth_deg(azi_deg)
+    inc_rad = inc_value * DEG2RAD
+    azi_rad = azi_value * DEG2RAD
     return np.array(
         [
             np.sin(inc_rad) * np.sin(azi_rad),
@@ -174,9 +176,11 @@ def tangent_vector_xyz(inc_deg: float, azi_deg: float) -> np.ndarray:
 def local_uncertainty_axes_xyz(
     inc_deg: float, azi_deg: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    inc_rad = float(inc_deg) * DEG2RAD
-    azi_rad = float(azi_deg) * DEG2RAD
-    tangent = tangent_vector_xyz(inc_deg=inc_deg, azi_deg=azi_deg)
+    inc_value = _validated_inclination_deg(inc_deg)
+    azi_value = _normalized_azimuth_deg(azi_deg)
+    inc_rad = inc_value * DEG2RAD
+    azi_rad = azi_value * DEG2RAD
+    tangent = tangent_vector_xyz(inc_deg=inc_value, azi_deg=azi_value)
     inc_axis = np.array(
         [
             np.cos(inc_rad) * np.sin(azi_rad),
@@ -203,7 +207,8 @@ def station_uncertainty_axes_m(
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> tuple[float, float]:
     md_value = max(float(md_m), 0.0)
-    inc_rad = float(inc_deg) * DEG2RAD
+    inc_value = _validated_inclination_deg(inc_deg)
+    inc_rad = inc_value * DEG2RAD
     lateral_exposure = abs(float(np.sin(inc_rad)))
     sigma_drift_m = (
         (md_value / 1000.0)
@@ -212,7 +217,7 @@ def station_uncertainty_axes_m(
     )
     sigma_inc_angle_m = md_value * float(model.sigma_inc_deg) * DEG2RAD
     sigma_inc_m = float(np.hypot(sigma_inc_angle_m, sigma_drift_m))
-    if abs(float(inc_deg)) < float(model.near_vertical_isotropic_threshold_deg):
+    if abs(float(inc_value)) < float(model.near_vertical_isotropic_threshold_deg):
         isotropic_radius_m = float(model.confidence_scale) * sigma_inc_m
         return isotropic_radius_m, isotropic_radius_m
     sigma_azi_angle_m = (
@@ -344,13 +349,13 @@ def build_uncertainty_overlay(
     if len(stations) == 0:
         return WellUncertaintyOverlay(samples=(), model=model)
 
-    md_values = stations["MD_m"].to_numpy(dtype=float)
-    inc_values = stations["INC_deg"].to_numpy(dtype=float)
-    azi_values_deg = stations["AZI_deg"].to_numpy(dtype=float)
+    md_values, inc_values, azi_values_deg, x_values, y_values, z_values = (
+        _validated_station_arrays(
+            stations=stations,
+            context="uncertainty overlay",
+        )
+    )
     azi_values_rad = np.unwrap(np.deg2rad(azi_values_deg))
-    x_values = stations["X_m"].to_numpy(dtype=float)
-    y_values = stations["Y_m"].to_numpy(dtype=float)
-    z_values = stations["Z_m"].to_numpy(dtype=float)
     angles = np.linspace(0.0, 2.0 * np.pi, int(model.ellipse_points), endpoint=False)
     samples: list[UncertaintyEllipseSample] = []
     previous_ring_open_xyz: np.ndarray | None = None
@@ -457,13 +462,13 @@ def build_uncertainty_station_samples(
     if len(stations) == 0:
         return ()
 
-    md_values = stations["MD_m"].to_numpy(dtype=float)
-    inc_values = stations["INC_deg"].to_numpy(dtype=float)
-    azi_values_deg = stations["AZI_deg"].to_numpy(dtype=float)
+    md_values, inc_values, azi_values_deg, x_values, y_values, z_values = (
+        _validated_station_arrays(
+            stations=stations,
+            context="uncertainty station samples",
+        )
+    )
     azi_values_rad = np.unwrap(np.deg2rad(azi_values_deg))
-    x_values = stations["X_m"].to_numpy(dtype=float)
-    y_values = stations["Y_m"].to_numpy(dtype=float)
-    z_values = stations["Z_m"].to_numpy(dtype=float)
 
     sample_md_values = _display_sample_md_values(
         md_values=md_values,
@@ -496,8 +501,6 @@ def build_uncertainty_station_samples(
             inc_deg=float(sample_inc_deg[index]),
             model=model,
         )
-        if max(semi_inc_m, semi_azi_m) < float(model.min_display_radius_m):
-            continue
         station_index = int(np.argmin(np.abs(md_values - float(md_m))))
         samples.append(
             UncertaintyStationSample(
@@ -686,6 +689,7 @@ def _interpolate_station_state(
     z_values: np.ndarray,
     md_m: float,
 ) -> dict[str, float]:
+    _validate_md_values_for_interpolation(md_values, context="uncertainty interpolation")
     md_value = float(np.clip(md_m, float(md_values[0]), float(md_values[-1])))
     return {
         "md_m": md_value,
@@ -695,6 +699,62 @@ def _interpolate_station_state(
         "y_m": float(np.interp(md_value, md_values, y_values)),
         "z_m": float(np.interp(md_value, md_values, z_values)),
     }
+
+
+def _validated_inclination_deg(inc_deg: float) -> float:
+    inc_value = float(inc_deg)
+    if not np.isfinite(inc_value):
+        raise ValueError("inc_deg must be finite for uncertainty calculations.")
+    if inc_value < 0.0 or inc_value > 180.0:
+        raise ValueError("inc_deg must be within [0, 180] for uncertainty calculations.")
+    return inc_value
+
+
+def _normalized_azimuth_deg(azi_deg: float) -> float:
+    azi_value = float(azi_deg)
+    if not np.isfinite(azi_value):
+        raise ValueError("azi_deg must be finite for uncertainty calculations.")
+    return float(azi_value % 360.0)
+
+
+def _validate_md_values_for_interpolation(
+    md_values: np.ndarray,
+    *,
+    context: str,
+) -> None:
+    md_array = np.asarray(md_values, dtype=float)
+    if md_array.ndim != 1 or len(md_array) == 0:
+        raise ValueError(f"{context}: expected a non-empty 1D MD array.")
+    if not np.all(np.isfinite(md_array)):
+        raise ValueError(f"{context}: MD values must be finite.")
+    if len(md_array) > 1 and np.any(np.diff(md_array) <= 0.0):
+        raise ValueError(f"{context}: MD values must be strictly increasing.")
+
+
+def _validated_station_arrays(
+    *,
+    stations: pd.DataFrame,
+    context: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    azi_values_deg = stations["AZI_deg"].to_numpy(dtype=float)
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    z_values = stations["Z_m"].to_numpy(dtype=float)
+    _validate_md_values_for_interpolation(md_values, context=context)
+    if not (
+        np.all(np.isfinite(inc_values))
+        and np.all(np.isfinite(azi_values_deg))
+        and np.all(np.isfinite(x_values))
+        and np.all(np.isfinite(y_values))
+        and np.all(np.isfinite(z_values))
+    ):
+        raise ValueError(f"{context}: station INC/AZI/X/Y/Z values must be finite.")
+    if np.any((inc_values < 0.0) | (inc_values > 180.0)):
+        raise ValueError(f"{context}: station INC values must be within [0, 180].")
+    azi_values_deg = np.mod(azi_values_deg, 360.0)
+    return md_values, inc_values, azi_values_deg, x_values, y_values, z_values
 
 
 def uncertainty_ribbon_polygon(

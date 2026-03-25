@@ -223,6 +223,12 @@ def analyze_anti_collision(
     build_overlap_geometry: bool = True,
 ) -> AntiCollisionAnalysis:
     ordered_wells = tuple(wells)
+    if build_overlap_geometry:
+        for well in ordered_wells:
+            if well.samples and not well.overlay.samples:
+                raise ValueError(
+                    "build_overlap_geometry=True requires wells built with display geometry."
+                )
     corridors: list[AntiCollisionCorridor] = []
     zones: list[AntiCollisionZone] = []
     pair_count = 0
@@ -616,6 +622,12 @@ def _pair_overlap_corridors(
             principal_indices[:, None, None],
             axis=2,
         )[:, :, 0]
+        principal_norm = np.linalg.norm(principal_vectors, axis=1)
+        degenerate_mask = (np.max(eigenvalues, axis=1) <= 1e-12) | (principal_norm <= 1e-12)
+        if np.any(degenerate_mask):
+            principal_vectors[degenerate_mask] = np.array([1.0, 0.0, 0.0], dtype=float)
+            principal_norm[degenerate_mask] = 1.0
+        principal_vectors = principal_vectors / principal_norm[:, None]
         direction[zero_mask] = principal_vectors
 
     combined_sigma2 = np.einsum(

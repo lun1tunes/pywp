@@ -444,7 +444,22 @@ def _current_input_signature() -> tuple[object, ...]:
     )
     signature = [float(st.session_state[key]) for key in point_keys]
     signature.extend(APP_CALC_PARAMS.state_signature())
+    signature.append(_dataframe_signature(st.session_state.get("plan_csb_df")))
+    actual_profile = st.session_state.get("actual_profile_df")
+    if actual_profile is None:
+        actual_profile = st.session_state.get("actual_trajectory_df")
+    signature.append(_dataframe_signature(actual_profile))
     return tuple(signature)
+
+
+def _dataframe_signature(df: object) -> tuple[object, ...] | None:
+    if not isinstance(df, pd.DataFrame) or len(df) == 0:
+        return None
+    return (
+        tuple(str(column) for column in df.columns),
+        tuple(str(dtype) for dtype in df.dtypes),
+        int(pd.util.hash_pandas_object(df, index=True).sum()),
+    )
 
 
 def _build_points_from_state() -> tuple[Point3D, Point3D, Point3D]:
@@ -961,6 +976,23 @@ def _render_calculation_feedback() -> None:
 def _build_single_well_result_view(
     last_result: dict[str, object],
 ) -> SingleWellResultView:
+    if not isinstance(last_result, dict):
+        raise ValueError("last_result must be a mapping payload.")
+    required_keys = {
+        "surface",
+        "t1",
+        "t3",
+        "stations",
+        "summary",
+        "config",
+        "azimuth_deg",
+        "md_t1_m",
+    }
+    missing_keys = sorted(required_keys.difference(last_result))
+    if missing_keys:
+        raise ValueError(
+            "last_result is missing required fields: " + ", ".join(missing_keys)
+        )
     plan_csb_stations = st.session_state.get("plan_csb_df")
     plan_csb_df = (
         plan_csb_stations
@@ -1007,7 +1039,14 @@ def _render_last_result() -> None:
             "Параметры изменились после последнего расчета. Показан предыдущий результат. Нажмите «Построить траекторию» для обновления."
         )
 
-    well_view = _build_single_well_result_view(last_result=last_result)
+    try:
+        well_view = _build_single_well_result_view(last_result=last_result)
+    except Exception:
+        _clear_result()
+        st.warning(
+            "Предыдущий результат устарел или поврежден. Выполните расчет заново."
+        )
+        return
     t1_horizontal_offset_m = render_key_metrics(
         view=well_view,
         title="Ключевые показатели",

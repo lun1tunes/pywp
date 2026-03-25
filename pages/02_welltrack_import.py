@@ -64,10 +64,9 @@ from pywp.reference_trajectories import (
     REFERENCE_WELL_APPROVED,
     REFERENCE_WELL_KIND_COLORS,
     REFERENCE_WELL_KIND_LABELS,
-    parse_reference_trajectory_table,
-    parse_reference_trajectory_text,
+    parse_reference_trajectory_text_with_kind,
+    parse_reference_trajectory_welltrack_text,
     reference_well_display_label,
-    reference_wells_to_table_rows,
 )
 from pywp.plotly_config import DEFAULT_3D_CAMERA, trajectory_plotly_chart_config
 from pywp.planner_config import optimization_display_label
@@ -589,8 +588,66 @@ def _empty_reference_trajectory_df() -> pd.DataFrame:
     )
 
 
+def _reference_wells_state_key(kind: str) -> str:
+    return f"wt_reference_{str(kind)}_wells"
+
+
+def _reference_source_mode_key(kind: str) -> str:
+    return f"wt_reference_{str(kind)}_source_mode"
+
+
+def _reference_source_text_key(kind: str) -> str:
+    return f"wt_reference_{str(kind)}_source_text"
+
+
+def _reference_welltrack_path_key(kind: str) -> str:
+    return f"wt_reference_{str(kind)}_welltrack_path"
+
+
+def _set_reference_wells_for_kind(
+    *,
+    kind: str,
+    wells: Iterable[ImportedTrajectoryWell],
+) -> None:
+    normalized_kind = str(kind)
+    key = _reference_wells_state_key(normalized_kind)
+    st.session_state[key] = tuple(wells)
+    actual_wells = tuple(
+        st.session_state.get(_reference_wells_state_key(REFERENCE_WELL_ACTUAL)) or ()
+    )
+    approved_wells = tuple(
+        st.session_state.get(_reference_wells_state_key(REFERENCE_WELL_APPROVED)) or ()
+    )
+    st.session_state["wt_reference_wells"] = tuple(actual_wells) + tuple(approved_wells)
+
+
 def _reference_wells_from_state() -> tuple[ImportedTrajectoryWell, ...]:
-    return tuple(st.session_state.get("wt_reference_wells") or ())
+    actual_wells = tuple(
+        st.session_state.get(_reference_wells_state_key(REFERENCE_WELL_ACTUAL)) or ()
+    )
+    approved_wells = tuple(
+        st.session_state.get(_reference_wells_state_key(REFERENCE_WELL_APPROVED)) or ()
+    )
+    combined = tuple(actual_wells) + tuple(approved_wells)
+    if combined:
+        st.session_state["wt_reference_wells"] = combined
+        return combined
+
+    legacy_combined = tuple(st.session_state.get("wt_reference_wells") or ())
+    if legacy_combined:
+        actual_legacy = tuple(
+            item
+            for item in legacy_combined
+            if str(getattr(item, "kind", "")) == REFERENCE_WELL_ACTUAL
+        )
+        approved_legacy = tuple(
+            item
+            for item in legacy_combined
+            if str(getattr(item, "kind", "")) == REFERENCE_WELL_APPROVED
+        )
+        st.session_state[_reference_wells_state_key(REFERENCE_WELL_ACTUAL)] = actual_legacy
+        st.session_state[_reference_wells_state_key(REFERENCE_WELL_APPROVED)] = approved_legacy
+    return legacy_combined
 
 
 def _reset_anticollision_view_state(*, clear_prepared: bool) -> None:
@@ -613,11 +670,31 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_source_table_df", _empty_source_table_df())
     st.session_state.setdefault("wt_source_table_editor_nonce", 0)
     st.session_state.setdefault(
-        "wt_reference_trajectory_df", _empty_reference_trajectory_df()
+        _reference_wells_state_key(REFERENCE_WELL_ACTUAL),
+        (),
     )
-    st.session_state.setdefault("wt_reference_trajectory_editor_nonce", 0)
-    st.session_state.setdefault("wt_reference_source_mode", "Вставить текст")
-    st.session_state.setdefault("wt_reference_source_text", "")
+    st.session_state.setdefault(
+        _reference_wells_state_key(REFERENCE_WELL_APPROVED),
+        (),
+    )
+    st.session_state.setdefault(
+        _reference_source_mode_key(REFERENCE_WELL_ACTUAL),
+        "Вставить XYZ/MD текст",
+    )
+    st.session_state.setdefault(
+        _reference_source_mode_key(REFERENCE_WELL_APPROVED),
+        "Вставить XYZ/MD текст",
+    )
+    st.session_state.setdefault(_reference_source_text_key(REFERENCE_WELL_ACTUAL), "")
+    st.session_state.setdefault(_reference_source_text_key(REFERENCE_WELL_APPROVED), "")
+    st.session_state.setdefault(
+        _reference_welltrack_path_key(REFERENCE_WELL_ACTUAL),
+        "",
+    )
+    st.session_state.setdefault(
+        _reference_welltrack_path_key(REFERENCE_WELL_APPROVED),
+        "",
+    )
     _apply_profile_defaults(force=False)
     st.session_state.setdefault("wt_ui_defaults_version", 0)
 
@@ -3137,10 +3214,8 @@ def _handle_import_actions(
         st.session_state["wt_records"] = None
         st.session_state["wt_records_original"] = None
         st.session_state["wt_reference_wells"] = ()
-        st.session_state["wt_reference_trajectory_df"] = _empty_reference_trajectory_df()
-        st.session_state["wt_reference_trajectory_editor_nonce"] = (
-            int(st.session_state.get("wt_reference_trajectory_editor_nonce", 0)) + 1
-        )
+        st.session_state[_reference_wells_state_key(REFERENCE_WELL_ACTUAL)] = ()
+        st.session_state[_reference_wells_state_key(REFERENCE_WELL_APPROVED)] = ()
         st.session_state["wt_selected_names"] = []
         st.session_state["wt_loaded_at"] = ""
         _clear_pad_state()
@@ -3245,25 +3320,177 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     st.dataframe(arrow_safe_text_dataframe(parsed_df), width="stretch", hide_index=True)
 
 
+def _reference_kind_title(kind: str) -> str:
+    if str(kind) == REFERENCE_WELL_ACTUAL:
+        return "Фактические скважины"
+    return "Проектные утвержденные скважины"
+
+
+def _reference_kind_help(kind: str) -> str:
+    if str(kind) == REFERENCE_WELL_ACTUAL:
+        return (
+            "Фактические скважины считаются заданными: они участвуют в visual / "
+            "anti-collision, но не перестраиваются."
+        )
+    return (
+        "Утвержденные проектные скважины считаются заданными: они участвуют в visual / "
+        "anti-collision, но не перестраиваются."
+    )
+
+
+def _reference_kind_wells(kind: str) -> tuple[ImportedTrajectoryWell, ...]:
+    return tuple(st.session_state.get(_reference_wells_state_key(kind)) or ())
+
+
+def _render_reference_kind_import_block(*, kind: str) -> None:
+    title = _reference_kind_title(kind)
+    current_wells = _reference_kind_wells(kind)
+    mode = st.radio(
+        f"Источник для {title.lower()}",
+        options=[
+            "Вставить XYZ/MD текст",
+            "Загрузить XYZ/MD файл",
+            "Путь к WELLTRACK",
+            "Загрузить WELLTRACK",
+        ],
+        key=_reference_source_mode_key(kind),
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.caption(_reference_kind_help(kind))
+
+    uploaded_xyz_file = None
+    uploaded_welltrack_file = None
+
+    if mode == "Вставить XYZ/MD текст":
+        st.text_area(
+            "Текст траекторий",
+            key=_reference_source_text_key(kind),
+            height=220,
+            placeholder=(
+                "Wellname X Y Z MD\n"
+                "WELL-1 0 25 0 0\n"
+                "WELL-1 900 25 300 950\n"
+                "WELL-1 1800 25 400 1900"
+            ),
+        )
+        st.caption(
+            "Формат bulk-вставки: `Wellname X Y Z MD`. "
+            "Разделители: пробел, tab, `,` или `;`. Первая строка может быть header."
+        )
+    elif mode == "Загрузить XYZ/MD файл":
+        uploaded_xyz_file = st.file_uploader(
+            f"Файл XYZ/MD для {title.lower()}",
+            type=["txt", "csv", "tsv", "dat"],
+            key=f"wt_reference_{kind}_xyz_file",
+        )
+    elif mode == "Путь к WELLTRACK":
+        st.text_input(
+            "Путь к WELLTRACK",
+            key=_reference_welltrack_path_key(kind),
+            placeholder="tests/test_data/WELLTRACKS3.INC",
+        )
+        st.caption(
+            "Можно загрузить сразу несколько скважин из WELLTRACK. "
+            "Они будут помечены как заданные и не будут перестраиваться."
+        )
+    else:
+        uploaded_welltrack_file = st.file_uploader(
+            f"WELLTRACK файл для {title.lower()}",
+            type=["inc", "txt", "data", "ecl"],
+            key=f"wt_reference_{kind}_welltrack_file",
+        )
+
+    action_col, clear_col = st.columns([1.5, 1.0], gap="small")
+    import_clicked = action_col.button(
+        f"Импортировать {title.lower()}",
+        key=f"wt_reference_import_{kind}",
+        type="primary",
+        icon=":material/upload_file:",
+        width="stretch",
+    )
+    clear_clicked = clear_col.button(
+        f"Очистить {title.lower()}",
+        key=f"wt_reference_clear_{kind}",
+        icon=":material/delete:",
+        width="stretch",
+    )
+
+    if import_clicked:
+        with st.status(f"Импорт {title.lower()}...", expanded=True) as status:
+            started = perf_counter()
+            try:
+                if mode == "Вставить XYZ/MD текст":
+                    parsed = parse_reference_trajectory_text_with_kind(
+                        str(st.session_state.get(_reference_source_text_key(kind), "")),
+                        default_kind=kind,
+                    )
+                elif mode == "Загрузить XYZ/MD файл":
+                    payload = b"" if uploaded_xyz_file is None else uploaded_xyz_file.getvalue()
+                    parsed = parse_reference_trajectory_text_with_kind(
+                        _decode_welltrack_payload(
+                            payload,
+                            source_label=f"Файл XYZ/MD `{getattr(uploaded_xyz_file, 'name', 'uploaded')}`",
+                        ),
+                        default_kind=kind,
+                    )
+                elif mode == "Путь к WELLTRACK":
+                    parsed = parse_reference_trajectory_welltrack_text(
+                        _read_welltrack_file(
+                            str(st.session_state.get(_reference_welltrack_path_key(kind), ""))
+                        ),
+                        kind=kind,
+                    )
+                else:
+                    payload = (
+                        b"" if uploaded_welltrack_file is None else uploaded_welltrack_file.getvalue()
+                    )
+                    parsed = parse_reference_trajectory_welltrack_text(
+                        _decode_welltrack_payload(
+                            payload,
+                            source_label=f"WELLTRACK `{getattr(uploaded_welltrack_file, 'name', 'uploaded')}`",
+                        ),
+                        kind=kind,
+                    )
+                _set_reference_wells_for_kind(kind=kind, wells=parsed)
+                _reset_anticollision_view_state(clear_prepared=True)
+                status.write(f"Загружено скважин: {len(parsed)}.")
+                status.update(
+                    label=f"{title} импортированы за {perf_counter() - started:.2f} с",
+                    state="complete",
+                    expanded=False,
+                )
+                st.rerun()
+            except WelltrackParseError as exc:
+                status.write(str(exc))
+                status.update(
+                    label=f"Ошибка импорта: {title.lower()}",
+                    state="error",
+                    expanded=True,
+                )
+
+    if clear_clicked:
+        _set_reference_wells_for_kind(kind=kind, wells=())
+        st.session_state[_reference_source_text_key(kind)] = ""
+        st.session_state[_reference_welltrack_path_key(kind)] = ""
+        _reset_anticollision_view_state(clear_prepared=True)
+        st.rerun()
+
+    if current_wells:
+        st.caption(f"Загружено {len(current_wells)} скважин.")
+    else:
+        st.caption("Скважины этого типа не загружены.")
+
+
 def _render_reference_trajectory_panel() -> None:
     current_wells = _reference_wells_from_state()
-
-    def _apply_reference_wells(parsed: list[ImportedTrajectoryWell]) -> None:
-        st.session_state["wt_reference_wells"] = tuple(parsed)
-        st.session_state["wt_reference_trajectory_df"] = pd.DataFrame(
-            reference_wells_to_table_rows(parsed)
-        )
-        st.session_state["wt_reference_trajectory_editor_nonce"] = (
-            int(st.session_state.get("wt_reference_trajectory_editor_nonce", 0)) + 1
-        )
-        _reset_anticollision_view_state(clear_prepared=True)
 
     with st.container(border=True):
         st.markdown("### Дополнительные скважины для visual / anti-collision")
         st.caption(
-            "Загрузите внешние траектории в формате `Wellname / Type / X / Y / Z / MD`. "
-            "Они не перестраиваются solver-ом, но отображаются на графиках, получают "
-            "конусы неопределенности и участвуют в anti-collision как reference wells."
+            "Фактические и утвержденные проектные скважины загружаются независимо. "
+            "Они считаются заданными, отображаются на графиках, получают конусы "
+            "неопределенности и участвуют в anti-collision как reference wells."
         )
         m1, m2, m3 = st.columns(3, gap="small")
         m1.metric("Доп. скважин", f"{len(current_wells)}")
@@ -3272,168 +3499,13 @@ def _render_reference_trajectory_panel() -> None:
             f"{sum(1 for item in current_wells if str(item.kind) == REFERENCE_WELL_ACTUAL)}",
         )
         m3.metric(
-                "Проектных утвержденных",
+            "Проектных утвержденных",
             f"{sum(1 for item in current_wells if str(item.kind) == REFERENCE_WELL_APPROVED)}",
         )
-
-        with st.expander("Быстрый импорт текстом / файлом", expanded=False):
-            st.caption(
-                "Поддерживаются строки в формате `Wellname Type X Y Z MD`. "
-                "Разделители: пробел, tab, `,` или `;`. Первая строка может быть header."
-            )
-            source_mode = st.radio(
-                "Источник дополнительных траекторий",
-                options=["Вставить текст", "Загрузить файл"],
-                key="wt_reference_source_mode",
-                horizontal=True,
-                label_visibility="collapsed",
-            )
-            reference_text = ""
-            if source_mode == "Вставить текст":
-                reference_text = st.text_area(
-                    "Текст дополнительных траекторий",
-                    key="wt_reference_source_text",
-                    height=220,
-                    placeholder=(
-                        "Wellname Type X Y Z MD\n"
-                        "FACT-1 actual 0 25 0 0\n"
-                        "FACT-1 actual 900 25 300 950\n"
-                        "APP-1 approved 0 -35 0 0"
-                    ),
-                )
-            else:
-                uploaded_file = st.file_uploader(
-                    "Файл с дополнительными траекториями",
-                    type=["txt", "csv", "tsv", "dat"],
-                    key="wt_reference_source_file",
-                )
-                if uploaded_file is not None:
-                    reference_text = uploaded_file.getvalue().decode(
-                        "utf-8",
-                        errors="replace",
-                    )
-            if st.button(
-                "Импортировать из текста / файла",
-                key="wt_reference_import_apply",
-                type="primary",
-                icon=":material/upload_file:",
-                width="stretch",
-            ):
-                with st.status(
-                    "Разбор внешних траекторий из текста / файла...", expanded=True
-                ) as status:
-                    started = perf_counter()
-                    try:
-                        parsed = parse_reference_trajectory_text(reference_text)
-                        _apply_reference_wells(parsed)
-                        status.write(
-                            f"Загружено дополнительных скважин: {len(parsed)}."
-                        )
-                        status.update(
-                            label=(
-                                "Внешние траектории импортированы "
-                                f"за {perf_counter() - started:.2f} с"
-                            ),
-                            state="complete",
-                            expanded=False,
-                        )
-                        st.rerun()
-                    except WelltrackParseError as exc:
-                        status.write(str(exc))
-                        status.update(
-                            label="Ошибка разбора внешних траекторий",
-                            state="error",
-                            expanded=True,
-                        )
-
-        with st.expander("Таблица внешних траекторий", expanded=False):
-            st.caption(
-                "Поддерживается copy/paste из Excel, Google Sheets и похожих таблиц. "
-                "Type: `actual` для фактической, `approved` для утвержденной проектной."
-            )
-            edited_table = st.data_editor(
-                st.session_state.get(
-                    "wt_reference_trajectory_df",
-                    _empty_reference_trajectory_df(),
-                ),
-                key=(
-                    "wt_reference_trajectory_editor_"
-                    f"{int(st.session_state.get('wt_reference_trajectory_editor_nonce', 0))}"
-                ),
-                hide_index=True,
-                num_rows="dynamic",
-                width="stretch",
-                column_config={
-                    "Wellname": st.column_config.TextColumn("Wellname"),
-                    "Type": st.column_config.SelectboxColumn(
-                        "Type",
-                        options=[REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED],
-                    ),
-                    "X": st.column_config.NumberColumn("X"),
-                    "Y": st.column_config.NumberColumn("Y"),
-                    "Z": st.column_config.NumberColumn("Z"),
-                    "MD": st.column_config.NumberColumn("MD"),
-                },
-            )
-            st.session_state["wt_reference_trajectory_df"] = pd.DataFrame(edited_table)
-            apply_col, clear_col = st.columns([1.5, 1.0], gap="small")
-            apply_clicked = apply_col.button(
-                "Применить дополнительные скважины",
-                type="primary",
-                icon=":material/playlist_add_check:",
-                width="stretch",
-            )
-            clear_clicked = clear_col.button(
-                "Очистить дополнительные скважины",
-                icon=":material/delete:",
-                width="stretch",
-            )
-            if apply_clicked:
-                with st.status(
-                    "Разбор таблицы внешних траекторий...", expanded=True
-                ) as status:
-                    started = perf_counter()
-                    try:
-                        parsed = parse_reference_trajectory_table(
-                            pd.DataFrame(
-                                st.session_state["wt_reference_trajectory_df"]
-                            ).to_dict(orient="records")
-                        )
-                        _apply_reference_wells(parsed)
-                        status.write(
-                            f"Загружено дополнительных скважин: {len(parsed)}."
-                        )
-                        status.update(
-                            label=(
-                                "Дополнительные траектории применены "
-                                f"за {perf_counter() - started:.2f} с"
-                            ),
-                            state="complete",
-                            expanded=False,
-                        )
-                        st.rerun()
-                    except WelltrackParseError as exc:
-                        status.write(str(exc))
-                        status.update(
-                            label="Ошибка разбора внешних траекторий",
-                            state="error",
-                            expanded=True,
-                        )
-            if clear_clicked:
-                st.session_state["wt_reference_wells"] = ()
-                st.session_state["wt_reference_trajectory_df"] = (
-                    _empty_reference_trajectory_df()
-                )
-                st.session_state["wt_reference_trajectory_editor_nonce"] = (
-                    int(
-                        st.session_state.get(
-                            "wt_reference_trajectory_editor_nonce", 0
-                        )
-                    )
-                    + 1
-                )
-                _reset_anticollision_view_state(clear_prepared=True)
-                st.rerun()
+        with st.expander("Фактические скважины", expanded=False):
+            _render_reference_kind_import_block(kind=REFERENCE_WELL_ACTUAL)
+        with st.expander("Проектные утвержденные скважины", expanded=False):
+            _render_reference_kind_import_block(kind=REFERENCE_WELL_APPROVED)
 
         if current_wells:
             st.dataframe(

@@ -8,7 +8,11 @@ from typing import Iterable, Mapping
 import numpy as np
 import pandas as pd
 
-from pywp.eclipse_welltrack import WelltrackParseError
+from pywp.eclipse_welltrack import (
+    WelltrackParseError,
+    WelltrackRecord,
+    parse_welltrack_text,
+)
 from pywp.mcm import add_dls
 from pywp.models import Point3D
 from pywp.pydantic_base import FrozenArbitraryModel
@@ -57,7 +61,14 @@ class ImportedTrajectoryWell(FrozenArbitraryModel):
 
 def parse_reference_trajectory_table(
     rows: Iterable[Mapping[str, object]],
+    *,
+    default_kind: str | None = None,
 ) -> list[ImportedTrajectoryWell]:
+    normalized_default_kind = (
+        normalize_reference_well_kind(default_kind)
+        if default_kind is not None
+        else None
+    )
     grouped_rows: dict[tuple[str, str], list[tuple[int, float, float, float, float]]] = {}
     group_order: list[tuple[str, str]] = []
     has_non_empty_row = False
@@ -83,7 +94,10 @@ def parse_reference_trajectory_table(
             raise WelltrackParseError(
                 f"Таблица дополнительных скважин: пустое имя скважины в строке {row_no}."
             )
-        well_kind = normalize_reference_well_kind(kind_raw, row_no=row_no)
+        if normalized_default_kind is not None and _is_blank_table_value(kind_raw):
+            well_kind = normalized_default_kind
+        else:
+            well_kind = normalize_reference_well_kind(kind_raw, row_no=row_no)
         x = _coerce_table_float(x_raw, field_name="X", row_no=row_no)
         y = _coerce_table_float(y_raw, field_name="Y", row_no=row_no)
         z = _coerce_table_float(z_raw, field_name="Z", row_no=row_no)
@@ -138,12 +152,25 @@ def parse_reference_trajectory_table(
 
 
 def parse_reference_trajectory_text(text: str) -> list[ImportedTrajectoryWell]:
+    return parse_reference_trajectory_text_with_kind(text)
+
+
+def parse_reference_trajectory_text_with_kind(
+    text: str,
+    *,
+    default_kind: str | None = None,
+) -> list[ImportedTrajectoryWell]:
     source = str(text or "")
     if not source.strip():
         raise WelltrackParseError(
             "Текст дополнительных скважин пуст. "
             "Вставьте строки в формате Wellname / Type / X / Y / Z / MD."
         )
+    normalized_default_kind = (
+        normalize_reference_well_kind(default_kind)
+        if default_kind is not None
+        else None
+    )
     normalized_lines = [
         line.strip()
         for line in source.splitlines()
@@ -156,33 +183,120 @@ def parse_reference_trajectory_text(text: str) -> list[ImportedTrajectoryWell]:
         )
     first_tokens = _split_reference_text_line(normalized_lines[0])
     has_header = _looks_like_reference_header(first_tokens)
-    if has_header:
+    has_header_without_type = (
+        normalized_default_kind is not None
+        and _looks_like_reference_header_without_type(first_tokens)
+    )
+    if has_header or has_header_without_type:
         frame = pd.read_csv(
             StringIO("\n".join(normalized_lines)),
             sep=r"[\t,; ]+",
             engine="python",
         )
-        return parse_reference_trajectory_table(frame.to_dict(orient="records"))
+        return parse_reference_trajectory_table(
+            frame.to_dict(orient="records"),
+            default_kind=normalized_default_kind,
+        )
 
     rows: list[dict[str, object]] = []
     for row_no, line in enumerate(normalized_lines, start=1):
         tokens = _split_reference_text_line(line)
-        if len(tokens) != 6:
-            raise WelltrackParseError(
-                "Текст дополнительных скважин: ожидается 6 полей "
-                f"`Wellname Type X Y Z MD` в строке {row_no}, получено {len(tokens)}."
+        if len(tokens) == 6:
+            rows.append(
+                {
+                    "Wellname": tokens[0],
+                    "Type": tokens[1],
+                    "X": tokens[2],
+                    "Y": tokens[3],
+                    "Z": tokens[4],
+                    "MD": tokens[5],
+                }
             )
-        rows.append(
-            {
-                "Wellname": tokens[0],
-                "Type": tokens[1],
-                "X": tokens[2],
-                "Y": tokens[3],
-                "Z": tokens[4],
-                "MD": tokens[5],
-            }
+            continue
+        if normalized_default_kind is not None and len(tokens) == 5:
+            rows.append(
+                {
+                    "Wellname": tokens[0],
+                    "Type": normalized_default_kind,
+                    "X": tokens[1],
+                    "Y": tokens[2],
+                    "Z": tokens[3],
+                    "MD": tokens[4],
+                }
+            )
+            continue
+        expected_label = (
+            "5 или 6 полей `Wellname X Y Z MD` / `Wellname Type X Y Z MD`"
+            if normalized_default_kind is not None
+            else "6 полей `Wellname Type X Y Z MD`"
         )
-    return parse_reference_trajectory_table(rows)
+        raise WelltrackParseError(
+            "Текст дополнительных скважин: ожидается "
+            f"{expected_label} в строке {row_no}, получено {len(tokens)}."
+        )
+    return parse_reference_trajectory_table(
+        rows,
+        default_kind=normalized_default_kind,
+    )
+
+
+def parse_reference_trajectory_welltrack_text(
+    text: str,
+    *,
+    kind: str,
+) -> list[ImportedTrajectoryWell]:
+    source = str(text or "")
+    if not source.strip():
+        raise WelltrackParseError("Текст WELLTRACK для дополнительных скважин пуст.")
+    return reference_welltrack_records_to_wells(
+        parse_welltrack_text(source),
+        kind=kind,
+    )
+
+
+def reference_welltrack_records_to_wells(
+    records: Iterable[WelltrackRecord],
+    *,
+    kind: str,
+) -> list[ImportedTrajectoryWell]:
+    normalized_kind = normalize_reference_well_kind(kind)
+    ordered_records = list(records)
+    if not ordered_records:
+        raise WelltrackParseError("WELLTRACK дополнительных скважин пуст.")
+
+    wells: list[ImportedTrajectoryWell] = []
+    for record in ordered_records:
+        points = tuple(record.points)
+        if len(points) < 2:
+            raise WelltrackParseError(
+                "WELLTRACK дополнительных скважин: для "
+                f"'{record.name}' требуется минимум 2 точки траектории."
+            )
+        try:
+            stations = build_reference_trajectory_stations(
+                xs=[float(point.x) for point in points],
+                ys=[float(point.y) for point in points],
+                zs=[float(point.z) for point in points],
+                mds=[float(point.md) for point in points],
+            )
+        except WelltrackParseError as exc:
+            raise WelltrackParseError(
+                f"WELLTRACK дополнительных скважин '{record.name}': {exc}"
+            ) from exc
+        wells.append(
+            ImportedTrajectoryWell(
+                name=str(record.name),
+                kind=normalized_kind,
+                stations=stations,
+                surface=Point3D(
+                    x=float(stations["X_m"].iloc[0]),
+                    y=float(stations["Y_m"].iloc[0]),
+                    z=float(stations["Z_m"].iloc[0]),
+                ),
+                azimuth_deg=float(_infer_reference_azimuth_deg(stations)),
+            )
+        )
+    return wells
 
 
 def build_reference_trajectory_stations(
@@ -200,7 +314,20 @@ def build_reference_trajectory_stations(
         len(x_values) == len(y_values) == len(z_values) == len(md_values)
         and len(md_values) >= 2
     ):
-        raise ValueError("reference trajectory requires aligned X/Y/Z/MD arrays with at least 2 rows")
+        raise WelltrackParseError(
+            "массивы X, Y, Z и MD должны быть одинаковой длины и содержать не менее двух точек"
+        )
+    if not (
+        np.isfinite(x_values).all()
+        and np.isfinite(y_values).all()
+        and np.isfinite(z_values).all()
+        and np.isfinite(md_values).all()
+    ):
+        raise WelltrackParseError(
+            "все значения X, Y, Z и MD должны быть конечными числами"
+        )
+    if np.any(np.diff(md_values) <= 1e-9):
+        raise WelltrackParseError("MD должен строго возрастать по траектории")
 
     tangent_x = _local_derivative(md_values, x_values)
     tangent_y = _local_derivative(md_values, y_values)
@@ -308,6 +435,14 @@ def _split_reference_text_line(line: str) -> list[str]:
 def _looks_like_reference_header(tokens: list[str]) -> bool:
     normalized = [str(token).strip().lower() for token in tokens]
     expected = ["wellname", "type", "x", "y", "z", "md"]
+    if normalized[: len(expected)] == expected:
+        return True
+    return set(expected).issubset(set(normalized))
+
+
+def _looks_like_reference_header_without_type(tokens: list[str]) -> bool:
+    normalized = [str(token).strip().lower() for token in tokens]
+    expected = ["wellname", "x", "y", "z", "md"]
     if normalized[: len(expected)] == expected:
         return True
     return set(expected).issubset(set(normalized))

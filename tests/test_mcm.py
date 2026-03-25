@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from pywp.mcm import (
     add_dls,
@@ -164,3 +165,40 @@ def test_minimum_curvature_increment_wrap_invariance_holds_for_randomized_cases(
             azi2_deg=float(azi2_deg + 360.0 * rng.integers(-2, 3)),
         )
         assert np.allclose(base, shifted, atol=1e-9, rtol=0.0)
+
+
+def test_minimum_curvature_increment_rejects_non_positive_md_interval() -> None:
+    with pytest.raises(ValueError, match="md2_m > md1_m"):
+        minimum_curvature_increment(
+            md1_m=100.0,
+            inc1_deg=10.0,
+            azi1_deg=20.0,
+            md2_m=100.0,
+            inc2_deg=12.0,
+            azi2_deg=30.0,
+        )
+
+
+def test_compute_positions_min_curv_rejects_non_increasing_md() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0, 100.0],
+            "INC_deg": [0.0, 10.0, 20.0],
+            "AZI_deg": [0.0, 20.0, 40.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="strictly increasing MD"):
+        compute_positions_min_curv(stations, start=Point3D(0.0, 0.0, 0.0))
+
+
+def test_minimum_curvature_increment_rejects_near_180_degree_dogleg() -> None:
+    with pytest.raises(ValueError, match="too close to 180 degrees"):
+        minimum_curvature_increment(
+            md1_m=0.0,
+            inc1_deg=90.0,
+            azi1_deg=0.0,
+            md2_m=30.0,
+            inc2_deg=90.0,
+            azi2_deg=180.0,
+        )

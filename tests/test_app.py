@@ -92,3 +92,48 @@ def test_parse_actual_trajectory_import_text_rejects_invalid_columns() -> None:
 def test_parse_actual_trajectory_import_text_rejects_non_numeric_values() -> None:
     with pytest.raises(ValueError, match="не удалось распознать числа"):
         app._parse_actual_trajectory_import_text("0 0 0\nx 100 200")
+
+
+def test_current_input_signature_tracks_plan_and_actual_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyStreamlit:
+        def __init__(self, session_state: dict[str, object]) -> None:
+            self.session_state = session_state
+
+    state: dict[str, object] = {
+        "surface_x": 0.0,
+        "surface_y": 0.0,
+        "surface_z": 0.0,
+        "t1_x": 600.0,
+        "t1_y": 800.0,
+        "t1_z": 2400.0,
+        "t3_x": 1500.0,
+        "t3_y": 2000.0,
+        "t3_z": 2500.0,
+        "plan_csb_df": pd.DataFrame({"X_m": [0.0], "Y_m": [0.0], "Z_m": [0.0]}),
+        "actual_profile_df": None,
+        "actual_trajectory_df": None,
+    }
+    monkeypatch.setattr(app, "st", _DummyStreamlit(state))
+    monkeypatch.setattr(
+        type(app.APP_CALC_PARAMS),
+        "state_signature",
+        lambda self: ("calc",),
+    )
+
+    signature_before = app._current_input_signature()
+    state["plan_csb_df"] = pd.DataFrame({"X_m": [1.0], "Y_m": [0.0], "Z_m": [0.0]})
+    signature_after_plan = app._current_input_signature()
+    state["actual_profile_df"] = pd.DataFrame({"X_m": [0.0], "Y_m": [2.0], "Z_m": [0.0]})
+    signature_after_actual = app._current_input_signature()
+
+    assert signature_before != signature_after_plan
+    assert signature_after_plan != signature_after_actual
+
+
+def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
+    at = AppTest.from_file("app.py")
+    at.session_state["last_result"] = {"broken": True}
+    at.run(timeout=120)
+
+    warning_values = [str(widget.value) for widget in at.warning]
+    assert any("устарел или поврежден" in value for value in warning_values)
