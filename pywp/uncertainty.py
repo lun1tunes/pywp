@@ -12,11 +12,16 @@ _REQUIRED_STATION_COLUMNS = frozenset({"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m
 UNCERTAINTY_PRESET_OPTIMISTIC = "optimistic"
 UNCERTAINTY_PRESET_ORDINARY_MWD = "ordinary_mwd"
 UNCERTAINTY_PRESET_CONSERVATIVE = "conservative"
+UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND = "custom_actual_fund"
 DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_ORDINARY_MWD
 UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
     UNCERTAINTY_PRESET_OPTIMISTIC: "Оптимистичный",
     UNCERTAINTY_PRESET_ORDINARY_MWD: "Обычный MWD",
     UNCERTAINTY_PRESET_CONSERVATIVE: "Консервативный",
+}
+_UNCERTAINTY_PRESET_LABELS: dict[str, str] = {
+    **UNCERTAINTY_PRESET_OPTIONS,
+    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND: "Пользовательская (по фактическому фонду)",
 }
 
 
@@ -128,20 +133,39 @@ class UncertaintyTubeMesh:
     k: np.ndarray
 
 
-def normalize_uncertainty_preset(preset: object) -> str:
+def normalize_uncertainty_preset(
+    preset: object,
+    *,
+    allow_custom: bool = False,
+) -> str:
     preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
+    if allow_custom and preset_key == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND:
+        return preset_key
     if preset_key in PLANNING_UNCERTAINTY_PRESET_MODELS:
         return preset_key
     return DEFAULT_UNCERTAINTY_PRESET
 
 
-def planning_uncertainty_model_for_preset(preset: object) -> PlanningUncertaintyModel:
-    return PLANNING_UNCERTAINTY_PRESET_MODELS[normalize_uncertainty_preset(preset)]
+def planning_uncertainty_model_for_preset(
+    preset: object,
+    *,
+    custom_model: PlanningUncertaintyModel | None = None,
+) -> PlanningUncertaintyModel:
+    normalized = normalize_uncertainty_preset(
+        preset,
+        allow_custom=custom_model is not None,
+    )
+    if normalized == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND and custom_model is not None:
+        return custom_model
+    return PLANNING_UNCERTAINTY_PRESET_MODELS[normalized]
 
 
 def uncertainty_preset_label(preset: object) -> str:
-    preset_key = normalize_uncertainty_preset(preset)
-    return UNCERTAINTY_PRESET_OPTIONS[preset_key]
+    preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
+    return _UNCERTAINTY_PRESET_LABELS.get(
+        preset_key,
+        _UNCERTAINTY_PRESET_LABELS[DEFAULT_UNCERTAINTY_PRESET],
+    )
 
 
 def uncertainty_model_caption(

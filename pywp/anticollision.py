@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -221,6 +222,7 @@ def analyze_anti_collision(
     wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
     *,
     build_overlap_geometry: bool = True,
+    pair_filter: Callable[[AntiCollisionWell, AntiCollisionWell], bool] | None = None,
 ) -> AntiCollisionAnalysis:
     ordered_wells = tuple(wells)
     if build_overlap_geometry:
@@ -237,6 +239,7 @@ def analyze_anti_collision(
             if not _should_analyze_pair(
                 well_a=ordered_wells[left_index],
                 well_b=ordered_wells[right_index],
+                pair_filter=pair_filter,
             ):
                 continue
             pair_count += 1
@@ -283,11 +286,20 @@ def analyze_anti_collision(
     )
 
 
-def _should_analyze_pair(*, well_a: AntiCollisionWell, well_b: AntiCollisionWell) -> bool:
-    return not (
+def _should_analyze_pair(
+    *,
+    well_a: AntiCollisionWell,
+    well_b: AntiCollisionWell,
+    pair_filter: Callable[[AntiCollisionWell, AntiCollisionWell], bool] | None = None,
+) -> bool:
+    if (
         bool(well_a.is_reference_only)
         and bool(well_b.is_reference_only)
-    )
+    ):
+        return False
+    if pair_filter is not None and not bool(pair_filter(well_a, well_b)):
+        return False
+    return True
 
 
 def anti_collision_report_rows(

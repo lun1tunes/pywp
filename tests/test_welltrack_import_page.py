@@ -22,6 +22,7 @@ from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
+    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND,
     planning_uncertainty_model_for_preset,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan
@@ -189,6 +190,19 @@ def _reference_wells():
                 {"Wellname": "APP-1", "Type": "approved", "X": 0.0, "Y": -35.0, "Z": 0.0, "MD": 0.0},
                 {"Wellname": "APP-1", "Type": "approved", "X": 850.0, "Y": -35.0, "Z": 250.0, "MD": 900.0},
                 {"Wellname": "APP-1", "Type": "approved", "X": 1750.0, "Y": -35.0, "Z": 350.0, "MD": 1850.0},
+            ]
+        )
+    )
+
+
+def _far_reference_wells():
+    return tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 50000.0, "Y": 50000.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 52000.0, "Y": 50000.0, "Z": 300.0, "MD": 2100.0},
+                {"Wellname": "APP-FAR", "Type": "approved", "X": -45000.0, "Y": -42000.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "APP-FAR", "Type": "approved", "X": -43000.0, "Y": -42000.0, "Z": 280.0, "MD": 2050.0},
             ]
         )
     )
@@ -566,6 +580,40 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
         str(at.session_state["wt_anticollision_uncertainty_preset"])
         == DEFAULT_UNCERTAINTY_PRESET
     )
+
+
+def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_available() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()[:2]
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "OK"},
+        {"Скважина": "WELL-B", "Статус": "OK"},
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0),
+    ]
+    at.session_state["wt_actual_fund_custom_model"] = planning_uncertainty_model_for_preset(
+        DEFAULT_UNCERTAINTY_PRESET
+    )
+    at.session_state["wt_anticollision_uncertainty_preset"] = (
+        UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
+    )
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+
+    at.run(timeout=120)
+
+    preset_widgets = [
+        widget
+        for widget in at.selectbox
+        if widget.label == "Пресет неопределенности для anti-collision"
+    ]
+    assert preset_widgets
+    assert str(preset_widgets[0].value) == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
+    assert "Пользовательская (по фактическому фонду)" in list(preset_widgets[0].options)
 
 
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
@@ -2069,6 +2117,28 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     assert str(approved_3d.line.color) == "#C62828"
 
 
+def test_all_wells_overview_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
+    page = _load_welltrack_page_module()
+    successes = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+
+    base_3d = page._all_wells_3d_figure(successes)
+    base_plan = page._all_wells_plan_figure(successes)
+    far_ref_3d = page._all_wells_3d_figure(
+        successes,
+        reference_wells=_far_reference_wells(),
+    )
+    far_ref_plan = page._all_wells_plan_figure(
+        successes,
+        reference_wells=_far_reference_wells(),
+    )
+
+    assert tuple(base_3d.layout.scene.xaxis.range) == tuple(far_ref_3d.layout.scene.xaxis.range)
+    assert tuple(base_3d.layout.scene.yaxis.range) == tuple(far_ref_3d.layout.scene.yaxis.range)
+    assert tuple(base_3d.layout.scene.zaxis.range) == tuple(far_ref_3d.layout.scene.zaxis.range)
+    assert tuple(base_plan.layout.xaxis.range) == tuple(far_ref_plan.layout.xaxis.range)
+    assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
+
+
 def test_anticollision_figures_include_reference_trajectory_wells_without_target_markers() -> None:
     page = _load_welltrack_page_module()
     reference_wells = _reference_wells()
@@ -2085,6 +2155,31 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
     assert any(str(trace.name) == "APP-1 (Проектная утвержденная)" for trace in figure_3d.data)
     assert not any("FACT-1 (Фактическая): цели" == str(trace.name) for trace in figure_3d.data)
     assert not any("APP-1 (Проектная утвержденная): цели" == str(trace.name) for trace in figure_plan.data)
+
+
+def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
+    page = _load_welltrack_page_module()
+    successes = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    base_analysis = page._build_anti_collision_analysis(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    far_ref_analysis = page._build_anti_collision_analysis(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        reference_wells=_far_reference_wells(),
+    )
+
+    base_3d = page._all_wells_anticollision_3d_figure(base_analysis)
+    base_plan = page._all_wells_anticollision_plan_figure(base_analysis)
+    far_ref_3d = page._all_wells_anticollision_3d_figure(far_ref_analysis)
+    far_ref_plan = page._all_wells_anticollision_plan_figure(far_ref_analysis)
+
+    assert tuple(base_3d.layout.scene.xaxis.range) == tuple(far_ref_3d.layout.scene.xaxis.range)
+    assert tuple(base_3d.layout.scene.yaxis.range) == tuple(far_ref_3d.layout.scene.yaxis.range)
+    assert tuple(base_3d.layout.scene.zaxis.range) == tuple(far_ref_3d.layout.scene.zaxis.range)
+    assert tuple(base_plan.layout.xaxis.range) == tuple(far_ref_plan.layout.xaxis.range)
+    assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
 
 def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
