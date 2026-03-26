@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import colorsys
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -139,20 +140,6 @@ WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
 WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
 WT_T1T3_MIN_DELTA_M = 0.5
-WELL_COLOR_PALETTE: tuple[str, ...] = (
-    "#0B6E4F",
-    "#3A86FF",
-    "#00798C",
-    "#FFB703",
-    "#6A4C93",
-    "#1F7A8C",
-    "#3D5A80",
-    "#F4A261",
-    "#2A9D8F",
-    "#4D908E",
-    "#577590",
-    "#8E9AAF",
-)
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
     "wt_cfg_md_step_control_m": "wt_cfg_md_control",
@@ -211,6 +198,56 @@ class _TargetOnlyWell:
     t3: Point3D
     status: str
     problem: str
+
+
+def _build_well_color_palette() -> tuple[str, ...]:
+    """Return a long palette with high local contrast for adjacent wells.
+
+    The hue order intentionally jumps around the wheel instead of walking
+    sequentially, so neighboring indices remain visually distinct. Reds,
+    blacks and grays are excluded on purpose to keep collision overlays and
+    reference wells semantically separate.
+    """
+
+    hue_degrees: tuple[float, ...] = (
+        24.0,
+        48.0,
+        72.0,
+        96.0,
+        120.0,
+        144.0,
+        168.0,
+        192.0,
+        216.0,
+        240.0,
+        264.0,
+        288.0,
+        312.0,
+    )
+    hue_jump_order: tuple[int, ...] = (0, 6, 12, 5, 11, 4, 10, 3, 9, 2, 8, 1, 7)
+    lightness_saturation_bands: tuple[tuple[float, float], ...] = (
+        (0.46, 0.82),
+        (0.62, 0.74),
+        (0.40, 0.88),
+        (0.55, 0.90),
+    )
+    ordered_hues = tuple(hue_degrees[index] for index in hue_jump_order)
+    colors: list[str] = []
+    for index in range(len(ordered_hues) * len(lightness_saturation_bands)):
+        hue_deg = ordered_hues[index % len(ordered_hues)]
+        lightness, saturation = lightness_saturation_bands[index % len(lightness_saturation_bands)]
+        red, green, blue = colorsys.hls_to_rgb(hue_deg / 360.0, lightness, saturation)
+        colors.append(
+            "#{:02X}{:02X}{:02X}".format(
+                int(round(red * 255.0)),
+                int(round(green * 255.0)),
+                int(round(blue * 255.0)),
+            )
+        )
+    return tuple(colors)
+
+
+WELL_COLOR_PALETTE: tuple[str, ...] = _build_well_color_palette()
 
 
 def _well_color(index: int) -> str:
@@ -3611,30 +3648,41 @@ def _render_actual_fund_analysis_panel() -> None:
         return
 
     metrics = build_actual_fund_well_metrics(actual_wells)
-    horizontal_metrics = [item for item in metrics if bool(item.is_horizontal)]
-    pad_count = len({str(item.pad_group) for item in metrics if str(item.pad_group) != "—"})
-    horizontal_kop_values = [
+    eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
+    excluded_horizontal_metrics = [
+        item for item in metrics if bool(item.is_horizontal) and not bool(item.is_analysis_eligible)
+    ]
+    pad_count = len({str(item.pad_group) for item in eligible_metrics if str(item.pad_group) != "—"})
+    eligible_kop_values = [
         float(item.kop_md_m)
-        for item in horizontal_metrics
+        for item in eligible_metrics
         if item.kop_md_m is not None
     ]
 
     with st.expander("Анализ фактического фонда", expanded=False):
         st.caption(
             "В анализ попадают только фактические скважины. Для калибровки "
-            "учитываются только горизонтальные скважины. Пары одного семейства "
-            "вида `7401` / `7401_PL` / `7401_2` из calibration-scan исключаются. "
-            "Группировка по кустам строится по ведущему числовому коду скважины "
-            "без двух последних цифр: `6101/6102/6103 -> 61`, `8203/8210 -> 82`."
+            "учитываются только горизонтальные скважины без аномалий: если у "
+            "горизонтальной скважины не удаётся устойчиво выделить `KOP / HOLD / "
+            "терминальный high-angle interval` или получается аномально высокий "
+            "устойчивый `ПИ`, такая скважина исключается из анализа и калибровки. "
+            "Пары одного семейства вида `7401` / `7401_PL` / `7401_2` из calibration-scan "
+            "исключаются. Группировка по кустам строится по ведущему числовому коду "
+            "скважины без двух последних цифр: `6101/6102/6103 -> 61`, `8203/8210 -> 82`."
         )
         a1, a2, a3, a4 = st.columns(4, gap="small")
         a1.metric("Фактических скважин", f"{len(actual_wells)}")
-        a2.metric("Горизонтальных", f"{len(horizontal_metrics)}")
+        a2.metric("В анализе", f"{len(eligible_metrics)}")
         a3.metric("Кустов", f"{pad_count}")
         a4.metric(
             "Медианный KOP, м",
-            "—" if not horizontal_kop_values else f"{float(np.median(horizontal_kop_values)):.0f}",
+            "—" if not eligible_kop_values else f"{float(np.median(eligible_kop_values)):.0f}",
         )
+        if excluded_horizontal_metrics:
+            st.info(
+                "Из анализа исключено горизонтальных скважин: "
+                f"{len(excluded_horizontal_metrics)}. Причины видны в таблице."
+            )
 
         view_mode = st.radio(
             "Свод фактического фонда",

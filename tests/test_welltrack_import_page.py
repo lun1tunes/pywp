@@ -243,6 +243,31 @@ def test_welltrack_general_run_select_all_restores_full_selection() -> None:
     ]
 
 
+def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
+    page = _load_welltrack_page_module()
+
+    palette = tuple(str(color) for color in page.WELL_COLOR_PALETTE)
+    assert len(palette) >= 50
+    assert len(set(palette)) == len(palette)
+
+    def _rgb_triplet(value: str) -> tuple[int, int, int]:
+        normalized = value.lstrip("#")
+        return (
+            int(normalized[0:2], 16),
+            int(normalized[2:4], 16),
+            int(normalized[4:6], 16),
+        )
+
+    adjacent_distances = []
+    for index in range(len(palette) - 1):
+        red_a, green_a, blue_a = _rgb_triplet(palette[index])
+        red_b, green_b, blue_b = _rgb_triplet(palette[index + 1])
+        adjacent_distances.append(
+            abs(red_a - red_b) + abs(green_a - green_b) + abs(blue_a - blue_b)
+        )
+    assert min(adjacent_distances) >= 120
+
+
 def test_reference_trajectory_text_import_populates_reference_wells_state() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _records()
