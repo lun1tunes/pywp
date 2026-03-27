@@ -2370,7 +2370,7 @@ def test_scatter3d_legendonly_trace_preserves_legend_without_geometry() -> None:
     assert payload["legend_items"] == [
         {
             "label": "Фактические скважины",
-            "color": "#111111",
+            "color": "#6B7280",
             "opacity": 1.0,
         }
     ]

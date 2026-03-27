@@ -506,9 +506,12 @@ def _reference_legend_label(kind: str) -> str:
 
 
 def _reference_legend_color(kind: str) -> str:
-    if str(kind) == REFERENCE_WELL_APPROVED:
-        return "#C62828"
-    return "#111111"
+    return str(
+        REFERENCE_WELL_KIND_COLORS.get(
+            str(kind),
+            "#A0A0A0",
+        )
+    )
 
 
 def _reference_kind_value(reference_well: object) -> str:

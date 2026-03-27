@@ -1234,7 +1234,7 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/02_welltrack_import.py	230616
+===BEGIN_FILE===	pages/02_welltrack_import.py	247229
 from __future__ import annotations
 
 import colorsys
@@ -1252,10 +1252,11 @@ import streamlit as st
 
 from pywp import TrajectoryConfig, TrajectoryPlanner
 from pywp.actual_fund_analysis import (
+    ActualFundWellAnalysis,
     CALIBRATION_STATUS_READY,
+    build_actual_fund_well_analyses,
     actual_fund_metrics_rows,
     actual_fund_pad_rows,
-    build_actual_fund_well_metrics,
     calibrate_uncertainty_from_actual_fund,
 )
 from pywp.anticollision import (
@@ -1373,7 +1374,7 @@ from pywp.welltrack_batch import (
 )
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS3.INC")
-WT_UI_DEFAULTS_VERSION = 14
+WT_UI_DEFAULTS_VERSION = 15
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
 WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
@@ -1388,7 +1389,6 @@ REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
 REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M = 100.0
 WT_3D_RENDER_OPTIONS: tuple[str, ...] = (
-    WT_3D_RENDER_AUTO,
     WT_3D_RENDER_DETAIL,
     WT_3D_RENDER_FAST,
 )
@@ -1600,16 +1600,7 @@ def _resolve_3d_render_mode(
     normalized = str(requested_mode).strip()
     if normalized == WT_3D_RENDER_DETAIL:
         return WT_3D_RENDER_DETAIL
-    if normalized == WT_3D_RENDER_FAST:
-        return WT_3D_RENDER_FAST
-    reference_well_list = tuple(reference_wells)
-    if calculated_well_count >= WT_3D_FAST_CALC_WELL_THRESHOLD:
-        return WT_3D_RENDER_FAST
-    if len(reference_well_list) >= WT_3D_FAST_REFERENCE_WELL_THRESHOLD:
-        return WT_3D_RENDER_FAST
-    if _reference_point_count(reference_well_list) >= WT_3D_FAST_REFERENCE_POINT_THRESHOLD:
-        return WT_3D_RENDER_FAST
-    return WT_3D_RENDER_DETAIL
+    return WT_3D_RENDER_FAST
 
 
 def _decimated_station_frame(stations: pd.DataFrame, *, target_points: int) -> pd.DataFrame:
@@ -1680,6 +1671,7 @@ def _combined_reference_trace_3d(
         z=z_values,
         mode="lines",
         name=f"{kind_label} (сводно)",
+        showlegend=False,
         line={
             "width": 2.5,
             "color": REFERENCE_WELL_KIND_COLORS.get(str(kind), "#A0A0A0"),
@@ -1742,6 +1734,64 @@ def _reference_label_color(kind: str) -> str:
     if str(kind) == REFERENCE_WELL_APPROVED:
         return REFERENCE_LABEL_APPROVED_COLOR
     return REFERENCE_LABEL_ACTUAL_COLOR
+
+
+def _reference_legend_label(kind: str) -> str:
+    if str(kind) == REFERENCE_WELL_APPROVED:
+        return "Проектные утвержденные скважины"
+    return "Фактические скважины"
+
+
+def _reference_legend_color(kind: str) -> str:
+    return str(
+        REFERENCE_WELL_KIND_COLORS.get(
+            str(kind),
+            "#A0A0A0",
+        )
+    )
+
+
+def _reference_kind_value(reference_well: object) -> str:
+    return str(getattr(reference_well, "kind", getattr(reference_well, "well_kind", "")))
+
+
+def _reference_kinds_present(reference_wells: Iterable[object]) -> tuple[str, ...]:
+    kinds: list[str] = []
+    seen: set[str] = set()
+    for reference_well in reference_wells:
+        kind = _reference_kind_value(reference_well)
+        if not kind or kind in seen:
+            continue
+        seen.add(kind)
+        kinds.append(kind)
+    return tuple(kinds)
+
+
+def _reference_legend_trace_3d(kind: str) -> go.Scatter3d:
+    return go.Scatter3d(
+        x=[0.0, 1.0],
+        y=[0.0, 0.0],
+        z=[0.0, 0.0],
+        mode="lines",
+        name=_reference_legend_label(kind),
+        line={"width": 4, "color": _reference_legend_color(kind)},
+        hoverinfo="skip",
+        legendgroup=f"reference_kind_{str(kind)}",
+        visible="legendonly",
+    )
+
+
+def _reference_legend_trace_2d(kind: str) -> go.Scatter:
+    return go.Scatter(
+        x=[0.0, 1.0],
+        y=[0.0, 0.0],
+        mode="lines",
+        name=_reference_legend_label(kind),
+        line={"width": 4, "color": _reference_legend_color(kind)},
+        hoverinfo="skip",
+        legendgroup=f"reference_kind_{str(kind)}",
+        visible="legendonly",
+    )
 
 
 def _reference_label_anchor_point(
@@ -1842,6 +1892,15 @@ def _trace_showlegend(trace: object) -> bool:
     return bool(showlegend)
 
 
+def _trace_visibility_state(trace: object) -> str:
+    visible = getattr(trace, "visible", True)
+    if visible is False:
+        return "hidden"
+    if str(visible) == "legendonly":
+        return "legendonly"
+    return "visible"
+
+
 def _plotly_color_and_opacity(
     color_value: object,
     *,
@@ -1929,35 +1988,39 @@ def _scatter3d_trace_to_three_payload(
     trace_opacity = (
         1.0 if getattr(trace, "opacity", None) is None else float(trace.opacity)
     )
+    visibility_state = _trace_visibility_state(trace)
+    legend_added = False
     if "lines" in mode:
         line = trace.line or {}
         color, opacity = _plotly_color_and_opacity(
             getattr(line, "color", None),
             fallback_opacity=trace_opacity,
         )
-        segments = _split_nan_separated_xyz_segments(
-            x_values=() if trace.x is None else trace.x,
-            y_values=() if trace.y is None else trace.y,
-            z_values=() if trace.z is None else trace.z,
-        )
-        if segments:
-            payload["lines"].append(
-                {
-                    "name": trace_name,
-                    "segments": segments,
-                    "color": color,
-                    "opacity": opacity,
-                    "dash": str(getattr(line, "dash", "solid") or "solid"),
-                }
+        if visibility_state == "visible":
+            segments = _split_nan_separated_xyz_segments(
+                x_values=() if trace.x is None else trace.x,
+                y_values=() if trace.y is None else trace.y,
+                z_values=() if trace.z is None else trace.z,
             )
-            if _trace_showlegend(trace):
-                payload["legend_items"].append(
+            if segments:
+                payload["lines"].append(
                     {
-                        "label": trace_name,
+                        "name": trace_name,
+                        "segments": segments,
                         "color": color,
                         "opacity": opacity,
+                        "dash": str(getattr(line, "dash", "solid") or "solid"),
                     }
                 )
+        if _trace_showlegend(trace) and trace_name:
+            payload["legend_items"].append(
+                {
+                    "label": trace_name,
+                    "color": color,
+                    "opacity": opacity,
+                }
+            )
+            legend_added = True
     if "markers" in mode:
         marker = trace.marker or {}
         color, opacity = _plotly_color_and_opacity(
@@ -1966,76 +2029,80 @@ def _scatter3d_trace_to_three_payload(
         )
         if not (trace_name or opacity > 0.01):
             return payload
-        x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
-        y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
-        z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
-        mask = np.isfinite(x_array) & np.isfinite(y_array) & np.isfinite(z_array)
-        points = [
-            [float(x_value), float(y_value), float(z_value)]
-            for x_value, y_value, z_value in zip(
-                x_array[mask],
-                y_array[mask],
-                z_array[mask],
-                strict=False,
-            )
-        ]
-        if points:
-            marker_size = getattr(marker, "size", 6)
-            if isinstance(marker_size, (list, tuple, np.ndarray)):
-                marker_size = marker_size[0] if len(marker_size) else 6
-            payload["points"].append(
-                {
-                    "name": trace_name,
-                    "points": points,
-                    "color": color,
-                    "opacity": opacity,
-                    "size": float(marker_size),
-                    "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
-                }
-            )
-            if _trace_showlegend(trace):
-                payload["legend_items"].append(
+        if visibility_state == "visible":
+            x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+            y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+            z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+            mask = np.isfinite(x_array) & np.isfinite(y_array) & np.isfinite(z_array)
+            points = [
+                [float(x_value), float(y_value), float(z_value)]
+                for x_value, y_value, z_value in zip(
+                    x_array[mask],
+                    y_array[mask],
+                    z_array[mask],
+                    strict=False,
+                )
+            ]
+            if points:
+                marker_size = getattr(marker, "size", 6)
+                if isinstance(marker_size, (list, tuple, np.ndarray)):
+                    marker_size = marker_size[0] if len(marker_size) else 6
+                payload["points"].append(
                     {
-                        "label": trace_name,
+                        "name": trace_name,
+                        "points": points,
                         "color": color,
                         "opacity": opacity,
+                        "size": float(marker_size),
+                        "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
                     }
                 )
+        if _trace_showlegend(trace) and trace_name and not legend_added:
+            payload["legend_items"].append(
+                {
+                    "label": trace_name,
+                    "color": color,
+                    "opacity": opacity,
+                }
+            )
     if "text" in mode and "lines" not in mode and "markers" not in mode:
         text_font = trace.textfont or {}
         color = str(getattr(text_font, "color", "#0F172A"))
-        x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
-        y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
-        z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
-        text_values = list(() if trace.text is None else trace.text)
-        for x_value, y_value, z_value, text_value in zip(
-            x_array,
-            y_array,
-            z_array,
-            text_values,
-            strict=False,
-        ):
-            if not (
-                np.isfinite(float(x_value))
-                and np.isfinite(float(y_value))
-                and np.isfinite(float(z_value))
+        if visibility_state == "visible":
+            x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+            y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+            z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+            text_values = list(() if trace.text is None else trace.text)
+            for x_value, y_value, z_value, text_value in zip(
+                x_array,
+                y_array,
+                z_array,
+                text_values,
+                strict=False,
             ):
-                continue
-            payload["labels"].append(
-                {
-                    "text": str(text_value),
-                    "position": [
-                        float(x_value),
-                        float(y_value),
-                        float(z_value),
-                    ],
-                    "color": color,
-                }
-            )
+                if not (
+                    np.isfinite(float(x_value))
+                    and np.isfinite(float(y_value))
+                    and np.isfinite(float(z_value))
+                ):
+                    continue
+                payload["labels"].append(
+                    {
+                        "text": str(text_value),
+                        "position": [
+                            float(x_value),
+                            float(y_value),
+                            float(z_value),
+                        ],
+                        "color": color,
+                    }
+                )
     return payload
 
 
 def _mesh3d_trace_to_three_payload(trace: go.Mesh3d) -> dict[str, object] | None:
+    if _trace_visibility_state(trace) != "visible":
+        return None
     x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
     y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
     z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
@@ -2725,7 +2792,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault("wt_results_view_mode", "Отдельная скважина")
     st.session_state.setdefault("wt_results_all_view_mode", "Траектории")
-    st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_AUTO)
+    st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_FAST)
     st.session_state.setdefault("wt_3d_backend", WT_3D_BACKEND_PLOTLY)
     st.session_state.setdefault(
         "wt_anticollision_uncertainty_preset", DEFAULT_UNCERTAINTY_PRESET
@@ -2745,7 +2812,7 @@ def _init_state() -> None:
     }:
         st.session_state["wt_results_all_view_mode"] = "Траектории"
     if str(st.session_state.get("wt_3d_render_mode", "")).strip() not in set(WT_3D_RENDER_OPTIONS):
-        st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_AUTO
+        st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_FAST
     if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(WT_3D_BACKEND_OPTIONS):
         st.session_state["wt_3d_backend"] = WT_3D_BACKEND_PLOTLY
     st.session_state["wt_anticollision_uncertainty_preset"] = (
@@ -2883,7 +2950,7 @@ def _all_wells_3d_figure(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
-    render_mode: str = WT_3D_RENDER_AUTO,
+    render_mode: str = WT_3D_RENDER_FAST,
     height: int = 620,
 ) -> go.Figure:
     fig = go.Figure()
@@ -3014,6 +3081,7 @@ def _all_wells_3d_figure(
                     z=z_values,
                     mode="lines",
                     name=reference_well_display_label(reference_well),
+                    showlegend=False,
                     line={"width": 4, "color": line_color},
                     customdata=np.column_stack(
                         [stations["MD_m"].to_numpy(dtype=float)]
@@ -3033,6 +3101,8 @@ def _all_wells_3d_figure(
                     ),
                 )
             )
+    for kind in _reference_kinds_present(reference_wells):
+        fig.add_trace(_reference_legend_trace_3d(kind))
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
         if label_trace is not None:
@@ -3277,6 +3347,7 @@ def _all_wells_plan_figure(
                 y=y_values,
                 mode="lines",
                 name=reference_well_display_label(reference_well),
+                showlegend=False,
                 line={"width": 3.5, "color": line_color},
                 customdata=np.column_stack([stations["MD_m"].to_numpy(dtype=float)]),
                 hovertemplate=(
@@ -3293,6 +3364,8 @@ def _all_wells_plan_figure(
                     ),
                 )
             )
+    for kind in _reference_kinds_present(reference_wells):
+        fig.add_trace(_reference_legend_trace_2d(kind))
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_2d(reference_wells, kind=kind)
         if label_trace is not None:
@@ -3396,7 +3469,7 @@ def _all_wells_anticollision_3d_figure(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
-    render_mode: str = WT_3D_RENDER_AUTO,
+    render_mode: str = WT_3D_RENDER_FAST,
     height: int = 660,
 ) -> go.Figure:
     fig = go.Figure()
@@ -3530,6 +3603,7 @@ def _all_wells_anticollision_3d_figure(
                 mode="lines",
                 name=well_label,
                 legendgroup=str(well.name),
+                showlegend=not is_reference_only,
                 line={"width": 5, "color": str(well.color)},
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
@@ -3651,6 +3725,8 @@ def _all_wells_anticollision_3d_figure(
                 x_arrays.append(np.asarray(combined_trace.x, dtype=float))
                 y_arrays.append(np.asarray(combined_trace.y, dtype=float))
                 z_arrays.append(np.asarray(combined_trace.z, dtype=float))
+    for kind in _reference_kinds_present(reference_wells):
+        fig.add_trace(_reference_legend_trace_3d(kind))
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_3d(
             [
@@ -3917,6 +3993,7 @@ def _all_wells_anticollision_plan_figure(
                 mode="lines",
                 name=well_label,
                 legendgroup=str(well.name),
+                showlegend=not bool(well.is_reference_only),
                 line={"width": 4, "color": str(well.color)},
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
@@ -4052,6 +4129,10 @@ def _all_wells_anticollision_plan_figure(
         x_focus_arrays.append(x_segment)
         y_focus_arrays.append(y_segment)
         segment_legend_added = True
+    for kind in _reference_kinds_present(
+        [well for well in analysis.wells if bool(well.is_reference_only)]
+    ):
+        fig.add_trace(_reference_legend_trace_2d(kind))
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_2d(
             [
@@ -5760,12 +5841,373 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
         st.caption("Скважины этого типа не загружены.")
 
 
+ACTUAL_FUND_ZONE_COLORS: dict[str, str] = {
+    "vertical": "#2563EB",
+    "build1": "#F59E0B",
+    "hold": "#16A34A",
+    "build2": "#8B5CF6",
+    "horizontal": "#0F766E",
+}
+
+
+def _actual_fund_zone_color(zone_key: str) -> str:
+    return ACTUAL_FUND_ZONE_COLORS.get(str(zone_key), "#475569")
+
+
+def _actual_fund_interp_row(survey: pd.DataFrame, md_m: float) -> dict[str, float]:
+    md_values = survey["MD_m"].to_numpy(dtype=float)
+    return {
+        column: float(np.interp(float(md_m), md_values, survey[column].to_numpy(dtype=float)))
+        for column in ("MD_m", "X_m", "Y_m", "Z_m", "INC_deg", "DLS_deg_per_30m", "Lateral_m")
+    }
+
+
+def _actual_fund_interval_df(
+    survey: pd.DataFrame,
+    start_md_m: float,
+    end_md_m: float,
+) -> pd.DataFrame:
+    if end_md_m <= start_md_m + 1e-9:
+        return pd.DataFrame(columns=survey.columns)
+    interval = survey.loc[
+        (survey["MD_m"] >= float(start_md_m) - 1e-9)
+        & (survey["MD_m"] <= float(end_md_m) + 1e-9)
+    ].copy()
+    if interval.empty or abs(float(interval["MD_m"].iloc[0]) - float(start_md_m)) > 1e-9:
+        interval = pd.concat(
+            [pd.DataFrame([_actual_fund_interp_row(survey, float(start_md_m))]), interval],
+            ignore_index=True,
+        )
+    if abs(float(interval["MD_m"].iloc[-1]) - float(end_md_m)) > 1e-9:
+        interval = pd.concat(
+            [interval, pd.DataFrame([_actual_fund_interp_row(survey, float(end_md_m))])],
+            ignore_index=True,
+        )
+    return interval.sort_values("MD_m").reset_index(drop=True)
+
+
+def _actual_fund_kop_marker(detail: ActualFundWellAnalysis) -> dict[str, float] | None:
+    if detail.metrics.kop_md_m is None:
+        return None
+    return _actual_fund_interp_row(detail.survey, float(detail.metrics.kop_md_m))
+
+
+def _actual_fund_horizontal_entry_marker(
+    detail: ActualFundWellAnalysis,
+) -> dict[str, float] | None:
+    if detail.metrics.horizontal_entry_md_m is None:
+        return None
+    return _actual_fund_interp_row(detail.survey, float(detail.metrics.horizontal_entry_md_m))
+
+
+def _actual_fund_lateral_from_horizontal_entry_m(detail: ActualFundWellAnalysis) -> float | None:
+    entry = _actual_fund_horizontal_entry_marker(detail)
+    if entry is None:
+        return None
+    end_x = float(detail.survey["X_m"].iloc[-1])
+    end_y = float(detail.survey["Y_m"].iloc[-1])
+    return float(np.hypot(end_x - float(entry["X_m"]), end_y - float(entry["Y_m"])))
+
+
+def _actual_fund_zone_table_rows(detail: ActualFundWellAnalysis) -> list[dict[str, object]]:
+    return [
+        {
+            "Участок": str(item.zone_label),
+            "Интервал MD, м": f"{float(item.md_from_m):.0f} - {float(item.md_to_m):.0f}",
+            "Длина MD, м": float(item.md_length_m),
+            "INC min, deg": item.inc_min_deg,
+            "INC avg, deg": item.inc_mean_deg,
+            "INC max, deg": item.inc_max_deg,
+            "DLS min, deg/30м": item.dls_min_deg_per_30m,
+            "DLS avg, deg/30м": item.dls_mean_deg_per_30m,
+            "DLS max, deg/30м": item.dls_max_deg_per_30m,
+        }
+        for item in detail.zone_summaries
+    ]
+
+
+def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
+    figure = go.Figure()
+    shown_legend_keys: set[str] = set()
+    for zone in detail.zone_summaries:
+        interval = _actual_fund_interval_df(
+            detail.survey,
+            float(zone.md_from_m),
+            float(zone.md_to_m),
+        )
+        if len(interval) < 2:
+            continue
+        zone_key = str(zone.zone_key)
+        customdata = np.column_stack(
+            [
+                interval["MD_m"].to_numpy(dtype=float),
+                interval["Z_m"].to_numpy(dtype=float),
+                interval["DLS_deg_per_30m"].to_numpy(dtype=float),
+                interval["INC_deg"].to_numpy(dtype=float),
+            ]
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=interval["X_m"],
+                y=interval["Y_m"],
+                mode="lines",
+                name=str(zone.zone_label),
+                showlegend=zone_key not in shown_legend_keys,
+                legendgroup=zone_key,
+                line={"color": _actual_fund_zone_color(zone_key), "width": 4},
+                customdata=customdata,
+                hovertemplate=(
+                    f"{detail.name}<br>Участок: {zone.zone_label}"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        shown_legend_keys.add(zone_key)
+
+    kop_marker = _actual_fund_kop_marker(detail)
+    if kop_marker is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=[float(kop_marker["X_m"])],
+                y=[float(kop_marker["Y_m"])],
+                mode="markers+text",
+                name="KOP",
+                text=["KOP"],
+                textposition="top center",
+                marker={"color": "#111827", "symbol": "diamond", "size": 10},
+                customdata=[[
+                    float(kop_marker["MD_m"]),
+                    float(kop_marker["Z_m"]),
+                    float(kop_marker["DLS_deg_per_30m"]),
+                    float(kop_marker["INC_deg"]),
+                ]],
+                hovertemplate=(
+                    "KOP"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    horizontal_marker = _actual_fund_horizontal_entry_marker(detail)
+    if horizontal_marker is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=[float(horizontal_marker["X_m"])],
+                y=[float(horizontal_marker["Y_m"])],
+                mode="markers+text",
+                name="Старт горизонта",
+                text=["ГС"],
+                textposition="top center",
+                marker={"color": "#B91C1C", "symbol": "square", "size": 9},
+                customdata=[[
+                    float(horizontal_marker["MD_m"]),
+                    float(horizontal_marker["Z_m"]),
+                    float(horizontal_marker["DLS_deg_per_30m"]),
+                    float(horizontal_marker["INC_deg"]),
+                ]],
+                hovertemplate=(
+                    "Старт горизонтального участка"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    figure.update_layout(
+        title=f"{detail.name}: план",
+        xaxis_title="X / Восток (м)",
+        yaxis_title="Y / Север (м)",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
+        margin={"l": 20, "r": 20, "t": 48, "b": 20},
+        template="plotly_white",
+    )
+    return figure
+
+
+def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.Figure:
+    figure = go.Figure()
+    shown_legend_keys: set[str] = set()
+    for zone in detail.zone_summaries:
+        interval = _actual_fund_interval_df(
+            detail.survey,
+            float(zone.md_from_m),
+            float(zone.md_to_m),
+        )
+        if len(interval) < 2:
+            continue
+        zone_key = str(zone.zone_key)
+        customdata = np.column_stack(
+            [
+                interval["MD_m"].to_numpy(dtype=float),
+                interval["Z_m"].to_numpy(dtype=float),
+                interval["DLS_deg_per_30m"].to_numpy(dtype=float),
+                interval["INC_deg"].to_numpy(dtype=float),
+            ]
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=interval["Lateral_m"],
+                y=interval["Z_m"],
+                mode="lines",
+                name=str(zone.zone_label),
+                showlegend=zone_key not in shown_legend_keys,
+                legendgroup=zone_key,
+                line={"color": _actual_fund_zone_color(zone_key), "width": 4},
+                customdata=customdata,
+                hovertemplate=(
+                    f"{detail.name}<br>Участок: {zone.zone_label}"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        shown_legend_keys.add(zone_key)
+
+    kop_marker = _actual_fund_kop_marker(detail)
+    if kop_marker is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=[float(kop_marker["Lateral_m"])],
+                y=[float(kop_marker["Z_m"])],
+                mode="markers+text",
+                name="KOP",
+                text=["KOP"],
+                textposition="top center",
+                marker={"color": "#111827", "symbol": "diamond", "size": 10},
+                customdata=[[
+                    float(kop_marker["MD_m"]),
+                    float(kop_marker["Z_m"]),
+                    float(kop_marker["DLS_deg_per_30m"]),
+                    float(kop_marker["INC_deg"]),
+                ]],
+                hovertemplate=(
+                    "KOP"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    horizontal_marker = _actual_fund_horizontal_entry_marker(detail)
+    if horizontal_marker is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=[float(horizontal_marker["Lateral_m"])],
+                y=[float(horizontal_marker["Z_m"])],
+                mode="markers+text",
+                name="Старт горизонта",
+                text=["ГС"],
+                textposition="top center",
+                marker={"color": "#B91C1C", "symbol": "square", "size": 9},
+                customdata=[[
+                    float(horizontal_marker["MD_m"]),
+                    float(horizontal_marker["Z_m"]),
+                    float(horizontal_marker["DLS_deg_per_30m"]),
+                    float(horizontal_marker["INC_deg"]),
+                ]],
+                hovertemplate=(
+                    "Старт горизонтального участка"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    figure.update_layout(
+        title=f"{detail.name}: профиль",
+        xaxis_title="Латеральный отход (м)",
+        yaxis_title="Z / TVD (м)",
+        yaxis={"autorange": "reversed"},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
+        margin={"l": 20, "r": 20, "t": 48, "b": 20},
+        template="plotly_white",
+    )
+    return figure
+
+
+def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]) -> None:
+    if not analyses:
+        return
+    names = [str(item.name) for item in analyses]
+    default_name = next(
+        (str(item.name) for item in analyses if bool(item.metrics.is_analysis_eligible)),
+        names[0],
+    )
+    selected_name = st.selectbox(
+        "Просмотр фактической скважины",
+        options=names,
+        index=max(names.index(default_name), 0),
+        key="wt_actual_fund_selected_well",
+    )
+    detail = next(item for item in analyses if str(item.name) == str(selected_name))
+    metrics = detail.metrics
+    lateral_from_horizontal_entry_m = _actual_fund_lateral_from_horizontal_entry_m(detail)
+
+    m1, m2, m3, m4, m5 = st.columns(5, gap="small")
+    m1.metric("Итоговая MD, м", f"{float(metrics.md_total_m):.0f}")
+    m2.metric(
+        "KOP MD, м",
+        "—" if metrics.kop_md_m is None else f"{float(metrics.kop_md_m):.0f}",
+    )
+    m3.metric(
+        "Вход в горизонталь, MD",
+        "—" if metrics.horizontal_entry_md_m is None else f"{float(metrics.horizontal_entry_md_m):.0f}",
+    )
+    m4.metric(
+        "Горизонталь, м",
+        "—" if not metrics.is_horizontal else f"{float(metrics.horizontal_length_m):.0f}",
+    )
+    m5.metric(
+        "Отход, м",
+        (
+            "—"
+            if lateral_from_horizontal_entry_m is None
+            else f"{float(lateral_from_horizontal_entry_m):.0f}"
+        ),
+    )
+    if not bool(metrics.is_analysis_eligible):
+        st.info(
+            "Скважина исключена из aggregate-анализа и калибровки: "
+            f"{metrics.analysis_exclusion_reason or 'без пояснения'}."
+        )
+
+    c1, c2 = st.columns(2, gap="medium")
+    c1.plotly_chart(_actual_fund_plan_figure(detail), width="stretch")
+    c2.plotly_chart(_actual_fund_vertical_profile_figure(detail), width="stretch")
+    st.dataframe(
+        arrow_safe_text_dataframe(pd.DataFrame(_actual_fund_zone_table_rows(detail))),
+        width="stretch",
+        hide_index=True,
+    )
+
+
 def _render_actual_fund_analysis_panel() -> None:
     actual_wells = _reference_kind_wells(REFERENCE_WELL_ACTUAL)
     if not actual_wells:
         return
 
-    metrics = build_actual_fund_well_metrics(actual_wells)
+    analyses = build_actual_fund_well_analyses(actual_wells)
+    metrics = tuple(item.metrics for item in analyses)
     eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
     excluded_horizontal_metrics = [
         item for item in metrics if bool(item.is_horizontal) and not bool(item.is_analysis_eligible)
@@ -5817,6 +6259,14 @@ def _render_actual_fund_analysis_panel() -> None:
             width="stretch",
             hide_index=True,
         )
+
+        st.markdown("#### Просмотр выбранной скважины")
+        st.caption(
+            "Профили строятся по реконструированной survey-линии из фактического XYZ/MD. "
+            "Зоны `Vertical / BUILD1 / HOLD / BUILD2 / Horizontal` и точки `KOP / старт ГС` "
+            "используют ту же сегментацию, что и aggregate-анализ."
+        )
+        _render_actual_fund_well_detail(analyses)
 
         st.markdown("#### Калибровка пользовательской функции конусов")
         st.caption(
@@ -7232,7 +7682,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/actual_fund_analysis.py	31657
+===BEGIN_FILE===	pywp/actual_fund_analysis.py	41669
 from __future__ import annotations
 
 import re
@@ -7304,6 +7754,27 @@ class ActualFundPadSummary(FrozenArbitraryModel):
     median_horizontal_length_m: float | None
 
 
+class ActualFundZoneSummary(FrozenArbitraryModel):
+    zone_key: str
+    zone_label: str
+    md_from_m: float
+    md_to_m: float
+    md_length_m: float
+    inc_min_deg: float | None
+    inc_max_deg: float | None
+    inc_mean_deg: float | None
+    dls_min_deg_per_30m: float | None
+    dls_max_deg_per_30m: float | None
+    dls_mean_deg_per_30m: float | None
+
+
+class ActualFundWellAnalysis(FrozenArbitraryModel):
+    name: str
+    metrics: ActualFundWellMetrics
+    survey: pd.DataFrame
+    zone_summaries: tuple[ActualFundZoneSummary, ...]
+
+
 class ActualFundCalibrationResult(FrozenArbitraryModel):
     status: str
     base_preset: str
@@ -7318,6 +7789,23 @@ class ActualFundCalibrationResult(FrozenArbitraryModel):
     worst_separation_factor_before: float | None = None
     worst_separation_factor_after: float | None = None
     note: str = ""
+
+
+ZONE_VERTICAL = "vertical"
+ZONE_BUILD1 = "build1"
+ZONE_HOLD = "hold"
+ZONE_BUILD2 = "build2"
+ZONE_HORIZONTAL = "horizontal"
+
+ZONE_LABELS: dict[str, str] = {
+    ZONE_VERTICAL: "Вертикальный",
+    ZONE_BUILD1: "BUILD 1",
+    ZONE_HOLD: "HOLD",
+    ZONE_BUILD2: "BUILD 2",
+    ZONE_HORIZONTAL: "Горизонтальный",
+}
+
+HORIZONTAL_ENTRY_MIN_INC_DEG = 70.0
 
 
 def actual_well_family_name(name: object) -> str:
@@ -7347,82 +7835,234 @@ def actual_well_is_horizontal(stations: pd.DataFrame) -> bool:
     return bool(max_inc >= HORIZONTAL_INC_THRESHOLD_DEG and interval[2] >= HORIZONTAL_MIN_INTERVAL_M)
 
 
+def build_actual_fund_well_analysis(
+    actual_well: ImportedTrajectoryWell,
+) -> ActualFundWellAnalysis:
+    return _analyze_actual_well(actual_well)
+
+
+def build_actual_fund_well_analyses(
+    actual_wells: Iterable[ImportedTrajectoryWell],
+) -> tuple[ActualFundWellAnalysis, ...]:
+    return tuple(_analyze_actual_well(well) for well in actual_wells)
+
+
 def build_actual_fund_well_metrics(
     actual_wells: Iterable[ImportedTrajectoryWell],
 ) -> tuple[ActualFundWellMetrics, ...]:
-    metrics: list[ActualFundWellMetrics] = []
-    for well in actual_wells:
-        stations = _reconstruct_actual_survey(well.stations)
-        source_md_values = well.stations["MD_m"].to_numpy(dtype=float)
-        source_z_values = well.stations["Z_m"].to_numpy(dtype=float)
-        md_values = stations["MD_m"].to_numpy(dtype=float)
-        z_values = stations["Z_m"].to_numpy(dtype=float)
-        x_values = stations["X_m"].to_numpy(dtype=float)
-        y_values = stations["Y_m"].to_numpy(dtype=float)
-        inc_values = stations["INC_deg"].to_numpy(dtype=float)
-        kop_md = _first_kop_md_from_geometry(well.stations, threshold_deg=KOP_INC_THRESHOLD_DEG)
-        horizontal_entry_md, _, horizontal_length = _terminal_horizontal_interval(stations)
-        hold_start_md, hold_end_md, hold_inc, hold_azi = _detect_hold_interval(
+    return tuple(item.metrics for item in build_actual_fund_well_analyses(actual_wells))
+
+
+def _analyze_actual_well(actual_well: ImportedTrajectoryWell) -> ActualFundWellAnalysis:
+    stations = _reconstruct_actual_survey(actual_well.stations)
+    source_md_values = actual_well.stations["MD_m"].to_numpy(dtype=float)
+    source_z_values = actual_well.stations["Z_m"].to_numpy(dtype=float)
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    z_values = stations["Z_m"].to_numpy(dtype=float)
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    kop_md = _first_kop_md_from_geometry(actual_well.stations, threshold_deg=KOP_INC_THRESHOLD_DEG)
+    terminal_horizontal_start_md, _, terminal_horizontal_length_m = _terminal_horizontal_interval(
+        stations
+    )
+    provisional_hold_start_md, provisional_hold_end_md, _, _ = _detect_hold_interval(
+        stations=stations,
+        kop_md_m=kop_md,
+        horizontal_entry_md_m=terminal_horizontal_start_md,
+    )
+    horizontal_entry_md = _detect_horizontal_entry_md(
+        stations=stations,
+        kop_md_m=kop_md,
+        hold_end_md_m=provisional_hold_end_md,
+        terminal_horizontal_start_md_m=terminal_horizontal_start_md,
+    )
+    hold_start_md, hold_end_md, hold_inc, hold_azi = _detect_hold_interval(
+        stations=stations,
+        kop_md_m=kop_md,
+        horizontal_entry_md_m=horizontal_entry_md,
+    )
+    hold_length = (
+        0.0
+        if hold_start_md is None or hold_end_md is None
+        else float(max(hold_end_md - hold_start_md, 0.0))
+    )
+    is_horizontal = bool(
+        terminal_horizontal_start_md is not None
+        and float(terminal_horizontal_length_m) >= HORIZONTAL_MIN_INTERVAL_M
+        and float(np.nanmax(inc_values)) >= HORIZONTAL_INC_THRESHOLD_DEG
+    )
+    if not is_horizontal:
+        horizontal_entry_md = None
+    horizontal_length = (
+        0.0
+        if horizontal_entry_md is None
+        else float(max(md_values[-1] - float(horizontal_entry_md), 0.0))
+    )
+    build_limit_md = (
+        float(hold_start_md)
+        if hold_start_md is not None
+        else float(horizontal_entry_md)
+        if horizontal_entry_md is not None
+        else float(md_values[-1])
+    )
+    build_mask = md_values <= build_limit_md + 1e-9
+    max_dls = _robust_max_dls(stations)
+    max_build_dls = _robust_max_dls(stations.loc[build_mask].reset_index(drop=True))
+    exclusion_reason = _analysis_exclusion_reason(
+        is_horizontal=is_horizontal,
+        kop_md_m=kop_md,
+        horizontal_entry_md_m=horizontal_entry_md,
+        horizontal_length_m=float(horizontal_length),
+        hold_inc_deg=hold_inc,
+        hold_length_m=float(hold_length),
+        max_dls_deg_per_30m=max_dls,
+        max_build_dls_before_hold_deg_per_30m=max_build_dls,
+    )
+    metrics = ActualFundWellMetrics(
+        name=str(actual_well.name),
+        family_name=actual_well_family_name(actual_well.name),
+        pad_group=actual_well_pad_group(actual_well.name),
+        is_horizontal=is_horizontal,
+        md_total_m=float(md_values[-1]),
+        tvd_end_m=float(z_values[-1]),
+        lateral_departure_m=float(
+            np.hypot(x_values[-1] - x_values[0], y_values[-1] - y_values[0])
+        ),
+        kop_md_m=kop_md,
+        kop_tvd_m=(
+            None
+            if kop_md is None
+            else _interp_1d(source_md_values, source_z_values, float(kop_md))
+        ),
+        horizontal_entry_md_m=horizontal_entry_md,
+        horizontal_length_m=float(horizontal_length),
+        hold_inc_deg=hold_inc,
+        hold_azi_deg=hold_azi,
+        hold_length_m=float(hold_length),
+        max_inc_deg=float(np.nanmax(inc_values)),
+        max_dls_deg_per_30m=max_dls,
+        max_build_dls_before_hold_deg_per_30m=max_build_dls,
+        is_analysis_eligible=exclusion_reason is None,
+        analysis_exclusion_reason=exclusion_reason,
+    )
+    zone_summaries = _build_zone_summaries(
+        stations=stations,
+        kop_md_m=kop_md,
+        hold_start_md_m=hold_start_md,
+        hold_end_md_m=hold_end_md,
+        horizontal_entry_md_m=horizontal_entry_md,
+    )
+    return ActualFundWellAnalysis(
+        name=str(actual_well.name),
+        metrics=metrics,
+        survey=_annotate_actual_fund_survey(
             stations=stations,
-            kop_md_m=kop_md,
-            horizontal_entry_md_m=horizontal_entry_md,
-        )
-        hold_length = (
-            0.0
-            if hold_start_md is None or hold_end_md is None
-            else float(max(hold_end_md - hold_start_md, 0.0))
-        )
-        build_limit_md = (
-            float(hold_start_md)
-            if hold_start_md is not None
-            else float(horizontal_entry_md)
-            if horizontal_entry_md is not None
-            else float(md_values[-1])
-        )
-        build_mask = md_values <= build_limit_md + 1e-9
-        is_horizontal = actual_well_is_horizontal(well.stations)
-        max_dls = _robust_max_dls(stations)
-        max_build_dls = _robust_max_dls(stations.loc[build_mask].reset_index(drop=True))
-        exclusion_reason = _analysis_exclusion_reason(
-            is_horizontal=is_horizontal,
-            kop_md_m=kop_md,
-            horizontal_entry_md_m=horizontal_entry_md,
-            horizontal_length_m=float(horizontal_length),
-            hold_inc_deg=hold_inc,
-            hold_length_m=float(hold_length),
-            max_dls_deg_per_30m=max_dls,
-            max_build_dls_before_hold_deg_per_30m=max_build_dls,
-        )
-        metrics.append(
-            ActualFundWellMetrics(
-                name=str(well.name),
-                family_name=actual_well_family_name(well.name),
-                pad_group=actual_well_pad_group(well.name),
-                is_horizontal=is_horizontal,
-                md_total_m=float(md_values[-1]),
-                tvd_end_m=float(z_values[-1]),
-                lateral_departure_m=float(
-                    np.hypot(x_values[-1] - x_values[0], y_values[-1] - y_values[0])
-                ),
-                kop_md_m=kop_md,
-                kop_tvd_m=(
-                    None
-                    if kop_md is None
-                    else _interp_1d(source_md_values, source_z_values, float(kop_md))
-                ),
-                horizontal_entry_md_m=horizontal_entry_md,
-                horizontal_length_m=float(horizontal_length),
-                hold_inc_deg=hold_inc,
-                hold_azi_deg=hold_azi,
-                hold_length_m=float(hold_length),
-                max_inc_deg=float(np.nanmax(inc_values)),
-                max_dls_deg_per_30m=max_dls,
-                max_build_dls_before_hold_deg_per_30m=max_build_dls,
-                is_analysis_eligible=exclusion_reason is None,
-                analysis_exclusion_reason=exclusion_reason,
+            zone_summaries=zone_summaries,
+        ),
+        zone_summaries=zone_summaries,
+    )
+
+
+def _build_zone_summaries(
+    *,
+    stations: pd.DataFrame,
+    kop_md_m: float | None,
+    hold_start_md_m: float | None,
+    hold_end_md_m: float | None,
+    horizontal_entry_md_m: float | None,
+) -> tuple[ActualFundZoneSummary, ...]:
+    md_start = float(stations["MD_m"].iloc[0])
+    md_end = float(stations["MD_m"].iloc[-1])
+    intervals: list[tuple[str, float, float]] = []
+
+    def add_interval(zone_key: str, start_m: float | None, end_m: float | None) -> None:
+        if start_m is None or end_m is None:
+            return
+        start_value = float(start_m)
+        end_value = float(end_m)
+        if end_value <= start_value + 1e-9:
+            return
+        intervals.append((zone_key, start_value, end_value))
+
+    if kop_md_m is None:
+        add_interval(ZONE_VERTICAL, md_start, md_end)
+    else:
+        kop_md = float(min(max(kop_md_m, md_start), md_end))
+        add_interval(ZONE_VERTICAL, md_start, kop_md)
+        if hold_start_md_m is not None and hold_start_md_m > kop_md + 1e-9:
+            add_interval(ZONE_BUILD1, kop_md, hold_start_md_m)
+        elif horizontal_entry_md_m is not None and horizontal_entry_md_m > kop_md + 1e-9:
+            add_interval(ZONE_BUILD1, kop_md, horizontal_entry_md_m)
+        else:
+            add_interval(ZONE_BUILD1, kop_md, md_end)
+
+        if hold_start_md_m is not None and hold_end_md_m is not None:
+            add_interval(ZONE_HOLD, hold_start_md_m, hold_end_md_m)
+            if horizontal_entry_md_m is not None and horizontal_entry_md_m > hold_end_md_m + 1e-9:
+                add_interval(ZONE_BUILD2, hold_end_md_m, horizontal_entry_md_m)
+            elif hold_end_md_m < md_end - 1e-9 and horizontal_entry_md_m is None:
+                add_interval(ZONE_BUILD2, hold_end_md_m, md_end)
+
+        if horizontal_entry_md_m is not None:
+            add_interval(ZONE_HORIZONTAL, horizontal_entry_md_m, md_end)
+
+    zone_summaries: list[ActualFundZoneSummary] = []
+    for zone_key, zone_start_md, zone_end_md in intervals:
+        interval_df = _survey_interval(stations, zone_start_md, zone_end_md)
+        inc_stats = _series_stats(interval_df["INC_deg"])
+        dls_stats = _series_stats(interval_df["DLS_deg_per_30m"])
+        zone_summaries.append(
+            ActualFundZoneSummary(
+                zone_key=zone_key,
+                zone_label=ZONE_LABELS.get(zone_key, zone_key),
+                md_from_m=float(zone_start_md),
+                md_to_m=float(zone_end_md),
+                md_length_m=float(max(zone_end_md - zone_start_md, 0.0)),
+                inc_min_deg=inc_stats[0],
+                inc_max_deg=inc_stats[1],
+                inc_mean_deg=inc_stats[2],
+                dls_min_deg_per_30m=dls_stats[0],
+                dls_max_deg_per_30m=dls_stats[1],
+                dls_mean_deg_per_30m=dls_stats[2],
             )
         )
-    return tuple(metrics)
+    return tuple(zone_summaries)
+
+
+def _annotate_actual_fund_survey(
+    *,
+    stations: pd.DataFrame,
+    zone_summaries: tuple[ActualFundZoneSummary, ...],
+) -> pd.DataFrame:
+    annotated = stations.copy()
+    x_values = annotated["X_m"].to_numpy(dtype=float)
+    y_values = annotated["Y_m"].to_numpy(dtype=float)
+    annotated["Lateral_m"] = np.hypot(
+        x_values - float(x_values[0]),
+        y_values - float(y_values[0]),
+    )
+    zone_keys: list[str] = []
+    zone_labels: list[str] = []
+    md_values = annotated["MD_m"].to_numpy(dtype=float)
+    for md_value in md_values.tolist():
+        summary = next(
+            (
+                item
+                for item in zone_summaries
+                if float(item.md_from_m) - 1e-9 <= float(md_value) <= float(item.md_to_m) + 1e-9
+            ),
+            None,
+        )
+        if summary is None:
+            zone_keys.append(ZONE_BUILD1)
+            zone_labels.append(ZONE_LABELS[ZONE_BUILD1])
+        else:
+            zone_keys.append(str(summary.zone_key))
+            zone_labels.append(str(summary.zone_label))
+    annotated["AnalysisZoneKey"] = zone_keys
+    annotated["AnalysisZoneLabel"] = zone_labels
+    return annotated
 
 
 def actual_fund_metrics_rows(
@@ -7684,6 +8324,59 @@ def _terminal_horizontal_interval(stations: pd.DataFrame) -> tuple[float | None,
     return float(best_start), float(best_end), float(best_length)
 
 
+def _detect_horizontal_entry_md(
+    *,
+    stations: pd.DataFrame,
+    kop_md_m: float | None,
+    hold_end_md_m: float | None,
+    terminal_horizontal_start_md_m: float | None,
+) -> float | None:
+    if terminal_horizontal_start_md_m is None:
+        return None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
+    stable_dls = _rolling_median(np.where(np.isfinite(dls_values), dls_values, 0.0), window_size=window_size)
+    tail_length_m = max(HORIZONTAL_MIN_INTERVAL_M, 120.0)
+    tail_mask = md_values >= float(md_values[-1]) - tail_length_m
+    tail_dls = stable_dls[tail_mask & np.isfinite(stable_dls)]
+    terminal_dls_baseline = (
+        float(np.median(tail_dls))
+        if len(tail_dls) > 0
+        else HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M
+    )
+    horizontal_dls_threshold = float(
+        min(
+            HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M,
+            max(0.6, terminal_dls_baseline + 0.4),
+        )
+    )
+    search_start_md = (
+        float(hold_end_md_m)
+        if hold_end_md_m is not None
+        else float(kop_md_m)
+        if kop_md_m is not None
+        else float(md_values[0])
+    )
+    horizontal_mask = (
+        (md_values >= search_start_md - 1e-9)
+        & (stable_dls <= horizontal_dls_threshold)
+        & (inc_values >= HORIZONTAL_ENTRY_MIN_INC_DEG)
+    )
+    candidate_intervals = [
+        (start_md, end_md, length_m)
+        for start_md, end_md, length_m in _mask_intervals(md_values, horizontal_mask)
+        if end_md >= float(md_values[-1]) - HORIZONTAL_END_TOLERANCE_M
+        and length_m >= HORIZONTAL_MIN_INTERVAL_M
+    ]
+    if candidate_intervals:
+        best_start_md = min(float(item[0]) for item in candidate_intervals)
+        return float(best_start_md)
+    return float(terminal_horizontal_start_md_m)
+
+
 def _first_threshold_crossing_md(
     *,
     md_values: np.ndarray,
@@ -7730,6 +8423,43 @@ def _first_kop_md_from_geometry(stations: pd.DataFrame, *, threshold_deg: float)
 
 def _interp_1d(md_values: np.ndarray, values: np.ndarray, md_m: float) -> float:
     return float(np.interp(float(md_m), md_values, values))
+
+
+def _interpolate_row(stations: pd.DataFrame, md_m: float) -> dict[str, float]:
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    return {
+        column: float(np.interp(float(md_m), md_values, stations[column].to_numpy(dtype=float)))
+        for column in ("MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m", "DLS_deg_per_30m")
+    }
+
+
+def _survey_interval(stations: pd.DataFrame, start_md_m: float, end_md_m: float) -> pd.DataFrame:
+    if end_md_m <= start_md_m + 1e-9:
+        return pd.DataFrame(columns=stations.columns)
+    interval = stations.loc[
+        (stations["MD_m"] >= float(start_md_m) - 1e-9)
+        & (stations["MD_m"] <= float(end_md_m) + 1e-9)
+    ].copy()
+    if interval.empty or abs(float(interval["MD_m"].iloc[0]) - float(start_md_m)) > 1e-9:
+        interval = pd.concat(
+            [pd.DataFrame([_interpolate_row(stations, float(start_md_m))]), interval],
+            ignore_index=True,
+        )
+    if abs(float(interval["MD_m"].iloc[-1]) - float(end_md_m)) > 1e-9:
+        interval = pd.concat(
+            [interval, pd.DataFrame([_interpolate_row(stations, float(end_md_m))])],
+            ignore_index=True,
+        )
+    interval = interval.sort_values("MD_m").reset_index(drop=True)
+    return interval
+
+
+def _series_stats(series: pd.Series) -> tuple[float | None, float | None, float | None]:
+    values = series.to_numpy(dtype=float)
+    finite = values[np.isfinite(values)]
+    if len(finite) == 0:
+        return None, None, None
+    return float(np.min(finite)), float(np.max(finite)), float(np.mean(finite))
 
 
 def _circular_median_deg(values_deg: np.ndarray) -> float | None:
@@ -19400,7 +20130,7 @@ def render_solver_diagnostics(
         st.code(ui_error_text(raw_error), language="text")
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer.py	1399
+===BEGIN_FILE===	pywp/three_viewer.py	1415
 from __future__ import annotations
 
 import json
@@ -19421,8 +20151,8 @@ def _three_library_text() -> str:
 
 
 @lru_cache(maxsize=1)
-def _orbit_controls_text() -> str:
-    return (_VENDOR_DIR / "OrbitControls.js").read_text(encoding="utf-8")
+def _trackball_controls_text() -> str:
+    return (_VENDOR_DIR / "TrackballControls.js").read_text(encoding="utf-8")
 
 
 @lru_cache(maxsize=1)
@@ -19435,7 +20165,7 @@ def _viewer_template_with_libraries() -> str:
     return (
         _viewer_template_text()
         .replace("__THREE_LIBRARY__", _three_library_text())
-        .replace("__ORBIT_CONTROLS__", _orbit_controls_text())
+        .replace("__TRACKBALL_CONTROLS__", _trackball_controls_text())
     )
 
 
@@ -24905,7 +25635,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_actual_fund_analysis.py	6693
+===BEGIN_FILE===	tests/test_actual_fund_analysis.py	7776
 from __future__ import annotations
 
 import numpy as np
@@ -24917,6 +25647,7 @@ from pywp.actual_fund_analysis import (
     actual_well_family_name,
     actual_well_is_horizontal,
     actual_well_pad_group,
+    build_actual_fund_well_analysis,
     build_actual_fund_well_metrics,
     calibrate_uncertainty_from_actual_fund,
 )
@@ -25007,7 +25738,9 @@ def test_actual_fund_metrics_detect_horizontal_wells_and_estimate_kop() -> None:
     assert len(metrics) == 3
     assert all(actual_well_is_horizontal(well.stations) for well in wells)
     assert all(item.is_horizontal for item in metrics)
-    assert all(item.horizontal_length_m >= 1000.0 for item in metrics)
+    assert all(item.horizontal_entry_md_m is not None for item in metrics)
+    assert all(1900.0 <= float(item.horizontal_entry_md_m) <= 2050.0 for item in metrics)
+    assert all(item.horizontal_length_m >= 900.0 for item in metrics)
     assert all(item.kop_md_m is not None for item in metrics)
     assert all(item.max_inc_deg >= 80.0 for item in metrics)
 
@@ -25023,7 +25756,7 @@ def test_actual_fund_metrics_reconstruct_hold_and_robust_dls_from_irregular_xyzm
     assert item.kop_md_m is not None
     assert 500.0 <= float(item.kop_md_m) <= 950.0
     assert item.horizontal_entry_md_m is not None
-    assert float(item.horizontal_entry_md_m) >= 2200.0
+    assert 2280.0 <= float(item.horizontal_entry_md_m) <= 2320.0
     assert float(item.horizontal_length_m) >= 600.0
     assert item.hold_inc_deg is not None
     assert 52.0 <= float(item.hold_inc_deg) <= 58.0
@@ -25032,6 +25765,27 @@ def test_actual_fund_metrics_reconstruct_hold_and_robust_dls_from_irregular_xyzm
     assert float(item.max_dls_deg_per_30m) < 5.0
     assert item.max_build_dls_before_hold_deg_per_30m is not None
     assert float(item.max_build_dls_before_hold_deg_per_30m) < 5.0
+
+
+def test_actual_fund_well_analysis_builds_segmented_view_for_selected_well() -> None:
+    well = _synthetic_hold_actual_well()[0]
+
+    analysis = build_actual_fund_well_analysis(well)
+
+    assert analysis.metrics.horizontal_entry_md_m is not None
+    assert 2280.0 <= float(analysis.metrics.horizontal_entry_md_m) <= 2320.0
+    assert {"Lateral_m", "AnalysisZoneKey", "AnalysisZoneLabel"} <= set(analysis.survey.columns)
+    assert [zone.zone_key for zone in analysis.zone_summaries] == [
+        "vertical",
+        "build1",
+        "hold",
+        "build2",
+        "horizontal",
+    ]
+    horizontal_zone = analysis.zone_summaries[-1]
+    assert horizontal_zone.zone_label == "Горизонтальный"
+    assert float(horizontal_zone.md_from_m) == float(analysis.metrics.horizontal_entry_md_m)
+    assert float(horizontal_zone.md_to_m) == float(analysis.metrics.md_total_m)
 
 
 def test_actual_fund_analysis_excludes_horizontal_anomaly_without_stable_hold() -> None:
@@ -33600,7 +34354,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	99106
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	100760
 from __future__ import annotations
 
 import importlib.util
@@ -34258,6 +35012,22 @@ def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_availab
     assert "Пользовательская (по фактическому фонду)" in list(preset_widgets[0].options)
 
 
+def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()[:2]
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_reference_actual_wells"] = list(_horizontal_reference_well())
+
+    at.run(timeout=120)
+
+    detail_selectboxes = [
+        widget for widget in at.selectbox if widget.label == "Просмотр фактической скважины"
+    ]
+    assert detail_selectboxes
+    assert str(detail_selectboxes[0].value) == "FACT-H"
+
+
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
     page = _load_welltrack_page_module()
 
@@ -34267,6 +35037,16 @@ def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
 
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+
+
+def test_init_state_defaults_fast_3d_render_mode() -> None:
+    page = _load_welltrack_page_module()
+
+    page.st.session_state.clear()
+    page._init_state()
+
+    assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_FAST
+    assert page.WT_3D_RENDER_AUTO not in page.WT_3D_RENDER_OPTIONS
 
 
 def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
@@ -35739,6 +36519,7 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     figure_3d = page._all_wells_3d_figure(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
         reference_wells=reference_wells,
+        render_mode=page.WT_3D_RENDER_DETAIL,
     )
     figure_plan = page._all_wells_plan_figure(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
@@ -35814,7 +36595,10 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
         reference_wells=reference_wells,
     )
 
-    figure_3d = page._all_wells_anticollision_3d_figure(analysis)
+    figure_3d = page._all_wells_anticollision_3d_figure(
+        analysis,
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
     figure_plan = page._all_wells_anticollision_plan_figure(analysis)
 
     assert any(str(trace.name) == "FACT-1 (Фактическая)" for trace in figure_3d.data)
@@ -35926,7 +36710,27 @@ def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend(
     assert "FACT-1" in labels
     assert "APP-1" in labels
     assert "WELL-A" in legend_labels
-    assert "FACT-1 (Фактическая)" in legend_labels
+    assert "Фактические скважины" in legend_labels
+    assert "Проектные утвержденные скважины" in legend_labels
+    assert "FACT-1 (Фактическая)" not in legend_labels
+
+
+def test_scatter3d_legendonly_trace_preserves_legend_without_geometry() -> None:
+    page = _load_welltrack_page_module()
+    trace = page._reference_legend_trace_3d(page.REFERENCE_WELL_ACTUAL)
+
+    payload = page._scatter3d_trace_to_three_payload(trace)
+
+    assert payload["lines"] == []
+    assert payload["points"] == []
+    assert payload["labels"] == []
+    assert payload["legend_items"] == [
+        {
+            "label": "Фактические скважины",
+            "color": "#6B7280",
+            "opacity": 1.0,
+        }
+    ]
 
 
 def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> None:
