@@ -21,6 +21,7 @@ from pywp.uncertainty import (
 TARGET_NONE = ""
 TARGET_T1 = "t1"
 TARGET_T3 = "t3"
+_PAIR_XY_PREFILTER_DIAMETER_FACTOR = 1.5
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,15 @@ class AntiCollisionAnalysis:
     overlapping_pair_count: int
     target_overlap_pair_count: int
     worst_separation_factor: float | None
+
+
+@dataclass(frozen=True)
+class _AntiCollisionLateralEnvelope:
+    min_x_m: float
+    max_x_m: float
+    min_y_m: float
+    max_y_m: float
+    max_lateral_radius_m: float
 
 
 def anti_collision_method_caption(
@@ -231,21 +241,32 @@ def analyze_anti_collision(
                 raise ValueError(
                     "build_overlap_geometry=True requires wells built with display geometry."
                 )
+    lateral_envelopes = {
+        well.name: _lateral_envelope_for_prefilter(well)
+        for well in ordered_wells
+    }
     corridors: list[AntiCollisionCorridor] = []
     zones: list[AntiCollisionZone] = []
     pair_count = 0
     for left_index in range(len(ordered_wells)):
         for right_index in range(left_index + 1, len(ordered_wells)):
+            well_a = ordered_wells[left_index]
+            well_b = ordered_wells[right_index]
             if not _should_analyze_pair(
-                well_a=ordered_wells[left_index],
-                well_b=ordered_wells[right_index],
+                well_a=well_a,
+                well_b=well_b,
                 pair_filter=pair_filter,
+            ):
+                continue
+            if _pair_prefilter_xy_far_apart(
+                lateral_envelope_a=lateral_envelopes[well_a.name],
+                lateral_envelope_b=lateral_envelopes[well_b.name],
             ):
                 continue
             pair_count += 1
             pair_corridors = _pair_overlap_corridors(
-                well_a=ordered_wells[left_index],
-                well_b=ordered_wells[right_index],
+                well_a=well_a,
+                well_b=well_b,
                 build_overlap_geometry=build_overlap_geometry,
             )
             corridors.extend(pair_corridors)
@@ -300,6 +321,79 @@ def _should_analyze_pair(
     if pair_filter is not None and not bool(pair_filter(well_a, well_b)):
         return False
     return True
+
+
+def _lateral_envelope_for_prefilter(
+    well: AntiCollisionWell,
+) -> _AntiCollisionLateralEnvelope:
+    if {"X_m", "Y_m"}.issubset(well.stations.columns):
+        x_values = well.stations["X_m"].to_numpy(dtype=float)
+        y_values = well.stations["Y_m"].to_numpy(dtype=float)
+        finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+        x_values = x_values[finite_mask]
+        y_values = y_values[finite_mask]
+    else:
+        x_values = np.asarray([sample.center_xyz[0] for sample in well.samples], dtype=float)
+        y_values = np.asarray([sample.center_xyz[1] for sample in well.samples], dtype=float)
+    if x_values.size == 0 or y_values.size == 0:
+        surface_x = float(well.surface.x)
+        surface_y = float(well.surface.y)
+        x_values = np.asarray([surface_x], dtype=float)
+        y_values = np.asarray([surface_y], dtype=float)
+    max_lateral_radius_m = max(
+        (
+            _sample_xy_confidence_radius_m(
+                covariance_xyz=sample.covariance_xyz,
+                confidence_scale=float(well.overlay.model.confidence_scale),
+            )
+            for sample in well.samples
+        ),
+        default=0.0,
+    )
+    return _AntiCollisionLateralEnvelope(
+        min_x_m=float(np.min(x_values)),
+        max_x_m=float(np.max(x_values)),
+        min_y_m=float(np.min(y_values)),
+        max_y_m=float(np.max(y_values)),
+        max_lateral_radius_m=float(max_lateral_radius_m),
+    )
+
+
+def _sample_xy_confidence_radius_m(
+    *,
+    covariance_xyz: np.ndarray,
+    confidence_scale: float,
+) -> float:
+    covariance_xy = np.asarray(covariance_xyz, dtype=float)[:2, :2]
+    if covariance_xy.shape != (2, 2) or not np.all(np.isfinite(covariance_xy)):
+        return 0.0
+    eigenvalues = np.linalg.eigvalsh(covariance_xy)
+    principal_variance = float(max(np.max(eigenvalues), 0.0))
+    return float(max(confidence_scale, 0.0)) * float(np.sqrt(principal_variance))
+
+
+def _pair_prefilter_xy_far_apart(
+    *,
+    lateral_envelope_a: _AntiCollisionLateralEnvelope,
+    lateral_envelope_b: _AntiCollisionLateralEnvelope,
+) -> bool:
+    gap_x_m = max(
+        0.0,
+        float(lateral_envelope_a.min_x_m) - float(lateral_envelope_b.max_x_m),
+        float(lateral_envelope_b.min_x_m) - float(lateral_envelope_a.max_x_m),
+    )
+    gap_y_m = max(
+        0.0,
+        float(lateral_envelope_a.min_y_m) - float(lateral_envelope_b.max_y_m),
+        float(lateral_envelope_b.min_y_m) - float(lateral_envelope_a.max_y_m),
+    )
+    xy_gap_m = float(np.hypot(gap_x_m, gap_y_m))
+    max_lateral_diameter_m = 2.0 * max(
+        float(lateral_envelope_a.max_lateral_radius_m),
+        float(lateral_envelope_b.max_lateral_radius_m),
+    )
+    threshold_m = float(_PAIR_XY_PREFILTER_DIAMETER_FACTOR) * max_lateral_diameter_m
+    return bool(xy_gap_m > threshold_m)
 
 
 def anti_collision_report_rows(

@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import pywp.anticollision as anticollision_module
 from pywp.anticollision import (
     AntiCollisionAnalysis,
     AntiCollisionCorridor,
@@ -179,6 +180,103 @@ def test_collision_corridor_geometry_and_well_segments_are_built() -> None:
     assert tube_mesh is not None
     assert tube_mesh.vertices_xyz.shape[1] == 3
     assert {segment.well_name for segment in analysis.well_segments} == {"WELL-A", "WELL-B"}
+
+
+def test_analyze_anti_collision_skips_distant_pair_before_corridor_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=1500.0),
+        surface=Point3D(0.0, 1500.0, 0.0),
+        t1=Point3D(1000.0, 1500.0, 0.0),
+        t3=Point3D(2000.0, 1500.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+
+    def _unexpected_pair_scan(**_: object) -> list[AntiCollisionCorridor]:
+        raise AssertionError("distant pair should be skipped by XY prefilter")
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _unexpected_pair_scan,
+    )
+
+    analysis = analyze_anti_collision(
+        [well_a, well_b],
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 0
+    assert analysis.overlapping_pair_count == 0
+    assert not analysis.corridors
+
+
+def test_analyze_anti_collision_keeps_near_pair_after_xy_prefilter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=25.0),
+        surface=Point3D(0.0, 25.0, 0.0),
+        t1=Point3D(1000.0, 25.0, 0.0),
+        t3=Point3D(2000.0, 25.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    seen_pairs: list[tuple[str, str]] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: object,
+        well_b: object,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        assert build_overlap_geometry is False
+        seen_pairs.append((str(getattr(well_a, "name")), str(getattr(well_b, "name"))))
+        return []
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _record_pair_scan,
+    )
+
+    analysis = analyze_anti_collision(
+        [well_a, well_b],
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 1
+    assert seen_pairs == [("WELL-A", "WELL-B")]
 
 
 def test_analyze_anti_collision_rejects_overlap_geometry_without_display_overlay() -> None:

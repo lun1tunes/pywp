@@ -1234,9 +1234,10 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/02_welltrack_import.py	195043
+===BEGIN_FILE===	pages/02_welltrack_import.py	230616
 from __future__ import annotations
 
+import colorsys
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -1314,6 +1315,7 @@ from pywp.reference_trajectories import (
 )
 from pywp.plotly_config import DEFAULT_3D_CAMERA, trajectory_plotly_chart_config
 from pywp.planner_config import optimization_display_label
+from pywp.three_viewer import render_local_three_scene
 from pywp.plot_axes import (
     equalized_axis_ranges,
     equalized_xy_ranges,
@@ -1376,20 +1378,30 @@ WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
 WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
 WT_T1T3_MIN_DELTA_M = 0.5
-WELL_COLOR_PALETTE: tuple[str, ...] = (
-    "#0B6E4F",
-    "#3A86FF",
-    "#00798C",
-    "#FFB703",
-    "#6A4C93",
-    "#1F7A8C",
-    "#3D5A80",
-    "#F4A261",
-    "#2A9D8F",
-    "#4D908E",
-    "#577590",
-    "#8E9AAF",
+WT_3D_RENDER_AUTO = "Авто"
+WT_3D_RENDER_DETAIL = "Детально"
+WT_3D_RENDER_FAST = "Быстро"
+WT_3D_BACKEND_PLOTLY = "Plotly"
+WT_3D_BACKEND_THREE_LOCAL = "Three.js (локально, экспериментально)"
+REFERENCE_LABEL_ACTUAL_COLOR = "#111111"
+REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
+REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG = 80.0
+REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M = 100.0
+WT_3D_RENDER_OPTIONS: tuple[str, ...] = (
+    WT_3D_RENDER_AUTO,
+    WT_3D_RENDER_DETAIL,
+    WT_3D_RENDER_FAST,
 )
+WT_3D_BACKEND_OPTIONS: tuple[str, ...] = (
+    WT_3D_BACKEND_PLOTLY,
+    WT_3D_BACKEND_THREE_LOCAL,
+)
+WT_3D_FAST_REFERENCE_WELL_THRESHOLD = 10
+WT_3D_FAST_REFERENCE_POINT_THRESHOLD = 1200
+WT_3D_FAST_CALC_WELL_THRESHOLD = 14
+WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
+WT_3D_FAST_CALC_TARGET_POINTS = 180
+WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT = 6
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
     "wt_cfg_md_step_control_m": "wt_cfg_md_control",
@@ -1448,6 +1460,56 @@ class _TargetOnlyWell:
     t3: Point3D
     status: str
     problem: str
+
+
+def _build_well_color_palette() -> tuple[str, ...]:
+    """Return a long palette with high local contrast for adjacent wells.
+
+    The hue order intentionally jumps around the wheel instead of walking
+    sequentially, so neighboring indices remain visually distinct. Reds,
+    blacks and grays are excluded on purpose to keep collision overlays and
+    reference wells semantically separate.
+    """
+
+    hue_degrees: tuple[float, ...] = (
+        24.0,
+        48.0,
+        72.0,
+        96.0,
+        120.0,
+        144.0,
+        168.0,
+        192.0,
+        216.0,
+        240.0,
+        264.0,
+        288.0,
+        312.0,
+    )
+    hue_jump_order: tuple[int, ...] = (0, 6, 12, 5, 11, 4, 10, 3, 9, 2, 8, 1, 7)
+    lightness_saturation_bands: tuple[tuple[float, float], ...] = (
+        (0.46, 0.82),
+        (0.62, 0.74),
+        (0.40, 0.88),
+        (0.55, 0.90),
+    )
+    ordered_hues = tuple(hue_degrees[index] for index in hue_jump_order)
+    colors: list[str] = []
+    for index in range(len(ordered_hues) * len(lightness_saturation_bands)):
+        hue_deg = ordered_hues[index % len(ordered_hues)]
+        lightness, saturation = lightness_saturation_bands[index % len(lightness_saturation_bands)]
+        red, green, blue = colorsys.hls_to_rgb(hue_deg / 360.0, lightness, saturation)
+        colors.append(
+            "#{:02X}{:02X}{:02X}".format(
+                int(round(red * 255.0)),
+                int(round(green * 255.0)),
+                int(round(blue * 255.0)),
+            )
+        )
+    return tuple(colors)
+
+
+WELL_COLOR_PALETTE: tuple[str, ...] = _build_well_color_palette()
 
 
 def _well_color(index: int) -> str:
@@ -1519,6 +1581,128 @@ def _lighten_hex(hex_color: str, blend_with_white: float = 0.38) -> str:
     return f"#{red:02X}{green:02X}{blue:02X}"
 
 
+def _reference_point_count(reference_wells: Iterable[ImportedTrajectoryWell]) -> int:
+    return int(
+        sum(
+            len(well.stations.index)
+            for well in reference_wells
+            if not well.stations.empty
+        )
+    )
+
+
+def _resolve_3d_render_mode(
+    *,
+    requested_mode: str,
+    calculated_well_count: int,
+    reference_wells: Iterable[ImportedTrajectoryWell],
+) -> str:
+    normalized = str(requested_mode).strip()
+    if normalized == WT_3D_RENDER_DETAIL:
+        return WT_3D_RENDER_DETAIL
+    if normalized == WT_3D_RENDER_FAST:
+        return WT_3D_RENDER_FAST
+    reference_well_list = tuple(reference_wells)
+    if calculated_well_count >= WT_3D_FAST_CALC_WELL_THRESHOLD:
+        return WT_3D_RENDER_FAST
+    if len(reference_well_list) >= WT_3D_FAST_REFERENCE_WELL_THRESHOLD:
+        return WT_3D_RENDER_FAST
+    if _reference_point_count(reference_well_list) >= WT_3D_FAST_REFERENCE_POINT_THRESHOLD:
+        return WT_3D_RENDER_FAST
+    return WT_3D_RENDER_DETAIL
+
+
+def _decimated_station_frame(stations: pd.DataFrame, *, target_points: int) -> pd.DataFrame:
+    if target_points <= 2 or len(stations.index) <= target_points:
+        return stations
+    indices = np.linspace(
+        0,
+        len(stations.index) - 1,
+        num=int(target_points),
+        dtype=int,
+    )
+    unique_indices = np.unique(indices)
+    return stations.iloc[unique_indices].reset_index(drop=True)
+
+
+def _nan_separated_xyz_segments(
+    polylines_xyz: Iterable[tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    x_values: list[float] = []
+    y_values: list[float] = []
+    z_values: list[float] = []
+    for polyline_x, polyline_y, polyline_z in polylines_xyz:
+        if len(polyline_x) == 0:
+            continue
+        x_values.extend(np.asarray(polyline_x, dtype=float).tolist())
+        y_values.extend(np.asarray(polyline_y, dtype=float).tolist())
+        z_values.extend(np.asarray(polyline_z, dtype=float).tolist())
+        x_values.append(np.nan)
+        y_values.append(np.nan)
+        z_values.append(np.nan)
+    return (
+        np.asarray(x_values, dtype=float),
+        np.asarray(y_values, dtype=float),
+        np.asarray(z_values, dtype=float),
+    )
+
+
+def _combined_reference_trace_3d(
+    *,
+    reference_wells: Iterable[object],
+    kind: str,
+    target_points_per_well: int,
+) -> go.Scatter3d | None:
+    matching = [
+        well
+        for well in reference_wells
+        if str(getattr(well, "kind", getattr(well, "well_kind", ""))) == str(kind)
+        and not getattr(well, "stations").empty
+    ]
+    if not matching:
+        return None
+    x_values, y_values, z_values = _nan_separated_xyz_segments(
+        (
+            tuple(
+                _decimated_station_frame(
+                    well.stations,
+                    target_points=target_points_per_well,
+                )[column].to_numpy(dtype=float)
+                for column in ("X_m", "Y_m", "Z_m")
+            )
+            for well in matching
+        )
+    )
+    kind_label = REFERENCE_WELL_KIND_LABELS.get(str(kind), str(kind))
+    return go.Scatter3d(
+        x=x_values,
+        y=y_values,
+        z=z_values,
+        mode="lines",
+        name=f"{kind_label} (сводно)",
+        line={
+            "width": 2.5,
+            "color": REFERENCE_WELL_KIND_COLORS.get(str(kind), "#A0A0A0"),
+        },
+        hoverinfo="skip",
+    )
+
+
+def _anticollision_focus_reference_names(analysis: AntiCollisionAnalysis) -> set[str]:
+    reference_names = {
+        str(well.name)
+        for well in analysis.wells
+        if bool(well.is_reference_only)
+    }
+    focus_names: set[str] = set()
+    for corridor in analysis.corridors:
+        if str(corridor.well_a) in reference_names:
+            focus_names.add(str(corridor.well_a))
+        if str(corridor.well_b) in reference_names:
+            focus_names.add(str(corridor.well_b))
+    return focus_names
+
+
 def _t1_name_trace_3d(*, well_name: str, t1: Point3D, color: str) -> go.Scatter3d:
     return go.Scatter3d(
         x=[float(t1.x)],
@@ -1551,6 +1735,563 @@ def _t1_name_trace_2d(
         showlegend=False,
         textfont={"color": str(color), "size": 12},
         hoverinfo="skip",
+    )
+
+
+def _reference_label_color(kind: str) -> str:
+    if str(kind) == REFERENCE_WELL_APPROVED:
+        return REFERENCE_LABEL_APPROVED_COLOR
+    return REFERENCE_LABEL_ACTUAL_COLOR
+
+
+def _reference_label_anchor_point(
+    reference_well: ImportedTrajectoryWell,
+) -> tuple[float, float, float] | None:
+    stations = reference_well.stations
+    required = {"MD_m", "INC_deg", "X_m", "Y_m", "Z_m"}
+    if stations.empty or not required.issubset(stations.columns):
+        return None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    z_values = stations["Z_m"].to_numpy(dtype=float)
+    if len(md_values) == 0:
+        return None
+    high_angle_mask = inc_values >= float(REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG)
+    if bool(high_angle_mask[-1]):
+        start_index = len(high_angle_mask) - 1
+        while start_index > 0 and bool(high_angle_mask[start_index - 1]):
+            start_index -= 1
+        if float(md_values[-1] - md_values[start_index]) >= float(
+            REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M
+        ):
+            return (
+                float(x_values[start_index]),
+                float(y_values[start_index]),
+                float(z_values[start_index]),
+            )
+    return (
+        float(x_values[-1]),
+        float(y_values[-1]),
+        float(z_values[-1]),
+    )
+
+
+def _reference_name_trace_3d(
+    reference_wells: Iterable[ImportedTrajectoryWell],
+    *,
+    kind: str,
+) -> go.Scatter3d | None:
+    points: list[tuple[float, float, float, str]] = []
+    for well in reference_wells:
+        if str(well.kind) != str(kind):
+            continue
+        anchor = _reference_label_anchor_point(well)
+        if anchor is None:
+            continue
+        points.append((float(anchor[0]), float(anchor[1]), float(anchor[2]), str(well.name)))
+    if not points:
+        return None
+    return go.Scatter3d(
+        x=[item[0] for item in points],
+        y=[item[1] for item in points],
+        z=[item[2] for item in points],
+        mode="text",
+        text=[item[3] for item in points],
+        textposition="top center",
+        name=f"{REFERENCE_WELL_KIND_LABELS.get(str(kind), str(kind))}: подписи",
+        showlegend=False,
+        textfont={"color": _reference_label_color(str(kind)), "size": 11},
+        hoverinfo="skip",
+    )
+
+
+def _reference_name_trace_2d(
+    reference_wells: Iterable[ImportedTrajectoryWell],
+    *,
+    kind: str,
+) -> go.Scatter | None:
+    points: list[tuple[float, float, str]] = []
+    for well in reference_wells:
+        if str(well.kind) != str(kind):
+            continue
+        anchor = _reference_label_anchor_point(well)
+        if anchor is None:
+            continue
+        points.append((float(anchor[0]), float(anchor[1]), str(well.name)))
+    if not points:
+        return None
+    return go.Scatter(
+        x=[item[0] for item in points],
+        y=[item[1] for item in points],
+        mode="text",
+        text=[item[2] for item in points],
+        textposition="top center",
+        name=f"{REFERENCE_WELL_KIND_LABELS.get(str(kind), str(kind))}: подписи",
+        showlegend=False,
+        textfont={"color": _reference_label_color(str(kind)), "size": 11},
+        hoverinfo="skip",
+    )
+
+
+def _trace_showlegend(trace: object) -> bool:
+    showlegend = getattr(trace, "showlegend", None)
+    if showlegend is None:
+        return bool(str(getattr(trace, "name", "") or "").strip())
+    return bool(showlegend)
+
+
+def _plotly_color_and_opacity(
+    color_value: object,
+    *,
+    fallback_opacity: float = 1.0,
+) -> tuple[str, float]:
+    color_text = str(color_value or "").strip()
+    if not color_text:
+        return "#94A3B8", float(np.clip(fallback_opacity, 0.0, 1.0))
+    if color_text.startswith("#"):
+        return color_text, float(np.clip(fallback_opacity, 0.0, 1.0))
+    if color_text.startswith("rgba(") and color_text.endswith(")"):
+        raw = color_text[5:-1]
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) == 4:
+            try:
+                red = int(float(parts[0]))
+                green = int(float(parts[1]))
+                blue = int(float(parts[2]))
+                alpha = float(parts[3])
+                return (
+                    f"#{red:02X}{green:02X}{blue:02X}",
+                    float(np.clip(alpha, 0.0, 1.0)),
+                )
+            except ValueError:
+                pass
+    if color_text.startswith("rgb(") and color_text.endswith(")"):
+        raw = color_text[4:-1]
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) == 3:
+            try:
+                red = int(float(parts[0]))
+                green = int(float(parts[1]))
+                blue = int(float(parts[2]))
+                return (
+                    f"#{red:02X}{green:02X}{blue:02X}",
+                    float(np.clip(fallback_opacity, 0.0, 1.0)),
+                )
+            except ValueError:
+                pass
+    return color_text, float(np.clip(fallback_opacity, 0.0, 1.0))
+
+
+def _split_nan_separated_xyz_segments(
+    *,
+    x_values: Iterable[object],
+    y_values: Iterable[object],
+    z_values: Iterable[object],
+) -> list[list[list[float]]]:
+    x_array = np.asarray(list(x_values), dtype=float)
+    y_array = np.asarray(list(y_values), dtype=float)
+    z_array = np.asarray(list(z_values), dtype=float)
+    if not (len(x_array) == len(y_array) == len(z_array)):
+        return []
+    segments: list[list[list[float]]] = []
+    current_segment: list[list[float]] = []
+    for x_value, y_value, z_value in zip(x_array, y_array, z_array, strict=False):
+        if not (
+            np.isfinite(float(x_value))
+            and np.isfinite(float(y_value))
+            and np.isfinite(float(z_value))
+        ):
+            if len(current_segment) >= 2:
+                segments.append(list(current_segment))
+            current_segment = []
+            continue
+        current_segment.append(
+            [float(x_value), float(y_value), float(z_value)]
+        )
+    if len(current_segment) >= 2:
+        segments.append(list(current_segment))
+    return segments
+
+
+def _scatter3d_trace_to_three_payload(
+    trace: go.Scatter3d,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "lines": [],
+        "points": [],
+        "labels": [],
+        "legend_items": [],
+    }
+    mode = str(trace.mode or "")
+    trace_name = str(trace.name or "").strip()
+    trace_opacity = (
+        1.0 if getattr(trace, "opacity", None) is None else float(trace.opacity)
+    )
+    if "lines" in mode:
+        line = trace.line or {}
+        color, opacity = _plotly_color_and_opacity(
+            getattr(line, "color", None),
+            fallback_opacity=trace_opacity,
+        )
+        segments = _split_nan_separated_xyz_segments(
+            x_values=() if trace.x is None else trace.x,
+            y_values=() if trace.y is None else trace.y,
+            z_values=() if trace.z is None else trace.z,
+        )
+        if segments:
+            payload["lines"].append(
+                {
+                    "name": trace_name,
+                    "segments": segments,
+                    "color": color,
+                    "opacity": opacity,
+                    "dash": str(getattr(line, "dash", "solid") or "solid"),
+                }
+            )
+            if _trace_showlegend(trace):
+                payload["legend_items"].append(
+                    {
+                        "label": trace_name,
+                        "color": color,
+                        "opacity": opacity,
+                    }
+                )
+    if "markers" in mode:
+        marker = trace.marker or {}
+        color, opacity = _plotly_color_and_opacity(
+            getattr(marker, "color", None),
+            fallback_opacity=trace_opacity,
+        )
+        if not (trace_name or opacity > 0.01):
+            return payload
+        x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+        y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+        z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+        mask = np.isfinite(x_array) & np.isfinite(y_array) & np.isfinite(z_array)
+        points = [
+            [float(x_value), float(y_value), float(z_value)]
+            for x_value, y_value, z_value in zip(
+                x_array[mask],
+                y_array[mask],
+                z_array[mask],
+                strict=False,
+            )
+        ]
+        if points:
+            marker_size = getattr(marker, "size", 6)
+            if isinstance(marker_size, (list, tuple, np.ndarray)):
+                marker_size = marker_size[0] if len(marker_size) else 6
+            payload["points"].append(
+                {
+                    "name": trace_name,
+                    "points": points,
+                    "color": color,
+                    "opacity": opacity,
+                    "size": float(marker_size),
+                    "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
+                }
+            )
+            if _trace_showlegend(trace):
+                payload["legend_items"].append(
+                    {
+                        "label": trace_name,
+                        "color": color,
+                        "opacity": opacity,
+                    }
+                )
+    if "text" in mode and "lines" not in mode and "markers" not in mode:
+        text_font = trace.textfont or {}
+        color = str(getattr(text_font, "color", "#0F172A"))
+        x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+        y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+        z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+        text_values = list(() if trace.text is None else trace.text)
+        for x_value, y_value, z_value, text_value in zip(
+            x_array,
+            y_array,
+            z_array,
+            text_values,
+            strict=False,
+        ):
+            if not (
+                np.isfinite(float(x_value))
+                and np.isfinite(float(y_value))
+                and np.isfinite(float(z_value))
+            ):
+                continue
+            payload["labels"].append(
+                {
+                    "text": str(text_value),
+                    "position": [
+                        float(x_value),
+                        float(y_value),
+                        float(z_value),
+                    ],
+                    "color": color,
+                }
+            )
+    return payload
+
+
+def _mesh3d_trace_to_three_payload(trace: go.Mesh3d) -> dict[str, object] | None:
+    x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+    y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+    z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+    i_array = np.asarray(list(() if trace.i is None else trace.i), dtype=int)
+    j_array = np.asarray(list(() if trace.j is None else trace.j), dtype=int)
+    k_array = np.asarray(list(() if trace.k is None else trace.k), dtype=int)
+    if (
+        len(x_array) == 0
+        or len(y_array) != len(x_array)
+        or len(z_array) != len(x_array)
+        or len(i_array) == 0
+        or len(i_array) != len(j_array)
+        or len(i_array) != len(k_array)
+    ):
+        return None
+    color, opacity = _plotly_color_and_opacity(
+        getattr(trace, "color", None),
+        fallback_opacity=float(
+            1.0 if getattr(trace, "opacity", None) is None else trace.opacity
+        ),
+    )
+    payload = {
+        "name": str(trace.name or "").strip(),
+        "vertices": [
+            [float(x_value), float(y_value), float(z_value)]
+            for x_value, y_value, z_value in zip(x_array, y_array, z_array, strict=False)
+        ],
+        "faces": [
+            [int(i_value), int(j_value), int(k_value)]
+            for i_value, j_value, k_value in zip(i_array, j_array, k_array, strict=False)
+        ],
+        "color": color,
+        "opacity": opacity,
+    }
+    return payload
+
+
+def _optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
+    optimized = dict(payload)
+    optimized["lines"] = _merge_three_line_payloads(payload.get("lines") or [])
+    optimized["points"] = _merge_three_point_payloads(payload.get("points") or [])
+    optimized["meshes"] = _merge_three_mesh_payloads(payload.get("meshes") or [])
+    optimized["labels"] = list(payload.get("labels") or [])
+    optimized["legend"] = list(payload.get("legend") or [])
+    return optimized
+
+
+def _merge_three_line_payloads(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, float, str], list[list[list[float]]]] = {}
+    ordered_keys: list[tuple[str, float, str]] = []
+    for item in items:
+        color = str(item.get("color") or "#0F172A")
+        opacity = float(item.get("opacity") or 1.0)
+        dash = str(item.get("dash") or "solid")
+        key = (color, opacity, dash)
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+        grouped[key].extend(
+            [
+                segment
+                for segment in (item.get("segments") or [])
+                if isinstance(segment, list) and len(segment) >= 2
+            ]
+        )
+    merged: list[dict[str, object]] = []
+    for color, opacity, dash in ordered_keys:
+        segments = grouped[(color, opacity, dash)]
+        if not segments:
+            continue
+        merged.append(
+            {
+                "segments": segments,
+                "color": color,
+                "opacity": float(opacity),
+                "dash": dash,
+            }
+        )
+    return merged
+
+
+def _merge_three_point_payloads(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, float, float, str], list[list[float]]] = {}
+    ordered_keys: list[tuple[str, float, float, str]] = []
+    for item in items:
+        color = str(item.get("color") or "#0F172A")
+        opacity = float(item.get("opacity") or 1.0)
+        size = float(item.get("size") or 6.0)
+        symbol = str(item.get("symbol") or "circle")
+        key = (color, opacity, size, symbol)
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+        grouped[key].extend(
+            [
+                point
+                for point in (item.get("points") or [])
+                if isinstance(point, list) and len(point) == 3
+            ]
+        )
+    merged: list[dict[str, object]] = []
+    for color, opacity, size, symbol in ordered_keys:
+        points = grouped[(color, opacity, size, symbol)]
+        if not points:
+            continue
+        merged.append(
+            {
+                "points": points,
+                "color": color,
+                "opacity": float(opacity),
+                "size": float(size),
+                "symbol": symbol,
+            }
+        )
+    return merged
+
+
+def _merge_three_mesh_payloads(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, float], dict[str, object]] = {}
+    ordered_keys: list[tuple[str, float]] = []
+    for item in items:
+        color = str(item.get("color") or "#94A3B8")
+        opacity = float(item.get("opacity") or 1.0)
+        key = (color, opacity)
+        if key not in grouped:
+            grouped[key] = {
+                "vertices": [],
+                "faces": [],
+                "color": color,
+                "opacity": float(opacity),
+            }
+            ordered_keys.append(key)
+        merged = grouped[key]
+        vertices = [
+            vertex
+            for vertex in (item.get("vertices") or [])
+            if isinstance(vertex, list) and len(vertex) == 3
+        ]
+        faces = [
+            face
+            for face in (item.get("faces") or [])
+            if isinstance(face, list) and len(face) == 3
+        ]
+        if not vertices or not faces:
+            continue
+        vertex_offset = len(merged["vertices"])
+        merged["vertices"].extend(vertices)
+        merged["faces"].extend(
+            [
+                [
+                    int(face[0]) + vertex_offset,
+                    int(face[1]) + vertex_offset,
+                    int(face[2]) + vertex_offset,
+                ]
+                for face in faces
+            ]
+        )
+    return [
+        grouped[key]
+        for key in ordered_keys
+        if grouped[key]["vertices"] and grouped[key]["faces"]
+    ]
+
+
+def _plotly_3d_figure_to_three_payload(fig: go.Figure) -> dict[str, object]:
+    scene = fig.layout.scene
+    x_range = (
+        [float(scene.xaxis.range[0]), float(scene.xaxis.range[1])]
+        if scene.xaxis.range is not None
+        else [0.0, 1000.0]
+    )
+    y_range = (
+        [float(scene.yaxis.range[0]), float(scene.yaxis.range[1])]
+        if scene.yaxis.range is not None
+        else [0.0, 1000.0]
+    )
+    z_range = (
+        [float(scene.zaxis.range[0]), float(scene.zaxis.range[1])]
+        if scene.zaxis.range is not None
+        else [0.0, 1000.0]
+    )
+    payload: dict[str, object] = {
+        "background": "#FFFFFF",
+        "title": str(getattr(getattr(fig.layout, "title", None), "text", "") or ""),
+        "bounds": {
+            "min": [x_range[0], y_range[0], z_range[0]],
+            "max": [x_range[1], y_range[1], z_range[1]],
+        },
+        "camera": (
+            scene.camera.to_plotly_json()
+            if getattr(scene, "camera", None) is not None
+            else DEFAULT_3D_CAMERA
+        ),
+        "lines": [],
+        "meshes": [],
+        "points": [],
+        "labels": [],
+        "legend": [],
+    }
+    seen_legend_labels: set[str] = set()
+    for trace in fig.data:
+        if isinstance(trace, go.Scatter3d):
+            trace_payload = _scatter3d_trace_to_three_payload(trace)
+            payload["lines"].extend(trace_payload["lines"])
+            payload["points"].extend(trace_payload["points"])
+            payload["labels"].extend(trace_payload["labels"])
+            for item in trace_payload["legend_items"]:
+                label = str(item["label"])
+                if not label or label in seen_legend_labels:
+                    continue
+                payload["legend"].append(item)
+                seen_legend_labels.add(label)
+            continue
+        if isinstance(trace, go.Mesh3d):
+            mesh_payload = _mesh3d_trace_to_three_payload(trace)
+            if mesh_payload is None:
+                continue
+            payload["meshes"].append(mesh_payload)
+            if _trace_showlegend(trace):
+                label = str(mesh_payload["name"])
+                if label and label not in seen_legend_labels:
+                    payload["legend"].append(
+                        {
+                            "label": label,
+                            "color": str(mesh_payload["color"]),
+                            "opacity": float(mesh_payload["opacity"]),
+                        }
+                    )
+                    seen_legend_labels.add(label)
+    return _optimize_three_payload(payload)
+
+
+def _render_plotly_or_three_3d(
+    *,
+    container: object,
+    figure: go.Figure,
+    backend: str,
+    height: int,
+) -> None:
+    if str(backend) == WT_3D_BACKEND_THREE_LOCAL:
+        with container:
+            render_local_three_scene(
+                _plotly_3d_figure_to_three_payload(figure),
+                height=height,
+            )
+        return
+    container.plotly_chart(
+        figure,
+        config=trajectory_plotly_chart_config(),
+        width="stretch",
     )
 
 
@@ -1984,6 +2725,8 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault("wt_results_view_mode", "Отдельная скважина")
     st.session_state.setdefault("wt_results_all_view_mode", "Траектории")
+    st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_AUTO)
+    st.session_state.setdefault("wt_3d_backend", WT_3D_BACKEND_PLOTLY)
     st.session_state.setdefault(
         "wt_anticollision_uncertainty_preset", DEFAULT_UNCERTAINTY_PRESET
     )
@@ -2001,6 +2744,10 @@ def _init_state() -> None:
         "Anti-collision",
     }:
         st.session_state["wt_results_all_view_mode"] = "Траектории"
+    if str(st.session_state.get("wt_3d_render_mode", "")).strip() not in set(WT_3D_RENDER_OPTIONS):
+        st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_AUTO
+    if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(WT_3D_BACKEND_OPTIONS):
+        st.session_state["wt_3d_backend"] = WT_3D_BACKEND_PLOTLY
     st.session_state["wt_anticollision_uncertainty_preset"] = (
         normalize_uncertainty_preset(
             st.session_state.get(
@@ -2136,6 +2883,7 @@ def _all_wells_3d_figure(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
+    render_mode: str = WT_3D_RENDER_AUTO,
     height: int = 620,
 ) -> go.Figure:
     fig = go.Figure()
@@ -2145,6 +2893,11 @@ def _all_wells_3d_figure(
     x_focus_arrays: list[np.ndarray] = []
     y_focus_arrays: list[np.ndarray] = []
     z_focus_arrays: list[np.ndarray] = []
+    resolved_render_mode = _resolve_3d_render_mode(
+        requested_mode=render_mode,
+        calculated_well_count=len(successes),
+        reference_wells=reference_wells,
+    )
     color_map = name_to_color or {
         str(item.name): _well_color(index) for index, item in enumerate(successes)
     }
@@ -2152,7 +2905,14 @@ def _all_wells_3d_figure(
         line_color = color_map.get(str(item.name), _well_color(index))
         line_dash = "dash" if bool(item.md_postcheck_exceeded) else "solid"
         name = item.name
-        stations = item.stations
+        stations = (
+            _decimated_station_frame(
+                item.stations,
+                target_points=WT_3D_FAST_CALC_TARGET_POINTS,
+            )
+            if resolved_render_mode == WT_3D_RENDER_FAST
+            else item.stations
+        )
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
         y_arrays.append(stations["Y_m"].to_numpy(dtype=float))
         z_arrays.append(stations["Z_m"].to_numpy(dtype=float))
@@ -2220,46 +2980,63 @@ def _all_wells_3d_figure(
             )
         )
 
-    for reference_well in reference_wells:
-        stations = reference_well.stations
-        if stations.empty:
-            continue
-        line_color = REFERENCE_WELL_KIND_COLORS.get(
-            str(reference_well.kind),
-            "#A0A0A0",
-        )
-        x_values = stations["X_m"].to_numpy(dtype=float)
-        y_values = stations["Y_m"].to_numpy(dtype=float)
-        z_values = stations["Z_m"].to_numpy(dtype=float)
-        x_arrays.append(x_values)
-        y_arrays.append(y_values)
-        z_arrays.append(z_values)
-        fig.add_trace(
-            go.Scatter3d(
-                x=x_values,
-                y=y_values,
-                z=z_values,
-                mode="lines",
-                name=reference_well_display_label(reference_well),
-                line={"width": 4, "color": line_color},
-                customdata=np.column_stack(
-                    [stations["MD_m"].to_numpy(dtype=float)]
-                ),
-                hovertemplate=(
-                    "Тип: "
-                    + REFERENCE_WELL_KIND_LABELS.get(
-                        str(reference_well.kind),
-                        str(reference_well.kind),
-                    )
-                    + "<br>"
-                    "X: %{x:.2f} m<br>"
-                    "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m<br>"
-                    "MD: %{customdata[0]:.2f} m"
-                    "<extra>%{fullData.name}</extra>"
-                ),
+    if resolved_render_mode == WT_3D_RENDER_FAST:
+        for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+            combined_trace = _combined_reference_trace_3d(
+                reference_wells=reference_wells,
+                kind=kind,
+                target_points_per_well=WT_3D_FAST_REFERENCE_TARGET_POINTS,
             )
-        )
+            if combined_trace is not None:
+                fig.add_trace(combined_trace)
+                x_arrays.append(np.asarray(combined_trace.x, dtype=float))
+                y_arrays.append(np.asarray(combined_trace.y, dtype=float))
+                z_arrays.append(np.asarray(combined_trace.z, dtype=float))
+    else:
+        for reference_well in reference_wells:
+            stations = reference_well.stations
+            if stations.empty:
+                continue
+            line_color = REFERENCE_WELL_KIND_COLORS.get(
+                str(reference_well.kind),
+                "#A0A0A0",
+            )
+            x_values = stations["X_m"].to_numpy(dtype=float)
+            y_values = stations["Y_m"].to_numpy(dtype=float)
+            z_values = stations["Z_m"].to_numpy(dtype=float)
+            x_arrays.append(x_values)
+            y_arrays.append(y_values)
+            z_arrays.append(z_values)
+            fig.add_trace(
+                go.Scatter3d(
+                    x=x_values,
+                    y=y_values,
+                    z=z_values,
+                    mode="lines",
+                    name=reference_well_display_label(reference_well),
+                    line={"width": 4, "color": line_color},
+                    customdata=np.column_stack(
+                        [stations["MD_m"].to_numpy(dtype=float)]
+                    ),
+                    hovertemplate=(
+                        "Тип: "
+                        + REFERENCE_WELL_KIND_LABELS.get(
+                            str(reference_well.kind),
+                            str(reference_well.kind),
+                        )
+                        + "<br>"
+                        "X: %{x:.2f} m<br>"
+                        "Y: %{y:.2f} m<br>"
+                        "Z/TVD: %{z:.2f} m<br>"
+                        "MD: %{customdata[0]:.2f} m"
+                        "<extra>%{fullData.name}</extra>"
+                    ),
+                )
+            )
+    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
+        if label_trace is not None:
+            fig.add_trace(label_trace)
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
@@ -2513,9 +3290,13 @@ def _all_wells_plan_figure(
                     "Y: %{y:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m"
                     "<extra>%{fullData.name}</extra>"
-                ),
+                    ),
+                )
             )
-        )
+    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label_trace = _reference_name_trace_2d(reference_wells, kind=kind)
+        if label_trace is not None:
+            fig.add_trace(label_trace)
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
@@ -2615,6 +3396,7 @@ def _all_wells_anticollision_3d_figure(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    render_mode: str = WT_3D_RENDER_AUTO,
     height: int = 660,
 ) -> go.Figure:
     fig = go.Figure()
@@ -2624,16 +3406,53 @@ def _all_wells_anticollision_3d_figure(
     x_focus_arrays: list[np.ndarray] = []
     y_focus_arrays: list[np.ndarray] = []
     z_focus_arrays: list[np.ndarray] = []
+    reference_wells = tuple(
+        well for well in analysis.wells if bool(well.is_reference_only)
+    )
+    resolved_render_mode = _resolve_3d_render_mode(
+        requested_mode=render_mode,
+        calculated_well_count=len(
+            [well for well in analysis.wells if not bool(well.is_reference_only)]
+        ),
+        reference_wells=reference_wells,
+    )
+    focus_reference_names = (
+        set(
+            sorted(_anticollision_focus_reference_names(analysis))[
+                :WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT
+            ]
+        )
+        if resolved_render_mode == WT_3D_RENDER_FAST
+        else set()
+    )
     well_lookup = {str(well.name): well for well in analysis.wells}
+    aggregated_reference_wells: list = []
 
     for well in analysis.wells:
+        is_reference_only = bool(well.is_reference_only)
+        is_focus_reference = str(well.name) in focus_reference_names
+        if (
+            resolved_render_mode == WT_3D_RENDER_FAST
+            and is_reference_only
+            and not is_focus_reference
+        ):
+            aggregated_reference_wells.append(well)
+            continue
         well_label = (
             f"{well.name} ({REFERENCE_WELL_KIND_LABELS.get(str(well.well_kind), str(well.well_kind))})"
-            if bool(well.is_reference_only)
+            if is_reference_only
             else str(well.name)
         )
         overlay = well.overlay
-        tube_mesh = build_uncertainty_tube_mesh(overlay)
+        tube_mesh = (
+            build_uncertainty_tube_mesh(overlay)
+            if (
+                resolved_render_mode != WT_3D_RENDER_FAST
+                or not is_reference_only
+                or is_focus_reference
+            )
+            else None
+        )
         if tube_mesh is not None:
             x_arrays.append(tube_mesh.vertices_xyz[:, 0])
             y_arrays.append(tube_mesh.vertices_xyz[:, 1])
@@ -2655,7 +3474,9 @@ def _all_wells_anticollision_3d_figure(
                     hoverinfo="skip",
                 )
             )
-        if overlay.samples:
+        if overlay.samples and (
+            resolved_render_mode != WT_3D_RENDER_FAST or not is_reference_only
+        ):
             terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
             x_arrays.append(terminal_ring[:, 0])
             y_arrays.append(terminal_ring[:, 1])
@@ -2677,7 +3498,18 @@ def _all_wells_anticollision_3d_figure(
                 )
             )
 
-        stations = well.stations
+        stations = (
+            _decimated_station_frame(
+                well.stations,
+                target_points=(
+                    WT_3D_FAST_REFERENCE_TARGET_POINTS
+                    if is_reference_only
+                    else WT_3D_FAST_CALC_TARGET_POINTS
+                ),
+            )
+            if resolved_render_mode == WT_3D_RENDER_FAST
+            else well.stations
+        )
         x_values = stations["X_m"].to_numpy(dtype=float)
         y_values = stations["Y_m"].to_numpy(dtype=float)
         z_values = stations["Z_m"].to_numpy(dtype=float)
@@ -2685,7 +3517,7 @@ def _all_wells_anticollision_3d_figure(
         x_arrays.append(x_values)
         y_arrays.append(y_values)
         z_arrays.append(z_values)
-        if not bool(well.is_reference_only):
+        if not is_reference_only:
             x_focus_arrays.append(x_values)
             y_focus_arrays.append(y_values)
             z_focus_arrays.append(z_values)
@@ -2749,24 +3581,25 @@ def _all_wells_anticollision_3d_figure(
             x_focus_arrays.append(previous_x)
             y_focus_arrays.append(previous_y)
             z_focus_arrays.append(previous_z)
-        fig.add_trace(
-            _hover_proxy_trace_3d(
-                x_values=x_values,
-                y_values=y_values,
-                z_values=z_values,
-                customdata=_trajectory_hover_customdata(stations),
-                hovertemplate=(
-                    "X: %{x:.2f} m<br>"
-                    "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m<br>"
-                    "MD: %{customdata[0]:.2f} m<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
-                    "Сегмент: %{customdata[2]}"
-                    f"<extra>{well_label}</extra>"
-                ),
+        if resolved_render_mode != WT_3D_RENDER_FAST or not is_reference_only:
+            fig.add_trace(
+                _hover_proxy_trace_3d(
+                    x_values=x_values,
+                    y_values=y_values,
+                    z_values=z_values,
+                    customdata=_trajectory_hover_customdata(stations),
+                    hovertemplate=(
+                        "X: %{x:.2f} m<br>"
+                        "Y: %{y:.2f} m<br>"
+                        "Z/TVD: %{z:.2f} m<br>"
+                        "MD: %{customdata[0]:.2f} m<br>"
+                        "ПИ: %{customdata[1]:.2f} deg/10m<br>"
+                        "Сегмент: %{customdata[2]}"
+                        f"<extra>{well_label}</extra>"
+                    ),
+                )
             )
-        )
-        if (well.t1 is not None) and (well.t3 is not None) and not bool(well.is_reference_only):
+        if (well.t1 is not None) and (well.t3 is not None) and not is_reference_only:
             fig.add_trace(
                 go.Scatter3d(
                     x=[well.surface.x, well.t1.x, well.t3.x],
@@ -2803,6 +3636,38 @@ def _all_wells_anticollision_3d_figure(
             x_focus_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
             y_focus_arrays.append(np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float))
             z_focus_arrays.append(np.array([well.surface.z, well.t1.z, well.t3.z], dtype=float))
+
+    if aggregated_reference_wells:
+        for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+            combined_trace = _combined_reference_trace_3d(
+                reference_wells=[
+                    well for well in aggregated_reference_wells if str(well.well_kind) == str(kind)
+                ],
+                kind=kind,
+                target_points_per_well=WT_3D_FAST_REFERENCE_TARGET_POINTS,
+            )
+            if combined_trace is not None:
+                fig.add_trace(combined_trace)
+                x_arrays.append(np.asarray(combined_trace.x, dtype=float))
+                y_arrays.append(np.asarray(combined_trace.y, dtype=float))
+                z_arrays.append(np.asarray(combined_trace.z, dtype=float))
+    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label_trace = _reference_name_trace_3d(
+            [
+                ImportedTrajectoryWell(
+                    name=str(well.name),
+                    kind=str(well.well_kind),
+                    stations=well.stations,
+                    surface=well.surface,
+                    azimuth_deg=0.0,
+                )
+                for well in analysis.wells
+                if bool(well.is_reference_only)
+            ],
+            kind=kind,
+        )
+        if label_trace is not None:
+            fig.add_trace(label_trace)
 
     overlap_legend_added = False
     for corridor in analysis.corridors:
@@ -3187,6 +4052,23 @@ def _all_wells_anticollision_plan_figure(
         x_focus_arrays.append(x_segment)
         y_focus_arrays.append(y_segment)
         segment_legend_added = True
+    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label_trace = _reference_name_trace_2d(
+            [
+                ImportedTrajectoryWell(
+                    name=str(well.name),
+                    kind=str(well.well_kind),
+                    stations=well.stations,
+                    surface=well.surface,
+                    azimuth_deg=0.0,
+                )
+                for well in analysis.wells
+                if bool(well.is_reference_only)
+            ],
+            kind=kind,
+        )
+        if label_trace is not None:
+            fig.add_trace(label_trace)
 
     x_values = (
         np.concatenate(x_focus_arrays) if x_focus_arrays else np.concatenate(x_arrays)
@@ -3279,6 +4161,38 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         f"Пресет: {uncertainty_preset_label(selected_preset)}. "
         f"{anti_collision_method_caption(uncertainty_model)}"
     )
+    selected_render_mode = st.selectbox(
+        "3D-режим отображения",
+        options=list(WT_3D_RENDER_OPTIONS),
+        key="wt_3d_render_mode",
+    )
+    selected_3d_backend = st.selectbox(
+        "3D backend",
+        options=list(WT_3D_BACKEND_OPTIONS),
+        key="wt_3d_backend",
+        help=(
+            "Plotly сохраняет привычные hover-подсказки. "
+            "Локальный Three.js backend быстрее на тяжёлых кустах и хранит все файлы локально."
+        ),
+    )
+    resolved_render_mode = _resolve_3d_render_mode(
+        requested_mode=selected_render_mode,
+        calculated_well_count=len(successes),
+        reference_wells=(
+            well for well in analysis.wells if bool(well.is_reference_only)
+        ),
+    )
+    if resolved_render_mode == WT_3D_RENDER_FAST:
+        st.caption(
+            "Включён быстрый 3D-режим: reference-скважины частично объединяются и "
+            "часть их cone-геометрии скрывается из 3D-рендера, но anti-collision "
+            "анализ и расчёт рекомендаций остаются прежними."
+        )
+    if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+        st.caption(
+            "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "
+            "но детальные Plotly-hover подсказки доступны только в режиме Plotly."
+        )
 
     m1, m2, m3, m4 = st.columns(4, gap="small")
     m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
@@ -3290,12 +4204,16 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         st.markdown(_sf_help_markdown())
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
-    chart_col1.plotly_chart(
-        _all_wells_anticollision_3d_figure(
-            analysis,
-            previous_successes_by_name=previous_successes_by_name,
-        ),
-        width="stretch",
+    anticollision_3d_figure = _all_wells_anticollision_3d_figure(
+        analysis,
+        previous_successes_by_name=previous_successes_by_name,
+        render_mode=selected_render_mode,
+    )
+    _render_plotly_or_three_3d(
+        container=chart_col1,
+        figure=anticollision_3d_figure,
+        backend=selected_3d_backend,
+        height=660,
     )
     chart_col2.plotly_chart(
         _all_wells_anticollision_plan_figure(
@@ -4848,30 +5766,41 @@ def _render_actual_fund_analysis_panel() -> None:
         return
 
     metrics = build_actual_fund_well_metrics(actual_wells)
-    horizontal_metrics = [item for item in metrics if bool(item.is_horizontal)]
-    pad_count = len({str(item.pad_group) for item in metrics if str(item.pad_group) != "—"})
-    horizontal_kop_values = [
+    eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
+    excluded_horizontal_metrics = [
+        item for item in metrics if bool(item.is_horizontal) and not bool(item.is_analysis_eligible)
+    ]
+    pad_count = len({str(item.pad_group) for item in eligible_metrics if str(item.pad_group) != "—"})
+    eligible_kop_values = [
         float(item.kop_md_m)
-        for item in horizontal_metrics
+        for item in eligible_metrics
         if item.kop_md_m is not None
     ]
 
     with st.expander("Анализ фактического фонда", expanded=False):
         st.caption(
             "В анализ попадают только фактические скважины. Для калибровки "
-            "учитываются только горизонтальные скважины. Пары одного семейства "
-            "вида `7401` / `7401_PL` / `7401_2` из calibration-scan исключаются. "
-            "Группировка по кустам строится по ведущему числовому коду скважины "
-            "без двух последних цифр: `6101/6102/6103 -> 61`, `8203/8210 -> 82`."
+            "учитываются только горизонтальные скважины без аномалий: если у "
+            "горизонтальной скважины не удаётся устойчиво выделить `KOP / HOLD / "
+            "терминальный high-angle interval` или получается аномально высокий "
+            "устойчивый `ПИ`, такая скважина исключается из анализа и калибровки. "
+            "Пары одного семейства вида `7401` / `7401_PL` / `7401_2` из calibration-scan "
+            "исключаются. Группировка по кустам строится по ведущему числовому коду "
+            "скважины без двух последних цифр: `6101/6102/6103 -> 61`, `8203/8210 -> 82`."
         )
         a1, a2, a3, a4 = st.columns(4, gap="small")
         a1.metric("Фактических скважин", f"{len(actual_wells)}")
-        a2.metric("Горизонтальных", f"{len(horizontal_metrics)}")
+        a2.metric("В анализе", f"{len(eligible_metrics)}")
         a3.metric("Кустов", f"{pad_count}")
         a4.metric(
             "Медианный KOP, м",
-            "—" if not horizontal_kop_values else f"{float(np.median(horizontal_kop_values)):.0f}",
+            "—" if not eligible_kop_values else f"{float(np.median(eligible_kop_values)):.0f}",
         )
+        if excluded_horizontal_metrics:
+            st.info(
+                "Из анализа исключено горизонтальных скважин: "
+                f"{len(excluded_horizontal_metrics)}. Причины видны в таблице."
+            )
 
         view_mode = st.radio(
             "Свод фактического фонда",
@@ -6167,6 +7096,25 @@ def _render_success_tabs(
         label_visibility="collapsed",
     )
     if str(all_view_mode) == "Траектории":
+        selected_render_mode = st.selectbox(
+            "3D-режим отображения",
+            options=list(WT_3D_RENDER_OPTIONS),
+            key="wt_3d_render_mode",
+        )
+        selected_3d_backend = st.selectbox(
+            "3D backend",
+            options=list(WT_3D_BACKEND_OPTIONS),
+            key="wt_3d_backend",
+            help=(
+                "Plotly сохраняет привычные hover-подсказки. "
+                "Локальный Three.js backend быстрее на тяжёлых кустах и хранит все файлы локально."
+            ),
+        )
+        resolved_render_mode = _resolve_3d_render_mode(
+            requested_mode=selected_render_mode,
+            calculated_well_count=len(successes),
+            reference_wells=reference_wells,
+        )
         if target_only_wells:
             st.caption(
                 "Для непростроенных скважин на обзорных графиках показаны только "
@@ -6177,16 +7125,30 @@ def _render_success_tabs(
                 "Дополнительные фактические и утвержденные скважины показаны как "
                 "reference-траектории: серые и красные линии без точек S/t1/t3."
             )
+        if resolved_render_mode == WT_3D_RENDER_FAST:
+            st.caption(
+                "Включён быстрый 3D-режим: reference-скважины объединяются в "
+                "сводные фоновые 3D-линии, чтобы не перегружать браузер. 2D-план "
+                "и сами расчётные скважины остаются без смысловых изменений."
+            )
+        if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+            st.caption(
+                "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "
+                "но детальные Plotly-hover подсказки доступны только в режиме Plotly."
+            )
         c1, c2 = st.columns(2, gap="medium")
-        c1.plotly_chart(
-            _all_wells_3d_figure(
-                successes,
-                target_only_wells=target_only_wells,
-                reference_wells=reference_wells,
-                name_to_color=name_to_color,
-            ),
-            config=trajectory_plotly_chart_config(),
-            width="stretch",
+        overview_3d_figure = _all_wells_3d_figure(
+            successes,
+            target_only_wells=target_only_wells,
+            reference_wells=reference_wells,
+            name_to_color=name_to_color,
+            render_mode=selected_render_mode,
+        )
+        _render_plotly_or_three_3d(
+            container=c1,
+            figure=overview_3d_figure,
+            backend=selected_3d_backend,
+            height=620,
         )
         c2.plotly_chart(
             _all_wells_plan_figure(
@@ -6270,7 +7232,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/actual_fund_analysis.py	18507
+===BEGIN_FILE===	pywp/actual_fund_analysis.py	31657
 from __future__ import annotations
 
 import re
@@ -6281,6 +7243,7 @@ import numpy as np
 import pandas as pd
 
 from pywp.anticollision import analyze_anti_collision, build_anti_collision_well
+from pywp.mcm import add_dls, wrap_azimuth_deg
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.uncertainty import (
@@ -6289,8 +7252,17 @@ from pywp.uncertainty import (
 )
 
 HORIZONTAL_INC_THRESHOLD_DEG = 80.0
-HORIZONTAL_MIN_INTERVAL_M = 150.0
-KOP_INC_THRESHOLD_DEG = 5.0
+HORIZONTAL_MIN_INTERVAL_M = 100.0
+HORIZONTAL_END_TOLERANCE_M = 60.0
+KOP_INC_THRESHOLD_DEG = 1.0
+ACTUAL_FUND_RESAMPLE_STEP_M = 10.0
+HOLD_INC_TOLERANCE_DEG = 3.0
+HOLD_MIN_INTERVAL_M = 90.0
+HOLD_MAX_INC_DEG = 78.0
+HOLD_MIN_INC_DEG = 8.0
+HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M = 1.5
+ROBUST_DLS_WINDOW_M = 60.0
+MAX_REASONABLE_ACTUAL_DLS_DEG_PER_30M = 6.0
 MIN_CUSTOM_ACTUAL_FUND_SCALE = 0.35
 
 CALIBRATION_STATUS_READY = "ready"
@@ -6313,9 +7285,12 @@ class ActualFundWellMetrics(FrozenArbitraryModel):
     horizontal_length_m: float
     hold_inc_deg: float | None
     hold_azi_deg: float | None
+    hold_length_m: float
     max_inc_deg: float
     max_dls_deg_per_30m: float | None
     max_build_dls_before_hold_deg_per_30m: float | None
+    is_analysis_eligible: bool
+    analysis_exclusion_reason: str | None = None
 
 
 class ActualFundPadSummary(FrozenArbitraryModel):
@@ -6324,6 +7299,7 @@ class ActualFundPadSummary(FrozenArbitraryModel):
     horizontal_well_count: int
     median_kop_md_m: float | None
     median_hold_inc_deg: float | None
+    median_hold_length_m: float | None
     max_pi_deg_per_30m: float | None
     median_horizontal_length_m: float | None
 
@@ -6365,8 +7341,9 @@ def actual_well_pad_group(name: object) -> str:
 
 
 def actual_well_is_horizontal(stations: pd.DataFrame) -> bool:
-    interval = _dominant_horizontal_interval(stations)
-    max_inc = float(np.nanmax(stations["INC_deg"].to_numpy(dtype=float)))
+    survey = _reconstruct_actual_survey(stations)
+    interval = _terminal_horizontal_interval(survey)
+    max_inc = float(np.nanmax(survey["INC_deg"].to_numpy(dtype=float)))
     return bool(max_inc >= HORIZONTAL_INC_THRESHOLD_DEG and interval[2] >= HORIZONTAL_MIN_INTERVAL_M)
 
 
@@ -6375,48 +7352,53 @@ def build_actual_fund_well_metrics(
 ) -> tuple[ActualFundWellMetrics, ...]:
     metrics: list[ActualFundWellMetrics] = []
     for well in actual_wells:
-        stations = well.stations.copy()
+        stations = _reconstruct_actual_survey(well.stations)
+        source_md_values = well.stations["MD_m"].to_numpy(dtype=float)
+        source_z_values = well.stations["Z_m"].to_numpy(dtype=float)
         md_values = stations["MD_m"].to_numpy(dtype=float)
         z_values = stations["Z_m"].to_numpy(dtype=float)
         x_values = stations["X_m"].to_numpy(dtype=float)
         y_values = stations["Y_m"].to_numpy(dtype=float)
         inc_values = stations["INC_deg"].to_numpy(dtype=float)
-        dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
-        kop_md = _first_threshold_crossing_md(
-            md_values=md_values,
-            values=inc_values,
-            threshold=KOP_INC_THRESHOLD_DEG,
+        kop_md = _first_kop_md_from_geometry(well.stations, threshold_deg=KOP_INC_THRESHOLD_DEG)
+        horizontal_entry_md, _, horizontal_length = _terminal_horizontal_interval(stations)
+        hold_start_md, hold_end_md, hold_inc, hold_azi = _detect_hold_interval(
+            stations=stations,
+            kop_md_m=kop_md,
+            horizontal_entry_md_m=horizontal_entry_md,
         )
-        horizontal_entry_md, _, horizontal_length = _dominant_horizontal_interval(stations)
-        hold_mask = (
-            (md_values >= float(horizontal_entry_md) - 1e-9)
+        hold_length = (
+            0.0
+            if hold_start_md is None or hold_end_md is None
+            else float(max(hold_end_md - hold_start_md, 0.0))
+        )
+        build_limit_md = (
+            float(hold_start_md)
+            if hold_start_md is not None
+            else float(horizontal_entry_md)
             if horizontal_entry_md is not None
-            else np.zeros(len(md_values), dtype=bool)
+            else float(md_values[-1])
         )
-        hold_inc = (
-            float(np.median(inc_values[hold_mask]))
-            if np.any(hold_mask)
-            else None
+        build_mask = md_values <= build_limit_md + 1e-9
+        is_horizontal = actual_well_is_horizontal(well.stations)
+        max_dls = _robust_max_dls(stations)
+        max_build_dls = _robust_max_dls(stations.loc[build_mask].reset_index(drop=True))
+        exclusion_reason = _analysis_exclusion_reason(
+            is_horizontal=is_horizontal,
+            kop_md_m=kop_md,
+            horizontal_entry_md_m=horizontal_entry_md,
+            horizontal_length_m=float(horizontal_length),
+            hold_inc_deg=hold_inc,
+            hold_length_m=float(hold_length),
+            max_dls_deg_per_30m=max_dls,
+            max_build_dls_before_hold_deg_per_30m=max_build_dls,
         )
-        hold_azi = (
-            _circular_median_deg(stations.loc[hold_mask, "AZI_deg"].to_numpy(dtype=float))
-            if np.any(hold_mask)
-            else None
-        )
-        build_mask = (
-            (md_values <= float(horizontal_entry_md) + 1e-9)
-            if horizontal_entry_md is not None
-            else np.ones(len(md_values), dtype=bool)
-        )
-        build_dls_values = dls_values[build_mask]
-        finite_build_dls = build_dls_values[np.isfinite(build_dls_values)]
-        finite_dls = dls_values[np.isfinite(dls_values)]
         metrics.append(
             ActualFundWellMetrics(
                 name=str(well.name),
                 family_name=actual_well_family_name(well.name),
                 pad_group=actual_well_pad_group(well.name),
-                is_horizontal=actual_well_is_horizontal(stations),
+                is_horizontal=is_horizontal,
                 md_total_m=float(md_values[-1]),
                 tvd_end_m=float(z_values[-1]),
                 lateral_departure_m=float(
@@ -6424,19 +7406,20 @@ def build_actual_fund_well_metrics(
                 ),
                 kop_md_m=kop_md,
                 kop_tvd_m=(
-                    None if kop_md is None else _interp_1d(md_values, z_values, float(kop_md))
+                    None
+                    if kop_md is None
+                    else _interp_1d(source_md_values, source_z_values, float(kop_md))
                 ),
                 horizontal_entry_md_m=horizontal_entry_md,
                 horizontal_length_m=float(horizontal_length),
                 hold_inc_deg=hold_inc,
                 hold_azi_deg=hold_azi,
+                hold_length_m=float(hold_length),
                 max_inc_deg=float(np.nanmax(inc_values)),
-                max_dls_deg_per_30m=(
-                    None if len(finite_dls) == 0 else float(np.max(finite_dls))
-                ),
-                max_build_dls_before_hold_deg_per_30m=(
-                    None if len(finite_build_dls) == 0 else float(np.max(finite_build_dls))
-                ),
+                max_dls_deg_per_30m=max_dls,
+                max_build_dls_before_hold_deg_per_30m=max_build_dls,
+                is_analysis_eligible=exclusion_reason is None,
+                analysis_exclusion_reason=exclusion_reason,
             )
         )
     return tuple(metrics)
@@ -6451,6 +7434,8 @@ def actual_fund_metrics_rows(
             "Скважина": item.name,
             "Семейство": item.family_name,
             "Горизонтальная": "Да" if item.is_horizontal else "Нет",
+            "В анализе": "Да" if item.is_analysis_eligible else "Нет",
+            "Причина исключения": item.analysis_exclusion_reason or "—",
             "MD, м": item.md_total_m,
             "KOP MD, м": item.kop_md_m,
             "KOP TVD, м": item.kop_tvd_m,
@@ -6458,6 +7443,7 @@ def actual_fund_metrics_rows(
             "Горизонталь, м": item.horizontal_length_m,
             "Зенит HOLD, deg": item.hold_inc_deg,
             "Азимут HOLD, deg": item.hold_azi_deg,
+            "HOLD, м": item.hold_length_m,
             "Макс INC, deg": item.max_inc_deg,
             "Макс ПИ, deg/30м": item.max_dls_deg_per_30m,
             "Макс ПИ до HOLD, deg/30м": item.max_build_dls_before_hold_deg_per_30m,
@@ -6477,6 +7463,7 @@ def actual_fund_pad_rows(
             "Горизонтальных": item.horizontal_well_count,
             "Медианный KOP MD, м": item.median_kop_md_m,
             "Медианный HOLD INC, deg": item.median_hold_inc_deg,
+            "Медианный HOLD, м": item.median_hold_length_m,
             "Макс ПИ, deg/30м": item.max_pi_deg_per_30m,
             "Медианная горизонталь, м": item.median_horizontal_length_m,
         }
@@ -6489,7 +7476,8 @@ def summarize_actual_fund_by_pad(
 ) -> tuple[ActualFundPadSummary, ...]:
     grouped: dict[str, list[ActualFundWellMetrics]] = defaultdict(list)
     for item in metrics:
-        grouped[str(item.pad_group)].append(item)
+        if bool(item.is_analysis_eligible):
+            grouped[str(item.pad_group)].append(item)
     summaries: list[ActualFundPadSummary] = []
     for pad_group in sorted(grouped):
         items = grouped[pad_group]
@@ -6501,6 +7489,7 @@ def summarize_actual_fund_by_pad(
                 horizontal_well_count=len(horizontal_items),
                 median_kop_md_m=_median_or_none(item.kop_md_m for item in horizontal_items),
                 median_hold_inc_deg=_median_or_none(item.hold_inc_deg for item in horizontal_items),
+                median_hold_length_m=_median_or_none(item.hold_length_m for item in horizontal_items),
                 max_pi_deg_per_30m=_max_or_none(item.max_dls_deg_per_30m for item in horizontal_items),
                 median_horizontal_length_m=_median_or_none(
                     item.horizontal_length_m for item in horizontal_items
@@ -6517,9 +7506,13 @@ def calibrate_uncertainty_from_actual_fund(
     base_preset: str = DEFAULT_UNCERTAINTY_PRESET,
 ) -> ActualFundCalibrationResult:
     actual_well_list = list(actual_wells)
+    reconstructed_by_name = {
+        str(well.name): _reconstruct_actual_survey(well.stations)
+        for well in actual_well_list
+    }
     metrics = build_actual_fund_well_metrics(actual_well_list)
     horizontal_names = {
-        item.name for item in metrics if bool(item.is_horizontal)
+        item.name for item in metrics if bool(item.is_analysis_eligible)
     }
     eligible_wells = [well for well in actual_well_list if str(well.name) in horizontal_names]
     if len(eligible_wells) < 2:
@@ -6533,7 +7526,8 @@ def calibrate_uncertainty_from_actual_fund(
             skipped_same_family_pair_count=0,
             overlapping_pair_count_before=0,
             note=(
-                "Для калибровки нужны минимум две фактические горизонтальные скважины."
+                "Для калибровки нужны минимум две фактические горизонтальные "
+                "скважины без аномалий анализа."
             ),
         )
 
@@ -6554,7 +7548,7 @@ def calibrate_uncertainty_from_actual_fund(
             build_anti_collision_well(
                 name=well.name,
                 color="#6B7280",
-                stations=well.stations,
+                stations=reconstructed_by_name[str(well.name)],
                 surface=well.surface,
                 t1=None,
                 t3=None,
@@ -6633,7 +7627,7 @@ def calibrate_uncertainty_from_actual_fund(
             build_anti_collision_well(
                 name=well.name,
                 color="#6B7280",
-                stations=well.stations,
+                stations=reconstructed_by_name[str(well.name)],
                 surface=well.surface,
                 t1=None,
                 t3=None,
@@ -6671,7 +7665,7 @@ def calibrate_uncertainty_from_actual_fund(
     )
 
 
-def _dominant_horizontal_interval(stations: pd.DataFrame) -> tuple[float | None, float | None, float]:
+def _terminal_horizontal_interval(stations: pd.DataFrame) -> tuple[float | None, float | None, float]:
     md_values = stations["MD_m"].to_numpy(dtype=float)
     inc_values = stations["INC_deg"].to_numpy(dtype=float)
     if len(md_values) == 0:
@@ -6679,22 +7673,15 @@ def _dominant_horizontal_interval(stations: pd.DataFrame) -> tuple[float | None,
     mask = inc_values >= HORIZONTAL_INC_THRESHOLD_DEG
     if not np.any(mask):
         return None, None, 0.0
-    best_start: float | None = None
-    best_end: float | None = None
-    best_length = 0.0
-    current_start_index: int | None = None
-    for index, is_high_angle in enumerate(mask.tolist()):
-        if is_high_angle and current_start_index is None:
-            current_start_index = index
-        if (not is_high_angle or index == len(mask) - 1) and current_start_index is not None:
-            end_index = index if is_high_angle and index == len(mask) - 1 else index - 1
-            start_md = float(md_values[current_start_index])
-            end_md = float(md_values[end_index])
-            length = float(max(end_md - start_md, 0.0))
-            if length > best_length:
-                best_start, best_end, best_length = start_md, end_md, length
-            current_start_index = None
-    return best_start, best_end, best_length
+    candidates = [
+        (start_md, end_md, length_m)
+        for start_md, end_md, length_m in _mask_intervals(md_values, mask)
+        if end_md >= float(md_values[-1]) - HORIZONTAL_END_TOLERANCE_M
+    ]
+    if not candidates:
+        return None, None, 0.0
+    best_start, best_end, best_length = max(candidates, key=lambda item: (item[2], item[1]))
+    return float(best_start), float(best_end), float(best_length)
 
 
 def _first_threshold_crossing_md(
@@ -6716,6 +7703,28 @@ def _first_threshold_crossing_md(
                 return float(md_values[index])
             alpha = float((threshold - left_value) / delta)
             return float(md_values[index - 1] + alpha * (md_values[index] - md_values[index - 1]))
+    return None
+
+
+def _first_kop_md_from_geometry(stations: pd.DataFrame, *, threshold_deg: float) -> float | None:
+    source = stations.sort_values("MD_m").reset_index(drop=True)
+    md_values = source["MD_m"].to_numpy(dtype=float)
+    x_values = source["X_m"].to_numpy(dtype=float)
+    y_values = source["Y_m"].to_numpy(dtype=float)
+    z_values = source["Z_m"].to_numpy(dtype=float)
+    if len(md_values) < 2:
+        return None
+    dx = np.diff(x_values)
+    dy = np.diff(y_values)
+    dz = np.diff(z_values)
+    lengths = np.sqrt(dx * dx + dy * dy + dz * dz)
+    valid = lengths > 1e-9
+    if not np.any(valid):
+        return None
+    inc_deg = np.degrees(np.arctan2(np.hypot(dx, dy), dz))
+    for index, is_valid in enumerate(valid.tolist()):
+        if is_valid and float(inc_deg[index]) >= float(threshold_deg):
+            return float(md_values[index])
     return None
 
 
@@ -6744,8 +7753,285 @@ def _max_or_none(values: Iterable[float | None]) -> float | None:
         return None
     return float(np.max(finite))
 
+
+def _analysis_exclusion_reason(
+    *,
+    is_horizontal: bool,
+    kop_md_m: float | None,
+    horizontal_entry_md_m: float | None,
+    horizontal_length_m: float,
+    hold_inc_deg: float | None,
+    hold_length_m: float,
+    max_dls_deg_per_30m: float | None,
+    max_build_dls_before_hold_deg_per_30m: float | None,
+) -> str | None:
+    if not bool(is_horizontal):
+        return "Не горизонтальная"
+    if kop_md_m is None:
+        return "Не удалось определить KOP"
+    if horizontal_entry_md_m is None or float(horizontal_length_m) < HORIZONTAL_MIN_INTERVAL_M:
+        return "Не удалось выделить терминальный горизонтальный участок"
+    if hold_inc_deg is None or float(hold_length_m) < HOLD_MIN_INTERVAL_M:
+        return "Не удалось устойчиво выделить HOLD"
+    if (
+        max_dls_deg_per_30m is not None
+        and float(max_dls_deg_per_30m) > MAX_REASONABLE_ACTUAL_DLS_DEG_PER_30M
+    ):
+        return "Аномально высокий устойчивый ПИ по стволу"
+    if (
+        max_build_dls_before_hold_deg_per_30m is not None
+        and float(max_build_dls_before_hold_deg_per_30m) > MAX_REASONABLE_ACTUAL_DLS_DEG_PER_30M
+    ):
+        return "Аномально высокий устойчивый ПИ до HOLD"
+    return None
+
+
+def _reconstruct_actual_survey(
+    stations: pd.DataFrame,
+    *,
+    resample_step_m: float | None = ACTUAL_FUND_RESAMPLE_STEP_M,
+) -> pd.DataFrame:
+    source = stations.sort_values("MD_m").reset_index(drop=True).copy()
+    md_values = source["MD_m"].to_numpy(dtype=float)
+    x_values = source["X_m"].to_numpy(dtype=float)
+    y_values = source["Y_m"].to_numpy(dtype=float)
+    z_values = source["Z_m"].to_numpy(dtype=float)
+    if len(md_values) < 2:
+        raise ValueError("actual-fund analysis requires at least two stations.")
+    if not (
+        np.isfinite(md_values).all()
+        and np.isfinite(x_values).all()
+        and np.isfinite(y_values).all()
+        and np.isfinite(z_values).all()
+    ):
+        raise ValueError("actual-fund stations require finite MD/X/Y/Z values.")
+    if np.any(np.diff(md_values) <= 0.0):
+        raise ValueError("actual-fund stations require strictly increasing MD.")
+
+    positions = np.column_stack([x_values, y_values, z_values]).astype(float)
+    station_directions = _station_direction_vectors(md_values, positions)
+    md_grid = (
+        _regular_md_grid(md_values, float(resample_step_m))
+        if resample_step_m is not None
+        else np.asarray(md_values, dtype=float)
+    )
+    x_grid = np.interp(md_grid, md_values, x_values)
+    y_grid = np.interp(md_grid, md_values, y_values)
+    z_grid = np.interp(md_grid, md_values, z_values)
+    direction_grid = np.column_stack(
+        [
+            np.interp(md_grid, md_values, station_directions[:, axis_index])
+            for axis_index in range(3)
+        ]
+    )
+    direction_grid = _normalize_vectors(direction_grid)
+
+    horizontal = np.hypot(direction_grid[:, 0], direction_grid[:, 1])
+    inc_deg = np.degrees(np.arctan2(horizontal, direction_grid[:, 2]))
+    azi_deg = wrap_azimuth_deg(np.degrees(np.arctan2(direction_grid[:, 0], direction_grid[:, 1])))
+
+    rebuilt = pd.DataFrame(
+        {
+            "MD_m": md_grid,
+            "INC_deg": inc_deg,
+            "AZI_deg": azi_deg,
+            "X_m": x_grid,
+            "Y_m": y_grid,
+            "Z_m": z_grid,
+            "segment": ["IMPORTED"] * len(md_grid),
+        }
+    )
+    return add_dls(rebuilt)
+
+
+def _station_direction_vectors(md_values: np.ndarray, positions: np.ndarray) -> np.ndarray:
+    delta_md = np.diff(md_values)
+    segment_vectors = np.diff(positions, axis=0)
+    segment_norms = np.linalg.norm(segment_vectors, axis=1)
+    segment_directions = np.zeros_like(segment_vectors, dtype=float)
+    valid = segment_norms > 1e-9
+    if np.any(valid):
+        segment_directions[valid] = segment_vectors[valid] / segment_norms[valid, None]
+        last_valid = np.array([0.0, 0.0, 1.0], dtype=float)
+        for index in range(len(segment_directions)):
+            if valid[index]:
+                last_valid = segment_directions[index]
+            else:
+                segment_directions[index] = last_valid
+        next_valid = np.array([0.0, 0.0, 1.0], dtype=float)
+        for index in range(len(segment_directions) - 1, -1, -1):
+            if valid[index]:
+                next_valid = segment_directions[index]
+            elif np.linalg.norm(segment_directions[index]) <= 1e-9:
+                segment_directions[index] = next_valid
+    else:
+        segment_directions[:] = np.array([0.0, 0.0, 1.0], dtype=float)
+    station_directions = np.zeros((len(md_values), 3), dtype=float)
+    station_directions[0] = segment_directions[0]
+    station_directions[-1] = segment_directions[-1]
+    for index in range(1, len(md_values) - 1):
+        left_weight = float(delta_md[index - 1])
+        right_weight = float(delta_md[index])
+        weighted = left_weight * segment_directions[index - 1] + right_weight * segment_directions[index]
+        norm = float(np.linalg.norm(weighted))
+        if norm <= 1e-9:
+            station_directions[index] = segment_directions[index]
+        else:
+            station_directions[index] = weighted / norm
+    return _normalize_vectors(station_directions)
+
+
+def _normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(vectors, axis=1)
+    normalized = np.array(vectors, dtype=float, copy=True)
+    valid = norms > 1e-12
+    normalized[valid] = normalized[valid] / norms[valid, None]
+    normalized[~valid] = np.array([0.0, 0.0, 1.0], dtype=float)
+    return normalized
+
+
+def _regular_md_grid(md_values: np.ndarray, step_m: float) -> np.ndarray:
+    start_md = float(md_values[0])
+    end_md = float(md_values[-1])
+    if end_md <= start_md + 1e-9:
+        return np.asarray([start_md, end_md], dtype=float)
+    grid = np.arange(start_md, end_md, float(step_m), dtype=float)
+    if len(grid) == 0 or abs(grid[0] - start_md) > 1e-9:
+        grid = np.concatenate([[start_md], grid])
+    if abs(grid[-1] - end_md) > 1e-9:
+        grid = np.concatenate([grid, [end_md]])
+    return grid
+
+
+def _mask_intervals(md_values: np.ndarray, mask: np.ndarray) -> list[tuple[float, float, float]]:
+    intervals: list[tuple[float, float, float]] = []
+    current_start_index: int | None = None
+    for index, is_active in enumerate(mask.tolist()):
+        if is_active and current_start_index is None:
+            current_start_index = index
+        is_last = index == len(mask) - 1
+        if current_start_index is not None and ((not is_active) or is_last):
+            end_index = index if is_active and is_last else index - 1
+            start_md = float(md_values[current_start_index])
+            end_md = float(md_values[end_index])
+            intervals.append((start_md, end_md, float(max(end_md - start_md, 0.0))))
+            current_start_index = None
+    return intervals
+
+
+def _rolling_median(values: np.ndarray, window_size: int) -> np.ndarray:
+    if len(values) == 0:
+        return np.asarray([], dtype=float)
+    if window_size <= 1:
+        return np.asarray(values, dtype=float)
+    series = pd.Series(np.asarray(values, dtype=float))
+    return (
+        series.rolling(window=window_size, center=True, min_periods=1)
+        .median()
+        .to_numpy(dtype=float)
+    )
+
+
+def _robust_max_dls(stations: pd.DataFrame) -> float | None:
+    if len(stations) < 2:
+        return None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+    finite_mask = np.isfinite(dls_values)
+    if not np.any(finite_mask):
+        return None
+    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
+    smoothed = _rolling_median(np.where(finite_mask, dls_values, 0.0), window_size=window_size)
+    finite_smoothed = smoothed[np.isfinite(smoothed)]
+    if len(finite_smoothed) == 0:
+        return None
+    return float(np.max(finite_smoothed))
+
+
+def _detect_hold_interval(
+    *,
+    stations: pd.DataFrame,
+    kop_md_m: float | None,
+    horizontal_entry_md_m: float | None,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    if kop_md_m is None:
+        return None, None, None, None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    azi_values = stations["AZI_deg"].to_numpy(dtype=float)
+    dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+
+    analysis_end_md = (
+        float(horizontal_entry_md_m)
+        if horizontal_entry_md_m is not None
+        else float(md_values[-1])
+    )
+    candidate_mask = (
+        (md_values >= float(kop_md_m) + 10.0)
+        & (md_values <= analysis_end_md - 10.0)
+        & np.isfinite(inc_values)
+        & np.isfinite(dls_values)
+        & (inc_values >= HOLD_MIN_INC_DEG)
+        & (inc_values <= HOLD_MAX_INC_DEG)
+    )
+    if not np.any(candidate_mask):
+        return None, None, None, None
+
+    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
+    stable_dls = _rolling_median(np.where(np.isfinite(dls_values), dls_values, 0.0), window_size=window_size)
+    weighted_mode_inc = _weighted_modal_inclination(
+        md_values=md_values,
+        inc_values=inc_values,
+        mask=candidate_mask & (stable_dls <= HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M),
+    )
+    if weighted_mode_inc is None:
+        return None, None, None, None
+
+    hold_mask = (
+        candidate_mask
+        & (np.abs(inc_values - float(weighted_mode_inc)) <= HOLD_INC_TOLERANCE_DEG)
+        & (stable_dls <= HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M)
+    )
+    intervals = [
+        (start_md, end_md, length_m)
+        for start_md, end_md, length_m in _mask_intervals(md_values, hold_mask)
+        if length_m >= HOLD_MIN_INTERVAL_M
+    ]
+    if not intervals:
+        return None, None, None, None
+    start_md, end_md, _ = min(intervals, key=lambda item: (item[0], -item[2]))
+    interval_mask = (md_values >= start_md - 1e-9) & (md_values <= end_md + 1e-9)
+    hold_inc = float(np.median(inc_values[interval_mask]))
+    hold_azi = _circular_median_deg(azi_values[interval_mask])
+    return float(start_md), float(end_md), hold_inc, hold_azi
+
+
+def _weighted_modal_inclination(
+    *,
+    md_values: np.ndarray,
+    inc_values: np.ndarray,
+    mask: np.ndarray,
+) -> float | None:
+    if not np.any(mask):
+        return None
+    rounded = np.round(inc_values).astype(int)
+    weights = np.zeros(len(md_values), dtype=float)
+    if len(md_values) > 1:
+        weights[:-1] = np.diff(md_values)
+        weights[-1] = weights[-2]
+    totals: dict[int, float] = defaultdict(float)
+    for index, is_active in enumerate(mask.tolist()):
+        if is_active:
+            totals[int(rounded[index])] += float(weights[index])
+    if not totals:
+        return None
+    best_bin, _ = max(totals.items(), key=lambda item: (item[1], -abs(item[0] - 45)))
+    return float(best_bin)
+
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	51919
+===BEGIN_FILE===	pywp/anticollision.py	55313
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6769,6 +8055,7 @@ from pywp.uncertainty import (
 TARGET_NONE = ""
 TARGET_T1 = "t1"
 TARGET_T3 = "t3"
+_PAIR_XY_PREFILTER_DIAMETER_FACTOR = 1.5
 
 
 @dataclass(frozen=True)
@@ -6872,6 +8159,15 @@ class AntiCollisionAnalysis:
     overlapping_pair_count: int
     target_overlap_pair_count: int
     worst_separation_factor: float | None
+
+
+@dataclass(frozen=True)
+class _AntiCollisionLateralEnvelope:
+    min_x_m: float
+    max_x_m: float
+    min_y_m: float
+    max_y_m: float
+    max_lateral_radius_m: float
 
 
 def anti_collision_method_caption(
@@ -6979,21 +8275,32 @@ def analyze_anti_collision(
                 raise ValueError(
                     "build_overlap_geometry=True requires wells built with display geometry."
                 )
+    lateral_envelopes = {
+        well.name: _lateral_envelope_for_prefilter(well)
+        for well in ordered_wells
+    }
     corridors: list[AntiCollisionCorridor] = []
     zones: list[AntiCollisionZone] = []
     pair_count = 0
     for left_index in range(len(ordered_wells)):
         for right_index in range(left_index + 1, len(ordered_wells)):
+            well_a = ordered_wells[left_index]
+            well_b = ordered_wells[right_index]
             if not _should_analyze_pair(
-                well_a=ordered_wells[left_index],
-                well_b=ordered_wells[right_index],
+                well_a=well_a,
+                well_b=well_b,
                 pair_filter=pair_filter,
+            ):
+                continue
+            if _pair_prefilter_xy_far_apart(
+                lateral_envelope_a=lateral_envelopes[well_a.name],
+                lateral_envelope_b=lateral_envelopes[well_b.name],
             ):
                 continue
             pair_count += 1
             pair_corridors = _pair_overlap_corridors(
-                well_a=ordered_wells[left_index],
-                well_b=ordered_wells[right_index],
+                well_a=well_a,
+                well_b=well_b,
                 build_overlap_geometry=build_overlap_geometry,
             )
             corridors.extend(pair_corridors)
@@ -7048,6 +8355,79 @@ def _should_analyze_pair(
     if pair_filter is not None and not bool(pair_filter(well_a, well_b)):
         return False
     return True
+
+
+def _lateral_envelope_for_prefilter(
+    well: AntiCollisionWell,
+) -> _AntiCollisionLateralEnvelope:
+    if {"X_m", "Y_m"}.issubset(well.stations.columns):
+        x_values = well.stations["X_m"].to_numpy(dtype=float)
+        y_values = well.stations["Y_m"].to_numpy(dtype=float)
+        finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+        x_values = x_values[finite_mask]
+        y_values = y_values[finite_mask]
+    else:
+        x_values = np.asarray([sample.center_xyz[0] for sample in well.samples], dtype=float)
+        y_values = np.asarray([sample.center_xyz[1] for sample in well.samples], dtype=float)
+    if x_values.size == 0 or y_values.size == 0:
+        surface_x = float(well.surface.x)
+        surface_y = float(well.surface.y)
+        x_values = np.asarray([surface_x], dtype=float)
+        y_values = np.asarray([surface_y], dtype=float)
+    max_lateral_radius_m = max(
+        (
+            _sample_xy_confidence_radius_m(
+                covariance_xyz=sample.covariance_xyz,
+                confidence_scale=float(well.overlay.model.confidence_scale),
+            )
+            for sample in well.samples
+        ),
+        default=0.0,
+    )
+    return _AntiCollisionLateralEnvelope(
+        min_x_m=float(np.min(x_values)),
+        max_x_m=float(np.max(x_values)),
+        min_y_m=float(np.min(y_values)),
+        max_y_m=float(np.max(y_values)),
+        max_lateral_radius_m=float(max_lateral_radius_m),
+    )
+
+
+def _sample_xy_confidence_radius_m(
+    *,
+    covariance_xyz: np.ndarray,
+    confidence_scale: float,
+) -> float:
+    covariance_xy = np.asarray(covariance_xyz, dtype=float)[:2, :2]
+    if covariance_xy.shape != (2, 2) or not np.all(np.isfinite(covariance_xy)):
+        return 0.0
+    eigenvalues = np.linalg.eigvalsh(covariance_xy)
+    principal_variance = float(max(np.max(eigenvalues), 0.0))
+    return float(max(confidence_scale, 0.0)) * float(np.sqrt(principal_variance))
+
+
+def _pair_prefilter_xy_far_apart(
+    *,
+    lateral_envelope_a: _AntiCollisionLateralEnvelope,
+    lateral_envelope_b: _AntiCollisionLateralEnvelope,
+) -> bool:
+    gap_x_m = max(
+        0.0,
+        float(lateral_envelope_a.min_x_m) - float(lateral_envelope_b.max_x_m),
+        float(lateral_envelope_b.min_x_m) - float(lateral_envelope_a.max_x_m),
+    )
+    gap_y_m = max(
+        0.0,
+        float(lateral_envelope_a.min_y_m) - float(lateral_envelope_b.max_y_m),
+        float(lateral_envelope_b.min_y_m) - float(lateral_envelope_a.max_y_m),
+    )
+    xy_gap_m = float(np.hypot(gap_x_m, gap_y_m))
+    max_lateral_diameter_m = 2.0 * max(
+        float(lateral_envelope_a.max_lateral_radius_m),
+        float(lateral_envelope_b.max_lateral_radius_m),
+    )
+    threshold_m = float(_PAIR_XY_PREFILTER_DIAMETER_FACTOR) * max_lateral_diameter_m
+    return bool(xy_gap_m > threshold_m)
 
 
 def anti_collision_report_rows(
@@ -18020,6 +19400,63 @@ def render_solver_diagnostics(
         st.code(ui_error_text(raw_error), language="text")
 
 ===END_FILE===
+===BEGIN_FILE===	pywp/three_viewer.py	1399
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from pathlib import Path
+from typing import Mapping
+
+import streamlit.components.v1 as components
+
+_ASSETS_DIR = Path(__file__).resolve().parent / "three_viewer_assets"
+_VENDOR_DIR = _ASSETS_DIR / "vendor"
+_TEMPLATE_PATH = _ASSETS_DIR / "templates" / "viewer_template.html"
+
+
+@lru_cache(maxsize=1)
+def _three_library_text() -> str:
+    return (_VENDOR_DIR / "three.min.js").read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=1)
+def _orbit_controls_text() -> str:
+    return (_VENDOR_DIR / "OrbitControls.js").read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=1)
+def _viewer_template_text() -> str:
+    return _TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=1)
+def _viewer_template_with_libraries() -> str:
+    return (
+        _viewer_template_text()
+        .replace("__THREE_LIBRARY__", _three_library_text())
+        .replace("__ORBIT_CONTROLS__", _orbit_controls_text())
+    )
+
+
+def render_local_three_scene(
+    payload: Mapping[str, object],
+    *,
+    height: int,
+) -> None:
+    payload_json = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
+    html = _viewer_template_with_libraries().replace("__SCENE_PAYLOAD__", payload_json)
+    components.html(
+        html,
+        height=int(height),
+        scrolling=False,
+    )
+
+===END_FILE===
 ===BEGIN_FILE===	pywp/trajectory.py	890
 from __future__ import annotations
 
@@ -23468,17 +24905,23 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_actual_fund_analysis.py	3297
+===BEGIN_FILE===	tests/test_actual_fund_analysis.py	6693
 from __future__ import annotations
+
+import numpy as np
+import pandas as pd
 
 from pywp.actual_fund_analysis import (
     CALIBRATION_STATUS_READY,
+    _reconstruct_actual_survey,
     actual_well_family_name,
     actual_well_is_horizontal,
     actual_well_pad_group,
     build_actual_fund_well_metrics,
     calibrate_uncertainty_from_actual_fund,
 )
+from pywp.mcm import compute_positions_min_curv
+from pywp.models import Point3D
 from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.uncertainty import DEFAULT_UNCERTAINTY_PRESET, DEFAULT_PLANNING_UNCERTAINTY_MODEL
 
@@ -23504,6 +24947,52 @@ def _actual_wells():
     )
 
 
+def _synthetic_hold_actual_well(name: str = "9001") -> tuple:
+    survey = pd.DataFrame(
+        {
+            "MD_m": [0.0, 600.0, 950.0, 1200.0, 1500.0, 1800.0, 2050.0, 2300.0, 2650.0, 3000.0],
+            "INC_deg": [0.0, 0.0, 25.0, 55.0, 55.0, 55.0, 70.0, 88.0, 90.0, 90.0],
+            "AZI_deg": [90.0] * 10,
+        }
+    )
+    positioned = compute_positions_min_curv(survey, start=Point3D(0.0, 0.0, 0.0))
+    rows = [
+        {
+            "Wellname": name,
+            "Type": "actual",
+            "X": float(row["X_m"]),
+            "Y": float(row["Y_m"]),
+            "Z": float(row["Z_m"]),
+            "MD": float(row["MD_m"]),
+        }
+        for _, row in positioned.iterrows()
+    ]
+    return tuple(parse_reference_trajectory_table(rows))
+
+
+def _synthetic_anomalous_horizontal_well(name: str = "9002") -> tuple:
+    survey = pd.DataFrame(
+        {
+            "MD_m": [0.0, 500.0, 850.0, 1100.0, 1400.0, 1750.0, 2100.0, 2450.0],
+            "INC_deg": [0.0, 0.0, 35.0, 65.0, 82.0, 88.0, 90.0, 90.0],
+            "AZI_deg": [90.0] * 8,
+        }
+    )
+    positioned = compute_positions_min_curv(survey, start=Point3D(0.0, 0.0, 0.0))
+    rows = [
+        {
+            "Wellname": name,
+            "Type": "actual",
+            "X": float(row["X_m"]),
+            "Y": float(row["Y_m"]),
+            "Z": float(row["Z_m"]),
+            "MD": float(row["MD_m"]),
+        }
+        for _, row in positioned.iterrows()
+    ]
+    return tuple(parse_reference_trajectory_table(rows))
+
+
 def test_actual_well_family_and_pad_group_extract_numeric_prefixes() -> None:
     assert actual_well_family_name("7401_PL") == "7401"
     assert actual_well_family_name("7402_2") == "7402"
@@ -23523,6 +25012,52 @@ def test_actual_fund_metrics_detect_horizontal_wells_and_estimate_kop() -> None:
     assert all(item.max_inc_deg >= 80.0 for item in metrics)
 
 
+def test_actual_fund_metrics_reconstruct_hold_and_robust_dls_from_irregular_xyzmd() -> None:
+    wells = _synthetic_hold_actual_well()
+
+    metrics = build_actual_fund_well_metrics(wells)
+
+    assert len(metrics) == 1
+    item = metrics[0]
+    assert item.is_horizontal is True
+    assert item.kop_md_m is not None
+    assert 500.0 <= float(item.kop_md_m) <= 950.0
+    assert item.horizontal_entry_md_m is not None
+    assert float(item.horizontal_entry_md_m) >= 2200.0
+    assert float(item.horizontal_length_m) >= 600.0
+    assert item.hold_inc_deg is not None
+    assert 52.0 <= float(item.hold_inc_deg) <= 58.0
+    assert float(item.hold_length_m) >= 350.0
+    assert item.max_dls_deg_per_30m is not None
+    assert float(item.max_dls_deg_per_30m) < 5.0
+    assert item.max_build_dls_before_hold_deg_per_30m is not None
+    assert float(item.max_build_dls_before_hold_deg_per_30m) < 5.0
+
+
+def test_actual_fund_analysis_excludes_horizontal_anomaly_without_stable_hold() -> None:
+    wells = _synthetic_anomalous_horizontal_well()
+
+    metrics = build_actual_fund_well_metrics(wells)
+
+    assert len(metrics) == 1
+    item = metrics[0]
+    assert item.is_horizontal is True
+    assert item.is_analysis_eligible is False
+    assert item.analysis_exclusion_reason is not None
+    assert "HOLD" in str(item.analysis_exclusion_reason)
+
+
+def test_reconstruct_actual_survey_respects_custom_resample_step() -> None:
+    well = _synthetic_hold_actual_well()[0]
+
+    rebuilt = _reconstruct_actual_survey(well.stations, resample_step_m=25.0)
+
+    md_values = rebuilt["MD_m"].to_numpy(dtype=float)
+    assert md_values[0] == 0.0
+    assert md_values[-1] == float(well.stations["MD_m"].iloc[-1])
+    assert np.allclose(np.diff(md_values[:-1]), 25.0)
+
+
 def test_calibration_excludes_same_family_pairs_and_builds_custom_model() -> None:
     wells = _actual_wells()
     result = calibrate_uncertainty_from_actual_fund(
@@ -23540,13 +25075,14 @@ def test_calibration_excludes_same_family_pairs_and_builds_custom_model() -> Non
     assert result.overlapping_pair_count_before >= result.overlapping_pair_count_after
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_anticollision.py	58273
+===BEGIN_FILE===	tests/test_anticollision.py	61182
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import pytest
 
+import pywp.anticollision as anticollision_module
 from pywp.anticollision import (
     AntiCollisionAnalysis,
     AntiCollisionCorridor,
@@ -23722,6 +25258,103 @@ def test_collision_corridor_geometry_and_well_segments_are_built() -> None:
     assert tube_mesh is not None
     assert tube_mesh.vertices_xyz.shape[1] == 3
     assert {segment.well_name for segment in analysis.well_segments} == {"WELL-A", "WELL-B"}
+
+
+def test_analyze_anti_collision_skips_distant_pair_before_corridor_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=1500.0),
+        surface=Point3D(0.0, 1500.0, 0.0),
+        t1=Point3D(1000.0, 1500.0, 0.0),
+        t3=Point3D(2000.0, 1500.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+
+    def _unexpected_pair_scan(**_: object) -> list[AntiCollisionCorridor]:
+        raise AssertionError("distant pair should be skipped by XY prefilter")
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _unexpected_pair_scan,
+    )
+
+    analysis = analyze_anti_collision(
+        [well_a, well_b],
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 0
+    assert analysis.overlapping_pair_count == 0
+    assert not analysis.corridors
+
+
+def test_analyze_anti_collision_keeps_near_pair_after_xy_prefilter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=25.0),
+        surface=Point3D(0.0, 25.0, 0.0),
+        t1=Point3D(1000.0, 25.0, 0.0),
+        t3=Point3D(2000.0, 25.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    seen_pairs: list[tuple[str, str]] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: object,
+        well_b: object,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        assert build_overlap_geometry is False
+        seen_pairs.append((str(getattr(well_a, "name")), str(getattr(well_b, "name"))))
+        return []
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _record_pair_scan,
+    )
+
+    analysis = analyze_anti_collision(
+        [well_a, well_b],
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 1
+    assert seen_pairs == [("WELL-A", "WELL-B")]
 
 
 def test_analyze_anti_collision_rejects_overlap_geometry_without_display_overlay() -> None:
@@ -31967,7 +33600,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	90842
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	99106
 from __future__ import annotations
 
 import importlib.util
@@ -32178,6 +33811,20 @@ def _far_reference_wells():
     )
 
 
+def _horizontal_reference_well():
+    return tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-H", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-H", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
+                {"Wellname": "FACT-H", "Type": "actual", "X": 100.0, "Y": 0.0, "Z": 1100.0, "MD": 1600.0},
+                {"Wellname": "FACT-H", "Type": "actual", "X": 700.0, "Y": 0.0, "Z": 1150.0, "MD": 2200.0},
+                {"Wellname": "FACT-H", "Type": "actual", "X": 1300.0, "Y": 0.0, "Z": 1200.0, "MD": 2800.0},
+            ]
+        )
+    )
+
+
 def test_welltrack_page_shows_only_general_run_before_results() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _records()
@@ -32211,6 +33858,31 @@ def test_welltrack_general_run_select_all_restores_full_selection() -> None:
         "WELL-B",
         "WELL-C",
     ]
+
+
+def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
+    page = _load_welltrack_page_module()
+
+    palette = tuple(str(color) for color in page.WELL_COLOR_PALETTE)
+    assert len(palette) >= 50
+    assert len(set(palette)) == len(palette)
+
+    def _rgb_triplet(value: str) -> tuple[int, int, int]:
+        normalized = value.lstrip("#")
+        return (
+            int(normalized[0:2], 16),
+            int(normalized[2:4], 16),
+            int(normalized[4:6], 16),
+        )
+
+    adjacent_distances = []
+    for index in range(len(palette) - 1):
+        red_a, green_a, blue_a = _rgb_triplet(palette[index])
+        red_b, green_b, blue_b = _rgb_triplet(palette[index + 1])
+        adjacent_distances.append(
+            abs(red_a - red_b) + abs(green_a - green_b) + abs(blue_a - blue_b)
+        )
+    assert min(adjacent_distances) >= 120
 
 
 def test_reference_trajectory_text_import_populates_reference_wells_state() -> None:
@@ -34085,6 +35757,30 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     approved_3d = next(trace for trace in figure_3d.data if str(trace.name) == "APP-1 (Проектная утвержденная)")
     assert str(fact_3d.line.color) == "#6B7280"
     assert str(approved_3d.line.color) == "#C62828"
+    fact_label_3d = next(
+        trace for trace in figure_3d.data if str(trace.name) == "Фактическая: подписи"
+    )
+    approved_label_3d = next(
+        trace
+        for trace in figure_3d.data
+        if str(trace.name) == "Проектная утвержденная: подписи"
+    )
+    assert "FACT-1" in list(fact_label_3d.text)
+    assert "APP-1" in list(approved_label_3d.text)
+    assert str(fact_label_3d.textfont.color) == "#111111"
+    assert str(approved_label_3d.textfont.color) == "#C62828"
+
+
+def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> None:
+    page = _load_welltrack_page_module()
+    horizontal_well = _horizontal_reference_well()[0]
+
+    anchor = page._reference_label_anchor_point(horizontal_well)
+
+    assert anchor is not None
+    assert float(anchor[0]) == pytest.approx(700.0)
+    assert float(anchor[1]) == pytest.approx(0.0)
+    assert float(anchor[2]) == pytest.approx(1150.0)
 
 
 def test_all_wells_overview_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
@@ -34125,6 +35821,8 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
     assert any(str(trace.name) == "APP-1 (Проектная утвержденная)" for trace in figure_3d.data)
     assert not any("FACT-1 (Фактическая): цели" == str(trace.name) for trace in figure_3d.data)
     assert not any("APP-1 (Проектная утвержденная): цели" == str(trace.name) for trace in figure_plan.data)
+    assert any(str(trace.name) == "Фактическая: подписи" for trace in figure_3d.data)
+    assert any(str(trace.name) == "Проектная утвержденная: подписи" for trace in figure_plan.data)
 
 
 def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
@@ -34152,6 +35850,41 @@ def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> Non
     assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
 
+def test_all_wells_3d_figure_aggregates_reference_wells_in_fast_mode() -> None:
+    page = _load_welltrack_page_module()
+    figure = page._all_wells_3d_figure(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        reference_wells=_reference_wells(),
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
+
+    trace_names = {str(trace.name) for trace in figure.data}
+    assert "Фактическая (сводно)" in trace_names
+    assert "Проектная утвержденная (сводно)" in trace_names
+    assert "FACT-1 (Фактическая)" not in trace_names
+    assert "APP-1 (Проектная утвержденная)" not in trace_names
+
+
+def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_fast_mode() -> None:
+    page = _load_welltrack_page_module()
+    analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        reference_wells=_reference_wells(),
+    )
+
+    figure = page._all_wells_anticollision_3d_figure(
+        analysis,
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
+
+    trace_names = {str(trace.name) for trace in figure.data}
+    assert "Фактическая (сводно)" in trace_names
+    assert "Проектная утвержденная (сводно)" in trace_names
+    assert "FACT-1 (Фактическая)" not in trace_names
+    assert "APP-1 (Проектная утвержденная)" not in trace_names
+
+
 def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
     page = _load_welltrack_page_module()
     successes = [
@@ -34175,6 +35908,125 @@ def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
         trace_names = {str(trace.name) for trace in figure.data}
         assert "WELL-A: t1 label" in trace_names
         assert "WELL-B: t1 label" in trace_names
+
+
+def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend() -> None:
+    page = _load_welltrack_page_module()
+    figure = page._all_wells_3d_figure(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        reference_wells=_reference_wells(),
+    )
+
+    payload = page._plotly_3d_figure_to_three_payload(figure)
+
+    labels = {str(item["text"]) for item in payload["labels"]}
+    legend_labels = {str(item["label"]) for item in payload["legend"]}
+    assert payload["camera"] == DEFAULT_3D_CAMERA
+    assert "WELL-A" in labels
+    assert "FACT-1" in labels
+    assert "APP-1" in labels
+    assert "WELL-A" in legend_labels
+    assert "FACT-1 (Фактическая)" in legend_labels
+
+
+def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> None:
+    page = _load_welltrack_page_module()
+    analysis = page._build_anti_collision_analysis(
+        [
+            _successful_plan(name="WELL-A", y_offset_m=0.0),
+            _successful_plan(name="WELL-B", y_offset_m=5.0),
+        ],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    figure = page._all_wells_anticollision_3d_figure(analysis)
+
+    payload = page._plotly_3d_figure_to_three_payload(figure)
+
+    assert payload["meshes"]
+    assert any(str(item["label"]) == "WELL-A" for item in payload["legend"])
+
+
+def test_optimize_three_payload_merges_same_style_objects() -> None:
+    page = _load_welltrack_page_module()
+    payload = {
+        "background": "#FFFFFF",
+        "bounds": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+        "camera": DEFAULT_3D_CAMERA,
+        "lines": [
+            {
+                "segments": [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
+                "color": "#0B6E4F",
+                "opacity": 1.0,
+                "dash": "solid",
+            },
+            {
+                "segments": [[[1.0, 1.0, 0.0], [2.0, 1.0, 0.0]]],
+                "color": "#0B6E4F",
+                "opacity": 1.0,
+                "dash": "solid",
+            },
+        ],
+        "points": [
+            {
+                "points": [[0.0, 0.0, 0.0]],
+                "color": "#111111",
+                "opacity": 1.0,
+                "size": 6.0,
+                "symbol": "circle",
+            },
+            {
+                "points": [[1.0, 0.0, 0.0]],
+                "color": "#111111",
+                "opacity": 1.0,
+                "size": 6.0,
+                "symbol": "circle",
+            },
+        ],
+        "meshes": [
+            {
+                "vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                "faces": [[0, 1, 2]],
+                "color": "#C62828",
+                "opacity": 0.4,
+            },
+            {
+                "vertices": [[1.0, 1.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]],
+                "faces": [[0, 1, 2]],
+                "color": "#C62828",
+                "opacity": 0.4,
+            },
+        ],
+        "labels": [{"text": "A", "position": [0.0, 0.0, 0.0], "color": "#111111"}],
+        "legend": [{"label": "A", "color": "#0B6E4F", "opacity": 1.0}],
+    }
+
+    optimized = page._optimize_three_payload(payload)
+
+    assert len(optimized["lines"]) == 1
+    assert len(optimized["lines"][0]["segments"]) == 2
+    assert len(optimized["points"]) == 1
+    assert len(optimized["points"][0]["points"]) == 2
+    assert len(optimized["meshes"]) == 1
+    assert len(optimized["meshes"][0]["vertices"]) == 6
+    assert len(optimized["meshes"][0]["faces"]) == 2
+    assert optimized["camera"] == DEFAULT_3D_CAMERA
+    assert optimized["labels"] == payload["labels"]
+    assert optimized["legend"] == payload["legend"]
+
+
+def test_plotly_3d_figure_to_three_payload_preserves_custom_camera() -> None:
+    page = _load_welltrack_page_module()
+    figure = page._all_wells_3d_figure([_successful_plan(name="WELL-A", y_offset_m=0.0)])
+    custom_camera = {
+        "up": {"x": 0.0, "y": 0.0, "z": 1.0},
+        "center": {"x": 0.15, "y": -0.05, "z": 0.0},
+        "eye": {"x": 1.6, "y": 0.9, "z": 1.1},
+    }
+    figure.update_layout(scene={"camera": custom_camera})
+
+    payload = page._plotly_3d_figure_to_three_payload(figure)
+
+    assert payload["camera"] == custom_camera
 
 
 def test_batch_summary_display_df_reorders_and_shortens_summary_columns() -> None:

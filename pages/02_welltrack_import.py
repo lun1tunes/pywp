@@ -78,6 +78,7 @@ from pywp.reference_trajectories import (
 )
 from pywp.plotly_config import DEFAULT_3D_CAMERA, trajectory_plotly_chart_config
 from pywp.planner_config import optimization_display_label
+from pywp.three_viewer import render_local_three_scene
 from pywp.plot_axes import (
     equalized_axis_ranges,
     equalized_xy_ranges,
@@ -140,6 +141,30 @@ WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
 WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
 WT_T1T3_MIN_DELTA_M = 0.5
+WT_3D_RENDER_AUTO = "Авто"
+WT_3D_RENDER_DETAIL = "Детально"
+WT_3D_RENDER_FAST = "Быстро"
+WT_3D_BACKEND_PLOTLY = "Plotly"
+WT_3D_BACKEND_THREE_LOCAL = "Three.js (локально, экспериментально)"
+REFERENCE_LABEL_ACTUAL_COLOR = "#111111"
+REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
+REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG = 80.0
+REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M = 100.0
+WT_3D_RENDER_OPTIONS: tuple[str, ...] = (
+    WT_3D_RENDER_AUTO,
+    WT_3D_RENDER_DETAIL,
+    WT_3D_RENDER_FAST,
+)
+WT_3D_BACKEND_OPTIONS: tuple[str, ...] = (
+    WT_3D_BACKEND_PLOTLY,
+    WT_3D_BACKEND_THREE_LOCAL,
+)
+WT_3D_FAST_REFERENCE_WELL_THRESHOLD = 10
+WT_3D_FAST_REFERENCE_POINT_THRESHOLD = 1200
+WT_3D_FAST_CALC_WELL_THRESHOLD = 14
+WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
+WT_3D_FAST_CALC_TARGET_POINTS = 180
+WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT = 6
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
     "wt_cfg_md_step_control_m": "wt_cfg_md_control",
@@ -319,6 +344,128 @@ def _lighten_hex(hex_color: str, blend_with_white: float = 0.38) -> str:
     return f"#{red:02X}{green:02X}{blue:02X}"
 
 
+def _reference_point_count(reference_wells: Iterable[ImportedTrajectoryWell]) -> int:
+    return int(
+        sum(
+            len(well.stations.index)
+            for well in reference_wells
+            if not well.stations.empty
+        )
+    )
+
+
+def _resolve_3d_render_mode(
+    *,
+    requested_mode: str,
+    calculated_well_count: int,
+    reference_wells: Iterable[ImportedTrajectoryWell],
+) -> str:
+    normalized = str(requested_mode).strip()
+    if normalized == WT_3D_RENDER_DETAIL:
+        return WT_3D_RENDER_DETAIL
+    if normalized == WT_3D_RENDER_FAST:
+        return WT_3D_RENDER_FAST
+    reference_well_list = tuple(reference_wells)
+    if calculated_well_count >= WT_3D_FAST_CALC_WELL_THRESHOLD:
+        return WT_3D_RENDER_FAST
+    if len(reference_well_list) >= WT_3D_FAST_REFERENCE_WELL_THRESHOLD:
+        return WT_3D_RENDER_FAST
+    if _reference_point_count(reference_well_list) >= WT_3D_FAST_REFERENCE_POINT_THRESHOLD:
+        return WT_3D_RENDER_FAST
+    return WT_3D_RENDER_DETAIL
+
+
+def _decimated_station_frame(stations: pd.DataFrame, *, target_points: int) -> pd.DataFrame:
+    if target_points <= 2 or len(stations.index) <= target_points:
+        return stations
+    indices = np.linspace(
+        0,
+        len(stations.index) - 1,
+        num=int(target_points),
+        dtype=int,
+    )
+    unique_indices = np.unique(indices)
+    return stations.iloc[unique_indices].reset_index(drop=True)
+
+
+def _nan_separated_xyz_segments(
+    polylines_xyz: Iterable[tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    x_values: list[float] = []
+    y_values: list[float] = []
+    z_values: list[float] = []
+    for polyline_x, polyline_y, polyline_z in polylines_xyz:
+        if len(polyline_x) == 0:
+            continue
+        x_values.extend(np.asarray(polyline_x, dtype=float).tolist())
+        y_values.extend(np.asarray(polyline_y, dtype=float).tolist())
+        z_values.extend(np.asarray(polyline_z, dtype=float).tolist())
+        x_values.append(np.nan)
+        y_values.append(np.nan)
+        z_values.append(np.nan)
+    return (
+        np.asarray(x_values, dtype=float),
+        np.asarray(y_values, dtype=float),
+        np.asarray(z_values, dtype=float),
+    )
+
+
+def _combined_reference_trace_3d(
+    *,
+    reference_wells: Iterable[object],
+    kind: str,
+    target_points_per_well: int,
+) -> go.Scatter3d | None:
+    matching = [
+        well
+        for well in reference_wells
+        if str(getattr(well, "kind", getattr(well, "well_kind", ""))) == str(kind)
+        and not getattr(well, "stations").empty
+    ]
+    if not matching:
+        return None
+    x_values, y_values, z_values = _nan_separated_xyz_segments(
+        (
+            tuple(
+                _decimated_station_frame(
+                    well.stations,
+                    target_points=target_points_per_well,
+                )[column].to_numpy(dtype=float)
+                for column in ("X_m", "Y_m", "Z_m")
+            )
+            for well in matching
+        )
+    )
+    kind_label = REFERENCE_WELL_KIND_LABELS.get(str(kind), str(kind))
+    return go.Scatter3d(
+        x=x_values,
+        y=y_values,
+        z=z_values,
+        mode="lines",
+        name=f"{kind_label} (сводно)",
+        line={
+            "width": 2.5,
+            "color": REFERENCE_WELL_KIND_COLORS.get(str(kind), "#A0A0A0"),
+        },
+        hoverinfo="skip",
+    )
+
+
+def _anticollision_focus_reference_names(analysis: AntiCollisionAnalysis) -> set[str]:
+    reference_names = {
+        str(well.name)
+        for well in analysis.wells
+        if bool(well.is_reference_only)
+    }
+    focus_names: set[str] = set()
+    for corridor in analysis.corridors:
+        if str(corridor.well_a) in reference_names:
+            focus_names.add(str(corridor.well_a))
+        if str(corridor.well_b) in reference_names:
+            focus_names.add(str(corridor.well_b))
+    return focus_names
+
+
 def _t1_name_trace_3d(*, well_name: str, t1: Point3D, color: str) -> go.Scatter3d:
     return go.Scatter3d(
         x=[float(t1.x)],
@@ -351,6 +498,563 @@ def _t1_name_trace_2d(
         showlegend=False,
         textfont={"color": str(color), "size": 12},
         hoverinfo="skip",
+    )
+
+
+def _reference_label_color(kind: str) -> str:
+    if str(kind) == REFERENCE_WELL_APPROVED:
+        return REFERENCE_LABEL_APPROVED_COLOR
+    return REFERENCE_LABEL_ACTUAL_COLOR
+
+
+def _reference_label_anchor_point(
+    reference_well: ImportedTrajectoryWell,
+) -> tuple[float, float, float] | None:
+    stations = reference_well.stations
+    required = {"MD_m", "INC_deg", "X_m", "Y_m", "Z_m"}
+    if stations.empty or not required.issubset(stations.columns):
+        return None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    z_values = stations["Z_m"].to_numpy(dtype=float)
+    if len(md_values) == 0:
+        return None
+    high_angle_mask = inc_values >= float(REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG)
+    if bool(high_angle_mask[-1]):
+        start_index = len(high_angle_mask) - 1
+        while start_index > 0 and bool(high_angle_mask[start_index - 1]):
+            start_index -= 1
+        if float(md_values[-1] - md_values[start_index]) >= float(
+            REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M
+        ):
+            return (
+                float(x_values[start_index]),
+                float(y_values[start_index]),
+                float(z_values[start_index]),
+            )
+    return (
+        float(x_values[-1]),
+        float(y_values[-1]),
+        float(z_values[-1]),
+    )
+
+
+def _reference_name_trace_3d(
+    reference_wells: Iterable[ImportedTrajectoryWell],
+    *,
+    kind: str,
+) -> go.Scatter3d | None:
+    points: list[tuple[float, float, float, str]] = []
+    for well in reference_wells:
+        if str(well.kind) != str(kind):
+            continue
+        anchor = _reference_label_anchor_point(well)
+        if anchor is None:
+            continue
+        points.append((float(anchor[0]), float(anchor[1]), float(anchor[2]), str(well.name)))
+    if not points:
+        return None
+    return go.Scatter3d(
+        x=[item[0] for item in points],
+        y=[item[1] for item in points],
+        z=[item[2] for item in points],
+        mode="text",
+        text=[item[3] for item in points],
+        textposition="top center",
+        name=f"{REFERENCE_WELL_KIND_LABELS.get(str(kind), str(kind))}: подписи",
+        showlegend=False,
+        textfont={"color": _reference_label_color(str(kind)), "size": 11},
+        hoverinfo="skip",
+    )
+
+
+def _reference_name_trace_2d(
+    reference_wells: Iterable[ImportedTrajectoryWell],
+    *,
+    kind: str,
+) -> go.Scatter | None:
+    points: list[tuple[float, float, str]] = []
+    for well in reference_wells:
+        if str(well.kind) != str(kind):
+            continue
+        anchor = _reference_label_anchor_point(well)
+        if anchor is None:
+            continue
+        points.append((float(anchor[0]), float(anchor[1]), str(well.name)))
+    if not points:
+        return None
+    return go.Scatter(
+        x=[item[0] for item in points],
+        y=[item[1] for item in points],
+        mode="text",
+        text=[item[2] for item in points],
+        textposition="top center",
+        name=f"{REFERENCE_WELL_KIND_LABELS.get(str(kind), str(kind))}: подписи",
+        showlegend=False,
+        textfont={"color": _reference_label_color(str(kind)), "size": 11},
+        hoverinfo="skip",
+    )
+
+
+def _trace_showlegend(trace: object) -> bool:
+    showlegend = getattr(trace, "showlegend", None)
+    if showlegend is None:
+        return bool(str(getattr(trace, "name", "") or "").strip())
+    return bool(showlegend)
+
+
+def _plotly_color_and_opacity(
+    color_value: object,
+    *,
+    fallback_opacity: float = 1.0,
+) -> tuple[str, float]:
+    color_text = str(color_value or "").strip()
+    if not color_text:
+        return "#94A3B8", float(np.clip(fallback_opacity, 0.0, 1.0))
+    if color_text.startswith("#"):
+        return color_text, float(np.clip(fallback_opacity, 0.0, 1.0))
+    if color_text.startswith("rgba(") and color_text.endswith(")"):
+        raw = color_text[5:-1]
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) == 4:
+            try:
+                red = int(float(parts[0]))
+                green = int(float(parts[1]))
+                blue = int(float(parts[2]))
+                alpha = float(parts[3])
+                return (
+                    f"#{red:02X}{green:02X}{blue:02X}",
+                    float(np.clip(alpha, 0.0, 1.0)),
+                )
+            except ValueError:
+                pass
+    if color_text.startswith("rgb(") and color_text.endswith(")"):
+        raw = color_text[4:-1]
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) == 3:
+            try:
+                red = int(float(parts[0]))
+                green = int(float(parts[1]))
+                blue = int(float(parts[2]))
+                return (
+                    f"#{red:02X}{green:02X}{blue:02X}",
+                    float(np.clip(fallback_opacity, 0.0, 1.0)),
+                )
+            except ValueError:
+                pass
+    return color_text, float(np.clip(fallback_opacity, 0.0, 1.0))
+
+
+def _split_nan_separated_xyz_segments(
+    *,
+    x_values: Iterable[object],
+    y_values: Iterable[object],
+    z_values: Iterable[object],
+) -> list[list[list[float]]]:
+    x_array = np.asarray(list(x_values), dtype=float)
+    y_array = np.asarray(list(y_values), dtype=float)
+    z_array = np.asarray(list(z_values), dtype=float)
+    if not (len(x_array) == len(y_array) == len(z_array)):
+        return []
+    segments: list[list[list[float]]] = []
+    current_segment: list[list[float]] = []
+    for x_value, y_value, z_value in zip(x_array, y_array, z_array, strict=False):
+        if not (
+            np.isfinite(float(x_value))
+            and np.isfinite(float(y_value))
+            and np.isfinite(float(z_value))
+        ):
+            if len(current_segment) >= 2:
+                segments.append(list(current_segment))
+            current_segment = []
+            continue
+        current_segment.append(
+            [float(x_value), float(y_value), float(z_value)]
+        )
+    if len(current_segment) >= 2:
+        segments.append(list(current_segment))
+    return segments
+
+
+def _scatter3d_trace_to_three_payload(
+    trace: go.Scatter3d,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "lines": [],
+        "points": [],
+        "labels": [],
+        "legend_items": [],
+    }
+    mode = str(trace.mode or "")
+    trace_name = str(trace.name or "").strip()
+    trace_opacity = (
+        1.0 if getattr(trace, "opacity", None) is None else float(trace.opacity)
+    )
+    if "lines" in mode:
+        line = trace.line or {}
+        color, opacity = _plotly_color_and_opacity(
+            getattr(line, "color", None),
+            fallback_opacity=trace_opacity,
+        )
+        segments = _split_nan_separated_xyz_segments(
+            x_values=() if trace.x is None else trace.x,
+            y_values=() if trace.y is None else trace.y,
+            z_values=() if trace.z is None else trace.z,
+        )
+        if segments:
+            payload["lines"].append(
+                {
+                    "name": trace_name,
+                    "segments": segments,
+                    "color": color,
+                    "opacity": opacity,
+                    "dash": str(getattr(line, "dash", "solid") or "solid"),
+                }
+            )
+            if _trace_showlegend(trace):
+                payload["legend_items"].append(
+                    {
+                        "label": trace_name,
+                        "color": color,
+                        "opacity": opacity,
+                    }
+                )
+    if "markers" in mode:
+        marker = trace.marker or {}
+        color, opacity = _plotly_color_and_opacity(
+            getattr(marker, "color", None),
+            fallback_opacity=trace_opacity,
+        )
+        if not (trace_name or opacity > 0.01):
+            return payload
+        x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+        y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+        z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+        mask = np.isfinite(x_array) & np.isfinite(y_array) & np.isfinite(z_array)
+        points = [
+            [float(x_value), float(y_value), float(z_value)]
+            for x_value, y_value, z_value in zip(
+                x_array[mask],
+                y_array[mask],
+                z_array[mask],
+                strict=False,
+            )
+        ]
+        if points:
+            marker_size = getattr(marker, "size", 6)
+            if isinstance(marker_size, (list, tuple, np.ndarray)):
+                marker_size = marker_size[0] if len(marker_size) else 6
+            payload["points"].append(
+                {
+                    "name": trace_name,
+                    "points": points,
+                    "color": color,
+                    "opacity": opacity,
+                    "size": float(marker_size),
+                    "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
+                }
+            )
+            if _trace_showlegend(trace):
+                payload["legend_items"].append(
+                    {
+                        "label": trace_name,
+                        "color": color,
+                        "opacity": opacity,
+                    }
+                )
+    if "text" in mode and "lines" not in mode and "markers" not in mode:
+        text_font = trace.textfont or {}
+        color = str(getattr(text_font, "color", "#0F172A"))
+        x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+        y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+        z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+        text_values = list(() if trace.text is None else trace.text)
+        for x_value, y_value, z_value, text_value in zip(
+            x_array,
+            y_array,
+            z_array,
+            text_values,
+            strict=False,
+        ):
+            if not (
+                np.isfinite(float(x_value))
+                and np.isfinite(float(y_value))
+                and np.isfinite(float(z_value))
+            ):
+                continue
+            payload["labels"].append(
+                {
+                    "text": str(text_value),
+                    "position": [
+                        float(x_value),
+                        float(y_value),
+                        float(z_value),
+                    ],
+                    "color": color,
+                }
+            )
+    return payload
+
+
+def _mesh3d_trace_to_three_payload(trace: go.Mesh3d) -> dict[str, object] | None:
+    x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+    y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+    z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+    i_array = np.asarray(list(() if trace.i is None else trace.i), dtype=int)
+    j_array = np.asarray(list(() if trace.j is None else trace.j), dtype=int)
+    k_array = np.asarray(list(() if trace.k is None else trace.k), dtype=int)
+    if (
+        len(x_array) == 0
+        or len(y_array) != len(x_array)
+        or len(z_array) != len(x_array)
+        or len(i_array) == 0
+        or len(i_array) != len(j_array)
+        or len(i_array) != len(k_array)
+    ):
+        return None
+    color, opacity = _plotly_color_and_opacity(
+        getattr(trace, "color", None),
+        fallback_opacity=float(
+            1.0 if getattr(trace, "opacity", None) is None else trace.opacity
+        ),
+    )
+    payload = {
+        "name": str(trace.name or "").strip(),
+        "vertices": [
+            [float(x_value), float(y_value), float(z_value)]
+            for x_value, y_value, z_value in zip(x_array, y_array, z_array, strict=False)
+        ],
+        "faces": [
+            [int(i_value), int(j_value), int(k_value)]
+            for i_value, j_value, k_value in zip(i_array, j_array, k_array, strict=False)
+        ],
+        "color": color,
+        "opacity": opacity,
+    }
+    return payload
+
+
+def _optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
+    optimized = dict(payload)
+    optimized["lines"] = _merge_three_line_payloads(payload.get("lines") or [])
+    optimized["points"] = _merge_three_point_payloads(payload.get("points") or [])
+    optimized["meshes"] = _merge_three_mesh_payloads(payload.get("meshes") or [])
+    optimized["labels"] = list(payload.get("labels") or [])
+    optimized["legend"] = list(payload.get("legend") or [])
+    return optimized
+
+
+def _merge_three_line_payloads(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, float, str], list[list[list[float]]]] = {}
+    ordered_keys: list[tuple[str, float, str]] = []
+    for item in items:
+        color = str(item.get("color") or "#0F172A")
+        opacity = float(item.get("opacity") or 1.0)
+        dash = str(item.get("dash") or "solid")
+        key = (color, opacity, dash)
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+        grouped[key].extend(
+            [
+                segment
+                for segment in (item.get("segments") or [])
+                if isinstance(segment, list) and len(segment) >= 2
+            ]
+        )
+    merged: list[dict[str, object]] = []
+    for color, opacity, dash in ordered_keys:
+        segments = grouped[(color, opacity, dash)]
+        if not segments:
+            continue
+        merged.append(
+            {
+                "segments": segments,
+                "color": color,
+                "opacity": float(opacity),
+                "dash": dash,
+            }
+        )
+    return merged
+
+
+def _merge_three_point_payloads(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, float, float, str], list[list[float]]] = {}
+    ordered_keys: list[tuple[str, float, float, str]] = []
+    for item in items:
+        color = str(item.get("color") or "#0F172A")
+        opacity = float(item.get("opacity") or 1.0)
+        size = float(item.get("size") or 6.0)
+        symbol = str(item.get("symbol") or "circle")
+        key = (color, opacity, size, symbol)
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+        grouped[key].extend(
+            [
+                point
+                for point in (item.get("points") or [])
+                if isinstance(point, list) and len(point) == 3
+            ]
+        )
+    merged: list[dict[str, object]] = []
+    for color, opacity, size, symbol in ordered_keys:
+        points = grouped[(color, opacity, size, symbol)]
+        if not points:
+            continue
+        merged.append(
+            {
+                "points": points,
+                "color": color,
+                "opacity": float(opacity),
+                "size": float(size),
+                "symbol": symbol,
+            }
+        )
+    return merged
+
+
+def _merge_three_mesh_payloads(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, float], dict[str, object]] = {}
+    ordered_keys: list[tuple[str, float]] = []
+    for item in items:
+        color = str(item.get("color") or "#94A3B8")
+        opacity = float(item.get("opacity") or 1.0)
+        key = (color, opacity)
+        if key not in grouped:
+            grouped[key] = {
+                "vertices": [],
+                "faces": [],
+                "color": color,
+                "opacity": float(opacity),
+            }
+            ordered_keys.append(key)
+        merged = grouped[key]
+        vertices = [
+            vertex
+            for vertex in (item.get("vertices") or [])
+            if isinstance(vertex, list) and len(vertex) == 3
+        ]
+        faces = [
+            face
+            for face in (item.get("faces") or [])
+            if isinstance(face, list) and len(face) == 3
+        ]
+        if not vertices or not faces:
+            continue
+        vertex_offset = len(merged["vertices"])
+        merged["vertices"].extend(vertices)
+        merged["faces"].extend(
+            [
+                [
+                    int(face[0]) + vertex_offset,
+                    int(face[1]) + vertex_offset,
+                    int(face[2]) + vertex_offset,
+                ]
+                for face in faces
+            ]
+        )
+    return [
+        grouped[key]
+        for key in ordered_keys
+        if grouped[key]["vertices"] and grouped[key]["faces"]
+    ]
+
+
+def _plotly_3d_figure_to_three_payload(fig: go.Figure) -> dict[str, object]:
+    scene = fig.layout.scene
+    x_range = (
+        [float(scene.xaxis.range[0]), float(scene.xaxis.range[1])]
+        if scene.xaxis.range is not None
+        else [0.0, 1000.0]
+    )
+    y_range = (
+        [float(scene.yaxis.range[0]), float(scene.yaxis.range[1])]
+        if scene.yaxis.range is not None
+        else [0.0, 1000.0]
+    )
+    z_range = (
+        [float(scene.zaxis.range[0]), float(scene.zaxis.range[1])]
+        if scene.zaxis.range is not None
+        else [0.0, 1000.0]
+    )
+    payload: dict[str, object] = {
+        "background": "#FFFFFF",
+        "title": str(getattr(getattr(fig.layout, "title", None), "text", "") or ""),
+        "bounds": {
+            "min": [x_range[0], y_range[0], z_range[0]],
+            "max": [x_range[1], y_range[1], z_range[1]],
+        },
+        "camera": (
+            scene.camera.to_plotly_json()
+            if getattr(scene, "camera", None) is not None
+            else DEFAULT_3D_CAMERA
+        ),
+        "lines": [],
+        "meshes": [],
+        "points": [],
+        "labels": [],
+        "legend": [],
+    }
+    seen_legend_labels: set[str] = set()
+    for trace in fig.data:
+        if isinstance(trace, go.Scatter3d):
+            trace_payload = _scatter3d_trace_to_three_payload(trace)
+            payload["lines"].extend(trace_payload["lines"])
+            payload["points"].extend(trace_payload["points"])
+            payload["labels"].extend(trace_payload["labels"])
+            for item in trace_payload["legend_items"]:
+                label = str(item["label"])
+                if not label or label in seen_legend_labels:
+                    continue
+                payload["legend"].append(item)
+                seen_legend_labels.add(label)
+            continue
+        if isinstance(trace, go.Mesh3d):
+            mesh_payload = _mesh3d_trace_to_three_payload(trace)
+            if mesh_payload is None:
+                continue
+            payload["meshes"].append(mesh_payload)
+            if _trace_showlegend(trace):
+                label = str(mesh_payload["name"])
+                if label and label not in seen_legend_labels:
+                    payload["legend"].append(
+                        {
+                            "label": label,
+                            "color": str(mesh_payload["color"]),
+                            "opacity": float(mesh_payload["opacity"]),
+                        }
+                    )
+                    seen_legend_labels.add(label)
+    return _optimize_three_payload(payload)
+
+
+def _render_plotly_or_three_3d(
+    *,
+    container: object,
+    figure: go.Figure,
+    backend: str,
+    height: int,
+) -> None:
+    if str(backend) == WT_3D_BACKEND_THREE_LOCAL:
+        with container:
+            render_local_three_scene(
+                _plotly_3d_figure_to_three_payload(figure),
+                height=height,
+            )
+        return
+    container.plotly_chart(
+        figure,
+        config=trajectory_plotly_chart_config(),
+        width="stretch",
     )
 
 
@@ -784,6 +1488,8 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault("wt_results_view_mode", "Отдельная скважина")
     st.session_state.setdefault("wt_results_all_view_mode", "Траектории")
+    st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_AUTO)
+    st.session_state.setdefault("wt_3d_backend", WT_3D_BACKEND_PLOTLY)
     st.session_state.setdefault(
         "wt_anticollision_uncertainty_preset", DEFAULT_UNCERTAINTY_PRESET
     )
@@ -801,6 +1507,10 @@ def _init_state() -> None:
         "Anti-collision",
     }:
         st.session_state["wt_results_all_view_mode"] = "Траектории"
+    if str(st.session_state.get("wt_3d_render_mode", "")).strip() not in set(WT_3D_RENDER_OPTIONS):
+        st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_AUTO
+    if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(WT_3D_BACKEND_OPTIONS):
+        st.session_state["wt_3d_backend"] = WT_3D_BACKEND_PLOTLY
     st.session_state["wt_anticollision_uncertainty_preset"] = (
         normalize_uncertainty_preset(
             st.session_state.get(
@@ -936,6 +1646,7 @@ def _all_wells_3d_figure(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
+    render_mode: str = WT_3D_RENDER_AUTO,
     height: int = 620,
 ) -> go.Figure:
     fig = go.Figure()
@@ -945,6 +1656,11 @@ def _all_wells_3d_figure(
     x_focus_arrays: list[np.ndarray] = []
     y_focus_arrays: list[np.ndarray] = []
     z_focus_arrays: list[np.ndarray] = []
+    resolved_render_mode = _resolve_3d_render_mode(
+        requested_mode=render_mode,
+        calculated_well_count=len(successes),
+        reference_wells=reference_wells,
+    )
     color_map = name_to_color or {
         str(item.name): _well_color(index) for index, item in enumerate(successes)
     }
@@ -952,7 +1668,14 @@ def _all_wells_3d_figure(
         line_color = color_map.get(str(item.name), _well_color(index))
         line_dash = "dash" if bool(item.md_postcheck_exceeded) else "solid"
         name = item.name
-        stations = item.stations
+        stations = (
+            _decimated_station_frame(
+                item.stations,
+                target_points=WT_3D_FAST_CALC_TARGET_POINTS,
+            )
+            if resolved_render_mode == WT_3D_RENDER_FAST
+            else item.stations
+        )
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
         y_arrays.append(stations["Y_m"].to_numpy(dtype=float))
         z_arrays.append(stations["Z_m"].to_numpy(dtype=float))
@@ -1020,46 +1743,63 @@ def _all_wells_3d_figure(
             )
         )
 
-    for reference_well in reference_wells:
-        stations = reference_well.stations
-        if stations.empty:
-            continue
-        line_color = REFERENCE_WELL_KIND_COLORS.get(
-            str(reference_well.kind),
-            "#A0A0A0",
-        )
-        x_values = stations["X_m"].to_numpy(dtype=float)
-        y_values = stations["Y_m"].to_numpy(dtype=float)
-        z_values = stations["Z_m"].to_numpy(dtype=float)
-        x_arrays.append(x_values)
-        y_arrays.append(y_values)
-        z_arrays.append(z_values)
-        fig.add_trace(
-            go.Scatter3d(
-                x=x_values,
-                y=y_values,
-                z=z_values,
-                mode="lines",
-                name=reference_well_display_label(reference_well),
-                line={"width": 4, "color": line_color},
-                customdata=np.column_stack(
-                    [stations["MD_m"].to_numpy(dtype=float)]
-                ),
-                hovertemplate=(
-                    "Тип: "
-                    + REFERENCE_WELL_KIND_LABELS.get(
-                        str(reference_well.kind),
-                        str(reference_well.kind),
-                    )
-                    + "<br>"
-                    "X: %{x:.2f} m<br>"
-                    "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m<br>"
-                    "MD: %{customdata[0]:.2f} m"
-                    "<extra>%{fullData.name}</extra>"
-                ),
+    if resolved_render_mode == WT_3D_RENDER_FAST:
+        for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+            combined_trace = _combined_reference_trace_3d(
+                reference_wells=reference_wells,
+                kind=kind,
+                target_points_per_well=WT_3D_FAST_REFERENCE_TARGET_POINTS,
             )
-        )
+            if combined_trace is not None:
+                fig.add_trace(combined_trace)
+                x_arrays.append(np.asarray(combined_trace.x, dtype=float))
+                y_arrays.append(np.asarray(combined_trace.y, dtype=float))
+                z_arrays.append(np.asarray(combined_trace.z, dtype=float))
+    else:
+        for reference_well in reference_wells:
+            stations = reference_well.stations
+            if stations.empty:
+                continue
+            line_color = REFERENCE_WELL_KIND_COLORS.get(
+                str(reference_well.kind),
+                "#A0A0A0",
+            )
+            x_values = stations["X_m"].to_numpy(dtype=float)
+            y_values = stations["Y_m"].to_numpy(dtype=float)
+            z_values = stations["Z_m"].to_numpy(dtype=float)
+            x_arrays.append(x_values)
+            y_arrays.append(y_values)
+            z_arrays.append(z_values)
+            fig.add_trace(
+                go.Scatter3d(
+                    x=x_values,
+                    y=y_values,
+                    z=z_values,
+                    mode="lines",
+                    name=reference_well_display_label(reference_well),
+                    line={"width": 4, "color": line_color},
+                    customdata=np.column_stack(
+                        [stations["MD_m"].to_numpy(dtype=float)]
+                    ),
+                    hovertemplate=(
+                        "Тип: "
+                        + REFERENCE_WELL_KIND_LABELS.get(
+                            str(reference_well.kind),
+                            str(reference_well.kind),
+                        )
+                        + "<br>"
+                        "X: %{x:.2f} m<br>"
+                        "Y: %{y:.2f} m<br>"
+                        "Z/TVD: %{z:.2f} m<br>"
+                        "MD: %{customdata[0]:.2f} m"
+                        "<extra>%{fullData.name}</extra>"
+                    ),
+                )
+            )
+    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
+        if label_trace is not None:
+            fig.add_trace(label_trace)
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
@@ -1313,9 +2053,13 @@ def _all_wells_plan_figure(
                     "Y: %{y:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m"
                     "<extra>%{fullData.name}</extra>"
-                ),
+                    ),
+                )
             )
-        )
+    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label_trace = _reference_name_trace_2d(reference_wells, kind=kind)
+        if label_trace is not None:
+            fig.add_trace(label_trace)
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
@@ -1415,6 +2159,7 @@ def _all_wells_anticollision_3d_figure(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    render_mode: str = WT_3D_RENDER_AUTO,
     height: int = 660,
 ) -> go.Figure:
     fig = go.Figure()
@@ -1424,16 +2169,53 @@ def _all_wells_anticollision_3d_figure(
     x_focus_arrays: list[np.ndarray] = []
     y_focus_arrays: list[np.ndarray] = []
     z_focus_arrays: list[np.ndarray] = []
+    reference_wells = tuple(
+        well for well in analysis.wells if bool(well.is_reference_only)
+    )
+    resolved_render_mode = _resolve_3d_render_mode(
+        requested_mode=render_mode,
+        calculated_well_count=len(
+            [well for well in analysis.wells if not bool(well.is_reference_only)]
+        ),
+        reference_wells=reference_wells,
+    )
+    focus_reference_names = (
+        set(
+            sorted(_anticollision_focus_reference_names(analysis))[
+                :WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT
+            ]
+        )
+        if resolved_render_mode == WT_3D_RENDER_FAST
+        else set()
+    )
     well_lookup = {str(well.name): well for well in analysis.wells}
+    aggregated_reference_wells: list = []
 
     for well in analysis.wells:
+        is_reference_only = bool(well.is_reference_only)
+        is_focus_reference = str(well.name) in focus_reference_names
+        if (
+            resolved_render_mode == WT_3D_RENDER_FAST
+            and is_reference_only
+            and not is_focus_reference
+        ):
+            aggregated_reference_wells.append(well)
+            continue
         well_label = (
             f"{well.name} ({REFERENCE_WELL_KIND_LABELS.get(str(well.well_kind), str(well.well_kind))})"
-            if bool(well.is_reference_only)
+            if is_reference_only
             else str(well.name)
         )
         overlay = well.overlay
-        tube_mesh = build_uncertainty_tube_mesh(overlay)
+        tube_mesh = (
+            build_uncertainty_tube_mesh(overlay)
+            if (
+                resolved_render_mode != WT_3D_RENDER_FAST
+                or not is_reference_only
+                or is_focus_reference
+            )
+            else None
+        )
         if tube_mesh is not None:
             x_arrays.append(tube_mesh.vertices_xyz[:, 0])
             y_arrays.append(tube_mesh.vertices_xyz[:, 1])
@@ -1455,7 +2237,9 @@ def _all_wells_anticollision_3d_figure(
                     hoverinfo="skip",
                 )
             )
-        if overlay.samples:
+        if overlay.samples and (
+            resolved_render_mode != WT_3D_RENDER_FAST or not is_reference_only
+        ):
             terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
             x_arrays.append(terminal_ring[:, 0])
             y_arrays.append(terminal_ring[:, 1])
@@ -1477,7 +2261,18 @@ def _all_wells_anticollision_3d_figure(
                 )
             )
 
-        stations = well.stations
+        stations = (
+            _decimated_station_frame(
+                well.stations,
+                target_points=(
+                    WT_3D_FAST_REFERENCE_TARGET_POINTS
+                    if is_reference_only
+                    else WT_3D_FAST_CALC_TARGET_POINTS
+                ),
+            )
+            if resolved_render_mode == WT_3D_RENDER_FAST
+            else well.stations
+        )
         x_values = stations["X_m"].to_numpy(dtype=float)
         y_values = stations["Y_m"].to_numpy(dtype=float)
         z_values = stations["Z_m"].to_numpy(dtype=float)
@@ -1485,7 +2280,7 @@ def _all_wells_anticollision_3d_figure(
         x_arrays.append(x_values)
         y_arrays.append(y_values)
         z_arrays.append(z_values)
-        if not bool(well.is_reference_only):
+        if not is_reference_only:
             x_focus_arrays.append(x_values)
             y_focus_arrays.append(y_values)
             z_focus_arrays.append(z_values)
@@ -1549,24 +2344,25 @@ def _all_wells_anticollision_3d_figure(
             x_focus_arrays.append(previous_x)
             y_focus_arrays.append(previous_y)
             z_focus_arrays.append(previous_z)
-        fig.add_trace(
-            _hover_proxy_trace_3d(
-                x_values=x_values,
-                y_values=y_values,
-                z_values=z_values,
-                customdata=_trajectory_hover_customdata(stations),
-                hovertemplate=(
-                    "X: %{x:.2f} m<br>"
-                    "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m<br>"
-                    "MD: %{customdata[0]:.2f} m<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
-                    "Сегмент: %{customdata[2]}"
-                    f"<extra>{well_label}</extra>"
-                ),
+        if resolved_render_mode != WT_3D_RENDER_FAST or not is_reference_only:
+            fig.add_trace(
+                _hover_proxy_trace_3d(
+                    x_values=x_values,
+                    y_values=y_values,
+                    z_values=z_values,
+                    customdata=_trajectory_hover_customdata(stations),
+                    hovertemplate=(
+                        "X: %{x:.2f} m<br>"
+                        "Y: %{y:.2f} m<br>"
+                        "Z/TVD: %{z:.2f} m<br>"
+                        "MD: %{customdata[0]:.2f} m<br>"
+                        "ПИ: %{customdata[1]:.2f} deg/10m<br>"
+                        "Сегмент: %{customdata[2]}"
+                        f"<extra>{well_label}</extra>"
+                    ),
+                )
             )
-        )
-        if (well.t1 is not None) and (well.t3 is not None) and not bool(well.is_reference_only):
+        if (well.t1 is not None) and (well.t3 is not None) and not is_reference_only:
             fig.add_trace(
                 go.Scatter3d(
                     x=[well.surface.x, well.t1.x, well.t3.x],
@@ -1603,6 +2399,38 @@ def _all_wells_anticollision_3d_figure(
             x_focus_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
             y_focus_arrays.append(np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float))
             z_focus_arrays.append(np.array([well.surface.z, well.t1.z, well.t3.z], dtype=float))
+
+    if aggregated_reference_wells:
+        for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+            combined_trace = _combined_reference_trace_3d(
+                reference_wells=[
+                    well for well in aggregated_reference_wells if str(well.well_kind) == str(kind)
+                ],
+                kind=kind,
+                target_points_per_well=WT_3D_FAST_REFERENCE_TARGET_POINTS,
+            )
+            if combined_trace is not None:
+                fig.add_trace(combined_trace)
+                x_arrays.append(np.asarray(combined_trace.x, dtype=float))
+                y_arrays.append(np.asarray(combined_trace.y, dtype=float))
+                z_arrays.append(np.asarray(combined_trace.z, dtype=float))
+    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label_trace = _reference_name_trace_3d(
+            [
+                ImportedTrajectoryWell(
+                    name=str(well.name),
+                    kind=str(well.well_kind),
+                    stations=well.stations,
+                    surface=well.surface,
+                    azimuth_deg=0.0,
+                )
+                for well in analysis.wells
+                if bool(well.is_reference_only)
+            ],
+            kind=kind,
+        )
+        if label_trace is not None:
+            fig.add_trace(label_trace)
 
     overlap_legend_added = False
     for corridor in analysis.corridors:
@@ -1987,6 +2815,23 @@ def _all_wells_anticollision_plan_figure(
         x_focus_arrays.append(x_segment)
         y_focus_arrays.append(y_segment)
         segment_legend_added = True
+    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label_trace = _reference_name_trace_2d(
+            [
+                ImportedTrajectoryWell(
+                    name=str(well.name),
+                    kind=str(well.well_kind),
+                    stations=well.stations,
+                    surface=well.surface,
+                    azimuth_deg=0.0,
+                )
+                for well in analysis.wells
+                if bool(well.is_reference_only)
+            ],
+            kind=kind,
+        )
+        if label_trace is not None:
+            fig.add_trace(label_trace)
 
     x_values = (
         np.concatenate(x_focus_arrays) if x_focus_arrays else np.concatenate(x_arrays)
@@ -2079,6 +2924,38 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         f"Пресет: {uncertainty_preset_label(selected_preset)}. "
         f"{anti_collision_method_caption(uncertainty_model)}"
     )
+    selected_render_mode = st.selectbox(
+        "3D-режим отображения",
+        options=list(WT_3D_RENDER_OPTIONS),
+        key="wt_3d_render_mode",
+    )
+    selected_3d_backend = st.selectbox(
+        "3D backend",
+        options=list(WT_3D_BACKEND_OPTIONS),
+        key="wt_3d_backend",
+        help=(
+            "Plotly сохраняет привычные hover-подсказки. "
+            "Локальный Three.js backend быстрее на тяжёлых кустах и хранит все файлы локально."
+        ),
+    )
+    resolved_render_mode = _resolve_3d_render_mode(
+        requested_mode=selected_render_mode,
+        calculated_well_count=len(successes),
+        reference_wells=(
+            well for well in analysis.wells if bool(well.is_reference_only)
+        ),
+    )
+    if resolved_render_mode == WT_3D_RENDER_FAST:
+        st.caption(
+            "Включён быстрый 3D-режим: reference-скважины частично объединяются и "
+            "часть их cone-геометрии скрывается из 3D-рендера, но anti-collision "
+            "анализ и расчёт рекомендаций остаются прежними."
+        )
+    if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+        st.caption(
+            "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "
+            "но детальные Plotly-hover подсказки доступны только в режиме Plotly."
+        )
 
     m1, m2, m3, m4 = st.columns(4, gap="small")
     m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
@@ -2090,12 +2967,16 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         st.markdown(_sf_help_markdown())
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
-    chart_col1.plotly_chart(
-        _all_wells_anticollision_3d_figure(
-            analysis,
-            previous_successes_by_name=previous_successes_by_name,
-        ),
-        width="stretch",
+    anticollision_3d_figure = _all_wells_anticollision_3d_figure(
+        analysis,
+        previous_successes_by_name=previous_successes_by_name,
+        render_mode=selected_render_mode,
+    )
+    _render_plotly_or_three_3d(
+        container=chart_col1,
+        figure=anticollision_3d_figure,
+        backend=selected_3d_backend,
+        height=660,
     )
     chart_col2.plotly_chart(
         _all_wells_anticollision_plan_figure(
@@ -4978,6 +5859,25 @@ def _render_success_tabs(
         label_visibility="collapsed",
     )
     if str(all_view_mode) == "Траектории":
+        selected_render_mode = st.selectbox(
+            "3D-режим отображения",
+            options=list(WT_3D_RENDER_OPTIONS),
+            key="wt_3d_render_mode",
+        )
+        selected_3d_backend = st.selectbox(
+            "3D backend",
+            options=list(WT_3D_BACKEND_OPTIONS),
+            key="wt_3d_backend",
+            help=(
+                "Plotly сохраняет привычные hover-подсказки. "
+                "Локальный Three.js backend быстрее на тяжёлых кустах и хранит все файлы локально."
+            ),
+        )
+        resolved_render_mode = _resolve_3d_render_mode(
+            requested_mode=selected_render_mode,
+            calculated_well_count=len(successes),
+            reference_wells=reference_wells,
+        )
         if target_only_wells:
             st.caption(
                 "Для непростроенных скважин на обзорных графиках показаны только "
@@ -4988,16 +5888,30 @@ def _render_success_tabs(
                 "Дополнительные фактические и утвержденные скважины показаны как "
                 "reference-траектории: серые и красные линии без точек S/t1/t3."
             )
+        if resolved_render_mode == WT_3D_RENDER_FAST:
+            st.caption(
+                "Включён быстрый 3D-режим: reference-скважины объединяются в "
+                "сводные фоновые 3D-линии, чтобы не перегружать браузер. 2D-план "
+                "и сами расчётные скважины остаются без смысловых изменений."
+            )
+        if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+            st.caption(
+                "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "
+                "но детальные Plotly-hover подсказки доступны только в режиме Plotly."
+            )
         c1, c2 = st.columns(2, gap="medium")
-        c1.plotly_chart(
-            _all_wells_3d_figure(
-                successes,
-                target_only_wells=target_only_wells,
-                reference_wells=reference_wells,
-                name_to_color=name_to_color,
-            ),
-            config=trajectory_plotly_chart_config(),
-            width="stretch",
+        overview_3d_figure = _all_wells_3d_figure(
+            successes,
+            target_only_wells=target_only_wells,
+            reference_wells=reference_wells,
+            name_to_color=name_to_color,
+            render_mode=selected_render_mode,
+        )
+        _render_plotly_or_three_3d(
+            container=c1,
+            figure=overview_3d_figure,
+            backend=selected_3d_backend,
+            height=620,
         )
         c2.plotly_chart(
             _all_wells_plan_figure(

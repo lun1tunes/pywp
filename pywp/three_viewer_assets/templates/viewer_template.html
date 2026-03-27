@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #ffffff;
+        font-family:
+          Inter,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+      }
+
+      #root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #ffffff;
+      }
+
+      #legend {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        max-width: 260px;
+        max-height: calc(100% - 20px);
+        overflow: auto;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.86);
+        box-shadow: 0 6px 24px rgba(15, 23, 42, 0.12);
+        backdrop-filter: blur(8px);
+        z-index: 2;
+      }
+
+      #toolbar {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        display: flex;
+        gap: 8px;
+        z-index: 2;
+      }
+
+      .toolbar-btn {
+        border: 1px solid rgba(15, 23, 42, 0.12);
+        background: rgba(255, 255, 255, 0.88);
+        color: #0f172a;
+        border-radius: 9px;
+        padding: 6px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 6px 24px rgba(15, 23, 42, 0.08);
+        backdrop-filter: blur(8px);
+      }
+
+      .toolbar-btn:hover {
+        background: rgba(255, 255, 255, 0.96);
+      }
+
+      #legend:empty {
+        display: none;
+      }
+
+      .legend-title {
+        margin: 0 0 8px 0;
+        font-size: 12px;
+        font-weight: 700;
+        color: #0f172a;
+        letter-spacing: 0.02em;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 6px 0;
+        font-size: 12px;
+        line-height: 1.25;
+        color: #0f172a;
+      }
+
+      .legend-swatch {
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+        flex: 0 0 12px;
+        border: 1px solid rgba(15, 23, 42, 0.16);
+      }
+
+      .legend-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="toolbar">
+        <button id="fit-camera-btn" class="toolbar-btn" type="button">Fit</button>
+        <button id="reset-camera-btn" class="toolbar-btn" type="button">Reset</button>
+      </div>
+      <div id="legend"></div>
+    </div>
+    <script>
+      __THREE_LIBRARY__
+    </script>
+    <script>
+      __ORBIT_CONTROLS__
+    </script>
+    <script id="scene-payload" type="application/json">
+      __SCENE_PAYLOAD__
+    </script>
+    <script>
+      (function () {
+        const payloadElement = document.getElementById("scene-payload");
+        if (!payloadElement) {
+          return;
+        }
+        const payload = JSON.parse(payloadElement.textContent || "{}");
+        const root = document.getElementById("root");
+        const legendElement = document.getElementById("legend");
+        const fitButton = document.getElementById("fit-camera-btn");
+        const resetButton = document.getElementById("reset-camera-btn");
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(payload.background || "#ffffff");
+        const sceneComplexity =
+          (payload.lines || []).reduce(
+            (acc, item) =>
+              acc +
+              (Array.isArray(item.segments)
+                ? item.segments.reduce(
+                    (segmentAcc, segment) =>
+                      segmentAcc +
+                      (Array.isArray(segment) ? Math.max(segment.length - 1, 0) : 0),
+                    0,
+                  )
+                : 0),
+            0,
+          ) +
+          (payload.points || []).reduce(
+            (acc, item) => acc + (Array.isArray(item.points) ? item.points.length : 0),
+            0,
+          ) +
+          (payload.labels || []).length * 12 +
+          (payload.meshes || []).reduce(
+            (acc, item) => acc + (Array.isArray(item.vertices) ? item.vertices.length : 0),
+            0,
+          );
+        const maxPixelRatio =
+          sceneComplexity > 80000 ? 1.0 : sceneComplexity > 25000 ? 1.2 : 1.5;
+
+        const renderer = new THREE.WebGLRenderer({
+          antialias: sceneComplexity <= 25000,
+          alpha: false,
+          powerPreference: "high-performance",
+        });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, maxPixelRatio));
+        root.appendChild(renderer.domElement);
+
+        const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
+        camera.up.set(0, 0, 1);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = false;
+        controls.screenSpacePanning = true;
+        controls.addEventListener("change", render);
+        controls.rotateSpeed = 0.9;
+        controls.zoomSpeed = 1.0;
+        controls.panSpeed = 0.9;
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.96);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.58);
+        directionalLight.position.set(1.2, 1.1, 1.4);
+        scene.add(directionalLight);
+
+        function arrayToVector3(value) {
+          return new THREE.Vector3(
+            Number(value[0] || 0),
+            Number(value[1] || 0),
+            Number(value[2] || 0),
+          );
+        }
+
+        function hexOrDefault(colorValue, fallback) {
+          if (typeof colorValue !== "string" || colorValue.trim() === "") {
+            return fallback;
+          }
+          return colorValue;
+        }
+
+        const bounds = payload.bounds || {
+          min: [0, 0, 0],
+          max: [1000, 1000, 1000],
+        };
+        const minBound = arrayToVector3(bounds.min || [0, 0, 0]);
+        const maxBound = arrayToVector3(bounds.max || [1000, 1000, 1000]);
+        const center = new THREE.Vector3()
+          .addVectors(minBound, maxBound)
+          .multiplyScalar(0.5);
+        const span = new THREE.Vector3().subVectors(maxBound, minBound);
+        const maxSpan = Math.max(span.x, span.y, span.z, 1);
+        const worldMarkerSize = Math.max(maxSpan * 0.008, 10.0);
+        const worldLabelScale = Math.max(maxSpan * 0.11, 80.0);
+
+        const grid = new THREE.GridHelper(
+          Math.max(maxSpan * 1.2, 100.0),
+          12,
+          0xd7dce6,
+          0xebeff5,
+        );
+        grid.rotation.x = Math.PI / 2.0;
+        grid.position.set(center.x, center.y, minBound.z);
+        scene.add(grid);
+
+        const axes = new THREE.AxesHelper(Math.max(maxSpan * 0.18, 40.0));
+        axes.position.set(minBound.x, minBound.y, minBound.z);
+        scene.add(axes);
+        const defaultCameraPosition = new THREE.Vector3();
+        const defaultCameraTarget = new THREE.Vector3();
+        const defaultCameraUp = new THREE.Vector3(0, 0, 1);
+        const labelMaterialCache = new Map();
+
+        function plotlyCameraVector(value, fallback) {
+          if (!value || typeof value !== "object") {
+            return fallback.clone();
+          }
+          return new THREE.Vector3(
+            Number(value.x ?? fallback.x),
+            Number(value.y ?? fallback.y),
+            Number(value.z ?? fallback.z),
+          );
+        }
+
+        function resize() {
+          const width = Math.max(root.clientWidth || 1, 1);
+          const height = Math.max(root.clientHeight || 1, 1);
+          camera.aspect = width / height;
+          camera.updateProjectionMatrix();
+          renderer.setSize(width, height, false);
+          render();
+        }
+
+        function applyPlotlyCamera() {
+          const plotlyCamera = payload.camera || {};
+          const centerOffset = plotlyCameraVector(
+            plotlyCamera.center,
+            new THREE.Vector3(0, 0, 0),
+          );
+          const eyeOffset = plotlyCameraVector(
+            plotlyCamera.eye,
+            new THREE.Vector3(1.25, 1.25, 1.25),
+          );
+          const upVector = plotlyCameraVector(
+            plotlyCamera.up,
+            new THREE.Vector3(0, 0, 1),
+          ).normalize();
+          const target = center.clone().addScaledVector(centerOffset, maxSpan * 0.35);
+          const eyeDirection = eyeOffset.length() > 1e-9
+            ? eyeOffset.clone().normalize()
+            : new THREE.Vector3(1, 1, 1).normalize();
+          const eyeDistance = Math.max(maxSpan * Math.max(eyeOffset.length(), 0.85), maxSpan * 0.85);
+
+          camera.near = Math.max(maxSpan / 1000.0, 0.1);
+          camera.far = Math.max(maxSpan * 40.0, 5000.0);
+          camera.up.copy(upVector);
+          camera.position.copy(target).addScaledVector(eyeDirection, eyeDistance);
+          controls.target.copy(target);
+          defaultCameraPosition.copy(camera.position);
+          defaultCameraTarget.copy(target);
+          defaultCameraUp.copy(camera.up);
+          camera.updateProjectionMatrix();
+          controls.update();
+          render();
+        }
+
+        function fitCamera() {
+          camera.near = Math.max(maxSpan / 1000.0, 0.1);
+          camera.far = Math.max(maxSpan * 40.0, 5000.0);
+          camera.up.set(0, 0, 1);
+          camera.position.set(
+            center.x + maxSpan * 1.35,
+            center.y + maxSpan * 1.35,
+            center.z + maxSpan * 1.15,
+          );
+          controls.target.copy(center);
+          camera.updateProjectionMatrix();
+          controls.update();
+          render();
+        }
+
+        function resetCamera() {
+          camera.position.copy(defaultCameraPosition);
+          controls.target.copy(defaultCameraTarget);
+          camera.up.copy(defaultCameraUp);
+          camera.updateProjectionMatrix();
+          controls.update();
+          render();
+        }
+
+        function addLegend(items) {
+          if (!Array.isArray(items) || items.length === 0) {
+            legendElement.innerHTML = "";
+            return;
+          }
+          const title = document.createElement("div");
+          title.className = "legend-title";
+          title.textContent = "Легенда";
+          legendElement.appendChild(title);
+          items.forEach((item) => {
+            const row = document.createElement("div");
+            row.className = "legend-item";
+            const swatch = document.createElement("div");
+            swatch.className = "legend-swatch";
+            swatch.style.background = hexOrDefault(item.color, "#9ca3af");
+            swatch.style.opacity = String(
+              Number.isFinite(item.opacity) ? item.opacity : 1.0,
+            );
+            const label = document.createElement("div");
+            label.className = "legend-label";
+            label.textContent = String(item.label || "");
+            row.appendChild(swatch);
+            row.appendChild(label);
+            legendElement.appendChild(row);
+          });
+        }
+
+        function addLine(item) {
+          const segments = Array.isArray(item.segments) ? item.segments : [];
+          const materialOptions = {
+            color: hexOrDefault(item.color, "#0f172a"),
+            transparent: Number(item.opacity || 1.0) < 0.999,
+            opacity: Number(item.opacity || 1.0),
+          };
+          if (String(item.dash || "solid") !== "solid") {
+            segments.forEach((segment) => {
+              if (!Array.isArray(segment) || segment.length < 2) {
+                return;
+              }
+              const points = segment.map(arrayToVector3);
+              const geometry = new THREE.BufferGeometry().setFromPoints(points);
+              const material = new THREE.LineDashedMaterial({
+                ...materialOptions,
+                dashSize: Math.max(maxSpan * 0.025, 14.0),
+                gapSize: Math.max(maxSpan * 0.015, 8.0),
+              });
+              const line = new THREE.Line(geometry, material);
+              line.computeLineDistances();
+              scene.add(line);
+            });
+            return;
+          }
+          const positions = [];
+          segments.forEach((segment) => {
+            if (!Array.isArray(segment) || segment.length < 2) {
+              return;
+            }
+            for (let index = 1; index < segment.length; index += 1) {
+              const previousPoint = segment[index - 1];
+              const currentPoint = segment[index];
+              positions.push(
+                Number(previousPoint[0] || 0),
+                Number(previousPoint[1] || 0),
+                Number(previousPoint[2] || 0),
+                Number(currentPoint[0] || 0),
+                Number(currentPoint[1] || 0),
+                Number(currentPoint[2] || 0),
+              );
+            }
+          });
+          if (positions.length === 0) {
+            return;
+          }
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3),
+          );
+          scene.add(
+            new THREE.LineSegments(
+              geometry,
+              new THREE.LineBasicMaterial(materialOptions),
+            ),
+          );
+        }
+
+        function addMesh(item) {
+          const vertices = Array.isArray(item.vertices) ? item.vertices : [];
+          const faces = Array.isArray(item.faces) ? item.faces : [];
+          if (vertices.length === 0 || faces.length === 0) {
+            return;
+          }
+          const positions = new Float32Array(vertices.length * 3);
+          vertices.forEach((vertex, index) => {
+            positions[index * 3 + 0] = Number(vertex[0] || 0);
+            positions[index * 3 + 1] = Number(vertex[1] || 0);
+            positions[index * 3 + 2] = Number(vertex[2] || 0);
+          });
+          const indices = new Uint32Array(faces.length * 3);
+          faces.forEach((face, index) => {
+            indices[index * 3 + 0] = Number(face[0] || 0);
+            indices[index * 3 + 1] = Number(face[1] || 0);
+            indices[index * 3 + 2] = Number(face[2] || 0);
+          });
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+          geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+          geometry.computeVertexNormals();
+          const material = new THREE.MeshLambertMaterial({
+            color: hexOrDefault(item.color, "#94a3b8"),
+            transparent: true,
+            opacity: Number(item.opacity || 0.25),
+            side: THREE.DoubleSide,
+            depthWrite: Number(item.opacity || 0.25) >= 0.95,
+          });
+          scene.add(new THREE.Mesh(geometry, material));
+        }
+
+        function addMarkers(item) {
+          const points = Array.isArray(item.points) ? item.points : [];
+          if (points.length === 0) {
+            return;
+          }
+          const symbol = String(item.symbol || "circle");
+          const markerScale = Math.max(
+            worldMarkerSize * Number(item.size || 6) / 8.0,
+            5.0,
+          );
+          if (symbol === "cross") {
+            const positions = [];
+            points.forEach((point) => {
+              const centerPoint = arrayToVector3(point);
+              const half = markerScale * 0.5;
+              positions.push(
+                centerPoint.x - half, centerPoint.y, centerPoint.z,
+                centerPoint.x + half, centerPoint.y, centerPoint.z,
+                centerPoint.x, centerPoint.y - half, centerPoint.z,
+                centerPoint.x, centerPoint.y + half, centerPoint.z,
+                centerPoint.x, centerPoint.y, centerPoint.z - half,
+                centerPoint.x, centerPoint.y, centerPoint.z + half,
+              );
+            });
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(positions, 3),
+            );
+            const line = new THREE.LineSegments(
+              geometry,
+              new THREE.LineBasicMaterial({
+                color: hexOrDefault(item.color, "#0f172a"),
+                transparent: Number(item.opacity || 1.0) < 0.999,
+                opacity: Number(item.opacity || 1.0),
+              }),
+            );
+            scene.add(line);
+            return;
+          }
+          const sphereSegments = sceneComplexity > 60000 ? 6 : sceneComplexity > 25000 ? 8 : 10;
+          const geometry = new THREE.SphereGeometry(
+            markerScale * 0.32,
+            sphereSegments,
+            sphereSegments,
+          );
+          const material = new THREE.MeshLambertMaterial({
+            color: hexOrDefault(item.color, "#0f172a"),
+            transparent: Number(item.opacity || 1.0) < 0.999,
+            opacity: Number(item.opacity || 1.0),
+          });
+          const instanced = new THREE.InstancedMesh(
+            geometry,
+            material,
+            points.length,
+          );
+          const matrix = new THREE.Matrix4();
+          points.forEach((point, index) => {
+            matrix.makeTranslation(
+              Number(point[0] || 0),
+              Number(point[1] || 0),
+              Number(point[2] || 0),
+            );
+            instanced.setMatrixAt(index, matrix);
+          });
+          instanced.instanceMatrix.needsUpdate = true;
+          scene.add(instanced);
+        }
+
+        function labelMaterial(text, color) {
+          const key = `${String(text || "")}|${String(color || "#0f172a")}`;
+          if (labelMaterialCache.has(key)) {
+            return labelMaterialCache.get(key);
+          }
+          const fontSize = sceneComplexity > 60000 ? 28 : 34;
+          const paddingX = 36;
+          const paddingY = 18;
+          const measureCanvas = document.createElement("canvas");
+          const measureContext = measureCanvas.getContext("2d");
+          measureContext.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+          const textWidth = Math.max(
+            Math.ceil(measureContext.measureText(String(text || "")).width),
+            fontSize * 2,
+          );
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.ceil(textWidth + paddingX * 2);
+          canvas.height = Math.ceil(fontSize + paddingY * 2);
+          const context = canvas.getContext("2d");
+          context.clearRect(0, 0, canvas.width, canvas.height);
+          context.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+          context.fillStyle = String(color || "#0f172a");
+          context.textAlign = "center";
+          context.textBaseline = "middle";
+          context.fillText(String(text || ""), canvas.width / 2, canvas.height / 2);
+          const texture = new THREE.CanvasTexture(canvas);
+          texture.needsUpdate = true;
+          texture.generateMipmaps = false;
+          texture.minFilter = THREE.LinearFilter;
+          texture.magFilter = THREE.LinearFilter;
+          const material = new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthWrite: false,
+          });
+          labelMaterialCache.set(key, material);
+          return material;
+        }
+
+        function addLabel(item) {
+          const sprite = new THREE.Sprite(labelMaterial(item.text, item.color));
+          sprite.position.copy(arrayToVector3(item.position || [0, 0, 0]));
+          sprite.position.z += Math.max(maxSpan * 0.015, 18.0);
+          sprite.scale.set(worldLabelScale * 1.25, worldLabelScale * 0.32, 1.0);
+          scene.add(sprite);
+        }
+
+        (payload.lines || []).forEach(addLine);
+        (payload.meshes || []).forEach(addMesh);
+        (payload.points || []).forEach(addMarkers);
+        (payload.labels || []).forEach(addLabel);
+        addLegend(payload.legend || []);
+
+        function render() {
+          renderer.render(scene, camera);
+        }
+
+        window.addEventListener("resize", resize);
+        if (typeof ResizeObserver !== "undefined") {
+          const resizeObserver = new ResizeObserver(() => resize());
+          resizeObserver.observe(root);
+        }
+        if (fitButton) {
+          fitButton.addEventListener("click", fitCamera);
+        }
+        if (resetButton) {
+          resetButton.addEventListener("click", resetCamera);
+        }
+        applyPlotlyCamera();
+        resize();
+      })();
+    </script>
+  </body>
+</html>

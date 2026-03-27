@@ -208,6 +208,20 @@ def _far_reference_wells():
     )
 
 
+def _horizontal_reference_well():
+    return tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-H", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-H", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
+                {"Wellname": "FACT-H", "Type": "actual", "X": 100.0, "Y": 0.0, "Z": 1100.0, "MD": 1600.0},
+                {"Wellname": "FACT-H", "Type": "actual", "X": 700.0, "Y": 0.0, "Z": 1150.0, "MD": 2200.0},
+                {"Wellname": "FACT-H", "Type": "actual", "X": 1300.0, "Y": 0.0, "Z": 1200.0, "MD": 2800.0},
+            ]
+        )
+    )
+
+
 def test_welltrack_page_shows_only_general_run_before_results() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _records()
@@ -2140,6 +2154,30 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     approved_3d = next(trace for trace in figure_3d.data if str(trace.name) == "APP-1 (Проектная утвержденная)")
     assert str(fact_3d.line.color) == "#6B7280"
     assert str(approved_3d.line.color) == "#C62828"
+    fact_label_3d = next(
+        trace for trace in figure_3d.data if str(trace.name) == "Фактическая: подписи"
+    )
+    approved_label_3d = next(
+        trace
+        for trace in figure_3d.data
+        if str(trace.name) == "Проектная утвержденная: подписи"
+    )
+    assert "FACT-1" in list(fact_label_3d.text)
+    assert "APP-1" in list(approved_label_3d.text)
+    assert str(fact_label_3d.textfont.color) == "#111111"
+    assert str(approved_label_3d.textfont.color) == "#C62828"
+
+
+def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> None:
+    page = _load_welltrack_page_module()
+    horizontal_well = _horizontal_reference_well()[0]
+
+    anchor = page._reference_label_anchor_point(horizontal_well)
+
+    assert anchor is not None
+    assert float(anchor[0]) == pytest.approx(700.0)
+    assert float(anchor[1]) == pytest.approx(0.0)
+    assert float(anchor[2]) == pytest.approx(1150.0)
 
 
 def test_all_wells_overview_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
@@ -2180,6 +2218,8 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
     assert any(str(trace.name) == "APP-1 (Проектная утвержденная)" for trace in figure_3d.data)
     assert not any("FACT-1 (Фактическая): цели" == str(trace.name) for trace in figure_3d.data)
     assert not any("APP-1 (Проектная утвержденная): цели" == str(trace.name) for trace in figure_plan.data)
+    assert any(str(trace.name) == "Фактическая: подписи" for trace in figure_3d.data)
+    assert any(str(trace.name) == "Проектная утвержденная: подписи" for trace in figure_plan.data)
 
 
 def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
@@ -2207,6 +2247,41 @@ def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> Non
     assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
 
+def test_all_wells_3d_figure_aggregates_reference_wells_in_fast_mode() -> None:
+    page = _load_welltrack_page_module()
+    figure = page._all_wells_3d_figure(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        reference_wells=_reference_wells(),
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
+
+    trace_names = {str(trace.name) for trace in figure.data}
+    assert "Фактическая (сводно)" in trace_names
+    assert "Проектная утвержденная (сводно)" in trace_names
+    assert "FACT-1 (Фактическая)" not in trace_names
+    assert "APP-1 (Проектная утвержденная)" not in trace_names
+
+
+def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_fast_mode() -> None:
+    page = _load_welltrack_page_module()
+    analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        reference_wells=_reference_wells(),
+    )
+
+    figure = page._all_wells_anticollision_3d_figure(
+        analysis,
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
+
+    trace_names = {str(trace.name) for trace in figure.data}
+    assert "Фактическая (сводно)" in trace_names
+    assert "Проектная утвержденная (сводно)" in trace_names
+    assert "FACT-1 (Фактическая)" not in trace_names
+    assert "APP-1 (Проектная утвержденная)" not in trace_names
+
+
 def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
     page = _load_welltrack_page_module()
     successes = [
@@ -2230,6 +2305,125 @@ def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
         trace_names = {str(trace.name) for trace in figure.data}
         assert "WELL-A: t1 label" in trace_names
         assert "WELL-B: t1 label" in trace_names
+
+
+def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend() -> None:
+    page = _load_welltrack_page_module()
+    figure = page._all_wells_3d_figure(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        reference_wells=_reference_wells(),
+    )
+
+    payload = page._plotly_3d_figure_to_three_payload(figure)
+
+    labels = {str(item["text"]) for item in payload["labels"]}
+    legend_labels = {str(item["label"]) for item in payload["legend"]}
+    assert payload["camera"] == DEFAULT_3D_CAMERA
+    assert "WELL-A" in labels
+    assert "FACT-1" in labels
+    assert "APP-1" in labels
+    assert "WELL-A" in legend_labels
+    assert "FACT-1 (Фактическая)" in legend_labels
+
+
+def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> None:
+    page = _load_welltrack_page_module()
+    analysis = page._build_anti_collision_analysis(
+        [
+            _successful_plan(name="WELL-A", y_offset_m=0.0),
+            _successful_plan(name="WELL-B", y_offset_m=5.0),
+        ],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    figure = page._all_wells_anticollision_3d_figure(analysis)
+
+    payload = page._plotly_3d_figure_to_three_payload(figure)
+
+    assert payload["meshes"]
+    assert any(str(item["label"]) == "WELL-A" for item in payload["legend"])
+
+
+def test_optimize_three_payload_merges_same_style_objects() -> None:
+    page = _load_welltrack_page_module()
+    payload = {
+        "background": "#FFFFFF",
+        "bounds": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+        "camera": DEFAULT_3D_CAMERA,
+        "lines": [
+            {
+                "segments": [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
+                "color": "#0B6E4F",
+                "opacity": 1.0,
+                "dash": "solid",
+            },
+            {
+                "segments": [[[1.0, 1.0, 0.0], [2.0, 1.0, 0.0]]],
+                "color": "#0B6E4F",
+                "opacity": 1.0,
+                "dash": "solid",
+            },
+        ],
+        "points": [
+            {
+                "points": [[0.0, 0.0, 0.0]],
+                "color": "#111111",
+                "opacity": 1.0,
+                "size": 6.0,
+                "symbol": "circle",
+            },
+            {
+                "points": [[1.0, 0.0, 0.0]],
+                "color": "#111111",
+                "opacity": 1.0,
+                "size": 6.0,
+                "symbol": "circle",
+            },
+        ],
+        "meshes": [
+            {
+                "vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                "faces": [[0, 1, 2]],
+                "color": "#C62828",
+                "opacity": 0.4,
+            },
+            {
+                "vertices": [[1.0, 1.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]],
+                "faces": [[0, 1, 2]],
+                "color": "#C62828",
+                "opacity": 0.4,
+            },
+        ],
+        "labels": [{"text": "A", "position": [0.0, 0.0, 0.0], "color": "#111111"}],
+        "legend": [{"label": "A", "color": "#0B6E4F", "opacity": 1.0}],
+    }
+
+    optimized = page._optimize_three_payload(payload)
+
+    assert len(optimized["lines"]) == 1
+    assert len(optimized["lines"][0]["segments"]) == 2
+    assert len(optimized["points"]) == 1
+    assert len(optimized["points"][0]["points"]) == 2
+    assert len(optimized["meshes"]) == 1
+    assert len(optimized["meshes"][0]["vertices"]) == 6
+    assert len(optimized["meshes"][0]["faces"]) == 2
+    assert optimized["camera"] == DEFAULT_3D_CAMERA
+    assert optimized["labels"] == payload["labels"]
+    assert optimized["legend"] == payload["legend"]
+
+
+def test_plotly_3d_figure_to_three_payload_preserves_custom_camera() -> None:
+    page = _load_welltrack_page_module()
+    figure = page._all_wells_3d_figure([_successful_plan(name="WELL-A", y_offset_m=0.0)])
+    custom_camera = {
+        "up": {"x": 0.0, "y": 0.0, "z": 1.0},
+        "center": {"x": 0.15, "y": -0.05, "z": 0.0},
+        "eye": {"x": 1.6, "y": 0.9, "z": 1.1},
+    }
+    figure.update_layout(scene={"camera": custom_camera})
+
+    payload = page._plotly_3d_figure_to_three_payload(figure)
+
+    assert payload["camera"] == custom_camera
 
 
 def test_batch_summary_display_df_reorders_and_shortens_summary_columns() -> None:
