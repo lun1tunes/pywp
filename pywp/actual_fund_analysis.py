@@ -69,6 +69,27 @@ class ActualFundPadSummary(FrozenArbitraryModel):
     median_horizontal_length_m: float | None
 
 
+class ActualFundZoneSummary(FrozenArbitraryModel):
+    zone_key: str
+    zone_label: str
+    md_from_m: float
+    md_to_m: float
+    md_length_m: float
+    inc_min_deg: float | None
+    inc_max_deg: float | None
+    inc_mean_deg: float | None
+    dls_min_deg_per_30m: float | None
+    dls_max_deg_per_30m: float | None
+    dls_mean_deg_per_30m: float | None
+
+
+class ActualFundWellAnalysis(FrozenArbitraryModel):
+    name: str
+    metrics: ActualFundWellMetrics
+    survey: pd.DataFrame
+    zone_summaries: tuple[ActualFundZoneSummary, ...]
+
+
 class ActualFundCalibrationResult(FrozenArbitraryModel):
     status: str
     base_preset: str
@@ -83,6 +104,23 @@ class ActualFundCalibrationResult(FrozenArbitraryModel):
     worst_separation_factor_before: float | None = None
     worst_separation_factor_after: float | None = None
     note: str = ""
+
+
+ZONE_VERTICAL = "vertical"
+ZONE_BUILD1 = "build1"
+ZONE_HOLD = "hold"
+ZONE_BUILD2 = "build2"
+ZONE_HORIZONTAL = "horizontal"
+
+ZONE_LABELS: dict[str, str] = {
+    ZONE_VERTICAL: "Вертикальный",
+    ZONE_BUILD1: "BUILD 1",
+    ZONE_HOLD: "HOLD",
+    ZONE_BUILD2: "BUILD 2",
+    ZONE_HORIZONTAL: "Горизонтальный",
+}
+
+HORIZONTAL_ENTRY_MIN_INC_DEG = 70.0
 
 
 def actual_well_family_name(name: object) -> str:
@@ -112,82 +150,234 @@ def actual_well_is_horizontal(stations: pd.DataFrame) -> bool:
     return bool(max_inc >= HORIZONTAL_INC_THRESHOLD_DEG and interval[2] >= HORIZONTAL_MIN_INTERVAL_M)
 
 
+def build_actual_fund_well_analysis(
+    actual_well: ImportedTrajectoryWell,
+) -> ActualFundWellAnalysis:
+    return _analyze_actual_well(actual_well)
+
+
+def build_actual_fund_well_analyses(
+    actual_wells: Iterable[ImportedTrajectoryWell],
+) -> tuple[ActualFundWellAnalysis, ...]:
+    return tuple(_analyze_actual_well(well) for well in actual_wells)
+
+
 def build_actual_fund_well_metrics(
     actual_wells: Iterable[ImportedTrajectoryWell],
 ) -> tuple[ActualFundWellMetrics, ...]:
-    metrics: list[ActualFundWellMetrics] = []
-    for well in actual_wells:
-        stations = _reconstruct_actual_survey(well.stations)
-        source_md_values = well.stations["MD_m"].to_numpy(dtype=float)
-        source_z_values = well.stations["Z_m"].to_numpy(dtype=float)
-        md_values = stations["MD_m"].to_numpy(dtype=float)
-        z_values = stations["Z_m"].to_numpy(dtype=float)
-        x_values = stations["X_m"].to_numpy(dtype=float)
-        y_values = stations["Y_m"].to_numpy(dtype=float)
-        inc_values = stations["INC_deg"].to_numpy(dtype=float)
-        kop_md = _first_kop_md_from_geometry(well.stations, threshold_deg=KOP_INC_THRESHOLD_DEG)
-        horizontal_entry_md, _, horizontal_length = _terminal_horizontal_interval(stations)
-        hold_start_md, hold_end_md, hold_inc, hold_azi = _detect_hold_interval(
+    return tuple(item.metrics for item in build_actual_fund_well_analyses(actual_wells))
+
+
+def _analyze_actual_well(actual_well: ImportedTrajectoryWell) -> ActualFundWellAnalysis:
+    stations = _reconstruct_actual_survey(actual_well.stations)
+    source_md_values = actual_well.stations["MD_m"].to_numpy(dtype=float)
+    source_z_values = actual_well.stations["Z_m"].to_numpy(dtype=float)
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    z_values = stations["Z_m"].to_numpy(dtype=float)
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    kop_md = _first_kop_md_from_geometry(actual_well.stations, threshold_deg=KOP_INC_THRESHOLD_DEG)
+    terminal_horizontal_start_md, _, terminal_horizontal_length_m = _terminal_horizontal_interval(
+        stations
+    )
+    provisional_hold_start_md, provisional_hold_end_md, _, _ = _detect_hold_interval(
+        stations=stations,
+        kop_md_m=kop_md,
+        horizontal_entry_md_m=terminal_horizontal_start_md,
+    )
+    horizontal_entry_md = _detect_horizontal_entry_md(
+        stations=stations,
+        kop_md_m=kop_md,
+        hold_end_md_m=provisional_hold_end_md,
+        terminal_horizontal_start_md_m=terminal_horizontal_start_md,
+    )
+    hold_start_md, hold_end_md, hold_inc, hold_azi = _detect_hold_interval(
+        stations=stations,
+        kop_md_m=kop_md,
+        horizontal_entry_md_m=horizontal_entry_md,
+    )
+    hold_length = (
+        0.0
+        if hold_start_md is None or hold_end_md is None
+        else float(max(hold_end_md - hold_start_md, 0.0))
+    )
+    is_horizontal = bool(
+        terminal_horizontal_start_md is not None
+        and float(terminal_horizontal_length_m) >= HORIZONTAL_MIN_INTERVAL_M
+        and float(np.nanmax(inc_values)) >= HORIZONTAL_INC_THRESHOLD_DEG
+    )
+    if not is_horizontal:
+        horizontal_entry_md = None
+    horizontal_length = (
+        0.0
+        if horizontal_entry_md is None
+        else float(max(md_values[-1] - float(horizontal_entry_md), 0.0))
+    )
+    build_limit_md = (
+        float(hold_start_md)
+        if hold_start_md is not None
+        else float(horizontal_entry_md)
+        if horizontal_entry_md is not None
+        else float(md_values[-1])
+    )
+    build_mask = md_values <= build_limit_md + 1e-9
+    max_dls = _robust_max_dls(stations)
+    max_build_dls = _robust_max_dls(stations.loc[build_mask].reset_index(drop=True))
+    exclusion_reason = _analysis_exclusion_reason(
+        is_horizontal=is_horizontal,
+        kop_md_m=kop_md,
+        horizontal_entry_md_m=horizontal_entry_md,
+        horizontal_length_m=float(horizontal_length),
+        hold_inc_deg=hold_inc,
+        hold_length_m=float(hold_length),
+        max_dls_deg_per_30m=max_dls,
+        max_build_dls_before_hold_deg_per_30m=max_build_dls,
+    )
+    metrics = ActualFundWellMetrics(
+        name=str(actual_well.name),
+        family_name=actual_well_family_name(actual_well.name),
+        pad_group=actual_well_pad_group(actual_well.name),
+        is_horizontal=is_horizontal,
+        md_total_m=float(md_values[-1]),
+        tvd_end_m=float(z_values[-1]),
+        lateral_departure_m=float(
+            np.hypot(x_values[-1] - x_values[0], y_values[-1] - y_values[0])
+        ),
+        kop_md_m=kop_md,
+        kop_tvd_m=(
+            None
+            if kop_md is None
+            else _interp_1d(source_md_values, source_z_values, float(kop_md))
+        ),
+        horizontal_entry_md_m=horizontal_entry_md,
+        horizontal_length_m=float(horizontal_length),
+        hold_inc_deg=hold_inc,
+        hold_azi_deg=hold_azi,
+        hold_length_m=float(hold_length),
+        max_inc_deg=float(np.nanmax(inc_values)),
+        max_dls_deg_per_30m=max_dls,
+        max_build_dls_before_hold_deg_per_30m=max_build_dls,
+        is_analysis_eligible=exclusion_reason is None,
+        analysis_exclusion_reason=exclusion_reason,
+    )
+    zone_summaries = _build_zone_summaries(
+        stations=stations,
+        kop_md_m=kop_md,
+        hold_start_md_m=hold_start_md,
+        hold_end_md_m=hold_end_md,
+        horizontal_entry_md_m=horizontal_entry_md,
+    )
+    return ActualFundWellAnalysis(
+        name=str(actual_well.name),
+        metrics=metrics,
+        survey=_annotate_actual_fund_survey(
             stations=stations,
-            kop_md_m=kop_md,
-            horizontal_entry_md_m=horizontal_entry_md,
-        )
-        hold_length = (
-            0.0
-            if hold_start_md is None or hold_end_md is None
-            else float(max(hold_end_md - hold_start_md, 0.0))
-        )
-        build_limit_md = (
-            float(hold_start_md)
-            if hold_start_md is not None
-            else float(horizontal_entry_md)
-            if horizontal_entry_md is not None
-            else float(md_values[-1])
-        )
-        build_mask = md_values <= build_limit_md + 1e-9
-        is_horizontal = actual_well_is_horizontal(well.stations)
-        max_dls = _robust_max_dls(stations)
-        max_build_dls = _robust_max_dls(stations.loc[build_mask].reset_index(drop=True))
-        exclusion_reason = _analysis_exclusion_reason(
-            is_horizontal=is_horizontal,
-            kop_md_m=kop_md,
-            horizontal_entry_md_m=horizontal_entry_md,
-            horizontal_length_m=float(horizontal_length),
-            hold_inc_deg=hold_inc,
-            hold_length_m=float(hold_length),
-            max_dls_deg_per_30m=max_dls,
-            max_build_dls_before_hold_deg_per_30m=max_build_dls,
-        )
-        metrics.append(
-            ActualFundWellMetrics(
-                name=str(well.name),
-                family_name=actual_well_family_name(well.name),
-                pad_group=actual_well_pad_group(well.name),
-                is_horizontal=is_horizontal,
-                md_total_m=float(md_values[-1]),
-                tvd_end_m=float(z_values[-1]),
-                lateral_departure_m=float(
-                    np.hypot(x_values[-1] - x_values[0], y_values[-1] - y_values[0])
-                ),
-                kop_md_m=kop_md,
-                kop_tvd_m=(
-                    None
-                    if kop_md is None
-                    else _interp_1d(source_md_values, source_z_values, float(kop_md))
-                ),
-                horizontal_entry_md_m=horizontal_entry_md,
-                horizontal_length_m=float(horizontal_length),
-                hold_inc_deg=hold_inc,
-                hold_azi_deg=hold_azi,
-                hold_length_m=float(hold_length),
-                max_inc_deg=float(np.nanmax(inc_values)),
-                max_dls_deg_per_30m=max_dls,
-                max_build_dls_before_hold_deg_per_30m=max_build_dls,
-                is_analysis_eligible=exclusion_reason is None,
-                analysis_exclusion_reason=exclusion_reason,
+            zone_summaries=zone_summaries,
+        ),
+        zone_summaries=zone_summaries,
+    )
+
+
+def _build_zone_summaries(
+    *,
+    stations: pd.DataFrame,
+    kop_md_m: float | None,
+    hold_start_md_m: float | None,
+    hold_end_md_m: float | None,
+    horizontal_entry_md_m: float | None,
+) -> tuple[ActualFundZoneSummary, ...]:
+    md_start = float(stations["MD_m"].iloc[0])
+    md_end = float(stations["MD_m"].iloc[-1])
+    intervals: list[tuple[str, float, float]] = []
+
+    def add_interval(zone_key: str, start_m: float | None, end_m: float | None) -> None:
+        if start_m is None or end_m is None:
+            return
+        start_value = float(start_m)
+        end_value = float(end_m)
+        if end_value <= start_value + 1e-9:
+            return
+        intervals.append((zone_key, start_value, end_value))
+
+    if kop_md_m is None:
+        add_interval(ZONE_VERTICAL, md_start, md_end)
+    else:
+        kop_md = float(min(max(kop_md_m, md_start), md_end))
+        add_interval(ZONE_VERTICAL, md_start, kop_md)
+        if hold_start_md_m is not None and hold_start_md_m > kop_md + 1e-9:
+            add_interval(ZONE_BUILD1, kop_md, hold_start_md_m)
+        elif horizontal_entry_md_m is not None and horizontal_entry_md_m > kop_md + 1e-9:
+            add_interval(ZONE_BUILD1, kop_md, horizontal_entry_md_m)
+        else:
+            add_interval(ZONE_BUILD1, kop_md, md_end)
+
+        if hold_start_md_m is not None and hold_end_md_m is not None:
+            add_interval(ZONE_HOLD, hold_start_md_m, hold_end_md_m)
+            if horizontal_entry_md_m is not None and horizontal_entry_md_m > hold_end_md_m + 1e-9:
+                add_interval(ZONE_BUILD2, hold_end_md_m, horizontal_entry_md_m)
+            elif hold_end_md_m < md_end - 1e-9 and horizontal_entry_md_m is None:
+                add_interval(ZONE_BUILD2, hold_end_md_m, md_end)
+
+        if horizontal_entry_md_m is not None:
+            add_interval(ZONE_HORIZONTAL, horizontal_entry_md_m, md_end)
+
+    zone_summaries: list[ActualFundZoneSummary] = []
+    for zone_key, zone_start_md, zone_end_md in intervals:
+        interval_df = _survey_interval(stations, zone_start_md, zone_end_md)
+        inc_stats = _series_stats(interval_df["INC_deg"])
+        dls_stats = _series_stats(interval_df["DLS_deg_per_30m"])
+        zone_summaries.append(
+            ActualFundZoneSummary(
+                zone_key=zone_key,
+                zone_label=ZONE_LABELS.get(zone_key, zone_key),
+                md_from_m=float(zone_start_md),
+                md_to_m=float(zone_end_md),
+                md_length_m=float(max(zone_end_md - zone_start_md, 0.0)),
+                inc_min_deg=inc_stats[0],
+                inc_max_deg=inc_stats[1],
+                inc_mean_deg=inc_stats[2],
+                dls_min_deg_per_30m=dls_stats[0],
+                dls_max_deg_per_30m=dls_stats[1],
+                dls_mean_deg_per_30m=dls_stats[2],
             )
         )
-    return tuple(metrics)
+    return tuple(zone_summaries)
+
+
+def _annotate_actual_fund_survey(
+    *,
+    stations: pd.DataFrame,
+    zone_summaries: tuple[ActualFundZoneSummary, ...],
+) -> pd.DataFrame:
+    annotated = stations.copy()
+    x_values = annotated["X_m"].to_numpy(dtype=float)
+    y_values = annotated["Y_m"].to_numpy(dtype=float)
+    annotated["Lateral_m"] = np.hypot(
+        x_values - float(x_values[0]),
+        y_values - float(y_values[0]),
+    )
+    zone_keys: list[str] = []
+    zone_labels: list[str] = []
+    md_values = annotated["MD_m"].to_numpy(dtype=float)
+    for md_value in md_values.tolist():
+        summary = next(
+            (
+                item
+                for item in zone_summaries
+                if float(item.md_from_m) - 1e-9 <= float(md_value) <= float(item.md_to_m) + 1e-9
+            ),
+            None,
+        )
+        if summary is None:
+            zone_keys.append(ZONE_BUILD1)
+            zone_labels.append(ZONE_LABELS[ZONE_BUILD1])
+        else:
+            zone_keys.append(str(summary.zone_key))
+            zone_labels.append(str(summary.zone_label))
+    annotated["AnalysisZoneKey"] = zone_keys
+    annotated["AnalysisZoneLabel"] = zone_labels
+    return annotated
 
 
 def actual_fund_metrics_rows(
@@ -449,6 +639,59 @@ def _terminal_horizontal_interval(stations: pd.DataFrame) -> tuple[float | None,
     return float(best_start), float(best_end), float(best_length)
 
 
+def _detect_horizontal_entry_md(
+    *,
+    stations: pd.DataFrame,
+    kop_md_m: float | None,
+    hold_end_md_m: float | None,
+    terminal_horizontal_start_md_m: float | None,
+) -> float | None:
+    if terminal_horizontal_start_md_m is None:
+        return None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
+    stable_dls = _rolling_median(np.where(np.isfinite(dls_values), dls_values, 0.0), window_size=window_size)
+    tail_length_m = max(HORIZONTAL_MIN_INTERVAL_M, 120.0)
+    tail_mask = md_values >= float(md_values[-1]) - tail_length_m
+    tail_dls = stable_dls[tail_mask & np.isfinite(stable_dls)]
+    terminal_dls_baseline = (
+        float(np.median(tail_dls))
+        if len(tail_dls) > 0
+        else HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M
+    )
+    horizontal_dls_threshold = float(
+        min(
+            HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M,
+            max(0.6, terminal_dls_baseline + 0.4),
+        )
+    )
+    search_start_md = (
+        float(hold_end_md_m)
+        if hold_end_md_m is not None
+        else float(kop_md_m)
+        if kop_md_m is not None
+        else float(md_values[0])
+    )
+    horizontal_mask = (
+        (md_values >= search_start_md - 1e-9)
+        & (stable_dls <= horizontal_dls_threshold)
+        & (inc_values >= HORIZONTAL_ENTRY_MIN_INC_DEG)
+    )
+    candidate_intervals = [
+        (start_md, end_md, length_m)
+        for start_md, end_md, length_m in _mask_intervals(md_values, horizontal_mask)
+        if end_md >= float(md_values[-1]) - HORIZONTAL_END_TOLERANCE_M
+        and length_m >= HORIZONTAL_MIN_INTERVAL_M
+    ]
+    if candidate_intervals:
+        best_start_md = min(float(item[0]) for item in candidate_intervals)
+        return float(best_start_md)
+    return float(terminal_horizontal_start_md_m)
+
+
 def _first_threshold_crossing_md(
     *,
     md_values: np.ndarray,
@@ -495,6 +738,43 @@ def _first_kop_md_from_geometry(stations: pd.DataFrame, *, threshold_deg: float)
 
 def _interp_1d(md_values: np.ndarray, values: np.ndarray, md_m: float) -> float:
     return float(np.interp(float(md_m), md_values, values))
+
+
+def _interpolate_row(stations: pd.DataFrame, md_m: float) -> dict[str, float]:
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    return {
+        column: float(np.interp(float(md_m), md_values, stations[column].to_numpy(dtype=float)))
+        for column in ("MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m", "DLS_deg_per_30m")
+    }
+
+
+def _survey_interval(stations: pd.DataFrame, start_md_m: float, end_md_m: float) -> pd.DataFrame:
+    if end_md_m <= start_md_m + 1e-9:
+        return pd.DataFrame(columns=stations.columns)
+    interval = stations.loc[
+        (stations["MD_m"] >= float(start_md_m) - 1e-9)
+        & (stations["MD_m"] <= float(end_md_m) + 1e-9)
+    ].copy()
+    if interval.empty or abs(float(interval["MD_m"].iloc[0]) - float(start_md_m)) > 1e-9:
+        interval = pd.concat(
+            [pd.DataFrame([_interpolate_row(stations, float(start_md_m))]), interval],
+            ignore_index=True,
+        )
+    if abs(float(interval["MD_m"].iloc[-1]) - float(end_md_m)) > 1e-9:
+        interval = pd.concat(
+            [interval, pd.DataFrame([_interpolate_row(stations, float(end_md_m))])],
+            ignore_index=True,
+        )
+    interval = interval.sort_values("MD_m").reset_index(drop=True)
+    return interval
+
+
+def _series_stats(series: pd.Series) -> tuple[float | None, float | None, float | None]:
+    values = series.to_numpy(dtype=float)
+    finite = values[np.isfinite(values)]
+    if len(finite) == 0:
+        return None, None, None
+    return float(np.min(finite)), float(np.max(finite)), float(np.mean(finite))
 
 
 def _circular_median_deg(values_deg: np.ndarray) -> float | None:

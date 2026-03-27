@@ -655,6 +655,22 @@ def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_availab
     assert "Пользовательская (по фактическому фонду)" in list(preset_widgets[0].options)
 
 
+def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()[:2]
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_reference_actual_wells"] = list(_horizontal_reference_well())
+
+    at.run(timeout=120)
+
+    detail_selectboxes = [
+        widget for widget in at.selectbox if widget.label == "Просмотр фактической скважины"
+    ]
+    assert detail_selectboxes
+    assert str(detail_selectboxes[0].value) == "FACT-H"
+
+
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
     page = _load_welltrack_page_module()
 
@@ -664,6 +680,16 @@ def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
 
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+
+
+def test_init_state_defaults_fast_3d_render_mode() -> None:
+    page = _load_welltrack_page_module()
+
+    page.st.session_state.clear()
+    page._init_state()
+
+    assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_FAST
+    assert page.WT_3D_RENDER_AUTO not in page.WT_3D_RENDER_OPTIONS
 
 
 def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
@@ -2136,6 +2162,7 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     figure_3d = page._all_wells_3d_figure(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
         reference_wells=reference_wells,
+        render_mode=page.WT_3D_RENDER_DETAIL,
     )
     figure_plan = page._all_wells_plan_figure(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
@@ -2211,7 +2238,10 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
         reference_wells=reference_wells,
     )
 
-    figure_3d = page._all_wells_anticollision_3d_figure(analysis)
+    figure_3d = page._all_wells_anticollision_3d_figure(
+        analysis,
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
     figure_plan = page._all_wells_anticollision_plan_figure(analysis)
 
     assert any(str(trace.name) == "FACT-1 (Фактическая)" for trace in figure_3d.data)
@@ -2323,7 +2353,27 @@ def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend(
     assert "FACT-1" in labels
     assert "APP-1" in labels
     assert "WELL-A" in legend_labels
-    assert "FACT-1 (Фактическая)" in legend_labels
+    assert "Фактические скважины" in legend_labels
+    assert "Проектные утвержденные скважины" in legend_labels
+    assert "FACT-1 (Фактическая)" not in legend_labels
+
+
+def test_scatter3d_legendonly_trace_preserves_legend_without_geometry() -> None:
+    page = _load_welltrack_page_module()
+    trace = page._reference_legend_trace_3d(page.REFERENCE_WELL_ACTUAL)
+
+    payload = page._scatter3d_trace_to_three_payload(trace)
+
+    assert payload["lines"] == []
+    assert payload["points"] == []
+    assert payload["labels"] == []
+    assert payload["legend_items"] == [
+        {
+            "label": "Фактические скважины",
+            "color": "#111111",
+            "opacity": 1.0,
+        }
+    ]
 
 
 def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> None:

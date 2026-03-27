@@ -18,8 +18,8 @@ def _three_library_text() -> str:
 
 
 @lru_cache(maxsize=1)
-def _orbit_controls_text() -> str:
-    return (_VENDOR_DIR / "OrbitControls.js").read_text(encoding="utf-8")
+def _trackball_controls_text() -> str:
+    return (_VENDOR_DIR / "TrackballControls.js").read_text(encoding="utf-8")
 
 
 @lru_cache(maxsize=1)
@@ -32,7 +32,7 @@ def _viewer_template_with_libraries() -> str:
     return (
         _viewer_template_text()
         .replace("__THREE_LIBRARY__", _three_library_text())
-        .replace("__ORBIT_CONTROLS__", _orbit_controls_text())
+        .replace("__TRACKBALL_CONTROLS__", _trackball_controls_text())
     )
 
 

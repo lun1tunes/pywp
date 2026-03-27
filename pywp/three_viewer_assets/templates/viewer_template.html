@@ -96,11 +96,11 @@
       }
 
       .legend-swatch {
-        width: 12px;
-        height: 12px;
-        border-radius: 3px;
-        flex: 0 0 12px;
-        border: 1px solid rgba(15, 23, 42, 0.16);
+        width: 16px;
+        height: 3px;
+        border-radius: 999px;
+        flex: 0 0 16px;
+        border: 0;
       }
 
       .legend-label {
@@ -122,7 +122,7 @@
       __THREE_LIBRARY__
     </script>
     <script>
-      __ORBIT_CONTROLS__
+      __TRACKBALL_CONTROLS__
     </script>
     <script id="scene-payload" type="application/json">
       __SCENE_PAYLOAD__
@@ -177,13 +177,16 @@
         const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
         camera.up.set(0, 0, 1);
 
-        const controls = new THREE.OrbitControls(camera, renderer.domElement);
-        controls.enableDamping = false;
-        controls.screenSpacePanning = true;
+        const controls = new THREE.TrackballControls(camera, renderer.domElement);
         controls.addEventListener("change", render);
-        controls.rotateSpeed = 0.9;
-        controls.zoomSpeed = 1.0;
-        controls.panSpeed = 0.9;
+        controls.rotateSpeed = 3.2;
+        controls.zoomSpeed = 1.1;
+        controls.panSpeed = 0.85;
+        controls.staticMoving = true;
+        controls.dynamicDampingFactor = 0.18;
+        controls.noRotate = false;
+        controls.noZoom = false;
+        controls.noPan = false;
 
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.96);
         scene.add(ambientLight);
@@ -255,6 +258,9 @@
           camera.aspect = width / height;
           camera.updateProjectionMatrix();
           renderer.setSize(width, height, false);
+          if (typeof controls.handleResize === "function") {
+            controls.handleResize();
+          }
           render();
         }
 

@@ -9,6 +9,7 @@ from pywp.actual_fund_analysis import (
     actual_well_family_name,
     actual_well_is_horizontal,
     actual_well_pad_group,
+    build_actual_fund_well_analysis,
     build_actual_fund_well_metrics,
     calibrate_uncertainty_from_actual_fund,
 )
@@ -99,7 +100,9 @@ def test_actual_fund_metrics_detect_horizontal_wells_and_estimate_kop() -> None:
     assert len(metrics) == 3
     assert all(actual_well_is_horizontal(well.stations) for well in wells)
     assert all(item.is_horizontal for item in metrics)
-    assert all(item.horizontal_length_m >= 1000.0 for item in metrics)
+    assert all(item.horizontal_entry_md_m is not None for item in metrics)
+    assert all(1900.0 <= float(item.horizontal_entry_md_m) <= 2050.0 for item in metrics)
+    assert all(item.horizontal_length_m >= 900.0 for item in metrics)
     assert all(item.kop_md_m is not None for item in metrics)
     assert all(item.max_inc_deg >= 80.0 for item in metrics)
 
@@ -115,7 +118,7 @@ def test_actual_fund_metrics_reconstruct_hold_and_robust_dls_from_irregular_xyzm
     assert item.kop_md_m is not None
     assert 500.0 <= float(item.kop_md_m) <= 950.0
     assert item.horizontal_entry_md_m is not None
-    assert float(item.horizontal_entry_md_m) >= 2200.0
+    assert 2280.0 <= float(item.horizontal_entry_md_m) <= 2320.0
     assert float(item.horizontal_length_m) >= 600.0
     assert item.hold_inc_deg is not None
     assert 52.0 <= float(item.hold_inc_deg) <= 58.0
@@ -124,6 +127,27 @@ def test_actual_fund_metrics_reconstruct_hold_and_robust_dls_from_irregular_xyzm
     assert float(item.max_dls_deg_per_30m) < 5.0
     assert item.max_build_dls_before_hold_deg_per_30m is not None
     assert float(item.max_build_dls_before_hold_deg_per_30m) < 5.0
+
+
+def test_actual_fund_well_analysis_builds_segmented_view_for_selected_well() -> None:
+    well = _synthetic_hold_actual_well()[0]
+
+    analysis = build_actual_fund_well_analysis(well)
+
+    assert analysis.metrics.horizontal_entry_md_m is not None
+    assert 2280.0 <= float(analysis.metrics.horizontal_entry_md_m) <= 2320.0
+    assert {"Lateral_m", "AnalysisZoneKey", "AnalysisZoneLabel"} <= set(analysis.survey.columns)
+    assert [zone.zone_key for zone in analysis.zone_summaries] == [
+        "vertical",
+        "build1",
+        "hold",
+        "build2",
+        "horizontal",
+    ]
+    horizontal_zone = analysis.zone_summaries[-1]
+    assert horizontal_zone.zone_label == "Горизонтальный"
+    assert float(horizontal_zone.md_from_m) == float(analysis.metrics.horizontal_entry_md_m)
+    assert float(horizontal_zone.md_to_m) == float(analysis.metrics.md_total_m)
 
 
 def test_actual_fund_analysis_excludes_horizontal_anomaly_without_stable_hold() -> None:

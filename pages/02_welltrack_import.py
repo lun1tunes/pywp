@@ -15,10 +15,11 @@ import streamlit as st
 
 from pywp import TrajectoryConfig, TrajectoryPlanner
 from pywp.actual_fund_analysis import (
+    ActualFundWellAnalysis,
     CALIBRATION_STATUS_READY,
+    build_actual_fund_well_analyses,
     actual_fund_metrics_rows,
     actual_fund_pad_rows,
-    build_actual_fund_well_metrics,
     calibrate_uncertainty_from_actual_fund,
 )
 from pywp.anticollision import (
@@ -136,7 +137,7 @@ from pywp.welltrack_batch import (
 )
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS3.INC")
-WT_UI_DEFAULTS_VERSION = 14
+WT_UI_DEFAULTS_VERSION = 15
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
 WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
@@ -151,7 +152,6 @@ REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
 REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M = 100.0
 WT_3D_RENDER_OPTIONS: tuple[str, ...] = (
-    WT_3D_RENDER_AUTO,
     WT_3D_RENDER_DETAIL,
     WT_3D_RENDER_FAST,
 )
@@ -363,16 +363,7 @@ def _resolve_3d_render_mode(
     normalized = str(requested_mode).strip()
     if normalized == WT_3D_RENDER_DETAIL:
         return WT_3D_RENDER_DETAIL
-    if normalized == WT_3D_RENDER_FAST:
-        return WT_3D_RENDER_FAST
-    reference_well_list = tuple(reference_wells)
-    if calculated_well_count >= WT_3D_FAST_CALC_WELL_THRESHOLD:
-        return WT_3D_RENDER_FAST
-    if len(reference_well_list) >= WT_3D_FAST_REFERENCE_WELL_THRESHOLD:
-        return WT_3D_RENDER_FAST
-    if _reference_point_count(reference_well_list) >= WT_3D_FAST_REFERENCE_POINT_THRESHOLD:
-        return WT_3D_RENDER_FAST
-    return WT_3D_RENDER_DETAIL
+    return WT_3D_RENDER_FAST
 
 
 def _decimated_station_frame(stations: pd.DataFrame, *, target_points: int) -> pd.DataFrame:
@@ -443,6 +434,7 @@ def _combined_reference_trace_3d(
         z=z_values,
         mode="lines",
         name=f"{kind_label} (сводно)",
+        showlegend=False,
         line={
             "width": 2.5,
             "color": REFERENCE_WELL_KIND_COLORS.get(str(kind), "#A0A0A0"),
@@ -505,6 +497,61 @@ def _reference_label_color(kind: str) -> str:
     if str(kind) == REFERENCE_WELL_APPROVED:
         return REFERENCE_LABEL_APPROVED_COLOR
     return REFERENCE_LABEL_ACTUAL_COLOR
+
+
+def _reference_legend_label(kind: str) -> str:
+    if str(kind) == REFERENCE_WELL_APPROVED:
+        return "Проектные утвержденные скважины"
+    return "Фактические скважины"
+
+
+def _reference_legend_color(kind: str) -> str:
+    if str(kind) == REFERENCE_WELL_APPROVED:
+        return "#C62828"
+    return "#111111"
+
+
+def _reference_kind_value(reference_well: object) -> str:
+    return str(getattr(reference_well, "kind", getattr(reference_well, "well_kind", "")))
+
+
+def _reference_kinds_present(reference_wells: Iterable[object]) -> tuple[str, ...]:
+    kinds: list[str] = []
+    seen: set[str] = set()
+    for reference_well in reference_wells:
+        kind = _reference_kind_value(reference_well)
+        if not kind or kind in seen:
+            continue
+        seen.add(kind)
+        kinds.append(kind)
+    return tuple(kinds)
+
+
+def _reference_legend_trace_3d(kind: str) -> go.Scatter3d:
+    return go.Scatter3d(
+        x=[0.0, 1.0],
+        y=[0.0, 0.0],
+        z=[0.0, 0.0],
+        mode="lines",
+        name=_reference_legend_label(kind),
+        line={"width": 4, "color": _reference_legend_color(kind)},
+        hoverinfo="skip",
+        legendgroup=f"reference_kind_{str(kind)}",
+        visible="legendonly",
+    )
+
+
+def _reference_legend_trace_2d(kind: str) -> go.Scatter:
+    return go.Scatter(
+        x=[0.0, 1.0],
+        y=[0.0, 0.0],
+        mode="lines",
+        name=_reference_legend_label(kind),
+        line={"width": 4, "color": _reference_legend_color(kind)},
+        hoverinfo="skip",
+        legendgroup=f"reference_kind_{str(kind)}",
+        visible="legendonly",
+    )
 
 
 def _reference_label_anchor_point(
@@ -605,6 +652,15 @@ def _trace_showlegend(trace: object) -> bool:
     return bool(showlegend)
 
 
+def _trace_visibility_state(trace: object) -> str:
+    visible = getattr(trace, "visible", True)
+    if visible is False:
+        return "hidden"
+    if str(visible) == "legendonly":
+        return "legendonly"
+    return "visible"
+
+
 def _plotly_color_and_opacity(
     color_value: object,
     *,
@@ -692,35 +748,39 @@ def _scatter3d_trace_to_three_payload(
     trace_opacity = (
         1.0 if getattr(trace, "opacity", None) is None else float(trace.opacity)
     )
+    visibility_state = _trace_visibility_state(trace)
+    legend_added = False
     if "lines" in mode:
         line = trace.line or {}
         color, opacity = _plotly_color_and_opacity(
             getattr(line, "color", None),
             fallback_opacity=trace_opacity,
         )
-        segments = _split_nan_separated_xyz_segments(
-            x_values=() if trace.x is None else trace.x,
-            y_values=() if trace.y is None else trace.y,
-            z_values=() if trace.z is None else trace.z,
-        )
-        if segments:
-            payload["lines"].append(
-                {
-                    "name": trace_name,
-                    "segments": segments,
-                    "color": color,
-                    "opacity": opacity,
-                    "dash": str(getattr(line, "dash", "solid") or "solid"),
-                }
+        if visibility_state == "visible":
+            segments = _split_nan_separated_xyz_segments(
+                x_values=() if trace.x is None else trace.x,
+                y_values=() if trace.y is None else trace.y,
+                z_values=() if trace.z is None else trace.z,
             )
-            if _trace_showlegend(trace):
-                payload["legend_items"].append(
+            if segments:
+                payload["lines"].append(
                     {
-                        "label": trace_name,
+                        "name": trace_name,
+                        "segments": segments,
                         "color": color,
                         "opacity": opacity,
+                        "dash": str(getattr(line, "dash", "solid") or "solid"),
                     }
                 )
+        if _trace_showlegend(trace) and trace_name:
+            payload["legend_items"].append(
+                {
+                    "label": trace_name,
+                    "color": color,
+                    "opacity": opacity,
+                }
+            )
+            legend_added = True
     if "markers" in mode:
         marker = trace.marker or {}
         color, opacity = _plotly_color_and_opacity(
@@ -729,76 +789,80 @@ def _scatter3d_trace_to_three_payload(
         )
         if not (trace_name or opacity > 0.01):
             return payload
-        x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
-        y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
-        z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
-        mask = np.isfinite(x_array) & np.isfinite(y_array) & np.isfinite(z_array)
-        points = [
-            [float(x_value), float(y_value), float(z_value)]
-            for x_value, y_value, z_value in zip(
-                x_array[mask],
-                y_array[mask],
-                z_array[mask],
-                strict=False,
-            )
-        ]
-        if points:
-            marker_size = getattr(marker, "size", 6)
-            if isinstance(marker_size, (list, tuple, np.ndarray)):
-                marker_size = marker_size[0] if len(marker_size) else 6
-            payload["points"].append(
-                {
-                    "name": trace_name,
-                    "points": points,
-                    "color": color,
-                    "opacity": opacity,
-                    "size": float(marker_size),
-                    "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
-                }
-            )
-            if _trace_showlegend(trace):
-                payload["legend_items"].append(
+        if visibility_state == "visible":
+            x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+            y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+            z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+            mask = np.isfinite(x_array) & np.isfinite(y_array) & np.isfinite(z_array)
+            points = [
+                [float(x_value), float(y_value), float(z_value)]
+                for x_value, y_value, z_value in zip(
+                    x_array[mask],
+                    y_array[mask],
+                    z_array[mask],
+                    strict=False,
+                )
+            ]
+            if points:
+                marker_size = getattr(marker, "size", 6)
+                if isinstance(marker_size, (list, tuple, np.ndarray)):
+                    marker_size = marker_size[0] if len(marker_size) else 6
+                payload["points"].append(
                     {
-                        "label": trace_name,
+                        "name": trace_name,
+                        "points": points,
                         "color": color,
                         "opacity": opacity,
+                        "size": float(marker_size),
+                        "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
                     }
                 )
+        if _trace_showlegend(trace) and trace_name and not legend_added:
+            payload["legend_items"].append(
+                {
+                    "label": trace_name,
+                    "color": color,
+                    "opacity": opacity,
+                }
+            )
     if "text" in mode and "lines" not in mode and "markers" not in mode:
         text_font = trace.textfont or {}
         color = str(getattr(text_font, "color", "#0F172A"))
-        x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
-        y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
-        z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
-        text_values = list(() if trace.text is None else trace.text)
-        for x_value, y_value, z_value, text_value in zip(
-            x_array,
-            y_array,
-            z_array,
-            text_values,
-            strict=False,
-        ):
-            if not (
-                np.isfinite(float(x_value))
-                and np.isfinite(float(y_value))
-                and np.isfinite(float(z_value))
+        if visibility_state == "visible":
+            x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+            y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+            z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
+            text_values = list(() if trace.text is None else trace.text)
+            for x_value, y_value, z_value, text_value in zip(
+                x_array,
+                y_array,
+                z_array,
+                text_values,
+                strict=False,
             ):
-                continue
-            payload["labels"].append(
-                {
-                    "text": str(text_value),
-                    "position": [
-                        float(x_value),
-                        float(y_value),
-                        float(z_value),
-                    ],
-                    "color": color,
-                }
-            )
+                if not (
+                    np.isfinite(float(x_value))
+                    and np.isfinite(float(y_value))
+                    and np.isfinite(float(z_value))
+                ):
+                    continue
+                payload["labels"].append(
+                    {
+                        "text": str(text_value),
+                        "position": [
+                            float(x_value),
+                            float(y_value),
+                            float(z_value),
+                        ],
+                        "color": color,
+                    }
+                )
     return payload
 
 
 def _mesh3d_trace_to_three_payload(trace: go.Mesh3d) -> dict[str, object] | None:
+    if _trace_visibility_state(trace) != "visible":
+        return None
     x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
     y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
     z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
@@ -1488,7 +1552,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault("wt_results_view_mode", "Отдельная скважина")
     st.session_state.setdefault("wt_results_all_view_mode", "Траектории")
-    st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_AUTO)
+    st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_FAST)
     st.session_state.setdefault("wt_3d_backend", WT_3D_BACKEND_PLOTLY)
     st.session_state.setdefault(
         "wt_anticollision_uncertainty_preset", DEFAULT_UNCERTAINTY_PRESET
@@ -1508,7 +1572,7 @@ def _init_state() -> None:
     }:
         st.session_state["wt_results_all_view_mode"] = "Траектории"
     if str(st.session_state.get("wt_3d_render_mode", "")).strip() not in set(WT_3D_RENDER_OPTIONS):
-        st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_AUTO
+        st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_FAST
     if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(WT_3D_BACKEND_OPTIONS):
         st.session_state["wt_3d_backend"] = WT_3D_BACKEND_PLOTLY
     st.session_state["wt_anticollision_uncertainty_preset"] = (
@@ -1646,7 +1710,7 @@ def _all_wells_3d_figure(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
-    render_mode: str = WT_3D_RENDER_AUTO,
+    render_mode: str = WT_3D_RENDER_FAST,
     height: int = 620,
 ) -> go.Figure:
     fig = go.Figure()
@@ -1777,6 +1841,7 @@ def _all_wells_3d_figure(
                     z=z_values,
                     mode="lines",
                     name=reference_well_display_label(reference_well),
+                    showlegend=False,
                     line={"width": 4, "color": line_color},
                     customdata=np.column_stack(
                         [stations["MD_m"].to_numpy(dtype=float)]
@@ -1796,6 +1861,8 @@ def _all_wells_3d_figure(
                     ),
                 )
             )
+    for kind in _reference_kinds_present(reference_wells):
+        fig.add_trace(_reference_legend_trace_3d(kind))
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
         if label_trace is not None:
@@ -2040,6 +2107,7 @@ def _all_wells_plan_figure(
                 y=y_values,
                 mode="lines",
                 name=reference_well_display_label(reference_well),
+                showlegend=False,
                 line={"width": 3.5, "color": line_color},
                 customdata=np.column_stack([stations["MD_m"].to_numpy(dtype=float)]),
                 hovertemplate=(
@@ -2056,6 +2124,8 @@ def _all_wells_plan_figure(
                     ),
                 )
             )
+    for kind in _reference_kinds_present(reference_wells):
+        fig.add_trace(_reference_legend_trace_2d(kind))
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_2d(reference_wells, kind=kind)
         if label_trace is not None:
@@ -2159,7 +2229,7 @@ def _all_wells_anticollision_3d_figure(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
-    render_mode: str = WT_3D_RENDER_AUTO,
+    render_mode: str = WT_3D_RENDER_FAST,
     height: int = 660,
 ) -> go.Figure:
     fig = go.Figure()
@@ -2293,6 +2363,7 @@ def _all_wells_anticollision_3d_figure(
                 mode="lines",
                 name=well_label,
                 legendgroup=str(well.name),
+                showlegend=not is_reference_only,
                 line={"width": 5, "color": str(well.color)},
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
@@ -2414,6 +2485,8 @@ def _all_wells_anticollision_3d_figure(
                 x_arrays.append(np.asarray(combined_trace.x, dtype=float))
                 y_arrays.append(np.asarray(combined_trace.y, dtype=float))
                 z_arrays.append(np.asarray(combined_trace.z, dtype=float))
+    for kind in _reference_kinds_present(reference_wells):
+        fig.add_trace(_reference_legend_trace_3d(kind))
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_3d(
             [
@@ -2680,6 +2753,7 @@ def _all_wells_anticollision_plan_figure(
                 mode="lines",
                 name=well_label,
                 legendgroup=str(well.name),
+                showlegend=not bool(well.is_reference_only),
                 line={"width": 4, "color": str(well.color)},
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
@@ -2815,6 +2889,10 @@ def _all_wells_anticollision_plan_figure(
         x_focus_arrays.append(x_segment)
         y_focus_arrays.append(y_segment)
         segment_legend_added = True
+    for kind in _reference_kinds_present(
+        [well for well in analysis.wells if bool(well.is_reference_only)]
+    ):
+        fig.add_trace(_reference_legend_trace_2d(kind))
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_2d(
             [
@@ -4523,12 +4601,373 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
         st.caption("Скважины этого типа не загружены.")
 
 
+ACTUAL_FUND_ZONE_COLORS: dict[str, str] = {
+    "vertical": "#2563EB",
+    "build1": "#F59E0B",
+    "hold": "#16A34A",
+    "build2": "#8B5CF6",
+    "horizontal": "#0F766E",
+}
+
+
+def _actual_fund_zone_color(zone_key: str) -> str:
+    return ACTUAL_FUND_ZONE_COLORS.get(str(zone_key), "#475569")
+
+
+def _actual_fund_interp_row(survey: pd.DataFrame, md_m: float) -> dict[str, float]:
+    md_values = survey["MD_m"].to_numpy(dtype=float)
+    return {
+        column: float(np.interp(float(md_m), md_values, survey[column].to_numpy(dtype=float)))
+        for column in ("MD_m", "X_m", "Y_m", "Z_m", "INC_deg", "DLS_deg_per_30m", "Lateral_m")
+    }
+
+
+def _actual_fund_interval_df(
+    survey: pd.DataFrame,
+    start_md_m: float,
+    end_md_m: float,
+) -> pd.DataFrame:
+    if end_md_m <= start_md_m + 1e-9:
+        return pd.DataFrame(columns=survey.columns)
+    interval = survey.loc[
+        (survey["MD_m"] >= float(start_md_m) - 1e-9)
+        & (survey["MD_m"] <= float(end_md_m) + 1e-9)
+    ].copy()
+    if interval.empty or abs(float(interval["MD_m"].iloc[0]) - float(start_md_m)) > 1e-9:
+        interval = pd.concat(
+            [pd.DataFrame([_actual_fund_interp_row(survey, float(start_md_m))]), interval],
+            ignore_index=True,
+        )
+    if abs(float(interval["MD_m"].iloc[-1]) - float(end_md_m)) > 1e-9:
+        interval = pd.concat(
+            [interval, pd.DataFrame([_actual_fund_interp_row(survey, float(end_md_m))])],
+            ignore_index=True,
+        )
+    return interval.sort_values("MD_m").reset_index(drop=True)
+
+
+def _actual_fund_kop_marker(detail: ActualFundWellAnalysis) -> dict[str, float] | None:
+    if detail.metrics.kop_md_m is None:
+        return None
+    return _actual_fund_interp_row(detail.survey, float(detail.metrics.kop_md_m))
+
+
+def _actual_fund_horizontal_entry_marker(
+    detail: ActualFundWellAnalysis,
+) -> dict[str, float] | None:
+    if detail.metrics.horizontal_entry_md_m is None:
+        return None
+    return _actual_fund_interp_row(detail.survey, float(detail.metrics.horizontal_entry_md_m))
+
+
+def _actual_fund_lateral_from_horizontal_entry_m(detail: ActualFundWellAnalysis) -> float | None:
+    entry = _actual_fund_horizontal_entry_marker(detail)
+    if entry is None:
+        return None
+    end_x = float(detail.survey["X_m"].iloc[-1])
+    end_y = float(detail.survey["Y_m"].iloc[-1])
+    return float(np.hypot(end_x - float(entry["X_m"]), end_y - float(entry["Y_m"])))
+
+
+def _actual_fund_zone_table_rows(detail: ActualFundWellAnalysis) -> list[dict[str, object]]:
+    return [
+        {
+            "Участок": str(item.zone_label),
+            "Интервал MD, м": f"{float(item.md_from_m):.0f} - {float(item.md_to_m):.0f}",
+            "Длина MD, м": float(item.md_length_m),
+            "INC min, deg": item.inc_min_deg,
+            "INC avg, deg": item.inc_mean_deg,
+            "INC max, deg": item.inc_max_deg,
+            "DLS min, deg/30м": item.dls_min_deg_per_30m,
+            "DLS avg, deg/30м": item.dls_mean_deg_per_30m,
+            "DLS max, deg/30м": item.dls_max_deg_per_30m,
+        }
+        for item in detail.zone_summaries
+    ]
+
+
+def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
+    figure = go.Figure()
+    shown_legend_keys: set[str] = set()
+    for zone in detail.zone_summaries:
+        interval = _actual_fund_interval_df(
+            detail.survey,
+            float(zone.md_from_m),
+            float(zone.md_to_m),
+        )
+        if len(interval) < 2:
+            continue
+        zone_key = str(zone.zone_key)
+        customdata = np.column_stack(
+            [
+                interval["MD_m"].to_numpy(dtype=float),
+                interval["Z_m"].to_numpy(dtype=float),
+                interval["DLS_deg_per_30m"].to_numpy(dtype=float),
+                interval["INC_deg"].to_numpy(dtype=float),
+            ]
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=interval["X_m"],
+                y=interval["Y_m"],
+                mode="lines",
+                name=str(zone.zone_label),
+                showlegend=zone_key not in shown_legend_keys,
+                legendgroup=zone_key,
+                line={"color": _actual_fund_zone_color(zone_key), "width": 4},
+                customdata=customdata,
+                hovertemplate=(
+                    f"{detail.name}<br>Участок: {zone.zone_label}"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        shown_legend_keys.add(zone_key)
+
+    kop_marker = _actual_fund_kop_marker(detail)
+    if kop_marker is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=[float(kop_marker["X_m"])],
+                y=[float(kop_marker["Y_m"])],
+                mode="markers+text",
+                name="KOP",
+                text=["KOP"],
+                textposition="top center",
+                marker={"color": "#111827", "symbol": "diamond", "size": 10},
+                customdata=[[
+                    float(kop_marker["MD_m"]),
+                    float(kop_marker["Z_m"]),
+                    float(kop_marker["DLS_deg_per_30m"]),
+                    float(kop_marker["INC_deg"]),
+                ]],
+                hovertemplate=(
+                    "KOP"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    horizontal_marker = _actual_fund_horizontal_entry_marker(detail)
+    if horizontal_marker is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=[float(horizontal_marker["X_m"])],
+                y=[float(horizontal_marker["Y_m"])],
+                mode="markers+text",
+                name="Старт горизонта",
+                text=["ГС"],
+                textposition="top center",
+                marker={"color": "#B91C1C", "symbol": "square", "size": 9},
+                customdata=[[
+                    float(horizontal_marker["MD_m"]),
+                    float(horizontal_marker["Z_m"]),
+                    float(horizontal_marker["DLS_deg_per_30m"]),
+                    float(horizontal_marker["INC_deg"]),
+                ]],
+                hovertemplate=(
+                    "Старт горизонтального участка"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    figure.update_layout(
+        title=f"{detail.name}: план",
+        xaxis_title="X / Восток (м)",
+        yaxis_title="Y / Север (м)",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
+        margin={"l": 20, "r": 20, "t": 48, "b": 20},
+        template="plotly_white",
+    )
+    return figure
+
+
+def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.Figure:
+    figure = go.Figure()
+    shown_legend_keys: set[str] = set()
+    for zone in detail.zone_summaries:
+        interval = _actual_fund_interval_df(
+            detail.survey,
+            float(zone.md_from_m),
+            float(zone.md_to_m),
+        )
+        if len(interval) < 2:
+            continue
+        zone_key = str(zone.zone_key)
+        customdata = np.column_stack(
+            [
+                interval["MD_m"].to_numpy(dtype=float),
+                interval["Z_m"].to_numpy(dtype=float),
+                interval["DLS_deg_per_30m"].to_numpy(dtype=float),
+                interval["INC_deg"].to_numpy(dtype=float),
+            ]
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=interval["Lateral_m"],
+                y=interval["Z_m"],
+                mode="lines",
+                name=str(zone.zone_label),
+                showlegend=zone_key not in shown_legend_keys,
+                legendgroup=zone_key,
+                line={"color": _actual_fund_zone_color(zone_key), "width": 4},
+                customdata=customdata,
+                hovertemplate=(
+                    f"{detail.name}<br>Участок: {zone.zone_label}"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        shown_legend_keys.add(zone_key)
+
+    kop_marker = _actual_fund_kop_marker(detail)
+    if kop_marker is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=[float(kop_marker["Lateral_m"])],
+                y=[float(kop_marker["Z_m"])],
+                mode="markers+text",
+                name="KOP",
+                text=["KOP"],
+                textposition="top center",
+                marker={"color": "#111827", "symbol": "diamond", "size": 10},
+                customdata=[[
+                    float(kop_marker["MD_m"]),
+                    float(kop_marker["Z_m"]),
+                    float(kop_marker["DLS_deg_per_30m"]),
+                    float(kop_marker["INC_deg"]),
+                ]],
+                hovertemplate=(
+                    "KOP"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    horizontal_marker = _actual_fund_horizontal_entry_marker(detail)
+    if horizontal_marker is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=[float(horizontal_marker["Lateral_m"])],
+                y=[float(horizontal_marker["Z_m"])],
+                mode="markers+text",
+                name="Старт горизонта",
+                text=["ГС"],
+                textposition="top center",
+                marker={"color": "#B91C1C", "symbol": "square", "size": 9},
+                customdata=[[
+                    float(horizontal_marker["MD_m"]),
+                    float(horizontal_marker["Z_m"]),
+                    float(horizontal_marker["DLS_deg_per_30m"]),
+                    float(horizontal_marker["INC_deg"]),
+                ]],
+                hovertemplate=(
+                    "Старт горизонтального участка"
+                    "<br>MD=%{customdata[0]:.1f} м"
+                    "<br>Z=%{customdata[1]:.1f} м"
+                    "<br>DLS=%{customdata[2]:.2f} deg/30м"
+                    "<br>INC=%{customdata[3]:.2f} deg"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    figure.update_layout(
+        title=f"{detail.name}: профиль",
+        xaxis_title="Латеральный отход (м)",
+        yaxis_title="Z / TVD (м)",
+        yaxis={"autorange": "reversed"},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
+        margin={"l": 20, "r": 20, "t": 48, "b": 20},
+        template="plotly_white",
+    )
+    return figure
+
+
+def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]) -> None:
+    if not analyses:
+        return
+    names = [str(item.name) for item in analyses]
+    default_name = next(
+        (str(item.name) for item in analyses if bool(item.metrics.is_analysis_eligible)),
+        names[0],
+    )
+    selected_name = st.selectbox(
+        "Просмотр фактической скважины",
+        options=names,
+        index=max(names.index(default_name), 0),
+        key="wt_actual_fund_selected_well",
+    )
+    detail = next(item for item in analyses if str(item.name) == str(selected_name))
+    metrics = detail.metrics
+    lateral_from_horizontal_entry_m = _actual_fund_lateral_from_horizontal_entry_m(detail)
+
+    m1, m2, m3, m4, m5 = st.columns(5, gap="small")
+    m1.metric("Итоговая MD, м", f"{float(metrics.md_total_m):.0f}")
+    m2.metric(
+        "KOP MD, м",
+        "—" if metrics.kop_md_m is None else f"{float(metrics.kop_md_m):.0f}",
+    )
+    m3.metric(
+        "Вход в горизонталь, MD",
+        "—" if metrics.horizontal_entry_md_m is None else f"{float(metrics.horizontal_entry_md_m):.0f}",
+    )
+    m4.metric(
+        "Горизонталь, м",
+        "—" if not metrics.is_horizontal else f"{float(metrics.horizontal_length_m):.0f}",
+    )
+    m5.metric(
+        "Отход, м",
+        (
+            "—"
+            if lateral_from_horizontal_entry_m is None
+            else f"{float(lateral_from_horizontal_entry_m):.0f}"
+        ),
+    )
+    if not bool(metrics.is_analysis_eligible):
+        st.info(
+            "Скважина исключена из aggregate-анализа и калибровки: "
+            f"{metrics.analysis_exclusion_reason or 'без пояснения'}."
+        )
+
+    c1, c2 = st.columns(2, gap="medium")
+    c1.plotly_chart(_actual_fund_plan_figure(detail), width="stretch")
+    c2.plotly_chart(_actual_fund_vertical_profile_figure(detail), width="stretch")
+    st.dataframe(
+        arrow_safe_text_dataframe(pd.DataFrame(_actual_fund_zone_table_rows(detail))),
+        width="stretch",
+        hide_index=True,
+    )
+
+
 def _render_actual_fund_analysis_panel() -> None:
     actual_wells = _reference_kind_wells(REFERENCE_WELL_ACTUAL)
     if not actual_wells:
         return
 
-    metrics = build_actual_fund_well_metrics(actual_wells)
+    analyses = build_actual_fund_well_analyses(actual_wells)
+    metrics = tuple(item.metrics for item in analyses)
     eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
     excluded_horizontal_metrics = [
         item for item in metrics if bool(item.is_horizontal) and not bool(item.is_analysis_eligible)
@@ -4580,6 +5019,14 @@ def _render_actual_fund_analysis_panel() -> None:
             width="stretch",
             hide_index=True,
         )
+
+        st.markdown("#### Просмотр выбранной скважины")
+        st.caption(
+            "Профили строятся по реконструированной survey-линии из фактического XYZ/MD. "
+            "Зоны `Vertical / BUILD1 / HOLD / BUILD2 / Horizontal` и точки `KOP / старт ГС` "
+            "используют ту же сегментацию, что и aggregate-анализ."
+        )
+        _render_actual_fund_well_detail(analyses)
 
         st.markdown("#### Калибровка пользовательской функции конусов")
         st.caption(
