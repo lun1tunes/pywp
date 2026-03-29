@@ -137,7 +137,7 @@ from pywp.welltrack_batch import (
 )
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS3.INC")
-WT_UI_DEFAULTS_VERSION = 15
+WT_UI_DEFAULTS_VERSION = 16
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
 WT_LOG_LEVEL_OPTIONS: tuple[str, ...] = (WT_LOG_COMPACT, WT_LOG_VERBOSE)
@@ -156,8 +156,8 @@ WT_3D_RENDER_OPTIONS: tuple[str, ...] = (
     WT_3D_RENDER_FAST,
 )
 WT_3D_BACKEND_OPTIONS: tuple[str, ...] = (
-    WT_3D_BACKEND_PLOTLY,
     WT_3D_BACKEND_THREE_LOCAL,
+    WT_3D_BACKEND_PLOTLY,
 )
 WT_3D_FAST_REFERENCE_WELL_THRESHOLD = 10
 WT_3D_FAST_REFERENCE_POINT_THRESHOLD = 1200
@@ -234,41 +234,52 @@ def _build_well_color_palette() -> tuple[str, ...]:
     reference wells semantically separate.
     """
 
+    leading_colors: tuple[str, ...] = (
+        "#15D562",
+        "#1562D5",
+        "#F59E0B",
+        "#AF15D5",
+        "#D54A9A",
+        "#00A0A0",
+        "#8A5CF6",
+        "#62D515",
+    )
     hue_degrees: tuple[float, ...] = (
-        24.0,
-        48.0,
+        18.0,
+        42.0,
         72.0,
-        96.0,
-        120.0,
-        144.0,
-        168.0,
+        102.0,
+        132.0,
+        162.0,
         192.0,
-        216.0,
-        240.0,
-        264.0,
-        288.0,
+        222.0,
+        252.0,
+        282.0,
         312.0,
     )
-    hue_jump_order: tuple[int, ...] = (0, 6, 12, 5, 11, 4, 10, 3, 9, 2, 8, 1, 7)
+    hue_jump_order: tuple[int, ...] = (0, 5, 10, 4, 9, 3, 8, 2, 7, 1, 6)
     lightness_saturation_bands: tuple[tuple[float, float], ...] = (
-        (0.46, 0.82),
-        (0.62, 0.74),
-        (0.40, 0.88),
-        (0.55, 0.90),
+        (0.47, 0.82),
+        (0.61, 0.74),
+        (0.39, 0.88),
+        (0.55, 0.9),
     )
     ordered_hues = tuple(hue_degrees[index] for index in hue_jump_order)
-    colors: list[str] = []
-    for index in range(len(ordered_hues) * len(lightness_saturation_bands)):
-        hue_deg = ordered_hues[index % len(ordered_hues)]
-        lightness, saturation = lightness_saturation_bands[index % len(lightness_saturation_bands)]
-        red, green, blue = colorsys.hls_to_rgb(hue_deg / 360.0, lightness, saturation)
-        colors.append(
-            "#{:02X}{:02X}{:02X}".format(
+    colors: list[str] = list(leading_colors)
+    for lightness, saturation in lightness_saturation_bands:
+        for hue_deg in ordered_hues:
+            red, green, blue = colorsys.hls_to_rgb(
+                hue_deg / 360.0,
+                lightness,
+                saturation,
+            )
+            candidate = "#{:02X}{:02X}{:02X}".format(
                 int(round(red * 255.0)),
                 int(round(green * 255.0)),
                 int(round(blue * 255.0)),
             )
-        )
+            if candidate not in colors:
+                colors.append(candidate)
     return tuple(colors)
 
 
@@ -706,6 +717,51 @@ def _plotly_color_and_opacity(
     return color_text, float(np.clip(fallback_opacity, 0.0, 1.0))
 
 
+def _trace_extra_name(trace: object) -> str:
+    hovertemplate = str(getattr(trace, "hovertemplate", "") or "")
+    start = hovertemplate.find("<extra>")
+    end = hovertemplate.find("</extra>")
+    if start >= 0 and end > start:
+        return hovertemplate[start + len("<extra>") : end].strip()
+    return ""
+
+
+def _customdata_row_to_hover_item(
+    customdata_row: object,
+    *,
+    fallback_name: str,
+) -> dict[str, object]:
+    if isinstance(customdata_row, np.ndarray):
+        values = customdata_row.tolist()
+    elif isinstance(customdata_row, (list, tuple)):
+        values = list(customdata_row)
+    elif customdata_row is None:
+        values = []
+    else:
+        values = [customdata_row]
+    item: dict[str, object] = {"name": str(fallback_name).strip()}
+    if values:
+        first = values[0]
+        try:
+            first_float = float(first)
+        except (TypeError, ValueError):
+            first_float = None
+        if first_float is not None and np.isfinite(first_float):
+            item["md"] = float(first_float)
+        elif str(first).strip():
+            item["point"] = str(first).strip()
+    if len(values) >= 2:
+        try:
+            second_float = float(values[1])
+        except (TypeError, ValueError):
+            second_float = None
+        if second_float is not None and np.isfinite(second_float):
+            item["pi"] = float(second_float)
+    if len(values) >= 3 and str(values[2]).strip():
+        item["segment"] = str(values[2]).strip()
+    return item
+
+
 def _split_nan_separated_xyz_segments(
     *,
     x_values: Iterable[object],
@@ -748,6 +804,8 @@ def _scatter3d_trace_to_three_payload(
     }
     mode = str(trace.mode or "")
     trace_name = str(trace.name or "").strip()
+    extra_name = _trace_extra_name(trace)
+    hover_name = trace_name or extra_name
     trace_opacity = (
         1.0 if getattr(trace, "opacity", None) is None else float(trace.opacity)
     )
@@ -760,10 +818,13 @@ def _scatter3d_trace_to_three_payload(
             fallback_opacity=trace_opacity,
         )
         if visibility_state == "visible":
+            x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
+            y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
+            z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
             segments = _split_nan_separated_xyz_segments(
-                x_values=() if trace.x is None else trace.x,
-                y_values=() if trace.y is None else trace.y,
-                z_values=() if trace.z is None else trace.z,
+                x_values=x_array,
+                y_values=y_array,
+                z_values=z_array,
             )
             if segments:
                 payload["lines"].append(
@@ -773,8 +834,53 @@ def _scatter3d_trace_to_three_payload(
                         "color": color,
                         "opacity": opacity,
                         "dash": str(getattr(line, "dash", "solid") or "solid"),
+                        "role": (
+                            "cone_tip"
+                            if "граница конуса" in trace_name.lower()
+                            else "line"
+                        ),
                     }
                 )
+            customdata_rows = list(
+                ()
+                if getattr(trace, "customdata", None) is None
+                else np.asarray(trace.customdata, dtype=object)
+            )
+            if customdata_rows:
+                hover_points: list[list[float]] = []
+                hover_items: list[dict[str, object]] = []
+                for index, (x_value, y_value, z_value) in enumerate(
+                    zip(x_array, y_array, z_array, strict=False)
+                ):
+                    if not (
+                        np.isfinite(float(x_value))
+                        and np.isfinite(float(y_value))
+                        and np.isfinite(float(z_value))
+                    ):
+                        continue
+                    hover_points.append(
+                        [float(x_value), float(y_value), float(z_value)]
+                    )
+                    row = customdata_rows[index] if index < len(customdata_rows) else None
+                    hover_items.append(
+                        _customdata_row_to_hover_item(
+                            row,
+                            fallback_name=hover_name,
+                        )
+                    )
+                if hover_points:
+                    payload["points"].append(
+                        {
+                            "name": hover_name,
+                            "points": hover_points,
+                            "color": color,
+                            "opacity": 0.001,
+                            "size": 8.5,
+                            "symbol": "circle",
+                            "hover": hover_items,
+                            "hover_only": True,
+                        }
+                    )
         if _trace_showlegend(trace) and trace_name:
             payload["legend_items"].append(
                 {
@@ -796,28 +902,45 @@ def _scatter3d_trace_to_three_payload(
             x_array = np.asarray(list(() if trace.x is None else trace.x), dtype=float)
             y_array = np.asarray(list(() if trace.y is None else trace.y), dtype=float)
             z_array = np.asarray(list(() if trace.z is None else trace.z), dtype=float)
-            mask = np.isfinite(x_array) & np.isfinite(y_array) & np.isfinite(z_array)
-            points = [
-                [float(x_value), float(y_value), float(z_value)]
-                for x_value, y_value, z_value in zip(
-                    x_array[mask],
-                    y_array[mask],
-                    z_array[mask],
-                    strict=False,
+            customdata_rows = list(
+                ()
+                if getattr(trace, "customdata", None) is None
+                else np.asarray(trace.customdata, dtype=object)
+            )
+            points: list[list[float]] = []
+            hover_items: list[dict[str, object]] = []
+            for index, (x_value, y_value, z_value) in enumerate(
+                zip(x_array, y_array, z_array, strict=False)
+            ):
+                if not (
+                    np.isfinite(float(x_value))
+                    and np.isfinite(float(y_value))
+                    and np.isfinite(float(z_value))
+                ):
+                    continue
+                points.append([float(x_value), float(y_value), float(z_value)])
+                row = customdata_rows[index] if index < len(customdata_rows) else None
+                hover_items.append(
+                    _customdata_row_to_hover_item(
+                        row,
+                        fallback_name=hover_name,
+                    )
                 )
-            ]
             if points:
                 marker_size = getattr(marker, "size", 6)
                 if isinstance(marker_size, (list, tuple, np.ndarray)):
                     marker_size = marker_size[0] if len(marker_size) else 6
+                hover_only = opacity <= 0.01
                 payload["points"].append(
                     {
-                        "name": trace_name,
+                        "name": hover_name,
                         "points": points,
                         "color": color,
                         "opacity": opacity,
-                        "size": float(marker_size),
+                        "size": max(float(marker_size), 8.5) if hover_only else float(marker_size),
                         "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
+                        "hover": hover_items,
+                        "hover_only": hover_only,
                     }
                 )
         if _trace_showlegend(trace) and trace_name and not legend_added:
@@ -899,6 +1022,13 @@ def _mesh3d_trace_to_three_payload(trace: go.Mesh3d) -> dict[str, object] | None
         ],
         "color": color,
         "opacity": opacity,
+        "role": (
+            "cone"
+            if "cone" in str(trace.name or "").lower()
+            else "overlap"
+            if "overlap" in str(trace.name or "").lower()
+            else "mesh"
+        ),
     }
     return payload
 
@@ -916,13 +1046,14 @@ def _optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
 def _merge_three_line_payloads(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    grouped: dict[tuple[str, float, str], list[list[list[float]]]] = {}
-    ordered_keys: list[tuple[str, float, str]] = []
+    grouped: dict[tuple[str, float, str, str], list[list[list[float]]]] = {}
+    ordered_keys: list[tuple[str, float, str, str]] = []
     for item in items:
         color = str(item.get("color") or "#0F172A")
         opacity = float(item.get("opacity") or 1.0)
         dash = str(item.get("dash") or "solid")
-        key = (color, opacity, dash)
+        role = str(item.get("role") or "line")
+        key = (color, opacity, dash, role)
         if key not in grouped:
             grouped[key] = []
             ordered_keys.append(key)
@@ -934,8 +1065,8 @@ def _merge_three_line_payloads(
             ]
         )
     merged: list[dict[str, object]] = []
-    for color, opacity, dash in ordered_keys:
-        segments = grouped[(color, opacity, dash)]
+    for color, opacity, dash, role in ordered_keys:
+        segments = grouped[(color, opacity, dash, role)]
         if not segments:
             continue
         merged.append(
@@ -944,6 +1075,7 @@ def _merge_three_line_payloads(
                 "color": color,
                 "opacity": float(opacity),
                 "dash": dash,
+                "role": role,
             }
         )
     return merged
@@ -952,36 +1084,49 @@ def _merge_three_line_payloads(
 def _merge_three_point_payloads(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    grouped: dict[tuple[str, float, float, str], list[list[float]]] = {}
-    ordered_keys: list[tuple[str, float, float, str]] = []
+    grouped: dict[tuple[str, float, float, str, bool], dict[str, object]] = {}
+    ordered_keys: list[tuple[str, float, float, str, bool]] = []
     for item in items:
         color = str(item.get("color") or "#0F172A")
         opacity = float(item.get("opacity") or 1.0)
         size = float(item.get("size") or 6.0)
         symbol = str(item.get("symbol") or "circle")
-        key = (color, opacity, size, symbol)
+        hover_only = bool(item.get("hover_only"))
+        key = (color, opacity, size, symbol, hover_only)
         if key not in grouped:
-            grouped[key] = []
+            grouped[key] = {
+                "points": [],
+                "hover": [],
+                "color": color,
+                "opacity": float(opacity),
+                "size": float(size),
+                "symbol": symbol,
+                "hover_only": hover_only,
+            }
             ordered_keys.append(key)
-        grouped[key].extend(
-            [
-                point
-                for point in (item.get("points") or [])
-                if isinstance(point, list) and len(point) == 3
-            ]
-        )
+        valid_points = [
+            point
+            for point in (item.get("points") or [])
+            if isinstance(point, list) and len(point) == 3
+        ]
+        grouped[key]["points"].extend(valid_points)
+        raw_hover = list(item.get("hover") or [])
+        grouped[key]["hover"].extend(raw_hover[: len(valid_points)])
     merged: list[dict[str, object]] = []
-    for color, opacity, size, symbol in ordered_keys:
-        points = grouped[(color, opacity, size, symbol)]
+    for key in ordered_keys:
+        entry = grouped[key]
+        points = list(entry["points"])
         if not points:
             continue
         merged.append(
             {
                 "points": points,
-                "color": color,
-                "opacity": float(opacity),
-                "size": float(size),
-                "symbol": symbol,
+                "hover": list(entry["hover"]),
+                "color": str(entry["color"]),
+                "opacity": float(entry["opacity"]),
+                "size": float(entry["size"]),
+                "symbol": str(entry["symbol"]),
+                "hover_only": bool(entry["hover_only"]),
             }
         )
     return merged
@@ -990,18 +1135,20 @@ def _merge_three_point_payloads(
 def _merge_three_mesh_payloads(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    grouped: dict[tuple[str, float], dict[str, object]] = {}
-    ordered_keys: list[tuple[str, float]] = []
+    grouped: dict[tuple[str, float, str], dict[str, object]] = {}
+    ordered_keys: list[tuple[str, float, str]] = []
     for item in items:
         color = str(item.get("color") or "#94A3B8")
         opacity = float(item.get("opacity") or 1.0)
-        key = (color, opacity)
+        role = str(item.get("role") or "mesh")
+        key = (color, opacity, role)
         if key not in grouped:
             grouped[key] = {
                 "vertices": [],
                 "faces": [],
                 "color": color,
                 "opacity": float(opacity),
+                "role": role,
             }
             ordered_keys.append(key)
         merged = grouped[key]
@@ -1116,6 +1263,7 @@ def _render_plotly_or_three_3d(
             render_local_three_scene(
                 _plotly_3d_figure_to_three_payload(figure),
                 height=height,
+                instance_token=int(st.session_state.get("wt_three_viewer_nonce", 0)),
             )
         return
     container.plotly_chart(
@@ -1349,7 +1497,7 @@ def _hover_proxy_trace_3d(
         mode="markers",
         showlegend=False,
         marker={
-            "size": 6,
+            "size": 7.5,
             "color": "rgba(0, 0, 0, 0.001)",
         },
         customdata=customdata,
@@ -1553,10 +1701,11 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_runtime_s", None)
     st.session_state.setdefault("wt_last_run_log_lines", [])
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
-    st.session_state.setdefault("wt_results_view_mode", "Отдельная скважина")
+    st.session_state.setdefault("wt_results_view_mode", "Все скважины")
     st.session_state.setdefault("wt_results_all_view_mode", "Траектории")
-    st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_FAST)
-    st.session_state.setdefault("wt_3d_backend", WT_3D_BACKEND_PLOTLY)
+    st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_DETAIL)
+    st.session_state.setdefault("wt_3d_backend", WT_3D_BACKEND_THREE_LOCAL)
+    st.session_state.setdefault("wt_three_viewer_nonce", 0)
     st.session_state.setdefault(
         "wt_anticollision_uncertainty_preset", DEFAULT_UNCERTAINTY_PRESET
     )
@@ -1568,16 +1717,16 @@ def _init_state() -> None:
         "Отдельная скважина",
         "Все скважины",
     }:
-        st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+        st.session_state["wt_results_view_mode"] = "Все скважины"
     if str(st.session_state.get("wt_results_all_view_mode", "")).strip() not in {
         "Траектории",
         "Anti-collision",
     }:
         st.session_state["wt_results_all_view_mode"] = "Траектории"
     if str(st.session_state.get("wt_3d_render_mode", "")).strip() not in set(WT_3D_RENDER_OPTIONS):
-        st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_FAST
+        st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_DETAIL
     if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(WT_3D_BACKEND_OPTIONS):
-        st.session_state["wt_3d_backend"] = WT_3D_BACKEND_PLOTLY
+        st.session_state["wt_3d_backend"] = WT_3D_BACKEND_THREE_LOCAL
     st.session_state["wt_anticollision_uncertainty_preset"] = (
         normalize_uncertainty_preset(
             st.session_state.get(
@@ -1605,7 +1754,7 @@ def _clear_results() -> None:
     st.session_state["wt_last_run_at"] = ""
     st.session_state["wt_last_runtime_s"] = None
     st.session_state["wt_last_run_log_lines"] = []
-    st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+    st.session_state["wt_results_view_mode"] = "Все скважины"
     st.session_state["wt_results_all_view_mode"] = "Траектории"
     st.session_state["wt_prepared_well_overrides"] = {}
     st.session_state["wt_prepared_override_message"] = ""
@@ -1620,6 +1769,21 @@ def _clear_results() -> None:
 def _focus_all_wells_anticollision_results() -> None:
     st.session_state["wt_results_view_mode"] = "Все скважины"
     st.session_state["wt_results_all_view_mode"] = "Anti-collision"
+    st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_DETAIL
+    st.session_state["wt_3d_backend"] = WT_3D_BACKEND_THREE_LOCAL
+
+
+def _focus_all_wells_trajectory_results() -> None:
+    st.session_state["wt_results_view_mode"] = "Все скважины"
+    st.session_state["wt_results_all_view_mode"] = "Траектории"
+    st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_DETAIL
+    st.session_state["wt_3d_backend"] = WT_3D_BACKEND_THREE_LOCAL
+
+
+def _bump_three_viewer_nonce() -> None:
+    st.session_state["wt_three_viewer_nonce"] = int(
+        st.session_state.get("wt_three_viewer_nonce", 0)
+    ) + 1
 
 
 def _clear_pad_state() -> None:
@@ -1757,22 +1921,14 @@ def _all_wells_3d_figure(
                 mode="lines",
                 name=name,
                 line={"width": 5, "color": line_color, "dash": line_dash},
-                customdata=np.column_stack(
-                    [
-                        stations["MD_m"].to_numpy(dtype=float),
-                        dls_to_pi(
-                            stations["DLS_deg_per_30m"]
-                            .fillna(0.0)
-                            .to_numpy(dtype=float)
-                        ),
-                    ]
-                ),
+                customdata=_trajectory_hover_customdata(stations),
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m"
+                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
+                    "Сегмент: %{customdata[2]}"
                     "<extra>%{fullData.name}</extra>"
                 ),
             )
@@ -2327,8 +2483,8 @@ def _all_wells_anticollision_3d_figure(
                     legendgroup=str(well.name),
                     showlegend=False,
                     line={
-                        "width": 1.5,
-                        "color": _lighten_hex(str(well.color)),
+                        "width": 1.0,
+                        "color": _lighten_hex(str(well.color), 0.55),
                     },
                     hoverinfo="skip",
                 )
@@ -3019,6 +3175,10 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
             "Локальный Three.js backend быстрее на тяжёлых кустах и хранит все файлы локально."
         ),
     )
+    if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+        if st.button("Пересоздать 3D viewer", key="wt_recreate_three_ac"):
+            _bump_three_viewer_nonce()
+            st.rerun()
     resolved_render_mode = _resolve_3d_render_mode(
         requested_mode=selected_render_mode,
         calculated_well_count=len(successes),
@@ -6025,6 +6185,7 @@ def _run_batch_if_clicked(
             else:
                 st.session_state["wt_last_anticollision_resolution"] = None
                 st.session_state["wt_last_anticollision_previous_successes"] = {}
+                _focus_all_wells_trajectory_results()
             st.session_state["wt_last_error"] = ""
             st.session_state["wt_last_run_at"] = datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -6323,6 +6484,10 @@ def _render_success_tabs(
                 "Локальный Three.js backend быстрее на тяжёлых кустах и хранит все файлы локально."
             ),
         )
+        if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+            if st.button("Пересоздать 3D viewer", key="wt_recreate_three_traj"):
+                _bump_three_viewer_nonce()
+                st.rerun()
         resolved_render_mode = _resolve_3d_render_mode(
             requested_mode=selected_render_mode,
             calculated_well_count=len(successes),

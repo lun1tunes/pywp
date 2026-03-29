@@ -281,6 +281,18 @@ def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
         )
     assert min(adjacent_distances) >= 120
 
+    first_colors = palette[:8]
+    for index, color_a in enumerate(first_colors):
+        red_a, green_a, blue_a = _rgb_triplet(color_a)
+        for color_b in first_colors[index + 1 :]:
+            red_b, green_b, blue_b = _rgb_triplet(color_b)
+            distance = (
+                abs(red_a - red_b)
+                + abs(green_a - green_b)
+                + abs(blue_a - blue_b)
+            )
+            assert distance >= 115
+
 
 def test_reference_trajectory_text_import_populates_reference_wells_state() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
@@ -680,16 +692,36 @@ def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
 
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+    assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
+    assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
 
 
-def test_init_state_defaults_fast_3d_render_mode() -> None:
+def test_init_state_defaults_to_all_wells_detail_three_backend() -> None:
     page = _load_welltrack_page_module()
 
     page.st.session_state.clear()
     page._init_state()
 
-    assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_FAST
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
+    assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
     assert page.WT_3D_RENDER_AUTO not in page.WT_3D_RENDER_OPTIONS
+
+
+def test_focus_all_wells_trajectory_results_sets_detail_three_defaults() -> None:
+    page = _load_welltrack_page_module()
+
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_3d_render_mode"] = page.WT_3D_RENDER_FAST
+    page.st.session_state["wt_3d_backend"] = page.WT_3D_BACKEND_PLOTLY
+
+    page._focus_all_wells_trajectory_results()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Траектории"
+    assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
+    assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
 
 
 def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
@@ -2038,10 +2070,10 @@ def test_anticollision_3d_figure_draws_terminal_cone_boundaries_per_well() -> No
 
     assert len(boundary_traces) == 2
     assert {str(trace.line.color) for trace in boundary_traces} == {
-        page._lighten_hex(page._well_color(0)),
-        page._lighten_hex(page._well_color(1)),
+        page._lighten_hex(page._well_color(0), 0.55),
+        page._lighten_hex(page._well_color(1), 0.55),
     }
-    assert all(float(trace.line.width) == 1.5 for trace in boundary_traces)
+    assert all(float(trace.line.width) == 1.0 for trace in boundary_traces)
     assert figure.layout.scene.camera.to_plotly_json() == DEFAULT_3D_CAMERA
 
 
@@ -2393,6 +2425,20 @@ def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> N
     assert any(str(item["label"]) == "WELL-A" for item in payload["legend"])
 
 
+def test_plotly_3d_figure_to_three_payload_preserves_hover_metadata_for_tooltip() -> None:
+    page = _load_welltrack_page_module()
+    figure = page._all_wells_3d_figure([_successful_plan(name="WELL-A", y_offset_m=0.0)])
+
+    payload = page._plotly_3d_figure_to_three_payload(figure)
+
+    hover_only_points = [item for item in payload["points"] if bool(item.get("hover_only"))]
+    assert hover_only_points
+    first_hover = hover_only_points[0]["hover"][0]
+    assert first_hover["name"] == "WELL-A"
+    assert "md" in first_hover
+    assert "segment" in first_hover
+
+
 def test_optimize_three_payload_merges_same_style_objects() -> None:
     page = _load_welltrack_page_module()
     payload = {
@@ -2435,12 +2481,14 @@ def test_optimize_three_payload_merges_same_style_objects() -> None:
                 "faces": [[0, 1, 2]],
                 "color": "#C62828",
                 "opacity": 0.4,
+                "role": "overlap",
             },
             {
                 "vertices": [[1.0, 1.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]],
                 "faces": [[0, 1, 2]],
                 "color": "#C62828",
                 "opacity": 0.4,
+                "role": "overlap",
             },
         ],
         "labels": [{"text": "A", "position": [0.0, 0.0, 0.0], "color": "#111111"}],
@@ -2453,12 +2501,48 @@ def test_optimize_three_payload_merges_same_style_objects() -> None:
     assert len(optimized["lines"][0]["segments"]) == 2
     assert len(optimized["points"]) == 1
     assert len(optimized["points"][0]["points"]) == 2
+    assert optimized["points"][0]["hover_only"] is False
     assert len(optimized["meshes"]) == 1
     assert len(optimized["meshes"][0]["vertices"]) == 6
     assert len(optimized["meshes"][0]["faces"]) == 2
+    assert optimized["meshes"][0]["role"] == "overlap"
     assert optimized["camera"] == DEFAULT_3D_CAMERA
     assert optimized["labels"] == payload["labels"]
     assert optimized["legend"] == payload["legend"]
+
+
+def test_optimize_three_payload_keeps_mesh_roles_separate() -> None:
+    page = _load_welltrack_page_module()
+    payload = {
+        "background": "#FFFFFF",
+        "bounds": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+        "camera": DEFAULT_3D_CAMERA,
+        "lines": [],
+        "points": [],
+        "meshes": [
+            {
+                "vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                "faces": [[0, 1, 2]],
+                "color": "#15D562",
+                "opacity": 0.12,
+                "role": "cone",
+            },
+            {
+                "vertices": [[1.0, 1.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]],
+                "faces": [[0, 1, 2]],
+                "color": "#15D562",
+                "opacity": 0.12,
+                "role": "overlap",
+            },
+        ],
+        "labels": [],
+        "legend": [],
+    }
+
+    optimized = page._optimize_three_payload(payload)
+
+    assert len(optimized["meshes"]) == 2
+    assert {str(item["role"]) for item in optimized["meshes"]} == {"cone", "overlap"}
 
 
 def test_plotly_3d_figure_to_three_payload_preserves_custom_camera() -> None:
