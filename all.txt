@@ -1234,7 +1234,7 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/02_welltrack_import.py	253899
+===BEGIN_FILE===	pages/02_welltrack_import.py	254857
 from __future__ import annotations
 
 import colorsys
@@ -1993,9 +1993,16 @@ def _customdata_row_to_hover_item(
         except (TypeError, ValueError):
             second_float = None
         if second_float is not None and np.isfinite(second_float):
-            item["pi"] = float(second_float)
-    if len(values) >= 3 and str(values[2]).strip():
-        item["segment"] = str(values[2]).strip()
+            item["dls"] = float(second_float)
+    if len(values) >= 3:
+        try:
+            third_float = float(values[2])
+        except (TypeError, ValueError):
+            third_float = None
+        if third_float is not None and np.isfinite(third_float):
+            item["inc"] = float(third_float)
+    if len(values) >= 4 and str(values[3]).strip():
+        item["segment"] = str(values[3]).strip()
     return item
 
 
@@ -2704,18 +2711,18 @@ def _trajectory_interval_points(
 
 
 def _trajectory_hover_customdata(stations: pd.DataFrame) -> np.ndarray:
-    dls_pi_values = dls_to_pi(
-        stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
-    )
+    dls_values = stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].fillna(0.0).to_numpy(dtype=float)
     segment_values = (
         stations["segment"].astype(str).to_numpy(dtype=object)
         if "segment" in stations.columns
         else np.full(len(stations), "—", dtype=object)
     )
-    customdata = np.empty((len(stations), 3), dtype=object)
+    customdata = np.empty((len(stations), 4), dtype=object)
     customdata[:, 0] = stations["MD_m"].to_numpy(dtype=float)
-    customdata[:, 1] = dls_pi_values
-    customdata[:, 2] = segment_values
+    customdata[:, 1] = dls_values
+    customdata[:, 2] = inc_values
+    customdata[:, 3] = segment_values
     return customdata
 
 
@@ -3164,8 +3171,9 @@ def _all_wells_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
-                    "Сегмент: %{customdata[2]}"
+                    "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                    "INC: %{customdata[2]:.2f} deg<br>"
+                    "Сегмент: %{customdata[3]}"
                     "<extra>%{fullData.name}</extra>"
                 ),
             )
@@ -3720,7 +3728,7 @@ def _all_wells_anticollision_3d_figure(
                     legendgroup=str(well.name),
                     showlegend=False,
                     line={
-                        "width": 1.0,
+                        "width": 0.8,
                         "color": _lighten_hex(str(well.color), 0.55),
                     },
                     hoverinfo="skip",
@@ -3766,8 +3774,9 @@ def _all_wells_anticollision_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
-                    "Сегмент: %{customdata[2]}"
+                    "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                    "INC: %{customdata[2]:.2f} deg<br>"
+                    "Сегмент: %{customdata[3]}"
                     "<extra>%{fullData.name}</extra>"
                 ),
                 customdata=_trajectory_hover_customdata(stations),
@@ -3823,8 +3832,9 @@ def _all_wells_anticollision_3d_figure(
                         "Y: %{y:.2f} m<br>"
                         "Z/TVD: %{z:.2f} m<br>"
                         "MD: %{customdata[0]:.2f} m<br>"
-                        "ПИ: %{customdata[1]:.2f} deg/10m<br>"
-                        "Сегмент: %{customdata[2]}"
+                        "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                        "INC: %{customdata[2]:.2f} deg<br>"
+                        "Сегмент: %{customdata[3]}"
                         f"<extra>{well_label}</extra>"
                     ),
                 )
@@ -3981,11 +3991,21 @@ def _all_wells_anticollision_3d_figure(
         dls_segment = np.interp(
             md_segment,
             well.stations["MD_m"].to_numpy(dtype=float),
-            dls_to_pi(
-                well.stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
-            ),
+            well.stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float),
         )
-        conflict_customdata = np.column_stack([md_segment, dls_segment])
+        inc_segment = np.interp(
+            md_segment,
+            well.stations["MD_m"].to_numpy(dtype=float),
+            well.stations["INC_deg"].fillna(0.0).to_numpy(dtype=float),
+        )
+        conflict_customdata = np.column_stack(
+            [
+                md_segment,
+                dls_segment,
+                inc_segment,
+                np.full(len(md_segment), "Конфликтный участок", dtype=object),
+            ]
+        )
         x_arrays.append(x_segment)
         y_arrays.append(y_segment)
         z_arrays.append(z_segment)
@@ -4009,7 +4029,8 @@ def _all_wells_anticollision_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} м<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m"
+                    "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                    "INC: %{customdata[2]:.2f} deg"
                     "<extra>Конфликтный участок ствола</extra>"
                 ),
             )
@@ -4026,7 +4047,8 @@ def _all_wells_anticollision_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} м<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m"
+                    "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                    "INC: %{customdata[2]:.2f} deg"
                     "<extra>Конфликтный участок ствола</extra>"
                 ),
             )
@@ -20361,7 +20383,7 @@ def render_local_three_scene(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	28507
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	31528
 <!doctype html>
 <html lang="en">
   <head>
@@ -20413,6 +20435,13 @@ def render_local_three_scene(
         right: 10px;
       }
 
+      #legend-toggle-wrap {
+        position: absolute;
+        top: 52px;
+        right: 10px;
+        z-index: 4;
+      }
+
       .toolbar-btn {
         border: 1px solid rgba(37, 99, 235, 0.18);
         background: rgba(255, 255, 255, 0.96);
@@ -20451,6 +20480,10 @@ def render_local_three_scene(
         display: none;
       }
 
+      #legend.is-collapsed {
+        display: none;
+      }
+
       .legend-item {
         display: flex;
         align-items: center;
@@ -20477,8 +20510,8 @@ def render_local_three_scene(
       #tooltip {
         position: absolute;
         display: none;
-        min-width: 146px;
-        max-width: 260px;
+        min-width: 132px;
+        max-width: 234px;
         padding: 8px 10px;
         border: 1px solid rgba(37, 99, 235, 0.38);
         border-radius: 12px;
@@ -20511,6 +20544,12 @@ def render_local_three_scene(
         text-shadow:
           0 1px 0 rgba(255, 255, 255, 0.95),
           0 0 8px rgba(255, 255, 255, 0.8);
+      }
+
+      .scene-axis-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
       }
 
       .tooltip-head {
@@ -20562,6 +20601,9 @@ def render_local_three_scene(
       <div id="toolbar-right">
         <button id="fullscreen-btn" class="toolbar-btn" type="button" title="Развернуть на весь экран">⛶</button>
       </div>
+      <div id="legend-toggle-wrap">
+        <button id="legend-toggle-btn" class="toolbar-btn" type="button" title="Свернуть или развернуть легенду">Legend</button>
+      </div>
       <div id="label-layer"></div>
       <div id="legend"></div>
       <div id="tooltip"></div>
@@ -20585,6 +20627,7 @@ def render_local_three_scene(
         const root = document.getElementById("root");
         const labelLayerElement = document.getElementById("label-layer");
         const legendElement = document.getElementById("legend");
+        const legendToggleButton = document.getElementById("legend-toggle-btn");
         const tooltipElement = document.getElementById("tooltip");
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
@@ -20633,11 +20676,11 @@ def render_local_three_scene(
         camera.up.set(0, 0, 1);
 
         const controls = new THREE.TrackballControls(camera, renderer.domElement);
-        controls.rotateSpeed = 3.2;
-        controls.zoomSpeed = 1.1;
-        controls.panSpeed = 0.85;
-        controls.staticMoving = true;
-        controls.dynamicDampingFactor = 0.16;
+        controls.rotateSpeed = 0.72;
+        controls.zoomSpeed = 0.95;
+        controls.panSpeed = 0.235;
+        controls.staticMoving = false;
+        controls.dynamicDampingFactor = 0.14;
         controls.noRotate = false;
         controls.noZoom = false;
         controls.noPan = false;
@@ -20648,6 +20691,7 @@ def render_local_three_scene(
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
         let hoveredObject = null;
+        let legendCollapsed = false;
 
         function requestRender() {
           needsRender = true;
@@ -20737,9 +20781,39 @@ def render_local_three_scene(
         const worldMarkerSize = Math.max(maxSpan * 0.008, 9.0);
         const labelLift = Math.max(maxSpan * 0.015, 18.0);
 
-        const axes = new THREE.AxesHelper(Math.max(maxSpan * 0.18, 40.0));
-        axes.position.set(minBound.x, minBound.y, maxBound.z);
+        const axisLength = Math.max(maxSpan * 0.18, 40.0);
+        const axes = new THREE.AxesHelper(axisLength);
+        const axisOrigin = new THREE.Vector3(minBound.x, minBound.y, maxBound.z);
+        axes.position.copy(axisOrigin);
         scene.add(axes);
+
+        function addSceneLabel(text, position, color, extraClassName) {
+          const element = document.createElement("div");
+          element.className = `scene-label ${String(extraClassName || "").trim()}`.trim();
+          element.textContent = String(text || "");
+          element.style.color = String(color || "#0f172a");
+          labelLayerElement.appendChild(element);
+          sceneLabels.push({ element: element, position: position.clone() });
+        }
+
+        addSceneLabel(
+          "X / East",
+          new THREE.Vector3(axisOrigin.x + axisLength * 1.08, axisOrigin.y, axisOrigin.z),
+          "#B91C1C",
+          "scene-axis-label",
+        );
+        addSceneLabel(
+          "Y / North",
+          new THREE.Vector3(axisOrigin.x, axisOrigin.y + axisLength * 1.08, axisOrigin.z),
+          "#15803D",
+          "scene-axis-label",
+        );
+        addSceneLabel(
+          "Z / TVD",
+          new THREE.Vector3(axisOrigin.x, axisOrigin.y, axisOrigin.z + axisLength * 1.08),
+          "#1D4ED8",
+          "scene-axis-label",
+        );
 
         function resize() {
           const width = Math.max(root.clientWidth || 1, 1);
@@ -20771,7 +20845,14 @@ def render_local_three_scene(
         function addLegend(items) {
           legendElement.innerHTML = "";
           if (!Array.isArray(items) || items.length === 0) {
+            if (legendToggleButton) {
+              legendToggleButton.style.display = "none";
+            }
             return;
+          }
+          if (legendToggleButton) {
+            legendToggleButton.style.display = "inline-flex";
+            legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
           }
           items.forEach((item) => {
             const row = document.createElement("div");
@@ -20789,6 +20870,17 @@ def render_local_three_scene(
             row.appendChild(label);
             legendElement.appendChild(row);
           });
+        }
+
+        function syncLegendVisibility() {
+          if (legendCollapsed) {
+            legendElement.classList.add("is-collapsed");
+          } else {
+            legendElement.classList.remove("is-collapsed");
+          }
+          if (legendToggleButton && legendElement.innerHTML.trim() !== "") {
+            legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
+          }
         }
 
         function addLine(item) {
@@ -20938,7 +21030,7 @@ def render_local_three_scene(
             5.0,
           );
           const geometry = new THREE.SphereGeometry(
-            markerScale * 0.34,
+            markerScale * 0.52,
             8,
             8,
           );
@@ -21018,14 +21110,14 @@ def render_local_three_scene(
         }
 
         function addLabel(item) {
-          const element = document.createElement("div");
-          element.className = "scene-label";
-          element.textContent = String(item.text || "");
-          element.style.color = String(item.color || "#0f172a");
-          labelLayerElement.appendChild(element);
           const position = displayPoint(item.position || [0, 0, 0]);
           position.z += labelLift;
-          sceneLabels.push({ element: element, position: position });
+          addSceneLabel(
+            String(item.text || ""),
+            position,
+            String(item.color || "#0f172a"),
+            "",
+          );
         }
 
         function escapeHtml(value) {
@@ -21060,6 +21152,16 @@ def render_local_three_scene(
           if (Number.isFinite(hover.md)) {
             lines.push(
               `<div class="tooltip-kv"><strong>MD:</strong> <span class="tooltip-mono">${Number(hover.md).toFixed(1)} м</span></div>`,
+            );
+          }
+          if (Number.isFinite(hover.dls)) {
+            lines.push(
+              `<div class="tooltip-kv"><strong>DLS:</strong> <span class="tooltip-mono">${Number(hover.dls).toFixed(2)} deg/30м</span></div>`,
+            );
+          }
+          if (Number.isFinite(hover.inc)) {
+            lines.push(
+              `<div class="tooltip-kv"><strong>INC:</strong> <span class="tooltip-mono">${Number(hover.inc).toFixed(2)} deg</span></div>`,
             );
           }
           return lines.join("");
@@ -21207,8 +21309,15 @@ def render_local_three_scene(
         if (fullscreenButton) {
           fullscreenButton.addEventListener("click", enterFullscreen);
         }
+        if (legendToggleButton) {
+          legendToggleButton.addEventListener("click", () => {
+            legendCollapsed = !legendCollapsed;
+            syncLegendVisibility();
+          });
+        }
         resize();
         fitCamera();
+        syncLegendVisibility();
         startAnimationLoop();
       })();
     </script>
@@ -22264,7 +22373,7 @@ def render_local_three_scene(
 } )();
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/vendor/TrackballControls.js	17825
+===BEGIN_FILE===	pywp/three_viewer_assets/vendor/TrackballControls.js	17867
 ( function () {
 
 	const _changeEvent = {
@@ -22384,7 +22493,10 @@ def render_local_three_scene(
 				const vector = new THREE.Vector2();
 				return function getMouseOnCircle( pageX, pageY ) {
 
-					vector.set( ( pageX - scope.screen.width * 0.5 - scope.screen.left ) / ( scope.screen.width * 0.5 ), ( scope.screen.height + 2 * ( scope.screen.top - pageY ) ) / scope.screen.width // screen.width intentional
+					const radius = Math.max( Math.min( scope.screen.width, scope.screen.height ) * 0.5, 1 );
+					vector.set(
+						( pageX - scope.screen.left - scope.screen.width * 0.5 ) / radius,
+						( scope.screen.top + scope.screen.height * 0.5 - pageY ) / radius
 					);
 					return vector;
 
@@ -24418,7 +24530,7 @@ def render_result_tables(
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/uncertainty.py	34313
+===BEGIN_FILE===	pywp/uncertainty.py	36510
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -25214,17 +25326,22 @@ def uncertainty_ribbon_polygon(
 
     positive_side: list[np.ndarray] = []
     negative_side: list[np.ndarray] = []
+    previous_positive_index: int | None = None
+    previous_negative_index: int | None = None
     for sample_index, sample in enumerate(overlay.samples):
         center = (
             np.array(sample.center_plan_xy, dtype=float)
             if projection == "plan"
             else np.array(sample.center_section_xz, dtype=float)
         )
-        ring = (
+        ring_closed = (
             np.asarray(sample.ring_plan_xy, dtype=float)
             if projection == "plan"
             else np.asarray(sample.ring_section_xz, dtype=float)
         )
+        ring = _open_closed_ring(ring_closed)
+        if ring.shape[0] < 3:
+            continue
         tangent = _projected_center_tangent(
             overlay=overlay,
             sample_index=sample_index,
@@ -25238,8 +25355,20 @@ def uncertainty_ribbon_polygon(
         normal = np.array([-tangent[1], tangent[0]], dtype=float)
 
         offsets = (ring - center[None, :]) @ normal
-        positive_side.append(ring[int(np.argmax(offsets))])
-        negative_side.append(ring[int(np.argmin(offsets))])
+        positive_index = _continuous_extreme_index(
+            offsets=offsets,
+            maximize=True,
+            previous_index=previous_positive_index,
+        )
+        negative_index = _continuous_extreme_index(
+            offsets=offsets,
+            maximize=False,
+            previous_index=previous_negative_index,
+        )
+        positive_side.append(ring[int(positive_index)])
+        negative_side.append(ring[int(negative_index)])
+        previous_positive_index = int(positive_index)
+        previous_negative_index = int(negative_index)
 
     if len(positive_side) < 2:
         return np.empty((0, 2), dtype=float)
@@ -25341,6 +25470,58 @@ def _projected_center_tangent(
     if int(sample_index) == len(centers) - 1:
         return current - centers[-2]
     return centers[int(sample_index) + 1] - centers[int(sample_index) - 1]
+
+
+def _open_closed_ring(ring_xy: np.ndarray) -> np.ndarray:
+    ring = np.asarray(ring_xy, dtype=float)
+    if ring.ndim != 2 or ring.shape[0] == 0:
+        return ring
+    if ring.shape[0] >= 2 and np.allclose(ring[0], ring[-1], atol=1e-9):
+        return ring[:-1]
+    return ring
+
+
+def _circular_index_distance(index_a: int, index_b: int, size: int) -> int:
+    if size <= 0:
+        return 0
+    delta = abs(int(index_a) - int(index_b))
+    return min(delta, size - delta)
+
+
+def _continuous_extreme_index(
+    *,
+    offsets: np.ndarray,
+    maximize: bool,
+    previous_index: int | None,
+) -> int:
+    values = np.asarray(offsets, dtype=float)
+    if values.ndim != 1 or len(values) == 0:
+        return 0
+
+    best_value = float(np.max(values) if maximize else np.min(values))
+    spread = float(np.max(values) - np.min(values))
+    tolerance = max(spread * 0.03, 1e-9)
+    if maximize:
+        candidate_indices = np.flatnonzero(values >= best_value - tolerance)
+        fallback_index = int(np.argmax(values))
+    else:
+        candidate_indices = np.flatnonzero(values <= best_value + tolerance)
+        fallback_index = int(np.argmin(values))
+
+    if len(candidate_indices) == 0:
+        return fallback_index
+    if previous_index is None:
+        return fallback_index
+
+    return int(
+        min(
+            candidate_indices.tolist(),
+            key=lambda idx: (
+                _circular_index_distance(int(idx), int(previous_index), len(values)),
+                abs(float(values[int(idx)]) - best_value),
+            ),
+        )
+    )
 
 
 def _stable_normal_plane_basis(tangent: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -33405,7 +33586,7 @@ def test_parse_solver_error_formats_exact_target_delta_for_direct_miss() -> None
     assert "dZ=0.57 м" in rows[0]["Причина"]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	2563
+===BEGIN_FILE===	tests/test_three_viewer.py	3576
 from __future__ import annotations
 
 from pathlib import Path
@@ -33419,17 +33600,41 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
 
     assert 'id="fit-camera-btn"' in html
     assert 'id="fullscreen-btn"' in html
+    assert 'id="legend-toggle-btn"' in html
     assert 'id="tooltip"' in html
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
     assert "TrackballControls" in html
+    assert "controls.rotateSpeed = 0.72;" in html
+    assert "controls.zoomSpeed = 0.95;" in html
+    assert "controls.panSpeed = 0.235;" in html
+    assert "controls.staticMoving = false;" in html
+    assert "controls.dynamicDampingFactor = 0.14;" in html
     assert "function updateLabels()" in html
+    assert "X / East" in html
+    assert "Y / North" in html
+    assert "Z / TVD" in html
+    assert "scene-axis-label" in html
+    assert "#legend.is-collapsed" in html
+    assert "function syncLegendVisibility()" in html
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html
     assert "new THREE.MeshLambertMaterial" not in html
+    assert "markerScale * 0.52" in html
+    assert '<strong>DLS:</strong>' in html
+    assert '<strong>INC:</strong>' in html
     assert 'id="reset-camera-btn"' not in html
     assert "Легенда" not in html
+
+
+def test_trackball_controls_use_centered_min_dimension_mapping() -> None:
+    controls_js = (three_viewer._VENDOR_DIR / "TrackballControls.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Math.min( scope.screen.width, scope.screen.height )" in controls_js
+    assert "( scope.screen.top + scope.screen.height * 0.5 - pageY ) / radius" in controls_js
 
 
 def test_render_local_three_scene_appends_instance_token(monkeypatch) -> None:
@@ -33875,7 +34080,7 @@ def test_build_key_metrics_rows_shows_reference_without_optimization_when_availa
     assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение без оптимизации"] == "0.90 / 0.90 / 0.90 deg/10m"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_uncertainty.py	10938
+===BEGIN_FILE===	tests/test_uncertainty.py	13042
 from __future__ import annotations
 
 import numpy as np
@@ -33885,6 +34090,8 @@ import pytest
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.planner import TrajectoryPlanner
 from pywp.uncertainty import (
+    _continuous_extreme_index,
+    _open_closed_ring,
     DEFAULT_UNCERTAINTY_PRESET,
     UNCERTAINTY_PRESET_CONSERVATIVE,
     UNCERTAINTY_PRESET_OPTIMISTIC,
@@ -34129,6 +34336,68 @@ def test_regression_overlay_ring_alignment_avoids_twist_for_build_to_hold_case()
                 )
                 best_cost = min(best_cost, candidate_cost)
         assert current_cost == pytest.approx(best_cost, abs=1e-9)
+
+
+def test_open_closed_ring_drops_duplicate_endpoint() -> None:
+    ring = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [1.0, 0.0],
+        ],
+        dtype=float,
+    )
+
+    opened = _open_closed_ring(ring)
+
+    assert opened.shape == (3, 2)
+    assert np.allclose(opened[0], ring[0])
+    assert np.allclose(opened[-1], ring[2])
+
+
+def test_continuous_extreme_index_prefers_nearby_candidate_on_closed_ring() -> None:
+    offsets = np.array([9.8, 10.0, 9.9, -2.0, -3.0, 9.85], dtype=float)
+
+    index = _continuous_extreme_index(
+        offsets=offsets,
+        maximize=True,
+        previous_index=5,
+    )
+
+    assert int(index) == 5
+
+
+def test_uncertainty_ribbon_regression_stays_locally_continuous_on_turn_case() -> None:
+    result = TrajectoryPlanner().plan(
+        Point3D(0.0, 0.0, 0.0),
+        Point3D(334.0, 46.0, 3769.0),
+        Point3D(1464.0, 649.0, 3806.0),
+        TrajectoryConfig(),
+    )
+    overlay = build_uncertainty_overlay(
+        stations=result.stations,
+        surface=Point3D(0.0, 0.0, 0.0),
+        azimuth_deg=float(result.azimuth_deg),
+        required_md_m=(
+            float(result.summary["kop_md_m"]),
+            float(result.md_t1_m),
+            float(result.summary["md_total_m"]),
+        ),
+    )
+
+    ribbon = uncertainty_ribbon_polygon(overlay, projection="plan")
+    sample_count = len(overlay.samples)
+    positive_side = np.asarray(ribbon[:sample_count], dtype=float)
+    negative_side = np.asarray(ribbon[sample_count : sample_count * 2], dtype=float)[::-1]
+    centers = np.asarray([sample.center_plan_xy for sample in overlay.samples], dtype=float)
+
+    center_step_max = float(np.max(np.linalg.norm(np.diff(centers, axis=0), axis=1)))
+    positive_step_max = float(np.max(np.linalg.norm(np.diff(positive_side, axis=0), axis=1)))
+    negative_step_max = float(np.max(np.linalg.norm(np.diff(negative_side, axis=0), axis=1)))
+
+    assert positive_step_max <= center_step_max * 1.25
+    assert negative_step_max <= center_step_max * 1.25
 
 
 def test_adaptive_refinement_densifies_curved_build_intervals() -> None:
@@ -37331,7 +37600,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	104072
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	104136
 from __future__ import annotations
 
 import importlib.util
@@ -39407,7 +39676,7 @@ def test_anticollision_3d_figure_draws_terminal_cone_boundaries_per_well() -> No
         page._lighten_hex(page._well_color(0), 0.55),
         page._lighten_hex(page._well_color(1), 0.55),
     }
-    assert all(float(trace.line.width) == 1.0 for trace in boundary_traces)
+    assert all(float(trace.line.width) == 0.8 for trace in boundary_traces)
     assert figure.layout.scene.camera.to_plotly_json() == DEFAULT_3D_CAMERA
 
 
@@ -39770,6 +40039,8 @@ def test_plotly_3d_figure_to_three_payload_preserves_hover_metadata_for_tooltip(
     first_hover = hover_only_points[0]["hover"][0]
     assert first_hover["name"] == "WELL-A"
     assert "md" in first_hover
+    assert "dls" in first_hover
+    assert "inc" in first_hover
     assert "segment" in first_hover
 
 
