@@ -239,10 +239,10 @@ def _build_well_color_palette() -> tuple[str, ...]:
         "#1562D5",
         "#F59E0B",
         "#AF15D5",
-        "#D54A9A",
         "#00A0A0",
-        "#8A5CF6",
+        "#D54A9A",
         "#62D515",
+        "#8A5CF6",
     )
     hue_degrees: tuple[float, ...] = (
         18.0,

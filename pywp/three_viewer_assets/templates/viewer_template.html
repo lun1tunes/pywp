@@ -253,7 +253,7 @@
             0,
           );
         const maxPixelRatio =
-          sceneComplexity > 80000 ? 1.0 : sceneComplexity > 25000 ? 1.25 : 1.6;
+          sceneComplexity > 80000 ? 1.15 : sceneComplexity > 25000 ? 1.45 : 1.85;
 
         const renderer = new THREE.WebGLRenderer({
           antialias: sceneComplexity <= 25000,
@@ -318,7 +318,7 @@
           if (circleMarkerTexture) {
             return circleMarkerTexture;
           }
-          const size = 64;
+          const size = 96;
           const canvas = document.createElement("canvas");
           canvas.width = size;
           canvas.height = size;

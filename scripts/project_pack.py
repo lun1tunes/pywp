@@ -9,6 +9,9 @@ ARCHIVE_FILE = "all.txt"
 BEGIN = "===BEGIN_FILE==="
 END = "===END_FILE==="
 
+# Static assets for the Three.js viewer (HTML/JS); packed alongside Python sources.
+THREE_VIEWER_ASSETS_REL = Path("pywp/three_viewer_assets")
+
 EXCLUDED_DIR_NAMES = {
     ".git",
     ".venv",
@@ -31,6 +34,17 @@ def should_skip_path(path: Path, root: Path) -> bool:
     return False
 
 
+def collect_three_viewer_assets(root: Path) -> list[Path]:
+    assets_dir = root / THREE_VIEWER_ASSETS_REL
+    if not assets_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for path in assets_dir.rglob("*"):
+        if path.is_file() and not should_skip_path(path, root):
+            out.append(path)
+    return out
+
+
 def collect_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for path in root.rglob("*.py"):
@@ -40,6 +54,8 @@ def collect_files(root: Path) -> list[Path]:
     req = root / "requirements.txt"
     if req.exists() and req.is_file() and not should_skip_path(req, root):
         files.append(req)
+
+    files.extend(collect_three_viewer_assets(root))
 
     return sorted(set(files), key=lambda p: str(p.relative_to(root)))
 
@@ -100,7 +116,10 @@ def unpack(root: Path, input_file: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Pack project .py files + requirements.txt to all.txt and unpack back."
+        description=(
+            "Pack project .py files, requirements.txt, and pywp/three_viewer_assets "
+            "to all.txt and unpack back."
+        )
     )
     parser.add_argument(
         "mode",
