@@ -49,6 +49,13 @@
         right: 10px;
       }
 
+      #legend-toggle-wrap {
+        position: absolute;
+        top: 52px;
+        right: 10px;
+        z-index: 4;
+      }
+
       .toolbar-btn {
         border: 1px solid rgba(37, 99, 235, 0.18);
         background: rgba(255, 255, 255, 0.96);
@@ -87,6 +94,10 @@
         display: none;
       }
 
+      #legend.is-collapsed {
+        display: none;
+      }
+
       .legend-item {
         display: flex;
         align-items: center;
@@ -113,8 +124,8 @@
       #tooltip {
         position: absolute;
         display: none;
-        min-width: 146px;
-        max-width: 260px;
+        min-width: 132px;
+        max-width: 234px;
         padding: 8px 10px;
         border: 1px solid rgba(37, 99, 235, 0.38);
         border-radius: 12px;
@@ -147,6 +158,12 @@
         text-shadow:
           0 1px 0 rgba(255, 255, 255, 0.95),
           0 0 8px rgba(255, 255, 255, 0.8);
+      }
+
+      .scene-axis-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
       }
 
       .tooltip-head {
@@ -198,6 +215,9 @@
       <div id="toolbar-right">
         <button id="fullscreen-btn" class="toolbar-btn" type="button" title="Развернуть на весь экран">⛶</button>
       </div>
+      <div id="legend-toggle-wrap">
+        <button id="legend-toggle-btn" class="toolbar-btn" type="button" title="Свернуть или развернуть легенду">Legend</button>
+      </div>
       <div id="label-layer"></div>
       <div id="legend"></div>
       <div id="tooltip"></div>
@@ -221,6 +241,7 @@
         const root = document.getElementById("root");
         const labelLayerElement = document.getElementById("label-layer");
         const legendElement = document.getElementById("legend");
+        const legendToggleButton = document.getElementById("legend-toggle-btn");
         const tooltipElement = document.getElementById("tooltip");
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
@@ -269,11 +290,11 @@
         camera.up.set(0, 0, 1);
 
         const controls = new THREE.TrackballControls(camera, renderer.domElement);
-        controls.rotateSpeed = 3.2;
-        controls.zoomSpeed = 1.1;
-        controls.panSpeed = 0.85;
-        controls.staticMoving = true;
-        controls.dynamicDampingFactor = 0.16;
+        controls.rotateSpeed = 0.72;
+        controls.zoomSpeed = 0.95;
+        controls.panSpeed = 0.62;
+        controls.staticMoving = false;
+        controls.dynamicDampingFactor = 0.14;
         controls.noRotate = false;
         controls.noZoom = false;
         controls.noPan = false;
@@ -284,6 +305,7 @@
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
         let hoveredObject = null;
+        let legendCollapsed = false;
 
         function requestRender() {
           needsRender = true;
@@ -373,9 +395,39 @@
         const worldMarkerSize = Math.max(maxSpan * 0.008, 9.0);
         const labelLift = Math.max(maxSpan * 0.015, 18.0);
 
-        const axes = new THREE.AxesHelper(Math.max(maxSpan * 0.18, 40.0));
-        axes.position.set(minBound.x, minBound.y, maxBound.z);
+        const axisLength = Math.max(maxSpan * 0.18, 40.0);
+        const axes = new THREE.AxesHelper(axisLength);
+        const axisOrigin = new THREE.Vector3(minBound.x, minBound.y, maxBound.z);
+        axes.position.copy(axisOrigin);
         scene.add(axes);
+
+        function addSceneLabel(text, position, color, extraClassName) {
+          const element = document.createElement("div");
+          element.className = `scene-label ${String(extraClassName || "").trim()}`.trim();
+          element.textContent = String(text || "");
+          element.style.color = String(color || "#0f172a");
+          labelLayerElement.appendChild(element);
+          sceneLabels.push({ element: element, position: position.clone() });
+        }
+
+        addSceneLabel(
+          "X / East",
+          new THREE.Vector3(axisOrigin.x + axisLength * 1.08, axisOrigin.y, axisOrigin.z),
+          "#B91C1C",
+          "scene-axis-label",
+        );
+        addSceneLabel(
+          "Y / North",
+          new THREE.Vector3(axisOrigin.x, axisOrigin.y + axisLength * 1.08, axisOrigin.z),
+          "#15803D",
+          "scene-axis-label",
+        );
+        addSceneLabel(
+          "Z / TVD",
+          new THREE.Vector3(axisOrigin.x, axisOrigin.y, axisOrigin.z + axisLength * 1.08),
+          "#1D4ED8",
+          "scene-axis-label",
+        );
 
         function resize() {
           const width = Math.max(root.clientWidth || 1, 1);
@@ -407,7 +459,14 @@
         function addLegend(items) {
           legendElement.innerHTML = "";
           if (!Array.isArray(items) || items.length === 0) {
+            if (legendToggleButton) {
+              legendToggleButton.style.display = "none";
+            }
             return;
+          }
+          if (legendToggleButton) {
+            legendToggleButton.style.display = "inline-flex";
+            legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
           }
           items.forEach((item) => {
             const row = document.createElement("div");
@@ -425,6 +484,17 @@
             row.appendChild(label);
             legendElement.appendChild(row);
           });
+        }
+
+        function syncLegendVisibility() {
+          if (legendCollapsed) {
+            legendElement.classList.add("is-collapsed");
+          } else {
+            legendElement.classList.remove("is-collapsed");
+          }
+          if (legendToggleButton && legendElement.innerHTML.trim() !== "") {
+            legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
+          }
         }
 
         function addLine(item) {
@@ -574,7 +644,7 @@
             5.0,
           );
           const geometry = new THREE.SphereGeometry(
-            markerScale * 0.34,
+            markerScale * 0.52,
             8,
             8,
           );
@@ -654,14 +724,14 @@
         }
 
         function addLabel(item) {
-          const element = document.createElement("div");
-          element.className = "scene-label";
-          element.textContent = String(item.text || "");
-          element.style.color = String(item.color || "#0f172a");
-          labelLayerElement.appendChild(element);
           const position = displayPoint(item.position || [0, 0, 0]);
           position.z += labelLift;
-          sceneLabels.push({ element: element, position: position });
+          addSceneLabel(
+            String(item.text || ""),
+            position,
+            String(item.color || "#0f172a"),
+            "",
+          );
         }
 
         function escapeHtml(value) {
@@ -696,6 +766,16 @@
           if (Number.isFinite(hover.md)) {
             lines.push(
               `<div class="tooltip-kv"><strong>MD:</strong> <span class="tooltip-mono">${Number(hover.md).toFixed(1)} м</span></div>`,
+            );
+          }
+          if (Number.isFinite(hover.dls)) {
+            lines.push(
+              `<div class="tooltip-kv"><strong>DLS:</strong> <span class="tooltip-mono">${Number(hover.dls).toFixed(2)} deg/30м</span></div>`,
+            );
+          }
+          if (Number.isFinite(hover.inc)) {
+            lines.push(
+              `<div class="tooltip-kv"><strong>INC:</strong> <span class="tooltip-mono">${Number(hover.inc).toFixed(2)} deg</span></div>`,
             );
           }
           return lines.join("");
@@ -843,8 +923,15 @@
         if (fullscreenButton) {
           fullscreenButton.addEventListener("click", enterFullscreen);
         }
+        if (legendToggleButton) {
+          legendToggleButton.addEventListener("click", () => {
+            legendCollapsed = !legendCollapsed;
+            syncLegendVisibility();
+          });
+        }
         resize();
         fitCamera();
+        syncLegendVisibility();
         startAnimationLoop();
       })();
     </script>

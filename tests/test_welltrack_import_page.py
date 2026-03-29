@@ -2073,7 +2073,7 @@ def test_anticollision_3d_figure_draws_terminal_cone_boundaries_per_well() -> No
         page._lighten_hex(page._well_color(0), 0.55),
         page._lighten_hex(page._well_color(1), 0.55),
     }
-    assert all(float(trace.line.width) == 1.0 for trace in boundary_traces)
+    assert all(float(trace.line.width) == 0.8 for trace in boundary_traces)
     assert figure.layout.scene.camera.to_plotly_json() == DEFAULT_3D_CAMERA
 
 
@@ -2436,6 +2436,8 @@ def test_plotly_3d_figure_to_three_payload_preserves_hover_metadata_for_tooltip(
     first_hover = hover_only_points[0]["hover"][0]
     assert first_hover["name"] == "WELL-A"
     assert "md" in first_hover
+    assert "dls" in first_hover
+    assert "inc" in first_hover
     assert "segment" in first_hover
 
 

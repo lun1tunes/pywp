@@ -11,17 +11,41 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
 
     assert 'id="fit-camera-btn"' in html
     assert 'id="fullscreen-btn"' in html
+    assert 'id="legend-toggle-btn"' in html
     assert 'id="tooltip"' in html
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
     assert "TrackballControls" in html
+    assert "controls.rotateSpeed = 0.72;" in html
+    assert "controls.zoomSpeed = 0.95;" in html
+    assert "controls.panSpeed = 0.62;" in html
+    assert "controls.staticMoving = false;" in html
+    assert "controls.dynamicDampingFactor = 0.14;" in html
     assert "function updateLabels()" in html
+    assert "X / East" in html
+    assert "Y / North" in html
+    assert "Z / TVD" in html
+    assert "scene-axis-label" in html
+    assert "#legend.is-collapsed" in html
+    assert "function syncLegendVisibility()" in html
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html
     assert "new THREE.MeshLambertMaterial" not in html
+    assert "markerScale * 0.52" in html
+    assert '<strong>DLS:</strong>' in html
+    assert '<strong>INC:</strong>' in html
     assert 'id="reset-camera-btn"' not in html
     assert "Легенда" not in html
+
+
+def test_trackball_controls_use_centered_min_dimension_mapping() -> None:
+    controls_js = (three_viewer._VENDOR_DIR / "TrackballControls.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Math.min( scope.screen.width, scope.screen.height )" in controls_js
+    assert "( scope.screen.top + scope.screen.height * 0.5 - pageY ) / radius" in controls_js
 
 
 def test_render_local_three_scene_appends_instance_token(monkeypatch) -> None:

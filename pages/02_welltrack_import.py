@@ -756,9 +756,16 @@ def _customdata_row_to_hover_item(
         except (TypeError, ValueError):
             second_float = None
         if second_float is not None and np.isfinite(second_float):
-            item["pi"] = float(second_float)
-    if len(values) >= 3 and str(values[2]).strip():
-        item["segment"] = str(values[2]).strip()
+            item["dls"] = float(second_float)
+    if len(values) >= 3:
+        try:
+            third_float = float(values[2])
+        except (TypeError, ValueError):
+            third_float = None
+        if third_float is not None and np.isfinite(third_float):
+            item["inc"] = float(third_float)
+    if len(values) >= 4 and str(values[3]).strip():
+        item["segment"] = str(values[3]).strip()
     return item
 
 
@@ -1467,18 +1474,18 @@ def _trajectory_interval_points(
 
 
 def _trajectory_hover_customdata(stations: pd.DataFrame) -> np.ndarray:
-    dls_pi_values = dls_to_pi(
-        stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
-    )
+    dls_values = stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].fillna(0.0).to_numpy(dtype=float)
     segment_values = (
         stations["segment"].astype(str).to_numpy(dtype=object)
         if "segment" in stations.columns
         else np.full(len(stations), "—", dtype=object)
     )
-    customdata = np.empty((len(stations), 3), dtype=object)
+    customdata = np.empty((len(stations), 4), dtype=object)
     customdata[:, 0] = stations["MD_m"].to_numpy(dtype=float)
-    customdata[:, 1] = dls_pi_values
-    customdata[:, 2] = segment_values
+    customdata[:, 1] = dls_values
+    customdata[:, 2] = inc_values
+    customdata[:, 3] = segment_values
     return customdata
 
 
@@ -1927,8 +1934,9 @@ def _all_wells_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
-                    "Сегмент: %{customdata[2]}"
+                    "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                    "INC: %{customdata[2]:.2f} deg<br>"
+                    "Сегмент: %{customdata[3]}"
                     "<extra>%{fullData.name}</extra>"
                 ),
             )
@@ -2483,7 +2491,7 @@ def _all_wells_anticollision_3d_figure(
                     legendgroup=str(well.name),
                     showlegend=False,
                     line={
-                        "width": 1.0,
+                        "width": 0.8,
                         "color": _lighten_hex(str(well.color), 0.55),
                     },
                     hoverinfo="skip",
@@ -2529,8 +2537,9 @@ def _all_wells_anticollision_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m<br>"
-                    "Сегмент: %{customdata[2]}"
+                    "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                    "INC: %{customdata[2]:.2f} deg<br>"
+                    "Сегмент: %{customdata[3]}"
                     "<extra>%{fullData.name}</extra>"
                 ),
                 customdata=_trajectory_hover_customdata(stations),
@@ -2586,8 +2595,9 @@ def _all_wells_anticollision_3d_figure(
                         "Y: %{y:.2f} m<br>"
                         "Z/TVD: %{z:.2f} m<br>"
                         "MD: %{customdata[0]:.2f} m<br>"
-                        "ПИ: %{customdata[1]:.2f} deg/10m<br>"
-                        "Сегмент: %{customdata[2]}"
+                        "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                        "INC: %{customdata[2]:.2f} deg<br>"
+                        "Сегмент: %{customdata[3]}"
                         f"<extra>{well_label}</extra>"
                     ),
                 )
@@ -2744,11 +2754,21 @@ def _all_wells_anticollision_3d_figure(
         dls_segment = np.interp(
             md_segment,
             well.stations["MD_m"].to_numpy(dtype=float),
-            dls_to_pi(
-                well.stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float)
-            ),
+            well.stations["DLS_deg_per_30m"].fillna(0.0).to_numpy(dtype=float),
         )
-        conflict_customdata = np.column_stack([md_segment, dls_segment])
+        inc_segment = np.interp(
+            md_segment,
+            well.stations["MD_m"].to_numpy(dtype=float),
+            well.stations["INC_deg"].fillna(0.0).to_numpy(dtype=float),
+        )
+        conflict_customdata = np.column_stack(
+            [
+                md_segment,
+                dls_segment,
+                inc_segment,
+                np.full(len(md_segment), "Конфликтный участок", dtype=object),
+            ]
+        )
         x_arrays.append(x_segment)
         y_arrays.append(y_segment)
         z_arrays.append(z_segment)
@@ -2772,7 +2792,8 @@ def _all_wells_anticollision_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} м<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m"
+                    "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                    "INC: %{customdata[2]:.2f} deg"
                     "<extra>Конфликтный участок ствола</extra>"
                 ),
             )
@@ -2789,7 +2810,8 @@ def _all_wells_anticollision_3d_figure(
                     "Y: %{y:.2f} m<br>"
                     "Z/TVD: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} м<br>"
-                    "ПИ: %{customdata[1]:.2f} deg/10m"
+                    "DLS: %{customdata[1]:.2f} deg/30м<br>"
+                    "INC: %{customdata[2]:.2f} deg"
                     "<extra>Конфликтный участок ствола</extra>"
                 ),
             )

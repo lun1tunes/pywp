@@ -117,7 +117,10 @@
 				const vector = new THREE.Vector2();
 				return function getMouseOnCircle( pageX, pageY ) {
 
-					vector.set( ( pageX - scope.screen.width * 0.5 - scope.screen.left ) / ( scope.screen.width * 0.5 ), ( scope.screen.height + 2 * ( scope.screen.top - pageY ) ) / scope.screen.width // screen.width intentional
+					const radius = Math.max( Math.min( scope.screen.width, scope.screen.height ) * 0.5, 1 );
+					vector.set(
+						( pageX - scope.screen.left - scope.screen.width * 0.5 ) / radius,
+						( scope.screen.top + scope.screen.height * 0.5 - pageY ) / radius
 					);
 					return vector;
 
