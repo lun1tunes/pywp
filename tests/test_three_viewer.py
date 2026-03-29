@@ -18,7 +18,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "TrackballControls" in html
     assert "controls.rotateSpeed = 0.72;" in html
     assert "controls.zoomSpeed = 0.95;" in html
-    assert "controls.panSpeed = 0.62;" in html
+    assert "controls.panSpeed = 0.235;" in html
     assert "controls.staticMoving = false;" in html
     assert "controls.dynamicDampingFactor = 0.14;" in html
     assert "function updateLabels()" in html

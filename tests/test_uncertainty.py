@@ -7,6 +7,8 @@ import pytest
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.planner import TrajectoryPlanner
 from pywp.uncertainty import (
+    _continuous_extreme_index,
+    _open_closed_ring,
     DEFAULT_UNCERTAINTY_PRESET,
     UNCERTAINTY_PRESET_CONSERVATIVE,
     UNCERTAINTY_PRESET_OPTIMISTIC,
@@ -251,6 +253,68 @@ def test_regression_overlay_ring_alignment_avoids_twist_for_build_to_hold_case()
                 )
                 best_cost = min(best_cost, candidate_cost)
         assert current_cost == pytest.approx(best_cost, abs=1e-9)
+
+
+def test_open_closed_ring_drops_duplicate_endpoint() -> None:
+    ring = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [1.0, 0.0],
+        ],
+        dtype=float,
+    )
+
+    opened = _open_closed_ring(ring)
+
+    assert opened.shape == (3, 2)
+    assert np.allclose(opened[0], ring[0])
+    assert np.allclose(opened[-1], ring[2])
+
+
+def test_continuous_extreme_index_prefers_nearby_candidate_on_closed_ring() -> None:
+    offsets = np.array([9.8, 10.0, 9.9, -2.0, -3.0, 9.85], dtype=float)
+
+    index = _continuous_extreme_index(
+        offsets=offsets,
+        maximize=True,
+        previous_index=5,
+    )
+
+    assert int(index) == 5
+
+
+def test_uncertainty_ribbon_regression_stays_locally_continuous_on_turn_case() -> None:
+    result = TrajectoryPlanner().plan(
+        Point3D(0.0, 0.0, 0.0),
+        Point3D(334.0, 46.0, 3769.0),
+        Point3D(1464.0, 649.0, 3806.0),
+        TrajectoryConfig(),
+    )
+    overlay = build_uncertainty_overlay(
+        stations=result.stations,
+        surface=Point3D(0.0, 0.0, 0.0),
+        azimuth_deg=float(result.azimuth_deg),
+        required_md_m=(
+            float(result.summary["kop_md_m"]),
+            float(result.md_t1_m),
+            float(result.summary["md_total_m"]),
+        ),
+    )
+
+    ribbon = uncertainty_ribbon_polygon(overlay, projection="plan")
+    sample_count = len(overlay.samples)
+    positive_side = np.asarray(ribbon[:sample_count], dtype=float)
+    negative_side = np.asarray(ribbon[sample_count : sample_count * 2], dtype=float)[::-1]
+    centers = np.asarray([sample.center_plan_xy for sample in overlay.samples], dtype=float)
+
+    center_step_max = float(np.max(np.linalg.norm(np.diff(centers, axis=0), axis=1)))
+    positive_step_max = float(np.max(np.linalg.norm(np.diff(positive_side, axis=0), axis=1)))
+    negative_step_max = float(np.max(np.linalg.norm(np.diff(negative_side, axis=0), axis=1)))
+
+    assert positive_step_max <= center_step_max * 1.25
+    assert negative_step_max <= center_step_max * 1.25
 
 
 def test_adaptive_refinement_densifies_curved_build_intervals() -> None:

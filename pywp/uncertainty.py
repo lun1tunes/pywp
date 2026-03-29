@@ -793,17 +793,22 @@ def uncertainty_ribbon_polygon(
 
     positive_side: list[np.ndarray] = []
     negative_side: list[np.ndarray] = []
+    previous_positive_index: int | None = None
+    previous_negative_index: int | None = None
     for sample_index, sample in enumerate(overlay.samples):
         center = (
             np.array(sample.center_plan_xy, dtype=float)
             if projection == "plan"
             else np.array(sample.center_section_xz, dtype=float)
         )
-        ring = (
+        ring_closed = (
             np.asarray(sample.ring_plan_xy, dtype=float)
             if projection == "plan"
             else np.asarray(sample.ring_section_xz, dtype=float)
         )
+        ring = _open_closed_ring(ring_closed)
+        if ring.shape[0] < 3:
+            continue
         tangent = _projected_center_tangent(
             overlay=overlay,
             sample_index=sample_index,
@@ -817,8 +822,20 @@ def uncertainty_ribbon_polygon(
         normal = np.array([-tangent[1], tangent[0]], dtype=float)
 
         offsets = (ring - center[None, :]) @ normal
-        positive_side.append(ring[int(np.argmax(offsets))])
-        negative_side.append(ring[int(np.argmin(offsets))])
+        positive_index = _continuous_extreme_index(
+            offsets=offsets,
+            maximize=True,
+            previous_index=previous_positive_index,
+        )
+        negative_index = _continuous_extreme_index(
+            offsets=offsets,
+            maximize=False,
+            previous_index=previous_negative_index,
+        )
+        positive_side.append(ring[int(positive_index)])
+        negative_side.append(ring[int(negative_index)])
+        previous_positive_index = int(positive_index)
+        previous_negative_index = int(negative_index)
 
     if len(positive_side) < 2:
         return np.empty((0, 2), dtype=float)
@@ -920,6 +937,58 @@ def _projected_center_tangent(
     if int(sample_index) == len(centers) - 1:
         return current - centers[-2]
     return centers[int(sample_index) + 1] - centers[int(sample_index) - 1]
+
+
+def _open_closed_ring(ring_xy: np.ndarray) -> np.ndarray:
+    ring = np.asarray(ring_xy, dtype=float)
+    if ring.ndim != 2 or ring.shape[0] == 0:
+        return ring
+    if ring.shape[0] >= 2 and np.allclose(ring[0], ring[-1], atol=1e-9):
+        return ring[:-1]
+    return ring
+
+
+def _circular_index_distance(index_a: int, index_b: int, size: int) -> int:
+    if size <= 0:
+        return 0
+    delta = abs(int(index_a) - int(index_b))
+    return min(delta, size - delta)
+
+
+def _continuous_extreme_index(
+    *,
+    offsets: np.ndarray,
+    maximize: bool,
+    previous_index: int | None,
+) -> int:
+    values = np.asarray(offsets, dtype=float)
+    if values.ndim != 1 or len(values) == 0:
+        return 0
+
+    best_value = float(np.max(values) if maximize else np.min(values))
+    spread = float(np.max(values) - np.min(values))
+    tolerance = max(spread * 0.03, 1e-9)
+    if maximize:
+        candidate_indices = np.flatnonzero(values >= best_value - tolerance)
+        fallback_index = int(np.argmax(values))
+    else:
+        candidate_indices = np.flatnonzero(values <= best_value + tolerance)
+        fallback_index = int(np.argmin(values))
+
+    if len(candidate_indices) == 0:
+        return fallback_index
+    if previous_index is None:
+        return fallback_index
+
+    return int(
+        min(
+            candidate_indices.tolist(),
+            key=lambda idx: (
+                _circular_index_distance(int(idx), int(previous_index), len(values)),
+                abs(float(values[int(idx)]) - best_value),
+            ),
+        )
+    )
 
 
 def _stable_normal_plane_basis(tangent: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
