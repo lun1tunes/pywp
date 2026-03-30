@@ -56,6 +56,41 @@
         z-index: 4;
       }
 
+      #axes-gizmo {
+        position: absolute;
+        top: 54px;
+        left: 10px;
+        width: 136px;
+        height: 118px;
+        pointer-events: none;
+        z-index: 3;
+      }
+
+      #axes-gizmo svg {
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+      }
+
+      .axes-gizmo-line {
+        fill: none;
+        stroke-linecap: round;
+        stroke-width: 2.2;
+      }
+
+      .axes-gizmo-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        dominant-baseline: middle;
+      }
+
+      .axes-gizmo-center {
+        fill: #ffffff;
+        stroke: rgba(15, 23, 42, 0.18);
+        stroke-width: 1.2;
+      }
+
       .toolbar-btn {
         border: 1px solid rgba(37, 99, 235, 0.18);
         background: rgba(255, 255, 255, 0.96);
@@ -218,6 +253,7 @@
       <div id="legend-toggle-wrap">
         <button id="legend-toggle-btn" class="toolbar-btn" type="button" title="Свернуть или развернуть легенду">Legend</button>
       </div>
+      <div id="axes-gizmo"></div>
       <div id="label-layer"></div>
       <div id="legend"></div>
       <div id="tooltip"></div>
@@ -245,6 +281,7 @@
         const tooltipElement = document.getElementById("tooltip");
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
+        const axesGizmoElement = document.getElementById("axes-gizmo");
         const Z_DISPLAY_SIGN = -1.0;
         const scene = new THREE.Scene();
         const backgroundColor = String(payload.background || "#ffffff");
@@ -412,39 +449,6 @@
         const labelLift = Math.max(maxSpan * 0.015, 18.0);
 
         const axisLength = Math.max(maxSpan * 0.18, 40.0);
-        const axisOrigin = new THREE.Vector3(minBound.x, minBound.y, maxBound.z);
-        function addAxisLine(startPoint, endPoint, colorValue) {
-          const geometry = new THREE.BufferGeometry().setFromPoints([
-            startPoint.clone(),
-            endPoint.clone(),
-          ]);
-          scene.add(
-            new THREE.Line(
-              geometry,
-              new THREE.LineBasicMaterial({
-                color: colorValue,
-                transparent: false,
-                opacity: 1.0,
-              }),
-            ),
-          );
-        }
-
-        addAxisLine(
-          axisOrigin,
-          new THREE.Vector3(axisOrigin.x + axisLength, axisOrigin.y, axisOrigin.z),
-          "#B91C1C",
-        );
-        addAxisLine(
-          axisOrigin,
-          new THREE.Vector3(axisOrigin.x, axisOrigin.y + axisLength, axisOrigin.z),
-          "#15803D",
-        );
-        addAxisLine(
-          axisOrigin,
-          new THREE.Vector3(axisOrigin.x, axisOrigin.y, axisOrigin.z - axisLength),
-          "#1D4ED8",
-        );
 
         function addSceneLabel(text, position, color, extraClassName) {
           const element = document.createElement("div");
@@ -455,24 +459,73 @@
           sceneLabels.push({ element: element, position: position.clone() });
         }
 
-        addSceneLabel(
-          "X / East",
-          new THREE.Vector3(axisOrigin.x + axisLength * 1.08, axisOrigin.y, axisOrigin.z),
-          "#B91C1C",
-          "scene-axis-label",
-        );
-        addSceneLabel(
-          "Y / North",
-          new THREE.Vector3(axisOrigin.x, axisOrigin.y + axisLength * 1.08, axisOrigin.z),
-          "#15803D",
-          "scene-axis-label",
-        );
-        addSceneLabel(
-          "Z / TVD",
-          new THREE.Vector3(axisOrigin.x, axisOrigin.y, axisOrigin.z - axisLength * 1.08),
-          "#1D4ED8",
-          "scene-axis-label",
-        );
+        const axisOverlayDefinitions = [
+          {
+            key: "x",
+            label: "X / East",
+            color: "#B91C1C",
+            vector: new THREE.Vector3(1, 0, 0),
+          },
+          {
+            key: "y",
+            label: "Y / North",
+            color: "#15803D",
+            vector: new THREE.Vector3(0, 1, 0),
+          },
+          {
+            key: "z",
+            label: "Z / TVD",
+            color: "#1D4ED8",
+            vector: new THREE.Vector3(0, 0, -1),
+          },
+        ];
+
+        function updateAxesGizmo() {
+          if (!axesGizmoElement) {
+            return;
+          }
+          const width = Math.max(axesGizmoElement.clientWidth || 136, 136);
+          const height = Math.max(axesGizmoElement.clientHeight || 118, 118);
+          const centerX = 58;
+          const centerY = 42;
+          const radius = Math.min(width, height) * 0.34;
+          const inverseCameraQuaternion = camera.quaternion.clone().invert();
+          const axisItems = axisOverlayDefinitions.map((item) => {
+            const projected = item.vector
+              .clone()
+              .applyQuaternion(inverseCameraQuaternion)
+              .normalize();
+            return {
+              label: item.label,
+              color: item.color,
+              x: centerX + projected.x * radius,
+              y: centerY - projected.y * radius,
+              z: projected.z,
+            };
+          });
+          axisItems.sort((left, right) => left.z - right.z);
+          const lines = axisItems
+            .map(
+              (item) =>
+                `<line class="axes-gizmo-line" x1="${centerX.toFixed(1)}" y1="${centerY.toFixed(1)}" x2="${item.x.toFixed(1)}" y2="${item.y.toFixed(1)}" stroke="${item.color}" opacity="${(item.z > 0 ? 1.0 : 0.72).toFixed(2)}"></line>`,
+            )
+            .join("");
+          const labels = axisItems
+            .map((item) => {
+              const dx = item.x - centerX;
+              const dy = item.y - centerY;
+              const labelX = item.x + (Math.abs(dx) < 4 ? 0 : Math.sign(dx) * 7);
+              const labelY = item.y + (Math.abs(dy) < 4 ? 0 : Math.sign(dy) * 7);
+              return `<text class="axes-gizmo-label" x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" fill="${item.color}" text-anchor="${dx >= 0 ? "start" : "end"}">${item.label}</text>`;
+            })
+            .join("");
+          axesGizmoElement.innerHTML =
+            `<svg viewBox="0 0 ${width} ${height}" aria-hidden="true">` +
+            `<circle class="axes-gizmo-center" cx="${centerX.toFixed(1)}" cy="${centerY.toFixed(1)}" r="3.2"></circle>` +
+            lines +
+            labels +
+            `</svg>`;
+        }
         function resize() {
           const width = Math.max(root.clientWidth || 1, 1);
           const height = Math.max(root.clientHeight || 1, 1);
@@ -860,6 +913,7 @@
         function render() {
           renderer.clear(true, true, true);
           renderer.render(scene, camera);
+          updateAxesGizmo();
           updateLabels();
           updateTooltip();
         }

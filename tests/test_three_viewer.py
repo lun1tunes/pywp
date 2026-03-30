@@ -13,8 +13,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="fullscreen-btn"' in html
     assert 'id="legend-toggle-btn"' in html
     assert 'id="tooltip"' in html
+    assert 'id="axes-gizmo"' in html
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
+    assert ".axes-gizmo-line" in html
+    assert ".axes-gizmo-label" in html
     assert "OrbitControls" in html
     assert "controls.rotateSpeed = 0.72;" in html
     assert "controls.zoomSpeed = 0.95;" in html
@@ -27,6 +30,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "Y / North" in html
     assert "Z / TVD" in html
     assert "scene-axis-label" in html
+    assert "function updateAxesGizmo()" in html
+    assert "camera.quaternion.clone().invert()" in html
     assert "#legend.is-collapsed" in html
     assert "function syncLegendVisibility()" in html
     assert "function ensureCircleMarkerTexture()" in html
@@ -34,8 +39,6 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "new THREE.PointsMaterial" in html
     assert "new THREE.MeshLambertMaterial" not in html
     assert "markerScale * 0.52" in html
-    assert "function addAxisLine" in html
-    assert "axisOrigin.z - axisLength" in html
     assert '<strong>DLS:</strong>' in html
     assert '<strong>INC:</strong>' in html
     assert 'id="reset-camera-btn"' not in html
