@@ -13,6 +13,10 @@ from pywp.anticollision import (
     TARGET_T3,
     anti_collision_report_events,
 )
+from pywp.anticollision_stage import (
+    ANTI_COLLISION_STAGE_EARLY_KOP_BUILD1,
+    ANTI_COLLISION_STAGE_LATE_TRAJECTORY,
+)
 from pywp.models import (
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
@@ -49,6 +53,8 @@ class AntiCollisionWellContext:
     md_t1_m: float | None = None
     md_total_m: float | None = None
     optimization_mode: str = OPTIMIZATION_NONE
+    anti_collision_stage: str | None = None
+    anti_collision_attempted_stages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -522,12 +528,21 @@ def _build_single_recommendation(
     if (
         well_a_context is not None
         and well_b_context is not None
-        and str(well_a_context.optimization_mode) == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
-        and str(well_b_context.optimization_mode) == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+        and _well_has_late_trajectory_attempt(well_a_context)
+        and _well_has_late_trajectory_attempt(well_b_context)
     ):
+        preferred_moving_well = _select_movable_well_for_trajectory_event(
+            event=event,
+            well_context_by_name=well_context_by_name,
+        ) or str(event.well_a)
+        fixed_well = (
+            str(event.well_b)
+            if str(preferred_moving_well) == str(event.well_a)
+            else str(event.well_a)
+        )
         expected_maneuver = _expected_trajectory_maneuver(
             event=event,
-            moving_well=str(event.well_a),
+            moving_well=str(preferred_moving_well),
             well_context_by_name=well_context_by_name,
             analysis=analysis,
         )
@@ -539,13 +554,18 @@ def _build_single_recommendation(
             category=RECOMMENDATION_TRAJECTORY_REVIEW,
             summary=(
                 "Остаточный конфликт на криволинейном участке: automatic "
-                "late BUILD2/HOLD anti-collision rerun для этой пары уже исчерпан."
+                "late BUILD2/HOLD anti-collision rerun для этой пары уже исчерпан. "
+                f"Нужен дополнительный local spacing не меньше "
+                f"{float(event.max_overlap_depth_m):.1f} м."
             ),
             detail=(
                 "Обе проектные скважины пары уже пересчитаны в anti-collision mode, "
                 "но overlap сохраняется. Это признак того, что в текущих пределах "
                 "t1/t3, min KOP и DLS remaining late conflict требует ручной "
-                "корректировки targets/spacing или ослабления ограничений."
+                "корректировки targets/spacing или ослабления ограничений. "
+                f"Практически следующий ручной ход: разводить {preferred_moving_well} "
+                f"от {fixed_well} в lateral-плоскости на участке "
+                f"'{expected_maneuver}' минимум на {float(event.max_overlap_depth_m):.1f} м."
             ),
             expected_maneuver=str(expected_maneuver),
             action_label="Только рекомендация",
@@ -711,6 +731,8 @@ def _well_interval_prefers_kop(
 
 
 def _well_can_prepare_early_kop_build1(context: AntiCollisionWellContext) -> bool:
+    if _well_has_attempted_stage(context, ANTI_COLLISION_STAGE_EARLY_KOP_BUILD1):
+        return False
     current_kop = context.kop_md_m
     kop_floor = context.kop_min_vertical_m
     current_build1 = context.build1_dls_deg_per_30m
@@ -822,12 +844,15 @@ def _select_movable_well_for_trajectory_event(
     candidates = [item for item in (left, right) if item is not None]
     if not candidates:
         return None
+    not_yet_late = [
+        item for item in candidates if not _well_has_late_trajectory_attempt(item)
+    ]
     not_yet_optimized = [
         item
-        for item in candidates
+        for item in (not_yet_late or candidates)
         if str(item.optimization_mode).strip() != OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
     ]
-    ranked_pool = not_yet_optimized if not_yet_optimized else candidates
+    ranked_pool = not_yet_optimized if not_yet_optimized else (not_yet_late or candidates)
     ranked = sorted(
         ranked_pool,
         key=lambda item: (
@@ -837,6 +862,29 @@ def _select_movable_well_for_trajectory_event(
         ),
     )
     return str(ranked[0].well_name)
+
+
+def _well_has_late_trajectory_attempt(context: AntiCollisionWellContext) -> bool:
+    if _well_has_attempted_stage(context, ANTI_COLLISION_STAGE_LATE_TRAJECTORY):
+        return True
+    return str(context.optimization_mode).strip() == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+
+
+def _well_has_attempted_stage(
+    context: AntiCollisionWellContext,
+    stage_name: str,
+) -> bool:
+    target_stage = str(stage_name).strip()
+    if not target_stage:
+        return False
+    current_stage = str(context.anti_collision_stage or "").strip()
+    if current_stage == target_stage:
+        return True
+    return target_stage in {
+        str(stage).strip()
+        for stage in tuple(context.anti_collision_attempted_stages)
+        if str(stage).strip()
+    }
 
 
 def _expected_trajectory_maneuver(

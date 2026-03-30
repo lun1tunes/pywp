@@ -165,6 +165,7 @@ WT_3D_FAST_CALC_WELL_THRESHOLD = 14
 WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
 WT_3D_FAST_CALC_TARGET_POINTS = 180
 WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT = 6
+WT_PAD_FOCUS_ALL = "__all_pads__"
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
     "wt_cfg_md_step_control_m": "wt_cfg_md_control",
@@ -1710,6 +1711,8 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault("wt_results_view_mode", "Все скважины")
     st.session_state.setdefault("wt_results_all_view_mode", "Траектории")
+    st.session_state.setdefault("wt_results_focus_pad_id", WT_PAD_FOCUS_ALL)
+    st.session_state.setdefault("wt_batch_select_pad_id", "")
     st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_DETAIL)
     st.session_state.setdefault("wt_3d_backend", WT_3D_BACKEND_THREE_LOCAL)
     st.session_state.setdefault("wt_three_viewer_nonce", 0)
@@ -1884,6 +1887,7 @@ def _all_wells_3d_figure(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
+    focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
     height: int = 620,
 ) -> go.Figure:
@@ -1899,6 +1903,7 @@ def _all_wells_3d_figure(
         calculated_well_count=len(successes),
         reference_wells=reference_wells,
     )
+    focus_set = {str(name) for name in focus_well_names if str(name).strip()}
     color_map = name_to_color or {
         str(item.name): _well_color(index) for index, item in enumerate(successes)
     }
@@ -1917,9 +1922,10 @@ def _all_wells_3d_figure(
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
         y_arrays.append(stations["Y_m"].to_numpy(dtype=float))
         z_arrays.append(stations["Z_m"].to_numpy(dtype=float))
-        x_focus_arrays.append(stations["X_m"].to_numpy(dtype=float))
-        y_focus_arrays.append(stations["Y_m"].to_numpy(dtype=float))
-        z_focus_arrays.append(stations["Z_m"].to_numpy(dtype=float))
+        if not focus_set or str(item.name) in focus_set:
+            x_focus_arrays.append(stations["X_m"].to_numpy(dtype=float))
+            y_focus_arrays.append(stations["Y_m"].to_numpy(dtype=float))
+            z_focus_arrays.append(stations["Z_m"].to_numpy(dtype=float))
         fig.add_trace(
             go.Scatter3d(
                 x=stations["X_m"],
@@ -1947,9 +1953,10 @@ def _all_wells_3d_figure(
         x_arrays.append(np.array([surface.x, t1.x, t3.x], dtype=float))
         y_arrays.append(np.array([surface.y, t1.y, t3.y], dtype=float))
         z_arrays.append(np.array([surface.z, t1.z, t3.z], dtype=float))
-        x_focus_arrays.append(np.array([surface.x, t1.x, t3.x], dtype=float))
-        y_focus_arrays.append(np.array([surface.y, t1.y, t3.y], dtype=float))
-        z_focus_arrays.append(np.array([surface.z, t1.z, t3.z], dtype=float))
+        if not focus_set or str(item.name) in focus_set:
+            x_focus_arrays.append(np.array([surface.x, t1.x, t3.x], dtype=float))
+            y_focus_arrays.append(np.array([surface.y, t1.y, t3.y], dtype=float))
+            z_focus_arrays.append(np.array([surface.z, t1.z, t3.z], dtype=float))
         fig.add_trace(
             go.Scatter3d(
                 x=[surface.x, t1.x, t3.x],
@@ -2052,9 +2059,10 @@ def _all_wells_3d_figure(
         x_arrays.append(marker_x)
         y_arrays.append(marker_y)
         z_arrays.append(marker_z)
-        x_focus_arrays.append(marker_x)
-        y_focus_arrays.append(marker_y)
-        z_focus_arrays.append(marker_z)
+        if not focus_set or str(target_only.name) in focus_set:
+            x_focus_arrays.append(marker_x)
+            y_focus_arrays.append(marker_y)
+            z_focus_arrays.append(marker_z)
         customdata = np.array(
             [
                 ["S", target_only.status, target_only.problem or "—"],
@@ -2174,6 +2182,7 @@ def _all_wells_plan_figure(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
+    focus_well_names: tuple[str, ...] = (),
     height: int = 560,
 ) -> go.Figure:
     fig = go.Figure()
@@ -2181,6 +2190,7 @@ def _all_wells_plan_figure(
     y_arrays: list[np.ndarray] = []
     x_focus_arrays: list[np.ndarray] = []
     y_focus_arrays: list[np.ndarray] = []
+    focus_set = {str(name) for name in focus_well_names if str(name).strip()}
     color_map = name_to_color or {
         str(item.name): _well_color(index) for index, item in enumerate(successes)
     }
@@ -2191,8 +2201,9 @@ def _all_wells_plan_figure(
         stations = item.stations
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
         y_arrays.append(stations["Y_m"].to_numpy(dtype=float))
-        x_focus_arrays.append(stations["X_m"].to_numpy(dtype=float))
-        y_focus_arrays.append(stations["Y_m"].to_numpy(dtype=float))
+        if not focus_set or str(item.name) in focus_set:
+            x_focus_arrays.append(stations["X_m"].to_numpy(dtype=float))
+            y_focus_arrays.append(stations["Y_m"].to_numpy(dtype=float))
         fig.add_trace(
             go.Scatter(
                 x=stations["X_m"],
@@ -2226,8 +2237,9 @@ def _all_wells_plan_figure(
         t3 = item.t3
         x_arrays.append(np.array([surface.x, t1.x, t3.x], dtype=float))
         y_arrays.append(np.array([surface.y, t1.y, t3.y], dtype=float))
-        x_focus_arrays.append(np.array([surface.x, t1.x, t3.x], dtype=float))
-        y_focus_arrays.append(np.array([surface.y, t1.y, t3.y], dtype=float))
+        if not focus_set or str(item.name) in focus_set:
+            x_focus_arrays.append(np.array([surface.x, t1.x, t3.x], dtype=float))
+            y_focus_arrays.append(np.array([surface.y, t1.y, t3.y], dtype=float))
         fig.add_trace(
             go.Scatter(
                 x=[surface.x, t1.x, t3.x],
@@ -2310,8 +2322,9 @@ def _all_wells_plan_figure(
         )
         x_arrays.append(marker_x)
         y_arrays.append(marker_y)
-        x_focus_arrays.append(marker_x)
-        y_focus_arrays.append(marker_y)
+        if not focus_set or str(target_only.name) in focus_set:
+            x_focus_arrays.append(marker_x)
+            y_focus_arrays.append(marker_y)
         customdata = np.array(
             [
                 ["S", target_only.status, target_only.problem or "—"],
@@ -2396,6 +2409,7 @@ def _all_wells_anticollision_3d_figure(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
     height: int = 660,
 ) -> go.Figure:
@@ -2416,6 +2430,7 @@ def _all_wells_anticollision_3d_figure(
         ),
         reference_wells=reference_wells,
     )
+    focus_set = {str(name) for name in focus_well_names if str(name).strip()}
     focus_reference_names = (
         set(
             sorted(_anticollision_focus_reference_names(analysis))[
@@ -2453,10 +2468,18 @@ def _all_wells_anticollision_3d_figure(
             )
             else None
         )
+        include_in_focus = (
+            (not focus_set and not is_reference_only)
+            or (bool(focus_set) and str(well.name) in focus_set)
+        )
         if tube_mesh is not None:
             x_arrays.append(tube_mesh.vertices_xyz[:, 0])
             y_arrays.append(tube_mesh.vertices_xyz[:, 1])
             z_arrays.append(tube_mesh.vertices_xyz[:, 2])
+            if include_in_focus:
+                x_focus_arrays.append(tube_mesh.vertices_xyz[:, 0])
+                y_focus_arrays.append(tube_mesh.vertices_xyz[:, 1])
+                z_focus_arrays.append(tube_mesh.vertices_xyz[:, 2])
             fig.add_trace(
                 go.Mesh3d(
                     x=tube_mesh.vertices_xyz[:, 0],
@@ -2481,6 +2504,10 @@ def _all_wells_anticollision_3d_figure(
             x_arrays.append(terminal_ring[:, 0])
             y_arrays.append(terminal_ring[:, 1])
             z_arrays.append(terminal_ring[:, 2])
+            if include_in_focus:
+                x_focus_arrays.append(terminal_ring[:, 0])
+                y_focus_arrays.append(terminal_ring[:, 1])
+                z_focus_arrays.append(terminal_ring[:, 2])
             fig.add_trace(
                 go.Scatter3d(
                     x=terminal_ring[:, 0],
@@ -2517,7 +2544,7 @@ def _all_wells_anticollision_3d_figure(
         x_arrays.append(x_values)
         y_arrays.append(y_values)
         z_arrays.append(z_values)
-        if not is_reference_only:
+        if include_in_focus:
             x_focus_arrays.append(x_values)
             y_focus_arrays.append(y_values)
             z_focus_arrays.append(z_values)
@@ -2580,9 +2607,10 @@ def _all_wells_anticollision_3d_figure(
             x_arrays.append(previous_x)
             y_arrays.append(previous_y)
             z_arrays.append(previous_z)
-            x_focus_arrays.append(previous_x)
-            y_focus_arrays.append(previous_y)
-            z_focus_arrays.append(previous_z)
+            if include_in_focus:
+                x_focus_arrays.append(previous_x)
+                y_focus_arrays.append(previous_y)
+                z_focus_arrays.append(previous_z)
         if resolved_render_mode != WT_3D_RENDER_FAST or not is_reference_only:
             fig.add_trace(
                 _hover_proxy_trace_3d(
@@ -2636,9 +2664,16 @@ def _all_wells_anticollision_3d_figure(
             x_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
             y_arrays.append(np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float))
             z_arrays.append(np.array([well.surface.z, well.t1.z, well.t3.z], dtype=float))
-            x_focus_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
-            y_focus_arrays.append(np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float))
-            z_focus_arrays.append(np.array([well.surface.z, well.t1.z, well.t3.z], dtype=float))
+            if include_in_focus:
+                x_focus_arrays.append(
+                    np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float)
+                )
+                y_focus_arrays.append(
+                    np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float)
+                )
+                z_focus_arrays.append(
+                    np.array([well.surface.z, well.t1.z, well.t3.z], dtype=float)
+                )
 
     if aggregated_reference_wells:
         for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
@@ -2676,14 +2711,18 @@ def _all_wells_anticollision_3d_figure(
 
     overlap_legend_added = False
     for corridor in analysis.corridors:
+        corridor_in_focus = (not focus_set) or bool(
+            {str(corridor.well_a), str(corridor.well_b)}.intersection(focus_set)
+        )
         mesh = collision_corridor_tube_mesh(corridor)
         if mesh is not None:
             x_arrays.append(mesh.vertices_xyz[:, 0])
             y_arrays.append(mesh.vertices_xyz[:, 1])
             z_arrays.append(mesh.vertices_xyz[:, 2])
-            x_focus_arrays.append(mesh.vertices_xyz[:, 0])
-            y_focus_arrays.append(mesh.vertices_xyz[:, 1])
-            z_focus_arrays.append(mesh.vertices_xyz[:, 2])
+            if corridor_in_focus:
+                x_focus_arrays.append(mesh.vertices_xyz[:, 0])
+                y_focus_arrays.append(mesh.vertices_xyz[:, 1])
+                z_focus_arrays.append(mesh.vertices_xyz[:, 2])
             fig.add_trace(
                 go.Mesh3d(
                     x=mesh.vertices_xyz[:, 0],
@@ -2709,9 +2748,10 @@ def _all_wells_anticollision_3d_figure(
             x_arrays.append(sphere_x.reshape(-1))
             y_arrays.append(sphere_y.reshape(-1))
             z_arrays.append(sphere_z.reshape(-1))
-            x_focus_arrays.append(sphere_x.reshape(-1))
-            y_focus_arrays.append(sphere_y.reshape(-1))
-            z_focus_arrays.append(sphere_z.reshape(-1))
+            if corridor_in_focus:
+                x_focus_arrays.append(sphere_x.reshape(-1))
+                y_focus_arrays.append(sphere_y.reshape(-1))
+                z_focus_arrays.append(sphere_z.reshape(-1))
             fig.add_trace(
                 go.Surface(
                     x=sphere_x,
@@ -2772,9 +2812,10 @@ def _all_wells_anticollision_3d_figure(
         x_arrays.append(x_segment)
         y_arrays.append(y_segment)
         z_arrays.append(z_segment)
-        x_focus_arrays.append(x_segment)
-        y_focus_arrays.append(y_segment)
-        z_focus_arrays.append(z_segment)
+        if (not focus_set) or str(segment.well_name) in focus_set:
+            x_focus_arrays.append(x_segment)
+            y_focus_arrays.append(y_segment)
+            z_focus_arrays.append(z_segment)
         fig.add_trace(
             go.Scatter3d(
                 x=x_segment,
@@ -2885,6 +2926,7 @@ def _all_wells_anticollision_plan_figure(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    focus_well_names: tuple[str, ...] = (),
     height: int = 620,
 ) -> go.Figure:
     fig = go.Figure()
@@ -2892,6 +2934,7 @@ def _all_wells_anticollision_plan_figure(
     y_arrays: list[np.ndarray] = []
     x_focus_arrays: list[np.ndarray] = []
     y_focus_arrays: list[np.ndarray] = []
+    focus_set = {str(name) for name in focus_well_names if str(name).strip()}
     well_lookup = {str(well.name): well for well in analysis.wells}
 
     for well in analysis.wells:
@@ -2919,7 +2962,10 @@ def _all_wells_anticollision_plan_figure(
             )
             x_arrays.append(ribbon[:, 0])
             y_arrays.append(ribbon[:, 1])
-            if not bool(well.is_reference_only):
+            if (
+                (not focus_set and not bool(well.is_reference_only))
+                or (bool(focus_set) and str(well.name) in focus_set)
+            ):
                 x_focus_arrays.append(ribbon[:, 0])
                 y_focus_arrays.append(ribbon[:, 1])
 
@@ -2976,8 +3022,9 @@ def _all_wells_anticollision_plan_figure(
             )
             x_arrays.append(previous_x)
             y_arrays.append(previous_y)
-            x_focus_arrays.append(previous_x)
-            y_focus_arrays.append(previous_y)
+            if (not focus_set) or str(well.name) in focus_set:
+                x_focus_arrays.append(previous_x)
+                y_focus_arrays.append(previous_y)
         if (well.t1 is not None) and (well.t3 is not None) and not bool(well.is_reference_only):
             fig.add_trace(
                 go.Scatter(
@@ -3005,8 +3052,13 @@ def _all_wells_anticollision_plan_figure(
             )
             x_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
             y_arrays.append(np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float))
-            x_focus_arrays.append(np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float))
-            y_focus_arrays.append(np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float))
+            if (not focus_set) or str(well.name) in focus_set:
+                x_focus_arrays.append(
+                    np.array([well.surface.x, well.t1.x, well.t3.x], dtype=float)
+                )
+                y_focus_arrays.append(
+                    np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float)
+                )
 
     overlap_legend_added = False
     for corridor in analysis.corridors:
@@ -3030,8 +3082,11 @@ def _all_wells_anticollision_plan_figure(
         overlap_legend_added = True
         x_arrays.append(polygon[:, 0])
         y_arrays.append(polygon[:, 1])
-        x_focus_arrays.append(polygon[:, 0])
-        y_focus_arrays.append(polygon[:, 1])
+        if (not focus_set) or bool(
+            {str(corridor.well_a), str(corridor.well_b)}.intersection(focus_set)
+        ):
+            x_focus_arrays.append(polygon[:, 0])
+            y_focus_arrays.append(polygon[:, 1])
 
     segment_legend_added = False
     for segment in analysis.well_segments:
@@ -3067,8 +3122,9 @@ def _all_wells_anticollision_plan_figure(
         )
         x_arrays.append(x_segment)
         y_arrays.append(y_segment)
-        x_focus_arrays.append(x_segment)
-        y_focus_arrays.append(y_segment)
+        if (not focus_set) or str(segment.well_name) in focus_set:
+            x_focus_arrays.append(x_segment)
+            y_focus_arrays.append(y_segment)
         segment_legend_added = True
     for kind in _reference_kinds_present(
         [well for well in analysis.wells if bool(well.is_reference_only)]
@@ -3132,7 +3188,12 @@ def _all_wells_anticollision_plan_figure(
     return fig
 
 
-def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
+def _render_anticollision_panel(
+    successes: list[SuccessfulWellPlan],
+    *,
+    records: list[WelltrackRecord],
+    focus_pad_id: str,
+) -> None:
     reference_wells = _reference_wells_from_state()
     if len(successes) + len(reference_wells) < 2:
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
@@ -3166,12 +3227,27 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         selected_preset,
         custom_model=custom_actual_fund_model,
     )
-    records = list(st.session_state.get("wt_records") or [])
     analysis, recommendations, clusters = _cached_anti_collision_view_model(
         successes=successes,
         uncertainty_model=uncertainty_model,
         records=records,
         reference_wells=reference_wells,
+    )
+    focus_pad_well_names = _focus_pad_well_names(
+        records=records,
+        focus_pad_id=focus_pad_id,
+    )
+    visible_clusters = _clusters_touching_focus_pad(
+        clusters=clusters,
+        focus_pad_well_names=focus_pad_well_names,
+    )
+    visible_recommendations = _recommendations_for_clusters(
+        recommendations=recommendations,
+        clusters=visible_clusters,
+    )
+    focus_anticollision_well_names = _anticollision_focus_well_names(
+        clusters=visible_clusters,
+        focus_pad_well_names=focus_pad_well_names,
     )
     previous_successes_by_name = {
         str(name): value
@@ -3233,6 +3309,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
     anticollision_3d_figure = _all_wells_anticollision_3d_figure(
         analysis,
         previous_successes_by_name=previous_successes_by_name,
+        focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
         render_mode=selected_render_mode,
     )
     _render_plotly_or_three_3d(
@@ -3245,6 +3322,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         _all_wells_anticollision_plan_figure(
             analysis,
             previous_successes_by_name=previous_successes_by_name,
+            focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
         ),
         width="stretch",
     )
@@ -3265,14 +3343,24 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
     else:
         st.warning("Найдены пересечения 2σ конусов неопределенности по траекториям.")
 
-    report_events = anti_collision_report_events(analysis)
-    report_df = arrow_safe_text_dataframe(
-        pd.DataFrame(anti_collision_report_rows(analysis))
+    if focus_pad_well_names:
+        st.info(
+            "Показаны только anti-collision события и кластеры, которые затрагивают "
+            f"выбранный куст ({', '.join(focus_pad_well_names)}). Если в такой кластер "
+            "входят рассчитываемые скважины других кустов, они будут автоматически "
+            "учтены и при необходимости попадут в пересчет."
+        )
+    report_rows = (
+        _report_rows_from_recommendations(visible_recommendations)
+        if focus_pad_well_names
+        else anti_collision_report_rows(analysis)
     )
+    report_event_count = len(report_rows)
+    report_df = arrow_safe_text_dataframe(pd.DataFrame(report_rows))
     st.markdown("### Отчет по anti-collision")
     st.caption(
         "Смежные и пересекающиеся corridor-интервалы одной и той же collision природы "
-        f"в отчете объединяются в одно событие. Всего событий: {len(report_events)}."
+        f"в отчете объединяются в одно событие. Всего событий: {int(report_event_count)}."
     )
     st.dataframe(
         report_df,
@@ -3295,7 +3383,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
     )
 
     recommendation_df = arrow_safe_text_dataframe(
-        pd.DataFrame(anti_collision_recommendation_rows(recommendations))
+        pd.DataFrame(anti_collision_recommendation_rows(visible_recommendations))
     )
     st.markdown("### Рекомендации")
     st.caption(
@@ -3329,7 +3417,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
     )
 
     cluster_df = arrow_safe_text_dataframe(
-        pd.DataFrame(anti_collision_cluster_rows(clusters))
+        pd.DataFrame(anti_collision_cluster_rows(visible_clusters))
     )
     st.markdown("### Cluster-level пересчет")
     st.caption(
@@ -3366,7 +3454,9 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
         "подготовленный план: новая подготовка заменяет предыдущую."
     )
 
-    actionable_clusters = [item for item in clusters if bool(item.can_prepare_rerun)]
+    actionable_clusters = [
+        item for item in visible_clusters if bool(item.can_prepare_rerun)
+    ]
     if actionable_clusters:
         cluster_ids = [item.cluster_id for item in actionable_clusters]
         if (
@@ -3405,6 +3495,10 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
                         selected_cluster,
                         successes=successes,
                         uncertainty_model=uncertainty_model,
+                        target_well_names=_pad_scoped_cluster_target_well_names(
+                            cluster=selected_cluster,
+                            focus_pad_well_names=focus_pad_well_names,
+                        ),
                     )
                 st.toast(
                     "Подготовлен план пересчета для всего связанного кластера. "
@@ -3413,7 +3507,7 @@ def _render_anticollision_panel(successes: list[SuccessfulWellPlan]) -> None:
                 st.rerun()
 
     actionable_recommendations = [
-        item for item in recommendations if bool(item.can_prepare_rerun)
+        item for item in visible_recommendations if bool(item.can_prepare_rerun)
     ]
     if actionable_recommendations:
         actionable_ids = [item.recommendation_id for item in actionable_recommendations]
@@ -3673,6 +3767,8 @@ def _recommendation_snapshot(
 
 def _cluster_snapshot(
     cluster: AntiCollisionRecommendationCluster,
+    *,
+    target_well_names: tuple[str, ...] = (),
 ) -> dict[str, object]:
     items = tuple(_recommendation_snapshot(item) for item in cluster.recommendations)
     actionable_before_sf = [
@@ -3699,6 +3795,7 @@ def _cluster_snapshot(
         ),
         "affected_wells": tuple(str(name) for name in cluster.affected_wells),
         "well_names": tuple(str(name) for name in cluster.well_names),
+        "target_well_names": tuple(str(name) for name in target_well_names),
         "recommendation_count": int(cluster.recommendation_count),
         "before_sf": float(before_sf),
         "rerun_order_label": str(cluster.rerun_order_label),
@@ -3977,6 +4074,11 @@ def _build_last_anticollision_resolution(
 
 
 def _resolution_snapshot_well_names(snapshot: dict[str, object]) -> tuple[str, ...]:
+    target_wells = tuple(
+        str(name) for name in snapshot.get("target_well_names", ()) or ()
+    )
+    if target_wells:
+        return target_wells
     explicit_wells = tuple(str(name) for name in snapshot.get("well_names", ()) or ())
     if explicit_wells:
         return explicit_wells
@@ -4281,6 +4383,7 @@ def _prepare_rerun_from_cluster(
     *,
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
+    target_well_names: tuple[str, ...] = (),
 ) -> None:
     if (not bool(cluster.can_prepare_rerun)) or cluster.blocking_advisory is not None:
         blocking_message = (
@@ -4302,13 +4405,20 @@ def _prepare_rerun_from_cluster(
         successes=successes,
         uncertainty_model=uncertainty_model,
     )
-    snapshot = _cluster_snapshot(cluster)
+    snapshot = _cluster_snapshot(cluster, target_well_names=target_well_names)
     st.session_state["wt_prepared_well_overrides"] = prepared
     st.session_state["wt_prepared_recommendation_snapshot"] = (
         snapshot if prepared else None
     )
     if prepared:
         message = str(cluster.summary)
+        if target_well_names:
+            message += (
+                " Фокус пересчета: "
+                + ", ".join(str(name) for name in target_well_names)
+                + ". Соседние расчетные скважины других кустов будут подключены "
+                "только если они входят в тот же cluster-level конфликт."
+            )
         if cluster.blocking_advisory:
             message += " " + str(cluster.blocking_advisory)
         if skipped_wells:
@@ -5483,6 +5593,189 @@ def _build_pad_plan_map(pads: list[WellPad]) -> dict[str, PadLayoutPlan]:
     return plan_map
 
 
+def _project_pads_for_ui(records: list[WelltrackRecord]) -> list[WellPad]:
+    base_records = st.session_state.get("wt_records_original")
+    source_records = (
+        list(base_records)
+        if isinstance(base_records, list) and base_records
+        else list(records)
+    )
+    return detect_well_pads(source_records)
+
+
+def _pad_display_label(pad: WellPad) -> str:
+    return f"{str(pad.pad_id)} · {int(len(pad.wells))} скв."
+
+
+def _pad_config_for_ui(pad: WellPad) -> dict[str, float]:
+    defaults = _pad_config_defaults(pad)
+    current = dict(st.session_state.get("wt_pad_configs", {})).get(
+        str(pad.pad_id),
+        {},
+    )
+    return {
+        "spacing_m": float(current.get("spacing_m", defaults["spacing_m"])),
+        "nds_azimuth_deg": float(
+            current.get("nds_azimuth_deg", defaults["nds_azimuth_deg"])
+        )
+        % 360.0,
+        "first_surface_x": float(
+            current.get("first_surface_x", defaults["first_surface_x"])
+        ),
+        "first_surface_y": float(
+            current.get("first_surface_y", defaults["first_surface_y"])
+        ),
+        "first_surface_z": float(
+            current.get("first_surface_z", defaults["first_surface_z"])
+        ),
+    }
+
+
+def _pad_membership(
+    records: list[WelltrackRecord],
+) -> tuple[list[WellPad], dict[str, str], dict[str, tuple[str, ...]]]:
+    pads = _project_pads_for_ui(records)
+    name_to_pad_id: dict[str, str] = {}
+    well_names_by_pad_id: dict[str, tuple[str, ...]] = {}
+    for pad in pads:
+        pad_id = str(pad.pad_id)
+        ordered = ordered_pad_wells(
+            pad=pad,
+            nds_azimuth_deg=float(_pad_config_for_ui(pad)["nds_azimuth_deg"]),
+        )
+        ordered_names = tuple(str(item.name) for item in ordered)
+        well_names_by_pad_id[pad_id] = ordered_names
+        for well_name in ordered_names:
+            name_to_pad_id[well_name] = pad_id
+    return pads, name_to_pad_id, well_names_by_pad_id
+
+
+def _normalize_focus_pad_id(
+    *,
+    records: list[WelltrackRecord],
+    requested_pad_id: str | None,
+) -> str:
+    pads, _, _ = _pad_membership(records)
+    valid_options = {WT_PAD_FOCUS_ALL, *(str(pad.pad_id) for pad in pads)}
+    selected = str(requested_pad_id or "").strip() or WT_PAD_FOCUS_ALL
+    if selected not in valid_options:
+        return WT_PAD_FOCUS_ALL
+    return selected
+
+
+def _focus_pad_well_names(
+    *,
+    records: list[WelltrackRecord],
+    focus_pad_id: str | None,
+) -> tuple[str, ...]:
+    normalized = _normalize_focus_pad_id(records=records, requested_pad_id=focus_pad_id)
+    if normalized == WT_PAD_FOCUS_ALL:
+        return ()
+    _, _, well_names_by_pad_id = _pad_membership(records)
+    return tuple(well_names_by_pad_id.get(str(normalized), ()))
+
+
+def _clusters_touching_focus_pad(
+    *,
+    clusters: tuple[AntiCollisionRecommendationCluster, ...],
+    focus_pad_well_names: tuple[str, ...],
+) -> tuple[AntiCollisionRecommendationCluster, ...]:
+    focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
+    if not focus_set:
+        return tuple(clusters)
+    return tuple(
+        cluster
+        for cluster in clusters
+        if focus_set.intersection(str(name) for name in cluster.well_names)
+    )
+
+
+def _recommendations_for_clusters(
+    *,
+    recommendations: tuple[AntiCollisionRecommendation, ...],
+    clusters: tuple[AntiCollisionRecommendationCluster, ...],
+) -> tuple[AntiCollisionRecommendation, ...]:
+    visible_ids = {
+        str(item.recommendation_id)
+        for cluster in clusters
+        for item in cluster.recommendations
+    }
+    if not visible_ids:
+        return ()
+    return tuple(
+        item
+        for item in recommendations
+        if str(item.recommendation_id) in visible_ids
+    )
+
+
+def _report_rows_from_recommendations(
+    recommendations: tuple[AntiCollisionRecommendation, ...],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in recommendations:
+        rows.append(
+            {
+                "Приоритет": _priority_label(int(item.priority_rank)),
+                "Скважина A": str(item.well_a),
+                "Скважина B": str(item.well_b),
+                "Область": str(item.area_label),
+                "Интервал A, м": _md_interval_label(
+                    float(item.md_a_start_m),
+                    float(item.md_a_end_m),
+                ),
+                "Интервал B, м": _md_interval_label(
+                    float(item.md_b_start_m),
+                    float(item.md_b_end_m),
+                ),
+                "SF min": float(item.min_separation_factor),
+                "Overlap max, м": float(item.max_overlap_depth_m),
+                "Смежных зон": 1,
+            }
+        )
+    return rows
+
+
+def _pad_scoped_cluster_target_well_names(
+    *,
+    cluster: AntiCollisionRecommendationCluster,
+    focus_pad_well_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
+    if focus_set:
+        focused_affected = tuple(
+            str(name)
+            for name in cluster.affected_wells
+            if str(name) in focus_set
+        )
+        if focused_affected:
+            return focused_affected
+        focused_cluster = tuple(
+            str(name) for name in cluster.well_names if str(name) in focus_set
+        )
+        if focused_cluster:
+            return focused_cluster
+    if cluster.affected_wells:
+        return tuple(str(name) for name in cluster.affected_wells)
+    return tuple(str(name) for name in cluster.well_names)
+
+
+def _anticollision_focus_well_names(
+    *,
+    clusters: tuple[AntiCollisionRecommendationCluster, ...],
+    focus_pad_well_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
+    if not focus_set:
+        return ()
+    related = set(focus_set)
+    for cluster in clusters:
+        if focus_set.intersection(str(name) for name in cluster.well_names):
+            related.update(str(name) for name in cluster.well_names)
+            related.update(str(name) for name in cluster.affected_wells)
+    return tuple(sorted(related))
+
+
 def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
     base_records = st.session_state.get("wt_records_original")
     if base_records is None:
@@ -5806,10 +6099,14 @@ def _render_batch_run_forms(
     )
 
     requests: list[_BatchRunRequest] = []
+    pads, _, well_names_by_pad_id = _pad_membership(records)
+    pad_ids = [str(pad.pad_id) for pad in pads]
+    if pad_ids and str(st.session_state.get("wt_batch_select_pad_id", "")).strip() not in pad_ids:
+        st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
     with st.form("welltrack_run_form", clear_on_submit=False):
         st.markdown("#### Запуск / пересчет выбранных скважин")
-        select_col, action_col = st.columns(
-            [6.0, 1.4],
+        select_col, pad_col, action_col, pad_action_col = st.columns(
+            [5.0, 2.4, 1.2, 1.5],
             gap="small",
             vertical_alignment="bottom",
         )
@@ -5826,11 +6123,37 @@ def _render_batch_run_forms(
                 icon=":material/done_all:",
                 width="stretch",
             )
+        with pad_col:
+            if len(pad_ids) > 1:
+                st.selectbox(
+                    "Куст",
+                    options=pad_ids,
+                    format_func=lambda value: _pad_display_label(
+                        next(pad for pad in pads if str(pad.pad_id) == str(value))
+                    ),
+                    key="wt_batch_select_pad_id",
+                )
+        with pad_action_col:
+            select_pad_clicked = (
+                st.form_submit_button(
+                    "Выбрать куст",
+                    icon=":material/filter_alt:",
+                    width="stretch",
+                )
+                if len(pad_ids) > 1
+                else False
+            )
         st.caption(
             "Используйте этот блок и для первого расчета набора, и для пересчета "
             "любой выбранной части скважин. Применяются параметры расчета ниже, "
             "а результаты остальных скважин не будут затронуты."
         )
+        if len(pad_ids) > 1:
+            st.caption(
+                "При работе с несколькими кустами можно быстро выбрать весь куст. "
+                "Это удобно и для обычного batch, и как стартовая точка перед "
+                "anti-collision пересчетом только для интересующего куста."
+            )
         selected_now = list(st.session_state.get("wt_selected_names", []))
         prepared_scope_rows = _format_prepared_override_scope(
             selected_names=selected_now,
@@ -5866,6 +6189,12 @@ def _render_batch_run_forms(
         )
     if select_all_clicked:
         st.session_state["wt_pending_selected_names"] = list(all_names)
+        st.rerun()
+    if select_pad_clicked:
+        selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
+        st.session_state["wt_pending_selected_names"] = list(
+            well_names_by_pad_id.get(selected_pad_id, ())
+        )
         st.rerun()
     requests.append(
         _BatchRunRequest(
@@ -5955,7 +6284,11 @@ def _run_batch_if_clicked(
     }
     dynamic_cluster_context = None
     if str(prepared_snapshot.get("kind", "")).strip() == "cluster":
-        target_well_names = _resolution_snapshot_well_names(prepared_snapshot)
+        target_well_names = tuple(
+            str(name)
+            for name in prepared_snapshot.get("target_well_names", ()) or ()
+            if str(name).strip()
+        ) or _resolution_snapshot_well_names(prepared_snapshot)
         if target_well_names:
             dynamic_cluster_context = DynamicClusterExecutionContext(
                 target_well_names=tuple(target_well_names),
@@ -6491,6 +6824,43 @@ def _render_success_tabs(
         horizontal=True,
         label_visibility="collapsed",
     )
+    pads, _, _ = _pad_membership(records)
+    if len(pads) > 1:
+        focus_options = [WT_PAD_FOCUS_ALL, *(str(pad.pad_id) for pad in pads)]
+        normalized_focus_pad_id = _normalize_focus_pad_id(
+            records=records,
+            requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
+        )
+        if normalized_focus_pad_id != str(
+            st.session_state.get("wt_results_focus_pad_id", "")
+        ):
+            st.session_state["wt_results_focus_pad_id"] = normalized_focus_pad_id
+        st.selectbox(
+            "Фокус камеры по кусту",
+            options=focus_options,
+            format_func=lambda value: (
+                "Все кусты"
+                if str(value) == WT_PAD_FOCUS_ALL
+                else _pad_display_label(
+                    next(pad for pad in pads if str(pad.pad_id) == str(value))
+                )
+            ),
+            key="wt_results_focus_pad_id",
+            help=(
+                "Камера в 3D и 2D будет фокусироваться на выбранном кусте, "
+                "но остальные скважины останутся на сцене. В anti-collision для "
+                "выбранного куста будут показаны только затрагивающие его события "
+                "и кластеры."
+            ),
+        )
+    focus_pad_id = _normalize_focus_pad_id(
+        records=records,
+        requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
+    )
+    focus_pad_well_names = _focus_pad_well_names(
+        records=records,
+        focus_pad_id=focus_pad_id,
+    )
     if str(all_view_mode) == "Траектории":
         selected_render_mode = st.selectbox(
             "3D-режим отображения",
@@ -6542,6 +6912,7 @@ def _render_success_tabs(
             target_only_wells=target_only_wells,
             reference_wells=reference_wells,
             name_to_color=name_to_color,
+            focus_well_names=focus_pad_well_names,
             render_mode=selected_render_mode,
         )
         _render_plotly_or_three_3d(
@@ -6556,12 +6927,17 @@ def _render_success_tabs(
                 target_only_wells=target_only_wells,
                 reference_wells=reference_wells,
                 name_to_color=name_to_color,
+                focus_well_names=focus_pad_well_names,
             ),
             width="stretch",
         )
         return
 
-    _render_anticollision_panel(successes)
+    _render_anticollision_panel(
+        successes,
+        records=records,
+        focus_pad_id=focus_pad_id,
+    )
 
 
 def run_page() -> None:

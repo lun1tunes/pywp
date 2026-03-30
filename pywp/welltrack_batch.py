@@ -27,6 +27,11 @@ from pywp.anticollision_recommendations import (
     build_anti_collision_recommendation_clusters,
     build_anti_collision_recommendations,
 )
+from pywp.anticollision_stage import (
+    ANTI_COLLISION_STAGE_EARLY_KOP_BUILD1,
+    ANTI_COLLISION_STAGE_LATE_TRAJECTORY,
+    anti_collision_stage_from_context,
+)
 from pywp.models import Point3D, SummaryDict, TrajectoryConfig
 from pywp.optimization_reference import compute_unoptimized_reference
 from pywp.planner import PlanningError, TrajectoryPlanner
@@ -170,6 +175,48 @@ def ensure_successful_plan_baseline(
         baseline_summary=reference.summary,
         baseline_runtime_s=reference.runtime_s,
     )
+
+
+def _normalized_attempted_anticollision_stages(
+    summary: Mapping[str, object],
+) -> list[str]:
+    raw_value = summary.get("anti_collision_attempted_stages")
+    if isinstance(raw_value, str):
+        items = raw_value.split("|")
+    else:
+        items = []
+    stage_value = summary.get("anti_collision_stage")
+    if isinstance(stage_value, str):
+        items.append(stage_value)
+    known_stages = {
+        ANTI_COLLISION_STAGE_EARLY_KOP_BUILD1,
+        ANTI_COLLISION_STAGE_LATE_TRAJECTORY,
+    }
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        stage = str(item).strip()
+        if stage not in known_stages or stage in seen:
+            continue
+        normalized.append(stage)
+        seen.add(stage)
+    return normalized
+
+
+def _success_with_attempted_anticollision_stage(
+    *,
+    success: SuccessfulWellPlan,
+    stage: str | None,
+) -> SuccessfulWellPlan:
+    stage_name = str(stage or "").strip()
+    if not stage_name:
+        return success
+    summary = dict(success.summary)
+    attempted_stages = _normalized_attempted_anticollision_stages(summary)
+    if stage_name not in attempted_stages:
+        attempted_stages.append(stage_name)
+    summary["anti_collision_attempted_stages"] = "|".join(attempted_stages)
+    return success.validated_copy(summary=summary)
 
 
 class WelltrackBatchPlanner:
@@ -332,13 +379,7 @@ class WelltrackBatchPlanner:
                 if previous_success is None:
                     previous_success = initial_success_by_name.get(str(record.name))
                 retained_success = None
-                if isinstance(optimization_context, AntiCollisionOptimizationContext):
-                    retained_success = self._select_monotonic_anticollision_success(
-                        candidate_success=success,
-                        existing_success=previous_success,
-                        optimization_context=optimization_context,
-                    )
-                else:
+                if dynamic_cluster_context is not None:
                     current_success_by_name = dict(initial_success_by_name)
                     current_success_by_name.update(recalculated_success_by_name)
                     retained_success = self._select_cluster_monotonic_anticollision_success(
@@ -347,15 +388,43 @@ class WelltrackBatchPlanner:
                         current_success_by_name=current_success_by_name,
                         dynamic_cluster_context=dynamic_cluster_context,
                     )
-                    if retained_success is None:
+                    if (
+                        retained_success is None
+                        and not isinstance(
+                            optimization_context,
+                            AntiCollisionOptimizationContext,
+                        )
+                    ):
                         retained_success = self._select_monotonic_anticollision_success(
                             candidate_success=success,
                             existing_success=previous_success,
                             optimization_context=optimization_context,
                         )
+                elif isinstance(optimization_context, AntiCollisionOptimizationContext):
+                    retained_success = self._select_monotonic_anticollision_success(
+                        candidate_success=success,
+                        existing_success=previous_success,
+                        optimization_context=optimization_context,
+                    )
                 if retained_success is not None:
+                    retained_success = _success_with_attempted_anticollision_stage(
+                        success=retained_success,
+                        stage=(
+                            str(success.summary.get("anti_collision_stage")).strip()
+                            if success.summary.get("anti_collision_stage") is not None
+                            else anti_collision_stage_from_context(optimization_context)
+                        ),
+                    )
                     success = retained_success
                     row = self._row_from_success(record=record, success=retained_success)
+                if success is not None and previous_success is not None:
+                    for attempted_stage in _normalized_attempted_anticollision_stages(
+                        previous_success.summary
+                    ):
+                        success = _success_with_attempted_anticollision_stage(
+                            success=success,
+                            stage=attempted_stage,
+                        )
             summary_rows.append(row)
             if success is not None:
                 successes.append(success)
@@ -1012,7 +1081,11 @@ class WelltrackBatchPlanner:
             row["Статус"] = "Ошибка расчета"
             row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
-        summary = result.summary
+        summary = dict(result.summary)
+        anti_collision_stage = anti_collision_stage_from_context(optimization_context)
+        if anti_collision_stage is not None:
+            summary["anti_collision_stage"] = anti_collision_stage
+            summary["anti_collision_attempted_stages"] = anti_collision_stage
         md_total_m = float(summary.get("md_total_m", 0.0))
         md_limit_m = float(summary.get("max_total_md_postcheck_m", 0.0))
         md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
@@ -1030,7 +1103,7 @@ class WelltrackBatchPlanner:
             t1=t1,
             t3=t3,
             stations=result.stations,
-            summary=result.summary,
+            summary=summary,
             azimuth_deg=result.azimuth_deg,
             md_t1_m=result.md_t1_m,
             config=config,

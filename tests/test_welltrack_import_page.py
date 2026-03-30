@@ -59,6 +59,43 @@ def _records() -> list[WelltrackRecord]:
     ]
 
 
+def _multi_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="PAD1-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="PAD1-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="PAD2-A",
+            points=(
+                WelltrackPoint(x=5000.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=5600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=6500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="PAD2-B",
+            points=(
+                WelltrackPoint(x=5000.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=5650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=6550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
 def _multiselect_value(at: AppTest, label: str) -> list[str] | None:
     matches = [widget for widget in at.multiselect if widget.label == label]
     if not matches:
@@ -149,6 +186,55 @@ def _successful_plan(
             optimization_mode=optimization_mode,
             dls_build_max_deg_per_30m=build_dls_max_deg_per_30m,
         ),
+    )
+
+
+def _successful_plan_xy(
+    *,
+    name: str,
+    x_offset_m: float,
+    y_offset_m: float,
+) -> SuccessfulWellPlan:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "INC_deg": [0.0, 90.0, 90.0],
+            "AZI_deg": [0.0, 90.0, 90.0],
+            "X_m": [x_offset_m + 0.0, x_offset_m + 1000.0, x_offset_m + 2000.0],
+            "Y_m": [y_offset_m, y_offset_m, y_offset_m],
+            "Z_m": [0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0],
+            "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+        }
+    )
+    return SuccessfulWellPlan(
+        name=name,
+        surface={"x": x_offset_m + 0.0, "y": y_offset_m, "z": 0.0},
+        t1={"x": x_offset_m + 1000.0, "y": y_offset_m, "z": 0.0},
+        t3={"x": x_offset_m + 2000.0, "y": y_offset_m, "z": 0.0},
+        stations=stations,
+        summary={
+            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
+            "trajectory_target_direction": "Цели в одном направлении",
+            "well_complexity": "Обычная",
+            "optimization_mode": "none",
+            "azimuth_turn_deg": 0.0,
+            "horizontal_length_m": 1000.0,
+            "entry_inc_deg": 90.0,
+            "hold_inc_deg": 90.0,
+            "build_dls_selected_deg_per_30m": 0.0,
+            "build1_dls_selected_deg_per_30m": 0.0,
+            "max_dls_total_deg_per_30m": 0.0,
+            "kop_md_m": 0.0,
+            "max_inc_actual_deg": 90.0,
+            "max_inc_deg": 95.0,
+            "md_total_m": 2000.0,
+            "max_total_md_postcheck_m": 6500.0,
+            "md_postcheck_excess_m": 0.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(optimization_mode="none"),
     )
 
 
@@ -254,6 +340,27 @@ def test_welltrack_general_run_select_all_restores_full_selection() -> None:
         "WELL-A",
         "WELL-B",
         "WELL-C",
+    ]
+
+
+def test_welltrack_general_run_can_select_all_wells_for_single_pad() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _multi_pad_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run()
+
+    pad_select = next(widget for widget in at.selectbox if widget.label == "Куст")
+    pad_select.set_value("PAD-02")
+    at.run()
+
+    _click_button(at, "Выбрать куст")
+    at.run()
+
+    assert _multiselect_value(at, "Скважины для расчета") == [
+        "PAD2-A",
+        "PAD2-B",
     ]
 
 
@@ -1325,6 +1432,55 @@ def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> Non
     assert len(tuple(snapshot["items"])) == 2
 
 
+def test_prepare_rerun_from_cluster_persists_pad_scoped_target_wells() -> None:
+    page = _load_welltrack_page_module()
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(
+            AntiCollisionCorridor(
+                well_a="WELL-A",
+                well_b="WELL-B",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=1200.0,
+                md_a_end_m=1700.0,
+                md_b_start_m=1250.0,
+                md_b_end_m=1750.0,
+                md_a_values_m=np.array([1200.0, 1700.0], dtype=float),
+                md_b_values_m=np.array([1250.0, 1750.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
+                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+                separation_factor_values=np.array([0.78, 0.74], dtype=float),
+                overlap_depth_values_m=np.array([7.0, 8.0], dtype=float),
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=1,
+        target_overlap_pair_count=0,
+        worst_separation_factor=0.74,
+    )
+    successes = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0),
+    ]
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(successes),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+
+    snapshot = page._cluster_snapshot(clusters[0], target_well_names=("WELL-A",))
+    assert snapshot["target_well_names"] == ("WELL-A",)
+    assert page._resolution_snapshot_well_names(snapshot) == ("WELL-A",)
+
+
 def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() -> None:
     page = _load_welltrack_page_module()
     analysis = AntiCollisionAnalysis(
@@ -2261,6 +2417,39 @@ def test_all_wells_overview_figures_ignore_far_reference_wells_for_axis_zoom() -
     assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
 
+def test_focus_pad_well_names_return_selected_pad_members_only() -> None:
+    page = _load_welltrack_page_module()
+    records = _multi_pad_records()
+
+    focus_names = page._focus_pad_well_names(records=records, focus_pad_id="PAD-02")
+
+    assert focus_names == ("PAD2-A", "PAD2-B")
+
+
+def test_all_wells_figures_focus_camera_on_selected_pad_without_hiding_other_pads() -> None:
+    page = _load_welltrack_page_module()
+    successes = [
+        _successful_plan_xy(name="PAD1-A", x_offset_m=0.0, y_offset_m=0.0),
+        _successful_plan_xy(name="PAD1-B", x_offset_m=0.0, y_offset_m=30.0),
+        _successful_plan_xy(name="PAD2-A", x_offset_m=6000.0, y_offset_m=0.0),
+        _successful_plan_xy(name="PAD2-B", x_offset_m=6000.0, y_offset_m=30.0),
+    ]
+
+    figure_3d = page._all_wells_3d_figure(
+        successes,
+        focus_well_names=("PAD1-A", "PAD1-B"),
+    )
+    figure_plan = page._all_wells_plan_figure(
+        successes,
+        focus_well_names=("PAD1-A", "PAD1-B"),
+    )
+
+    assert float(figure_3d.layout.scene.xaxis.range[1]) < 4000.0
+    assert float(figure_plan.layout.xaxis.range[1]) < 4000.0
+    assert any(str(trace.name) == "PAD2-A" for trace in figure_3d.data)
+    assert any(str(trace.name) == "PAD2-B" for trace in figure_plan.data)
+
+
 def test_anticollision_figures_include_reference_trajectory_wells_without_target_markers() -> None:
     page = _load_welltrack_page_module()
     reference_wells = _reference_wells()
@@ -2342,6 +2531,39 @@ def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_f
     assert "Проектная утвержденная (сводно)" in trace_names
     assert "FACT-1 (Фактическая)" not in trace_names
     assert "APP-1 (Проектная утвержденная)" not in trace_names
+
+
+def test_clusters_touching_focus_pad_expand_focus_to_neighbor_cluster_wells() -> None:
+    page = _load_welltrack_page_module()
+    analysis = page._build_anti_collision_analysis(
+        [
+            _successful_plan(name="PAD1-A", y_offset_m=0.0),
+            _successful_plan(name="PAD2-A", y_offset_m=5.0),
+        ],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(
+            [
+                _successful_plan(name="PAD1-A", y_offset_m=0.0),
+                _successful_plan(name="PAD2-A", y_offset_m=5.0),
+            ]
+        ),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+
+    visible_clusters = page._clusters_touching_focus_pad(
+        clusters=clusters,
+        focus_pad_well_names=("PAD1-A",),
+    )
+    focus_names = page._anticollision_focus_well_names(
+        clusters=visible_clusters,
+        focus_pad_well_names=("PAD1-A",),
+    )
+
+    assert visible_clusters
+    assert set(focus_names) == {"PAD1-A", "PAD2-A"}
 
 
 def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
@@ -2682,9 +2904,10 @@ def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_con
     assert all(str(getattr(trace, "hoverinfo", "")) == "skip" for trace in cone_meshes)
     assert all(str(getattr(trace, "hoverinfo", "")) == "skip" for trace in overlap_meshes)
     assert well_lines
-    assert "ПИ: %{customdata[1]:.2f} deg/10m" in str(well_lines[0].hovertemplate)
-    assert "Сегмент: %{customdata[2]}" in str(well_lines[0].hovertemplate)
+    assert "DLS: %{customdata[1]:.2f} deg/30м" in str(well_lines[0].hovertemplate)
+    assert "INC: %{customdata[2]:.2f} deg" in str(well_lines[0].hovertemplate)
+    assert "Сегмент: %{customdata[3]}" in str(well_lines[0].hovertemplate)
     assert target_markers
     assert "Точка: %{customdata[0]}" in str(target_markers[0].hovertemplate)
     assert conflict_segments
-    assert "ПИ: %{customdata[1]:.2f} deg/10m" in str(conflict_segments[0].hovertemplate)
+    assert "DLS: %{customdata[1]:.2f} deg/30м" in str(conflict_segments[0].hovertemplate)

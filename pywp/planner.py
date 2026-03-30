@@ -1258,7 +1258,13 @@ def _select_anti_collision_candidate(
     )
     late_build2_stage = bool(
         split_build
-        and optimization_context.prefer_adjust_build2
+        and (
+            optimization_context.prefer_adjust_build2
+            or (
+                optimization_context.prefer_keep_kop
+                and optimization_context.prefer_keep_build1
+            )
+        )
         and not early_anti_collision_stage
     )
     ranked_all = sorted(candidates, key=anti_collision_sort_key)

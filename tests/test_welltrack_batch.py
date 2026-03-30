@@ -879,8 +879,8 @@ def test_build_dynamic_cluster_execution_plan_stages_mixed_and_trajectory_fronti
 
     assert plan is not None
     assert plan.resolution_state == DYNAMIC_CLUSTER_PLAN_ACTIVE
-    assert plan.ordered_well_names == ("well_02", "well_05")
-    assert set(plan.prepared_by_well) == {"well_02", "well_05"}
+    assert plan.ordered_well_names == ("well_04", "well_02")
+    assert set(plan.prepared_by_well) == {"well_02", "well_04"}
 
 
 def test_build_dynamic_cluster_execution_plan_can_switch_to_trajectory_stage(
@@ -1004,7 +1004,7 @@ def test_build_dynamic_cluster_execution_plan_can_switch_to_trajectory_stage(
     )
 
     assert plan is not None
-    assert plan.ordered_well_names == ("well_02", "well_05")
+    assert plan.ordered_well_names == ("well_05", "well_02")
     assert captured_flags == [True]
 
 
@@ -1809,16 +1809,17 @@ def test_batch_evaluate_uses_context_monotonic_for_anticollision_steps(
     monkeypatch.setattr(
         WelltrackBatchPlanner,
         "_select_monotonic_anticollision_success",
-        staticmethod(lambda **kwargs: None),
+        staticmethod(
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError("context guard should not run inside dynamic cluster mode")
+            )
+        ),
     )
+    cluster_guard_calls: list[bool] = []
     monkeypatch.setattr(
         WelltrackBatchPlanner,
         "_select_cluster_monotonic_anticollision_success",
-        staticmethod(
-            lambda **kwargs: (_ for _ in ()).throw(
-                AssertionError("cluster guard should not run for anti-collision step")
-            )
-        ),
+        staticmethod(lambda **kwargs: cluster_guard_calls.append(True) or None),
     )
 
     rows, successes = planner.evaluate(
@@ -1836,6 +1837,7 @@ def test_batch_evaluate_uses_context_monotonic_for_anticollision_steps(
     assert rows[0]["Статус"] == "OK"
     assert len(successes) == 1
     assert str(successes[0].config.optimization_mode) == "anti_collision_avoidance"
+    assert cluster_guard_calls == [True]
 
 
 def test_batch_planner_defers_unoptimized_reference_for_optimized_mode() -> None:
@@ -1972,7 +1974,13 @@ def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_l
         uncertainty_model=model,
     )
     assert plan is not None
-    assert plan.ordered_well_names[:2] == ("well_02", "well_05")
+    assert plan.ordered_well_names == (
+        "well_01",
+        "well_03",
+        "well_04",
+        "well_02",
+        "well_05",
+    )
     config_by_name = {
         str(well_name): base_config.validated_copy(**dict(payload.get("update_fields", {})))
         for well_name, payload in plan.prepared_by_well.items()
@@ -1999,11 +2007,32 @@ def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_l
         new_successes=new_successes,
     )
 
+    metadata = planner.last_evaluation_metadata
+    assert metadata.executed_well_names == (
+        "well_01",
+        "well_03",
+        "well_04",
+        "well_02",
+        "well_05",
+        "well_02",
+    )
+    assert metadata.skipped_selected_names == ("well_05",)
+    assert metadata.cluster_blocked is True
+    assert metadata.cluster_blocking_reason is not None
+    assert "не осталось автоматических шагов" in metadata.cluster_blocking_reason.lower()
+
     success_by_name = {str(item.name): item for item in merged_successes}
     well_02 = success_by_name["well_02"]
     well_04 = success_by_name["well_04"]
     assert str(well_02.config.optimization_mode) == "anti_collision_avoidance"
-    assert str(well_04.config.optimization_mode) == "none"
+    assert str(well_04.config.optimization_mode) == "anti_collision_avoidance"
+    assert str(dict(well_04.summary).get("anti_collision_stage")) == "early_kop_build1"
+    attempted_stages_02 = {
+        str(item).strip()
+        for item in str(dict(well_02.summary).get("anti_collision_attempted_stages", "")).split("|")
+        if str(item).strip()
+    }
+    assert attempted_stages_02 == {"early_kop_build1", "late_trajectory"}
     row_by_name = {str(row["Скважина"]): row for row in merged_rows}
     assert str(row_by_name["well_04"]["Статус"]) == "OK"
 
@@ -2029,6 +2058,17 @@ def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_l
         recommendation.can_prepare_rerun is False
         and str(recommendation.action_label) == "Только рекомендация"
         for recommendation in late_trajectory_conflicts_02_05
+    )
+    remaining_reduce_kop = [
+        recommendation
+        for recommendation in recommendations
+        if str(recommendation.category) == "reduce_kop"
+    ]
+    assert remaining_reduce_kop
+    assert all(
+        recommendation.can_prepare_rerun is False
+        and str(recommendation.action_label) == "Только рекомендация"
+        for recommendation in remaining_reduce_kop
     )
 
 

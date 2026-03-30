@@ -127,6 +127,24 @@ def build_anticollision_well_contexts(
             md_t1_m=float(success.md_t1_m),
             md_total_m=float(summary.get("md_total_m", 0.0)),
             optimization_mode=str(success.config.optimization_mode),
+            anti_collision_stage=(
+                str(summary.get("anti_collision_stage")).strip()
+                if summary.get("anti_collision_stage") is not None
+                and str(summary.get("anti_collision_stage")).strip()
+                else None
+            ),
+            anti_collision_attempted_stages=tuple(
+                str(item).strip()
+                for item in (
+                    str(summary.get("anti_collision_attempted_stages")).split("|")
+                    if isinstance(
+                        summary.get("anti_collision_attempted_stages"),
+                        str,
+                    )
+                    else []
+                )
+                if str(item).strip()
+            ),
         )
     return contexts
 
@@ -224,6 +242,7 @@ def build_dynamic_cluster_execution_plan(
         cluster=cluster,
         selected_names=selected_names,
         prepared_by_well=prepared,
+        prefer_trajectory_stage=bool(prefer_trajectory_stage),
     )
     active_prepared = (
         {
@@ -235,9 +254,9 @@ def build_dynamic_cluster_execution_plan(
         else dict(prepared)
     )
     ordered_well_names = tuple(
-        str(step.well_name)
-        for step in cluster.action_steps
-        if str(step.well_name) in selected_names and str(step.well_name) in active_prepared
+        str(name)
+        for name in staged_frontier
+        if str(name) in selected_names and str(name) in active_prepared
     )
     fallback_names = tuple(
         sorted(
@@ -284,9 +303,32 @@ def _cluster_staged_frontier_well_names(
     cluster: AntiCollisionRecommendationCluster,
     selected_names: set[str],
     prepared_by_well: Mapping[str, dict[str, object]],
+    prefer_trajectory_stage: bool,
 ) -> tuple[str, ...]:
     selected_set = {str(name) for name in selected_names}
     prepared_set = {str(name) for name in prepared_by_well}
+    step_by_well = {
+        str(step.well_name): step
+        for step in cluster.action_steps
+        if str(step.well_name) in selected_set and str(step.well_name) in prepared_set
+    }
+    early_frontier = tuple(
+        str(step.well_name)
+        for step in cluster.action_steps
+        if str(step.well_name) in selected_set
+        and str(step.well_name) in prepared_set
+        and str(step.category) in {"mixed", RECOMMENDATION_REDUCE_KOP}
+    )
+    early_frontier = tuple(
+        sorted(
+            early_frontier,
+            key=lambda name: (
+                1 if str(step_by_well[str(name)].category) == "mixed" else 0,
+                int(step_by_well[str(name)].order_rank),
+                str(name),
+            ),
+        )
+    )
     trajectory_frontier = tuple(
         str(step.well_name)
         for step in cluster.action_steps
@@ -294,8 +336,26 @@ def _cluster_staged_frontier_well_names(
         and str(step.well_name) in prepared_set
         and str(step.category) in {"mixed", RECOMMENDATION_TRAJECTORY_REVIEW}
     )
+    trajectory_frontier = tuple(
+        sorted(
+            trajectory_frontier,
+            key=lambda name: (
+                1
+                if str(step_by_well[str(name)].category) == "mixed"
+                else 0,
+                int(step_by_well[str(name)].order_rank),
+                str(name),
+            ),
+        )
+    )
+    if prefer_trajectory_stage and trajectory_frontier:
+        return trajectory_frontier
+    if not prefer_trajectory_stage and early_frontier:
+        return early_frontier
     if trajectory_frontier:
         return trajectory_frontier
+    if early_frontier:
+        return early_frontier
     return tuple(
         str(step.well_name)
         for step in cluster.action_steps
