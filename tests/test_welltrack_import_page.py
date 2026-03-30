@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import pytest
 import sys
 from streamlit.testing.v1 import AppTest
@@ -2515,10 +2517,20 @@ def test_all_wells_3d_figure_aggregates_reference_wells_in_fast_mode() -> None:
 
 def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_fast_mode() -> None:
     page = _load_welltrack_page_module()
+    far_reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 9000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 9000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+                {"Wellname": "APP-FAR", "Type": "approved", "X": 12000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "APP-FAR", "Type": "approved", "X": 12000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+            ]
+        )
+    )
     analysis = page._build_anti_collision_analysis(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
         model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
-        reference_wells=_reference_wells(),
+        reference_wells=far_reference_wells,
     )
 
     figure = page._all_wells_anticollision_3d_figure(
@@ -2529,8 +2541,8 @@ def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_f
     trace_names = {str(trace.name) for trace in figure.data}
     assert "Фактическая (сводно)" in trace_names
     assert "Проектная утвержденная (сводно)" in trace_names
-    assert "FACT-1 (Фактическая)" not in trace_names
-    assert "APP-1 (Проектная утвержденная)" not in trace_names
+    assert "FACT-FAR (Фактическая)" not in trace_names
+    assert "APP-FAR (Проектная утвержденная)" not in trace_names
 
 
 def test_clusters_touching_focus_pad_expand_focus_to_neighbor_cluster_wells() -> None:
@@ -2596,6 +2608,7 @@ def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend(
     figure = page._all_wells_3d_figure(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
         reference_wells=_reference_wells(),
+        render_mode=page.WT_3D_RENDER_DETAIL,
     )
 
     payload = page._plotly_3d_figure_to_three_payload(figure)
@@ -2767,6 +2780,114 @@ def test_optimize_three_payload_keeps_mesh_roles_separate() -> None:
 
     assert len(optimized["meshes"]) == 2
     assert {str(item["role"]) for item in optimized["meshes"]} == {"cone", "overlap"}
+
+
+def test_resolve_3d_render_mode_forces_fast_for_large_reference_scene() -> None:
+    page = _load_welltrack_page_module()
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": f"FACT-{index:03d}",
+                    "Type": "actual",
+                    "X": float(index * 10.0),
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": f"FACT-{index:03d}",
+                    "Type": "actual",
+                    "X": float(index * 10.0 + 100.0),
+                    "Y": 0.0,
+                    "Z": 1000.0,
+                    "MD": 1000.0,
+                },
+            ]
+        )[0]
+        for index in range(page.WT_3D_FAST_REFERENCE_WELL_THRESHOLD + 2)
+    )
+
+    resolved = page._resolve_3d_render_mode(
+        requested_mode=page.WT_3D_RENDER_DETAIL,
+        calculated_well_count=1,
+        reference_wells=reference_wells,
+    )
+
+    assert resolved == page.WT_3D_RENDER_FAST
+
+
+def test_plotly_3d_payload_decimates_reference_hover_points() -> None:
+    page = _load_welltrack_page_module()
+    stations = pd.DataFrame(
+        {
+            "MD_m": np.arange(0.0, 3000.0, 10.0, dtype=float),
+            "INC_deg": np.linspace(0.0, 90.0, 300, dtype=float),
+            "AZI_deg": np.full(300, 90.0, dtype=float),
+            "X_m": np.arange(300, dtype=float) * 10.0,
+            "Y_m": np.zeros(300, dtype=float),
+            "Z_m": np.linspace(0.0, 2500.0, 300, dtype=float),
+            "DLS_deg_per_30m": np.full(300, 2.0, dtype=float),
+            "segment": np.array(["HOLD"] * 300, dtype=object),
+        }
+    )
+    trace = go.Scatter3d(
+        x=stations["X_m"],
+        y=stations["Y_m"],
+        z=stations["Z_m"],
+        mode="lines",
+        name="FACT-001 (Фактическая)",
+        customdata=page._trajectory_hover_customdata(stations),
+        hovertemplate=(
+            "X: %{x:.2f} m<br>"
+            "Y: %{y:.2f} m<br>"
+            "Z/TVD: %{z:.2f} m<br>"
+            "MD: %{customdata[0]:.2f} m<br>"
+            "DLS: %{customdata[1]:.2f} deg/30м<br>"
+            "INC: %{customdata[2]:.2f} deg<br>"
+            "Сегмент: %{customdata[3]}<extra>%{fullData.name}</extra>"
+        ),
+    )
+
+    payload = page._scatter3d_trace_to_three_payload(trace)
+    hover_only_points = [item for item in payload["points"] if bool(item.get("hover_only"))]
+
+    assert len(hover_only_points) == 1
+    assert str(hover_only_points[0]["role"]) == "reference_hover"
+    assert len(hover_only_points[0]["points"]) == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+    assert len(hover_only_points[0]["hover"]) == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+
+
+def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
+    page = _load_welltrack_page_module()
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-NEAR", "Type": "actual", "X": 2200.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-NEAR", "Type": "actual", "X": 2200.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 8000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 8000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+            ]
+        )
+    )
+    analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        reference_wells=reference_wells,
+    )
+
+    figure = page._all_wells_anticollision_3d_figure(
+        analysis,
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
+    mesh_names = {
+        str(trace.name)
+        for trace in figure.data
+        if isinstance(trace, go.Mesh3d)
+    }
+
+    assert "FACT-NEAR (Фактическая) cone" in mesh_names
+    assert "FACT-FAR (Фактическая) cone" not in mesh_names
 
 
 def test_plotly_3d_figure_to_three_payload_preserves_custom_camera() -> None:

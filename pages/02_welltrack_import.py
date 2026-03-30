@@ -165,6 +165,11 @@ WT_3D_FAST_CALC_WELL_THRESHOLD = 14
 WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
 WT_3D_FAST_CALC_TARGET_POINTS = 180
 WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT = 6
+WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M = 500.0
+WT_THREE_MAX_HOVER_POINTS_PER_TRACE = 96
+WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = 24
+WT_THREE_MAX_LABELS = 48
+WT_THREE_MAX_REFERENCE_LABELS = 12
 WT_PAD_FOCUS_ALL = "__all_pads__"
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
@@ -373,9 +378,46 @@ def _resolve_3d_render_mode(
     reference_wells: Iterable[ImportedTrajectoryWell],
 ) -> str:
     normalized = str(requested_mode).strip()
+    reference_wells_tuple = tuple(reference_wells)
     if normalized == WT_3D_RENDER_DETAIL:
+        if (
+            calculated_well_count >= WT_3D_FAST_CALC_WELL_THRESHOLD
+            or len(reference_wells_tuple) >= WT_3D_FAST_REFERENCE_WELL_THRESHOLD
+            or _reference_point_count(reference_wells_tuple)
+            >= WT_3D_FAST_REFERENCE_POINT_THRESHOLD
+        ):
+            return WT_3D_RENDER_FAST
         return WT_3D_RENDER_DETAIL
     return WT_3D_RENDER_FAST
+
+
+def _is_reference_trace_name(trace_name: str) -> bool:
+    normalized = str(trace_name).strip()
+    if not normalized:
+        return False
+    return bool(
+        "(Фактическая)" in normalized
+        or "(Проектная утвержденная)" in normalized
+        or "Фактические скважины" in normalized
+        or "Проектные утвержденные скважины" in normalized
+    )
+
+
+def _decimate_hover_payload(
+    *,
+    points: list[list[float]],
+    hover_items: list[dict[str, object]],
+    max_points: int,
+) -> tuple[list[list[float]], list[dict[str, object]]]:
+    if max_points <= 1 or len(points) <= max_points:
+        return points, hover_items
+    indices = np.unique(
+        np.linspace(0, len(points) - 1, num=int(max_points), dtype=int)
+    ).tolist()
+    return (
+        [points[index] for index in indices],
+        [hover_items[index] for index in indices],
+    )
 
 
 def _decimated_station_frame(stations: pd.DataFrame, *, target_points: int) -> pd.DataFrame:
@@ -467,6 +509,66 @@ def _anticollision_focus_reference_names(analysis: AntiCollisionAnalysis) -> set
             focus_names.add(str(corridor.well_a))
         if str(corridor.well_b) in reference_names:
             focus_names.add(str(corridor.well_b))
+    return focus_names
+
+
+def _xy_bounds_from_stations(stations: pd.DataFrame) -> tuple[float, float, float, float] | None:
+    required = {"X_m", "Y_m"}
+    if stations.empty or not required.issubset(stations.columns):
+        return None
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    if len(x_values) == 0 or len(y_values) == 0:
+        return None
+    finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if not finite_mask.any():
+        return None
+    x_values = x_values[finite_mask]
+    y_values = y_values[finite_mask]
+    return (
+        float(np.min(x_values)),
+        float(np.max(x_values)),
+        float(np.min(y_values)),
+        float(np.max(y_values)),
+    )
+
+
+def _xy_bounds_gap_m(
+    bounds_a: tuple[float, float, float, float],
+    bounds_b: tuple[float, float, float, float],
+) -> float:
+    min_x_a, max_x_a, min_y_a, max_y_a = bounds_a
+    min_x_b, max_x_b, min_y_b, max_y_b = bounds_b
+    dx = max(min_x_a - max_x_b, min_x_b - max_x_a, 0.0)
+    dy = max(min_y_a - max_y_b, min_y_b - max_y_a, 0.0)
+    return float(np.hypot(dx, dy))
+
+
+def _anticollision_reference_cone_focus_names(
+    analysis: AntiCollisionAnalysis,
+) -> set[str]:
+    focus_names = set(_anticollision_focus_reference_names(analysis))
+    calculated_bounds = [
+        bounds
+        for well in analysis.wells
+        if not bool(well.is_reference_only)
+        for bounds in [_xy_bounds_from_stations(well.stations)]
+        if bounds is not None
+    ]
+    if not calculated_bounds:
+        return focus_names
+    for well in analysis.wells:
+        if not bool(well.is_reference_only):
+            continue
+        reference_bounds = _xy_bounds_from_stations(well.stations)
+        if reference_bounds is None:
+            continue
+        if any(
+            _xy_bounds_gap_m(reference_bounds, calculated_bounds_item)
+            <= WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M
+            for calculated_bounds_item in calculated_bounds
+        ):
+            focus_names.add(str(well.name))
     return focus_names
 
 
@@ -818,6 +920,7 @@ def _scatter3d_trace_to_three_payload(
         1.0 if getattr(trace, "opacity", None) is None else float(trace.opacity)
     )
     visibility_state = _trace_visibility_state(trace)
+    is_reference_trace = _is_reference_trace_name(trace_name)
     legend_added = False
     if "lines" in mode:
         line = trace.line or {}
@@ -877,6 +980,15 @@ def _scatter3d_trace_to_three_payload(
                         )
                     )
                 if hover_points:
+                    hover_points, hover_items = _decimate_hover_payload(
+                        points=hover_points,
+                        hover_items=hover_items,
+                        max_points=(
+                            WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+                            if is_reference_trace
+                            else WT_THREE_MAX_HOVER_POINTS_PER_TRACE
+                        ),
+                    )
                     payload["points"].append(
                         {
                             "name": hover_name,
@@ -887,6 +999,11 @@ def _scatter3d_trace_to_three_payload(
                             "symbol": "circle",
                             "hover": hover_items,
                             "hover_only": True,
+                            "role": (
+                                "reference_hover"
+                                if is_reference_trace
+                                else "trajectory_hover"
+                            ),
                         }
                     )
         if _trace_showlegend(trace) and trace_name:
@@ -949,6 +1066,11 @@ def _scatter3d_trace_to_three_payload(
                         "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
                         "hover": hover_items,
                         "hover_only": hover_only,
+                        "role": (
+                            "reference_marker"
+                            if is_reference_trace
+                            else "marker"
+                        ),
                     }
                 )
         if _trace_showlegend(trace) and trace_name and not legend_added:
@@ -989,6 +1111,13 @@ def _scatter3d_trace_to_three_payload(
                             float(z_value),
                         ],
                         "color": color,
+                        "role": (
+                            "reference_label"
+                            if "подписи" in trace_name.lower()
+                            else "well_label"
+                            if trace_name.endswith(": t1 label")
+                            else "label"
+                        ),
                     }
                 )
     return payload
@@ -1046,7 +1175,27 @@ def _optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
     optimized["lines"] = _merge_three_line_payloads(payload.get("lines") or [])
     optimized["points"] = _merge_three_point_payloads(payload.get("points") or [])
     optimized["meshes"] = _merge_three_mesh_payloads(payload.get("meshes") or [])
-    optimized["labels"] = list(payload.get("labels") or [])
+    labels = list(payload.get("labels") or [])
+    reference_labels = [
+        item for item in labels if str(item.get("role") or "") == "reference_label"
+    ]
+    other_labels = [
+        item for item in labels if str(item.get("role") or "") != "reference_label"
+    ]
+    if len(reference_labels) > WT_THREE_MAX_REFERENCE_LABELS:
+        indices = np.unique(
+            np.linspace(
+                0,
+                len(reference_labels) - 1,
+                num=WT_THREE_MAX_REFERENCE_LABELS,
+                dtype=int,
+            )
+        ).tolist()
+        reference_labels = [reference_labels[index] for index in indices]
+    labels = other_labels + reference_labels
+    if len(labels) > WT_THREE_MAX_LABELS:
+        labels = labels[:WT_THREE_MAX_LABELS]
+    optimized["labels"] = labels
     optimized["legend"] = list(payload.get("legend") or [])
     return optimized
 
@@ -1092,15 +1241,16 @@ def _merge_three_line_payloads(
 def _merge_three_point_payloads(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    grouped: dict[tuple[str, float, float, str, bool], dict[str, object]] = {}
-    ordered_keys: list[tuple[str, float, float, str, bool]] = []
+    grouped: dict[tuple[str, float, float, str, bool, str], dict[str, object]] = {}
+    ordered_keys: list[tuple[str, float, float, str, bool, str]] = []
     for item in items:
         color = str(item.get("color") or "#0F172A")
         opacity = float(item.get("opacity") or 1.0)
         size = float(item.get("size") or 6.0)
         symbol = str(item.get("symbol") or "circle")
         hover_only = bool(item.get("hover_only"))
-        key = (color, opacity, size, symbol, hover_only)
+        role = str(item.get("role") or "point")
+        key = (color, opacity, size, symbol, hover_only, role)
         if key not in grouped:
             grouped[key] = {
                 "points": [],
@@ -1110,6 +1260,7 @@ def _merge_three_point_payloads(
                 "size": float(size),
                 "symbol": symbol,
                 "hover_only": hover_only,
+                "role": role,
             }
             ordered_keys.append(key)
         valid_points = [
@@ -1135,6 +1286,7 @@ def _merge_three_point_payloads(
                 "size": float(entry["size"]),
                 "symbol": str(entry["symbol"]),
                 "hover_only": bool(entry["hover_only"]),
+                "role": str(entry["role"]),
             }
         )
     return merged
@@ -2037,10 +2189,11 @@ def _all_wells_3d_figure(
             )
     for kind in _reference_kinds_present(reference_wells):
         fig.add_trace(_reference_legend_trace_3d(kind))
-    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
-        label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
-        if label_trace is not None:
-            fig.add_trace(label_trace)
+    if resolved_render_mode == WT_3D_RENDER_DETAIL:
+        for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+            label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
+            if label_trace is not None:
+                fig.add_trace(label_trace)
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
@@ -2432,11 +2585,7 @@ def _all_wells_anticollision_3d_figure(
     )
     focus_set = {str(name) for name in focus_well_names if str(name).strip()}
     focus_reference_names = (
-        set(
-            sorted(_anticollision_focus_reference_names(analysis))[
-                :WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT
-            ]
-        )
+        _anticollision_reference_cone_focus_names(analysis)
         if resolved_render_mode == WT_3D_RENDER_FAST
         else set()
     )
@@ -2691,23 +2840,24 @@ def _all_wells_anticollision_3d_figure(
                 z_arrays.append(np.asarray(combined_trace.z, dtype=float))
     for kind in _reference_kinds_present(reference_wells):
         fig.add_trace(_reference_legend_trace_3d(kind))
-    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
-        label_trace = _reference_name_trace_3d(
-            [
-                ImportedTrajectoryWell(
-                    name=str(well.name),
-                    kind=str(well.well_kind),
-                    stations=well.stations,
-                    surface=well.surface,
-                    azimuth_deg=0.0,
-                )
-                for well in analysis.wells
-                if bool(well.is_reference_only)
-            ],
-            kind=kind,
-        )
-        if label_trace is not None:
-            fig.add_trace(label_trace)
+    if resolved_render_mode == WT_3D_RENDER_DETAIL:
+        for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+            label_trace = _reference_name_trace_3d(
+                [
+                    ImportedTrajectoryWell(
+                        name=str(well.name),
+                        kind=str(well.well_kind),
+                        stations=well.stations,
+                        surface=well.surface,
+                        azimuth_deg=0.0,
+                    )
+                    for well in analysis.wells
+                    if bool(well.is_reference_only)
+                ],
+                kind=kind,
+            )
+            if label_trace is not None:
+                fig.add_trace(label_trace)
 
     overlap_legend_added = False
     for corridor in analysis.corridors:
@@ -3290,6 +3440,12 @@ def _render_anticollision_panel(
             "часть их cone-геометрии скрывается из 3D-рендера, но anti-collision "
             "анализ и расчёт рекомендаций остаются прежними."
         )
+        if reference_wells:
+            st.caption(
+                "В fast anti-collision 3D reference-конусы показываются только для "
+                "reference-скважин, чьи XY-границы подходят к расчётным ближе чем на "
+                f"{int(WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M)} м."
+            )
     if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
         st.caption(
             "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "

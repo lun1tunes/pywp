@@ -226,7 +226,7 @@
       __THREE_LIBRARY__
     </script>
     <script>
-      __TRACKBALL_CONTROLS__
+      __ORBIT_CONTROLS__
     </script>
     <script id="scene-payload" type="application/json">
       __SCENE_PAYLOAD__
@@ -274,7 +274,10 @@
             0,
           );
         const maxPixelRatio =
-          sceneComplexity > 80000 ? 1.15 : sceneComplexity > 25000 ? 1.45 : 1.85;
+          sceneComplexity > 180000 ? 0.95 :
+          sceneComplexity > 90000 ? 1.0 :
+          sceneComplexity > 30000 ? 1.25 :
+          1.65;
 
         const renderer = new THREE.WebGLRenderer({
           antialias: sceneComplexity <= 25000,
@@ -289,26 +292,39 @@
         const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
         camera.up.set(0, 0, 1);
 
-        const controls = new THREE.TrackballControls(camera, renderer.domElement);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.12;
         controls.rotateSpeed = 0.72;
         controls.zoomSpeed = 0.95;
-        controls.panSpeed = 0.235;
-        controls.staticMoving = false;
-        controls.dynamicDampingFactor = 0.14;
-        controls.noRotate = false;
-        controls.noZoom = false;
-        controls.noPan = false;
+        controls.panSpeed = 0.47;
+        controls.screenSpacePanning = true;
+        controls.enableRotate = true;
+        controls.enableZoom = true;
+        controls.enablePan = true;
 
         const hoverTargets = [];
         const sceneLabels = [];
-        let animationLoopStarted = false;
+        let animationFrameHandle = 0;
+        let idleFrameCount = 0;
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
-        let hoveredObject = null;
         let legendCollapsed = false;
+        let interactionActive = false;
+
+        const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
+        const hoverSphereMaterial = new THREE.MeshBasicMaterial({
+          color: "#64748b",
+          transparent: true,
+          opacity: 0.0,
+          depthWrite: false,
+          depthTest: false,
+        });
+        hoverSphereMaterial.colorWrite = false;
 
         function requestRender() {
           needsRender = true;
+          startAnimationLoop();
         }
 
         function displayPoint(value) {
@@ -396,10 +412,39 @@
         const labelLift = Math.max(maxSpan * 0.015, 18.0);
 
         const axisLength = Math.max(maxSpan * 0.18, 40.0);
-        const axes = new THREE.AxesHelper(axisLength);
         const axisOrigin = new THREE.Vector3(minBound.x, minBound.y, maxBound.z);
-        axes.position.copy(axisOrigin);
-        scene.add(axes);
+        function addAxisLine(startPoint, endPoint, colorValue) {
+          const geometry = new THREE.BufferGeometry().setFromPoints([
+            startPoint.clone(),
+            endPoint.clone(),
+          ]);
+          scene.add(
+            new THREE.Line(
+              geometry,
+              new THREE.LineBasicMaterial({
+                color: colorValue,
+                transparent: false,
+                opacity: 1.0,
+              }),
+            ),
+          );
+        }
+
+        addAxisLine(
+          axisOrigin,
+          new THREE.Vector3(axisOrigin.x + axisLength, axisOrigin.y, axisOrigin.z),
+          "#B91C1C",
+        );
+        addAxisLine(
+          axisOrigin,
+          new THREE.Vector3(axisOrigin.x, axisOrigin.y + axisLength, axisOrigin.z),
+          "#15803D",
+        );
+        addAxisLine(
+          axisOrigin,
+          new THREE.Vector3(axisOrigin.x, axisOrigin.y, axisOrigin.z - axisLength),
+          "#1D4ED8",
+        );
 
         function addSceneLabel(text, position, color, extraClassName) {
           const element = document.createElement("div");
@@ -424,20 +469,16 @@
         );
         addSceneLabel(
           "Z / TVD",
-          new THREE.Vector3(axisOrigin.x, axisOrigin.y, axisOrigin.z + axisLength * 1.08),
+          new THREE.Vector3(axisOrigin.x, axisOrigin.y, axisOrigin.z - axisLength * 1.08),
           "#1D4ED8",
           "scene-axis-label",
         );
-
         function resize() {
           const width = Math.max(root.clientWidth || 1, 1);
           const height = Math.max(root.clientHeight || 1, 1);
           camera.aspect = width / height;
           camera.updateProjectionMatrix();
           renderer.setSize(width, height, false);
-          if (typeof controls.handleResize === "function") {
-            controls.handleResize();
-          }
           requestRender();
         }
 
@@ -643,20 +684,8 @@
             worldMarkerSize * Number(item.size || 6) / 8.0,
             5.0,
           );
-          const geometry = new THREE.SphereGeometry(
-            markerScale * 0.52,
-            8,
-            8,
-          );
-          const material = new THREE.MeshBasicMaterial({
-            color: hexOrDefault(item.color, "#0f172a"),
-            transparent: true,
-            opacity: 0.0,
-            depthWrite: false,
-            depthTest: false,
-          });
-          material.colorWrite = false;
-          const mesh = new THREE.Mesh(geometry, material);
+          const mesh = new THREE.Mesh(hoverSphereGeometry, hoverSphereMaterial);
+          mesh.scale.setScalar(markerScale * 0.52);
           mesh.position.copy(displayPoint(point));
           mesh.userData.hover = Object.assign(
             {
@@ -789,9 +818,8 @@
         }
 
         function updateTooltip(event) {
-          if (!pointerScreen.inside || hoverTargets.length === 0) {
+          if (interactionActive || !pointerScreen.inside || hoverTargets.length === 0) {
             hideTooltip();
-            hoveredObject = null;
             return;
           }
           const rect = renderer.domElement.getBoundingClientRect();
@@ -801,11 +829,9 @@
           const intersections = raycaster.intersectObjects(hoverTargets, false);
           if (!intersections.length) {
             hideTooltip();
-            hoveredObject = null;
             return;
           }
           const hoverObject = intersections[0].object;
-          hoveredObject = hoverObject;
           const hoverData = Object.assign({}, hoverObject.userData.hover || {});
           hoverData.color = hexOrDefault(hoverData.color, "#64748b");
           const html = formatTooltip(hoverData);
@@ -861,12 +887,20 @@
         }
 
         function animate() {
-          window.requestAnimationFrame(animate);
           const controlsChanged = controls.update();
           if (controlsChanged || needsRender) {
             needsRender = false;
+            idleFrameCount = 0;
             render();
+            animationFrameHandle = window.requestAnimationFrame(animate);
+            return;
           }
+          if (idleFrameCount < 2) {
+            idleFrameCount += 1;
+            animationFrameHandle = window.requestAnimationFrame(animate);
+            return;
+          }
+          animationFrameHandle = 0;
         }
 
         function enterFullscreen() {
@@ -880,11 +914,11 @@
         }
 
         function startAnimationLoop() {
-          if (animationLoopStarted) {
+          if (animationFrameHandle !== 0) {
             return;
           }
-          animationLoopStarted = true;
-          animate();
+          idleFrameCount = 0;
+          animationFrameHandle = window.requestAnimationFrame(animate);
         }
 
         (payload.lines || []).forEach(addLine);
@@ -903,8 +937,16 @@
         });
         renderer.domElement.addEventListener("pointerleave", () => {
           pointerScreen.inside = false;
-          hoveredObject = null;
           hideTooltip();
+          requestRender();
+        });
+        controls.addEventListener("start", () => {
+          interactionActive = true;
+          hideTooltip();
+          requestRender();
+        });
+        controls.addEventListener("end", () => {
+          interactionActive = false;
           requestRender();
         });
         controls.addEventListener("change", requestRender);

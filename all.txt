@@ -1234,7 +1234,7 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/02_welltrack_import.py	269410
+===BEGIN_FILE===	pages/02_welltrack_import.py	273129
 from __future__ import annotations
 
 import colorsys
@@ -1402,6 +1402,10 @@ WT_3D_FAST_CALC_WELL_THRESHOLD = 14
 WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
 WT_3D_FAST_CALC_TARGET_POINTS = 180
 WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT = 6
+WT_THREE_MAX_HOVER_POINTS_PER_TRACE = 96
+WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = 24
+WT_THREE_MAX_LABELS = 48
+WT_THREE_MAX_REFERENCE_LABELS = 12
 WT_PAD_FOCUS_ALL = "__all_pads__"
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
@@ -1610,9 +1614,46 @@ def _resolve_3d_render_mode(
     reference_wells: Iterable[ImportedTrajectoryWell],
 ) -> str:
     normalized = str(requested_mode).strip()
+    reference_wells_tuple = tuple(reference_wells)
     if normalized == WT_3D_RENDER_DETAIL:
+        if (
+            calculated_well_count >= WT_3D_FAST_CALC_WELL_THRESHOLD
+            or len(reference_wells_tuple) >= WT_3D_FAST_REFERENCE_WELL_THRESHOLD
+            or _reference_point_count(reference_wells_tuple)
+            >= WT_3D_FAST_REFERENCE_POINT_THRESHOLD
+        ):
+            return WT_3D_RENDER_FAST
         return WT_3D_RENDER_DETAIL
     return WT_3D_RENDER_FAST
+
+
+def _is_reference_trace_name(trace_name: str) -> bool:
+    normalized = str(trace_name).strip()
+    if not normalized:
+        return False
+    return bool(
+        "(Фактическая)" in normalized
+        or "(Проектная утвержденная)" in normalized
+        or "Фактические скважины" in normalized
+        or "Проектные утвержденные скважины" in normalized
+    )
+
+
+def _decimate_hover_payload(
+    *,
+    points: list[list[float]],
+    hover_items: list[dict[str, object]],
+    max_points: int,
+) -> tuple[list[list[float]], list[dict[str, object]]]:
+    if max_points <= 1 or len(points) <= max_points:
+        return points, hover_items
+    indices = np.unique(
+        np.linspace(0, len(points) - 1, num=int(max_points), dtype=int)
+    ).tolist()
+    return (
+        [points[index] for index in indices],
+        [hover_items[index] for index in indices],
+    )
 
 
 def _decimated_station_frame(stations: pd.DataFrame, *, target_points: int) -> pd.DataFrame:
@@ -2055,6 +2096,7 @@ def _scatter3d_trace_to_three_payload(
         1.0 if getattr(trace, "opacity", None) is None else float(trace.opacity)
     )
     visibility_state = _trace_visibility_state(trace)
+    is_reference_trace = _is_reference_trace_name(trace_name)
     legend_added = False
     if "lines" in mode:
         line = trace.line or {}
@@ -2114,6 +2156,15 @@ def _scatter3d_trace_to_three_payload(
                         )
                     )
                 if hover_points:
+                    hover_points, hover_items = _decimate_hover_payload(
+                        points=hover_points,
+                        hover_items=hover_items,
+                        max_points=(
+                            WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+                            if is_reference_trace
+                            else WT_THREE_MAX_HOVER_POINTS_PER_TRACE
+                        ),
+                    )
                     payload["points"].append(
                         {
                             "name": hover_name,
@@ -2124,6 +2175,11 @@ def _scatter3d_trace_to_three_payload(
                             "symbol": "circle",
                             "hover": hover_items,
                             "hover_only": True,
+                            "role": (
+                                "reference_hover"
+                                if is_reference_trace
+                                else "trajectory_hover"
+                            ),
                         }
                     )
         if _trace_showlegend(trace) and trace_name:
@@ -2186,6 +2242,11 @@ def _scatter3d_trace_to_three_payload(
                         "symbol": str(getattr(marker, "symbol", "circle") or "circle"),
                         "hover": hover_items,
                         "hover_only": hover_only,
+                        "role": (
+                            "reference_marker"
+                            if is_reference_trace
+                            else "marker"
+                        ),
                     }
                 )
         if _trace_showlegend(trace) and trace_name and not legend_added:
@@ -2226,6 +2287,13 @@ def _scatter3d_trace_to_three_payload(
                             float(z_value),
                         ],
                         "color": color,
+                        "role": (
+                            "reference_label"
+                            if "подписи" in trace_name.lower()
+                            else "well_label"
+                            if trace_name.endswith(": t1 label")
+                            else "label"
+                        ),
                     }
                 )
     return payload
@@ -2283,7 +2351,27 @@ def _optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
     optimized["lines"] = _merge_three_line_payloads(payload.get("lines") or [])
     optimized["points"] = _merge_three_point_payloads(payload.get("points") or [])
     optimized["meshes"] = _merge_three_mesh_payloads(payload.get("meshes") or [])
-    optimized["labels"] = list(payload.get("labels") or [])
+    labels = list(payload.get("labels") or [])
+    reference_labels = [
+        item for item in labels if str(item.get("role") or "") == "reference_label"
+    ]
+    other_labels = [
+        item for item in labels if str(item.get("role") or "") != "reference_label"
+    ]
+    if len(reference_labels) > WT_THREE_MAX_REFERENCE_LABELS:
+        indices = np.unique(
+            np.linspace(
+                0,
+                len(reference_labels) - 1,
+                num=WT_THREE_MAX_REFERENCE_LABELS,
+                dtype=int,
+            )
+        ).tolist()
+        reference_labels = [reference_labels[index] for index in indices]
+    labels = other_labels + reference_labels
+    if len(labels) > WT_THREE_MAX_LABELS:
+        labels = labels[:WT_THREE_MAX_LABELS]
+    optimized["labels"] = labels
     optimized["legend"] = list(payload.get("legend") or [])
     return optimized
 
@@ -2329,15 +2417,16 @@ def _merge_three_line_payloads(
 def _merge_three_point_payloads(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    grouped: dict[tuple[str, float, float, str, bool], dict[str, object]] = {}
-    ordered_keys: list[tuple[str, float, float, str, bool]] = []
+    grouped: dict[tuple[str, float, float, str, bool, str], dict[str, object]] = {}
+    ordered_keys: list[tuple[str, float, float, str, bool, str]] = []
     for item in items:
         color = str(item.get("color") or "#0F172A")
         opacity = float(item.get("opacity") or 1.0)
         size = float(item.get("size") or 6.0)
         symbol = str(item.get("symbol") or "circle")
         hover_only = bool(item.get("hover_only"))
-        key = (color, opacity, size, symbol, hover_only)
+        role = str(item.get("role") or "point")
+        key = (color, opacity, size, symbol, hover_only, role)
         if key not in grouped:
             grouped[key] = {
                 "points": [],
@@ -2347,6 +2436,7 @@ def _merge_three_point_payloads(
                 "size": float(size),
                 "symbol": symbol,
                 "hover_only": hover_only,
+                "role": role,
             }
             ordered_keys.append(key)
         valid_points = [
@@ -2372,6 +2462,7 @@ def _merge_three_point_payloads(
                 "size": float(entry["size"]),
                 "symbol": str(entry["symbol"]),
                 "hover_only": bool(entry["hover_only"]),
+                "role": str(entry["role"]),
             }
         )
     return merged
@@ -3274,10 +3365,11 @@ def _all_wells_3d_figure(
             )
     for kind in _reference_kinds_present(reference_wells):
         fig.add_trace(_reference_legend_trace_3d(kind))
-    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
-        label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
-        if label_trace is not None:
-            fig.add_trace(label_trace)
+    if resolved_render_mode == WT_3D_RENDER_DETAIL:
+        for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+            label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
+            if label_trace is not None:
+                fig.add_trace(label_trace)
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
@@ -3928,23 +4020,24 @@ def _all_wells_anticollision_3d_figure(
                 z_arrays.append(np.asarray(combined_trace.z, dtype=float))
     for kind in _reference_kinds_present(reference_wells):
         fig.add_trace(_reference_legend_trace_3d(kind))
-    for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
-        label_trace = _reference_name_trace_3d(
-            [
-                ImportedTrajectoryWell(
-                    name=str(well.name),
-                    kind=str(well.well_kind),
-                    stations=well.stations,
-                    surface=well.surface,
-                    azimuth_deg=0.0,
-                )
-                for well in analysis.wells
-                if bool(well.is_reference_only)
-            ],
-            kind=kind,
-        )
-        if label_trace is not None:
-            fig.add_trace(label_trace)
+    if resolved_render_mode == WT_3D_RENDER_DETAIL:
+        for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+            label_trace = _reference_name_trace_3d(
+                [
+                    ImportedTrajectoryWell(
+                        name=str(well.name),
+                        kind=str(well.well_kind),
+                        stations=well.stations,
+                        surface=well.surface,
+                        azimuth_deg=0.0,
+                    )
+                    for well in analysis.wells
+                    if bool(well.is_reference_only)
+                ],
+                kind=kind,
+            )
+            if label_trace is not None:
+                fig.add_trace(label_trace)
 
     overlap_legend_added = False
     for corridor in analysis.corridors:
@@ -20896,7 +20989,7 @@ def render_local_three_scene(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	31528
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	32150
 <!doctype html>
 <html lang="en">
   <head>
@@ -21173,7 +21266,10 @@ def render_local_three_scene(
             0,
           );
         const maxPixelRatio =
-          sceneComplexity > 80000 ? 1.15 : sceneComplexity > 25000 ? 1.45 : 1.85;
+          sceneComplexity > 180000 ? 0.95 :
+          sceneComplexity > 90000 ? 1.0 :
+          sceneComplexity > 30000 ? 1.25 :
+          1.65;
 
         const renderer = new THREE.WebGLRenderer({
           antialias: sceneComplexity <= 25000,
@@ -21200,14 +21296,26 @@ def render_local_three_scene(
 
         const hoverTargets = [];
         const sceneLabels = [];
-        let animationLoopStarted = false;
+        let animationFrameHandle = 0;
+        let idleFrameCount = 0;
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
-        let hoveredObject = null;
         let legendCollapsed = false;
+        let interactionActive = false;
+
+        const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
+        const hoverSphereMaterial = new THREE.MeshBasicMaterial({
+          color: "#64748b",
+          transparent: true,
+          opacity: 0.0,
+          depthWrite: false,
+          depthTest: false,
+        });
+        hoverSphereMaterial.colorWrite = false;
 
         function requestRender() {
           needsRender = true;
+          startAnimationLoop();
         }
 
         function displayPoint(value) {
@@ -21542,20 +21650,8 @@ def render_local_three_scene(
             worldMarkerSize * Number(item.size || 6) / 8.0,
             5.0,
           );
-          const geometry = new THREE.SphereGeometry(
-            markerScale * 0.52,
-            8,
-            8,
-          );
-          const material = new THREE.MeshBasicMaterial({
-            color: hexOrDefault(item.color, "#0f172a"),
-            transparent: true,
-            opacity: 0.0,
-            depthWrite: false,
-            depthTest: false,
-          });
-          material.colorWrite = false;
-          const mesh = new THREE.Mesh(geometry, material);
+          const mesh = new THREE.Mesh(hoverSphereGeometry, hoverSphereMaterial);
+          mesh.scale.setScalar(markerScale * 0.52);
           mesh.position.copy(displayPoint(point));
           mesh.userData.hover = Object.assign(
             {
@@ -21688,9 +21784,8 @@ def render_local_three_scene(
         }
 
         function updateTooltip(event) {
-          if (!pointerScreen.inside || hoverTargets.length === 0) {
+          if (interactionActive || !pointerScreen.inside || hoverTargets.length === 0) {
             hideTooltip();
-            hoveredObject = null;
             return;
           }
           const rect = renderer.domElement.getBoundingClientRect();
@@ -21700,11 +21795,9 @@ def render_local_three_scene(
           const intersections = raycaster.intersectObjects(hoverTargets, false);
           if (!intersections.length) {
             hideTooltip();
-            hoveredObject = null;
             return;
           }
           const hoverObject = intersections[0].object;
-          hoveredObject = hoverObject;
           const hoverData = Object.assign({}, hoverObject.userData.hover || {});
           hoverData.color = hexOrDefault(hoverData.color, "#64748b");
           const html = formatTooltip(hoverData);
@@ -21760,12 +21853,20 @@ def render_local_three_scene(
         }
 
         function animate() {
-          window.requestAnimationFrame(animate);
           const controlsChanged = controls.update();
           if (controlsChanged || needsRender) {
             needsRender = false;
+            idleFrameCount = 0;
             render();
+            animationFrameHandle = window.requestAnimationFrame(animate);
+            return;
           }
+          if (idleFrameCount < 2) {
+            idleFrameCount += 1;
+            animationFrameHandle = window.requestAnimationFrame(animate);
+            return;
+          }
+          animationFrameHandle = 0;
         }
 
         function enterFullscreen() {
@@ -21779,11 +21880,11 @@ def render_local_three_scene(
         }
 
         function startAnimationLoop() {
-          if (animationLoopStarted) {
+          if (animationFrameHandle !== 0) {
             return;
           }
-          animationLoopStarted = true;
-          animate();
+          idleFrameCount = 0;
+          animationFrameHandle = window.requestAnimationFrame(animate);
         }
 
         (payload.lines || []).forEach(addLine);
@@ -21802,8 +21903,16 @@ def render_local_three_scene(
         });
         renderer.domElement.addEventListener("pointerleave", () => {
           pointerScreen.inside = false;
-          hoveredObject = null;
           hideTooltip();
+          requestRender();
+        });
+        controls.addEventListener("start", () => {
+          interactionActive = true;
+          hideTooltip();
+          requestRender();
+        });
+        controls.addEventListener("end", () => {
+          interactionActive = false;
           requestRender();
         });
         controls.addEventListener("change", requestRender);
@@ -29067,6 +29176,186 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 ===END_FILE===
+===BEGIN_FILE===	scripts/generate_reference_stress_welltracks.py	5570
+from __future__ import annotations
+
+import argparse
+import math
+from pathlib import Path
+
+import pandas as pd
+
+from pywp import TrajectoryConfig, TrajectoryPlanner
+from pywp.eclipse_welltrack import parse_welltrack_text, welltrack_points_to_targets
+
+BASE_SOURCE = Path("tests/test_data/WELLTRACKS3.INC")
+DEFAULT_FACT_TARGET = Path("tests/test_data/WELLTRACKS_FACT.INC")
+DEFAULT_PROJECT_TARGET = Path("tests/test_data/WELLTRACKS_PROJECT.INC")
+
+FACT_COUNT = 130
+PROJECT_COUNT = 90
+GRID_COLUMNS = 10
+X_STEP_PATTERN_M = (300.0, 450.0, 600.0, 750.0, 900.0, 1000.0)
+Y_STEP_PATTERN_M = (350.0, 500.0, 650.0, 800.0, 950.0)
+PROJECT_GLOBAL_OFFSET_X_M = 9500.0
+PROJECT_GLOBAL_OFFSET_Y_M = 1800.0
+OUTPUT_MD_STEP_M = 30.0
+
+
+def _cumulative_positions(count: int, steps: tuple[float, ...]) -> list[float]:
+    values = [0.0]
+    while len(values) < count:
+        previous = values[-1]
+        step = float(steps[(len(values) - 1) % len(steps)])
+        values.append(previous + step)
+    return values
+
+
+def _centered_grid_offsets(
+    *,
+    count: int,
+    columns: int,
+    global_x_offset_m: float = 0.0,
+    global_y_offset_m: float = 0.0,
+) -> list[tuple[float, float]]:
+    rows = int(math.ceil(float(count) / float(columns)))
+    x_positions = _cumulative_positions(columns, X_STEP_PATTERN_M)
+    y_positions = _cumulative_positions(rows, Y_STEP_PATTERN_M)
+    x_center = 0.5 * (x_positions[0] + x_positions[-1])
+    y_center = 0.5 * (y_positions[0] + y_positions[-1])
+    offsets: list[tuple[float, float]] = []
+    for index in range(count):
+        row = index // columns
+        col = index % columns
+        offsets.append(
+            (
+                float(x_positions[col] - x_center + global_x_offset_m),
+                float(y_positions[row] - y_center + global_y_offset_m),
+            )
+        )
+    return offsets
+
+
+def _stress_config() -> TrajectoryConfig:
+    return TrajectoryConfig(
+        optimization_mode="none",
+        md_step_m=OUTPUT_MD_STEP_M,
+        md_step_control_m=5.0,
+        max_total_md_postcheck_m=20000.0,
+    )
+
+
+def _translate_targets(surface, t1, t3, dx_m: float, dy_m: float):
+    return (
+        surface.model_copy(
+            update={"x": float(surface.x + dx_m), "y": float(surface.y + dy_m)}
+        ),
+        t1.model_copy(update={"x": float(t1.x + dx_m), "y": float(t1.y + dy_m)}),
+        t3.model_copy(update={"x": float(t3.x + dx_m), "y": float(t3.y + dy_m)}),
+    )
+
+
+def _plan_translated_wells(
+    *,
+    prefix: str,
+    count: int,
+    global_x_offset_m: float = 0.0,
+    global_y_offset_m: float = 0.0,
+) -> list[tuple[str, pd.DataFrame]]:
+    base_records = parse_welltrack_text(BASE_SOURCE.read_text(encoding="utf-8"))
+    templates = [welltrack_points_to_targets(record.points) for record in base_records]
+    offsets = _centered_grid_offsets(
+        count=count,
+        columns=GRID_COLUMNS,
+        global_x_offset_m=global_x_offset_m,
+        global_y_offset_m=global_y_offset_m,
+    )
+    planner = TrajectoryPlanner()
+    config = _stress_config()
+    planned: list[tuple[str, pd.DataFrame]] = []
+    for index in range(count):
+        surface, t1, t3 = templates[index % len(templates)]
+        dx_m, dy_m = offsets[index]
+        shifted_surface, shifted_t1, shifted_t3 = _translate_targets(
+            surface,
+            t1,
+            t3,
+            dx_m,
+            dy_m,
+        )
+        result = planner.plan(
+            surface=shifted_surface,
+            t1=shifted_t1,
+            t3=shifted_t3,
+            config=config,
+        )
+        planned.append((f"{prefix}_{index + 1:03d}", result.stations.copy()))
+    return planned
+
+
+def _format_welltrack_text(wells: list[tuple[str, pd.DataFrame]]) -> str:
+    blocks: list[str] = []
+    for well_name, stations in wells:
+        lines = [f"WELLTRACK '{well_name}'"]
+        for row in stations[["X_m", "Y_m", "Z_m", "MD_m"]].itertuples(index=False):
+            lines.append(
+                f"{float(row.X_m):.3f} {float(row.Y_m):.3f} "
+                f"{float(row.Z_m):.3f} {float(row.MD_m):.3f}"
+            )
+        lines.append("/")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) + "\n"
+
+
+def generate_stress_welltracks(
+    *,
+    fact_target: Path,
+    project_target: Path,
+) -> None:
+    fact_wells = _plan_translated_wells(prefix="FACT", count=FACT_COUNT)
+    project_wells = _plan_translated_wells(
+        prefix="PROJECT",
+        count=PROJECT_COUNT,
+        global_x_offset_m=PROJECT_GLOBAL_OFFSET_X_M,
+        global_y_offset_m=PROJECT_GLOBAL_OFFSET_Y_M,
+    )
+    fact_target.write_text(_format_welltrack_text(fact_wells), encoding="utf-8")
+    project_target.write_text(_format_welltrack_text(project_wells), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate large reference WELLTRACK datasets for custom 3D "
+            "performance testing."
+        )
+    )
+    parser.add_argument(
+        "--fact-target",
+        type=Path,
+        default=DEFAULT_FACT_TARGET,
+        help=f"Output path for factual trajectories (default: {DEFAULT_FACT_TARGET})",
+    )
+    parser.add_argument(
+        "--project-target",
+        type=Path,
+        default=DEFAULT_PROJECT_TARGET,
+        help=(
+            "Output path for approved project trajectories "
+            f"(default: {DEFAULT_PROJECT_TARGET})"
+        ),
+    )
+    args = parser.parse_args()
+    generate_stress_welltracks(
+        fact_target=Path(args.fact_target),
+        project_target=Path(args.project_target),
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+===END_FILE===
 ===BEGIN_FILE===	scripts/project_pack.py	4516
 #!/usr/bin/env python3
 from __future__ import annotations
@@ -33884,6 +34173,30 @@ def test_pack_and_unpack_restore_contents(tmp_path: Path) -> None:
         assert restored_path.read_text(encoding="utf-8") == expected_content
 
 ===END_FILE===
+===BEGIN_FILE===	tests/test_reference_stress_welltracks.py	772
+from __future__ import annotations
+
+from pathlib import Path
+
+from pywp.eclipse_welltrack import parse_welltrack_text
+
+
+def test_generated_stress_reference_welltracks_have_expected_sizes() -> None:
+    fact_records = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_FACT.INC").read_text(encoding="utf-8")
+    )
+    project_records = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_PROJECT.INC").read_text(encoding="utf-8")
+    )
+
+    assert len(fact_records) == 130
+    assert len(project_records) == 90
+    assert min(len(record.points) for record in fact_records) >= 200
+    assert min(len(record.points) for record in project_records) >= 200
+    assert fact_records[0].name == "FACT_001"
+    assert project_records[0].name == "PROJECT_001"
+
+===END_FILE===
 ===BEGIN_FILE===	tests/test_reference_trajectories.py	5073
 from __future__ import annotations
 
@@ -38226,12 +38539,14 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	112295
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	115175
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import pytest
 import sys
 from streamlit.testing.v1 import AppTest
@@ -40825,6 +41140,7 @@ def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend(
     figure = page._all_wells_3d_figure(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
         reference_wells=_reference_wells(),
+        render_mode=page.WT_3D_RENDER_DETAIL,
     )
 
     payload = page._plotly_3d_figure_to_three_payload(figure)
@@ -40996,6 +41312,82 @@ def test_optimize_three_payload_keeps_mesh_roles_separate() -> None:
 
     assert len(optimized["meshes"]) == 2
     assert {str(item["role"]) for item in optimized["meshes"]} == {"cone", "overlap"}
+
+
+def test_resolve_3d_render_mode_forces_fast_for_large_reference_scene() -> None:
+    page = _load_welltrack_page_module()
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": f"FACT-{index:03d}",
+                    "Type": "actual",
+                    "X": float(index * 10.0),
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": f"FACT-{index:03d}",
+                    "Type": "actual",
+                    "X": float(index * 10.0 + 100.0),
+                    "Y": 0.0,
+                    "Z": 1000.0,
+                    "MD": 1000.0,
+                },
+            ]
+        )[0]
+        for index in range(page.WT_3D_FAST_REFERENCE_WELL_THRESHOLD + 2)
+    )
+
+    resolved = page._resolve_3d_render_mode(
+        requested_mode=page.WT_3D_RENDER_DETAIL,
+        calculated_well_count=1,
+        reference_wells=reference_wells,
+    )
+
+    assert resolved == page.WT_3D_RENDER_FAST
+
+
+def test_plotly_3d_payload_decimates_reference_hover_points() -> None:
+    page = _load_welltrack_page_module()
+    stations = pd.DataFrame(
+        {
+            "MD_m": np.arange(0.0, 3000.0, 10.0, dtype=float),
+            "INC_deg": np.linspace(0.0, 90.0, 300, dtype=float),
+            "AZI_deg": np.full(300, 90.0, dtype=float),
+            "X_m": np.arange(300, dtype=float) * 10.0,
+            "Y_m": np.zeros(300, dtype=float),
+            "Z_m": np.linspace(0.0, 2500.0, 300, dtype=float),
+            "DLS_deg_per_30m": np.full(300, 2.0, dtype=float),
+            "segment": np.array(["HOLD"] * 300, dtype=object),
+        }
+    )
+    trace = go.Scatter3d(
+        x=stations["X_m"],
+        y=stations["Y_m"],
+        z=stations["Z_m"],
+        mode="lines",
+        name="FACT-001 (Фактическая)",
+        customdata=page._trajectory_hover_customdata(stations),
+        hovertemplate=(
+            "X: %{x:.2f} m<br>"
+            "Y: %{y:.2f} m<br>"
+            "Z/TVD: %{z:.2f} m<br>"
+            "MD: %{customdata[0]:.2f} m<br>"
+            "DLS: %{customdata[1]:.2f} deg/30м<br>"
+            "INC: %{customdata[2]:.2f} deg<br>"
+            "Сегмент: %{customdata[3]}<extra>%{fullData.name}</extra>"
+        ),
+    )
+
+    payload = page._scatter3d_trace_to_three_payload(trace)
+    hover_only_points = [item for item in payload["points"] if bool(item.get("hover_only"))]
+
+    assert len(hover_only_points) == 1
+    assert str(hover_only_points[0]["role"]) == "reference_hover"
+    assert len(hover_only_points[0]["points"]) == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+    assert len(hover_only_points[0]["hover"]) == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
 
 
 def test_plotly_3d_figure_to_three_payload_preserves_custom_camera() -> None:

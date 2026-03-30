@@ -31,15 +31,15 @@ def _viewer_template_text() -> str:
     return _read_text_with_mtime(_TEMPLATE_PATH)
 
 
-def _trackball_controls_text() -> str:
-    return _read_text_with_mtime(_VENDOR_DIR / "TrackballControls.js")
+def _orbit_controls_text() -> str:
+    return _read_text_with_mtime(_VENDOR_DIR / "OrbitControls.js")
 
 
 def _viewer_template_with_libraries() -> str:
     return (
         _viewer_template_text()
         .replace("__THREE_LIBRARY__", _three_library_text())
-        .replace("__TRACKBALL_CONTROLS__", _trackball_controls_text())
+        .replace("__ORBIT_CONTROLS__", _orbit_controls_text())
     )
 
 

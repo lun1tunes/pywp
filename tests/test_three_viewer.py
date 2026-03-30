@@ -15,12 +15,13 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="tooltip"' in html
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
-    assert "TrackballControls" in html
+    assert "OrbitControls" in html
     assert "controls.rotateSpeed = 0.72;" in html
     assert "controls.zoomSpeed = 0.95;" in html
-    assert "controls.panSpeed = 0.235;" in html
-    assert "controls.staticMoving = false;" in html
-    assert "controls.dynamicDampingFactor = 0.14;" in html
+    assert "controls.panSpeed = 0.47;" in html
+    assert "controls.enableDamping = true;" in html
+    assert "controls.dampingFactor = 0.12;" in html
+    assert "controls.screenSpacePanning = true;" in html
     assert "function updateLabels()" in html
     assert "X / East" in html
     assert "Y / North" in html
@@ -33,19 +34,23 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "new THREE.PointsMaterial" in html
     assert "new THREE.MeshLambertMaterial" not in html
     assert "markerScale * 0.52" in html
+    assert "function addAxisLine" in html
+    assert "axisOrigin.z - axisLength" in html
     assert '<strong>DLS:</strong>' in html
     assert '<strong>INC:</strong>' in html
     assert 'id="reset-camera-btn"' not in html
     assert "Легенда" not in html
 
 
-def test_trackball_controls_use_centered_min_dimension_mapping() -> None:
-    controls_js = (three_viewer._VENDOR_DIR / "TrackballControls.js").read_text(
+def test_orbit_controls_use_expected_mouse_bindings() -> None:
+    controls_js = (three_viewer._VENDOR_DIR / "OrbitControls.js").read_text(
         encoding="utf-8"
     )
 
-    assert "Math.min( scope.screen.width, scope.screen.height )" in controls_js
-    assert "( scope.screen.top + scope.screen.height * 0.5 - pageY ) / radius" in controls_js
+    assert "LEFT: THREE.MOUSE.ROTATE" in controls_js
+    assert "MIDDLE: THREE.MOUSE.DOLLY" in controls_js
+    assert "RIGHT: THREE.MOUSE.PAN" in controls_js
+    assert "this.screenSpacePanning = true;" in controls_js
 
 
 def test_render_local_three_scene_appends_instance_token(monkeypatch) -> None:
@@ -77,12 +82,12 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     vendor_dir = tmp_path / "vendor"
     vendor_dir.mkdir()
     (vendor_dir / "three.min.js").write_text("window.THREE = {};", encoding="utf-8")
-    (vendor_dir / "TrackballControls.js").write_text(
-        "window.TrackballControls = function () {};",
+    (vendor_dir / "OrbitControls.js").write_text(
+        "window.OrbitControls = function () {};",
         encoding="utf-8",
     )
     template_path.write_text(
-        "__THREE_LIBRARY__ __TRACKBALL_CONTROLS__ A __SCENE_PAYLOAD__",
+        "__THREE_LIBRARY__ __ORBIT_CONTROLS__ A __SCENE_PAYLOAD__",
         encoding="utf-8",
     )
 
@@ -95,7 +100,7 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
 
     time.sleep(0.01)
     template_path.write_text(
-        "__THREE_LIBRARY__ __TRACKBALL_CONTROLS__ B __SCENE_PAYLOAD__",
+        "__THREE_LIBRARY__ __ORBIT_CONTROLS__ B __SCENE_PAYLOAD__",
         encoding="utf-8",
     )
 
