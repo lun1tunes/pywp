@@ -1234,7 +1234,7 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/02_welltrack_import.py	273129
+===BEGIN_FILE===	pages/02_welltrack_import.py	275441
 from __future__ import annotations
 
 import colorsys
@@ -1402,6 +1402,7 @@ WT_3D_FAST_CALC_WELL_THRESHOLD = 14
 WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
 WT_3D_FAST_CALC_TARGET_POINTS = 180
 WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT = 6
+WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M = 500.0
 WT_THREE_MAX_HOVER_POINTS_PER_TRACE = 96
 WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = 24
 WT_THREE_MAX_LABELS = 48
@@ -1745,6 +1746,66 @@ def _anticollision_focus_reference_names(analysis: AntiCollisionAnalysis) -> set
             focus_names.add(str(corridor.well_a))
         if str(corridor.well_b) in reference_names:
             focus_names.add(str(corridor.well_b))
+    return focus_names
+
+
+def _xy_bounds_from_stations(stations: pd.DataFrame) -> tuple[float, float, float, float] | None:
+    required = {"X_m", "Y_m"}
+    if stations.empty or not required.issubset(stations.columns):
+        return None
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    if len(x_values) == 0 or len(y_values) == 0:
+        return None
+    finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if not finite_mask.any():
+        return None
+    x_values = x_values[finite_mask]
+    y_values = y_values[finite_mask]
+    return (
+        float(np.min(x_values)),
+        float(np.max(x_values)),
+        float(np.min(y_values)),
+        float(np.max(y_values)),
+    )
+
+
+def _xy_bounds_gap_m(
+    bounds_a: tuple[float, float, float, float],
+    bounds_b: tuple[float, float, float, float],
+) -> float:
+    min_x_a, max_x_a, min_y_a, max_y_a = bounds_a
+    min_x_b, max_x_b, min_y_b, max_y_b = bounds_b
+    dx = max(min_x_a - max_x_b, min_x_b - max_x_a, 0.0)
+    dy = max(min_y_a - max_y_b, min_y_b - max_y_a, 0.0)
+    return float(np.hypot(dx, dy))
+
+
+def _anticollision_reference_cone_focus_names(
+    analysis: AntiCollisionAnalysis,
+) -> set[str]:
+    focus_names = set(_anticollision_focus_reference_names(analysis))
+    calculated_bounds = [
+        bounds
+        for well in analysis.wells
+        if not bool(well.is_reference_only)
+        for bounds in [_xy_bounds_from_stations(well.stations)]
+        if bounds is not None
+    ]
+    if not calculated_bounds:
+        return focus_names
+    for well in analysis.wells:
+        if not bool(well.is_reference_only):
+            continue
+        reference_bounds = _xy_bounds_from_stations(well.stations)
+        if reference_bounds is None:
+            continue
+        if any(
+            _xy_bounds_gap_m(reference_bounds, calculated_bounds_item)
+            <= WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M
+            for calculated_bounds_item in calculated_bounds
+        ):
+            focus_names.add(str(well.name))
     return focus_names
 
 
@@ -3761,11 +3822,7 @@ def _all_wells_anticollision_3d_figure(
     )
     focus_set = {str(name) for name in focus_well_names if str(name).strip()}
     focus_reference_names = (
-        set(
-            sorted(_anticollision_focus_reference_names(analysis))[
-                :WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT
-            ]
-        )
+        _anticollision_reference_cone_focus_names(analysis)
         if resolved_render_mode == WT_3D_RENDER_FAST
         else set()
     )
@@ -4620,6 +4677,12 @@ def _render_anticollision_panel(
             "часть их cone-геометрии скрывается из 3D-рендера, но anti-collision "
             "анализ и расчёт рекомендаций остаются прежними."
         )
+        if reference_wells:
+            st.caption(
+                "В fast anti-collision 3D reference-конусы показываются только для "
+                "reference-скважин, чьи XY-границы подходят к расчётным ближе чем на "
+                f"{int(WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M)} м."
+            )
     if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
         st.caption(
             "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "
@@ -20923,7 +20986,7 @@ def render_solver_diagnostics(
         st.code(ui_error_text(raw_error), language="text")
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer.py	1710
+===BEGIN_FILE===	pywp/three_viewer.py	1694
 from __future__ import annotations
 
 import json
@@ -20957,15 +21020,15 @@ def _viewer_template_text() -> str:
     return _read_text_with_mtime(_TEMPLATE_PATH)
 
 
-def _trackball_controls_text() -> str:
-    return _read_text_with_mtime(_VENDOR_DIR / "TrackballControls.js")
+def _orbit_controls_text() -> str:
+    return _read_text_with_mtime(_VENDOR_DIR / "OrbitControls.js")
 
 
 def _viewer_template_with_libraries() -> str:
     return (
         _viewer_template_text()
         .replace("__THREE_LIBRARY__", _three_library_text())
-        .replace("__TRACKBALL_CONTROLS__", _trackball_controls_text())
+        .replace("__ORBIT_CONTROLS__", _orbit_controls_text())
     )
 
 
@@ -20989,7 +21052,7 @@ def render_local_three_scene(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	32150
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	34795
 <!doctype html>
 <html lang="en">
   <head>
@@ -21046,6 +21109,41 @@ def render_local_three_scene(
         top: 52px;
         right: 10px;
         z-index: 4;
+      }
+
+      #axes-gizmo {
+        position: absolute;
+        top: 54px;
+        left: 10px;
+        width: 136px;
+        height: 118px;
+        pointer-events: none;
+        z-index: 3;
+      }
+
+      #axes-gizmo svg {
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+      }
+
+      .axes-gizmo-line {
+        fill: none;
+        stroke-linecap: round;
+        stroke-width: 2.2;
+      }
+
+      .axes-gizmo-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        dominant-baseline: middle;
+      }
+
+      .axes-gizmo-center {
+        fill: #ffffff;
+        stroke: rgba(15, 23, 42, 0.18);
+        stroke-width: 1.2;
       }
 
       .toolbar-btn {
@@ -21210,6 +21308,7 @@ def render_local_three_scene(
       <div id="legend-toggle-wrap">
         <button id="legend-toggle-btn" class="toolbar-btn" type="button" title="Свернуть или развернуть легенду">Legend</button>
       </div>
+      <div id="axes-gizmo"></div>
       <div id="label-layer"></div>
       <div id="legend"></div>
       <div id="tooltip"></div>
@@ -21218,7 +21317,7 @@ def render_local_three_scene(
       __THREE_LIBRARY__
     </script>
     <script>
-      __TRACKBALL_CONTROLS__
+      __ORBIT_CONTROLS__
     </script>
     <script id="scene-payload" type="application/json">
       __SCENE_PAYLOAD__
@@ -21237,6 +21336,7 @@ def render_local_three_scene(
         const tooltipElement = document.getElementById("tooltip");
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
+        const axesGizmoElement = document.getElementById("axes-gizmo");
         const Z_DISPLAY_SIGN = -1.0;
         const scene = new THREE.Scene();
         const backgroundColor = String(payload.background || "#ffffff");
@@ -21284,15 +21384,16 @@ def render_local_three_scene(
         const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
         camera.up.set(0, 0, 1);
 
-        const controls = new THREE.TrackballControls(camera, renderer.domElement);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.12;
         controls.rotateSpeed = 0.72;
         controls.zoomSpeed = 0.95;
-        controls.panSpeed = 0.235;
-        controls.staticMoving = false;
-        controls.dynamicDampingFactor = 0.14;
-        controls.noRotate = false;
-        controls.noZoom = false;
-        controls.noPan = false;
+        controls.panSpeed = 0.47;
+        controls.screenSpacePanning = true;
+        controls.enableRotate = true;
+        controls.enableZoom = true;
+        controls.enablePan = true;
 
         const hoverTargets = [];
         const sceneLabels = [];
@@ -21403,10 +21504,6 @@ def render_local_three_scene(
         const labelLift = Math.max(maxSpan * 0.015, 18.0);
 
         const axisLength = Math.max(maxSpan * 0.18, 40.0);
-        const axes = new THREE.AxesHelper(axisLength);
-        const axisOrigin = new THREE.Vector3(minBound.x, minBound.y, maxBound.z);
-        axes.position.copy(axisOrigin);
-        scene.add(axes);
 
         function addSceneLabel(text, position, color, extraClassName) {
           const element = document.createElement("div");
@@ -21417,34 +21514,79 @@ def render_local_three_scene(
           sceneLabels.push({ element: element, position: position.clone() });
         }
 
-        addSceneLabel(
-          "X / East",
-          new THREE.Vector3(axisOrigin.x + axisLength * 1.08, axisOrigin.y, axisOrigin.z),
-          "#B91C1C",
-          "scene-axis-label",
-        );
-        addSceneLabel(
-          "Y / North",
-          new THREE.Vector3(axisOrigin.x, axisOrigin.y + axisLength * 1.08, axisOrigin.z),
-          "#15803D",
-          "scene-axis-label",
-        );
-        addSceneLabel(
-          "Z / TVD",
-          new THREE.Vector3(axisOrigin.x, axisOrigin.y, axisOrigin.z + axisLength * 1.08),
-          "#1D4ED8",
-          "scene-axis-label",
-        );
+        const axisOverlayDefinitions = [
+          {
+            key: "x",
+            label: "X / East",
+            color: "#B91C1C",
+            vector: new THREE.Vector3(1, 0, 0),
+          },
+          {
+            key: "y",
+            label: "Y / North",
+            color: "#15803D",
+            vector: new THREE.Vector3(0, 1, 0),
+          },
+          {
+            key: "z",
+            label: "Z / TVD",
+            color: "#1D4ED8",
+            vector: new THREE.Vector3(0, 0, -1),
+          },
+        ];
 
+        function updateAxesGizmo() {
+          if (!axesGizmoElement) {
+            return;
+          }
+          const width = Math.max(axesGizmoElement.clientWidth || 136, 136);
+          const height = Math.max(axesGizmoElement.clientHeight || 118, 118);
+          const centerX = 58;
+          const centerY = 42;
+          const radius = Math.min(width, height) * 0.34;
+          const inverseCameraQuaternion = camera.quaternion.clone().invert();
+          const axisItems = axisOverlayDefinitions.map((item) => {
+            const projected = item.vector
+              .clone()
+              .applyQuaternion(inverseCameraQuaternion)
+              .normalize();
+            return {
+              label: item.label,
+              color: item.color,
+              x: centerX + projected.x * radius,
+              y: centerY - projected.y * radius,
+              z: projected.z,
+            };
+          });
+          axisItems.sort((left, right) => left.z - right.z);
+          const lines = axisItems
+            .map(
+              (item) =>
+                `<line class="axes-gizmo-line" x1="${centerX.toFixed(1)}" y1="${centerY.toFixed(1)}" x2="${item.x.toFixed(1)}" y2="${item.y.toFixed(1)}" stroke="${item.color}" opacity="${(item.z > 0 ? 1.0 : 0.72).toFixed(2)}"></line>`,
+            )
+            .join("");
+          const labels = axisItems
+            .map((item) => {
+              const dx = item.x - centerX;
+              const dy = item.y - centerY;
+              const labelX = item.x + (Math.abs(dx) < 4 ? 0 : Math.sign(dx) * 7);
+              const labelY = item.y + (Math.abs(dy) < 4 ? 0 : Math.sign(dy) * 7);
+              return `<text class="axes-gizmo-label" x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" fill="${item.color}" text-anchor="${dx >= 0 ? "start" : "end"}">${item.label}</text>`;
+            })
+            .join("");
+          axesGizmoElement.innerHTML =
+            `<svg viewBox="0 0 ${width} ${height}" aria-hidden="true">` +
+            `<circle class="axes-gizmo-center" cx="${centerX.toFixed(1)}" cy="${centerY.toFixed(1)}" r="3.2"></circle>` +
+            lines +
+            labels +
+            `</svg>`;
+        }
         function resize() {
           const width = Math.max(root.clientWidth || 1, 1);
           const height = Math.max(root.clientHeight || 1, 1);
           camera.aspect = width / height;
           camera.updateProjectionMatrix();
           renderer.setSize(width, height, false);
-          if (typeof controls.handleResize === "function") {
-            controls.handleResize();
-          }
           requestRender();
         }
 
@@ -21826,6 +21968,7 @@ def render_local_three_scene(
         function render() {
           renderer.clear(true, true, true);
           renderer.render(scene, camera);
+          updateAxesGizmo();
           updateLabels();
           updateTooltip();
         }
@@ -29176,7 +29319,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/generate_reference_stress_welltracks.py	5570
+===BEGIN_FILE===	scripts/generate_reference_stress_welltracks.py	5581
 from __future__ import annotations
 
 import argparse
@@ -29195,10 +29338,10 @@ DEFAULT_PROJECT_TARGET = Path("tests/test_data/WELLTRACKS_PROJECT.INC")
 FACT_COUNT = 130
 PROJECT_COUNT = 90
 GRID_COLUMNS = 10
-X_STEP_PATTERN_M = (300.0, 450.0, 600.0, 750.0, 900.0, 1000.0)
-Y_STEP_PATTERN_M = (350.0, 500.0, 650.0, 800.0, 950.0)
-PROJECT_GLOBAL_OFFSET_X_M = 9500.0
-PROJECT_GLOBAL_OFFSET_Y_M = 1800.0
+X_STEP_PATTERN_M = (1050.0, 1500.0, 1950.0, 2400.0, 3000.0, 3600.0)
+Y_STEP_PATTERN_M = (1200.0, 1650.0, 2100.0, 2550.0, 3150.0)
+PROJECT_GLOBAL_OFFSET_X_M = 32000.0
+PROJECT_GLOBAL_OFFSET_Y_M = 6000.0
 OUTPUT_MD_STEP_M = 30.0
 
 
@@ -34485,7 +34628,7 @@ def test_parse_solver_error_formats_exact_target_delta_for_direct_miss() -> None
     assert "dZ=0.57 м" in rows[0]["Причина"]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	3576
+===BEGIN_FILE===	tests/test_three_viewer.py	3852
 from __future__ import annotations
 
 from pathlib import Path
@@ -34501,19 +34644,25 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="fullscreen-btn"' in html
     assert 'id="legend-toggle-btn"' in html
     assert 'id="tooltip"' in html
+    assert 'id="axes-gizmo"' in html
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
-    assert "TrackballControls" in html
+    assert ".axes-gizmo-line" in html
+    assert ".axes-gizmo-label" in html
+    assert "OrbitControls" in html
     assert "controls.rotateSpeed = 0.72;" in html
     assert "controls.zoomSpeed = 0.95;" in html
-    assert "controls.panSpeed = 0.235;" in html
-    assert "controls.staticMoving = false;" in html
-    assert "controls.dynamicDampingFactor = 0.14;" in html
+    assert "controls.panSpeed = 0.47;" in html
+    assert "controls.enableDamping = true;" in html
+    assert "controls.dampingFactor = 0.12;" in html
+    assert "controls.screenSpacePanning = true;" in html
     assert "function updateLabels()" in html
     assert "X / East" in html
     assert "Y / North" in html
     assert "Z / TVD" in html
     assert "scene-axis-label" in html
+    assert "function updateAxesGizmo()" in html
+    assert "camera.quaternion.clone().invert()" in html
     assert "#legend.is-collapsed" in html
     assert "function syncLegendVisibility()" in html
     assert "function ensureCircleMarkerTexture()" in html
@@ -34527,13 +34676,15 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "Легенда" not in html
 
 
-def test_trackball_controls_use_centered_min_dimension_mapping() -> None:
-    controls_js = (three_viewer._VENDOR_DIR / "TrackballControls.js").read_text(
+def test_orbit_controls_use_expected_mouse_bindings() -> None:
+    controls_js = (three_viewer._VENDOR_DIR / "OrbitControls.js").read_text(
         encoding="utf-8"
     )
 
-    assert "Math.min( scope.screen.width, scope.screen.height )" in controls_js
-    assert "( scope.screen.top + scope.screen.height * 0.5 - pageY ) / radius" in controls_js
+    assert "LEFT: THREE.MOUSE.ROTATE" in controls_js
+    assert "MIDDLE: THREE.MOUSE.DOLLY" in controls_js
+    assert "RIGHT: THREE.MOUSE.PAN" in controls_js
+    assert "this.screenSpacePanning = true;" in controls_js
 
 
 def test_render_local_three_scene_appends_instance_token(monkeypatch) -> None:
@@ -34565,12 +34716,12 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     vendor_dir = tmp_path / "vendor"
     vendor_dir.mkdir()
     (vendor_dir / "three.min.js").write_text("window.THREE = {};", encoding="utf-8")
-    (vendor_dir / "TrackballControls.js").write_text(
-        "window.TrackballControls = function () {};",
+    (vendor_dir / "OrbitControls.js").write_text(
+        "window.OrbitControls = function () {};",
         encoding="utf-8",
     )
     template_path.write_text(
-        "__THREE_LIBRARY__ __TRACKBALL_CONTROLS__ A __SCENE_PAYLOAD__",
+        "__THREE_LIBRARY__ __ORBIT_CONTROLS__ A __SCENE_PAYLOAD__",
         encoding="utf-8",
     )
 
@@ -34583,7 +34734,7 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
 
     time.sleep(0.01)
     template_path.write_text(
-        "__THREE_LIBRARY__ __TRACKBALL_CONTROLS__ B __SCENE_PAYLOAD__",
+        "__THREE_LIBRARY__ __ORBIT_CONTROLS__ B __SCENE_PAYLOAD__",
         encoding="utf-8",
     )
 
@@ -38539,7 +38690,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	115175
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	116997
 from __future__ import annotations
 
 import importlib.util
@@ -41059,10 +41210,20 @@ def test_all_wells_3d_figure_aggregates_reference_wells_in_fast_mode() -> None:
 
 def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_fast_mode() -> None:
     page = _load_welltrack_page_module()
+    far_reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 9000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 9000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+                {"Wellname": "APP-FAR", "Type": "approved", "X": 12000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "APP-FAR", "Type": "approved", "X": 12000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+            ]
+        )
+    )
     analysis = page._build_anti_collision_analysis(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
         model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
-        reference_wells=_reference_wells(),
+        reference_wells=far_reference_wells,
     )
 
     figure = page._all_wells_anticollision_3d_figure(
@@ -41073,8 +41234,8 @@ def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_f
     trace_names = {str(trace.name) for trace in figure.data}
     assert "Фактическая (сводно)" in trace_names
     assert "Проектная утвержденная (сводно)" in trace_names
-    assert "FACT-1 (Фактическая)" not in trace_names
-    assert "APP-1 (Проектная утвержденная)" not in trace_names
+    assert "FACT-FAR (Фактическая)" not in trace_names
+    assert "APP-FAR (Проектная утвержденная)" not in trace_names
 
 
 def test_clusters_touching_focus_pad_expand_focus_to_neighbor_cluster_wells() -> None:
@@ -41388,6 +41549,38 @@ def test_plotly_3d_payload_decimates_reference_hover_points() -> None:
     assert str(hover_only_points[0]["role"]) == "reference_hover"
     assert len(hover_only_points[0]["points"]) == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
     assert len(hover_only_points[0]["hover"]) == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+
+
+def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
+    page = _load_welltrack_page_module()
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "FACT-NEAR", "Type": "actual", "X": 2200.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-NEAR", "Type": "actual", "X": 2200.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 8000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "FACT-FAR", "Type": "actual", "X": 8000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+            ]
+        )
+    )
+    analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        reference_wells=reference_wells,
+    )
+
+    figure = page._all_wells_anticollision_3d_figure(
+        analysis,
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
+    mesh_names = {
+        str(trace.name)
+        for trace in figure.data
+        if isinstance(trace, go.Mesh3d)
+    }
+
+    assert "FACT-NEAR (Фактическая) cone" in mesh_names
+    assert "FACT-FAR (Фактическая) cone" not in mesh_names
 
 
 def test_plotly_3d_figure_to_three_payload_preserves_custom_camera() -> None:
