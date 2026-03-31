@@ -1343,6 +1343,186 @@ def _merge_three_mesh_payloads(
     ]
 
 
+def _raw_bounds_from_xyz_arrays(
+    *,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    z_values: np.ndarray,
+) -> dict[str, list[float]] | None:
+    if not (len(x_values) == len(y_values) == len(z_values)):
+        return None
+    finite_mask = (
+        np.isfinite(x_values.astype(float, copy=False))
+        & np.isfinite(y_values.astype(float, copy=False))
+        & np.isfinite(z_values.astype(float, copy=False))
+    )
+    if not finite_mask.any():
+        return None
+    filtered_x = x_values[finite_mask].astype(float, copy=False)
+    filtered_y = y_values[finite_mask].astype(float, copy=False)
+    filtered_z = z_values[finite_mask].astype(float, copy=False)
+    return {
+        "min": [
+            float(np.min(filtered_x)),
+            float(np.min(filtered_y)),
+            float(np.min(filtered_z)),
+        ],
+        "max": [
+            float(np.max(filtered_x)),
+            float(np.max(filtered_y)),
+            float(np.max(filtered_z)),
+        ],
+    }
+
+
+def _merge_raw_bounds(
+    bounds_items: Iterable[dict[str, list[float]] | None],
+) -> dict[str, list[float]] | None:
+    mins: list[np.ndarray] = []
+    maxs: list[np.ndarray] = []
+    for item in bounds_items:
+        if not item:
+            continue
+        mins.append(np.asarray(item["min"], dtype=float))
+        maxs.append(np.asarray(item["max"], dtype=float))
+    if not mins or not maxs:
+        return None
+    min_stack = np.vstack(mins)
+    max_stack = np.vstack(maxs)
+    return {
+        "min": np.min(min_stack, axis=0).astype(float).tolist(),
+        "max": np.max(max_stack, axis=0).astype(float).tolist(),
+    }
+
+
+def _successful_plan_raw_bounds(success: SuccessfulWellPlan) -> dict[str, list[float]] | None:
+    stations = success.stations
+    if stations.empty:
+        return _raw_bounds_from_xyz_arrays(
+            x_values=np.asarray([success.surface.x, success.t1.x, success.t3.x], dtype=float),
+            y_values=np.asarray([success.surface.y, success.t1.y, success.t3.y], dtype=float),
+            z_values=np.asarray([success.surface.z, success.t1.z, success.t3.z], dtype=float),
+        )
+    bounds = _raw_bounds_from_xyz_arrays(
+        x_values=stations["X_m"].to_numpy(dtype=float),
+        y_values=stations["Y_m"].to_numpy(dtype=float),
+        z_values=stations["Z_m"].to_numpy(dtype=float),
+    )
+    return _merge_raw_bounds(
+        (
+            bounds,
+            {
+                "min": [
+                    float(min(success.surface.x, success.t1.x, success.t3.x)),
+                    float(min(success.surface.y, success.t1.y, success.t3.y)),
+                    float(min(success.surface.z, success.t1.z, success.t3.z)),
+                ],
+                "max": [
+                    float(max(success.surface.x, success.t1.x, success.t3.x)),
+                    float(max(success.surface.y, success.t1.y, success.t3.y)),
+                    float(max(success.surface.z, success.t1.z, success.t3.z)),
+                ],
+            },
+        )
+    )
+
+
+def _target_only_raw_bounds(target_only: _TargetOnlyWell) -> dict[str, list[float]]:
+    return {
+        "min": [
+            float(min(target_only.surface.x, target_only.t1.x, target_only.t3.x)),
+            float(min(target_only.surface.y, target_only.t1.y, target_only.t3.y)),
+            float(min(target_only.surface.z, target_only.t1.z, target_only.t3.z)),
+        ],
+        "max": [
+            float(max(target_only.surface.x, target_only.t1.x, target_only.t3.x)),
+            float(max(target_only.surface.y, target_only.t1.y, target_only.t3.y)),
+            float(max(target_only.surface.z, target_only.t1.z, target_only.t3.z)),
+        ],
+    }
+
+
+def _legend_pad_label(pad: WellPad) -> str:
+    return f"Куст {str(pad.pad_id)}"
+
+
+def _three_legend_tree_payload(
+    *,
+    records: list[WelltrackRecord],
+    visible_well_names: Iterable[str],
+    well_bounds_by_name: Mapping[str, dict[str, list[float]]],
+    name_to_color: Mapping[str, str],
+) -> tuple[list[dict[str, object]], dict[str, dict[str, list[float]]], set[str]]:
+    visible_set = {str(name) for name in visible_well_names if str(name).strip()}
+    if not visible_set:
+        return [], {}, set()
+    pads, _, well_names_by_pad_id = _pad_membership(records)
+    if len(pads) <= 1:
+        return [], {}, set()
+    tree: list[dict[str, object]] = []
+    focus_targets: dict[str, dict[str, list[float]]] = {}
+    hidden_flat_legend_labels: set[str] = set()
+    for pad in pads:
+        pad_id = str(pad.pad_id)
+        ordered_names = [
+            str(name)
+            for name in well_names_by_pad_id.get(pad_id, ())
+            if str(name) in visible_set and str(name) in well_bounds_by_name
+        ]
+        if not ordered_names:
+            continue
+        child_nodes = []
+        child_bounds = []
+        for well_name in ordered_names:
+            focus_id = f"well::{well_name}"
+            child_nodes.append(
+                {
+                    "id": focus_id,
+                    "label": str(well_name),
+                    "color": str(name_to_color.get(str(well_name), "#64748b")),
+                }
+            )
+            focus_targets[focus_id] = dict(well_bounds_by_name[well_name])
+            child_bounds.append(well_bounds_by_name[well_name])
+            hidden_flat_legend_labels.add(str(well_name))
+        pad_focus_id = f"pad::{pad_id}"
+        merged_pad_bounds = _merge_raw_bounds(child_bounds)
+        if merged_pad_bounds is not None:
+            focus_targets[pad_focus_id] = merged_pad_bounds
+        tree.append(
+            {
+                "id": pad_focus_id,
+                "label": _legend_pad_label(pad),
+                "children": child_nodes,
+            }
+        )
+    return tree, focus_targets, hidden_flat_legend_labels
+
+
+def _augment_three_payload(
+    *,
+    payload: dict[str, object],
+    legend_tree: list[dict[str, object]] | None = None,
+    focus_targets: Mapping[str, dict[str, list[float]]] | None = None,
+    hidden_flat_legend_labels: set[str] | None = None,
+) -> dict[str, object]:
+    updated = dict(payload)
+    if legend_tree:
+        updated["legend_tree"] = list(legend_tree)
+    if focus_targets:
+        updated["focus_targets"] = {
+            str(key): dict(value) for key, value in focus_targets.items()
+        }
+    hidden_labels = {str(label) for label in (hidden_flat_legend_labels or set())}
+    if hidden_labels:
+        updated["legend"] = [
+            item
+            for item in list(updated.get("legend") or [])
+            if str(dict(item).get("label", "")).strip() not in hidden_labels
+        ]
+    return updated
+
+
 def _plotly_3d_figure_to_three_payload(fig: go.Figure) -> dict[str, object]:
     scene = fig.layout.scene
     x_range = (
@@ -1417,11 +1597,22 @@ def _render_plotly_or_three_3d(
     figure: go.Figure,
     backend: str,
     height: int,
+    payload_overrides: dict[str, object] | None = None,
 ) -> None:
     if str(backend) == WT_3D_BACKEND_THREE_LOCAL:
+        payload = _plotly_3d_figure_to_three_payload(figure)
+        if payload_overrides:
+            payload = _augment_three_payload(
+                payload=payload,
+                legend_tree=list(payload_overrides.get("legend_tree") or []),
+                focus_targets=payload_overrides.get("focus_targets"),
+                hidden_flat_legend_labels=set(
+                    str(item) for item in (payload_overrides.get("hidden_flat_legend_labels") or set())
+                ),
+            )
         with container:
             render_local_three_scene(
-                _plotly_3d_figure_to_three_payload(figure),
+                payload,
                 height=height,
                 instance_token=int(st.session_state.get("wt_three_viewer_nonce", 0)),
             )
@@ -1431,6 +1622,81 @@ def _render_plotly_or_three_3d(
         config=trajectory_plotly_chart_config(),
         width="stretch",
     )
+
+
+def _trajectory_three_payload_overrides(
+    *,
+    records: list[WelltrackRecord],
+    successes: list[SuccessfulWellPlan],
+    target_only_wells: list[_TargetOnlyWell],
+    name_to_color: Mapping[str, str],
+) -> dict[str, object]:
+    well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
+    for success in successes:
+        bounds = _successful_plan_raw_bounds(success)
+        if bounds is not None:
+            well_bounds_by_name[str(success.name)] = bounds
+    for target_only in target_only_wells:
+        well_bounds_by_name[str(target_only.name)] = _target_only_raw_bounds(target_only)
+    legend_tree, focus_targets, hidden_labels = _three_legend_tree_payload(
+        records=records,
+        visible_well_names=tuple(well_bounds_by_name.keys()),
+        well_bounds_by_name=well_bounds_by_name,
+        name_to_color=name_to_color,
+    )
+    return {
+        "legend_tree": legend_tree,
+        "focus_targets": focus_targets,
+        "hidden_flat_legend_labels": hidden_labels,
+    }
+
+
+def _anticollision_three_payload_overrides(
+    *,
+    records: list[WelltrackRecord],
+    analysis: AntiCollisionAnalysis,
+) -> dict[str, object]:
+    visible_names: list[str] = []
+    well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
+    name_to_color: dict[str, str] = {}
+    for well in analysis.wells:
+        if bool(well.is_reference_only):
+            continue
+        visible_names.append(str(well.name))
+        name_to_color[str(well.name)] = str(well.color)
+        bounds = _raw_bounds_from_xyz_arrays(
+            x_values=well.stations["X_m"].to_numpy(dtype=float),
+            y_values=well.stations["Y_m"].to_numpy(dtype=float),
+            z_values=well.stations["Z_m"].to_numpy(dtype=float),
+        )
+        extra_bounds = None
+        if well.t1 is not None and well.t3 is not None:
+            extra_bounds = {
+                "min": [
+                    float(min(well.surface.x, well.t1.x, well.t3.x)),
+                    float(min(well.surface.y, well.t1.y, well.t3.y)),
+                    float(min(well.surface.z, well.t1.z, well.t3.z)),
+                ],
+                "max": [
+                    float(max(well.surface.x, well.t1.x, well.t3.x)),
+                    float(max(well.surface.y, well.t1.y, well.t3.y)),
+                    float(max(well.surface.z, well.t1.z, well.t3.z)),
+                ],
+            }
+        merged_bounds = _merge_raw_bounds((bounds, extra_bounds))
+        if merged_bounds is not None:
+            well_bounds_by_name[str(well.name)] = merged_bounds
+    legend_tree, focus_targets, hidden_labels = _three_legend_tree_payload(
+        records=records,
+        visible_well_names=visible_names,
+        well_bounds_by_name=well_bounds_by_name,
+        name_to_color=name_to_color,
+    )
+    return {
+        "legend_tree": legend_tree,
+        "focus_targets": focus_targets,
+        "hidden_flat_legend_labels": hidden_labels,
+    }
 
 
 def _build_anti_collision_analysis(
@@ -3473,6 +3739,10 @@ def _render_anticollision_panel(
         figure=anticollision_3d_figure,
         backend=selected_3d_backend,
         height=660,
+        payload_overrides=_anticollision_three_payload_overrides(
+            records=records,
+            analysis=analysis,
+        ),
     )
     chart_col2.plotly_chart(
         _all_wells_anticollision_plan_figure(
@@ -3652,6 +3922,10 @@ def _render_anticollision_panel(
                         successes=successes,
                         uncertainty_model=uncertainty_model,
                         target_well_names=_pad_scoped_cluster_target_well_names(
+                            cluster=selected_cluster,
+                            focus_pad_well_names=focus_pad_well_names,
+                        ),
+                        focus_well_names=_pad_scoped_cluster_focus_well_names(
                             cluster=selected_cluster,
                             focus_pad_well_names=focus_pad_well_names,
                         ),
@@ -3925,6 +4199,7 @@ def _cluster_snapshot(
     cluster: AntiCollisionRecommendationCluster,
     *,
     target_well_names: tuple[str, ...] = (),
+    focus_well_names: tuple[str, ...] = (),
 ) -> dict[str, object]:
     items = tuple(_recommendation_snapshot(item) for item in cluster.recommendations)
     actionable_before_sf = [
@@ -3952,6 +4227,7 @@ def _cluster_snapshot(
         "affected_wells": tuple(str(name) for name in cluster.affected_wells),
         "well_names": tuple(str(name) for name in cluster.well_names),
         "target_well_names": tuple(str(name) for name in target_well_names),
+        "focus_well_names": tuple(str(name) for name in focus_well_names),
         "recommendation_count": int(cluster.recommendation_count),
         "before_sf": float(before_sf),
         "rerun_order_label": str(cluster.rerun_order_label),
@@ -4540,6 +4816,7 @@ def _prepare_rerun_from_cluster(
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
     target_well_names: tuple[str, ...] = (),
+    focus_well_names: tuple[str, ...] = (),
 ) -> None:
     if (not bool(cluster.can_prepare_rerun)) or cluster.blocking_advisory is not None:
         blocking_message = (
@@ -4561,20 +4838,42 @@ def _prepare_rerun_from_cluster(
         successes=successes,
         uncertainty_model=uncertainty_model,
     )
-    snapshot = _cluster_snapshot(cluster, target_well_names=target_well_names)
+    snapshot = _cluster_snapshot(
+        cluster,
+        target_well_names=target_well_names,
+        focus_well_names=focus_well_names,
+    )
     st.session_state["wt_prepared_well_overrides"] = prepared
     st.session_state["wt_prepared_recommendation_snapshot"] = (
         snapshot if prepared else None
     )
     if prepared:
         message = str(cluster.summary)
-        if target_well_names:
+        if focus_well_names:
             message += (
                 " Фокус пересчета: "
-                + ", ".join(str(name) for name in target_well_names)
-                + ". Соседние расчетные скважины других кустов будут подключены "
-                "только если они входят в тот же cluster-level конфликт."
+                + ", ".join(str(name) for name in focus_well_names)
+                + "."
             )
+        if target_well_names:
+            expanded_scope = [
+                str(name)
+                for name in target_well_names
+                if str(name) not in set(str(name) for name in focus_well_names)
+            ]
+            message += (
+                " Область cluster-level пересчета: "
+                + ", ".join(str(name) for name in target_well_names)
+                + "."
+            )
+            if expanded_scope:
+                message += (
+                    " Соседние расчетные скважины других кустов будут подключены "
+                    "автоматически, потому что входят в тот же связанный anti-collision "
+                    "кластер: "
+                    + ", ".join(expanded_scope)
+                    + "."
+                )
         if cluster.blocking_advisory:
             message += " " + str(cluster.blocking_advisory)
         if skipped_wells:
@@ -4588,11 +4887,18 @@ def _prepare_rerun_from_cluster(
         ordered_wells = [
             str(step.well_name)
             for step in cluster.action_steps
-            if str(step.well_name) in prepared
+            if str(step.well_name) in set(target_well_names or tuple(prepared.keys()))
         ]
-        st.session_state["wt_pending_selected_names"] = ordered_wells or list(
-            prepared.keys()
+        pending_names = list(
+            dict.fromkeys(
+                [
+                    *ordered_wells,
+                    *(str(name) for name in target_well_names),
+                    *(str(name) for name in prepared.keys()),
+                ]
+            )
         )
+        st.session_state["wt_pending_selected_names"] = pending_names
         return
     st.session_state["wt_prepared_override_message"] = (
         "Не удалось подготовить cluster-level пересчет: контекст конфликта недоступен."
@@ -5137,6 +5443,53 @@ def _actual_fund_zone_table_rows(detail: ActualFundWellAnalysis) -> list[dict[st
     ]
 
 
+def _actual_fund_analysis_signature(
+    actual_wells: tuple[ImportedTrajectoryWell, ...],
+) -> tuple[tuple[str, object, ...], ...]:
+    signature_rows: list[tuple[str, object, ...]] = []
+    for item in actual_wells:
+        stations = item.stations
+        last_md = (
+            float(stations["MD_m"].iloc[-1])
+            if not stations.empty and "MD_m" in stations.columns
+            else 0.0
+        )
+        point_count = int(len(stations))
+        last_xyz = (
+            float(stations["X_m"].iloc[-1]) if point_count and "X_m" in stations.columns else 0.0,
+            float(stations["Y_m"].iloc[-1]) if point_count and "Y_m" in stations.columns else 0.0,
+            float(stations["Z_m"].iloc[-1]) if point_count and "Z_m" in stations.columns else 0.0,
+        )
+        signature_rows.append(
+            (
+                str(item.name),
+                str(item.kind),
+                point_count,
+                last_md,
+                *last_xyz,
+            )
+        )
+    return tuple(signature_rows)
+
+
+def _actual_fund_analyses(
+    actual_wells: tuple[ImportedTrajectoryWell, ...],
+) -> tuple[ActualFundWellAnalysis, ...]:
+    signature = _actual_fund_analysis_signature(actual_wells)
+    cache_key = "wt_actual_fund_analysis_cache"
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict) and cached.get("signature") == signature:
+        analyses = cached.get("analyses")
+        if isinstance(analyses, tuple):
+            return analyses
+    analyses = build_actual_fund_well_analyses(actual_wells)
+    st.session_state[cache_key] = {
+        "signature": signature,
+        "analyses": analyses,
+    }
+    return analyses
+
+
 def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
     figure = go.Figure()
     shown_legend_keys: set[str] = set()
@@ -5412,12 +5765,15 @@ def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]
     )
 
 
-def _render_actual_fund_analysis_panel() -> None:
+def _render_actual_fund_analysis_panel(
+    analyses: tuple[ActualFundWellAnalysis, ...] | None = None,
+) -> None:
     actual_wells = _reference_kind_wells(REFERENCE_WELL_ACTUAL)
     if not actual_wells:
         return
 
-    analyses = build_actual_fund_well_analyses(actual_wells)
+    if analyses is None:
+        analyses = _actual_fund_analyses(actual_wells)
     metrics = tuple(item.metrics for item in analyses)
     eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
     excluded_horizontal_metrics = [
@@ -5898,22 +6254,38 @@ def _pad_scoped_cluster_target_well_names(
     focus_pad_well_names: tuple[str, ...],
 ) -> tuple[str, ...]:
     focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
-    if focus_set:
-        focused_affected = tuple(
-            str(name)
-            for name in cluster.affected_wells
-            if str(name) in focus_set
-        )
-        if focused_affected:
-            return focused_affected
-        focused_cluster = tuple(
-            str(name) for name in cluster.well_names if str(name) in focus_set
-        )
-        if focused_cluster:
-            return focused_cluster
-    if cluster.affected_wells:
-        return tuple(str(name) for name in cluster.affected_wells)
-    return tuple(str(name) for name in cluster.well_names)
+    focused_cluster = tuple(
+        str(name) for name in cluster.well_names if str(name) in focus_set
+    )
+    cluster_scope = (
+        tuple(str(name) for name in cluster.well_names)
+        if cluster.well_names
+        else tuple(str(name) for name in cluster.affected_wells)
+    )
+    if not focused_cluster:
+        return cluster_scope
+    ordered_scope: list[str] = []
+    for well_name in [*focused_cluster, *cluster_scope]:
+        normalized = str(well_name).strip()
+        if normalized and normalized not in ordered_scope:
+            ordered_scope.append(normalized)
+    return tuple(ordered_scope)
+
+
+def _pad_scoped_cluster_focus_well_names(
+    *,
+    cluster: AntiCollisionRecommendationCluster,
+    focus_pad_well_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
+    if not focus_set:
+        return ()
+    focused_affected = tuple(
+        str(name) for name in cluster.affected_wells if str(name) in focus_set
+    )
+    if focused_affected:
+        return focused_affected
+    return tuple(str(name) for name in cluster.well_names if str(name) in focus_set)
 
 
 def _anticollision_focus_well_names(
@@ -6261,8 +6633,8 @@ def _render_batch_run_forms(
         st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
     with st.form("welltrack_run_form", clear_on_submit=False):
         st.markdown("#### Запуск / пересчет выбранных скважин")
-        select_col, pad_col, action_col, pad_action_col = st.columns(
-            [5.0, 2.4, 1.2, 1.5],
+        select_col, pad_col, action_col, pad_add_col, pad_only_col = st.columns(
+            [5.0, 2.4, 1.2, 1.45, 1.45],
             gap="small",
             vertical_alignment="bottom",
         )
@@ -6289,11 +6661,21 @@ def _render_batch_run_forms(
                     ),
                     key="wt_batch_select_pad_id",
                 )
-        with pad_action_col:
-            select_pad_clicked = (
+        with pad_add_col:
+            add_pad_clicked = (
                 st.form_submit_button(
-                    "Выбрать куст",
+                    "Добавить куст",
                     icon=":material/filter_alt:",
+                    width="stretch",
+                )
+                if len(pad_ids) > 1
+                else False
+            )
+        with pad_only_col:
+            replace_with_pad_clicked = (
+                st.form_submit_button(
+                    "Только куст",
+                    icon=":material/rule:",
                     width="stretch",
                 )
                 if len(pad_ids) > 1
@@ -6306,8 +6688,9 @@ def _render_batch_run_forms(
         )
         if len(pad_ids) > 1:
             st.caption(
-                "При работе с несколькими кустами можно быстро выбрать весь куст. "
-                "Это удобно и для обычного batch, и как стартовая точка перед "
+                "При работе с несколькими кустами можно либо добавить весь куст "
+                "в текущую выборку, либо сразу переключиться только на него. Это "
+                "удобно и для обычного batch, и как стартовая точка перед "
                 "anti-collision пересчетом только для интересующего куста."
             )
         selected_now = list(st.session_state.get("wt_selected_names", []))
@@ -6346,7 +6729,21 @@ def _render_batch_run_forms(
     if select_all_clicked:
         st.session_state["wt_pending_selected_names"] = list(all_names)
         st.rerun()
-    if select_pad_clicked:
+    if add_pad_clicked:
+        selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
+        current_selected = [
+            str(name) for name in st.session_state.get("wt_selected_names", [])
+        ]
+        st.session_state["wt_pending_selected_names"] = list(
+            dict.fromkeys(
+                [
+                    *current_selected,
+                    *well_names_by_pad_id.get(selected_pad_id, ()),
+                ]
+            )
+        )
+        st.rerun()
+    if replace_with_pad_clicked:
         selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
         st.session_state["wt_pending_selected_names"] = list(
             well_names_by_pad_id.get(selected_pad_id, ())
@@ -7076,6 +7473,12 @@ def _render_success_tabs(
             figure=overview_3d_figure,
             backend=selected_3d_backend,
             height=620,
+            payload_overrides=_trajectory_three_payload_overrides(
+                records=records,
+                successes=successes,
+                target_only_wells=target_only_wells,
+                name_to_color=name_to_color,
+            ),
         )
         c2.plotly_chart(
             _all_wells_plan_figure(

@@ -345,7 +345,7 @@ def test_welltrack_general_run_select_all_restores_full_selection() -> None:
     ]
 
 
-def test_welltrack_general_run_can_select_all_wells_for_single_pad() -> None:
+def test_welltrack_general_run_can_replace_selection_with_single_pad() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _multi_pad_records()
     at.session_state["wt_records"] = records
@@ -357,12 +357,108 @@ def test_welltrack_general_run_can_select_all_wells_for_single_pad() -> None:
     pad_select.set_value("PAD-02")
     at.run()
 
-    _click_button(at, "Выбрать куст")
+    _click_button(at, "Только куст")
     at.run()
 
     assert _multiselect_value(at, "Скважины для расчета") == [
         "PAD2-A",
         "PAD2-B",
+    ]
+
+
+def test_welltrack_general_run_can_add_pad_to_existing_selection() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _multi_pad_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_selected_names"] = ["PAD1-A"]
+
+    at.run()
+
+    pad_select = next(widget for widget in at.selectbox if widget.label == "Куст")
+    pad_select.set_value("PAD-02")
+    at.run()
+
+    _click_button(at, "Добавить куст")
+    at.run()
+
+    assert _multiselect_value(at, "Скважины для расчета") == [
+        "PAD1-A",
+        "PAD2-A",
+        "PAD2-B",
+    ]
+
+
+def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_pad() -> None:
+    page = _load_welltrack_page_module()
+    records = _multi_pad_records()
+    successes = [
+        _successful_plan_xy(name="PAD1-A", x_offset_m=0.0, y_offset_m=0.0),
+        _successful_plan_xy(name="PAD1-B", x_offset_m=0.0, y_offset_m=50.0),
+        _successful_plan_xy(name="PAD2-A", x_offset_m=5000.0, y_offset_m=0.0),
+        _successful_plan_xy(name="PAD2-B", x_offset_m=5000.0, y_offset_m=50.0),
+    ]
+    name_to_color = {
+        "PAD1-A": "#22c55e",
+        "PAD1-B": "#2563eb",
+        "PAD2-A": "#f59e0b",
+        "PAD2-B": "#c026d3",
+    }
+
+    overrides = page._trajectory_three_payload_overrides(
+        records=records,
+        successes=successes,
+        target_only_wells=[],
+        name_to_color=name_to_color,
+    )
+
+    legend_tree = list(overrides["legend_tree"])
+    focus_targets = dict(overrides["focus_targets"])
+    hidden_labels = set(str(item) for item in overrides["hidden_flat_legend_labels"])
+
+    assert [str(item["label"]) for item in legend_tree] == ["Куст PAD-01", "Куст PAD-02"]
+    assert [str(child["label"]) for child in legend_tree[0]["children"]] == ["PAD1-A", "PAD1-B"]
+    assert [str(child["label"]) for child in legend_tree[1]["children"]] == ["PAD2-A", "PAD2-B"]
+    assert set(focus_targets) == {
+        "pad::PAD-01",
+        "pad::PAD-02",
+        "well::PAD1-A",
+        "well::PAD1-B",
+        "well::PAD2-A",
+        "well::PAD2-B",
+    }
+    assert hidden_labels == {"PAD1-A", "PAD1-B", "PAD2-A", "PAD2-B"}
+
+
+def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
+    page = _load_welltrack_page_module()
+    payload = {
+        "legend": [
+            {"label": "PAD1-A", "color": "#22c55e", "opacity": 1.0},
+            {"label": "PAD2-A", "color": "#f59e0b", "opacity": 1.0},
+            {"label": "Общая зона overlap", "color": "#fca5a5", "opacity": 0.4},
+        ]
+    }
+
+    updated = page._augment_three_payload(
+        payload=payload,
+        legend_tree=[
+            {
+                "id": "pad::PAD-01",
+                "label": "Куст PAD-01",
+                "children": [{"id": "well::PAD1-A", "label": "PAD1-A", "color": "#22c55e"}],
+            }
+        ],
+        focus_targets={"pad::PAD-01": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}},
+        hidden_flat_legend_labels={"PAD1-A", "PAD2-A"},
+    )
+
+    assert updated["legend_tree"]
+    assert updated["focus_targets"] == {
+        "pad::PAD-01": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}
+    }
+    assert list(updated["legend"]) == [
+        {"label": "Общая зона overlap", "color": "#fca5a5", "opacity": 0.4}
     ]
 
 
@@ -1480,7 +1576,41 @@ def test_prepare_rerun_from_cluster_persists_pad_scoped_target_wells() -> None:
 
     snapshot = page._cluster_snapshot(clusters[0], target_well_names=("WELL-A",))
     assert snapshot["target_well_names"] == ("WELL-A",)
+    assert snapshot["focus_well_names"] == ()
     assert page._resolution_snapshot_well_names(snapshot) == ("WELL-A",)
+
+
+def test_pad_scoped_cluster_target_wells_expand_to_neighbor_cluster_scope() -> None:
+    page = _load_welltrack_page_module()
+    analysis = page._build_anti_collision_analysis(
+        [
+            _successful_plan(name="PAD1-A", y_offset_m=0.0),
+            _successful_plan(name="PAD2-A", y_offset_m=5.0),
+        ],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(
+            [
+                _successful_plan(name="PAD1-A", y_offset_m=0.0),
+                _successful_plan(name="PAD2-A", y_offset_m=5.0),
+            ]
+        ),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+
+    target_names = page._pad_scoped_cluster_target_well_names(
+        cluster=clusters[0],
+        focus_pad_well_names=("PAD1-A",),
+    )
+    focus_names = page._pad_scoped_cluster_focus_well_names(
+        cluster=clusters[0],
+        focus_pad_well_names=("PAD1-A",),
+    )
+
+    assert target_names == ("PAD1-A", "PAD2-A")
+    assert focus_names == ("PAD1-A",)
 
 
 def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() -> None:

@@ -34,6 +34,13 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "camera.quaternion.clone().invert()" in html
     assert "#legend.is-collapsed" in html
     assert "function syncLegendVisibility()" in html
+    assert "payload.legend_tree" in html
+    assert "payload.focus_targets" in html
+    assert "function fitCameraToRawBounds(rawBounds)" in html
+    assert '"Свернуть всё"' in html
+    assert '"Развернуть всё"' in html
+    assert "legend-node-btn legend-node-pad" in html
+    assert "legend-node-btn legend-node-well" in html
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html

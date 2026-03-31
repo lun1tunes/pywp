@@ -1234,7 +1234,7 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/02_welltrack_import.py	275441
+===BEGIN_FILE===	pages/02_welltrack_import.py	290496
 from __future__ import annotations
 
 import colorsys
@@ -2580,6 +2580,186 @@ def _merge_three_mesh_payloads(
     ]
 
 
+def _raw_bounds_from_xyz_arrays(
+    *,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    z_values: np.ndarray,
+) -> dict[str, list[float]] | None:
+    if not (len(x_values) == len(y_values) == len(z_values)):
+        return None
+    finite_mask = (
+        np.isfinite(x_values.astype(float, copy=False))
+        & np.isfinite(y_values.astype(float, copy=False))
+        & np.isfinite(z_values.astype(float, copy=False))
+    )
+    if not finite_mask.any():
+        return None
+    filtered_x = x_values[finite_mask].astype(float, copy=False)
+    filtered_y = y_values[finite_mask].astype(float, copy=False)
+    filtered_z = z_values[finite_mask].astype(float, copy=False)
+    return {
+        "min": [
+            float(np.min(filtered_x)),
+            float(np.min(filtered_y)),
+            float(np.min(filtered_z)),
+        ],
+        "max": [
+            float(np.max(filtered_x)),
+            float(np.max(filtered_y)),
+            float(np.max(filtered_z)),
+        ],
+    }
+
+
+def _merge_raw_bounds(
+    bounds_items: Iterable[dict[str, list[float]] | None],
+) -> dict[str, list[float]] | None:
+    mins: list[np.ndarray] = []
+    maxs: list[np.ndarray] = []
+    for item in bounds_items:
+        if not item:
+            continue
+        mins.append(np.asarray(item["min"], dtype=float))
+        maxs.append(np.asarray(item["max"], dtype=float))
+    if not mins or not maxs:
+        return None
+    min_stack = np.vstack(mins)
+    max_stack = np.vstack(maxs)
+    return {
+        "min": np.min(min_stack, axis=0).astype(float).tolist(),
+        "max": np.max(max_stack, axis=0).astype(float).tolist(),
+    }
+
+
+def _successful_plan_raw_bounds(success: SuccessfulWellPlan) -> dict[str, list[float]] | None:
+    stations = success.stations
+    if stations.empty:
+        return _raw_bounds_from_xyz_arrays(
+            x_values=np.asarray([success.surface.x, success.t1.x, success.t3.x], dtype=float),
+            y_values=np.asarray([success.surface.y, success.t1.y, success.t3.y], dtype=float),
+            z_values=np.asarray([success.surface.z, success.t1.z, success.t3.z], dtype=float),
+        )
+    bounds = _raw_bounds_from_xyz_arrays(
+        x_values=stations["X_m"].to_numpy(dtype=float),
+        y_values=stations["Y_m"].to_numpy(dtype=float),
+        z_values=stations["Z_m"].to_numpy(dtype=float),
+    )
+    return _merge_raw_bounds(
+        (
+            bounds,
+            {
+                "min": [
+                    float(min(success.surface.x, success.t1.x, success.t3.x)),
+                    float(min(success.surface.y, success.t1.y, success.t3.y)),
+                    float(min(success.surface.z, success.t1.z, success.t3.z)),
+                ],
+                "max": [
+                    float(max(success.surface.x, success.t1.x, success.t3.x)),
+                    float(max(success.surface.y, success.t1.y, success.t3.y)),
+                    float(max(success.surface.z, success.t1.z, success.t3.z)),
+                ],
+            },
+        )
+    )
+
+
+def _target_only_raw_bounds(target_only: _TargetOnlyWell) -> dict[str, list[float]]:
+    return {
+        "min": [
+            float(min(target_only.surface.x, target_only.t1.x, target_only.t3.x)),
+            float(min(target_only.surface.y, target_only.t1.y, target_only.t3.y)),
+            float(min(target_only.surface.z, target_only.t1.z, target_only.t3.z)),
+        ],
+        "max": [
+            float(max(target_only.surface.x, target_only.t1.x, target_only.t3.x)),
+            float(max(target_only.surface.y, target_only.t1.y, target_only.t3.y)),
+            float(max(target_only.surface.z, target_only.t1.z, target_only.t3.z)),
+        ],
+    }
+
+
+def _legend_pad_label(pad: WellPad) -> str:
+    return f"Куст {str(pad.pad_id)}"
+
+
+def _three_legend_tree_payload(
+    *,
+    records: list[WelltrackRecord],
+    visible_well_names: Iterable[str],
+    well_bounds_by_name: Mapping[str, dict[str, list[float]]],
+    name_to_color: Mapping[str, str],
+) -> tuple[list[dict[str, object]], dict[str, dict[str, list[float]]], set[str]]:
+    visible_set = {str(name) for name in visible_well_names if str(name).strip()}
+    if not visible_set:
+        return [], {}, set()
+    pads, _, well_names_by_pad_id = _pad_membership(records)
+    if len(pads) <= 1:
+        return [], {}, set()
+    tree: list[dict[str, object]] = []
+    focus_targets: dict[str, dict[str, list[float]]] = {}
+    hidden_flat_legend_labels: set[str] = set()
+    for pad in pads:
+        pad_id = str(pad.pad_id)
+        ordered_names = [
+            str(name)
+            for name in well_names_by_pad_id.get(pad_id, ())
+            if str(name) in visible_set and str(name) in well_bounds_by_name
+        ]
+        if not ordered_names:
+            continue
+        child_nodes = []
+        child_bounds = []
+        for well_name in ordered_names:
+            focus_id = f"well::{well_name}"
+            child_nodes.append(
+                {
+                    "id": focus_id,
+                    "label": str(well_name),
+                    "color": str(name_to_color.get(str(well_name), "#64748b")),
+                }
+            )
+            focus_targets[focus_id] = dict(well_bounds_by_name[well_name])
+            child_bounds.append(well_bounds_by_name[well_name])
+            hidden_flat_legend_labels.add(str(well_name))
+        pad_focus_id = f"pad::{pad_id}"
+        merged_pad_bounds = _merge_raw_bounds(child_bounds)
+        if merged_pad_bounds is not None:
+            focus_targets[pad_focus_id] = merged_pad_bounds
+        tree.append(
+            {
+                "id": pad_focus_id,
+                "label": _legend_pad_label(pad),
+                "children": child_nodes,
+            }
+        )
+    return tree, focus_targets, hidden_flat_legend_labels
+
+
+def _augment_three_payload(
+    *,
+    payload: dict[str, object],
+    legend_tree: list[dict[str, object]] | None = None,
+    focus_targets: Mapping[str, dict[str, list[float]]] | None = None,
+    hidden_flat_legend_labels: set[str] | None = None,
+) -> dict[str, object]:
+    updated = dict(payload)
+    if legend_tree:
+        updated["legend_tree"] = list(legend_tree)
+    if focus_targets:
+        updated["focus_targets"] = {
+            str(key): dict(value) for key, value in focus_targets.items()
+        }
+    hidden_labels = {str(label) for label in (hidden_flat_legend_labels or set())}
+    if hidden_labels:
+        updated["legend"] = [
+            item
+            for item in list(updated.get("legend") or [])
+            if str(dict(item).get("label", "")).strip() not in hidden_labels
+        ]
+    return updated
+
+
 def _plotly_3d_figure_to_three_payload(fig: go.Figure) -> dict[str, object]:
     scene = fig.layout.scene
     x_range = (
@@ -2654,11 +2834,22 @@ def _render_plotly_or_three_3d(
     figure: go.Figure,
     backend: str,
     height: int,
+    payload_overrides: dict[str, object] | None = None,
 ) -> None:
     if str(backend) == WT_3D_BACKEND_THREE_LOCAL:
+        payload = _plotly_3d_figure_to_three_payload(figure)
+        if payload_overrides:
+            payload = _augment_three_payload(
+                payload=payload,
+                legend_tree=list(payload_overrides.get("legend_tree") or []),
+                focus_targets=payload_overrides.get("focus_targets"),
+                hidden_flat_legend_labels=set(
+                    str(item) for item in (payload_overrides.get("hidden_flat_legend_labels") or set())
+                ),
+            )
         with container:
             render_local_three_scene(
-                _plotly_3d_figure_to_three_payload(figure),
+                payload,
                 height=height,
                 instance_token=int(st.session_state.get("wt_three_viewer_nonce", 0)),
             )
@@ -2668,6 +2859,81 @@ def _render_plotly_or_three_3d(
         config=trajectory_plotly_chart_config(),
         width="stretch",
     )
+
+
+def _trajectory_three_payload_overrides(
+    *,
+    records: list[WelltrackRecord],
+    successes: list[SuccessfulWellPlan],
+    target_only_wells: list[_TargetOnlyWell],
+    name_to_color: Mapping[str, str],
+) -> dict[str, object]:
+    well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
+    for success in successes:
+        bounds = _successful_plan_raw_bounds(success)
+        if bounds is not None:
+            well_bounds_by_name[str(success.name)] = bounds
+    for target_only in target_only_wells:
+        well_bounds_by_name[str(target_only.name)] = _target_only_raw_bounds(target_only)
+    legend_tree, focus_targets, hidden_labels = _three_legend_tree_payload(
+        records=records,
+        visible_well_names=tuple(well_bounds_by_name.keys()),
+        well_bounds_by_name=well_bounds_by_name,
+        name_to_color=name_to_color,
+    )
+    return {
+        "legend_tree": legend_tree,
+        "focus_targets": focus_targets,
+        "hidden_flat_legend_labels": hidden_labels,
+    }
+
+
+def _anticollision_three_payload_overrides(
+    *,
+    records: list[WelltrackRecord],
+    analysis: AntiCollisionAnalysis,
+) -> dict[str, object]:
+    visible_names: list[str] = []
+    well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
+    name_to_color: dict[str, str] = {}
+    for well in analysis.wells:
+        if bool(well.is_reference_only):
+            continue
+        visible_names.append(str(well.name))
+        name_to_color[str(well.name)] = str(well.color)
+        bounds = _raw_bounds_from_xyz_arrays(
+            x_values=well.stations["X_m"].to_numpy(dtype=float),
+            y_values=well.stations["Y_m"].to_numpy(dtype=float),
+            z_values=well.stations["Z_m"].to_numpy(dtype=float),
+        )
+        extra_bounds = None
+        if well.t1 is not None and well.t3 is not None:
+            extra_bounds = {
+                "min": [
+                    float(min(well.surface.x, well.t1.x, well.t3.x)),
+                    float(min(well.surface.y, well.t1.y, well.t3.y)),
+                    float(min(well.surface.z, well.t1.z, well.t3.z)),
+                ],
+                "max": [
+                    float(max(well.surface.x, well.t1.x, well.t3.x)),
+                    float(max(well.surface.y, well.t1.y, well.t3.y)),
+                    float(max(well.surface.z, well.t1.z, well.t3.z)),
+                ],
+            }
+        merged_bounds = _merge_raw_bounds((bounds, extra_bounds))
+        if merged_bounds is not None:
+            well_bounds_by_name[str(well.name)] = merged_bounds
+    legend_tree, focus_targets, hidden_labels = _three_legend_tree_payload(
+        records=records,
+        visible_well_names=visible_names,
+        well_bounds_by_name=well_bounds_by_name,
+        name_to_color=name_to_color,
+    )
+    return {
+        "legend_tree": legend_tree,
+        "focus_targets": focus_targets,
+        "hidden_flat_legend_labels": hidden_labels,
+    }
 
 
 def _build_anti_collision_analysis(
@@ -4710,6 +4976,10 @@ def _render_anticollision_panel(
         figure=anticollision_3d_figure,
         backend=selected_3d_backend,
         height=660,
+        payload_overrides=_anticollision_three_payload_overrides(
+            records=records,
+            analysis=analysis,
+        ),
     )
     chart_col2.plotly_chart(
         _all_wells_anticollision_plan_figure(
@@ -4889,6 +5159,10 @@ def _render_anticollision_panel(
                         successes=successes,
                         uncertainty_model=uncertainty_model,
                         target_well_names=_pad_scoped_cluster_target_well_names(
+                            cluster=selected_cluster,
+                            focus_pad_well_names=focus_pad_well_names,
+                        ),
+                        focus_well_names=_pad_scoped_cluster_focus_well_names(
                             cluster=selected_cluster,
                             focus_pad_well_names=focus_pad_well_names,
                         ),
@@ -5162,6 +5436,7 @@ def _cluster_snapshot(
     cluster: AntiCollisionRecommendationCluster,
     *,
     target_well_names: tuple[str, ...] = (),
+    focus_well_names: tuple[str, ...] = (),
 ) -> dict[str, object]:
     items = tuple(_recommendation_snapshot(item) for item in cluster.recommendations)
     actionable_before_sf = [
@@ -5189,6 +5464,7 @@ def _cluster_snapshot(
         "affected_wells": tuple(str(name) for name in cluster.affected_wells),
         "well_names": tuple(str(name) for name in cluster.well_names),
         "target_well_names": tuple(str(name) for name in target_well_names),
+        "focus_well_names": tuple(str(name) for name in focus_well_names),
         "recommendation_count": int(cluster.recommendation_count),
         "before_sf": float(before_sf),
         "rerun_order_label": str(cluster.rerun_order_label),
@@ -5777,6 +6053,7 @@ def _prepare_rerun_from_cluster(
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
     target_well_names: tuple[str, ...] = (),
+    focus_well_names: tuple[str, ...] = (),
 ) -> None:
     if (not bool(cluster.can_prepare_rerun)) or cluster.blocking_advisory is not None:
         blocking_message = (
@@ -5798,20 +6075,42 @@ def _prepare_rerun_from_cluster(
         successes=successes,
         uncertainty_model=uncertainty_model,
     )
-    snapshot = _cluster_snapshot(cluster, target_well_names=target_well_names)
+    snapshot = _cluster_snapshot(
+        cluster,
+        target_well_names=target_well_names,
+        focus_well_names=focus_well_names,
+    )
     st.session_state["wt_prepared_well_overrides"] = prepared
     st.session_state["wt_prepared_recommendation_snapshot"] = (
         snapshot if prepared else None
     )
     if prepared:
         message = str(cluster.summary)
-        if target_well_names:
+        if focus_well_names:
             message += (
                 " Фокус пересчета: "
-                + ", ".join(str(name) for name in target_well_names)
-                + ". Соседние расчетные скважины других кустов будут подключены "
-                "только если они входят в тот же cluster-level конфликт."
+                + ", ".join(str(name) for name in focus_well_names)
+                + "."
             )
+        if target_well_names:
+            expanded_scope = [
+                str(name)
+                for name in target_well_names
+                if str(name) not in set(str(name) for name in focus_well_names)
+            ]
+            message += (
+                " Область cluster-level пересчета: "
+                + ", ".join(str(name) for name in target_well_names)
+                + "."
+            )
+            if expanded_scope:
+                message += (
+                    " Соседние расчетные скважины других кустов будут подключены "
+                    "автоматически, потому что входят в тот же связанный anti-collision "
+                    "кластер: "
+                    + ", ".join(expanded_scope)
+                    + "."
+                )
         if cluster.blocking_advisory:
             message += " " + str(cluster.blocking_advisory)
         if skipped_wells:
@@ -5825,11 +6124,18 @@ def _prepare_rerun_from_cluster(
         ordered_wells = [
             str(step.well_name)
             for step in cluster.action_steps
-            if str(step.well_name) in prepared
+            if str(step.well_name) in set(target_well_names or tuple(prepared.keys()))
         ]
-        st.session_state["wt_pending_selected_names"] = ordered_wells or list(
-            prepared.keys()
+        pending_names = list(
+            dict.fromkeys(
+                [
+                    *ordered_wells,
+                    *(str(name) for name in target_well_names),
+                    *(str(name) for name in prepared.keys()),
+                ]
+            )
         )
+        st.session_state["wt_pending_selected_names"] = pending_names
         return
     st.session_state["wt_prepared_override_message"] = (
         "Не удалось подготовить cluster-level пересчет: контекст конфликта недоступен."
@@ -6374,6 +6680,53 @@ def _actual_fund_zone_table_rows(detail: ActualFundWellAnalysis) -> list[dict[st
     ]
 
 
+def _actual_fund_analysis_signature(
+    actual_wells: tuple[ImportedTrajectoryWell, ...],
+) -> tuple[tuple[str, object, ...], ...]:
+    signature_rows: list[tuple[str, object, ...]] = []
+    for item in actual_wells:
+        stations = item.stations
+        last_md = (
+            float(stations["MD_m"].iloc[-1])
+            if not stations.empty and "MD_m" in stations.columns
+            else 0.0
+        )
+        point_count = int(len(stations))
+        last_xyz = (
+            float(stations["X_m"].iloc[-1]) if point_count and "X_m" in stations.columns else 0.0,
+            float(stations["Y_m"].iloc[-1]) if point_count and "Y_m" in stations.columns else 0.0,
+            float(stations["Z_m"].iloc[-1]) if point_count and "Z_m" in stations.columns else 0.0,
+        )
+        signature_rows.append(
+            (
+                str(item.name),
+                str(item.kind),
+                point_count,
+                last_md,
+                *last_xyz,
+            )
+        )
+    return tuple(signature_rows)
+
+
+def _actual_fund_analyses(
+    actual_wells: tuple[ImportedTrajectoryWell, ...],
+) -> tuple[ActualFundWellAnalysis, ...]:
+    signature = _actual_fund_analysis_signature(actual_wells)
+    cache_key = "wt_actual_fund_analysis_cache"
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict) and cached.get("signature") == signature:
+        analyses = cached.get("analyses")
+        if isinstance(analyses, tuple):
+            return analyses
+    analyses = build_actual_fund_well_analyses(actual_wells)
+    st.session_state[cache_key] = {
+        "signature": signature,
+        "analyses": analyses,
+    }
+    return analyses
+
+
 def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
     figure = go.Figure()
     shown_legend_keys: set[str] = set()
@@ -6649,12 +7002,15 @@ def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]
     )
 
 
-def _render_actual_fund_analysis_panel() -> None:
+def _render_actual_fund_analysis_panel(
+    analyses: tuple[ActualFundWellAnalysis, ...] | None = None,
+) -> None:
     actual_wells = _reference_kind_wells(REFERENCE_WELL_ACTUAL)
     if not actual_wells:
         return
 
-    analyses = build_actual_fund_well_analyses(actual_wells)
+    if analyses is None:
+        analyses = _actual_fund_analyses(actual_wells)
     metrics = tuple(item.metrics for item in analyses)
     eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
     excluded_horizontal_metrics = [
@@ -7135,22 +7491,38 @@ def _pad_scoped_cluster_target_well_names(
     focus_pad_well_names: tuple[str, ...],
 ) -> tuple[str, ...]:
     focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
-    if focus_set:
-        focused_affected = tuple(
-            str(name)
-            for name in cluster.affected_wells
-            if str(name) in focus_set
-        )
-        if focused_affected:
-            return focused_affected
-        focused_cluster = tuple(
-            str(name) for name in cluster.well_names if str(name) in focus_set
-        )
-        if focused_cluster:
-            return focused_cluster
-    if cluster.affected_wells:
-        return tuple(str(name) for name in cluster.affected_wells)
-    return tuple(str(name) for name in cluster.well_names)
+    focused_cluster = tuple(
+        str(name) for name in cluster.well_names if str(name) in focus_set
+    )
+    cluster_scope = (
+        tuple(str(name) for name in cluster.well_names)
+        if cluster.well_names
+        else tuple(str(name) for name in cluster.affected_wells)
+    )
+    if not focused_cluster:
+        return cluster_scope
+    ordered_scope: list[str] = []
+    for well_name in [*focused_cluster, *cluster_scope]:
+        normalized = str(well_name).strip()
+        if normalized and normalized not in ordered_scope:
+            ordered_scope.append(normalized)
+    return tuple(ordered_scope)
+
+
+def _pad_scoped_cluster_focus_well_names(
+    *,
+    cluster: AntiCollisionRecommendationCluster,
+    focus_pad_well_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
+    if not focus_set:
+        return ()
+    focused_affected = tuple(
+        str(name) for name in cluster.affected_wells if str(name) in focus_set
+    )
+    if focused_affected:
+        return focused_affected
+    return tuple(str(name) for name in cluster.well_names if str(name) in focus_set)
 
 
 def _anticollision_focus_well_names(
@@ -7498,8 +7870,8 @@ def _render_batch_run_forms(
         st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
     with st.form("welltrack_run_form", clear_on_submit=False):
         st.markdown("#### Запуск / пересчет выбранных скважин")
-        select_col, pad_col, action_col, pad_action_col = st.columns(
-            [5.0, 2.4, 1.2, 1.5],
+        select_col, pad_col, action_col, pad_add_col, pad_only_col = st.columns(
+            [5.0, 2.4, 1.2, 1.45, 1.45],
             gap="small",
             vertical_alignment="bottom",
         )
@@ -7526,11 +7898,21 @@ def _render_batch_run_forms(
                     ),
                     key="wt_batch_select_pad_id",
                 )
-        with pad_action_col:
-            select_pad_clicked = (
+        with pad_add_col:
+            add_pad_clicked = (
                 st.form_submit_button(
-                    "Выбрать куст",
+                    "Добавить куст",
                     icon=":material/filter_alt:",
+                    width="stretch",
+                )
+                if len(pad_ids) > 1
+                else False
+            )
+        with pad_only_col:
+            replace_with_pad_clicked = (
+                st.form_submit_button(
+                    "Только куст",
+                    icon=":material/rule:",
                     width="stretch",
                 )
                 if len(pad_ids) > 1
@@ -7543,8 +7925,9 @@ def _render_batch_run_forms(
         )
         if len(pad_ids) > 1:
             st.caption(
-                "При работе с несколькими кустами можно быстро выбрать весь куст. "
-                "Это удобно и для обычного batch, и как стартовая точка перед "
+                "При работе с несколькими кустами можно либо добавить весь куст "
+                "в текущую выборку, либо сразу переключиться только на него. Это "
+                "удобно и для обычного batch, и как стартовая точка перед "
                 "anti-collision пересчетом только для интересующего куста."
             )
         selected_now = list(st.session_state.get("wt_selected_names", []))
@@ -7583,7 +7966,21 @@ def _render_batch_run_forms(
     if select_all_clicked:
         st.session_state["wt_pending_selected_names"] = list(all_names)
         st.rerun()
-    if select_pad_clicked:
+    if add_pad_clicked:
+        selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
+        current_selected = [
+            str(name) for name in st.session_state.get("wt_selected_names", [])
+        ]
+        st.session_state["wt_pending_selected_names"] = list(
+            dict.fromkeys(
+                [
+                    *current_selected,
+                    *well_names_by_pad_id.get(selected_pad_id, ()),
+                ]
+            )
+        )
+        st.rerun()
+    if replace_with_pad_clicked:
         selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
         st.session_state["wt_pending_selected_names"] = list(
             well_names_by_pad_id.get(selected_pad_id, ())
@@ -8313,6 +8710,12 @@ def _render_success_tabs(
             figure=overview_3d_figure,
             backend=selected_3d_backend,
             height=620,
+            payload_overrides=_trajectory_three_payload_overrides(
+                records=records,
+                successes=successes,
+                target_only_wells=target_only_wells,
+                name_to_color=name_to_color,
+            ),
         )
         c2.plotly_chart(
             _all_wells_plan_figure(
@@ -8378,6 +8781,711 @@ def run_page() -> None:
         st.warning("Все выбранные скважины завершились ошибками расчета.")
         return
     _render_success_tabs(
+        successes=successes,
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
+
+
+if __name__ == "__main__":
+    run_page()
+
+===END_FILE===
+===BEGIN_FILE===	pages/03_ptc.py	25671
+from __future__ import annotations
+
+from functools import lru_cache
+import importlib.util
+from pathlib import Path
+from statistics import fmean
+import sys
+from types import ModuleType
+
+import pandas as pd
+import streamlit as st
+
+from pywp.ui_theme import apply_page_style, render_hero, render_small_note
+from pywp.ui_well_panels import render_run_log_panel
+from pywp.ui_well_result import (
+    SingleWellResultView,
+    render_key_metrics,
+    render_result_plots,
+    render_result_tables,
+)
+
+
+@lru_cache(maxsize=4)
+def _load_welltrack_import_module_cached(
+    page_path_str: str,
+    mtime_ns: int,
+) -> ModuleType:
+    module_name = f"_ptc_welltrack_import_shared_{mtime_ns}"
+    spec = importlib.util.spec_from_file_location(module_name, page_path_str)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Не удалось загрузить модуль WELLTRACK import.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_welltrack_import_module() -> ModuleType:
+    page_path = Path(__file__).with_name("02_welltrack_import.py")
+    return _load_welltrack_import_module_cached(
+        str(page_path),
+        int(page_path.stat().st_mtime_ns),
+    )
+
+
+def _force_ptc_defaults(wt: ModuleType) -> None:
+    st.session_state["wt_log_verbosity"] = str(wt.WT_LOG_COMPACT)
+    st.session_state["wt_3d_render_mode"] = str(wt.WT_3D_RENDER_DETAIL)
+    st.session_state["wt_3d_backend"] = str(wt.WT_3D_BACKEND_THREE_LOCAL)
+    if st.session_state.get("wt_prepared_recommendation_snapshot"):
+        st.session_state["wt_prepared_well_overrides"] = {}
+        st.session_state["wt_prepared_override_message"] = ""
+        st.session_state["wt_prepared_recommendation_id"] = ""
+        st.session_state["wt_anticollision_prepared_cluster_id"] = ""
+        st.session_state["wt_prepared_recommendation_snapshot"] = None
+
+
+def _render_ptc_import_section(wt: ModuleType) -> None:
+    st.markdown("## 1. Импорт целей")
+    st.caption(
+        "Загрузите целевые точки скважин в формате WELLTRACK. После успешного "
+        "импорта цели будут доступны для расчёта и визуализации."
+    )
+    source_payload = wt._render_source_input()
+    parse_clicked = st.button(
+        "Импорт целей",
+        type="primary",
+        icon=":material/upload_file:",
+        width="content",
+    )
+    wt._handle_import_actions(
+        source_payload=source_payload,
+        parse_clicked=bool(parse_clicked),
+        clear_clicked=False,
+        reset_params_clicked=False,
+    )
+
+
+def _render_ptc_reference_kind_import_block(wt: ModuleType, *, kind: str) -> None:
+    title = wt._reference_kind_title(kind)
+    state_mode_key = f"ptc_reference_source_mode::{kind}"
+    st.session_state.setdefault(state_mode_key, "Путь к WELLTRACK")
+    mode = st.radio(
+        f"Источник для {title.lower()}",
+        options=["Путь к WELLTRACK", "Загрузить WELLTRACK"],
+        key=state_mode_key,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.caption(str(wt._reference_kind_help(kind)))
+
+    uploaded_file = None
+    if mode == "Путь к WELLTRACK":
+        st.text_input(
+            "Путь к WELLTRACK",
+            key=wt._reference_welltrack_path_key(kind),
+            placeholder="tests/test_data/WELLTRACKS3.INC",
+        )
+    else:
+        uploaded_file = st.file_uploader(
+            f"WELLTRACK файл для {title.lower()}",
+            type=["inc", "txt", "data", "ecl"],
+            key=f"ptc_reference_{kind}_welltrack_file",
+        )
+
+    action_col, clear_col = st.columns([1.5, 1.0], gap="small")
+    import_clicked = action_col.button(
+        f"Загрузить {title.lower()}",
+        key=f"ptc_reference_import_{kind}",
+        type="primary",
+        icon=":material/upload_file:",
+        width="stretch",
+    )
+    clear_clicked = clear_col.button(
+        f"Очистить {title.lower()}",
+        key=f"ptc_reference_clear_{kind}",
+        icon=":material/delete:",
+        width="stretch",
+    )
+
+    if import_clicked:
+        with st.status(f"Импорт {title.lower()}...", expanded=True) as status:
+            try:
+                if mode == "Путь к WELLTRACK":
+                    parsed = wt.parse_reference_trajectory_welltrack_text(
+                        wt._read_welltrack_file(
+                            str(
+                                st.session_state.get(
+                                    wt._reference_welltrack_path_key(kind),
+                                    "",
+                                )
+                            )
+                        ),
+                        kind=kind,
+                    )
+                else:
+                    payload = b"" if uploaded_file is None else uploaded_file.getvalue()
+                    parsed = wt.parse_reference_trajectory_welltrack_text(
+                        wt._decode_welltrack_payload(
+                            payload,
+                            source_label=(
+                                f"WELLTRACK `{getattr(uploaded_file, 'name', 'uploaded')}`"
+                            ),
+                        ),
+                        kind=kind,
+                    )
+                wt._set_reference_wells_for_kind(kind=kind, wells=parsed)
+                wt._reset_anticollision_view_state(clear_prepared=True)
+                status.write(f"Загружено скважин: {len(parsed)}.")
+                status.update(
+                    label=f"{title} импортированы",
+                    state="complete",
+                    expanded=False,
+                )
+                st.rerun()
+            except wt.WelltrackParseError as exc:
+                status.write(str(exc))
+                status.update(
+                    label=f"Ошибка импорта: {title.lower()}",
+                    state="error",
+                    expanded=True,
+                )
+
+    if clear_clicked:
+        wt._set_reference_wells_for_kind(kind=kind, wells=())
+        st.session_state[wt._reference_welltrack_path_key(kind)] = ""
+        wt._reset_anticollision_view_state(clear_prepared=True)
+        st.rerun()
+
+    current_wells = tuple(wt._reference_kind_wells(kind))
+    if current_wells:
+        st.caption(f"Загружено {len(current_wells)} скважин.")
+    else:
+        st.caption("Скважины этого типа не загружены.")
+
+
+def _render_ptc_reference_section(wt: ModuleType) -> None:
+    st.markdown("## 3. Загрузка фактического фонда")
+    st.caption(
+        "Если на месторождении уже есть фактический фонд или утверждённый "
+        "проектный (проработанный в ЦСБ) - загрузите его в формате welltrack."
+    )
+    c1, c2 = st.columns(2, gap="medium")
+    with c1:
+        st.markdown("### Фактический фонд")
+        _render_ptc_reference_kind_import_block(wt, kind=wt.REFERENCE_WELL_ACTUAL)
+    with c2:
+        st.markdown("### Утверждённый проектный фонд")
+        _render_ptc_reference_kind_import_block(wt, kind=wt.REFERENCE_WELL_APPROVED)
+
+    reference_wells = tuple(wt._reference_wells_from_state())
+    if reference_wells:
+        m1, m2, m3 = st.columns(3, gap="small")
+        m1.metric("Доп. скважин", f"{len(reference_wells)}")
+        m2.metric(
+            "Фактических",
+            f"{sum(1 for item in reference_wells if str(item.kind) == wt.REFERENCE_WELL_ACTUAL)}",
+        )
+        m3.metric(
+            "Проектных утверждённых",
+            f"{sum(1 for item in reference_wells if str(item.kind) == wt.REFERENCE_WELL_APPROVED)}",
+        )
+
+        st.dataframe(
+            wt.arrow_safe_text_dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Скважина": wt.reference_well_display_label(item),
+                            "Точек": int(len(item.stations)),
+                            "MD max, м": float(item.stations["MD_m"].iloc[-1]),
+                        }
+                        for item in reference_wells
+                    ]
+                )
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    actual_wells = tuple(wt._reference_kind_wells(wt.REFERENCE_WELL_ACTUAL))
+    if actual_wells:
+        analyses = wt._actual_fund_analyses(actual_wells)
+        eligible_kop_values = [
+            float(item.metrics.kop_md_m)
+            for item in analyses
+            if bool(item.metrics.is_analysis_eligible) and item.metrics.kop_md_m is not None
+        ]
+        if eligible_kop_values:
+            mean_kop_m = float(fmean(eligible_kop_values))
+            info_col, action_col = st.columns([3.6, 1.6], gap="small")
+            with info_col:
+                st.metric("Средний KOP по фактическому фонду, м", f"{mean_kop_m:.0f}")
+                st.caption(
+                    "Можно сразу перенести этот ориентир в общие параметры расчёта "
+                    "как минимальный вертикальный участок до KOP."
+                )
+            with action_col:
+                if st.button(
+                    "Применить средний KOP",
+                    key="ptc_apply_mean_actual_kop",
+                    icon=":material/south_west:",
+                    width="stretch",
+                ):
+                    st.session_state[
+                        f"{wt.WT_CALC_PARAMS.prefix}kop_min_vertical"
+                    ] = float(mean_kop_m)
+                    st.toast(
+                        f"Мин VERTICAL до KOP обновлён до {mean_kop_m:.0f} м по фактическому фонду."
+                    )
+                    st.rerun()
+        wt._render_actual_fund_analysis_panel(analyses=analyses)
+
+
+def _render_ptc_run_section(wt: ModuleType, *, records: list[object]) -> None:
+    st.markdown("## 4. Расчёт траекторий")
+    st.caption("Детализация лога зафиксирована: краткий режим.")
+    summary_rows = st.session_state.get("wt_summary_rows")
+    wt._render_batch_selection_status(records=records, summary_rows=summary_rows)
+    all_names, _ = wt._sync_selection_state(records=records)
+    pads, _, well_names_by_pad_id = wt._pad_membership(records)
+    pad_ids = [str(pad.pad_id) for pad in pads]
+    if pad_ids and str(st.session_state.get("wt_batch_select_pad_id", "")).strip() not in pad_ids:
+        st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
+
+    with st.form("ptc_run_form", clear_on_submit=False):
+        select_col, pad_col, action_col, pad_add_col, pad_only_col = st.columns(
+            [5.0, 2.4, 1.2, 1.45, 1.45],
+            gap="small",
+            vertical_alignment="bottom",
+        )
+        with select_col:
+            st.multiselect(
+                "Скважины для расчёта",
+                options=all_names,
+                key="wt_selected_names",
+            )
+        with action_col:
+            select_all_clicked = st.form_submit_button(
+                "Выбрать все",
+                icon=":material/done_all:",
+                width="stretch",
+            )
+        with pad_col:
+            if len(pad_ids) > 1:
+                st.selectbox(
+                    "Куст",
+                    options=pad_ids,
+                    format_func=lambda value: wt._pad_display_label(
+                        next(pad for pad in pads if str(pad.pad_id) == str(value))
+                    ),
+                    key="wt_batch_select_pad_id",
+                )
+        with pad_add_col:
+            add_pad_clicked = (
+                st.form_submit_button(
+                    "Добавить куст",
+                    icon=":material/filter_alt:",
+                    width="stretch",
+                )
+                if len(pad_ids) > 1
+                else False
+            )
+        with pad_only_col:
+            replace_with_pad_clicked = (
+                st.form_submit_button(
+                    "Только куст",
+                    icon=":material/rule:",
+                    width="stretch",
+                )
+                if len(pad_ids) > 1
+                else False
+            )
+
+        with st.expander("Параметры расчёта", expanded=False):
+            config = wt._build_config_form(binding=wt.WT_CALC_PARAMS, title="")
+
+        run_clicked = st.form_submit_button(
+            "Рассчитать траектории",
+            type="primary",
+            icon=":material/play_arrow:",
+        )
+
+    if select_all_clicked:
+        st.session_state["wt_pending_selected_names"] = list(all_names)
+        st.rerun()
+    if add_pad_clicked:
+        selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
+        current_selected = [
+            str(name) for name in st.session_state.get("wt_selected_names", [])
+        ]
+        st.session_state["wt_pending_selected_names"] = list(
+            dict.fromkeys([*current_selected, *well_names_by_pad_id.get(selected_pad_id, ())])
+        )
+        st.rerun()
+    if replace_with_pad_clicked:
+        selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
+        st.session_state["wt_pending_selected_names"] = list(
+            well_names_by_pad_id.get(selected_pad_id, ())
+        )
+        st.rerun()
+
+    wt._run_batch_if_clicked(
+        requests=[
+            wt._BatchRunRequest(
+                selected_names=list(st.session_state.get("wt_selected_names", [])),
+                config=config,
+                run_clicked=bool(run_clicked),
+            )
+        ],
+        records=records,
+    )
+
+
+def _render_ptc_anticollision_panel(
+    wt: ModuleType,
+    *,
+    successes: list[object],
+    records: list[object],
+    focus_pad_id: str,
+) -> None:
+    reference_wells = wt._reference_wells_from_state()
+    if len(successes) + len(reference_wells) < 2:
+        st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
+        return
+
+    custom_actual_fund_model = wt._actual_fund_custom_model_from_state()
+    preset_options = list(wt.UNCERTAINTY_PRESET_OPTIONS.keys())
+    if custom_actual_fund_model is not None:
+        preset_options.append(wt.UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND)
+    normalized_preset = wt.normalize_uncertainty_preset(
+        st.session_state.get(
+            "wt_anticollision_uncertainty_preset",
+            wt.DEFAULT_UNCERTAINTY_PRESET,
+        ),
+        allow_custom=custom_actual_fund_model is not None,
+    )
+    if normalized_preset not in preset_options:
+        normalized_preset = wt.DEFAULT_UNCERTAINTY_PRESET
+    st.session_state["wt_anticollision_uncertainty_preset"] = normalized_preset
+    selected_preset = st.selectbox(
+        "Пресет неопределенности для anti-collision",
+        options=preset_options,
+        format_func=wt.uncertainty_preset_label,
+        key="wt_anticollision_uncertainty_preset",
+    )
+    uncertainty_model = wt.planning_uncertainty_model_for_preset(
+        selected_preset,
+        custom_model=custom_actual_fund_model,
+    )
+    analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
+        successes=successes,
+        uncertainty_model=uncertainty_model,
+        records=records,
+        reference_wells=reference_wells,
+    )
+    focus_pad_well_names = wt._focus_pad_well_names(
+        records=records,
+        focus_pad_id=focus_pad_id,
+    )
+    visible_clusters = wt._clusters_touching_focus_pad(
+        clusters=clusters,
+        focus_pad_well_names=focus_pad_well_names,
+    )
+    visible_recommendations = wt._recommendations_for_clusters(
+        recommendations=recommendations,
+        clusters=visible_clusters,
+    )
+    focus_anticollision_well_names = wt._anticollision_focus_well_names(
+        clusters=visible_clusters,
+        focus_pad_well_names=focus_pad_well_names,
+    )
+
+    st.caption(
+        f"Пресет: {wt.uncertainty_preset_label(selected_preset)}. "
+        f"{wt.anti_collision_method_caption(uncertainty_model)}"
+    )
+
+    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
+    m2.metric("Пар с overlap", f"{int(analysis.overlapping_pair_count)}")
+    m3.metric("Пересечения в t1/t3", f"{int(analysis.target_overlap_pair_count)}")
+    worst_sf = analysis.worst_separation_factor
+    m4.metric("Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}")
+    with st.expander("Что такое SF?", expanded=False):
+        st.markdown(wt._sf_help_markdown())
+
+    chart_col1, chart_col2 = st.columns(2, gap="medium")
+    anticollision_3d_figure = wt._all_wells_anticollision_3d_figure(
+        analysis,
+        previous_successes_by_name={},
+        focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
+        render_mode=wt.WT_3D_RENDER_DETAIL,
+    )
+    wt._render_plotly_or_three_3d(
+        container=chart_col1,
+        figure=anticollision_3d_figure,
+        backend=wt.WT_3D_BACKEND_THREE_LOCAL,
+        height=660,
+        payload_overrides=wt._anticollision_three_payload_overrides(
+            records=records,
+            analysis=analysis,
+        ),
+    )
+    chart_col2.plotly_chart(
+        wt._all_wells_anticollision_plan_figure(
+            analysis,
+            previous_successes_by_name={},
+            focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
+        ),
+        width="stretch",
+    )
+
+    if not analysis.zones:
+        st.success(
+            "Пересечения 2σ конусов неопределенности не обнаружены для рассчитанного набора."
+        )
+        return
+
+    target_zones = [zone for zone in analysis.zones if int(zone.priority_rank) < 2]
+    if target_zones:
+        st.warning(
+            "Найдены пересечения, затрагивающие точки целей t1/t3. Они вынесены "
+            "в начало отчета и должны разбираться в первую очередь."
+        )
+    else:
+        st.warning("Найдены пересечения 2σ конусов неопределенности по траекториям.")
+
+    report_rows = (
+        wt._report_rows_from_recommendations(visible_recommendations)
+        if focus_pad_well_names
+        else wt.anti_collision_report_rows(analysis)
+    )
+    st.markdown("### Отчет по anti-collision")
+    st.dataframe(
+        wt.arrow_safe_text_dataframe(pd.DataFrame(report_rows)),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.markdown("### Рекомендации")
+    st.dataframe(
+        wt.arrow_safe_text_dataframe(
+            pd.DataFrame(wt.anti_collision_recommendation_rows(visible_recommendations))
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _render_ptc_success_tabs(
+    wt: ModuleType,
+    *,
+    successes: list[object],
+    records: list[object],
+    summary_rows: list[dict[str, object]],
+) -> None:
+    name_to_color = wt._well_color_map(records)
+    reference_wells = wt._reference_wells_from_state()
+    target_only_wells = wt._failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+    view_mode = st.radio(
+        "Режим просмотра результатов",
+        options=["Отдельная скважина", "Все скважины"],
+        key="wt_results_view_mode",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if str(view_mode) == "Отдельная скважина":
+        selected_name = st.selectbox("Скважина", options=[item.name for item in successes])
+        selected = wt._ensure_selected_success_baseline(
+            selected_name=str(selected_name),
+            successes=successes,
+        )
+        well_view = SingleWellResultView(
+            well_name=str(selected.name),
+            surface=selected.surface,
+            t1=selected.t1,
+            t3=selected.t3,
+            stations=selected.stations,
+            summary=selected.summary,
+            config=selected.config,
+            azimuth_deg=float(selected.azimuth_deg),
+            md_t1_m=float(selected.md_t1_m),
+            runtime_s=selected.runtime_s,
+            baseline_summary=selected.baseline_summary,
+            baseline_runtime_s=selected.baseline_runtime_s,
+            issue_messages=(
+                (str(selected.md_postcheck_message),)
+                if str(selected.md_postcheck_message).strip()
+                else ()
+            ),
+            trajectory_line_dash="dash" if bool(selected.md_postcheck_exceeded) else "solid",
+        )
+        t1_horizontal_offset_m = render_key_metrics(
+            view=well_view,
+            title="Ключевые показатели",
+            border=True,
+        )
+        render_result_plots(
+            view=well_view,
+            title_trajectory=None,
+            title_plan=None,
+            border=True,
+        )
+        render_result_tables(
+            view=well_view,
+            t1_horizontal_offset_m=t1_horizontal_offset_m,
+            summary_tab_label="Сводка",
+            survey_tab_label="Инклинометрия",
+            survey_file_name=f"{selected_name}_survey.csv",
+            show_validation_section=False,
+            show_solver_diagnostics_section=False,
+        )
+        return
+
+    all_view_mode = st.radio(
+        "Режим отображения всех скважин",
+        options=["Траектории", "Anti-collision"],
+        key="wt_results_all_view_mode",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    pads, _, _ = wt._pad_membership(records)
+    if len(pads) > 1:
+        focus_options = [wt.WT_PAD_FOCUS_ALL, *(str(pad.pad_id) for pad in pads)]
+        normalized_focus_pad_id = wt._normalize_focus_pad_id(
+            records=records,
+            requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
+        )
+        if normalized_focus_pad_id != str(st.session_state.get("wt_results_focus_pad_id", "")):
+            st.session_state["wt_results_focus_pad_id"] = normalized_focus_pad_id
+        st.selectbox(
+            "Фокус камеры по кусту",
+            options=focus_options,
+            format_func=lambda value: (
+                "Все кусты"
+                if str(value) == wt.WT_PAD_FOCUS_ALL
+                else wt._pad_display_label(
+                    next(pad for pad in pads if str(pad.pad_id) == str(value))
+                )
+            ),
+            key="wt_results_focus_pad_id",
+        )
+    focus_pad_id = wt._normalize_focus_pad_id(
+        records=records,
+        requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
+    )
+    focus_pad_well_names = wt._focus_pad_well_names(
+        records=records,
+        focus_pad_id=focus_pad_id,
+    )
+
+    if str(all_view_mode) == "Траектории":
+        if target_only_wells:
+            st.caption(
+                "Для непростроенных скважин на обзорных графиках показаны только "
+                "точки S/t1/t3, без траектории."
+            )
+        if reference_wells:
+            st.caption(
+                "Дополнительные фактические и утвержденные скважины показаны как "
+                "reference-траектории: серые и красные линии без точек S/t1/t3."
+            )
+        c1, c2 = st.columns(2, gap="medium")
+        overview_3d_figure = wt._all_wells_3d_figure(
+            successes,
+            target_only_wells=target_only_wells,
+            reference_wells=reference_wells,
+            name_to_color=name_to_color,
+            focus_well_names=focus_pad_well_names,
+            render_mode=wt.WT_3D_RENDER_DETAIL,
+        )
+        wt._render_plotly_or_three_3d(
+            container=c1,
+            figure=overview_3d_figure,
+            backend=wt.WT_3D_BACKEND_THREE_LOCAL,
+            height=620,
+            payload_overrides=wt._trajectory_three_payload_overrides(
+                records=records,
+                successes=successes,
+                target_only_wells=target_only_wells,
+                name_to_color=name_to_color,
+            ),
+        )
+        c2.plotly_chart(
+            wt._all_wells_plan_figure(
+                successes,
+                target_only_wells=target_only_wells,
+                reference_wells=reference_wells,
+                name_to_color=name_to_color,
+                focus_well_names=focus_pad_well_names,
+            ),
+            width="stretch",
+        )
+        return
+
+    _render_ptc_anticollision_panel(
+        wt,
+        successes=successes,
+        records=records,
+        focus_pad_id=focus_pad_id,
+    )
+
+
+def run_page() -> None:
+    wt = _load_welltrack_import_module()
+    st.set_page_config(page_title="PTC", layout="wide")
+    wt._init_state()
+    _force_ptc_defaults(wt)
+    apply_page_style(max_width_px=1700)
+    render_hero(title="PTC", subtitle="Prototype trajectory constructor")
+
+    _render_ptc_import_section(wt)
+    records = st.session_state.get("wt_records")
+    if records is None:
+        st.info("Загрузите цели и нажмите «Импорт целей».")
+        return
+    if not records:
+        st.warning("В источнике не найдено ни одной скважины.")
+        return
+
+    wt._render_records_overview(records=records)
+    wt._render_raw_records_table(records=records)
+
+    st.markdown("## 2. Кусты и расчёт устьев")
+    wt._render_t1_t3_order_panel(records=records)
+    wt._render_pad_layout_panel(records=records)
+
+    _render_ptc_reference_section(wt)
+    _render_ptc_run_section(wt, records=records)
+
+    if st.session_state.get("wt_last_error"):
+        wt.render_solver_diagnostics(st.session_state["wt_last_error"])
+
+    st.markdown("## 5. Результаты расчёта")
+    render_run_log_panel(
+        st.session_state.get("wt_last_run_log_lines"),
+        border=False,
+    )
+
+    summary_rows = st.session_state.get("wt_summary_rows")
+    successes = st.session_state.get("wt_successes")
+    if not summary_rows:
+        render_small_note("Результаты расчёта появятся после запуска расчёта траекторий.")
+        return
+    wt._render_batch_summary(summary_rows=summary_rows)
+    if not successes:
+        st.warning("Все выбранные скважины завершились ошибками расчёта.")
+        return
+    _render_ptc_success_tabs(
+        wt,
         successes=successes,
         records=list(records),
         summary_rows=list(summary_rows),
@@ -21052,7 +22160,7 @@ def render_local_three_scene(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	34795
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	40104
 <!doctype html>
 <html lang="en">
   <head>
@@ -21196,6 +22304,63 @@ def render_local_three_scene(
         font-size: 12px;
         line-height: 1.25;
         color: #0f172a;
+      }
+
+      .legend-group {
+        margin: 0 0 10px 0;
+      }
+
+      .legend-group:last-child {
+        margin-bottom: 0;
+      }
+
+      .legend-node-btn {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        padding: 4px 0;
+        border: none;
+        background: none;
+        cursor: pointer;
+        text-align: left;
+        color: #0f172a;
+        font-size: 12px;
+        line-height: 1.25;
+      }
+
+      .legend-node-btn:hover {
+        color: #1d4ed8;
+      }
+
+      .legend-node-pad {
+        font-weight: 700;
+      }
+
+      .legend-node-well {
+        padding-left: 18px;
+      }
+
+      .legend-caret {
+        width: 10px;
+        flex: 0 0 10px;
+        color: #64748b;
+        font-size: 11px;
+      }
+
+      .legend-children {
+        margin: 2px 0 0 0;
+      }
+
+      .legend-children.is-collapsed {
+        display: none;
+      }
+
+      .legend-flat-section {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(15, 23, 42, 0.08);
       }
 
       .legend-swatch {
@@ -21402,7 +22567,14 @@ def render_local_three_scene(
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
         let legendCollapsed = false;
+        let legendTreeExpanded = true;
         let interactionActive = false;
+        const hasTreeLegend =
+          Array.isArray(payload.legend_tree) && payload.legend_tree.length > 0;
+        const focusTargets =
+          payload.focus_targets && typeof payload.focus_targets === "object"
+            ? payload.focus_targets
+            : {};
 
         const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
         const hoverSphereMaterial = new THREE.MeshBasicMaterial({
@@ -21590,24 +22762,131 @@ def render_local_three_scene(
           requestRender();
         }
 
-        function fitCamera() {
-          camera.near = Math.max(maxSpan / 1200.0, 0.1);
-          camera.far = Math.max(maxSpan * 40.0, 5000.0);
+        function fitCameraToRawBounds(rawBounds) {
+          const localBounds = transformedBounds(rawBounds || payload.bounds || {});
+          const localMin = localBounds.min;
+          const localMax = localBounds.max;
+          const localCenter = new THREE.Vector3()
+            .addVectors(localMin, localMax)
+            .multiplyScalar(0.5);
+          const localSpan = new THREE.Vector3().subVectors(localMax, localMin);
+          const localMaxSpan = Math.max(
+            localSpan.x,
+            localSpan.y,
+            localSpan.z,
+            1,
+          );
+          camera.near = Math.max(localMaxSpan / 1200.0, 0.1);
+          camera.far = Math.max(localMaxSpan * 40.0, 5000.0);
           camera.up.set(0, 0, 1);
           camera.position.set(
-            center.x + maxSpan * 1.15,
-            center.y - maxSpan * 1.05,
-            center.z + maxSpan * 1.42,
+            localCenter.x + localMaxSpan * 1.15,
+            localCenter.y - localMaxSpan * 1.05,
+            localCenter.z + localMaxSpan * 1.42,
           );
-          controls.target.copy(center);
+          controls.target.copy(localCenter);
           camera.updateProjectionMatrix();
           controls.update();
           requestRender();
         }
 
-        function addLegend(items) {
+        function fitCamera() {
+          fitCameraToRawBounds(payload.bounds || {});
+        }
+
+        function createLegendSwatch(color, opacity) {
+          const swatch = document.createElement("div");
+          swatch.className = "legend-swatch";
+          swatch.style.background = hexOrDefault(color, "#9ca3af");
+          swatch.style.opacity = String(
+            Number.isFinite(opacity) ? opacity : 1.0,
+          );
+          return swatch;
+        }
+
+        function createFlatLegendRow(item) {
+          const row = document.createElement("div");
+          row.className = "legend-item";
+          row.appendChild(
+            createLegendSwatch(
+              item.color,
+              Number.isFinite(item.opacity) ? item.opacity : 1.0,
+            ),
+          );
+          const label = document.createElement("div");
+          label.className = "legend-label";
+          label.textContent = String(item.label || "");
+          row.appendChild(label);
+          return row;
+        }
+
+        function createTreeNodeButton(item, kind) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className =
+            kind === "pad"
+              ? "legend-node-btn legend-node-pad"
+              : "legend-node-btn legend-node-well";
+          if (kind === "pad") {
+            const caret = document.createElement("span");
+            caret.className = "legend-caret";
+            caret.textContent = legendTreeExpanded ? "▾" : "▸";
+            button.appendChild(caret);
+          } else {
+            button.appendChild(
+              createLegendSwatch(item.color, Number.isFinite(item.opacity) ? item.opacity : 1.0),
+            );
+          }
+          const label = document.createElement("div");
+          label.className = "legend-label";
+          label.textContent = String(item.label || "");
+          button.appendChild(label);
+          button.addEventListener("click", () => {
+            const targetBounds = focusTargets[String(item.id || "")];
+            if (targetBounds) {
+              fitCameraToRawBounds(targetBounds);
+            }
+          });
+          return button;
+        }
+
+        function renderLegend() {
           legendElement.innerHTML = "";
-          if (!Array.isArray(items) || items.length === 0) {
+          const flatItems = Array.isArray(payload.legend) ? payload.legend : [];
+          if (hasTreeLegend) {
+            if (legendToggleButton) {
+              legendToggleButton.style.display = "inline-flex";
+              legendToggleButton.textContent = legendTreeExpanded
+                ? "Свернуть всё"
+                : "Развернуть всё";
+            }
+            legendElement.classList.remove("is-collapsed");
+            payload.legend_tree.forEach((group) => {
+              const groupWrap = document.createElement("div");
+              groupWrap.className = "legend-group";
+              groupWrap.appendChild(createTreeNodeButton(group, "pad"));
+              const childrenWrap = document.createElement("div");
+              childrenWrap.className = "legend-children";
+              if (!legendTreeExpanded) {
+                childrenWrap.classList.add("is-collapsed");
+              }
+              (Array.isArray(group.children) ? group.children : []).forEach((child) => {
+                childrenWrap.appendChild(createTreeNodeButton(child, "well"));
+              });
+              groupWrap.appendChild(childrenWrap);
+              legendElement.appendChild(groupWrap);
+            });
+            if (flatItems.length > 0) {
+              const flatSection = document.createElement("div");
+              flatSection.className = "legend-flat-section";
+              flatItems.forEach((item) => {
+                flatSection.appendChild(createFlatLegendRow(item));
+              });
+              legendElement.appendChild(flatSection);
+            }
+            return;
+          }
+          if (!Array.isArray(flatItems) || flatItems.length === 0) {
             if (legendToggleButton) {
               legendToggleButton.style.display = "none";
             }
@@ -21617,25 +22896,16 @@ def render_local_three_scene(
             legendToggleButton.style.display = "inline-flex";
             legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
           }
-          items.forEach((item) => {
-            const row = document.createElement("div");
-            row.className = "legend-item";
-            const swatch = document.createElement("div");
-            swatch.className = "legend-swatch";
-            swatch.style.background = hexOrDefault(item.color, "#9ca3af");
-            swatch.style.opacity = String(
-              Number.isFinite(item.opacity) ? item.opacity : 1.0,
-            );
-            const label = document.createElement("div");
-            label.className = "legend-label";
-            label.textContent = String(item.label || "");
-            row.appendChild(swatch);
-            row.appendChild(label);
-            legendElement.appendChild(row);
+          flatItems.forEach((item) => {
+            legendElement.appendChild(createFlatLegendRow(item));
           });
         }
 
         function syncLegendVisibility() {
+          renderLegend();
+          if (hasTreeLegend) {
+            return;
+          }
           if (legendCollapsed) {
             legendElement.classList.add("is-collapsed");
           } else {
@@ -22034,8 +23304,6 @@ def render_local_three_scene(
         (payload.meshes || []).forEach(addMesh);
         (payload.points || []).forEach(addMarkers);
         (payload.labels || []).forEach(addLabel);
-        addLegend(payload.legend || []);
-
         renderer.domElement.addEventListener("pointermove", (event) => {
           pointerScreen = {
             x: Number(event.clientX || 0),
@@ -22076,7 +23344,11 @@ def render_local_three_scene(
         }
         if (legendToggleButton) {
           legendToggleButton.addEventListener("click", () => {
-            legendCollapsed = !legendCollapsed;
+            if (hasTreeLegend) {
+              legendTreeExpanded = !legendTreeExpanded;
+            } else {
+              legendCollapsed = !legendCollapsed;
+            }
             syncLegendVisibility();
           });
         }
@@ -24652,7 +25924,7 @@ def render_survey_table_with_download(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_well_result.py	23364
+===BEGIN_FILE===	pywp/ui_well_result.py	23552
 from __future__ import annotations
 
 from typing import Callable, Mapping, Sequence
@@ -25209,6 +26481,8 @@ def render_result_tables(
     summary_tab_label: str = "Сводка",
     survey_tab_label: str = "Инклинометрия",
     survey_file_name: str = "well_survey.csv",
+    show_validation_section: bool = True,
+    show_solver_diagnostics_section: bool = True,
 ) -> None:
     summary = view.summary
     optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
@@ -25269,7 +26543,7 @@ def render_result_tables(
             width="stretch",
             hide_index=True,
         )
-        if validation_rows:
+        if show_validation_section and validation_rows:
             with st.expander("Контроль попадания и точность расчета", expanded=False):
                 st.dataframe(
                     arrow_safe_text_dataframe(pd.DataFrame(validation_rows)),
@@ -25280,12 +26554,13 @@ def render_result_tables(
                     "Промахи t1/t3 и INC на входе считаются аналитически по сегментам профиля. "
                     "Control-grid используется для survey-таблицы, графиков и постконтроля DLS."
                 )
-        with st.expander("Технические параметры и диагностика решателя", expanded=False):
-            st.dataframe(
-                arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),
-                width="stretch",
-                hide_index=True,
-            )
+        if show_solver_diagnostics_section:
+            with st.expander("Технические параметры и диагностика решателя", expanded=False):
+                st.dataframe(
+                    arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),
+                    width="stretch",
+                    hide_index=True,
+                )
 
     with tab_survey:
         render_survey_table_with_download(
@@ -34316,6 +35591,131 @@ def test_pack_and_unpack_restore_contents(tmp_path: Path) -> None:
         assert restored_path.read_text(encoding="utf-8") == expected_content
 
 ===END_FILE===
+===BEGIN_FILE===	tests/test_ptc_page.py	4432
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+from streamlit.testing.v1 import AppTest
+
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.models import TrajectoryConfig
+from pywp.welltrack_batch import SuccessfulWellPlan
+
+
+pytestmark = pytest.mark.integration
+
+
+def _records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=20.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=620.0, y=820.0, z=2410.0, md=2410.0),
+                WelltrackPoint(x=1520.0, y=2020.0, z=2510.0, md=3510.0),
+            ),
+        ),
+    ]
+
+
+def _successful_plan(*, name: str, y_offset_m: float) -> SuccessfulWellPlan:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "INC_deg": [0.0, 90.0, 90.0],
+            "AZI_deg": [0.0, 90.0, 90.0],
+            "X_m": [0.0, 1000.0, 2000.0],
+            "Y_m": [y_offset_m, y_offset_m, y_offset_m],
+            "Z_m": [0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0],
+            "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+        }
+    )
+    return SuccessfulWellPlan(
+        name=name,
+        surface={"x": 0.0, "y": y_offset_m, "z": 0.0},
+        t1={"x": 1000.0, "y": y_offset_m, "z": 0.0},
+        t3={"x": 2000.0, "y": y_offset_m, "z": 0.0},
+        stations=stations,
+        summary={
+            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
+            "trajectory_target_direction": "Цели в одном направлении",
+            "well_complexity": "Обычная",
+            "optimization_mode": "minimize_md",
+            "azimuth_turn_deg": 0.0,
+            "horizontal_length_m": 1000.0,
+            "entry_inc_deg": 90.0,
+            "hold_inc_deg": 90.0,
+            "build_dls_selected_deg_per_30m": 3.0,
+            "build1_dls_selected_deg_per_30m": 3.0,
+            "build2_dls_selected_deg_per_30m": 3.0,
+            "max_dls_total_deg_per_30m": 3.0,
+            "kop_md_m": 560.0,
+            "max_inc_actual_deg": 90.0,
+            "max_inc_deg": 95.0,
+            "md_total_m": 2000.0,
+            "max_total_md_postcheck_m": 6500.0,
+            "md_postcheck_excess_m": 0.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+
+
+def test_ptc_page_shows_user_facing_import_and_run_controls() -> None:
+    at = AppTest.from_file("pages/03_ptc.py")
+    at.run()
+
+    button_labels = {str(widget.label) for widget in at.button}
+    assert "Импорт целей" in button_labels
+    assert "Очистить импорт" not in button_labels
+
+
+def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sections() -> None:
+    at = AppTest.from_file("pages/03_ptc.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+    ]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Траектории"
+
+    at.run()
+
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+    button_labels = {str(widget.label) for widget in at.button}
+    assert "3D-режим отображения" not in selectbox_labels
+    assert "3D backend" not in selectbox_labels
+    assert "Пересоздать 3D viewer" not in button_labels
+
+    view_mode_radio = next(
+        widget for widget in at.radio if str(widget.label) == "Режим просмотра результатов"
+    )
+    view_mode_radio.set_value("Отдельная скважина")
+    at.run()
+
+    expander_labels = {str(widget.label) for widget in at.expander}
+    assert "Контроль попадания и точность расчета" not in expander_labels
+    assert "Технические параметры и диагностика решателя" not in expander_labels
+
+===END_FILE===
 ===BEGIN_FILE===	tests/test_reference_stress_welltracks.py	772
 from __future__ import annotations
 
@@ -34628,7 +36028,7 @@ def test_parse_solver_error_formats_exact_target_delta_for_direct_miss() -> None
     assert "dZ=0.57 м" in rows[0]["Причина"]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	3852
+===BEGIN_FILE===	tests/test_three_viewer.py	4179
 from __future__ import annotations
 
 from pathlib import Path
@@ -34665,6 +36065,13 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "camera.quaternion.clone().invert()" in html
     assert "#legend.is-collapsed" in html
     assert "function syncLegendVisibility()" in html
+    assert "payload.legend_tree" in html
+    assert "payload.focus_targets" in html
+    assert "function fitCameraToRawBounds(rawBounds)" in html
+    assert '"Свернуть всё"' in html
+    assert '"Развернуть всё"' in html
+    assert "legend-node-btn legend-node-pad" in html
+    assert "legend-node-btn legend-node-well" in html
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html
@@ -38690,7 +40097,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	116997
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	121557
 from __future__ import annotations
 
 import importlib.util
@@ -39038,7 +40445,7 @@ def test_welltrack_general_run_select_all_restores_full_selection() -> None:
     ]
 
 
-def test_welltrack_general_run_can_select_all_wells_for_single_pad() -> None:
+def test_welltrack_general_run_can_replace_selection_with_single_pad() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _multi_pad_records()
     at.session_state["wt_records"] = records
@@ -39050,12 +40457,108 @@ def test_welltrack_general_run_can_select_all_wells_for_single_pad() -> None:
     pad_select.set_value("PAD-02")
     at.run()
 
-    _click_button(at, "Выбрать куст")
+    _click_button(at, "Только куст")
     at.run()
 
     assert _multiselect_value(at, "Скважины для расчета") == [
         "PAD2-A",
         "PAD2-B",
+    ]
+
+
+def test_welltrack_general_run_can_add_pad_to_existing_selection() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _multi_pad_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_selected_names"] = ["PAD1-A"]
+
+    at.run()
+
+    pad_select = next(widget for widget in at.selectbox if widget.label == "Куст")
+    pad_select.set_value("PAD-02")
+    at.run()
+
+    _click_button(at, "Добавить куст")
+    at.run()
+
+    assert _multiselect_value(at, "Скважины для расчета") == [
+        "PAD1-A",
+        "PAD2-A",
+        "PAD2-B",
+    ]
+
+
+def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_pad() -> None:
+    page = _load_welltrack_page_module()
+    records = _multi_pad_records()
+    successes = [
+        _successful_plan_xy(name="PAD1-A", x_offset_m=0.0, y_offset_m=0.0),
+        _successful_plan_xy(name="PAD1-B", x_offset_m=0.0, y_offset_m=50.0),
+        _successful_plan_xy(name="PAD2-A", x_offset_m=5000.0, y_offset_m=0.0),
+        _successful_plan_xy(name="PAD2-B", x_offset_m=5000.0, y_offset_m=50.0),
+    ]
+    name_to_color = {
+        "PAD1-A": "#22c55e",
+        "PAD1-B": "#2563eb",
+        "PAD2-A": "#f59e0b",
+        "PAD2-B": "#c026d3",
+    }
+
+    overrides = page._trajectory_three_payload_overrides(
+        records=records,
+        successes=successes,
+        target_only_wells=[],
+        name_to_color=name_to_color,
+    )
+
+    legend_tree = list(overrides["legend_tree"])
+    focus_targets = dict(overrides["focus_targets"])
+    hidden_labels = set(str(item) for item in overrides["hidden_flat_legend_labels"])
+
+    assert [str(item["label"]) for item in legend_tree] == ["Куст PAD-01", "Куст PAD-02"]
+    assert [str(child["label"]) for child in legend_tree[0]["children"]] == ["PAD1-A", "PAD1-B"]
+    assert [str(child["label"]) for child in legend_tree[1]["children"]] == ["PAD2-A", "PAD2-B"]
+    assert set(focus_targets) == {
+        "pad::PAD-01",
+        "pad::PAD-02",
+        "well::PAD1-A",
+        "well::PAD1-B",
+        "well::PAD2-A",
+        "well::PAD2-B",
+    }
+    assert hidden_labels == {"PAD1-A", "PAD1-B", "PAD2-A", "PAD2-B"}
+
+
+def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
+    page = _load_welltrack_page_module()
+    payload = {
+        "legend": [
+            {"label": "PAD1-A", "color": "#22c55e", "opacity": 1.0},
+            {"label": "PAD2-A", "color": "#f59e0b", "opacity": 1.0},
+            {"label": "Общая зона overlap", "color": "#fca5a5", "opacity": 0.4},
+        ]
+    }
+
+    updated = page._augment_three_payload(
+        payload=payload,
+        legend_tree=[
+            {
+                "id": "pad::PAD-01",
+                "label": "Куст PAD-01",
+                "children": [{"id": "well::PAD1-A", "label": "PAD1-A", "color": "#22c55e"}],
+            }
+        ],
+        focus_targets={"pad::PAD-01": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}},
+        hidden_flat_legend_labels={"PAD1-A", "PAD2-A"},
+    )
+
+    assert updated["legend_tree"]
+    assert updated["focus_targets"] == {
+        "pad::PAD-01": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}
+    }
+    assert list(updated["legend"]) == [
+        {"label": "Общая зона overlap", "color": "#fca5a5", "opacity": 0.4}
     ]
 
 
@@ -40173,7 +41676,41 @@ def test_prepare_rerun_from_cluster_persists_pad_scoped_target_wells() -> None:
 
     snapshot = page._cluster_snapshot(clusters[0], target_well_names=("WELL-A",))
     assert snapshot["target_well_names"] == ("WELL-A",)
+    assert snapshot["focus_well_names"] == ()
     assert page._resolution_snapshot_well_names(snapshot) == ("WELL-A",)
+
+
+def test_pad_scoped_cluster_target_wells_expand_to_neighbor_cluster_scope() -> None:
+    page = _load_welltrack_page_module()
+    analysis = page._build_anti_collision_analysis(
+        [
+            _successful_plan(name="PAD1-A", y_offset_m=0.0),
+            _successful_plan(name="PAD2-A", y_offset_m=5.0),
+        ],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=page._build_anticollision_well_contexts(
+            [
+                _successful_plan(name="PAD1-A", y_offset_m=0.0),
+                _successful_plan(name="PAD2-A", y_offset_m=5.0),
+            ]
+        ),
+    )
+    clusters = build_anti_collision_recommendation_clusters(recommendations)
+
+    target_names = page._pad_scoped_cluster_target_well_names(
+        cluster=clusters[0],
+        focus_pad_well_names=("PAD1-A",),
+    )
+    focus_names = page._pad_scoped_cluster_focus_well_names(
+        cluster=clusters[0],
+        focus_pad_well_names=("PAD1-A",),
+    )
+
+    assert target_names == ("PAD1-A", "PAD2-A")
+    assert focus_names == ("PAD1-A",)
 
 
 def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() -> None:

@@ -554,6 +554,8 @@ def render_result_tables(
     summary_tab_label: str = "Сводка",
     survey_tab_label: str = "Инклинометрия",
     survey_file_name: str = "well_survey.csv",
+    show_validation_section: bool = True,
+    show_solver_diagnostics_section: bool = True,
 ) -> None:
     summary = view.summary
     optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
@@ -614,7 +616,7 @@ def render_result_tables(
             width="stretch",
             hide_index=True,
         )
-        if validation_rows:
+        if show_validation_section and validation_rows:
             with st.expander("Контроль попадания и точность расчета", expanded=False):
                 st.dataframe(
                     arrow_safe_text_dataframe(pd.DataFrame(validation_rows)),
@@ -625,12 +627,13 @@ def render_result_tables(
                     "Промахи t1/t3 и INC на входе считаются аналитически по сегментам профиля. "
                     "Control-grid используется для survey-таблицы, графиков и постконтроля DLS."
                 )
-        with st.expander("Технические параметры и диагностика решателя", expanded=False):
-            st.dataframe(
-                arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),
-                width="stretch",
-                hide_index=True,
-            )
+        if show_solver_diagnostics_section:
+            with st.expander("Технические параметры и диагностика решателя", expanded=False):
+                st.dataframe(
+                    arrow_safe_text_dataframe(pd.DataFrame(tech_rows)),
+                    width="stretch",
+                    hide_index=True,
+                )
 
     with tab_survey:
         render_survey_table_with_download(

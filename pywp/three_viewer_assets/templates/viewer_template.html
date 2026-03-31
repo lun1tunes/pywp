@@ -143,6 +143,63 @@
         color: #0f172a;
       }
 
+      .legend-group {
+        margin: 0 0 10px 0;
+      }
+
+      .legend-group:last-child {
+        margin-bottom: 0;
+      }
+
+      .legend-node-btn {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        padding: 4px 0;
+        border: none;
+        background: none;
+        cursor: pointer;
+        text-align: left;
+        color: #0f172a;
+        font-size: 12px;
+        line-height: 1.25;
+      }
+
+      .legend-node-btn:hover {
+        color: #1d4ed8;
+      }
+
+      .legend-node-pad {
+        font-weight: 700;
+      }
+
+      .legend-node-well {
+        padding-left: 18px;
+      }
+
+      .legend-caret {
+        width: 10px;
+        flex: 0 0 10px;
+        color: #64748b;
+        font-size: 11px;
+      }
+
+      .legend-children {
+        margin: 2px 0 0 0;
+      }
+
+      .legend-children.is-collapsed {
+        display: none;
+      }
+
+      .legend-flat-section {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(15, 23, 42, 0.08);
+      }
+
       .legend-swatch {
         width: 16px;
         height: 3px;
@@ -347,7 +404,14 @@
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
         let legendCollapsed = false;
+        let legendTreeExpanded = true;
         let interactionActive = false;
+        const hasTreeLegend =
+          Array.isArray(payload.legend_tree) && payload.legend_tree.length > 0;
+        const focusTargets =
+          payload.focus_targets && typeof payload.focus_targets === "object"
+            ? payload.focus_targets
+            : {};
 
         const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
         const hoverSphereMaterial = new THREE.MeshBasicMaterial({
@@ -535,24 +599,131 @@
           requestRender();
         }
 
-        function fitCamera() {
-          camera.near = Math.max(maxSpan / 1200.0, 0.1);
-          camera.far = Math.max(maxSpan * 40.0, 5000.0);
+        function fitCameraToRawBounds(rawBounds) {
+          const localBounds = transformedBounds(rawBounds || payload.bounds || {});
+          const localMin = localBounds.min;
+          const localMax = localBounds.max;
+          const localCenter = new THREE.Vector3()
+            .addVectors(localMin, localMax)
+            .multiplyScalar(0.5);
+          const localSpan = new THREE.Vector3().subVectors(localMax, localMin);
+          const localMaxSpan = Math.max(
+            localSpan.x,
+            localSpan.y,
+            localSpan.z,
+            1,
+          );
+          camera.near = Math.max(localMaxSpan / 1200.0, 0.1);
+          camera.far = Math.max(localMaxSpan * 40.0, 5000.0);
           camera.up.set(0, 0, 1);
           camera.position.set(
-            center.x + maxSpan * 1.15,
-            center.y - maxSpan * 1.05,
-            center.z + maxSpan * 1.42,
+            localCenter.x + localMaxSpan * 1.15,
+            localCenter.y - localMaxSpan * 1.05,
+            localCenter.z + localMaxSpan * 1.42,
           );
-          controls.target.copy(center);
+          controls.target.copy(localCenter);
           camera.updateProjectionMatrix();
           controls.update();
           requestRender();
         }
 
-        function addLegend(items) {
+        function fitCamera() {
+          fitCameraToRawBounds(payload.bounds || {});
+        }
+
+        function createLegendSwatch(color, opacity) {
+          const swatch = document.createElement("div");
+          swatch.className = "legend-swatch";
+          swatch.style.background = hexOrDefault(color, "#9ca3af");
+          swatch.style.opacity = String(
+            Number.isFinite(opacity) ? opacity : 1.0,
+          );
+          return swatch;
+        }
+
+        function createFlatLegendRow(item) {
+          const row = document.createElement("div");
+          row.className = "legend-item";
+          row.appendChild(
+            createLegendSwatch(
+              item.color,
+              Number.isFinite(item.opacity) ? item.opacity : 1.0,
+            ),
+          );
+          const label = document.createElement("div");
+          label.className = "legend-label";
+          label.textContent = String(item.label || "");
+          row.appendChild(label);
+          return row;
+        }
+
+        function createTreeNodeButton(item, kind) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className =
+            kind === "pad"
+              ? "legend-node-btn legend-node-pad"
+              : "legend-node-btn legend-node-well";
+          if (kind === "pad") {
+            const caret = document.createElement("span");
+            caret.className = "legend-caret";
+            caret.textContent = legendTreeExpanded ? "▾" : "▸";
+            button.appendChild(caret);
+          } else {
+            button.appendChild(
+              createLegendSwatch(item.color, Number.isFinite(item.opacity) ? item.opacity : 1.0),
+            );
+          }
+          const label = document.createElement("div");
+          label.className = "legend-label";
+          label.textContent = String(item.label || "");
+          button.appendChild(label);
+          button.addEventListener("click", () => {
+            const targetBounds = focusTargets[String(item.id || "")];
+            if (targetBounds) {
+              fitCameraToRawBounds(targetBounds);
+            }
+          });
+          return button;
+        }
+
+        function renderLegend() {
           legendElement.innerHTML = "";
-          if (!Array.isArray(items) || items.length === 0) {
+          const flatItems = Array.isArray(payload.legend) ? payload.legend : [];
+          if (hasTreeLegend) {
+            if (legendToggleButton) {
+              legendToggleButton.style.display = "inline-flex";
+              legendToggleButton.textContent = legendTreeExpanded
+                ? "Свернуть всё"
+                : "Развернуть всё";
+            }
+            legendElement.classList.remove("is-collapsed");
+            payload.legend_tree.forEach((group) => {
+              const groupWrap = document.createElement("div");
+              groupWrap.className = "legend-group";
+              groupWrap.appendChild(createTreeNodeButton(group, "pad"));
+              const childrenWrap = document.createElement("div");
+              childrenWrap.className = "legend-children";
+              if (!legendTreeExpanded) {
+                childrenWrap.classList.add("is-collapsed");
+              }
+              (Array.isArray(group.children) ? group.children : []).forEach((child) => {
+                childrenWrap.appendChild(createTreeNodeButton(child, "well"));
+              });
+              groupWrap.appendChild(childrenWrap);
+              legendElement.appendChild(groupWrap);
+            });
+            if (flatItems.length > 0) {
+              const flatSection = document.createElement("div");
+              flatSection.className = "legend-flat-section";
+              flatItems.forEach((item) => {
+                flatSection.appendChild(createFlatLegendRow(item));
+              });
+              legendElement.appendChild(flatSection);
+            }
+            return;
+          }
+          if (!Array.isArray(flatItems) || flatItems.length === 0) {
             if (legendToggleButton) {
               legendToggleButton.style.display = "none";
             }
@@ -562,25 +733,16 @@
             legendToggleButton.style.display = "inline-flex";
             legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
           }
-          items.forEach((item) => {
-            const row = document.createElement("div");
-            row.className = "legend-item";
-            const swatch = document.createElement("div");
-            swatch.className = "legend-swatch";
-            swatch.style.background = hexOrDefault(item.color, "#9ca3af");
-            swatch.style.opacity = String(
-              Number.isFinite(item.opacity) ? item.opacity : 1.0,
-            );
-            const label = document.createElement("div");
-            label.className = "legend-label";
-            label.textContent = String(item.label || "");
-            row.appendChild(swatch);
-            row.appendChild(label);
-            legendElement.appendChild(row);
+          flatItems.forEach((item) => {
+            legendElement.appendChild(createFlatLegendRow(item));
           });
         }
 
         function syncLegendVisibility() {
+          renderLegend();
+          if (hasTreeLegend) {
+            return;
+          }
           if (legendCollapsed) {
             legendElement.classList.add("is-collapsed");
           } else {
@@ -979,8 +1141,6 @@
         (payload.meshes || []).forEach(addMesh);
         (payload.points || []).forEach(addMarkers);
         (payload.labels || []).forEach(addLabel);
-        addLegend(payload.legend || []);
-
         renderer.domElement.addEventListener("pointermove", (event) => {
           pointerScreen = {
             x: Number(event.clientX || 0),
@@ -1021,7 +1181,11 @@
         }
         if (legendToggleButton) {
           legendToggleButton.addEventListener("click", () => {
-            legendCollapsed = !legendCollapsed;
+            if (hasTreeLegend) {
+              legendTreeExpanded = !legendTreeExpanded;
+            } else {
+              legendCollapsed = !legendCollapsed;
+            }
             syncLegendVisibility();
           });
         }
