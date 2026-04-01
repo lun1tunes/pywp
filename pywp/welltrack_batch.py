@@ -987,6 +987,7 @@ class WelltrackBatchPlanner:
                 ),
                 "Сложность": str(summary.get("well_complexity", "—")),
                 "Горизонтальный отход t1, м": f"{t1_offset:.2f}",
+                "Мин VERTICAL до KOP, м": f"{float(success.config.kop_min_vertical_m):.2f}",
                 "KOP MD, м": f"{float(summary.get('kop_md_m', 0.0)):.2f}",
                 "Длина HORIZONTAL, м": (
                     f"{float(summary.get('horizontal_length_m', 0.0)):.2f}"

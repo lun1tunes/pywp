@@ -2,24 +2,28 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
 
-from pywp.anticollision import analyze_anti_collision, build_anti_collision_well
+from pywp.anticollision import (
+    analyze_anti_collision,
+    anti_collision_report_events,
+    build_anti_collision_well,
+)
 from pywp.mcm import add_dls, wrap_azimuth_deg
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
     PlanningUncertaintyModel,
+    fitted_uncertainty_model,
 )
 
 HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 HORIZONTAL_MIN_INTERVAL_M = 100.0
 HORIZONTAL_END_TOLERANCE_M = 60.0
-KOP_INC_THRESHOLD_DEG = 1.0
 ACTUAL_FUND_RESAMPLE_STEP_M = 10.0
 HOLD_INC_TOLERANCE_DEG = 3.0
 HOLD_MIN_INTERVAL_M = 90.0
@@ -29,6 +33,14 @@ HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M = 1.5
 ROBUST_DLS_WINDOW_M = 60.0
 MAX_REASONABLE_ACTUAL_DLS_DEG_PER_30M = 6.0
 MIN_CUSTOM_ACTUAL_FUND_SCALE = 0.35
+MIN_CUSTOM_ACTUAL_FUND_SEARCH_SCALE = 0.12
+KOP_BUILD_RATE_THRESHOLD_DEG_PER_30M = 0.55
+KOP_MIN_BUILD_INTERVAL_M = 60.0
+KOP_VERTICAL_BASELINE_MAX_INC_DEG = 10.0
+KOP_INC_BUFFER_DEG = 3.0
+MAX_IGNORED_CLOSE_CALIBRATION_PAIRS = 2
+IGNORABLE_CLOSE_PAIR_SF_THRESHOLD = 0.35
+IGNORABLE_CLOSE_PAIR_OVERLAP_M = 25.0
 
 CALIBRATION_STATUS_READY = "ready"
 CALIBRATION_STATUS_NO_CHANGE = "no_change"
@@ -47,6 +59,7 @@ class ActualFundWellMetrics(FrozenArbitraryModel):
     kop_md_m: float | None
     kop_tvd_m: float | None
     horizontal_entry_md_m: float | None
+    horizontal_entry_tvd_m: float | None
     horizontal_length_m: float
     hold_inc_deg: float | None
     hold_azi_deg: float | None
@@ -67,6 +80,38 @@ class ActualFundPadSummary(FrozenArbitraryModel):
     median_hold_length_m: float | None
     max_pi_deg_per_30m: float | None
     median_horizontal_length_m: float | None
+
+
+class ActualFundDepthClusterSummary(FrozenArbitraryModel):
+    cluster_id: str
+    well_count: int
+    depth_from_tvd_m: float
+    depth_to_tvd_m: float
+    median_horizontal_entry_tvd_m: float
+    median_kop_md_m: float
+    well_names: tuple[str, ...]
+
+
+class ActualFundKopDepthFunction(FrozenArbitraryModel):
+    mode: str
+    cluster_count: int
+    anchor_depths_tvd_m: tuple[float, ...]
+    anchor_kop_md_m: tuple[float, ...]
+    note: str
+
+    def evaluate(self, horizontal_tvd_m: float) -> float:
+        depth = float(horizontal_tvd_m)
+        if not self.anchor_depths_tvd_m or not self.anchor_kop_md_m:
+            raise ValueError("KOP depth function has no anchors.")
+        if len(self.anchor_depths_tvd_m) == 1:
+            return float(self.anchor_kop_md_m[0])
+        return float(
+            np.interp(
+                depth,
+                np.asarray(self.anchor_depths_tvd_m, dtype=float),
+                np.asarray(self.anchor_kop_md_m, dtype=float),
+            )
+        )
 
 
 class ActualFundZoneSummary(FrozenArbitraryModel):
@@ -103,6 +148,9 @@ class ActualFundCalibrationResult(FrozenArbitraryModel):
     overlapping_pair_count_after: int | None = None
     worst_separation_factor_before: float | None = None
     worst_separation_factor_after: float | None = None
+    excluded_pilot_well_count: int = 0
+    ignored_close_pair_count: int = 0
+    ignored_close_pairs: tuple[str, ...] = ()
     note: str = ""
 
 
@@ -121,6 +169,7 @@ ZONE_LABELS: dict[str, str] = {
 }
 
 HORIZONTAL_ENTRY_MIN_INC_DEG = 70.0
+DEPTH_CLUSTER_REL_TOLERANCE = 0.08
 
 
 def actual_well_family_name(name: object) -> str:
@@ -141,6 +190,11 @@ def actual_well_pad_group(name: object) -> str:
     if len(digits) > 2:
         return digits[:-2]
     return digits
+
+
+def actual_well_is_pilot_name(name: object) -> bool:
+    label = str(name or "").strip().upper()
+    return bool(label.endswith("_PL"))
 
 
 def actual_well_is_horizontal(stations: pd.DataFrame) -> bool:
@@ -177,14 +231,17 @@ def _analyze_actual_well(actual_well: ImportedTrajectoryWell) -> ActualFundWellA
     x_values = stations["X_m"].to_numpy(dtype=float)
     y_values = stations["Y_m"].to_numpy(dtype=float)
     inc_values = stations["INC_deg"].to_numpy(dtype=float)
-    kop_md = _first_kop_md_from_geometry(actual_well.stations, threshold_deg=KOP_INC_THRESHOLD_DEG)
     terminal_horizontal_start_md, _, terminal_horizontal_length_m = _terminal_horizontal_interval(
         stations
     )
     provisional_hold_start_md, provisional_hold_end_md, _, _ = _detect_hold_interval(
         stations=stations,
-        kop_md_m=kop_md,
+        kop_md_m=None,
         horizontal_entry_md_m=terminal_horizontal_start_md,
+    )
+    kop_md = _detect_kop_md(
+        stations=stations,
+        hold_start_md_m=provisional_hold_start_md,
     )
     horizontal_entry_md = _detect_horizontal_entry_md(
         stations=stations,
@@ -228,6 +285,11 @@ def _analyze_actual_well(actual_well: ImportedTrajectoryWell) -> ActualFundWellA
         is_horizontal=is_horizontal,
         kop_md_m=kop_md,
         horizontal_entry_md_m=horizontal_entry_md,
+        horizontal_entry_tvd_m=(
+            None
+            if horizontal_entry_md is None
+            else _interp_1d(md_values, z_values, float(horizontal_entry_md))
+        ),
         horizontal_length_m=float(horizontal_length),
         hold_inc_deg=hold_inc,
         hold_length_m=float(hold_length),
@@ -251,6 +313,11 @@ def _analyze_actual_well(actual_well: ImportedTrajectoryWell) -> ActualFundWellA
             else _interp_1d(source_md_values, source_z_values, float(kop_md))
         ),
         horizontal_entry_md_m=horizontal_entry_md,
+        horizontal_entry_tvd_m=(
+            None
+            if horizontal_entry_md is None
+            else _interp_1d(md_values, z_values, float(horizontal_entry_md))
+        ),
         horizontal_length_m=float(horizontal_length),
         hold_inc_deg=hold_inc,
         hold_azi_deg=hold_azi,
@@ -395,6 +462,7 @@ def actual_fund_metrics_rows(
             "KOP MD, м": item.kop_md_m,
             "KOP TVD, м": item.kop_tvd_m,
             "Вход в горизонталь, MD": item.horizontal_entry_md_m,
+            "Вход в горизонталь, TVD": item.horizontal_entry_tvd_m,
             "Горизонталь, м": item.horizontal_length_m,
             "Зенит HOLD, deg": item.hold_inc_deg,
             "Азимут HOLD, deg": item.hold_azi_deg,
@@ -426,6 +494,117 @@ def actual_fund_pad_rows(
     ]
 
 
+def summarize_actual_fund_by_depth(
+    metrics: Iterable[ActualFundWellMetrics],
+    *,
+    relative_tolerance: float = DEPTH_CLUSTER_REL_TOLERANCE,
+) -> tuple[ActualFundDepthClusterSummary, ...]:
+    eligible = [
+        item
+        for item in metrics
+        if bool(item.is_analysis_eligible)
+        and item.horizontal_entry_tvd_m is not None
+        and item.kop_md_m is not None
+    ]
+    if not eligible:
+        return ()
+    ordered = sorted(eligible, key=lambda item: float(item.horizontal_entry_tvd_m))
+    clusters: list[list[ActualFundWellMetrics]] = []
+    current: list[ActualFundWellMetrics] = []
+    for item in ordered:
+        depth_tvd = float(item.horizontal_entry_tvd_m)
+        if not current:
+            current = [item]
+            continue
+        current_depths = np.asarray(
+            [float(candidate.horizontal_entry_tvd_m) for candidate in current],
+            dtype=float,
+        )
+        cluster_center = float(np.median(current_depths))
+        max_allowed_gap = max(80.0, abs(cluster_center) * float(relative_tolerance))
+        if abs(depth_tvd - cluster_center) <= max_allowed_gap:
+            current.append(item)
+        else:
+            clusters.append(current)
+            current = [item]
+    if current:
+        clusters.append(current)
+
+    summaries: list[ActualFundDepthClusterSummary] = []
+    for index, cluster_items in enumerate(clusters, start=1):
+        depths = np.asarray(
+            [float(item.horizontal_entry_tvd_m) for item in cluster_items],
+            dtype=float,
+        )
+        kops = np.asarray(
+            [float(item.kop_md_m) for item in cluster_items],
+            dtype=float,
+        )
+        summaries.append(
+            ActualFundDepthClusterSummary(
+                cluster_id=f"DEPTH-{index:02d}",
+                well_count=len(cluster_items),
+                depth_from_tvd_m=float(np.min(depths)),
+                depth_to_tvd_m=float(np.max(depths)),
+                median_horizontal_entry_tvd_m=float(np.median(depths)),
+                median_kop_md_m=float(np.median(kops)),
+                well_names=tuple(str(item.name) for item in cluster_items),
+            )
+        )
+    return tuple(summaries)
+
+
+def actual_fund_depth_rows(
+    metrics: Iterable[ActualFundWellMetrics],
+    *,
+    relative_tolerance: float = DEPTH_CLUSTER_REL_TOLERANCE,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "Глубинный кластер": item.cluster_id,
+            "Скважин": item.well_count,
+            "TVD диапазон, м": f"{float(item.depth_from_tvd_m):.0f} - {float(item.depth_to_tvd_m):.0f}",
+            "Медианный TVD входа, м": float(item.median_horizontal_entry_tvd_m),
+            "Медианный KOP MD, м": float(item.median_kop_md_m),
+            "Скважины": ", ".join(item.well_names),
+        }
+        for item in summarize_actual_fund_by_depth(
+            metrics,
+            relative_tolerance=relative_tolerance,
+        )
+    ]
+
+
+def build_actual_fund_kop_depth_function(
+    metrics: Iterable[ActualFundWellMetrics],
+    *,
+    relative_tolerance: float = DEPTH_CLUSTER_REL_TOLERANCE,
+) -> ActualFundKopDepthFunction | None:
+    clusters = summarize_actual_fund_by_depth(
+        metrics,
+        relative_tolerance=relative_tolerance,
+    )
+    if not clusters:
+        return None
+    depths = tuple(float(item.median_horizontal_entry_tvd_m) for item in clusters)
+    kops = tuple(float(item.median_kop_md_m) for item in clusters)
+    if len(clusters) == 1:
+        return ActualFundKopDepthFunction(
+            mode="constant",
+            cluster_count=1,
+            anchor_depths_tvd_m=depths,
+            anchor_kop_md_m=kops,
+            note="Один глубинный кластер: функция вырождается в константу.",
+        )
+    return ActualFundKopDepthFunction(
+        mode="piecewise_linear",
+        cluster_count=len(clusters),
+        anchor_depths_tvd_m=depths,
+        anchor_kop_md_m=kops,
+        note="KOP(TVD) задан кусочно-линейно по медианам глубинных кластеров.",
+    )
+
+
 def summarize_actual_fund_by_pad(
     metrics: Iterable[ActualFundWellMetrics],
 ) -> tuple[ActualFundPadSummary, ...]:
@@ -454,6 +633,161 @@ def summarize_actual_fund_by_pad(
     return tuple(summaries)
 
 
+def _calibration_pair_key(well_a: str, well_b: str) -> tuple[str, str]:
+    return tuple(sorted((str(well_a), str(well_b))))
+
+
+def _calibration_pair_label(pair_key: tuple[str, str]) -> str:
+    return f"{pair_key[0]} ↔ {pair_key[1]}"
+
+
+def _calibration_pair_filter(
+    *,
+    family_by_name: Mapping[str, str],
+    ignored_pair_keys: set[tuple[str, str]],
+):
+    def pair_filter(left, right) -> bool:
+        left_name = str(left.name)
+        right_name = str(right.name)
+        if family_by_name[left_name] == family_by_name[right_name]:
+            return False
+        if _calibration_pair_key(left_name, right_name) in ignored_pair_keys:
+            return False
+        return True
+
+    return pair_filter
+
+
+def _build_calibration_analysis(
+    *,
+    eligible_wells: list[ImportedTrajectoryWell],
+    reconstructed_by_name: Mapping[str, pd.DataFrame],
+    model: PlanningUncertaintyModel,
+    ignored_pair_keys: set[tuple[str, str]],
+    family_by_name: Mapping[str, str],
+) -> "AntiCollisionAnalysis":
+    return analyze_anti_collision(
+        [
+            build_anti_collision_well(
+                name=well.name,
+                color="#6B7280",
+                stations=reconstructed_by_name[str(well.name)],
+                surface=well.surface,
+                t1=None,
+                t3=None,
+                azimuth_deg=float(well.azimuth_deg),
+                md_t1_m=None,
+                md_t3_m=None,
+                model=model,
+                include_display_geometry=False,
+                well_kind="actual",
+                is_reference_only=False,
+            )
+            for well in eligible_wells
+        ],
+        build_overlap_geometry=False,
+        pair_filter=_calibration_pair_filter(
+            family_by_name=family_by_name,
+            ignored_pair_keys=ignored_pair_keys,
+        ),
+    )
+
+
+def _retained_uncertainty_score(
+    *,
+    base_model: PlanningUncertaintyModel,
+    candidate_model: PlanningUncertaintyModel,
+) -> float:
+    return float(
+        np.mean(
+            [
+                float(candidate_model.sigma_inc_deg) / float(base_model.sigma_inc_deg),
+                float(candidate_model.sigma_azi_deg) / float(base_model.sigma_azi_deg),
+                float(candidate_model.sigma_lateral_drift_m_per_1000m)
+                / max(float(base_model.sigma_lateral_drift_m_per_1000m), 1e-9),
+                float(candidate_model.confidence_scale)
+                / float(base_model.confidence_scale),
+            ]
+        )
+    )
+
+
+def _calibration_candidate_model(
+    *,
+    base_model: PlanningUncertaintyModel,
+    shape_key: str,
+    alpha: float,
+) -> PlanningUncertaintyModel:
+    alpha_value = float(alpha)
+    if shape_key == "uniform":
+        return fitted_uncertainty_model(
+            base_model,
+            sigma_inc_scale=alpha_value,
+            sigma_azi_scale=alpha_value,
+            sigma_lateral_drift_scale=alpha_value,
+            confidence_scale_factor=max(alpha_value, 0.10),
+        )
+    if shape_key == "azi_drift_relaxed":
+        return fitted_uncertainty_model(
+            base_model,
+            sigma_inc_scale=max(alpha_value**0.90, 0.05),
+            sigma_azi_scale=max(alpha_value**1.25, 0.05),
+            sigma_lateral_drift_scale=max(alpha_value**1.35, 0.05),
+            confidence_scale_factor=max(alpha_value**1.08, 0.10),
+        )
+    if shape_key == "angular_relaxed":
+        return fitted_uncertainty_model(
+            base_model,
+            sigma_inc_scale=max(alpha_value**1.05, 0.05),
+            sigma_azi_scale=max(alpha_value**1.20, 0.05),
+            sigma_lateral_drift_scale=max(alpha_value**1.10, 0.05),
+            confidence_scale_factor=max(alpha_value**1.05, 0.10),
+        )
+    if shape_key == "drift_relaxed":
+        return fitted_uncertainty_model(
+            base_model,
+            sigma_inc_scale=max(alpha_value**0.95, 0.05),
+            sigma_azi_scale=max(alpha_value**1.05, 0.05),
+            sigma_lateral_drift_scale=max(alpha_value**1.55, 0.05),
+            confidence_scale_factor=max(alpha_value**1.03, 0.10),
+        )
+    raise ValueError(f"Unsupported calibration shape: {shape_key}")
+
+
+def _ignorable_close_pair_keys(
+    analysis: "AntiCollisionAnalysis",
+) -> tuple[tuple[str, str], ...]:
+    candidates: list[tuple[tuple[str, str], float, float]] = []
+    for event in anti_collision_report_events(analysis):
+        min_sf = float(event.min_separation_factor)
+        max_overlap = float(event.max_overlap_depth_m)
+        if (
+            min_sf <= IGNORABLE_CLOSE_PAIR_SF_THRESHOLD
+            or max_overlap >= IGNORABLE_CLOSE_PAIR_OVERLAP_M
+        ):
+            candidates.append(
+                (
+                    _calibration_pair_key(str(event.well_a), str(event.well_b)),
+                    min_sf,
+                    max_overlap,
+                )
+            )
+    candidates = sorted(
+        candidates,
+        key=lambda item: (item[1], -item[2], item[0][0], item[0][1]),
+    )
+    unique_keys: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for pair_key, _, _ in candidates:
+        if pair_key in seen:
+            continue
+        seen.add(pair_key)
+        unique_keys.append(pair_key)
+        if len(unique_keys) >= MAX_IGNORED_CLOSE_CALIBRATION_PAIRS:
+            break
+    return tuple(unique_keys)
+
+
 def calibrate_uncertainty_from_actual_fund(
     *,
     actual_wells: Iterable[ImportedTrajectoryWell],
@@ -466,10 +800,21 @@ def calibrate_uncertainty_from_actual_fund(
         for well in actual_well_list
     }
     metrics = build_actual_fund_well_metrics(actual_well_list)
-    horizontal_names = {
+    eligible_metric_names = {
         item.name for item in metrics if bool(item.is_analysis_eligible)
     }
-    eligible_wells = [well for well in actual_well_list if str(well.name) in horizontal_names]
+    excluded_pilot_metric_names = {
+        item.name
+        for item in metrics
+        if bool(item.is_analysis_eligible) and actual_well_is_pilot_name(item.name)
+    }
+    eligible_wells = [
+        well
+        for well in actual_well_list
+        if str(well.name) in eligible_metric_names
+        and str(well.name) not in excluded_pilot_metric_names
+    ]
+    excluded_pilot_well_count = len(excluded_pilot_metric_names)
     if len(eligible_wells) < 2:
         return ActualFundCalibrationResult(
             status=CALIBRATION_STATUS_INSUFFICIENT,
@@ -480,9 +825,10 @@ def calibrate_uncertainty_from_actual_fund(
             analyzed_pair_count=0,
             skipped_same_family_pair_count=0,
             overlapping_pair_count_before=0,
+            excluded_pilot_well_count=excluded_pilot_well_count,
             note=(
                 "Для калибровки нужны минимум две фактические горизонтальные "
-                "скважины без аномалий анализа."
+                "скважины без аномалий анализа и без пилотов `_PL`."
             ),
         )
 
@@ -490,7 +836,6 @@ def calibrate_uncertainty_from_actual_fund(
         str(well.name): actual_well_family_name(well.name)
         for well in eligible_wells
     }
-    pair_filter = lambda left, right: family_by_name[str(left.name)] != family_by_name[str(right.name)]
     skipped_same_family_pairs = sum(
         1
         for left_index in range(len(eligible_wells))
@@ -498,30 +843,21 @@ def calibrate_uncertainty_from_actual_fund(
         if family_by_name[str(eligible_wells[left_index].name)]
         == family_by_name[str(eligible_wells[right_index].name)]
     )
-    analysis_before = analyze_anti_collision(
-        [
-            build_anti_collision_well(
-                name=well.name,
-                color="#6B7280",
-                stations=reconstructed_by_name[str(well.name)],
-                surface=well.surface,
-                t1=None,
-                t3=None,
-                azimuth_deg=float(well.azimuth_deg),
-                md_t1_m=None,
-                md_t3_m=None,
-                model=base_model,
-                include_display_geometry=False,
-                well_kind="actual",
-                is_reference_only=False,
-            )
-            for well in eligible_wells
-        ],
-        build_overlap_geometry=False,
-        pair_filter=pair_filter,
+    analysis_before = _build_calibration_analysis(
+        eligible_wells=eligible_wells,
+        reconstructed_by_name=reconstructed_by_name,
+        model=base_model,
+        ignored_pair_keys=set(),
+        family_by_name=family_by_name,
     )
     worst_sf_before = analysis_before.worst_separation_factor
     if worst_sf_before is None or float(worst_sf_before) >= 0.999:
+        note = (
+            "Текущая модель уже не даёт overlap по фактическому горизонтальному фонду. "
+            "Дополнительная пользовательская калибровка не требуется."
+        )
+        if excluded_pilot_well_count:
+            note += f" Из fit исключены пилоты `_PL`: {excluded_pilot_well_count}."
         return ActualFundCalibrationResult(
             status=CALIBRATION_STATUS_NO_CHANGE,
             base_preset=str(base_preset),
@@ -534,70 +870,107 @@ def calibrate_uncertainty_from_actual_fund(
             overlapping_pair_count_after=int(analysis_before.overlapping_pair_count),
             worst_separation_factor_before=worst_sf_before,
             worst_separation_factor_after=worst_sf_before,
-            note=(
-                "Текущая модель уже не даёт overlap по фактическому горизонтальному фонду. "
-                "Дополнительная пользовательская калибровка не требуется."
-            ),
+            excluded_pilot_well_count=excluded_pilot_well_count,
+            note=note,
         )
 
-    scale_factor = float(max(0.0, min(1.0, 0.98 * float(worst_sf_before))))
-    if scale_factor < MIN_CUSTOM_ACTUAL_FUND_SCALE:
+    ignored_candidates = _ignorable_close_pair_keys(analysis_before)
+    ignore_options: list[tuple[tuple[str, str], ...]] = [()]
+    for count in range(1, len(ignored_candidates) + 1):
+        ignore_options.append(tuple(ignored_candidates[:count]))
+
+    search_alphas = np.linspace(1.0, MIN_CUSTOM_ACTUAL_FUND_SEARCH_SCALE, num=18)
+    shape_keys = (
+        "uniform",
+        "azi_drift_relaxed",
+        "angular_relaxed",
+        "drift_relaxed",
+    )
+    best_candidate: tuple[
+        float,
+        PlanningUncertaintyModel,
+        "AntiCollisionAnalysis",
+        tuple[tuple[str, str], ...],
+        str,
+        float,
+    ] | None = None
+    for ignored_pair_keys in ignore_options:
+        ignored_pair_key_set = set(ignored_pair_keys)
+        for shape_key in shape_keys:
+            for alpha in search_alphas.tolist():
+                candidate_model = _calibration_candidate_model(
+                    base_model=base_model,
+                    shape_key=shape_key,
+                    alpha=float(alpha),
+                )
+                analysis_after = _build_calibration_analysis(
+                    eligible_wells=eligible_wells,
+                    reconstructed_by_name=reconstructed_by_name,
+                    model=candidate_model,
+                    ignored_pair_keys=ignored_pair_key_set,
+                    family_by_name=family_by_name,
+                )
+                if int(analysis_after.overlapping_pair_count) != 0:
+                    continue
+                retained_score = _retained_uncertainty_score(
+                    base_model=base_model,
+                    candidate_model=candidate_model,
+                )
+                score = retained_score - 0.12 * len(ignored_pair_keys)
+                if best_candidate is None or score > best_candidate[0]:
+                    best_candidate = (
+                        score,
+                        candidate_model,
+                        analysis_after,
+                        ignored_pair_keys,
+                        shape_key,
+                        float(alpha),
+                    )
+
+    if best_candidate is None:
+        note = (
+            "Автоматическая пользовательская функция не построена: даже после "
+            "адаптивного ослабления INC/AZI/drift и исключения пилотов `_PL` "
+            "ложные overlap по фактическому фонду остаются слишком жёсткими."
+        )
+        if ignored_candidates:
+            note += (
+                " Пробовали игнорировать до двух экстремально близких пар: "
+                + ", ".join(_calibration_pair_label(pair_key) for pair_key in ignored_candidates)
+                + "."
+            )
         return ActualFundCalibrationResult(
             status=CALIBRATION_STATUS_TOO_AGGRESSIVE,
             base_preset=str(base_preset),
-            scale_factor=scale_factor,
+            scale_factor=None,
             actual_well_count=len(actual_well_list),
             horizontal_well_count=len(eligible_wells),
             analyzed_pair_count=int(analysis_before.pair_count),
             skipped_same_family_pair_count=int(skipped_same_family_pairs),
             overlapping_pair_count_before=int(analysis_before.overlapping_pair_count),
             worst_separation_factor_before=worst_sf_before,
-            note=(
-                "Для снятия overlap по фактическому фонду потребовалось бы слишком "
-                "сильно уменьшить конусы одной глобальной шкалой. Пользовательская "
-                "модель не создана автоматически."
-            ),
+            excluded_pilot_well_count=excluded_pilot_well_count,
+            note=note,
         )
 
-    custom_model = base_model.__class__(
-        sigma_inc_deg=float(base_model.sigma_inc_deg) * scale_factor,
-        sigma_azi_deg=float(base_model.sigma_azi_deg) * scale_factor,
-        sigma_lateral_drift_m_per_1000m=float(base_model.sigma_lateral_drift_m_per_1000m)
-        * scale_factor,
-        confidence_scale=float(base_model.confidence_scale),
-        sample_step_m=float(base_model.sample_step_m),
-        max_display_ellipses=int(base_model.max_display_ellipses),
-        ellipse_points=int(base_model.ellipse_points),
-        min_display_radius_m=float(base_model.min_display_radius_m),
-        near_vertical_isotropic_threshold_deg=float(
-            base_model.near_vertical_isotropic_threshold_deg
-        ),
-        directional_refine_threshold_deg=float(
-            base_model.directional_refine_threshold_deg
-        ),
-        min_refined_step_m=float(base_model.min_refined_step_m),
-    )
-    analysis_after = analyze_anti_collision(
-        [
-            build_anti_collision_well(
-                name=well.name,
-                color="#6B7280",
-                stations=reconstructed_by_name[str(well.name)],
-                surface=well.surface,
-                t1=None,
-                t3=None,
-                azimuth_deg=float(well.azimuth_deg),
-                md_t1_m=None,
-                md_t3_m=None,
-                model=custom_model,
-                include_display_geometry=False,
-                well_kind="actual",
-                is_reference_only=False,
-            )
-            for well in eligible_wells
-        ],
-        build_overlap_geometry=False,
-        pair_filter=pair_filter,
+    _, custom_model, analysis_after, ignored_pair_keys, shape_key, scale_factor = best_candidate
+    note_parts = [
+        "Пользовательская модель построена как empirical field-fit относительно "
+        f"базового пресета '{base_preset}'.",
+        f"Форма подгонки: {shape_key}, базовый scale={scale_factor:.2f}.",
+        "Алгоритм умеет независимо ослаблять INC/AZI/drift, а не только одной "
+        "глобальной шкалой.",
+    ]
+    if excluded_pilot_well_count:
+        note_parts.append(f"Из fit исключены пилоты `_PL`: {excluded_pilot_well_count}.")
+    if ignored_pair_keys:
+        note_parts.append(
+            "Сознательно проигнорированы экстремально близкие пары: "
+            + ", ".join(_calibration_pair_label(pair_key) for pair_key in ignored_pair_keys)
+            + "."
+        )
+    note_parts.append(
+        "Это planning-level fit по фактическому фонду, а не формальная ISCWSA toolcode calibration."
     )
     return ActualFundCalibrationResult(
         status=CALIBRATION_STATUS_READY,
@@ -612,11 +985,12 @@ def calibrate_uncertainty_from_actual_fund(
         overlapping_pair_count_after=int(analysis_after.overlapping_pair_count),
         worst_separation_factor_before=worst_sf_before,
         worst_separation_factor_after=analysis_after.worst_separation_factor,
-        note=(
-            "Пользовательская модель построена как единая эмпирическая шкала "
-            "относительно базового пресета. Это planning-level field fit по "
-            "фактическому фонду, а не формальная ISCWSA toolcode calibration."
+        excluded_pilot_well_count=excluded_pilot_well_count,
+        ignored_close_pair_count=len(ignored_pair_keys),
+        ignored_close_pairs=tuple(
+            _calibration_pair_label(pair_key) for pair_key in ignored_pair_keys
         ),
+        note=" ".join(note_parts),
     )
 
 
@@ -714,26 +1088,63 @@ def _first_threshold_crossing_md(
     return None
 
 
-def _first_kop_md_from_geometry(stations: pd.DataFrame, *, threshold_deg: float) -> float | None:
-    source = stations.sort_values("MD_m").reset_index(drop=True)
-    md_values = source["MD_m"].to_numpy(dtype=float)
-    x_values = source["X_m"].to_numpy(dtype=float)
-    y_values = source["Y_m"].to_numpy(dtype=float)
-    z_values = source["Z_m"].to_numpy(dtype=float)
+def _detect_kop_md(
+    *,
+    stations: pd.DataFrame,
+    hold_start_md_m: float | None,
+) -> float | None:
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
     if len(md_values) < 2:
         return None
-    dx = np.diff(x_values)
-    dy = np.diff(y_values)
-    dz = np.diff(z_values)
-    lengths = np.sqrt(dx * dx + dy * dy + dz * dz)
-    valid = lengths > 1e-9
-    if not np.any(valid):
+
+    stable_inc = _stable_inc_values(stations)
+    build_rate = _stable_inc_build_rate_deg_per_30m(
+        stations=stations,
+        stable_inc=stable_inc,
+    )
+    search_limit_md = (
+        float(hold_start_md_m)
+        if hold_start_md_m is not None
+        else float(md_values[-1])
+    )
+    pre_hold_mask = md_values <= search_limit_md + 1e-9
+    if not np.any(pre_hold_mask):
         return None
-    inc_deg = np.degrees(np.arctan2(np.hypot(dx, dy), dz))
-    for index, is_valid in enumerate(valid.tolist()):
-        if is_valid and float(inc_deg[index]) >= float(threshold_deg):
-            return float(md_values[index])
-    return None
+
+    baseline_candidates = stable_inc[
+        pre_hold_mask & (stable_inc <= KOP_VERTICAL_BASELINE_MAX_INC_DEG)
+    ]
+    if len(baseline_candidates) == 0:
+        baseline_candidates = stable_inc[pre_hold_mask]
+    if len(baseline_candidates) == 0:
+        return None
+    vertical_baseline_inc = float(np.median(baseline_candidates))
+    kop_inc_threshold = float(
+        max(
+            HOLD_MIN_INC_DEG - 2.0,
+            vertical_baseline_inc + KOP_INC_BUFFER_DEG,
+        )
+    )
+    build_mask = (
+        pre_hold_mask
+        & np.isfinite(stable_inc)
+        & np.isfinite(build_rate)
+        & (stable_inc >= kop_inc_threshold)
+        & (build_rate >= KOP_BUILD_RATE_THRESHOLD_DEG_PER_30M)
+    )
+    build_intervals = [
+        (start_md, end_md, length_m)
+        for start_md, end_md, length_m in _mask_intervals(md_values, build_mask)
+        if length_m >= KOP_MIN_BUILD_INTERVAL_M
+    ]
+    if build_intervals:
+        return float(min(float(item[0]) for item in build_intervals))
+    return _first_threshold_crossing_md(
+        md_values=md_values[pre_hold_mask],
+        values=stable_inc[pre_hold_mask],
+        threshold=kop_inc_threshold,
+    )
 
 
 def _interp_1d(md_values: np.ndarray, values: np.ndarray, md_m: float) -> float:
@@ -804,6 +1215,7 @@ def _analysis_exclusion_reason(
     is_horizontal: bool,
     kop_md_m: float | None,
     horizontal_entry_md_m: float | None,
+    horizontal_entry_tvd_m: float | None,
     horizontal_length_m: float,
     hold_inc_deg: float | None,
     hold_length_m: float,
@@ -814,7 +1226,11 @@ def _analysis_exclusion_reason(
         return "Не горизонтальная"
     if kop_md_m is None:
         return "Не удалось определить KOP"
-    if horizontal_entry_md_m is None or float(horizontal_length_m) < HORIZONTAL_MIN_INTERVAL_M:
+    if (
+        horizontal_entry_md_m is None
+        or horizontal_entry_tvd_m is None
+        or float(horizontal_length_m) < HORIZONTAL_MIN_INTERVAL_M
+    ):
         return "Не удалось выделить терминальный горизонтальный участок"
     if hold_inc_deg is None or float(hold_length_m) < HOLD_MIN_INTERVAL_M:
         return "Не удалось устойчиво выделить HOLD"
@@ -994,14 +1410,47 @@ def _robust_max_dls(stations: pd.DataFrame) -> float | None:
     return float(np.max(finite_smoothed))
 
 
+def _stable_inc_values(stations: pd.DataFrame) -> np.ndarray:
+    inc_values = stations["INC_deg"].to_numpy(dtype=float)
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    if len(inc_values) == 0:
+        return np.asarray([], dtype=float)
+    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
+    return _rolling_median(inc_values, window_size=window_size)
+
+
+def _stable_inc_build_rate_deg_per_30m(
+    *,
+    stations: pd.DataFrame,
+    stable_inc: np.ndarray | None = None,
+) -> np.ndarray:
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    if len(md_values) == 0:
+        return np.asarray([], dtype=float)
+    if stable_inc is None:
+        stable_inc = _stable_inc_values(stations)
+    if len(md_values) == 1:
+        return np.zeros(1, dtype=float)
+    delta_md = np.diff(md_values)
+    delta_inc = np.diff(np.asarray(stable_inc, dtype=float))
+    segment_rate = np.zeros(len(delta_md), dtype=float)
+    valid = delta_md > 1e-9
+    segment_rate[valid] = np.maximum(delta_inc[valid], 0.0) / delta_md[valid] * 30.0
+    station_rate = np.zeros(len(md_values), dtype=float)
+    station_rate[0] = segment_rate[0]
+    station_rate[-1] = segment_rate[-1]
+    for index in range(1, len(md_values) - 1):
+        station_rate[index] = 0.5 * float(segment_rate[index - 1] + segment_rate[index])
+    return station_rate
+
+
 def _detect_hold_interval(
     *,
     stations: pd.DataFrame,
     kop_md_m: float | None,
     horizontal_entry_md_m: float | None,
 ) -> tuple[float | None, float | None, float | None, float | None]:
-    if kop_md_m is None:
-        return None, None, None, None
     md_values = stations["MD_m"].to_numpy(dtype=float)
     inc_values = stations["INC_deg"].to_numpy(dtype=float)
     azi_values = stations["AZI_deg"].to_numpy(dtype=float)
@@ -1012,13 +1461,19 @@ def _detect_hold_interval(
         if horizontal_entry_md_m is not None
         else float(md_values[-1])
     )
+    search_start_md = (
+        float(kop_md_m) + 10.0
+        if kop_md_m is not None
+        else float(md_values[0]) + 10.0
+    )
+    stable_inc = _stable_inc_values(stations)
     candidate_mask = (
-        (md_values >= float(kop_md_m) + 10.0)
+        (md_values >= search_start_md)
         & (md_values <= analysis_end_md - 10.0)
-        & np.isfinite(inc_values)
+        & np.isfinite(stable_inc)
         & np.isfinite(dls_values)
-        & (inc_values >= HOLD_MIN_INC_DEG)
-        & (inc_values <= HOLD_MAX_INC_DEG)
+        & (stable_inc >= HOLD_MIN_INC_DEG)
+        & (stable_inc <= HOLD_MAX_INC_DEG)
     )
     if not np.any(candidate_mask):
         return None, None, None, None
@@ -1028,7 +1483,7 @@ def _detect_hold_interval(
     stable_dls = _rolling_median(np.where(np.isfinite(dls_values), dls_values, 0.0), window_size=window_size)
     weighted_mode_inc = _weighted_modal_inclination(
         md_values=md_values,
-        inc_values=inc_values,
+        inc_values=stable_inc,
         mask=candidate_mask & (stable_dls <= HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M),
     )
     if weighted_mode_inc is None:
@@ -1036,7 +1491,7 @@ def _detect_hold_interval(
 
     hold_mask = (
         candidate_mask
-        & (np.abs(inc_values - float(weighted_mode_inc)) <= HOLD_INC_TOLERANCE_DEG)
+        & (np.abs(stable_inc - float(weighted_mode_inc)) <= HOLD_INC_TOLERANCE_DEG)
         & (stable_dls <= HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M)
     )
     intervals = [
@@ -1046,9 +1501,9 @@ def _detect_hold_interval(
     ]
     if not intervals:
         return None, None, None, None
-    start_md, end_md, _ = min(intervals, key=lambda item: (item[0], -item[2]))
+    start_md, end_md, _ = max(intervals, key=lambda item: (item[2], -item[0]))
     interval_mask = (md_values >= start_md - 1e-9) & (md_values <= end_md + 1e-9)
-    hold_inc = float(np.median(inc_values[interval_mask]))
+    hold_inc = float(np.median(stable_inc[interval_mask]))
     hold_azi = _circular_median_deg(azi_values[interval_mask])
     return float(start_md), float(end_md), hold_inc, hold_azi
 

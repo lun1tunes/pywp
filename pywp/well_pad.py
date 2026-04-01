@@ -15,6 +15,8 @@ from pywp.pydantic_base import FrozenModel
 
 _EPS = 1e-9
 _PCA_AXIS_DOMINANCE_RATIO_MIN = 1.05
+PAD_SURFACE_ANCHOR_FIRST = "first"
+PAD_SURFACE_ANCHOR_CENTER = "center"
 
 
 class PadWell(FrozenModel):
@@ -39,6 +41,7 @@ class PadLayoutPlan(FrozenModel):
     first_surface_z: float
     spacing_m: float
     nds_azimuth_deg: float
+    surface_anchor_mode: str = PAD_SURFACE_ANCHOR_FIRST
 
 
 def detect_well_pads(
@@ -114,6 +117,7 @@ def estimate_pad_nds_azimuth_deg(
     wells: tuple[PadWell, ...],
     surface_x: float,
     surface_y: float,
+    surface_anchor_mode: str = PAD_SURFACE_ANCHOR_FIRST,
 ) -> float:
     """Estimate rig walking/skidding azimuth for a pad from target geometry.
 
@@ -162,7 +166,17 @@ def estimate_pad_nds_azimuth_deg(
 
     unit = direction / norm
     reference = centroid - np.array([surface_x, surface_y], dtype=float)
-    if float(np.dot(unit, reference)) < 0.0:
+    if str(surface_anchor_mode) == PAD_SURFACE_ANCHOR_CENTER:
+        source_order = np.asarray(
+            [float(index) for index, _ in enumerate(wells)],
+            dtype=float,
+        )
+        source_order = source_order - float(np.mean(source_order))
+        centered_projection = points @ unit
+        centered_projection = centered_projection - float(np.mean(centered_projection))
+        if float(np.dot(centered_projection, source_order)) < 0.0:
+            unit = -unit
+    elif float(np.dot(unit, reference)) < 0.0:
         unit = -unit
     return _vector_to_azimuth_deg(dx=float(unit[0]), dy=float(unit[1]))
 
@@ -194,6 +208,8 @@ def apply_pad_layout(
         spacing_m = float(max(plan.spacing_m, 0.0))
         ux, uy = _azimuth_to_unit_xy(azimuth_deg=float(plan.nds_azimuth_deg))
         ordered = ordered_pad_wells(pad=pad, nds_azimuth_deg=float(plan.nds_azimuth_deg))
+        anchor_mode = str(getattr(plan, "surface_anchor_mode", PAD_SURFACE_ANCHOR_FIRST))
+        center_slot_index = 0.5 * float(max(len(ordered) - 1, 0))
 
         for slot_index, well in enumerate(ordered):
             record_index = name_to_index.get(str(well.name))
@@ -204,7 +220,10 @@ def apply_pad_layout(
                 continue
 
             source_surface = source_record.points[0]
-            shift_m = float(slot_index) * spacing_m
+            if anchor_mode == PAD_SURFACE_ANCHOR_CENTER:
+                shift_m = (float(slot_index) - center_slot_index) * spacing_m
+            else:
+                shift_m = float(slot_index) * spacing_m
             new_surface = WelltrackPoint(
                 x=float(plan.first_surface_x + shift_m * ux),
                 y=float(plan.first_surface_y + shift_m * uy),

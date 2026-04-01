@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.well_pad import (
+    PAD_SURFACE_ANCHOR_CENTER,
     PadLayoutPlan,
     apply_pad_layout,
     detect_well_pads,
@@ -177,6 +178,74 @@ def test_apply_pad_layout_rewrites_surface_points() -> None:
     assert math.isclose(float(s2.y), 500.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(s1.z), 5.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(s2.z), 5.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_apply_pad_layout_can_center_surfaces_about_anchor() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=200.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W3",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+    ordered = ordered_pad_wells(pad=pads[0], nds_azimuth_deg=90.0)
+    plan = PadLayoutPlan(
+        pad_id=str(pads[0].pad_id),
+        first_surface_x=1000.0,
+        first_surface_y=500.0,
+        first_surface_z=5.0,
+        spacing_m=20.0,
+        nds_azimuth_deg=90.0,
+        surface_anchor_mode=PAD_SURFACE_ANCHOR_CENTER,
+    )
+
+    updated = apply_pad_layout(
+        records=records,
+        pads=pads,
+        plan_by_pad_id={str(pads[0].pad_id): plan},
+    )
+    updated_by_name = {record.name: record for record in updated}
+
+    center_surface = updated_by_name[ordered[1].name].points[0]
+    left_surface = updated_by_name[ordered[0].name].points[0]
+    right_surface = updated_by_name[ordered[2].name].points[0]
+
+    assert math.isclose(float(center_surface.x), 1000.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(float(center_surface.y), 500.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(float(left_surface.x), 980.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(float(right_surface.x), 1020.0, rel_tol=0.0, abs_tol=1e-9)
 
 
 def test_apply_pad_layout_accepts_model_like_points_from_stale_session_state() -> None:

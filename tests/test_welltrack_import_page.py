@@ -9,6 +9,7 @@ import pytest
 import sys
 from streamlit.testing.v1 import AppTest
 
+from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp.anticollision import AntiCollisionAnalysis, AntiCollisionCorridor, build_anti_collision_well
 from pywp.anticollision_optimization import (
     AntiCollisionOptimizationContext,
@@ -22,6 +23,7 @@ from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.reference_trajectories import parse_reference_trajectory_table
+from pywp.ui_calc_params import clear_kop_min_vertical_function, set_kop_min_vertical_function
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
     UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND,
@@ -56,6 +58,27 @@ def _records() -> list[WelltrackRecord]:
                 WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
                 WelltrackPoint(x=700.0, y=760.0, z=2200.0, md=2300.0),
                 WelltrackPoint(x=1600.0, y=1960.0, z=2350.0, md=3350.0),
+            ),
+        ),
+    ]
+
+
+def _bad_order_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="BAD-1",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1200.0, y=0.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="OK-1",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=500.0, y=0.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=3500.0),
             ),
         ),
     ]
@@ -98,6 +121,72 @@ def _multi_pad_records() -> list[WelltrackRecord]:
     ]
 
 
+def _prepositioned_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="P1-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-B",
+            points=(
+                WelltrackPoint(x=25.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=625.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1525.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-C",
+            points=(
+                WelltrackPoint(x=50.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=760.0, z=2200.0, md=2300.0),
+                WelltrackPoint(x=1550.0, y=1960.0, z=2350.0, md=3350.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P2-A",
+            points=(
+                WelltrackPoint(x=2000.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=2600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=3500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P2-B",
+            points=(
+                WelltrackPoint(x=2025.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=2625.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=3525.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
+def _submeter_prepositioned_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="SUB-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="SUB-B",
+            points=(
+                WelltrackPoint(x=0.2, y=0.1, z=0.0, md=0.0),
+                WelltrackPoint(x=625.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1525.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
 def _multiselect_value(at: AppTest, label: str) -> list[str] | None:
     matches = [widget for widget in at.multiselect if widget.label == label]
     if not matches:
@@ -132,6 +221,72 @@ def _load_welltrack_page_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_records_overview_dataframe_uses_explicit_green_red_status_icons() -> None:
+    page = _load_welltrack_page_module()
+    incomplete = WelltrackRecord(
+        name="WELL-X",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+        ),
+    )
+
+    overview_df = page._records_overview_dataframe([_records()[0], incomplete])
+
+    assert list(overview_df["Статус"]) == ["✅", "❌"]
+    assert list(overview_df["Точек"]) == [2, 1]
+    assert str(overview_df.iloc[0]["Проблема"]) == "—"
+    assert "Не хватает одной из точек" in str(overview_df.iloc[1]["Проблема"])
+
+
+def test_records_overview_dataframe_detects_missing_wellhead_by_surface_z_heuristic() -> None:
+    page = _load_welltrack_page_module()
+    missing_surface = WelltrackRecord(
+        name="NO-S",
+        points=(
+            WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+            WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            WelltrackPoint(x=2200.0, y=2900.0, z=2520.0, md=4400.0),
+        ),
+    )
+
+    overview_df = page._records_overview_dataframe([missing_surface])
+
+    assert list(overview_df["Статус"]) == ["❌"]
+    assert list(overview_df["Точек"]) == [2]
+    assert "Не найден wellhead" in str(overview_df.iloc[0]["Проблема"])
+
+
+def test_t1_t3_resolution_message_reports_fixed_and_kept_wells() -> None:
+    page = _load_welltrack_page_module()
+
+    page._clear_t1_t3_order_resolution_state()
+    page._set_t1_t3_order_resolution(action="fixed", well_names={"WELL-B", "WELL-A"})
+    assert page._t1_t3_order_resolution_message() == (
+        "success",
+        "Порядок t1/t3 изменился для скважин: WELL-A, WELL-B.",
+    )
+
+    page._set_t1_t3_order_resolution(action="kept", well_names={"WELL-C"})
+    assert page._t1_t3_order_resolution_message() == (
+        "info",
+        "Порядок t1/t3 оставлен без изменений для скважин: WELL-C.",
+    )
+
+
+def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _bad_order_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+
+    button_labels = {str(widget.label) for widget in at.button}
+    assert "Исправить порядок для выбранных скважин" in button_labels
+    assert "Оставить все точки без изменений" in button_labels
 
 
 def _successful_plan(
@@ -701,6 +856,61 @@ def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_res
     assert at.session_state["wt_pad_auto_applied_on_import"] is False
 
 
+def test_pad_config_defaults_to_center_anchor_mode() -> None:
+    page = _load_welltrack_page_module()
+    pads = page.detect_well_pads(_multi_pad_records())
+
+    defaults = page._pad_config_defaults(pads[0])
+
+    assert str(defaults["surface_anchor_mode"]) == page.PAD_SURFACE_ANCHOR_CENTER
+
+
+def test_project_pads_for_ui_groups_prepositioned_surfaces_into_single_pad() -> None:
+    page = _load_welltrack_page_module()
+    page.st.session_state["wt_records_original"] = list(_prepositioned_pad_records())
+
+    pads = page._project_pads_for_ui(_prepositioned_pad_records())
+
+    assert [len(pad.wells) for pad in pads] == [3, 2]
+    metadata = page.st.session_state["wt_pad_detected_meta"]
+    assert bool(metadata[str(pads[0].pad_id)].source_surfaces_defined) is True
+    assert bool(metadata[str(pads[1].pad_id)].source_surfaces_defined) is True
+
+
+def test_project_pads_for_ui_detects_submeter_surface_offsets_as_prepositioned() -> None:
+    page = _load_welltrack_page_module()
+    page.st.session_state["wt_records_original"] = list(_submeter_prepositioned_pad_records())
+
+    pads = page._project_pads_for_ui(_submeter_prepositioned_pad_records())
+
+    assert [len(pad.wells) for pad in pads] == [2]
+    metadata = page.st.session_state["wt_pad_detected_meta"]
+    assert bool(metadata[str(pads[0].pad_id)].source_surfaces_defined) is True
+
+
+def test_build_pad_plan_map_skips_prepositioned_source_surface_pads() -> None:
+    page = _load_welltrack_page_module()
+
+    pads = page._ensure_pad_configs(list(_prepositioned_pad_records()))
+    plan_map = page._build_pad_plan_map(pads)
+
+    assert plan_map == {}
+
+
+def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _prepositioned_pad_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+
+    assert any(
+        "Положения устьев были заданы в исходных данных" in str(widget.value)
+        for widget in at.info
+    )
+
+
 def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     at.session_state["wt_source_mode"] = "Вставить таблицу"
@@ -886,6 +1096,61 @@ def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:
     ]
     assert detail_selectboxes
     assert str(detail_selectboxes[0].value) == "FACT-H"
+
+
+def test_actual_fund_vertical_profile_uses_explicit_reversed_tvd_range() -> None:
+    page = _load_welltrack_page_module()
+    detail = page.build_actual_fund_well_analyses(list(_horizontal_reference_well()))[0]
+
+    figure = page._actual_fund_vertical_profile_figure(detail)
+
+    assert figure.layout.yaxis.range is not None
+    assert float(figure.layout.yaxis.range[0]) > float(figure.layout.yaxis.range[1])
+    assert figure.layout.yaxis.autorange is None
+    assert not str(getattr(figure.layout.title, "text", "") or "").strip()
+    assert str(figure.layout.xaxis.title.text) == "Координата по разрезу (м)"
+
+
+def test_actual_fund_plan_figure_uses_equalized_xy_view_without_embedded_title() -> None:
+    page = _load_welltrack_page_module()
+    detail = page.build_actual_fund_well_analyses(list(_horizontal_reference_well()))[0]
+
+    figure = page._actual_fund_plan_figure(detail)
+
+    assert not str(getattr(figure.layout.title, "text", "") or "").strip()
+    assert str(figure.layout.yaxis.scaleanchor) == "x"
+
+
+def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> None:
+    page = _load_welltrack_page_module()
+    clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
+    kop_function = ActualFundKopDepthFunction(
+        mode="piecewise_linear",
+        cluster_count=3,
+        anchor_depths_tvd_m=(1600.0, 2500.0, 3400.0),
+        anchor_kop_md_m=(780.0, 1180.0, 1680.0),
+        note="test",
+    )
+    set_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix, kop_function=kop_function)
+    base_config = TrajectoryConfig()
+    records = {record.name: record for record in _records()}
+
+    config_map = page._build_selected_override_configs(
+        base_config=base_config,
+        selected_names={"WELL-A", "WELL-C"},
+        records_by_name=records,
+    )
+
+    assert set(config_map) == {"WELL-A", "WELL-C"}
+    assert float(config_map["WELL-A"].kop_min_vertical_m) == pytest.approx(
+        1135.5555555,
+        rel=1e-6,
+    )
+    assert float(config_map["WELL-C"].kop_min_vertical_m) == pytest.approx(
+        1046.6666666,
+        rel=1e-6,
+    )
+    clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
 
 
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
@@ -2527,6 +2792,32 @@ def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells()
     assert float(anchor[2]) == pytest.approx(1150.0)
 
 
+def test_reference_pad_labels_group_surface_points_by_chain_and_numeric_prefix() -> None:
+    page = _load_welltrack_page_module()
+    reference_wells = parse_reference_trajectory_table(
+        [
+            {"Wellname": "8012", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+            {"Wellname": "8012", "Type": "actual", "X": 100.0, "Y": 0.0, "Z": 50.0, "MD": 120.0},
+            {"Wellname": "8013", "Type": "actual", "X": 250.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+            {"Wellname": "8013", "Type": "actual", "X": 340.0, "Y": 0.0, "Z": 60.0, "MD": 120.0},
+            {"Wellname": "8014", "Type": "actual", "X": 530.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+            {"Wellname": "8014", "Type": "actual", "X": 620.0, "Y": 0.0, "Z": 60.0, "MD": 120.0},
+            {"Wellname": "9001", "Type": "approved", "X": 1200.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+            {"Wellname": "9001", "Type": "approved", "X": 1300.0, "Y": 0.0, "Z": 60.0, "MD": 120.0},
+        ]
+    )
+
+    pad_labels = page._reference_pad_labels(reference_wells)
+
+    assert [item.label for item in pad_labels] == ["Куст 80", "Куст 90"]
+    assert float(pad_labels[0].x) == pytest.approx(0.0)
+    assert float(pad_labels[1].x) == pytest.approx(1200.0)
+
+    label_trace = page._reference_pad_label_trace_3d(reference_wells)
+    assert label_trace is not None
+    assert list(label_trace.text) == ["Куст 80", "Куст 90"]
+
+
 def test_all_wells_overview_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
     page = _load_welltrack_page_module()
     successes = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
@@ -2735,8 +3026,9 @@ def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
 
 def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend() -> None:
     page = _load_welltrack_page_module()
+    success = _successful_plan(name="WELL-A", y_offset_m=0.0)
     figure = page._all_wells_3d_figure(
-        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        [success],
         reference_wells=_reference_wells(),
         render_mode=page.WT_3D_RENDER_DETAIL,
     )
@@ -2752,7 +3044,48 @@ def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend(
     assert "WELL-A" in legend_labels
     assert "Фактические скважины" in legend_labels
     assert "Проектные утвержденные скважины" in legend_labels
+    assert "Reference pads: кусты" not in legend_labels
     assert "FACT-1 (Фактическая)" not in legend_labels
+    well_label = next(
+        item for item in payload["labels"] if str(item["text"]) == "WELL-A"
+    )
+    assert str(well_label["role"]) == "well_label"
+    assert well_label["position"] == [
+        float(success.t1.x),
+        float(success.t1.y),
+        float(success.t1.z),
+    ]
+
+
+def test_three_legend_tree_stays_calculated_only_when_reference_pad_labels_exist() -> None:
+    page = _load_welltrack_page_module()
+    overrides = page._trajectory_three_payload_overrides(
+        records=_multi_pad_records(),
+        successes=[
+            _successful_plan(name="PAD1-A", y_offset_m=0.0),
+            _successful_plan(name="PAD1-B", y_offset_m=5.0),
+            _successful_plan(name="PAD2-A", y_offset_m=2500.0),
+            _successful_plan(name="PAD2-B", y_offset_m=2505.0),
+        ],
+        target_only_wells=[],
+        name_to_color={
+            "PAD1-A": "#00AA55",
+            "PAD1-B": "#0066DD",
+            "PAD2-A": "#AA00FF",
+            "PAD2-B": "#FF8800",
+        },
+    )
+
+    legend_tree = list(overrides["legend_tree"])
+
+    assert [str(item["label"]) for item in legend_tree] == ["Куст PAD-01", "Куст PAD-02"]
+    flat_child_labels = [
+        str(child["label"])
+        for group in legend_tree
+        for child in list(group["children"])
+    ]
+    assert "Куст 80" not in flat_child_labels
+    assert "Куст 90" not in flat_child_labels
 
 
 def test_scatter3d_legendonly_trace_preserves_legend_without_geometry() -> None:

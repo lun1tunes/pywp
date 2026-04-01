@@ -3,6 +3,23 @@ from __future__ import annotations
 import numpy as np
 
 
+def reversed_axis_range(
+    values: np.ndarray,
+    pad_fraction: float = 0.08,
+    min_span: float = 1.0,
+) -> list[float]:
+    finite_values = np.asarray(values, dtype=float)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size == 0:
+        return [1.0, 0.0]
+
+    lo = float(np.min(finite_values))
+    hi = float(np.max(finite_values))
+    span = max(hi - lo, float(min_span))
+    pad = span * float(pad_fraction)
+    return [hi + pad, lo - pad]
+
+
 def equalized_xy_ranges(
     x_values: np.ndarray,
     y_values: np.ndarray,

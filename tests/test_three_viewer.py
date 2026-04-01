@@ -26,6 +26,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "controls.dampingFactor = 0.12;" in html
     assert "controls.screenSpacePanning = true;" in html
     assert "function updateLabels()" in html
+    assert "offsetY: Number((options && options.offsetY) || 0)" in html
+    assert 'role === "well_label"' in html
+    assert 'role === "reference_pad_label"' in html
+    assert "item.offsetY" in html
+    assert "position.z += labelLift;" not in html
     assert "X / East" in html
     assert "Y / North" in html
     assert "Z / TVD" in html

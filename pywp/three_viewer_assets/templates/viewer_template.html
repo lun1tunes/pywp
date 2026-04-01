@@ -510,17 +510,20 @@
         const span = new THREE.Vector3().subVectors(maxBound, minBound);
         const maxSpan = Math.max(span.x, span.y, span.z, 1);
         const worldMarkerSize = Math.max(maxSpan * 0.008, 9.0);
-        const labelLift = Math.max(maxSpan * 0.015, 18.0);
-
         const axisLength = Math.max(maxSpan * 0.18, 40.0);
 
-        function addSceneLabel(text, position, color, extraClassName) {
+        function addSceneLabel(text, position, color, extraClassName, options) {
           const element = document.createElement("div");
           element.className = `scene-label ${String(extraClassName || "").trim()}`.trim();
           element.textContent = String(text || "");
           element.style.color = String(color || "#0f172a");
           labelLayerElement.appendChild(element);
-          sceneLabels.push({ element: element, position: position.clone() });
+          sceneLabels.push({
+            element: element,
+            position: position.clone(),
+            offsetX: Number((options && options.offsetX) || 0),
+            offsetY: Number((options && options.offsetY) || 0),
+          });
         }
 
         const axisOverlayDefinitions = [
@@ -968,13 +971,22 @@
         }
 
         function addLabel(item) {
+          const role = String(item.role || "label");
           const position = displayPoint(item.position || [0, 0, 0]);
-          position.z += labelLift;
+          const offsetY =
+            role === "well_label"
+              ? 14
+              : role === "reference_pad_label"
+              ? 12
+              : role === "reference_label"
+              ? 10
+              : 0;
           addSceneLabel(
             String(item.text || ""),
             position,
             String(item.color || "#0f172a"),
             "",
+            { offsetY: offsetY },
           );
         }
 
@@ -1097,8 +1109,8 @@
               return;
             }
             item.element.style.display = "block";
-            item.element.style.left = `${((projected.x + 1.0) * 0.5 * width).toFixed(1)}px`;
-            item.element.style.top = `${((-projected.y + 1.0) * 0.5 * height).toFixed(1)}px`;
+            item.element.style.left = `${(((projected.x + 1.0) * 0.5 * width) + item.offsetX).toFixed(1)}px`;
+            item.element.style.top = `${((((-projected.y + 1.0) * 0.5 * height) - item.offsetY)).toFixed(1)}px`;
           });
         }
 

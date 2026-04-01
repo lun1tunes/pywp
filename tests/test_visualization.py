@@ -66,6 +66,9 @@ def test_plotly_figures_are_constructed() -> None:
     assert len(fig_plan.data) >= 1
     assert len(fig_section.data) >= 1
     assert len(fig_dls.data) >= 1
+    assert fig_section.layout.yaxis.range is not None
+    assert float(fig_section.layout.yaxis.range[0]) > float(fig_section.layout.yaxis.range[1])
+    assert fig_section.layout.yaxis.autorange is None
 
     segment_traces = {str(trace.name): str(trace.line.color) for trace in fig_dls.data}
     assert {"BUILD1", "BUILD2", "HOLD", "HORIZONTAL"}.issubset(segment_traces.keys())

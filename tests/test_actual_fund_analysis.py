@@ -9,9 +9,11 @@ from pywp.actual_fund_analysis import (
     actual_well_family_name,
     actual_well_is_horizontal,
     actual_well_pad_group,
+    build_actual_fund_kop_depth_function,
     build_actual_fund_well_analysis,
     build_actual_fund_well_metrics,
     calibrate_uncertainty_from_actual_fund,
+    summarize_actual_fund_by_depth,
 )
 from pywp.mcm import compute_positions_min_curv
 from pywp.models import Point3D
@@ -86,6 +88,50 @@ def _synthetic_anomalous_horizontal_well(name: str = "9002") -> tuple:
     return tuple(parse_reference_trajectory_table(rows))
 
 
+def _synthetic_noisy_vertical_hold_actual_well(name: str = "9003") -> tuple:
+    survey = pd.DataFrame(
+        {
+            "MD_m": [0.0, 300.0, 600.0, 900.0, 1200.0, 1500.0, 1800.0, 2100.0, 2500.0, 3200.0],
+            "INC_deg": [0.0, 0.8, 1.8, 4.0, 16.0, 35.0, 55.0, 55.0, 82.0, 90.0],
+            "AZI_deg": [90.0] * 10,
+        }
+    )
+    positioned = compute_positions_min_curv(survey, start=Point3D(0.0, 0.0, 0.0))
+    rows = [
+        {
+            "Wellname": name,
+            "Type": "actual",
+            "X": float(row["X_m"]),
+            "Y": float(row["Y_m"]),
+            "Z": float(row["Z_m"]),
+            "MD": float(row["MD_m"]),
+        }
+        for _, row in positioned.iterrows()
+    ]
+    return tuple(parse_reference_trajectory_table(rows))
+
+
+def _synthetic_close_pair_actual_wells() -> tuple:
+    return tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "8001", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "8001", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
+                {"Wellname": "8001", "Type": "actual", "X": 1000.0, "Y": 0.0, "Z": 1000.0, "MD": 2000.0},
+                {"Wellname": "8001", "Type": "actual", "X": 2000.0, "Y": 0.0, "Z": 1000.0, "MD": 3000.0},
+                {"Wellname": "8002", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "8002", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
+                {"Wellname": "8002", "Type": "actual", "X": 1000.0, "Y": 0.0, "Z": 1000.0, "MD": 2000.0},
+                {"Wellname": "8002", "Type": "actual", "X": 2000.0, "Y": 0.0, "Z": 1000.0, "MD": 3000.0},
+                {"Wellname": "8003", "Type": "actual", "X": 0.0, "Y": 220.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "8003", "Type": "actual", "X": 0.0, "Y": 220.0, "Z": 1000.0, "MD": 1000.0},
+                {"Wellname": "8003", "Type": "actual", "X": 1000.0, "Y": 220.0, "Z": 1000.0, "MD": 2000.0},
+                {"Wellname": "8003", "Type": "actual", "X": 2000.0, "Y": 220.0, "Z": 1000.0, "MD": 3000.0},
+            ]
+        )
+    )
+
+
 def test_actual_well_family_and_pad_group_extract_numeric_prefixes() -> None:
     assert actual_well_family_name("7401_PL") == "7401"
     assert actual_well_family_name("7402_2") == "7402"
@@ -150,6 +196,19 @@ def test_actual_fund_well_analysis_builds_segmented_view_for_selected_well() -> 
     assert float(horizontal_zone.md_to_m) == float(analysis.metrics.md_total_m)
 
 
+def test_actual_fund_kop_ignores_small_noisy_inc_before_real_build1() -> None:
+    wells = _synthetic_noisy_vertical_hold_actual_well()
+
+    metrics = build_actual_fund_well_metrics(wells)
+
+    assert len(metrics) == 1
+    item = metrics[0]
+    assert item.kop_md_m is not None
+    assert 800.0 <= float(item.kop_md_m) <= 1300.0
+    assert item.hold_inc_deg is not None
+    assert 50.0 <= float(item.hold_inc_deg) <= 58.0
+
+
 def test_actual_fund_analysis_excludes_horizontal_anomaly_without_stable_hold() -> None:
     wells = _synthetic_anomalous_horizontal_well()
 
@@ -186,6 +245,44 @@ def test_calibration_excludes_same_family_pairs_and_builds_custom_model() -> Non
     assert result.custom_model is not None
     assert result.scale_factor is not None
     assert result.scale_factor < 1.0
-    assert result.skipped_same_family_pair_count == 1
-    assert result.analyzed_pair_count == 2
+    assert result.excluded_pilot_well_count == 1
+    assert result.skipped_same_family_pair_count == 0
+    assert result.analyzed_pair_count == 1
     assert result.overlapping_pair_count_before >= result.overlapping_pair_count_after
+
+
+def test_calibration_can_ignore_single_extreme_close_pair_and_still_build_model() -> None:
+    wells = _synthetic_close_pair_actual_wells()
+
+    result = calibrate_uncertainty_from_actual_fund(
+        actual_wells=wells,
+        base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        base_preset=DEFAULT_UNCERTAINTY_PRESET,
+    )
+
+    assert result.status == CALIBRATION_STATUS_READY
+    assert result.custom_model is not None
+    assert result.ignored_close_pair_count == 1
+    assert result.ignored_close_pairs == ("8001 ↔ 8002",)
+    assert result.overlapping_pair_count_after == 0
+
+
+def test_depth_cluster_summary_and_kop_function_build_from_generated_dataset() -> None:
+    from pathlib import Path
+
+    from pywp.reference_trajectories import parse_reference_trajectory_welltrack_text
+
+    wells = parse_reference_trajectory_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_FACT_DEPTH_CLUSTERS.INC").read_text(encoding="utf-8"),
+        kind="actual",
+    )
+    metrics = build_actual_fund_well_metrics(wells)
+    clusters = summarize_actual_fund_by_depth(metrics)
+    kop_function = build_actual_fund_kop_depth_function(metrics)
+
+    assert len(clusters) == 3
+    assert kop_function is not None
+    assert kop_function.mode == "piecewise_linear"
+    assert tuple(round(value, 1) for value in kop_function.anchor_depths_tvd_m) == tuple(
+        round(float(cluster.median_horizontal_entry_tvd_m), 1) for cluster in clusters
+    )

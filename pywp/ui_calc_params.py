@@ -5,6 +5,7 @@ from typing import Iterable
 
 import streamlit as st
 
+from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp import TrajectoryConfig
 from pywp.planner_config import (
     OPTIMIZATION_OPTIONS,
@@ -52,7 +53,11 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 9
+_DEFAULTS_SCHEMA_VERSION = 10
+_KOP_MODE_SUFFIX = "kop_min_vertical_mode"
+_KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
+KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
+KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION = "depth_function"
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,84 @@ def _state_value(prefix: str, suffix: str) -> float | int | str | bool:
     return calc_param_defaults()[suffix]
 
 
+def _kop_mode_key(prefix: str = "") -> str:
+    return _state_key(prefix, _KOP_MODE_SUFFIX)
+
+
+def _kop_function_payload_key(prefix: str = "") -> str:
+    return _state_key(prefix, _KOP_FUNCTION_PAYLOAD_SUFFIX)
+
+
+def kop_min_vertical_mode(prefix: str = "") -> str:
+    mode = str(st.session_state.get(_kop_mode_key(prefix), KOP_MIN_VERTICAL_MODE_CONSTANT)).strip()
+    if mode not in {KOP_MIN_VERTICAL_MODE_CONSTANT, KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION}:
+        return KOP_MIN_VERTICAL_MODE_CONSTANT
+    return mode
+
+
+def kop_min_vertical_function_from_state(
+    prefix: str = "",
+) -> ActualFundKopDepthFunction | None:
+    if kop_min_vertical_mode(prefix) != KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION:
+        return None
+    payload = st.session_state.get(_kop_function_payload_key(prefix))
+    if isinstance(payload, ActualFundKopDepthFunction):
+        return payload
+    if isinstance(payload, dict):
+        try:
+            return ActualFundKopDepthFunction(**payload)
+        except Exception:
+            return None
+    return None
+
+
+def kop_min_vertical_display_label(prefix: str = "") -> str:
+    kop_function = kop_min_vertical_function_from_state(prefix)
+    if kop_function is None:
+        return f"{float(_state_value(prefix, 'kop_min_vertical')):.0f} м"
+    if kop_function.cluster_count <= 1:
+        return "Константа по фактическому фонду"
+    return f"Функция KOP / TVD ({int(kop_function.cluster_count)} кластера)"
+
+
+def kop_min_vertical_detail_label(prefix: str = "") -> str:
+    kop_function = kop_min_vertical_function_from_state(prefix)
+    if kop_function is None:
+        return ""
+    anchors = list(zip(kop_function.anchor_depths_tvd_m, kop_function.anchor_kop_md_m))
+    preview = ", ".join(
+        f"{float(depth):.0f}->{float(kop):.0f}"
+        for depth, kop in anchors[:4]
+    )
+    if len(anchors) > 4:
+        preview += ", …"
+    return f"TVD -> KOP: {preview}"
+
+
+def set_kop_min_vertical_function(
+    *,
+    prefix: str = "",
+    kop_function: ActualFundKopDepthFunction,
+) -> None:
+    st.session_state[_kop_mode_key(prefix)] = KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION
+    st.session_state[_kop_function_payload_key(prefix)] = kop_function.model_dump(mode="python")
+    if kop_function.anchor_kop_md_m:
+        st.session_state[_state_key(prefix, "kop_min_vertical")] = float(
+            min(kop_function.anchor_kop_md_m)
+        )
+
+
+def clear_kop_min_vertical_function(
+    *,
+    prefix: str = "",
+    kop_min_vertical_m: float | None = None,
+) -> None:
+    st.session_state[_kop_mode_key(prefix)] = KOP_MIN_VERTICAL_MODE_CONSTANT
+    st.session_state[_kop_function_payload_key(prefix)] = None
+    if kop_min_vertical_m is not None:
+        st.session_state[_state_key(prefix, "kop_min_vertical")] = float(kop_min_vertical_m)
+
+
 def _setdefault_many(
     *,
     prefixes: Iterable[str],
@@ -158,6 +241,12 @@ def apply_calc_param_defaults(prefix: str = "", *, force: bool = False) -> None:
     )
     effective_force = bool(force or signature_changed or schema_changed or legacy_migrated)
     _setdefault_many(prefixes=(prefix,), force=effective_force, defaults=defaults)
+    mode_key = _kop_mode_key(prefix)
+    payload_key = _kop_function_payload_key(prefix)
+    if effective_force or mode_key not in st.session_state:
+        st.session_state[mode_key] = KOP_MIN_VERTICAL_MODE_CONSTANT
+    if effective_force or payload_key not in st.session_state:
+        st.session_state[payload_key] = None
     st.session_state[signature_key] = current_signature
     st.session_state[schema_key] = int(_DEFAULTS_SCHEMA_VERSION)
 
@@ -185,6 +274,11 @@ def calc_param_signature(prefix: str = "") -> tuple[object, ...]:
         signature.append(str(_state_value(prefix, suffix)))
     for suffix in _BOOL_SUFFIXES:
         signature.append(bool(_state_value(prefix, suffix)))
+    signature.append(kop_min_vertical_mode(prefix))
+    kop_function = kop_min_vertical_function_from_state(prefix)
+    if kop_function is not None:
+        signature.append(tuple(float(value) for value in kop_function.anchor_depths_tvd_m))
+        signature.append(tuple(float(value) for value in kop_function.anchor_kop_md_m))
     return tuple(signature)
 
 
@@ -287,7 +381,17 @@ def render_calc_params_block(
         min_value=0.0,
         step=10.0,
         help="Минимальный вертикальный участок от S до начала BUILD1.",
+    ) if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_CONSTANT else d2.text_input(
+        "Мин VERTICAL до KOP, м",
+        value=kop_min_vertical_display_label(prefix),
+        disabled=True,
+        help=(
+            "Для расчета активна функция KOP / TVD по фактическому фонду. "
+            "Пересчет по скважинам будет подставлять свой KOP по глубине t1."
+        ),
     )
+    if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION:
+        d2.caption(kop_min_vertical_detail_label(prefix))
     d3.number_input(
         "Макс итоговая MD (постпроверка), м",
         key=_state_key(prefix, "max_total_md_postcheck"),

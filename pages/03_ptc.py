@@ -3,7 +3,6 @@ from __future__ import annotations
 from functools import lru_cache
 import importlib.util
 from pathlib import Path
-from statistics import fmean
 import sys
 from types import ModuleType
 
@@ -221,34 +220,6 @@ def _render_ptc_reference_section(wt: ModuleType) -> None:
     actual_wells = tuple(wt._reference_kind_wells(wt.REFERENCE_WELL_ACTUAL))
     if actual_wells:
         analyses = wt._actual_fund_analyses(actual_wells)
-        eligible_kop_values = [
-            float(item.metrics.kop_md_m)
-            for item in analyses
-            if bool(item.metrics.is_analysis_eligible) and item.metrics.kop_md_m is not None
-        ]
-        if eligible_kop_values:
-            mean_kop_m = float(fmean(eligible_kop_values))
-            info_col, action_col = st.columns([3.6, 1.6], gap="small")
-            with info_col:
-                st.metric("Средний KOP по фактическому фонду, м", f"{mean_kop_m:.0f}")
-                st.caption(
-                    "Можно сразу перенести этот ориентир в общие параметры расчёта "
-                    "как минимальный вертикальный участок до KOP."
-                )
-            with action_col:
-                if st.button(
-                    "Применить средний KOP",
-                    key="ptc_apply_mean_actual_kop",
-                    icon=":material/south_west:",
-                    width="stretch",
-                ):
-                    st.session_state[
-                        f"{wt.WT_CALC_PARAMS.prefix}kop_min_vertical"
-                    ] = float(mean_kop_m)
-                    st.toast(
-                        f"Мин VERTICAL до KOP обновлён до {mean_kop_m:.0f} м по фактическому фонду."
-                    )
-                    st.rerun()
         wt._render_actual_fund_analysis_panel(analyses=analyses)
 
 

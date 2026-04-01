@@ -160,6 +160,51 @@ def planning_uncertainty_model_for_preset(
     return PLANNING_UNCERTAINTY_PRESET_MODELS[normalized]
 
 
+def fitted_uncertainty_model(
+    base_model: PlanningUncertaintyModel,
+    *,
+    sigma_inc_scale: float = 1.0,
+    sigma_azi_scale: float = 1.0,
+    sigma_lateral_drift_scale: float = 1.0,
+    confidence_scale_factor: float = 1.0,
+    sigma_inc_floor_deg: float = 0.0,
+    sigma_azi_floor_deg: float = 0.0,
+    sigma_lateral_drift_floor_m_per_1000m: float = 0.0,
+) -> PlanningUncertaintyModel:
+    inc_scale = float(sigma_inc_scale)
+    azi_scale = float(sigma_azi_scale)
+    drift_scale = float(sigma_lateral_drift_scale)
+    confidence_factor = float(confidence_scale_factor)
+    inc_floor = float(sigma_inc_floor_deg)
+    azi_floor = float(sigma_azi_floor_deg)
+    drift_floor = float(sigma_lateral_drift_floor_m_per_1000m)
+    if min(inc_scale, azi_scale, drift_scale, confidence_factor) <= 0.0:
+        raise ValueError("Uncertainty fit scales must be positive.")
+    if min(inc_floor, azi_floor, drift_floor) < 0.0:
+        raise ValueError("Uncertainty fit floors cannot be negative.")
+
+    return base_model.__class__(
+        sigma_inc_deg=inc_floor + float(base_model.sigma_inc_deg) * inc_scale,
+        sigma_azi_deg=azi_floor + float(base_model.sigma_azi_deg) * azi_scale,
+        sigma_lateral_drift_m_per_1000m=(
+            drift_floor
+            + float(base_model.sigma_lateral_drift_m_per_1000m) * drift_scale
+        ),
+        confidence_scale=float(base_model.confidence_scale) * confidence_factor,
+        sample_step_m=float(base_model.sample_step_m),
+        max_display_ellipses=int(base_model.max_display_ellipses),
+        ellipse_points=int(base_model.ellipse_points),
+        min_display_radius_m=float(base_model.min_display_radius_m),
+        near_vertical_isotropic_threshold_deg=float(
+            base_model.near_vertical_isotropic_threshold_deg
+        ),
+        directional_refine_threshold_deg=float(
+            base_model.directional_refine_threshold_deg
+        ),
+        min_refined_step_m=float(base_model.min_refined_step_m),
+    )
+
+
 def uncertainty_preset_label(preset: object) -> str:
     preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
     return _UNCERTAINTY_PRESET_LABELS.get(

@@ -15,12 +15,16 @@ import streamlit as st
 
 from pywp import TrajectoryConfig, TrajectoryPlanner
 from pywp.actual_fund_analysis import (
+    ActualFundKopDepthFunction,
     ActualFundWellAnalysis,
     CALIBRATION_STATUS_READY,
+    actual_fund_depth_rows,
     build_actual_fund_well_analyses,
+    build_actual_fund_kop_depth_function,
     actual_fund_metrics_rows,
     actual_fund_pad_rows,
     calibrate_uncertainty_from_actual_fund,
+    summarize_actual_fund_by_depth,
 )
 from pywp.anticollision import (
     AntiCollisionAnalysis,
@@ -66,6 +70,7 @@ from pywp.eclipse_welltrack import (
 from pywp.models import (
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
+    Point3D,
 )
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -85,6 +90,7 @@ from pywp.plot_axes import (
     equalized_xy_ranges,
     linear_tick_values,
     nice_tick_step,
+    reversed_axis_range,
 )
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
@@ -101,6 +107,10 @@ from pywp.uncertainty import (
 )
 from pywp.ui_calc_params import (
     CalcParamBinding,
+    clear_kop_min_vertical_function,
+    kop_min_vertical_function_from_state,
+    kop_min_vertical_mode,
+    set_kop_min_vertical_function,
 )
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_utils import (
@@ -120,10 +130,14 @@ from pywp.welltrack_quality import (
     swap_t1_t3_for_wells,
 )
 from pywp.well_pad import (
+    PAD_SURFACE_ANCHOR_CENTER,
+    PAD_SURFACE_ANCHOR_FIRST,
+    PadWell,
     PadLayoutPlan,
     WellPad,
     apply_pad_layout,
     detect_well_pads,
+    estimate_pad_nds_azimuth_deg,
     ordered_pad_wells,
 )
 from pywp.welltrack_batch import (
@@ -149,8 +163,11 @@ WT_3D_BACKEND_PLOTLY = "Plotly"
 WT_3D_BACKEND_THREE_LOCAL = "Three.js (локально, экспериментально)"
 REFERENCE_LABEL_ACTUAL_COLOR = "#111111"
 REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
+REFERENCE_PAD_LABEL_COLOR = "#334155"
 REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M = 100.0
+REFERENCE_PAD_GROUP_DISTANCE_M = 300.0
+WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M = 400.0
 WT_3D_RENDER_OPTIONS: tuple[str, ...] = (
     WT_3D_RENDER_DETAIL,
     WT_3D_RENDER_FAST,
@@ -171,6 +188,7 @@ WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = 24
 WT_THREE_MAX_LABELS = 48
 WT_THREE_MAX_REFERENCE_LABELS = 12
 WT_PAD_FOCUS_ALL = "__all_pads__"
+WT_IMPORT_WELLHEAD_Z_TOLERANCE_M = 50.0
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
     "wt_cfg_md_step_control_m": "wt_cfg_md_control",
@@ -182,6 +200,7 @@ _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
 }
 WT_CALC_PARAMS = CalcParamBinding(prefix="wt_cfg_")
 DEFAULT_PAD_SPACING_M = 20.0
+DEFAULT_PAD_SURFACE_ANCHOR_MODE = PAD_SURFACE_ANCHOR_CENTER
 _BATCH_SUMMARY_RENAME_COLUMNS: dict[str, str] = {
     "Рестарты решателя": "Рестарты",
     "Классификация целей": "Цели",
@@ -194,6 +213,7 @@ _BATCH_SUMMARY_DISPLAY_ORDER: tuple[str, ...] = (
     "Цели",
     "Сложность",
     "Отход t1, м",
+    "Мин VERTICAL до KOP, м",
     "KOP MD, м",
     "HORIZONTAL, м",
     "INC в t1, deg",
@@ -229,6 +249,16 @@ class _TargetOnlyWell:
     t3: Point3D
     status: str
     problem: str
+
+
+@dataclass(frozen=True)
+class _DetectedPadUiMeta:
+    source_surfaces_defined: bool
+    inferred_spacing_m: float
+    source_surface_x_m: float
+    source_surface_y_m: float
+    source_surface_z_m: float
+    source_surface_count: int
 
 
 def _build_well_color_palette() -> tuple[str, ...]:
@@ -705,6 +735,176 @@ def _reference_label_anchor_point(
     )
 
 
+@dataclass(frozen=True)
+class _ReferencePadLabel:
+    label: str
+    x: float
+    y: float
+    z: float
+
+
+def _reference_pad_numeric_id(well_name: str) -> str | None:
+    digits: list[str] = []
+    for char in str(well_name).strip():
+        if char.isdigit():
+            digits.append(char)
+            continue
+        break
+    if not digits:
+        return None
+    digit_text = "".join(digits)
+    if len(digit_text) > 2:
+        digit_text = digit_text[:-2]
+    normalized = digit_text.lstrip("0")
+    return normalized or "0"
+
+
+def _reference_pad_labels(
+    reference_wells: Iterable[ImportedTrajectoryWell],
+) -> list[_ReferencePadLabel]:
+    ordered_wells = [
+        well
+        for well in reference_wells
+        if np.isfinite(float(well.surface.x)) and np.isfinite(float(well.surface.y))
+    ]
+    if not ordered_wells:
+        return []
+
+    cell_size = float(REFERENCE_PAD_GROUP_DISTANCE_M)
+    parents = list(range(len(ordered_wells)))
+    ranks = [0] * len(ordered_wells)
+
+    def _find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def _union(left: int, right: int) -> None:
+        left_root = _find(left)
+        right_root = _find(right)
+        if left_root == right_root:
+            return
+        if ranks[left_root] < ranks[right_root]:
+            parents[left_root] = right_root
+            return
+        if ranks[left_root] > ranks[right_root]:
+            parents[right_root] = left_root
+            return
+        parents[right_root] = left_root
+        ranks[left_root] += 1
+
+    cells: dict[tuple[int, int], list[int]] = {}
+    for index, well in enumerate(ordered_wells):
+        cell = (
+            int(np.floor(float(well.surface.x) / cell_size)),
+            int(np.floor(float(well.surface.y) / cell_size)),
+        )
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for candidate_index in cells.get((cell[0] + dx, cell[1] + dy), ()):
+                    candidate = ordered_wells[candidate_index]
+                    if float(
+                        np.hypot(
+                            float(well.surface.x) - float(candidate.surface.x),
+                            float(well.surface.y) - float(candidate.surface.y),
+                        )
+                    ) <= float(REFERENCE_PAD_GROUP_DISTANCE_M):
+                        _union(index, candidate_index)
+        cells.setdefault(cell, []).append(index)
+
+    component_indices: dict[int, list[int]] = {}
+    for index in range(len(ordered_wells)):
+        component_indices.setdefault(_find(index), []).append(index)
+
+    pad_labels: list[_ReferencePadLabel] = []
+    fallback_counter = 1
+    for component in component_indices.values():
+        ordered_component = sorted(component)
+        anchor_well = ordered_wells[ordered_component[0]]
+        numeric_ids = [
+            pad_id
+            for index in ordered_component
+            for pad_id in [_reference_pad_numeric_id(str(ordered_wells[index].name))]
+            if pad_id is not None
+        ]
+        if numeric_ids:
+            counts = {pad_id: numeric_ids.count(pad_id) for pad_id in set(numeric_ids)}
+            pad_id = sorted(
+                counts.keys(),
+                key=lambda value: (-counts[value], numeric_ids.index(value), value),
+            )[0]
+        else:
+            if len(ordered_component) <= 1:
+                continue
+            pad_id = str(fallback_counter)
+            fallback_counter += 1
+        pad_labels.append(
+            _ReferencePadLabel(
+                label=f"Куст {pad_id}",
+                x=float(anchor_well.surface.x),
+                y=float(anchor_well.surface.y),
+                z=float(anchor_well.surface.z),
+            )
+        )
+    return pad_labels
+
+
+def _reference_pad_label_trace_3d(
+    reference_wells: Iterable[ImportedTrajectoryWell],
+) -> go.Scatter3d | None:
+    pad_labels = _reference_pad_labels(reference_wells)
+    if not pad_labels:
+        return None
+    return go.Scatter3d(
+        x=[item.x for item in pad_labels],
+        y=[item.y for item in pad_labels],
+        z=[item.z for item in pad_labels],
+        mode="text",
+        text=[item.label for item in pad_labels],
+        textposition="top center",
+        name="Reference pads: кусты",
+        showlegend=False,
+        textfont={"color": REFERENCE_PAD_LABEL_COLOR, "size": 12},
+        hoverinfo="skip",
+    )
+
+
+def _reference_pad_label_trace_2d(
+    reference_wells: Iterable[ImportedTrajectoryWell],
+) -> go.Scatter | None:
+    pad_labels = _reference_pad_labels(reference_wells)
+    if not pad_labels:
+        return None
+    return go.Scatter(
+        x=[item.x for item in pad_labels],
+        y=[item.y for item in pad_labels],
+        mode="text",
+        text=[item.label for item in pad_labels],
+        textposition="top center",
+        name="Reference pads: кусты",
+        showlegend=False,
+        textfont={"color": REFERENCE_PAD_LABEL_COLOR, "size": 12},
+        hoverinfo="skip",
+    )
+
+
+def _analysis_reference_wells(
+    analysis: AntiCollisionAnalysis,
+) -> list[ImportedTrajectoryWell]:
+    return [
+        ImportedTrajectoryWell(
+            name=str(well.name),
+            kind=str(well.well_kind),
+            stations=well.stations,
+            surface=well.surface,
+            azimuth_deg=0.0,
+        )
+        for well in analysis.wells
+        if bool(well.is_reference_only)
+    ]
+
+
 def _reference_name_trace_3d(
     reference_wells: Iterable[ImportedTrajectoryWell],
     *,
@@ -1112,7 +1312,9 @@ def _scatter3d_trace_to_three_payload(
                         ],
                         "color": color,
                         "role": (
-                            "reference_label"
+                            "reference_pad_label"
+                            if "кусты" in trace_name.lower()
+                            else "reference_label"
                             if "подписи" in trace_name.lower()
                             else "well_label"
                             if trace_name.endswith(": t1 label")
@@ -2116,6 +2318,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_pending_selected_names", None)
     st.session_state.setdefault("wt_loaded_at", "")
     st.session_state.setdefault("wt_pad_configs", {})
+    st.session_state.setdefault("wt_pad_detected_meta", {})
     st.session_state.setdefault("wt_pad_selected_id", "")
     st.session_state.setdefault("wt_pad_last_applied_at", "")
     st.session_state.setdefault("wt_pad_auto_applied_on_import", False)
@@ -2141,6 +2344,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_actual_fund_base_preset", DEFAULT_UNCERTAINTY_PRESET)
     st.session_state.setdefault("wt_actual_fund_calibration_result", None)
     st.session_state.setdefault("wt_actual_fund_custom_model", None)
+    st.session_state.setdefault("wt_t1_t3_last_resolution", None)
     if str(st.session_state.get("wt_results_view_mode", "")).strip() not in {
         "Отдельная скважина",
         "Все скважины",
@@ -2155,6 +2359,12 @@ def _init_state() -> None:
         st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_DETAIL
     if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(WT_3D_BACKEND_OPTIONS):
         st.session_state["wt_3d_backend"] = WT_3D_BACKEND_THREE_LOCAL
+    if str(st.session_state.get("wt_actual_fund_analysis_view_mode", "")).strip() not in {
+        "По скважинам",
+        "По кустам",
+        "По глубинам",
+    }:
+        st.session_state["wt_actual_fund_analysis_view_mode"] = "По скважинам"
     st.session_state["wt_anticollision_uncertainty_preset"] = (
         normalize_uncertainty_preset(
             st.session_state.get(
@@ -2216,6 +2426,7 @@ def _bump_three_viewer_nonce() -> None:
 
 def _clear_pad_state() -> None:
     st.session_state["wt_pad_configs"] = {}
+    st.session_state["wt_pad_detected_meta"] = {}
     st.session_state["wt_pad_selected_id"] = ""
     st.session_state["wt_pad_last_applied_at"] = ""
     st.session_state["wt_pad_auto_applied_on_import"] = False
@@ -2460,6 +2671,9 @@ def _all_wells_3d_figure(
             label_trace = _reference_name_trace_3d(reference_wells, kind=kind)
             if label_trace is not None:
                 fig.add_trace(label_trace)
+    pad_label_trace = _reference_pad_label_trace_3d(reference_wells)
+    if pad_label_trace is not None:
+        fig.add_trace(pad_label_trace)
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
@@ -2728,6 +2942,9 @@ def _all_wells_plan_figure(
         label_trace = _reference_name_trace_2d(reference_wells, kind=kind)
         if label_trace is not None:
             fig.add_trace(label_trace)
+    pad_label_trace = _reference_pad_label_trace_2d(reference_wells)
+    if pad_label_trace is not None:
+        fig.add_trace(pad_label_trace)
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
@@ -3106,24 +3323,18 @@ def _all_wells_anticollision_3d_figure(
                 z_arrays.append(np.asarray(combined_trace.z, dtype=float))
     for kind in _reference_kinds_present(reference_wells):
         fig.add_trace(_reference_legend_trace_3d(kind))
+    analysis_reference_wells = _analysis_reference_wells(analysis)
     if resolved_render_mode == WT_3D_RENDER_DETAIL:
         for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
             label_trace = _reference_name_trace_3d(
-                [
-                    ImportedTrajectoryWell(
-                        name=str(well.name),
-                        kind=str(well.well_kind),
-                        stations=well.stations,
-                        surface=well.surface,
-                        azimuth_deg=0.0,
-                    )
-                    for well in analysis.wells
-                    if bool(well.is_reference_only)
-                ],
+                analysis_reference_wells,
                 kind=kind,
             )
             if label_trace is not None:
                 fig.add_trace(label_trace)
+    pad_label_trace = _reference_pad_label_trace_3d(analysis_reference_wells)
+    if pad_label_trace is not None:
+        fig.add_trace(pad_label_trace)
 
     overlap_legend_added = False
     for corridor in analysis.corridors:
@@ -3546,23 +3757,17 @@ def _all_wells_anticollision_plan_figure(
         [well for well in analysis.wells if bool(well.is_reference_only)]
     ):
         fig.add_trace(_reference_legend_trace_2d(kind))
+    analysis_reference_wells = _analysis_reference_wells(analysis)
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_2d(
-            [
-                ImportedTrajectoryWell(
-                    name=str(well.name),
-                    kind=str(well.well_kind),
-                    stations=well.stations,
-                    surface=well.surface,
-                    azimuth_deg=0.0,
-                )
-                for well in analysis.wells
-                if bool(well.is_reference_only)
-            ],
+            analysis_reference_wells,
             kind=kind,
         )
         if label_trace is not None:
             fig.add_trace(label_trace)
+    pad_label_trace = _reference_pad_label_trace_2d(analysis_reference_wells)
+    if pad_label_trace is not None:
+        fig.add_trace(pad_label_trace)
 
     x_values = (
         np.concatenate(x_focus_arrays) if x_focus_arrays else np.concatenate(x_arrays)
@@ -4098,19 +4303,65 @@ def _format_prepared_override_scope(
     return rows
 
 
+def _welltrack_record_entry_tvd_m(record: WelltrackRecord) -> float | None:
+    try:
+        _, t1, _ = welltrack_points_to_targets(record.points)
+    except ValueError:
+        return None
+    return float(t1.z)
+
+
+def _evaluated_kop_min_vertical_for_record(
+    *,
+    record: WelltrackRecord,
+    base_config: TrajectoryConfig,
+    kop_function: ActualFundKopDepthFunction,
+) -> float | None:
+    entry_tvd_m = _welltrack_record_entry_tvd_m(record)
+    if entry_tvd_m is None:
+        return None
+    raw_kop_m = float(kop_function.evaluate(entry_tvd_m))
+    max_physical_kop_m = max(
+        0.0,
+        float(entry_tvd_m)
+        - max(
+            float(base_config.min_structural_segment_m),
+            float(base_config.vertical_tolerance_m),
+        ),
+    )
+    return float(min(max(raw_kop_m, 0.0), max_physical_kop_m))
+
+
 def _build_selected_override_configs(
     *,
     base_config: TrajectoryConfig,
     selected_names: set[str],
+    records_by_name: Mapping[str, WelltrackRecord] | None = None,
 ) -> dict[str, TrajectoryConfig]:
     prepared = st.session_state.get("wt_prepared_well_overrides", {}) or {}
+    kop_function = kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix)
     config_map: dict[str, TrajectoryConfig] = {}
     for well_name in sorted(str(name) for name in selected_names):
         payload = dict(prepared.get(well_name, {}))
         update_fields = dict(payload.get("update_fields", {}))
-        if not update_fields:
+        config = (
+            base_config.validated_copy(**update_fields)
+            if update_fields
+            else base_config
+        )
+        if kop_function is not None and records_by_name is not None:
+            record = records_by_name.get(well_name)
+            if record is not None:
+                evaluated_kop_m = _evaluated_kop_min_vertical_for_record(
+                    record=record,
+                    base_config=config,
+                    kop_function=kop_function,
+                )
+                if evaluated_kop_m is not None:
+                    config = config.validated_copy(kop_min_vertical_m=evaluated_kop_m)
+        if config == base_config and not update_fields:
             continue
-        config_map[well_name] = base_config.validated_copy(**update_fields)
+        config_map[well_name] = config
     return config_map
 
 
@@ -5003,6 +5254,7 @@ def _store_parsed_records(records: list[WelltrackRecord]) -> bool:
     st.session_state["wt_records"] = list(records)
     st.session_state["wt_records_original"] = list(records)
     st.session_state["wt_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _clear_t1_t3_order_resolution_state()
     _clear_pad_state()
     st.session_state["wt_last_error"] = ""
     _clear_results()
@@ -5094,6 +5346,7 @@ def _handle_import_actions(
         _clear_actual_fund_calibration_state()
         st.session_state["wt_selected_names"] = []
         st.session_state["wt_loaded_at"] = ""
+        _clear_t1_t3_order_resolution_state()
         _clear_pad_state()
         _clear_results()
         st.rerun()
@@ -5131,6 +5384,7 @@ def _handle_import_actions(
             except WelltrackParseError as exc:
                 st.session_state["wt_records"] = None
                 st.session_state["wt_records_original"] = None
+                _clear_t1_t3_order_resolution_state()
                 _clear_pad_state()
                 st.session_state["wt_last_error"] = str(exc)
                 status.write(str(exc))
@@ -5167,6 +5421,7 @@ def _handle_import_actions(
         except WelltrackParseError as exc:
             st.session_state["wt_records"] = None
             st.session_state["wt_records_original"] = None
+            _clear_t1_t3_order_resolution_state()
             _clear_pad_state()
             st.session_state["wt_last_error"] = str(exc)
             status.write(str(exc))
@@ -5176,24 +5431,110 @@ def _handle_import_actions(
 
 
 def _render_records_overview(records: list[WelltrackRecord]) -> None:
-    ready_count = sum(1 for record in records if len(record.points) == 3)
+    parsed_df = _records_overview_dataframe(records)
+    ready_count = int(sum(str(item) == "✅" for item in parsed_df["Статус"].tolist()))
+    problem_count = int(len(parsed_df) - ready_count)
     x1, x2, x3 = st.columns(3, gap="small")
-    x1.metric("Скважин в файле", f"{len(records)}")
-    x2.metric("Готово к расчету", f"{ready_count}")
-    x3.metric("Загружено", st.session_state.get("wt_loaded_at", "—"))
+    x1.metric("Скважин", f"{len(records)}")
+    x2.metric("Готово", f"{ready_count}")
+    x3.metric("Проблем", f"{problem_count}")
 
-    parsed_df = pd.DataFrame(
+    st.markdown("### Загруженные скважины")
+    st.dataframe(
+        arrow_safe_text_dataframe(parsed_df),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Скважина": st.column_config.TextColumn("Скважина", width="medium"),
+            "Точек": st.column_config.NumberColumn(
+                "Точек",
+                format="%d",
+                width="small",
+                help="Считаются только целевые точки `t1/t3`, без wellhead `S`.",
+            ),
+            "Статус": st.column_config.TextColumn(
+                "Статус",
+                width="small",
+                help="`✅` — импорт готов к расчёту; `❌` — проверьте колонку 'Проблема'.",
+            ),
+            "Проблема": st.column_config.TextColumn(
+                "Проблема",
+                width="large",
+                help=(
+                    "Показывает вероятные проблемы импорта: нет wellhead, не хватает "
+                    "t1/t3, неверный порядок точек или лишние точки."
+                ),
+            ),
+        },
+    )
+
+
+def _records_overview_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
+    return pd.DataFrame(
         [
             {
                 "Скважина": record.name,
-                "Точек": len(record.points),
-                "Готова к расчету (3 точки)": len(record.points) == 3,
+                "Точек": _record_target_point_count(record),
+                "Статус": "✅" if _record_is_ready_for_calc(record) else "❌",
+                "Проблема": _record_import_problem_text(record),
             }
             for record in records
         ]
     )
-    st.markdown("### Загруженные скважины")
-    st.dataframe(arrow_safe_text_dataframe(parsed_df), width="stretch", hide_index=True)
+
+
+def _record_target_point_count(record: WelltrackRecord) -> int:
+    return int(max(len(tuple(record.points)) - 1, 0))
+
+
+def _record_has_surface_like_point(record: WelltrackRecord) -> bool:
+    return any(
+        abs(float(point.z)) <= WT_IMPORT_WELLHEAD_Z_TOLERANCE_M
+        for point in tuple(record.points)
+    )
+
+
+def _record_first_point_is_surface_like(record: WelltrackRecord) -> bool:
+    points = tuple(record.points)
+    if not points:
+        return False
+    return bool(abs(float(points[0].z)) <= WT_IMPORT_WELLHEAD_Z_TOLERANCE_M)
+
+
+def _record_has_strictly_increasing_md(record: WelltrackRecord) -> bool:
+    md_values = [float(point.md) for point in tuple(record.points)]
+    return all(left < right for left, right in zip(md_values, md_values[1:], strict=False))
+
+
+def _record_import_problem_text(record: WelltrackRecord) -> str:
+    points = tuple(record.points)
+    problems: list[str] = []
+    target_count = _record_target_point_count(record)
+    if not points:
+        problems.append("Нет точек WELLTRACK.")
+    else:
+        has_surface_like_point = _record_has_surface_like_point(record)
+        if not has_surface_like_point:
+            problems.append(
+                "Не найден wellhead: среди точек нет `Z` около поверхности (±50 м)."
+            )
+        elif not _record_first_point_is_surface_like(record):
+            problems.append("Первая точка не похожа на wellhead `S`.")
+        if not _record_has_strictly_increasing_md(record):
+            problems.append("MD точек должны строго возрастать.")
+    if target_count < 2:
+        missing_count = 2 - target_count
+        if missing_count == 2:
+            problems.append("Не хватает точек `t1` и `t3`.")
+        else:
+            problems.append("Не хватает одной из точек `t1/t3`.")
+    elif target_count > 2:
+        problems.append("Лишние точки: ожидаются только `S`, `t1`, `t3`.")
+    return "—" if not problems else " ".join(problems)
+
+
+def _record_is_ready_for_calc(record: WelltrackRecord) -> bool:
+    return _record_import_problem_text(record) == "—"
 
 
 def _reference_kind_title(kind: str) -> str:
@@ -5426,6 +5767,33 @@ def _actual_fund_lateral_from_horizontal_entry_m(detail: ActualFundWellAnalysis)
     return float(np.hypot(end_x - float(entry["X_m"]), end_y - float(entry["Y_m"])))
 
 
+def _actual_fund_profile_azimuth_deg(detail: ActualFundWellAnalysis) -> float:
+    hold_azimuth = detail.metrics.hold_azi_deg
+    if hold_azimuth is not None and np.isfinite(float(hold_azimuth)):
+        return float(hold_azimuth) % 360.0
+    azi_values = detail.survey["AZI_deg"].to_numpy(dtype=float)
+    finite_azi = azi_values[np.isfinite(azi_values)]
+    if len(finite_azi) == 0:
+        return 0.0
+    return float(finite_azi[-1]) % 360.0
+
+
+def _actual_fund_section_coordinate(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    surface_x: float,
+    surface_y: float,
+    azimuth_deg: float,
+) -> np.ndarray:
+    angle_rad = np.deg2rad(float(azimuth_deg) % 360.0)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    return (np.asarray(x_values, dtype=float) - float(surface_x)) * ux + (
+        np.asarray(y_values, dtype=float) - float(surface_y)
+    ) * uy
+
+
 def _actual_fund_zone_table_rows(detail: ActualFundWellAnalysis) -> list[dict[str, object]]:
     return [
         {
@@ -5490,8 +5858,150 @@ def _actual_fund_analyses(
     return analyses
 
 
+def _actual_fund_depth_cluster_color(index: int) -> str:
+    palette = (
+        "#2563EB",
+        "#059669",
+        "#D97706",
+        "#7C3AED",
+        "#DC2626",
+        "#0891B2",
+    )
+    return palette[index % len(palette)]
+
+
+def _actual_fund_kop_depth_figure(
+    metrics: tuple[object, ...],
+) -> go.Figure | None:
+    eligible_metrics = [
+        item
+        for item in metrics
+        if getattr(item, "is_analysis_eligible", False)
+        and getattr(item, "horizontal_entry_tvd_m", None) is not None
+        and getattr(item, "kop_md_m", None) is not None
+    ]
+    if not eligible_metrics:
+        return None
+
+    clusters = summarize_actual_fund_by_depth(eligible_metrics)
+    cluster_by_well: dict[str, str] = {}
+    for cluster in clusters:
+        for well_name in cluster.well_names:
+            cluster_by_well[str(well_name)] = str(cluster.cluster_id)
+    cluster_order = [str(cluster.cluster_id) for cluster in clusters]
+    cluster_color_by_id = {
+        cluster_id: _actual_fund_depth_cluster_color(index)
+        for index, cluster_id in enumerate(cluster_order)
+    }
+
+    fig = go.Figure()
+    for cluster_id in cluster_order:
+        cluster_items = [
+            item
+            for item in eligible_metrics
+            if cluster_by_well.get(str(getattr(item, "name", ""))) == cluster_id
+        ]
+        if not cluster_items:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=[float(item.horizontal_entry_tvd_m) for item in cluster_items],
+                y=[float(item.kop_md_m) for item in cluster_items],
+                mode="markers",
+                name=cluster_id,
+                marker={
+                    "size": 10,
+                    "color": cluster_color_by_id[cluster_id],
+                    "line": {"width": 1, "color": "#FFFFFF"},
+                },
+                customdata=[
+                    [
+                        str(item.name),
+                        float(item.horizontal_entry_tvd_m),
+                        float(item.kop_md_m),
+                    ]
+                    for item in cluster_items
+                ],
+                hovertemplate=(
+                    "%{customdata[0]}"
+                    "<br>TVD входа=%{customdata[1]:.1f} м"
+                    "<br>KOP=%{customdata[2]:.1f} м"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    kop_function = build_actual_fund_kop_depth_function(eligible_metrics)
+    if kop_function is not None:
+        anchor_depths = np.asarray(kop_function.anchor_depths_tvd_m, dtype=float)
+        anchor_kops = np.asarray(kop_function.anchor_kop_md_m, dtype=float)
+        line_depths = np.linspace(
+            float(np.min(anchor_depths)),
+            float(np.max(anchor_depths)),
+            max(2, 60),
+            dtype=float,
+        )
+        line_kops = np.asarray(
+            [kop_function.evaluate(float(depth)) for depth in line_depths],
+            dtype=float,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=line_depths,
+                y=line_kops,
+                mode="lines",
+                name="Функция KOP / TVD",
+                line={"color": "#0F172A", "width": 2},
+                hovertemplate=(
+                    "Функция KOP / TVD"
+                    "<br>TVD=%{x:.1f} м"
+                    "<br>KOP=%{y:.1f} м"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=anchor_depths,
+                y=anchor_kops,
+                mode="markers",
+                name="Якоря функции",
+                marker={"size": 8, "symbol": "diamond", "color": "#111827"},
+                hovertemplate=(
+                    "Якорь функции"
+                    "<br>TVD=%{x:.1f} м"
+                    "<br>KOP=%{y:.1f} м"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        xaxis_title="TVD входа в горизонталь, м",
+        yaxis_title="KOP MD, м",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
+        margin={"l": 20, "r": 20, "t": 24, "b": 20},
+        template="plotly_white",
+    )
+    return fig
+
+
 def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
     figure = go.Figure()
+    x_arrays = [detail.survey["X_m"].to_numpy(dtype=float)]
+    y_arrays = [detail.survey["Y_m"].to_numpy(dtype=float)]
+    kop_marker = _actual_fund_kop_marker(detail)
+    if kop_marker is not None:
+        x_arrays.append(np.asarray([float(kop_marker["X_m"])], dtype=float))
+        y_arrays.append(np.asarray([float(kop_marker["Y_m"])], dtype=float))
+    horizontal_marker = _actual_fund_horizontal_entry_marker(detail)
+    if horizontal_marker is not None:
+        x_arrays.append(np.asarray([float(horizontal_marker["X_m"])], dtype=float))
+        y_arrays.append(np.asarray([float(horizontal_marker["Y_m"])], dtype=float))
+    x_range, y_range = equalized_xy_ranges(
+        x_values=np.concatenate(x_arrays),
+        y_values=np.concatenate(y_arrays),
+    )
     shown_legend_keys: set[str] = set()
     for zone in detail.zone_summaries:
         interval = _actual_fund_interval_df(
@@ -5532,7 +6042,6 @@ def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
         )
         shown_legend_keys.add(zone_key)
 
-    kop_marker = _actual_fund_kop_marker(detail)
     if kop_marker is not None:
         figure.add_trace(
             go.Scatter(
@@ -5560,7 +6069,6 @@ def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
             )
         )
 
-    horizontal_marker = _actual_fund_horizontal_entry_marker(detail)
     if horizontal_marker is not None:
         figure.add_trace(
             go.Scatter(
@@ -5589,9 +6097,15 @@ def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
         )
 
     figure.update_layout(
-        title=f"{detail.name}: план",
         xaxis_title="X / Восток (м)",
         yaxis_title="Y / Север (м)",
+        xaxis={"range": x_range, "tickformat": ".0f"},
+        yaxis={
+            "range": y_range,
+            "tickformat": ".0f",
+            "scaleanchor": "x",
+            "scaleratio": 1,
+        },
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
         margin={"l": 20, "r": 20, "t": 48, "b": 20},
         template="plotly_white",
@@ -5601,6 +6115,9 @@ def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
 
 def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.Figure:
     figure = go.Figure()
+    surface_x = float(detail.survey["X_m"].iloc[0])
+    surface_y = float(detail.survey["Y_m"].iloc[0])
+    profile_azimuth_deg = _actual_fund_profile_azimuth_deg(detail)
     shown_legend_keys: set[str] = set()
     for zone in detail.zone_summaries:
         interval = _actual_fund_interval_df(
@@ -5611,6 +6128,13 @@ def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.F
         if len(interval) < 2:
             continue
         zone_key = str(zone.zone_key)
+        section_x = _actual_fund_section_coordinate(
+            interval["X_m"].to_numpy(dtype=float),
+            interval["Y_m"].to_numpy(dtype=float),
+            surface_x=surface_x,
+            surface_y=surface_y,
+            azimuth_deg=profile_azimuth_deg,
+        )
         customdata = np.column_stack(
             [
                 interval["MD_m"].to_numpy(dtype=float),
@@ -5621,7 +6145,7 @@ def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.F
         )
         figure.add_trace(
             go.Scatter(
-                x=interval["Lateral_m"],
+                x=section_x,
                 y=interval["Z_m"],
                 mode="lines",
                 name=str(zone.zone_label),
@@ -5643,9 +6167,18 @@ def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.F
 
     kop_marker = _actual_fund_kop_marker(detail)
     if kop_marker is not None:
+        kop_section_x = float(
+            _actual_fund_section_coordinate(
+                np.asarray([float(kop_marker["X_m"])], dtype=float),
+                np.asarray([float(kop_marker["Y_m"])], dtype=float),
+                surface_x=surface_x,
+                surface_y=surface_y,
+                azimuth_deg=profile_azimuth_deg,
+            )[0]
+        )
         figure.add_trace(
             go.Scatter(
-                x=[float(kop_marker["Lateral_m"])],
+                x=[kop_section_x],
                 y=[float(kop_marker["Z_m"])],
                 mode="markers+text",
                 name="KOP",
@@ -5671,9 +6204,18 @@ def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.F
 
     horizontal_marker = _actual_fund_horizontal_entry_marker(detail)
     if horizontal_marker is not None:
+        horizontal_section_x = float(
+            _actual_fund_section_coordinate(
+                np.asarray([float(horizontal_marker["X_m"])], dtype=float),
+                np.asarray([float(horizontal_marker["Y_m"])], dtype=float),
+                surface_x=surface_x,
+                surface_y=surface_y,
+                azimuth_deg=profile_azimuth_deg,
+            )[0]
+        )
         figure.add_trace(
             go.Scatter(
-                x=[float(horizontal_marker["Lateral_m"])],
+                x=[horizontal_section_x],
                 y=[float(horizontal_marker["Z_m"])],
                 mode="markers+text",
                 name="Старт горизонта",
@@ -5696,12 +6238,18 @@ def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.F
                 ),
             )
         )
+    profile_y_values = np.concatenate(
+        [
+            np.asarray(trace.y, dtype=float)
+            for trace in figure.data
+            if getattr(trace, "y", None) is not None and len(trace.y) > 0
+        ]
+    )
 
     figure.update_layout(
-        title=f"{detail.name}: профиль",
-        xaxis_title="Латеральный отход (м)",
+        xaxis_title="Координата по разрезу (м)",
         yaxis_title="Z / TVD (м)",
-        yaxis={"autorange": "reversed"},
+        yaxis={"range": reversed_axis_range(profile_y_values)},
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
         margin={"l": 20, "r": 20, "t": 48, "b": 20},
         template="plotly_white",
@@ -5756,7 +6304,9 @@ def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]
         )
 
     c1, c2 = st.columns(2, gap="medium")
+    c1.markdown(f"**{detail.name}: план**")
     c1.plotly_chart(_actual_fund_plan_figure(detail), width="stretch")
+    c2.markdown(f"**{detail.name}: профиль**")
     c2.plotly_chart(_actual_fund_vertical_profile_figure(detail), width="stretch")
     st.dataframe(
         arrow_safe_text_dataframe(pd.DataFrame(_actual_fund_zone_table_rows(detail))),
@@ -5780,6 +6330,8 @@ def _render_actual_fund_analysis_panel(
         item for item in metrics if bool(item.is_horizontal) and not bool(item.is_analysis_eligible)
     ]
     pad_count = len({str(item.pad_group) for item in eligible_metrics if str(item.pad_group) != "—"})
+    depth_clusters = summarize_actual_fund_by_depth(eligible_metrics)
+    kop_depth_function = build_actual_fund_kop_depth_function(eligible_metrics)
     eligible_kop_values = [
         float(item.kop_md_m)
         for item in eligible_metrics
@@ -5793,11 +6345,14 @@ def _render_actual_fund_analysis_panel(
             "горизонтальной скважины не удаётся устойчиво выделить `KOP / HOLD / "
             "терминальный high-angle interval` или получается аномально высокий "
             "устойчивый `ПИ`, такая скважина исключается из анализа и калибровки. "
+            "Пилоты `_PL` в пользовательский anti-collision fit не попадают. "
             "Пары одного семейства вида `7401` / `7401_PL` / `7401_2` из calibration-scan "
-            "исключаются. Группировка по кустам строится по ведущему числовому коду "
+            "исключаются. В тяжёлых кейсах алгоритм может осознанно пренебречь "
+            "1–2 экстремально близкими парами и явно показать это в результате. "
+            "Группировка по кустам строится по ведущему числовому коду "
             "скважины без двух последних цифр: `6101/6102/6103 -> 61`, `8203/8210 -> 82`."
         )
-        a1, a2, a3, a4 = st.columns(4, gap="small")
+        a1, a2, a3, a4, a5 = st.columns(5, gap="small")
         a1.metric("Фактических скважин", f"{len(actual_wells)}")
         a2.metric("В анализе", f"{len(eligible_metrics)}")
         a3.metric("Кустов", f"{pad_count}")
@@ -5805,6 +6360,7 @@ def _render_actual_fund_analysis_panel(
             "Медианный KOP, м",
             "—" if not eligible_kop_values else f"{float(np.median(eligible_kop_values)):.0f}",
         )
+        a5.metric("Глубинных кластеров", f"{len(depth_clusters)}")
         if excluded_horizontal_metrics:
             st.info(
                 "Из анализа исключено горизонтальных скважин: "
@@ -5813,12 +6369,14 @@ def _render_actual_fund_analysis_panel(
 
         view_mode = st.radio(
             "Свод фактического фонда",
-            options=["По скважинам", "По кустам"],
+            options=["По скважинам", "По кустам", "По глубинам"],
             key="wt_actual_fund_analysis_view_mode",
             horizontal=True,
         )
         if str(view_mode) == "По кустам":
             df = pd.DataFrame(actual_fund_pad_rows(metrics))
+        elif str(view_mode) == "По глубинам":
+            df = pd.DataFrame(actual_fund_depth_rows(metrics))
         else:
             df = pd.DataFrame(actual_fund_metrics_rows(metrics))
         st.dataframe(
@@ -5826,6 +6384,60 @@ def _render_actual_fund_analysis_panel(
             width="stretch",
             hide_index=True,
         )
+
+        if kop_depth_function is not None:
+            st.markdown("#### KOP / TVD по фактическому фонду")
+            st.caption(
+                "Скважины сгруппированы по глубине входа в горизонталь. По медианам "
+                "этих групп строится функция KOP / TVD, которую можно применить к "
+                "рассчитываемым скважинам через глубину `t1`."
+            )
+            figure = _actual_fund_kop_depth_figure(metrics)
+            if figure is not None:
+                st.plotly_chart(figure, width="stretch")
+            f1, f2 = st.columns([3.6, 1.4], gap="small")
+            with f1:
+                st.caption(str(kop_depth_function.note))
+                if kop_depth_function.anchor_depths_tvd_m:
+                    st.caption(
+                        "Якоря TVD → KOP: "
+                        + ", ".join(
+                            f"{float(depth):.0f} → {float(kop):.0f}"
+                            for depth, kop in zip(
+                                kop_depth_function.anchor_depths_tvd_m,
+                                kop_depth_function.anchor_kop_md_m,
+                                strict=False,
+                            )
+                        )
+                    )
+            with f2:
+                if st.button(
+                    "Применить функцию KOP / TVD",
+                    key="wt_apply_actual_fund_kop_depth_function",
+                    icon=":material/timeline:",
+                    width="stretch",
+                ):
+                    set_kop_min_vertical_function(
+                        prefix=WT_CALC_PARAMS.prefix,
+                        kop_function=kop_depth_function,
+                    )
+                    st.toast("Функция KOP / TVD применена к параметрам расчёта.")
+                    st.rerun()
+                if kop_min_vertical_mode(WT_CALC_PARAMS.prefix) != "constant":
+                    if st.button(
+                        "Вернуть фиксированный KOP",
+                        key="wt_clear_actual_fund_kop_depth_function",
+                        icon=":material/looks_one:",
+                        width="stretch",
+                    ):
+                        clear_kop_min_vertical_function(prefix=WT_CALC_PARAMS.prefix)
+                        st.toast("Возвращён режим фиксированного KOP.")
+                        st.rerun()
+            if kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix) is not None:
+                st.success(
+                    "В параметрах расчёта активна функция KOP / TVD. Для каждой "
+                    "выбранной скважины `Мин VERTICAL до KOP` будет вычисляться по глубине `t1`."
+                )
 
         st.markdown("#### Просмотр выбранной скважины")
         st.caption(
@@ -5838,8 +6450,9 @@ def _render_actual_fund_analysis_panel(
         st.markdown("#### Калибровка пользовательской функции конусов")
         st.caption(
             "Это не formal ISCWSA toolcode calibration, а planning-level field fit: "
-            "единая эмпирическая шкала, которая уменьшает базовый пресет так, чтобы "
-            "ложные overlap по фактическому горизонтальному фонду не доминировали."
+            "алгоритм может независимо подстраивать INC/AZI/drift и confidence-scale "
+            "относительно базового пресета так, чтобы ложные overlap по фактическому "
+            "горизонтальному фонду не доминировали."
         )
         calibration_base_preset = st.selectbox(
             "Базовый пресет для калибровки",
@@ -5887,6 +6500,15 @@ def _render_actual_fund_analysis_panel(
                 if calibration_result.overlapping_pair_count_after is None
                 else f"{int(calibration_result.overlapping_pair_count_after)}",
             )
+            x1, x2 = st.columns(2, gap="small")
+            x1.metric(
+                "Исключено пилотов `_PL`",
+                f"{int(calibration_result.excluded_pilot_well_count)}",
+            )
+            x2.metric(
+                "Осознанно проигнорировано пар",
+                f"{int(calibration_result.ignored_close_pair_count)}",
+            )
             scale_label = (
                 "—"
                 if calibration_result.scale_factor is None
@@ -5907,6 +6529,11 @@ def _render_actual_fund_analysis_panel(
                 f"Scale={scale_label}, SF до={worst_before}, SF после={worst_after}. "
                 f"База: {uncertainty_preset_label(calibration_result.base_preset)}."
             )
+            if calibration_result.ignored_close_pairs:
+                st.caption(
+                    "Проигнорированные экстремально близкие пары: "
+                    + ", ".join(str(item) for item in calibration_result.ignored_close_pairs)
+                )
             if str(calibration_result.status) == CALIBRATION_STATUS_READY:
                 st.success(str(calibration_result.note))
             else:
@@ -5993,6 +6620,14 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
 
 
 def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
+    resolution_message = _t1_t3_order_resolution_message()
+    if resolution_message is not None:
+        level, message = resolution_message
+        if level == "success":
+            st.success(message)
+        else:
+            st.info(message)
+
     issues = detect_t1_t3_order_issues(records, min_delta_m=WT_T1T3_MIN_DELTA_M)
     if not issues:
         return
@@ -6003,27 +6638,46 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             "Найдены скважины, где `t1` дальше от устья `S` (куста) по горизонтальному "
             "отходу, чем `t3`. Вероятно, порядок точек `t1/t3` перепутан."
         )
-        issue_rows = [
-            {
-                "Скважина": item.well_name,
-                "Отход S→t1, м": float(item.t1_offset_m),
-                "Отход S→t3, м": float(item.t3_offset_m),
-                "Δ (t1 - t3), м": float(item.delta_m),
-            }
-            for item in issues
-        ]
-        st.dataframe(
-            arrow_safe_text_dataframe(pd.DataFrame(issue_rows)),
-            width="stretch",
-            hide_index=True,
+        header_cols = st.columns([0.9, 1.4, 1.1, 1.1, 1.1], gap="small")
+        header_cols[0].markdown("**Исправить**")
+        header_cols[1].markdown("**Скважина**")
+        header_cols[2].markdown("**Отход S→t1, м**")
+        header_cols[3].markdown("**Отход S→t3, м**")
+        header_cols[4].markdown("**Δ (t1 - t3), м**")
+        st.markdown(
+            "<div style='height: 0.25rem;'></div>",
+            unsafe_allow_html=True,
         )
-        if st.button(
-            "Исправить порядок t1/t3 для отмеченных скважин",
+        for item in issues:
+            well_name = str(item.well_name)
+            checkbox_key = f"wt_t1_t3_fix_{well_name}"
+            st.session_state.setdefault(checkbox_key, True)
+            row_cols = st.columns([0.9, 1.4, 1.1, 1.1, 1.1], gap="small")
+            row_cols[0].checkbox(
+                f"Исправить {well_name}",
+                key=checkbox_key,
+                label_visibility="collapsed",
+            )
+            row_cols[1].markdown(f"`{well_name}`")
+            row_cols[2].markdown(f"{float(item.t1_offset_m):.2f}")
+            row_cols[3].markdown(f"{float(item.t3_offset_m):.2f}")
+            row_cols[4].markdown(f"{float(item.delta_m):.2f}")
+
+        fix_col, keep_col = st.columns(2, gap="small")
+        if fix_col.button(
+            "Исправить порядок для выбранных скважин",
             type="primary",
             icon=":material/swap_horiz:",
             width="stretch",
         ):
-            target_names = {str(item.well_name) for item in issues}
+            target_names = {
+                str(item.well_name)
+                for item in issues
+                if bool(st.session_state.get(f"wt_t1_t3_fix_{str(item.well_name)}", True))
+            }
+            if not target_names:
+                st.warning("Выберите хотя бы одну скважину для исправления порядка t1/t3.")
+                return
             st.session_state["wt_records"] = swap_t1_t3_for_wells(
                 records=list(records),
                 well_names=target_names,
@@ -6035,8 +6689,23 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
                 records=list(original_records),
                 well_names=target_names,
             )
+            _set_t1_t3_order_resolution(
+                action="fixed",
+                well_names=target_names,
+            )
             _clear_results()
             st.toast(f"Порядок t1/t3 исправлен для {len(target_names)} скважин.")
+            st.rerun()
+        if keep_col.button(
+            "Оставить все точки без изменений",
+            icon=":material/do_not_disturb:",
+            width="stretch",
+        ):
+            _set_t1_t3_order_resolution(
+                action="kept",
+                well_names={str(item.well_name) for item in issues},
+            )
+            st.toast("Текущий порядок t1/t3 оставлен без изменений.")
             st.rerun()
         st.caption(
             "Исправление меняет местами координаты `t1` и `t3`, но сохраняет MD "
@@ -6044,22 +6713,261 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
         )
 
 
-def _pad_config_defaults(pad: WellPad) -> dict[str, float]:
-    return {
-        "spacing_m": float(DEFAULT_PAD_SPACING_M),
-        "nds_azimuth_deg": float(pad.auto_nds_azimuth_deg),
-        "first_surface_x": float(pad.surface.x),
-        "first_surface_y": float(pad.surface.y),
-        "first_surface_z": float(pad.surface.z),
+def _clear_t1_t3_order_resolution_state() -> None:
+    st.session_state["wt_t1_t3_last_resolution"] = None
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("wt_t1_t3_fix_"):
+            del st.session_state[key]
+
+
+def _set_t1_t3_order_resolution(
+    *,
+    action: str,
+    well_names: set[str] | list[str] | tuple[str, ...],
+) -> None:
+    st.session_state["wt_t1_t3_last_resolution"] = {
+        "action": str(action),
+        "well_names": tuple(sorted(str(name) for name in well_names)),
     }
 
 
+def _t1_t3_order_resolution_message() -> tuple[str, str] | None:
+    resolution = st.session_state.get("wt_t1_t3_last_resolution")
+    if not isinstance(resolution, dict):
+        return None
+    action = str(resolution.get("action", "")).strip()
+    well_names = tuple(str(item) for item in (resolution.get("well_names") or ()))
+    if not well_names:
+        return None
+    joined_names = ", ".join(well_names)
+    if action == "fixed":
+        return ("success", f"Порядок t1/t3 изменился для скважин: {joined_names}.")
+    if action == "kept":
+        return ("info", f"Порядок t1/t3 оставлен без изменений для скважин: {joined_names}.")
+    return None
+
+
+def _pad_config_defaults(pad: WellPad) -> dict[str, float | str]:
+    return {
+        "spacing_m": float(DEFAULT_PAD_SPACING_M),
+        "nds_azimuth_deg": float(
+            estimate_pad_nds_azimuth_deg(
+                wells=pad.wells,
+                surface_x=float(pad.surface.x),
+                surface_y=float(pad.surface.y),
+                surface_anchor_mode=DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+            )
+        ),
+        "first_surface_x": float(pad.surface.x),
+        "first_surface_y": float(pad.surface.y),
+        "first_surface_z": float(pad.surface.z),
+        "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+    }
+
+
+def _source_surface_xyz(record: WelltrackRecord) -> tuple[float, float, float] | None:
+    points = tuple(record.points)
+    if not points:
+        return None
+    surface = points[0]
+    return float(surface.x), float(surface.y), float(surface.z)
+
+
+def _record_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
+    points = tuple(record.points)
+    if len(points) >= 3:
+        try:
+            _, t1, t3 = welltrack_points_to_targets(tuple(points[:3]))
+            return (
+                float(0.5 * (t1.x + t3.x)),
+                float(0.5 * (t1.y + t3.y)),
+                float(0.5 * (t1.z + t3.z)),
+            )
+        except (TypeError, ValueError):
+            pass
+    surface_xyz = _source_surface_xyz(record)
+    return surface_xyz or (0.0, 0.0, 0.0)
+
+
+def _estimate_surface_pad_axis_deg(
+    surface_xyzs: list[tuple[float, float, float]],
+) -> float:
+    if len(surface_xyzs) <= 1:
+        return 0.0
+    points = np.asarray([(item[0], item[1]) for item in surface_xyzs], dtype=float)
+    centroid = np.mean(points, axis=0)
+    centered = points - centroid
+    covariance = centered.T @ centered
+    try:
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        principal_index = int(np.argmax(np.asarray(eigenvalues, dtype=float)))
+        direction = np.asarray(eigenvectors[:, principal_index], dtype=float)
+    except np.linalg.LinAlgError:
+        direction = np.asarray([1.0, 0.0], dtype=float)
+    norm = float(np.linalg.norm(direction))
+    if norm <= 1e-9:
+        return 0.0
+    unit = direction / norm
+    return float(np.degrees(np.arctan2(float(unit[0]), float(unit[1]))) % 360.0)
+
+
+def _inferred_surface_spacing_m(
+    *,
+    surface_xyzs: list[tuple[float, float, float]],
+    nds_azimuth_deg: float,
+) -> float:
+    if len(surface_xyzs) <= 1:
+        return 0.0
+    angle_rad = np.deg2rad(float(nds_azimuth_deg) % 360.0)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    projections = sorted(
+        float(x) * ux + float(y) * uy for x, y, _ in surface_xyzs
+    )
+    diffs = [
+        float(right - left)
+        for left, right in zip(projections, projections[1:], strict=False)
+        if float(right - left) > 1e-6
+    ]
+    if not diffs:
+        return 0.0
+    return float(np.median(np.asarray(diffs, dtype=float)))
+
+
+def _detect_ui_pads(
+    records: list[WelltrackRecord],
+) -> tuple[list[WellPad], dict[str, _DetectedPadUiMeta]]:
+    indexed_records = [
+        (index, record, _source_surface_xyz(record))
+        for index, record in enumerate(records)
+    ]
+    indexed_records = [
+        (index, record, surface_xyz)
+        for index, record, surface_xyz in indexed_records
+        if surface_xyz is not None
+    ]
+    if not indexed_records:
+        return [], {}
+
+    adjacency: dict[int, set[int]] = {index: set() for index, _, _ in indexed_records}
+    for left_pos, (left_index, _, left_surface) in enumerate(indexed_records):
+        for right_index, _, right_surface in indexed_records[left_pos + 1 :]:
+            distance_xy = float(
+                np.hypot(
+                    float(left_surface[0]) - float(right_surface[0]),
+                    float(left_surface[1]) - float(right_surface[1]),
+                )
+            )
+            if distance_xy <= WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M + 1e-9:
+                adjacency[left_index].add(right_index)
+                adjacency[right_index].add(left_index)
+
+    by_index = {
+        index: (index, record, surface_xyz)
+        for index, record, surface_xyz in indexed_records
+    }
+    clusters: list[list[tuple[int, WelltrackRecord, tuple[float, float, float]]]] = []
+    visited: set[int] = set()
+    for index, _, _ in indexed_records:
+        if index in visited:
+            continue
+        queue = [index]
+        visited.add(index)
+        cluster: list[tuple[int, WelltrackRecord, tuple[float, float, float]]] = []
+        while queue:
+            current = queue.pop()
+            cluster.append(by_index[current])
+            for neighbor in adjacency[current]:
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                queue.append(neighbor)
+        clusters.append(cluster)
+
+    prepared: list[
+        tuple[float, float, float, list[tuple[int, WelltrackRecord, tuple[float, float, float]]]]
+    ] = []
+    for cluster in clusters:
+        surface_xyzs = [surface_xyz for _, _, surface_xyz in cluster]
+        center_x = float(np.mean([item[0] for item in surface_xyzs]))
+        center_y = float(np.mean([item[1] for item in surface_xyzs]))
+        center_z = float(np.mean([item[2] for item in surface_xyzs]))
+        prepared.append((center_x, center_y, center_z, cluster))
+    prepared.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    pads: list[WellPad] = []
+    metadata: dict[str, _DetectedPadUiMeta] = {}
+    for index, (center_x, center_y, center_z, cluster) in enumerate(prepared, start=1):
+        wells: list[PadWell] = []
+        surface_xyzs: list[tuple[float, float, float]] = []
+        unique_surface_keys: set[tuple[int, int, int]] = set()
+        for record_index, record, surface_xyz in cluster:
+            midpoint_x, midpoint_y, midpoint_z = _record_midpoint_xyz(record)
+            wells.append(
+                PadWell(
+                    name=str(record.name),
+                    record_index=int(record_index),
+                    midpoint_x=float(midpoint_x),
+                    midpoint_y=float(midpoint_y),
+                    midpoint_z=float(midpoint_z),
+                )
+            )
+            surface_xyzs.append(surface_xyz)
+            unique_surface_keys.add(
+                (
+                    round(float(surface_xyz[0]), 6),
+                    round(float(surface_xyz[1]), 6),
+                    round(float(surface_xyz[2]), 6),
+                )
+            )
+        pad_id = f"PAD-{index:02d}"
+        source_surfaces_defined = len(unique_surface_keys) > 1
+        auto_nds = _estimate_surface_pad_axis_deg(surface_xyzs)
+        if abs(float(auto_nds)) <= 1e-9:
+            auto_nds = estimate_pad_nds_azimuth_deg(
+                wells=tuple(wells),
+                surface_x=float(center_x),
+                surface_y=float(center_y),
+                surface_anchor_mode=DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+            )
+        pads.append(
+            WellPad(
+                pad_id=pad_id,
+                surface=Point3D(x=float(center_x), y=float(center_y), z=float(center_z)),
+                wells=tuple(wells),
+                auto_nds_azimuth_deg=float(auto_nds),
+            )
+        )
+        metadata[pad_id] = _DetectedPadUiMeta(
+            source_surfaces_defined=bool(source_surfaces_defined),
+            inferred_spacing_m=_inferred_surface_spacing_m(
+                surface_xyzs=surface_xyzs,
+                nds_azimuth_deg=float(auto_nds),
+            ),
+            source_surface_x_m=float(center_x),
+            source_surface_y_m=float(center_y),
+            source_surface_z_m=float(center_z),
+            source_surface_count=len(surface_xyzs),
+        )
+    return pads, metadata
+
+
 def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
-    pads = detect_well_pads(base_records)
+    pads, metadata = _detect_ui_pads(base_records)
     existing = st.session_state.get("wt_pad_configs", {})
     merged: dict[str, dict[str, float]] = {}
     for pad in pads:
         defaults = _pad_config_defaults(pad)
+        pad_meta = metadata.get(str(pad.pad_id))
+        if isinstance(pad_meta, _DetectedPadUiMeta) and bool(pad_meta.source_surfaces_defined):
+            defaults = {
+                "spacing_m": float(max(pad_meta.inferred_spacing_m, 0.0)),
+                "nds_azimuth_deg": float(pad.auto_nds_azimuth_deg) % 360.0,
+                "first_surface_x": float(pad_meta.source_surface_x_m),
+                "first_surface_y": float(pad_meta.source_surface_y_m),
+                "first_surface_z": float(pad_meta.source_surface_z_m),
+                "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+            }
         current = existing.get(str(pad.pad_id), {})
         merged[str(pad.pad_id)] = {
             "spacing_m": float(current.get("spacing_m", defaults["spacing_m"])),
@@ -6076,8 +6984,14 @@ def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
             "first_surface_z": float(
                 current.get("first_surface_z", defaults["first_surface_z"])
             ),
+            "surface_anchor_mode": str(
+                current.get("surface_anchor_mode", defaults["surface_anchor_mode"])
+            ),
         }
+        if isinstance(pad_meta, _DetectedPadUiMeta) and bool(pad_meta.source_surfaces_defined):
+            merged[str(pad.pad_id)] = dict(defaults)
     st.session_state["wt_pad_configs"] = merged
+    st.session_state["wt_pad_detected_meta"] = metadata
 
     pad_ids = [str(pad.pad_id) for pad in pads]
     if not pad_ids:
@@ -6090,9 +7004,13 @@ def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
 
 def _build_pad_plan_map(pads: list[WellPad]) -> dict[str, PadLayoutPlan]:
     config_map = st.session_state.get("wt_pad_configs", {})
+    metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
     plan_map: dict[str, PadLayoutPlan] = {}
     for pad in pads:
         pad_id = str(pad.pad_id)
+        pad_meta = metadata.get(pad_id)
+        if isinstance(pad_meta, _DetectedPadUiMeta) and bool(pad_meta.source_surfaces_defined):
+            continue
         cfg = config_map.get(pad_id, _pad_config_defaults(pad))
         plan_map[pad_id] = PadLayoutPlan(
             pad_id=pad_id,
@@ -6101,6 +7019,9 @@ def _build_pad_plan_map(pads: list[WellPad]) -> dict[str, PadLayoutPlan]:
             first_surface_z=float(cfg["first_surface_z"]),
             spacing_m=float(max(cfg["spacing_m"], 0.0)),
             nds_azimuth_deg=float(cfg["nds_azimuth_deg"]) % 360.0,
+            surface_anchor_mode=str(
+                cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
+            ),
         )
     return plan_map
 
@@ -6112,19 +7033,33 @@ def _project_pads_for_ui(records: list[WelltrackRecord]) -> list[WellPad]:
         if isinstance(base_records, list) and base_records
         else list(records)
     )
-    return detect_well_pads(source_records)
+    pads, metadata = _detect_ui_pads(source_records)
+    st.session_state["wt_pad_detected_meta"] = metadata
+    return pads
 
 
 def _pad_display_label(pad: WellPad) -> str:
     return f"{str(pad.pad_id)} · {int(len(pad.wells))} скв."
 
 
-def _pad_config_for_ui(pad: WellPad) -> dict[str, float]:
+def _pad_config_for_ui(pad: WellPad) -> dict[str, float | str]:
     defaults = _pad_config_defaults(pad)
+    pad_meta = dict(st.session_state.get("wt_pad_detected_meta", {})).get(str(pad.pad_id))
+    if isinstance(pad_meta, _DetectedPadUiMeta) and bool(pad_meta.source_surfaces_defined):
+        defaults = {
+            "spacing_m": float(max(pad_meta.inferred_spacing_m, 0.0)),
+            "nds_azimuth_deg": float(pad.auto_nds_azimuth_deg) % 360.0,
+            "first_surface_x": float(pad_meta.source_surface_x_m),
+            "first_surface_y": float(pad_meta.source_surface_y_m),
+            "first_surface_z": float(pad_meta.source_surface_z_m),
+            "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+        }
     current = dict(st.session_state.get("wt_pad_configs", {})).get(
         str(pad.pad_id),
         {},
     )
+    if isinstance(pad_meta, _DetectedPadUiMeta) and bool(pad_meta.source_surfaces_defined):
+        current = {}
     return {
         "spacing_m": float(current.get("spacing_m", defaults["spacing_m"])),
         "nds_azimuth_deg": float(
@@ -6140,7 +7075,16 @@ def _pad_config_for_ui(pad: WellPad) -> dict[str, float]:
         "first_surface_z": float(
             current.get("first_surface_z", defaults["first_surface_z"])
         ),
+        "surface_anchor_mode": str(
+            current.get("surface_anchor_mode", defaults["surface_anchor_mode"])
+        ),
     }
+
+
+def _pad_anchor_mode_label(mode: object) -> str:
+    if str(mode) == PAD_SURFACE_ANCHOR_CENTER:
+        return "Центр куста"
+    return "S первой скважины"
 
 
 def _pad_membership(
@@ -6315,12 +7259,25 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
     with st.container(border=True):
         st.markdown("### Кусты и расчет устьев")
         st.caption(
-            "Куст определяется по совпадающим координатам устья S при импорте. "
+            "Куст определяется по устьям `S`: если координаты совпадают, это обычный "
+            "layout-сценарий; если устья уже разнесены и связаны цепочкой расстояний "
+            f"до {int(WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M)} м, куст считается "
+            "заданным в исходных данных и показывается в справочном режиме. "
             "Последовательность бурения строится по проекции середины (t1+t3)/2 вдоль НДС. "
             "Авто НДС — это стартовая геометрическая оценка по главной оси облака "
             "midpoint(t1, t3); для почти изотропных кустов она деградирует до "
             "стабильного fallback по направлению S→центроид и должна считаться "
             "рекомендацией, а не жестким инженерным решением."
+        )
+        st.caption(
+            "По умолчанию координата куста трактуется как центр раскладки: для "
+            "нечётного числа скважин это устье средней скважины, для чётного — "
+            "точка между двумя центральными устьями. Старый режим `S первой "
+            "скважины` сохранён как отдельная опция."
+        )
+        st.caption(
+            f"Из исходных данных WELLTRACK / точек целей было определено кустов: {len(pads)}. "
+            "Их параметры показаны в таблице ниже."
         )
         if bool(st.session_state.get("wt_pad_auto_applied_on_import", False)):
             st.info(
@@ -6329,14 +7286,28 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "Если нужно вернуться к исходному WELLTRACK, нажмите "
                 "'Вернуть исходные устья'."
             )
+        pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
         pad_rows = [
             {
                 "Куст": str(pad.pad_id),
                 "Скважин": int(len(pad.wells)),
-                "Авто НДС, deg": float(pad.auto_nds_azimuth_deg),
-                "S X, м": float(pad.surface.x),
-                "S Y, м": float(pad.surface.y),
-                "S Z, м": float(pad.surface.z),
+                "Устья заданы": (
+                    "Да"
+                    if bool(
+                        getattr(
+                            pad_metadata.get(str(pad.pad_id)),
+                            "source_surfaces_defined",
+                            False,
+                        )
+                    )
+                    else "Нет"
+                ),
+                "Авто НДС, deg": float(
+                    _pad_config_for_ui(pad)["nds_azimuth_deg"]
+                ),
+                "S X, м": float(_pad_config_for_ui(pad)["first_surface_x"]),
+                "S Y, м": float(_pad_config_for_ui(pad)["first_surface_y"]),
+                "S Z, м": float(_pad_config_for_ui(pad)["first_surface_z"]),
             }
             for pad in pads
         ]
@@ -6352,9 +7323,16 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         selected_pad = next(
             (pad for pad in pads if str(pad.pad_id) == selected_id), pads[0]
         )
+        selected_pad_meta = pad_metadata.get(selected_id)
+        source_surfaces_defined = bool(
+            getattr(selected_pad_meta, "source_surfaces_defined", False)
+        )
         config_map = st.session_state.get("wt_pad_configs", {})
         selected_cfg = dict(
             config_map.get(selected_id, _pad_config_defaults(selected_pad))
+        )
+        previous_anchor_mode = str(
+            selected_cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
         )
 
         widget_keys = {
@@ -6363,10 +7341,57 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             "first_surface_x": f"wt_pad_cfg_first_surface_x_{selected_id}",
             "first_surface_y": f"wt_pad_cfg_first_surface_y_{selected_id}",
             "first_surface_z": f"wt_pad_cfg_first_surface_z_{selected_id}",
+            "surface_anchor_center": f"wt_pad_cfg_surface_anchor_center_{selected_id}",
         }
         for field, widget_key in widget_keys.items():
+            if field == "surface_anchor_center":
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = (
+                        previous_anchor_mode == PAD_SURFACE_ANCHOR_CENTER
+                    )
+                continue
             if widget_key not in st.session_state:
                 st.session_state[widget_key] = float(selected_cfg[field])
+
+        if source_surfaces_defined:
+            st.info(
+                "Положения устьев были заданы в исходных данных. Для этого куста "
+                "параметры ниже показаны справочно и не редактируются."
+            )
+
+        anchor_center = st.toggle(
+            "Координата куста = центр раскладки",
+            key=widget_keys["surface_anchor_center"],
+            help=(
+                "Включено: введённые координаты S трактуются как центр куста. "
+                "Выключено: координаты S задают первую скважину в раскладке."
+            ),
+            disabled=source_surfaces_defined,
+        )
+        anchor_mode = (
+            PAD_SURFACE_ANCHOR_CENTER if bool(anchor_center) else PAD_SURFACE_ANCHOR_FIRST
+        )
+        if anchor_mode != previous_anchor_mode:
+            previous_auto_nds = estimate_pad_nds_azimuth_deg(
+                wells=selected_pad.wells,
+                surface_x=float(selected_pad.surface.x),
+                surface_y=float(selected_pad.surface.y),
+                surface_anchor_mode=previous_anchor_mode,
+            )
+            current_nds = float(
+                st.session_state.get(
+                    widget_keys["nds_azimuth_deg"], selected_cfg["nds_azimuth_deg"]
+                )
+            )
+            if abs(current_nds - previous_auto_nds) <= 1e-6:
+                st.session_state[widget_keys["nds_azimuth_deg"]] = float(
+                    estimate_pad_nds_azimuth_deg(
+                        wells=selected_pad.wells,
+                        surface_x=float(selected_pad.surface.x),
+                        surface_y=float(selected_pad.surface.y),
+                        surface_anchor_mode=anchor_mode,
+                    )
+                )
 
         p1, p2, p3, p4, p5 = st.columns(5, gap="small")
         spacing_m = p1.number_input(
@@ -6375,6 +7400,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             step=1.0,
             key=widget_keys["spacing_m"],
             help="Шаг по кусту между соседними устьями скважин.",
+            disabled=source_surfaces_defined,
         )
         nds_azimuth_deg = p2.number_input(
             "НДС (азимут), deg",
@@ -6383,21 +7409,31 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             step=0.5,
             key=widget_keys["nds_azimuth_deg"],
             help="Направление движения станка по кусту.",
+            disabled=source_surfaces_defined,
         )
         first_surface_x = p3.number_input(
-            "S1 X (East), м",
+            "S куста X (East), м"
+            if anchor_mode == PAD_SURFACE_ANCHOR_CENTER
+            else "S1 X (East), м",
             step=10.0,
             key=widget_keys["first_surface_x"],
+            disabled=source_surfaces_defined,
         )
         first_surface_y = p4.number_input(
-            "S1 Y (North), м",
+            "S куста Y (North), м"
+            if anchor_mode == PAD_SURFACE_ANCHOR_CENTER
+            else "S1 Y (North), м",
             step=10.0,
             key=widget_keys["first_surface_y"],
+            disabled=source_surfaces_defined,
         )
         first_surface_z = p5.number_input(
-            "S1 Z (TVD), м",
+            "S куста Z (TVD), м"
+            if anchor_mode == PAD_SURFACE_ANCHOR_CENTER
+            else "S1 Z (TVD), м",
             step=10.0,
             key=widget_keys["first_surface_z"],
+            disabled=source_surfaces_defined,
         )
 
         selected_cfg["spacing_m"] = float(max(spacing_m, 0.0))
@@ -6405,6 +7441,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         selected_cfg["first_surface_x"] = float(first_surface_x)
         selected_cfg["first_surface_y"] = float(first_surface_y)
         selected_cfg["first_surface_z"] = float(first_surface_z)
+        selected_cfg["surface_anchor_mode"] = anchor_mode
         config_map[selected_id] = selected_cfg
         st.session_state["wt_pad_configs"] = config_map
 
@@ -6415,24 +7452,40 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         angle_rad = np.deg2rad(float(selected_cfg["nds_azimuth_deg"]))
         ux = float(np.sin(angle_rad))
         uy = float(np.cos(angle_rad))
+        center_slot_index = 0.5 * float(max(len(ordered_wells) - 1, 0))
         preview_rows: list[dict[str, object]] = []
         for slot_index, well in enumerate(ordered_wells, start=1):
-            shift_m = float(slot_index - 1) * float(selected_cfg["spacing_m"])
-            preview_rows.append(
-                {
-                    "Порядок": int(slot_index),
-                    "Скважина": str(well.name),
-                    "Середина t1-t3 X, м": float(well.midpoint_x),
-                    "Середина t1-t3 Y, м": float(well.midpoint_y),
-                    "Новое S X, м": float(
-                        selected_cfg["first_surface_x"] + shift_m * ux
-                    ),
-                    "Новое S Y, м": float(
-                        selected_cfg["first_surface_y"] + shift_m * uy
-                    ),
-                    "Новое S Z, м": float(selected_cfg["first_surface_z"]),
-                }
-            )
+            row = {
+                "Порядок": int(slot_index),
+                "Скважина": str(well.name),
+                "Середина t1-t3 X, м": float(well.midpoint_x),
+                "Середина t1-t3 Y, м": float(well.midpoint_y),
+                "Опора S": _pad_anchor_mode_label(anchor_mode),
+            }
+            if source_surfaces_defined:
+                source_record = next(
+                    (item for item in base_records if str(item.name) == str(well.name)),
+                    None,
+                )
+                source_surface = (
+                    _source_surface_xyz(source_record)
+                    if source_record is not None
+                    else None
+                )
+                row["Текущее S X, м"] = None if source_surface is None else float(source_surface[0])
+                row["Текущее S Y, м"] = None if source_surface is None else float(source_surface[1])
+                row["Текущее S Z, м"] = None if source_surface is None else float(source_surface[2])
+            else:
+                if anchor_mode == PAD_SURFACE_ANCHOR_CENTER:
+                    shift_m = (float(slot_index - 1) - center_slot_index) * float(
+                        selected_cfg["spacing_m"]
+                    )
+                else:
+                    shift_m = float(slot_index - 1) * float(selected_cfg["spacing_m"])
+                row["Новое S X, м"] = float(selected_cfg["first_surface_x"] + shift_m * ux)
+                row["Новое S Y, м"] = float(selected_cfg["first_surface_y"] + shift_m * uy)
+                row["Новое S Z, м"] = float(selected_cfg["first_surface_z"])
+            preview_rows.append(row)
         st.dataframe(
             arrow_safe_text_dataframe(pd.DataFrame(preview_rows)),
             width="stretch",
@@ -6449,11 +7502,13 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "Обновляет координаты первой точки S для скважин по выбранным "
                 "параметрам кустов. Последующие расчеты будут использовать новые устья."
             ),
+            disabled=source_surfaces_defined,
         )
         reset_clicked = a2.button(
             "Вернуть исходные устья",
             icon=":material/restart_alt:",
             width="stretch",
+            disabled=source_surfaces_defined,
         )
 
         if apply_clicked:
@@ -6811,9 +7866,11 @@ def _run_batch_if_clicked(
     batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
     log_verbosity = str(st.session_state.get("wt_log_verbosity", WT_LOG_COMPACT))
     verbose_log_enabled = log_verbosity == WT_LOG_VERBOSE
+    records_by_name = {str(record.name): record for record in records_for_run}
     config_by_name = _build_selected_override_configs(
         base_config=request.config,
         selected_names=selected_set,
+        records_by_name=records_by_name,
     )
     optimization_context_by_name = _build_selected_optimization_contexts(
         selected_names=selected_set,
@@ -6912,6 +7969,12 @@ def _run_batch_if_clicked(
                 append_log(
                     "Для части выбранных скважин активирован anti-collision avoidance "
                     "mode на конфликтном окне."
+                )
+            active_kop_function = kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix)
+            if active_kop_function is not None:
+                append_log(
+                    "Для выбранных скважин активна функция KOP / TVD: "
+                    + str(active_kop_function.note).strip()
                 )
             if dynamic_cluster_context is not None:
                 append_log(

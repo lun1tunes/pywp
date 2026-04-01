@@ -11,6 +11,7 @@ from pywp.plot_axes import (
     equalized_xy_ranges,
     linear_tick_values,
     nice_tick_step,
+    reversed_axis_range,
 )
 from pywp.uncertainty import (
     WellUncertaintyOverlay,
@@ -1011,12 +1012,19 @@ def section_view_figure(
     if t1_label_trace is not None:
         fig.add_trace(t1_label_trace)
     _add_section_inc_labels(fig=fig, df=df, section_x=vs)
+    section_y_values = np.concatenate(
+        [
+            np.asarray(trace.y, dtype=float)
+            for trace in fig.data
+            if getattr(trace, "y", None) is not None and len(trace.y) > 0
+        ]
+    )
 
     fig.update_layout(
         title="Вертикальный разрез",
         xaxis_title="Координата по разрезу (м)",
         yaxis_title="TVD (м)",
-        yaxis={"autorange": "reversed"},
+        yaxis={"range": reversed_axis_range(section_y_values)},
         height=height,
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
     )
