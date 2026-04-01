@@ -26,6 +26,11 @@ _TABLE_POINT_ALIASES: dict[str, str] = {
     "end": "t3",
 }
 _TABLE_POINT_ORDER: tuple[str, ...] = ("wellhead", "t1", "t3")
+_TABLE_POINT_DISPLAY_LABELS: dict[str, str] = {
+    "wellhead": "S",
+    "t1": "t1",
+    "t3": "t3",
+}
 
 
 class WelltrackParseError(ValueError):
@@ -204,7 +209,8 @@ def parse_welltrack_points_table(
         if missing:
             raise WelltrackParseError(
                 "Табличный WELLTRACK: для скважины "
-                f"'{well_name}' отсутствуют точки: {', '.join(missing)}."
+                f"'{well_name}' отсутствуют точки: "
+                f"{', '.join(_table_point_display_name(name) for name in missing)}."
             )
         ordered_points = tuple(points_by_name[name] for name in _TABLE_POINT_ORDER)
         _validate_record_md(points=list(ordered_points), well_name=well_name)
@@ -283,9 +289,13 @@ def _normalize_table_point_name(value: object, *, row_no: int) -> str:
         raise WelltrackParseError(
             "Табличный WELLTRACK: unsupported Point="
             f"{value!r} в строке {row_no}. "
-            "Ожидается wellhead, t1 или t3."
+            "Ожидается S, t1 или t3."
         )
     return point_name
+
+
+def _table_point_display_name(point_name: str) -> str:
+    return _TABLE_POINT_DISPLAY_LABELS.get(str(point_name), str(point_name))
 
 
 def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float:

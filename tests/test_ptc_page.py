@@ -6,6 +6,7 @@ from streamlit.testing.v1 import AppTest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import TrajectoryConfig
+from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 
@@ -78,6 +79,61 @@ def _successful_plan(*, name: str, y_offset_m: float) -> SuccessfulWellPlan:
     )
 
 
+def _reference_wells():
+    return parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "FACT-001",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "FACT-001",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 1200.0,
+                "MD": 1200.0,
+            },
+            {
+                "Wellname": "FACT-001",
+                "Type": "actual",
+                "X": 600.0,
+                "Y": 0.0,
+                "Z": 1300.0,
+                "MD": 1900.0,
+            },
+            {
+                "Wellname": "APP-001",
+                "Type": "approved",
+                "X": 30.0,
+                "Y": 50.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "APP-001",
+                "Type": "approved",
+                "X": 30.0,
+                "Y": 50.0,
+                "Z": 1250.0,
+                "MD": 1250.0,
+            },
+            {
+                "Wellname": "APP-001",
+                "Type": "approved",
+                "X": 700.0,
+                "Y": 80.0,
+                "Z": 1360.0,
+                "MD": 2050.0,
+            },
+        ]
+    )
+
+
 def test_ptc_page_shows_user_facing_import_and_run_controls() -> None:
     at = AppTest.from_file("pages/03_ptc.py")
     at.run()
@@ -107,9 +163,11 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
 
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     button_labels = {str(widget.label) for widget in at.button}
+    radio_labels = {str(widget.label) for widget in at.radio}
     assert "3D-режим отображения" not in selectbox_labels
     assert "3D backend" not in selectbox_labels
     assert "Пересоздать 3D viewer" not in button_labels
+    assert "Режим отображения всех скважин" not in radio_labels
 
     view_mode_radio = next(
         widget for widget in at.radio if str(widget.label) == "Режим просмотра результатов"
@@ -120,3 +178,22 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
     expander_labels = {str(widget.label) for widget in at.expander}
     assert "Контроль попадания и точность расчета" not in expander_labels
     assert "Технические параметры и диагностика решателя" not in expander_labels
+
+
+def test_ptc_page_wraps_reference_well_table_into_expander() -> None:
+    at = AppTest.from_file("pages/03_ptc.py")
+    records = _records()
+    reference_wells = _reference_wells()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_reference_actual_wells"] = [
+        well for well in reference_wells if well.kind == "actual"
+    ]
+    at.session_state["wt_reference_approved_wells"] = [
+        well for well in reference_wells if well.kind == "approved"
+    ]
+
+    at.run()
+
+    expander_labels = {str(widget.label) for widget in at.expander}
+    assert "Список загруженных фактических/ проектных скважин" in expander_labels

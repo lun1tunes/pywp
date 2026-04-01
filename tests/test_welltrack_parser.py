@@ -135,3 +135,24 @@ def test_parse_welltrack_points_table_rejects_missing_required_points() -> None:
                 {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
             ]
         )
+
+
+def test_parse_welltrack_points_table_reports_surface_as_s_in_errors() -> None:
+    with pytest.raises(WelltrackParseError, match="отсутствуют точки: S"):
+        parse_welltrack_points_table(
+            [
+                {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+                {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            ]
+        )
+
+
+def test_parse_welltrack_points_table_reports_expected_s_in_unsupported_point_error() -> None:
+    with pytest.raises(WelltrackParseError, match="Ожидается S, t1 или t3"):
+        parse_welltrack_points_table(
+            [
+                {"Wellname": "WELL-A", "Point": "surface-head", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+                {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            ]
+        )

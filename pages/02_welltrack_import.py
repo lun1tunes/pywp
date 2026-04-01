@@ -2149,6 +2149,21 @@ def _empty_source_table_df() -> pd.DataFrame:
     )
 
 
+def _normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataFrame:
+    if table_df is None:
+        return _empty_source_table_df()
+    normalized_df = pd.DataFrame(table_df).copy()
+    if "Point" in normalized_df.columns:
+        normalized_df["Point"] = normalized_df["Point"].map(
+            lambda value: (
+                "S"
+                if str(value).strip().lower() in {"wellhead", "s"}
+                else value
+            )
+        )
+    return normalized_df
+
+
 def _empty_reference_trajectory_df() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -5210,7 +5225,7 @@ def _render_source_input() -> _WelltrackSourcePayload:
             st.caption(
                 "Вставьте таблицу в формате `Wellname`, `Point`, `X`, `Y`, `Z`. "
                 "Поддерживается copy/paste из Excel, Google Sheets и похожих таблиц. "
-                "Point принимает `wellhead`, `t1`, `t3`."
+                "Point принимает `S`, `t1`, `t3`."
             )
         with clear_col:
             if st.button(
@@ -5224,8 +5239,11 @@ def _render_source_input() -> _WelltrackSourcePayload:
                     int(st.session_state.get("wt_source_table_editor_nonce", 0)) + 1
                 )
                 st.rerun()
+        source_table_df = _normalize_source_table_df_for_ui(
+            st.session_state.get("wt_source_table_df", _empty_source_table_df())
+        )
         edited_table = st.data_editor(
-            st.session_state.get("wt_source_table_df", _empty_source_table_df()),
+            source_table_df,
             key=f"wt_source_table_editor_{int(st.session_state.get('wt_source_table_editor_nonce', 0))}",
             hide_index=True,
             num_rows="dynamic",
@@ -5234,14 +5252,16 @@ def _render_source_input() -> _WelltrackSourcePayload:
                 "Wellname": st.column_config.TextColumn("Wellname"),
                 "Point": st.column_config.SelectboxColumn(
                     "Point",
-                    options=["wellhead", "t1", "t3"],
+                    options=["S", "t1", "t3"],
                 ),
                 "X": st.column_config.NumberColumn("X"),
                 "Y": st.column_config.NumberColumn("Y"),
                 "Z": st.column_config.NumberColumn("Z"),
             },
         )
-        st.session_state["wt_source_table_df"] = pd.DataFrame(edited_table)
+        st.session_state["wt_source_table_df"] = _normalize_source_table_df_for_ui(
+            pd.DataFrame(edited_table)
+        )
 
     return _WelltrackSourcePayload(
         mode=source_mode,
@@ -5363,7 +5383,7 @@ def _handle_import_actions(
         with st.status("Чтение и преобразование таблицы точек...", expanded=True) as status:
             started = perf_counter()
             try:
-                status.write("Проверка строк таблицы и сборка точек wellhead / t1 / t3.")
+                status.write("Проверка строк таблицы и сборка точек S / t1 / t3.")
                 records = parse_welltrack_points_table(
                     pd.DataFrame(table_rows).to_dict(orient="records")
                 )
@@ -5431,6 +5451,8 @@ def _handle_import_actions(
 
 
 def _render_records_overview(records: list[WelltrackRecord]) -> None:
+    st.markdown("### Загруженные скважины")
+    
     parsed_df = _records_overview_dataframe(records)
     ready_count = int(sum(str(item) == "✅" for item in parsed_df["Статус"].tolist()))
     problem_count = int(len(parsed_df) - ready_count)
@@ -5439,7 +5461,6 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     x2.metric("Готово", f"{ready_count}")
     x3.metric("Проблем", f"{problem_count}")
 
-    st.markdown("### Загруженные скважины")
     st.dataframe(
         arrow_safe_text_dataframe(parsed_df),
         width="stretch",
@@ -5450,7 +5471,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                 "Точек",
                 format="%d",
                 width="small",
-                help="Считаются только целевые точки `t1/t3`, без wellhead `S`.",
+                help="Считаются только целевые точки `t1/t3`, без устья `S`.",
             ),
             "Статус": st.column_config.TextColumn(
                 "Статус",
@@ -5461,7 +5482,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                 "Проблема",
                 width="large",
                 help=(
-                    "Показывает вероятные проблемы импорта: нет wellhead, не хватает "
+                    "Показывает вероятные проблемы импорта: нет точки `S`, не хватает "
                     "t1/t3, неверный порядок точек или лишние точки."
                 ),
             ),
@@ -5516,10 +5537,10 @@ def _record_import_problem_text(record: WelltrackRecord) -> str:
         has_surface_like_point = _record_has_surface_like_point(record)
         if not has_surface_like_point:
             problems.append(
-                "Не найден wellhead: среди точек нет `Z` около поверхности (±50 м)."
+                "Не найдена точка `S`: среди точек нет `Z` около поверхности (±50 м)."
             )
         elif not _record_first_point_is_surface_like(record):
-            problems.append("Первая точка не похожа на wellhead `S`.")
+            problems.append("Первая точка не похожа на устье `S`.")
         if not _record_has_strictly_increasing_md(record):
             problems.append("MD точек должны строго возрастать.")
     if target_count < 2:
@@ -6609,7 +6630,6 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                         "X, м": float(point.x),
                         "Y, м": float(point.y),
                         "Z/TVD, м": float(point.z),
-                        "MD (из файла), м": float(point.md),
                     }
                 )
         st.dataframe(
@@ -6639,7 +6659,10 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             "отходу, чем `t3`. Вероятно, порядок точек `t1/t3` перепутан."
         )
         header_cols = st.columns([0.9, 1.4, 1.1, 1.1, 1.1], gap="small")
-        header_cols[0].markdown("**Исправить**")
+        header_cols[0].markdown(
+            "<div style='text-align: center;'><strong>Исправить</strong></div>",
+            unsafe_allow_html=True,
+        )
         header_cols[1].markdown("**Скважина**")
         header_cols[2].markdown("**Отход S→t1, м**")
         header_cols[3].markdown("**Отход S→t3, м**")
@@ -6653,7 +6676,8 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             checkbox_key = f"wt_t1_t3_fix_{well_name}"
             st.session_state.setdefault(checkbox_key, True)
             row_cols = st.columns([0.9, 1.4, 1.1, 1.1, 1.1], gap="small")
-            row_cols[0].checkbox(
+            checkbox_cols = row_cols[0].columns([1.0, 0.8, 1.0], gap="small")
+            checkbox_cols[1].checkbox(
                 f"Исправить {well_name}",
                 key=checkbox_key,
                 label_visibility="collapsed",

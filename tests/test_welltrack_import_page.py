@@ -241,7 +241,7 @@ def test_records_overview_dataframe_uses_explicit_green_red_status_icons() -> No
     assert "Не хватает одной из точек" in str(overview_df.iloc[1]["Проблема"])
 
 
-def test_records_overview_dataframe_detects_missing_wellhead_by_surface_z_heuristic() -> None:
+def test_records_overview_dataframe_detects_missing_surface_s_by_surface_z_heuristic() -> None:
     page = _load_welltrack_page_module()
     missing_surface = WelltrackRecord(
         name="NO-S",
@@ -256,7 +256,7 @@ def test_records_overview_dataframe_detects_missing_wellhead_by_surface_z_heuris
 
     assert list(overview_df["Статус"]) == ["❌"]
     assert list(overview_df["Точек"]) == [2]
-    assert "Не найден wellhead" in str(overview_df.iloc[0]["Проблема"])
+    assert "Не найдена точка `S`" in str(overview_df.iloc[0]["Проблема"])
 
 
 def test_t1_t3_resolution_message_reports_fixed_and_kept_wells() -> None:
@@ -935,6 +935,21 @@ def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
     assert records[1].points[2].y == pytest.approx(1980.0)
 
 
+def test_normalize_source_table_df_for_ui_uses_s_for_surface_point() -> None:
+    page = _load_welltrack_page_module()
+    normalized = page._normalize_source_table_df_for_ui(
+        pd.DataFrame(
+            [
+                {"Wellname": "TAB-01", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {"Wellname": "TAB-01", "Point": "s", "X": 1.0, "Y": 2.0, "Z": 0.0},
+                {"Wellname": "TAB-01", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            ]
+        )
+    )
+
+    assert list(normalized["Point"]) == ["S", "S", "t1"]
+
+
 def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> None:
     at = AppTest.from_file("pages/02_welltrack_import.py")
     records = _records()[:2]
@@ -1119,6 +1134,40 @@ def test_actual_fund_plan_figure_uses_equalized_xy_view_without_embedded_title()
 
     assert not str(getattr(figure.layout.title, "text", "") or "").strip()
     assert str(figure.layout.yaxis.scaleanchor) == "x"
+
+
+def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None:
+    page = _load_welltrack_page_module()
+    captured: dict[str, object] = {}
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(*args, **kwargs):
+        return _DummyExpander()
+
+    def _fake_dataframe(frame, **kwargs):
+        captured["frame"] = frame.copy()
+
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+
+    page._render_raw_records_table(_records()[:1])
+
+    frame = captured["frame"]
+    assert "MD (из файла), м" not in list(frame.columns)
+    assert list(frame.columns) == [
+        "Скважина",
+        "Порядок",
+        "Точка",
+        "X, м",
+        "Y, м",
+        "Z/TVD, м",
+    ]
 
 
 def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> None:

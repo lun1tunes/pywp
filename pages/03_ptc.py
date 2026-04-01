@@ -46,6 +46,7 @@ def _force_ptc_defaults(wt: ModuleType) -> None:
     st.session_state["wt_log_verbosity"] = str(wt.WT_LOG_COMPACT)
     st.session_state["wt_3d_render_mode"] = str(wt.WT_3D_RENDER_DETAIL)
     st.session_state["wt_3d_backend"] = str(wt.WT_3D_BACKEND_THREE_LOCAL)
+    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     if st.session_state.get("wt_prepared_recommendation_snapshot"):
         st.session_state["wt_prepared_well_overrides"] = {}
         st.session_state["wt_prepared_override_message"] = ""
@@ -200,22 +201,26 @@ def _render_ptc_reference_section(wt: ModuleType) -> None:
             f"{sum(1 for item in reference_wells if str(item.kind) == wt.REFERENCE_WELL_APPROVED)}",
         )
 
-        st.dataframe(
-            wt.arrow_safe_text_dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "Скважина": wt.reference_well_display_label(item),
-                            "Точек": int(len(item.stations)),
-                            "MD max, м": float(item.stations["MD_m"].iloc[-1]),
-                        }
-                        for item in reference_wells
-                    ]
-                )
-            ),
-            width="stretch",
-            hide_index=True,
-        )
+        with st.expander(
+            "Список загруженных фактических/ проектных скважин",
+            expanded=False,
+        ):
+            st.dataframe(
+                wt.arrow_safe_text_dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Скважина": wt.reference_well_display_label(item),
+                                "Точек": int(len(item.stations)),
+                                "MD max, м": float(item.stations["MD_m"].iloc[-1]),
+                            }
+                            for item in reference_wells
+                        ]
+                    )
+                ),
+                width="stretch",
+                hide_index=True,
+            )
 
     actual_wells = tuple(wt._reference_kind_wells(wt.REFERENCE_WELL_ACTUAL))
     if actual_wells:
@@ -321,6 +326,11 @@ def _render_ptc_run_section(wt: ModuleType, *, records: list[object]) -> None:
         ],
         records=records,
     )
+    if run_clicked and st.session_state.get("wt_summary_rows") and not st.session_state.get(
+        "wt_last_error"
+    ):
+        st.session_state["wt_results_view_mode"] = "Все скважины"
+        st.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
 
 def _render_ptc_anticollision_panel(
@@ -359,12 +369,19 @@ def _render_ptc_anticollision_panel(
         selected_preset,
         custom_model=custom_actual_fund_model,
     )
+    anti_collision_progress = st.progress(
+        8,
+        text="Подготовка anti-collision анализа...",
+    )
+    anti_collision_progress.progress(32, text="Расчёт Anti-collision...")
     analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
         successes=successes,
         uncertainty_model=uncertainty_model,
         records=records,
         reference_wells=reference_wells,
     )
+    anti_collision_progress.progress(100, text="Расчёт Anti-collision завершён.")
+    anti_collision_progress.empty()
     focus_pad_well_names = wt._focus_pad_well_names(
         records=records,
         focus_pad_id=focus_pad_id,
@@ -466,12 +483,6 @@ def _render_ptc_success_tabs(
     records: list[object],
     summary_rows: list[dict[str, object]],
 ) -> None:
-    name_to_color = wt._well_color_map(records)
-    reference_wells = wt._reference_wells_from_state()
-    target_only_wells = wt._failed_target_only_wells(
-        records=records,
-        summary_rows=summary_rows,
-    )
     view_mode = st.radio(
         "Режим просмотра результатов",
         options=["Отдельная скважина", "Все скважины"],
@@ -527,13 +538,6 @@ def _render_ptc_success_tabs(
         )
         return
 
-    all_view_mode = st.radio(
-        "Режим отображения всех скважин",
-        options=["Траектории", "Anti-collision"],
-        key="wt_results_all_view_mode",
-        horizontal=True,
-        label_visibility="collapsed",
-    )
     pads, _, _ = wt._pad_membership(records)
     if len(pads) > 1:
         focus_options = [wt.WT_PAD_FOCUS_ALL, *(str(pad.pad_id) for pad in pads)]
@@ -564,50 +568,6 @@ def _render_ptc_success_tabs(
         focus_pad_id=focus_pad_id,
     )
 
-    if str(all_view_mode) == "Траектории":
-        if target_only_wells:
-            st.caption(
-                "Для непростроенных скважин на обзорных графиках показаны только "
-                "точки S/t1/t3, без траектории."
-            )
-        if reference_wells:
-            st.caption(
-                "Дополнительные фактические и утвержденные скважины показаны как "
-                "reference-траектории: серые и красные линии без точек S/t1/t3."
-            )
-        c1, c2 = st.columns(2, gap="medium")
-        overview_3d_figure = wt._all_wells_3d_figure(
-            successes,
-            target_only_wells=target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            focus_well_names=focus_pad_well_names,
-            render_mode=wt.WT_3D_RENDER_DETAIL,
-        )
-        wt._render_plotly_or_three_3d(
-            container=c1,
-            figure=overview_3d_figure,
-            backend=wt.WT_3D_BACKEND_THREE_LOCAL,
-            height=620,
-            payload_overrides=wt._trajectory_three_payload_overrides(
-                records=records,
-                successes=successes,
-                target_only_wells=target_only_wells,
-                name_to_color=name_to_color,
-            ),
-        )
-        c2.plotly_chart(
-            wt._all_wells_plan_figure(
-                successes,
-                target_only_wells=target_only_wells,
-                reference_wells=reference_wells,
-                name_to_color=name_to_color,
-                focus_well_names=focus_pad_well_names,
-            ),
-            width="stretch",
-        )
-        return
-
     _render_ptc_anticollision_panel(
         wt,
         successes=successes,
@@ -622,7 +582,12 @@ def run_page() -> None:
     wt._init_state()
     _force_ptc_defaults(wt)
     apply_page_style(max_width_px=1700)
-    render_hero(title="PTC", subtitle="Prototype trajectory constructor")
+    render_hero(
+        title="PTC",
+        subtitle="Prototype trajectory constructor",
+        centered=True,
+        max_content_width_px=760,
+    )
 
     _render_ptc_import_section(wt)
     records = st.session_state.get("wt_records")
