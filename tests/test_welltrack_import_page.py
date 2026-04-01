@@ -21,6 +21,7 @@ from pywp.anticollision_recommendations import (
 )
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import Point3D, TrajectoryConfig
+from pywp.mcm import compute_positions_min_curv
 from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.ui_calc_params import clear_kop_min_vertical_function, set_kop_min_vertical_function
@@ -460,6 +461,32 @@ def _horizontal_reference_well():
                 {"Wellname": "FACT-H", "Type": "actual", "X": 100.0, "Y": 0.0, "Z": 1100.0, "MD": 1600.0},
                 {"Wellname": "FACT-H", "Type": "actual", "X": 700.0, "Y": 0.0, "Z": 1150.0, "MD": 2200.0},
                 {"Wellname": "FACT-H", "Type": "actual", "X": 1300.0, "Y": 0.0, "Z": 1200.0, "MD": 2800.0},
+            ]
+        )
+    )
+
+
+def _turned_horizontal_reference_well():
+    survey = pd.DataFrame(
+        {
+            "MD_m": [0.0, 600.0, 900.0, 1200.0, 1600.0, 2000.0, 2350.0, 2800.0],
+            "INC_deg": [0.0, 0.0, 20.0, 55.0, 55.0, 75.0, 90.0, 90.0],
+            "AZI_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 35.0, 90.0, 90.0],
+        }
+    )
+    positioned = compute_positions_min_curv(survey, start=Point3D(0.0, 0.0, 0.0))
+    return tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-TURN",
+                    "Type": "actual",
+                    "X": float(row["X_m"]),
+                    "Y": float(row["Y_m"]),
+                    "Z": float(row["Z_m"]),
+                    "MD": float(row["MD_m"]),
+                }
+                for _, row in positioned.iterrows()
             ]
         )
     )
@@ -1134,6 +1161,23 @@ def test_actual_fund_plan_figure_uses_equalized_xy_view_without_embedded_title()
 
     assert not str(getattr(figure.layout.title, "text", "") or "").strip()
     assert str(figure.layout.yaxis.scaleanchor) == "x"
+
+
+def test_actual_fund_profile_prefers_horizontal_azimuth_over_hold_azimuth() -> None:
+    page = _load_welltrack_page_module()
+    detail = page.build_actual_fund_well_analyses(list(_turned_horizontal_reference_well()))[0]
+
+    assert detail.metrics.hold_azi_deg is not None
+    assert float(detail.metrics.hold_azi_deg) < 10.0
+
+    profile_azimuth = float(page._reference_profile_azimuth_deg(detail))
+
+    assert 75.0 <= profile_azimuth <= 105.0
+
+    figure = page._actual_fund_vertical_profile_figure(detail)
+    horizontal_trace = next(trace for trace in figure.data if str(trace.name) == "Горизонтальный")
+    horizontal_x = np.asarray(horizontal_trace.x, dtype=float)
+    assert float(np.max(horizontal_x) - np.min(horizontal_x)) > 300.0
 
 
 def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None:

@@ -242,11 +242,13 @@
         position: absolute;
         display: none;
         transform: translate(-50%, -100%);
+        transform-origin: 50% 100%;
         font-size: 12px;
         font-weight: 600;
         line-height: 1;
         white-space: nowrap;
         color: #0f172a;
+        will-change: transform;
         text-shadow:
           0 1px 0 rgba(255, 255, 255, 0.95),
           0 0 8px rgba(255, 255, 255, 0.8);
@@ -1093,8 +1095,12 @@
         }
 
         function updateLabels() {
-          const width = Math.max(root.clientWidth || 1, 1);
-          const height = Math.max(root.clientHeight || 1, 1);
+          const canvasRect = renderer.domElement.getBoundingClientRect();
+          const labelRect = labelLayerElement.getBoundingClientRect();
+          const width = Math.max(canvasRect.width || 1, 1);
+          const height = Math.max(canvasRect.height || 1, 1);
+          const offsetLeft = canvasRect.left - labelRect.left;
+          const offsetTop = canvasRect.top - labelRect.top;
           sceneLabels.forEach((item) => {
             const projected = item.position.clone().project(camera);
             if (
@@ -1108,9 +1114,13 @@
               item.element.style.display = "none";
               return;
             }
+            const screenX =
+              offsetLeft + (((projected.x + 1.0) * 0.5) * width) + item.offsetX;
+            const screenY =
+              offsetTop + (((-projected.y + 1.0) * 0.5) * height) - item.offsetY;
             item.element.style.display = "block";
-            item.element.style.left = `${(((projected.x + 1.0) * 0.5 * width) + item.offsetX).toFixed(1)}px`;
-            item.element.style.top = `${((((-projected.y + 1.0) * 0.5 * height) - item.offsetY)).toFixed(1)}px`;
+            item.element.style.left = `${Math.round(screenX)}px`;
+            item.element.style.top = `${Math.round(screenY)}px`;
           });
         }
 

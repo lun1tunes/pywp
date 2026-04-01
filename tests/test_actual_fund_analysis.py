@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import numpy as np
 import pandas as pd
+import pytest
 
+import pywp.actual_fund_analysis as actual_fund_analysis_module
 from pywp.actual_fund_analysis import (
     CALIBRATION_STATUS_READY,
     _reconstruct_actual_survey,
@@ -265,6 +269,45 @@ def test_calibration_can_ignore_single_extreme_close_pair_and_still_build_model(
     assert result.ignored_close_pair_count == 1
     assert result.ignored_close_pairs == ("8001 ↔ 8002",)
     assert result.overlapping_pair_count_after == 0
+
+
+def test_calibration_reuses_prebuilt_analyses_without_recomputing_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wells = _actual_wells()
+    analyses = actual_fund_analysis_module.build_actual_fund_well_analyses(wells)
+    analysis_call_count = 0
+
+    def _fake_build_actual_fund_well_analyses(
+        actual_wells: Iterable[object],
+    ) -> tuple[actual_fund_analysis_module.ActualFundWellAnalysis, ...]:
+        nonlocal analysis_call_count
+        analysis_call_count += 1
+        assert len(tuple(actual_wells)) == len(wells)
+        return analyses
+
+    def _unexpected_metrics_call(*_: object, **__: object) -> tuple[object, ...]:
+        raise AssertionError("calibration should reuse metrics from prebuilt analyses")
+
+    monkeypatch.setattr(
+        actual_fund_analysis_module,
+        "build_actual_fund_well_analyses",
+        _fake_build_actual_fund_well_analyses,
+    )
+    monkeypatch.setattr(
+        actual_fund_analysis_module,
+        "build_actual_fund_well_metrics",
+        _unexpected_metrics_call,
+    )
+
+    result = calibrate_uncertainty_from_actual_fund(
+        actual_wells=wells,
+        base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        base_preset=DEFAULT_UNCERTAINTY_PRESET,
+    )
+
+    assert analysis_call_count == 1
+    assert result.status == CALIBRATION_STATUS_READY
 
 
 def test_depth_cluster_summary_and_kop_function_build_from_generated_dataset() -> None:

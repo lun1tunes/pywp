@@ -197,3 +197,23 @@ def test_ptc_page_wraps_reference_well_table_into_expander() -> None:
 
     expander_labels = {str(widget.label) for widget in at.expander}
     assert "Список загруженных фактических/ проектных скважин" in expander_labels
+
+
+def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
+    at = AppTest.from_file("pages/03_ptc.py")
+    records = _records()
+    reference_wells = _reference_wells()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_reference_actual_wells"] = [
+        well for well in reference_wells if well.kind == "actual"
+    ]
+    at.session_state["wt_reference_approved_wells"] = [
+        well for well in reference_wells if well.kind == "approved"
+    ]
+
+    at.run(timeout=120)
+
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+    assert "Просмотр фактической скважины" in selectbox_labels
+    assert "Просмотр утвержденной проектной скважины" in selectbox_labels

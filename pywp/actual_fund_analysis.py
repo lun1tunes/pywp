@@ -795,11 +795,12 @@ def calibrate_uncertainty_from_actual_fund(
     base_preset: str = DEFAULT_UNCERTAINTY_PRESET,
 ) -> ActualFundCalibrationResult:
     actual_well_list = list(actual_wells)
+    analyses = build_actual_fund_well_analyses(actual_well_list)
     reconstructed_by_name = {
-        str(well.name): _reconstruct_actual_survey(well.stations)
-        for well in actual_well_list
+        str(item.name): item.survey
+        for item in analyses
     }
-    metrics = build_actual_fund_well_metrics(actual_well_list)
+    metrics = tuple(item.metrics for item in analyses)
     eligible_metric_names = {
         item.name for item in metrics if bool(item.is_analysis_eligible)
     }

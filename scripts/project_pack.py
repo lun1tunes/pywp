@@ -9,9 +9,6 @@ ARCHIVE_FILE = "all.txt"
 BEGIN = "===BEGIN_FILE==="
 END = "===END_FILE==="
 
-# Static assets for the Three.js viewer (HTML/JS); packed alongside Python sources.
-THREE_VIEWER_ASSETS_REL = Path("pywp/three_viewer_assets")
-
 EXCLUDED_DIR_NAMES = {
     ".git",
     ".venv",
@@ -23,45 +20,66 @@ EXCLUDED_DIR_NAMES = {
     ".idea",
 }
 
+INCLUDED_FILE_EXTENSIONS = {
+    ".py",
+    ".txt",
+    ".md",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".html",
+    ".js",
+    ".css",
+    ".inc",
+    ".csv",
+}
+
+INCLUDED_FILE_NAMES = {
+    "requirements.txt",
+    "requirements-dev.txt",
+}
+
 
 def should_skip_path(path: Path, root: Path) -> bool:
     rel = path.relative_to(root)
     parts = set(rel.parts)
     if parts & EXCLUDED_DIR_NAMES:
         return True
-    if "poetry" in path.name.lower():
-        return True
     return False
 
 
-def collect_three_viewer_assets(root: Path) -> list[Path]:
-    assets_dir = root / THREE_VIEWER_ASSETS_REL
-    if not assets_dir.is_dir():
-        return []
-    out: list[Path] = []
-    for path in assets_dir.rglob("*"):
-        if path.is_file() and not should_skip_path(path, root):
-            out.append(path)
-    return out
+def should_include_path(path: Path) -> bool:
+    if path.name in INCLUDED_FILE_NAMES:
+        return True
+    return path.suffix.lower() in INCLUDED_FILE_EXTENSIONS
 
 
-def collect_files(root: Path) -> list[Path]:
+def collect_files(root: Path, *, archive_path: Path | None = None) -> list[Path]:
     files: list[Path] = []
-    for path in root.rglob("*.py"):
-        if path.is_file() and not should_skip_path(path, root):
-            files.append(path)
-
-    req = root / "requirements.txt"
-    if req.exists() and req.is_file() and not should_skip_path(req, root):
-        files.append(req)
-
-    files.extend(collect_three_viewer_assets(root))
+    archive_resolved = archive_path.resolve() if archive_path is not None else None
+    default_archive_resolved = (root / ARCHIVE_FILE).resolve()
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if should_skip_path(path, root):
+            continue
+        if not should_include_path(path):
+            continue
+        resolved_path = path.resolve()
+        if resolved_path == default_archive_resolved:
+            continue
+        if archive_resolved is not None and resolved_path == archive_resolved:
+            continue
+        files.append(path)
 
     return sorted(set(files), key=lambda p: str(p.relative_to(root)))
 
 
 def pack(root: Path, output_file: Path) -> None:
-    files = collect_files(root)
+    files = collect_files(root, archive_path=output_file)
     with output_file.open("w", encoding="utf-8", newline="") as out:
         for path in files:
             rel = path.relative_to(root).as_posix()
@@ -117,8 +135,8 @@ def unpack(root: Path, input_file: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Pack project .py files, requirements.txt, and pywp/three_viewer_assets "
-            "to all.txt and unpack back."
+            "Pack project text sources/config/assets (Python, HTML/JS/CSS, JSON/TOML,"
+            " Markdown, WELLTRACK .inc, etc.) to all.txt and unpack back."
         )
     )
     parser.add_argument(

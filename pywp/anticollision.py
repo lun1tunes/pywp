@@ -22,6 +22,7 @@ TARGET_NONE = ""
 TARGET_T1 = "t1"
 TARGET_T3 = "t3"
 _PAIR_XY_PREFILTER_DIAMETER_FACTOR = 1.5
+_PAIR_TERMINAL_PREFILTER_DIAMETER_FACTOR = 1.35
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,13 @@ class _AntiCollisionLateralEnvelope:
     min_y_m: float
     max_y_m: float
     max_lateral_radius_m: float
+    surface_x_m: float
+    surface_y_m: float
+    terminal_x_m: float
+    terminal_y_m: float
+    terminal_z_m: float
+    terminal_lateral_radius_m: float
+    terminal_spatial_radius_m: float
 
 
 def anti_collision_method_caption(
@@ -263,6 +271,11 @@ def analyze_anti_collision(
                 lateral_envelope_b=lateral_envelopes[well_b.name],
             ):
                 continue
+            if _pair_prefilter_terminal_far_apart(
+                lateral_envelope_a=lateral_envelopes[well_a.name],
+                lateral_envelope_b=lateral_envelopes[well_b.name],
+            ):
+                continue
             pair_count += 1
             pair_corridors = _pair_overlap_corridors(
                 well_a=well_a,
@@ -340,6 +353,19 @@ def _lateral_envelope_for_prefilter(
         surface_y = float(well.surface.y)
         x_values = np.asarray([surface_x], dtype=float)
         y_values = np.asarray([surface_y], dtype=float)
+    terminal_center_xyz = (
+        tuple(float(value) for value in well.samples[-1].center_xyz)
+        if well.samples
+        else (
+            float(x_values[-1]),
+            float(y_values[-1]),
+            float(
+                well.stations["Z_m"].to_numpy(dtype=float)[-1]
+                if {"Z_m"}.issubset(well.stations.columns) and len(well.stations)
+                else float(well.surface.z)
+            ),
+        )
+    )
     max_lateral_radius_m = max(
         (
             _sample_xy_confidence_radius_m(
@@ -350,12 +376,35 @@ def _lateral_envelope_for_prefilter(
         ),
         default=0.0,
     )
+    terminal_lateral_radius_m = (
+        _sample_xy_confidence_radius_m(
+            covariance_xyz=well.samples[-1].covariance_xyz,
+            confidence_scale=float(well.overlay.model.confidence_scale),
+        )
+        if well.samples
+        else 0.0
+    )
+    terminal_spatial_radius_m = (
+        _sample_3d_confidence_radius_m(
+            covariance_xyz=well.samples[-1].covariance_xyz,
+            confidence_scale=float(well.overlay.model.confidence_scale),
+        )
+        if well.samples
+        else 0.0
+    )
     return _AntiCollisionLateralEnvelope(
         min_x_m=float(np.min(x_values)),
         max_x_m=float(np.max(x_values)),
         min_y_m=float(np.min(y_values)),
         max_y_m=float(np.max(y_values)),
         max_lateral_radius_m=float(max_lateral_radius_m),
+        surface_x_m=float(well.surface.x),
+        surface_y_m=float(well.surface.y),
+        terminal_x_m=float(terminal_center_xyz[0]),
+        terminal_y_m=float(terminal_center_xyz[1]),
+        terminal_z_m=float(terminal_center_xyz[2]),
+        terminal_lateral_radius_m=float(terminal_lateral_radius_m),
+        terminal_spatial_radius_m=float(terminal_spatial_radius_m),
     )
 
 
@@ -368,6 +417,19 @@ def _sample_xy_confidence_radius_m(
     if covariance_xy.shape != (2, 2) or not np.all(np.isfinite(covariance_xy)):
         return 0.0
     eigenvalues = np.linalg.eigvalsh(covariance_xy)
+    principal_variance = float(max(np.max(eigenvalues), 0.0))
+    return float(max(confidence_scale, 0.0)) * float(np.sqrt(principal_variance))
+
+
+def _sample_3d_confidence_radius_m(
+    *,
+    covariance_xyz: np.ndarray,
+    confidence_scale: float,
+) -> float:
+    covariance = np.asarray(covariance_xyz, dtype=float)
+    if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
+        return 0.0
+    eigenvalues = np.linalg.eigvalsh(covariance)
     principal_variance = float(max(np.max(eigenvalues), 0.0))
     return float(max(confidence_scale, 0.0)) * float(np.sqrt(principal_variance))
 
@@ -394,6 +456,53 @@ def _pair_prefilter_xy_far_apart(
     )
     threshold_m = float(_PAIR_XY_PREFILTER_DIAMETER_FACTOR) * max_lateral_diameter_m
     return bool(xy_gap_m > threshold_m)
+
+
+def _pair_prefilter_terminal_far_apart(
+    *,
+    lateral_envelope_a: _AntiCollisionLateralEnvelope,
+    lateral_envelope_b: _AntiCollisionLateralEnvelope,
+) -> bool:
+    surface_xy_distance_m = float(
+        np.hypot(
+            float(lateral_envelope_a.surface_x_m) - float(lateral_envelope_b.surface_x_m),
+            float(lateral_envelope_a.surface_y_m) - float(lateral_envelope_b.surface_y_m),
+        )
+    )
+    terminal_xy_distance_m = float(
+        np.hypot(
+            float(lateral_envelope_a.terminal_x_m) - float(lateral_envelope_b.terminal_x_m),
+            float(lateral_envelope_a.terminal_y_m) - float(lateral_envelope_b.terminal_y_m),
+        )
+    )
+    terminal_3d_distance_m = float(
+        np.linalg.norm(
+            np.asarray(
+                [
+                    float(lateral_envelope_a.terminal_x_m) - float(lateral_envelope_b.terminal_x_m),
+                    float(lateral_envelope_a.terminal_y_m) - float(lateral_envelope_b.terminal_y_m),
+                    float(lateral_envelope_a.terminal_z_m) - float(lateral_envelope_b.terminal_z_m),
+                ],
+                dtype=float,
+            )
+        )
+    )
+    terminal_xy_diameter_m = 2.0 * max(
+        float(lateral_envelope_a.terminal_lateral_radius_m),
+        float(lateral_envelope_b.terminal_lateral_radius_m),
+    )
+    terminal_3d_diameter_m = 2.0 * max(
+        float(lateral_envelope_a.terminal_spatial_radius_m),
+        float(lateral_envelope_b.terminal_spatial_radius_m),
+    )
+    xy_cutoff_m = float(_PAIR_TERMINAL_PREFILTER_DIAMETER_FACTOR) * terminal_xy_diameter_m
+    spatial_cutoff_m = float(_PAIR_TERMINAL_PREFILTER_DIAMETER_FACTOR) * terminal_3d_diameter_m
+    if surface_xy_distance_m <= xy_cutoff_m:
+        return False
+    return bool(
+        terminal_xy_distance_m > xy_cutoff_m
+        and terminal_3d_distance_m > spatial_cutoff_m
+    )
 
 
 def anti_collision_report_rows(

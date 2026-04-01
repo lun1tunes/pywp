@@ -279,6 +279,92 @@ def test_analyze_anti_collision_keeps_near_pair_after_xy_prefilter(
     assert seen_pairs == [("WELL-A", "WELL-B")]
 
 
+def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(1000.0, 0.0, 0.0),
+        t1=Point3D(2000.0, 0.0, 0.0),
+        t3=Point3D(3000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+
+    envelope_by_name = {
+        "WELL-A": anticollision_module._AntiCollisionLateralEnvelope(
+            min_x_m=0.0,
+            max_x_m=1000.0,
+            min_y_m=0.0,
+            max_y_m=50.0,
+            max_lateral_radius_m=0.0,
+            surface_x_m=0.0,
+            surface_y_m=0.0,
+            terminal_x_m=0.0,
+            terminal_y_m=0.0,
+            terminal_z_m=0.0,
+            terminal_lateral_radius_m=100.0,
+            terminal_spatial_radius_m=100.0,
+        ),
+        "WELL-B": anticollision_module._AntiCollisionLateralEnvelope(
+            min_x_m=500.0,
+            max_x_m=1500.0,
+            min_y_m=0.0,
+            max_y_m=50.0,
+            max_lateral_radius_m=0.0,
+            surface_x_m=1000.0,
+            surface_y_m=0.0,
+            terminal_x_m=1000.0,
+            terminal_y_m=0.0,
+            terminal_z_m=0.0,
+            terminal_lateral_radius_m=100.0,
+            terminal_spatial_radius_m=100.0,
+        ),
+    }
+
+    def _fake_envelope(
+        well: anticollision_module.AntiCollisionWell,
+    ) -> anticollision_module._AntiCollisionLateralEnvelope:
+        return envelope_by_name[str(well.name)]
+
+    def _unexpected_pair_scan(**_: object) -> list[AntiCollisionCorridor]:
+        raise AssertionError("pair should be skipped by terminal prefilter")
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_lateral_envelope_for_prefilter",
+        _fake_envelope,
+    )
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _unexpected_pair_scan,
+    )
+
+    analysis = analyze_anti_collision(
+        [well_a, well_b],
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 0
+    assert analysis.overlapping_pair_count == 0
+    assert not analysis.corridors
+
+
 def test_analyze_anti_collision_rejects_overlap_geometry_without_display_overlay() -> None:
     well_a = build_anti_collision_well(
         name="WELL-A",

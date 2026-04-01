@@ -227,6 +227,15 @@ def _render_ptc_reference_section(wt: ModuleType) -> None:
         analyses = wt._actual_fund_analyses(actual_wells)
         wt._render_actual_fund_analysis_panel(analyses=analyses)
 
+    approved_wells = tuple(wt._reference_kind_wells(wt.REFERENCE_WELL_APPROVED))
+    if approved_wells:
+        st.markdown("#### Просмотр утвержденной проектной скважины")
+        wt._render_reference_well_detail(
+            wt.build_actual_fund_well_analyses(approved_wells),
+            select_label="Просмотр утвержденной проектной скважины",
+            selected_key="wt_approved_fund_selected_well",
+        )
+
 
 def _render_ptc_run_section(wt: ModuleType, *, records: list[object]) -> None:
     st.markdown("## 4. Расчёт траекторий")

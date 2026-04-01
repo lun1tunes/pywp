@@ -18,6 +18,9 @@ from pywp.actual_fund_analysis import (
     ActualFundKopDepthFunction,
     ActualFundWellAnalysis,
     CALIBRATION_STATUS_READY,
+    ZONE_BUILD2,
+    ZONE_HOLD,
+    ZONE_HORIZONTAL,
     actual_fund_depth_rows,
     build_actual_fund_well_analyses,
     build_actual_fund_kop_depth_function,
@@ -5788,10 +5791,38 @@ def _actual_fund_lateral_from_horizontal_entry_m(detail: ActualFundWellAnalysis)
     return float(np.hypot(end_x - float(entry["X_m"]), end_y - float(entry["Y_m"])))
 
 
-def _actual_fund_profile_azimuth_deg(detail: ActualFundWellAnalysis) -> float:
-    hold_azimuth = detail.metrics.hold_azi_deg
-    if hold_azimuth is not None and np.isfinite(float(hold_azimuth)):
-        return float(hold_azimuth) % 360.0
+def _xy_interval_azimuth_deg(interval: pd.DataFrame) -> float | None:
+    if len(interval) < 2 or not {"X_m", "Y_m"}.issubset(interval.columns):
+        return None
+    x_values = interval["X_m"].to_numpy(dtype=float)
+    y_values = interval["Y_m"].to_numpy(dtype=float)
+    finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+    x_values = x_values[finite_mask]
+    y_values = y_values[finite_mask]
+    if len(x_values) < 2:
+        return None
+    dx = float(x_values[-1] - x_values[0])
+    dy = float(y_values[-1] - y_values[0])
+    if abs(dx) <= 1e-9 and abs(dy) <= 1e-9:
+        return None
+    return float(np.degrees(np.arctan2(dx, dy)) % 360.0)
+
+
+def _reference_profile_azimuth_deg(detail: ActualFundWellAnalysis) -> float:
+    zone_by_key = {str(item.zone_key): item for item in detail.zone_summaries}
+    for preferred_zone_key in (ZONE_HORIZONTAL, ZONE_BUILD2, ZONE_HOLD):
+        zone = zone_by_key.get(preferred_zone_key)
+        if zone is None:
+            continue
+        interval = _actual_fund_interval_df(
+            detail.survey,
+            float(zone.md_from_m),
+            float(zone.md_to_m),
+        )
+        xy_azimuth = _xy_interval_azimuth_deg(interval)
+        if xy_azimuth is not None:
+            return xy_azimuth
+
     azi_values = detail.survey["AZI_deg"].to_numpy(dtype=float)
     finite_azi = azi_values[np.isfinite(azi_values)]
     if len(finite_azi) == 0:
@@ -6138,7 +6169,7 @@ def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.F
     figure = go.Figure()
     surface_x = float(detail.survey["X_m"].iloc[0])
     surface_y = float(detail.survey["Y_m"].iloc[0])
-    profile_azimuth_deg = _actual_fund_profile_azimuth_deg(detail)
+    profile_azimuth_deg = _reference_profile_azimuth_deg(detail)
     shown_legend_keys: set[str] = set()
     for zone in detail.zone_summaries:
         interval = _actual_fund_interval_df(
@@ -6278,7 +6309,12 @@ def _actual_fund_vertical_profile_figure(detail: ActualFundWellAnalysis) -> go.F
     return figure
 
 
-def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]) -> None:
+def _render_reference_well_detail(
+    analyses: tuple[ActualFundWellAnalysis, ...],
+    *,
+    select_label: str,
+    selected_key: str,
+) -> None:
     if not analyses:
         return
     names = [str(item.name) for item in analyses]
@@ -6287,10 +6323,10 @@ def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]
         names[0],
     )
     selected_name = st.selectbox(
-        "Просмотр фактической скважины",
+        select_label,
         options=names,
         index=max(names.index(default_name), 0),
-        key="wt_actual_fund_selected_well",
+        key=selected_key,
     )
     detail = next(item for item in analyses if str(item.name) == str(selected_name))
     metrics = detail.metrics
@@ -6333,6 +6369,14 @@ def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]
         arrow_safe_text_dataframe(pd.DataFrame(_actual_fund_zone_table_rows(detail))),
         width="stretch",
         hide_index=True,
+    )
+
+
+def _render_actual_fund_well_detail(analyses: tuple[ActualFundWellAnalysis, ...]) -> None:
+    _render_reference_well_detail(
+        analyses,
+        select_label="Просмотр фактической скважины",
+        selected_key="wt_actual_fund_selected_well",
     )
 
 

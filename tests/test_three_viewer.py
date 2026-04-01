@@ -30,6 +30,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'role === "well_label"' in html
     assert 'role === "reference_pad_label"' in html
     assert "item.offsetY" in html
+    assert "renderer.domElement.getBoundingClientRect()" in html
+    assert "labelLayerElement.getBoundingClientRect()" in html
+    assert "transform-origin: 50% 100%;" in html
     assert "position.z += labelLift;" not in html
     assert "X / East" in html
     assert "Y / North" in html
