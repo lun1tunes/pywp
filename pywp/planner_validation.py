@@ -551,11 +551,17 @@ def _build_validated_control_and_summary(
         evaluation=_evaluate_profile_endpoints(params=params),
         surface=surface,
     )
-    control = compute_positions_min_curv(
-        trajectory.stations(md_step_m=config.md_step_control_m),
-        start=surface,
-    )
-    control = add_dls(control)
+    try:
+        control = compute_positions_min_curv(
+            trajectory.stations(md_step_m=config.md_step_control_m),
+            start=surface,
+        )
+        control = add_dls(control)
+    except ValueError as exc:
+        raise PlanningError(
+            "Не удалось сформировать контрольную инклинометрию методом минимальной кривизны. "
+            f"Причина: {exc}"
+        ) from exc
     classification = classify_well(
         gv_m=geometry.z1_m,
         horizontal_offset_t1_m=horizontal_offset_t1_m,

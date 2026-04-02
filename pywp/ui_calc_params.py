@@ -138,7 +138,8 @@ def kop_min_vertical_function_from_state(
     if isinstance(payload, dict):
         try:
             return ActualFundKopDepthFunction(**payload)
-        except Exception:
+        except (TypeError, ValueError):
+            clear_kop_min_vertical_function(prefix=prefix)
             return None
     return None
 

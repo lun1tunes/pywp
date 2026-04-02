@@ -6,7 +6,7 @@ from datetime import datetime
 import hashlib
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -900,7 +900,11 @@ def _analysis_reference_wells(
             name=str(well.name),
             kind=str(well.well_kind),
             stations=well.stations,
-            surface=well.surface,
+            surface=Point3D(
+                x=float(well.surface.x),
+                y=float(well.surface.y),
+                z=float(well.surface.z),
+            ),
             azimuth_deg=0.0,
         )
         for well in analysis.wells
@@ -2006,18 +2010,63 @@ def _anti_collision_cache_key(
     return digest.hexdigest()
 
 
+def _store_anticollision_failure_state(
+    exc: Exception,
+    *,
+    started_at: float | None = None,
+    log_lines: Iterable[str] = (),
+) -> None:
+    previous_state = st.session_state.get("wt_anticollision_last_run")
+    previous_payload = previous_state if isinstance(previous_state, Mapping) else {}
+    merged_log_lines = [str(item) for item in (previous_payload.get("log_lines") or ())]
+    for item in log_lines:
+        text = str(item)
+        if text:
+            merged_log_lines.append(text)
+    error_line = (
+        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"Ошибка anti-collision: {type(exc).__name__}: {exc}"
+    )
+    if not merged_log_lines or merged_log_lines[-1] != error_line:
+        merged_log_lines.append(error_line)
+    st.session_state["wt_anticollision_last_run"] = {
+        "cached": False,
+        "runtime_s": (
+            float(perf_counter() - float(started_at))
+            if started_at is not None
+            else previous_payload.get("runtime_s")
+        ),
+        "log_lines": tuple(merged_log_lines),
+        "pair_count": int(previous_payload.get("pair_count") or 0),
+        "overlap_count": int(previous_payload.get("overlap_count") or 0),
+        "recommendation_count": int(previous_payload.get("recommendation_count") or 0),
+        "cluster_count": int(previous_payload.get("cluster_count") or 0),
+        "status": f"Ошибка: {type(exc).__name__}",
+    }
+
+
 def _cached_anti_collision_view_model(
     *,
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
     records: list[WelltrackRecord],
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> tuple[
     AntiCollisionAnalysis,
     tuple[AntiCollisionRecommendation, ...],
     tuple[AntiCollisionRecommendationCluster, ...],
 ]:
+    started_at = perf_counter()
+    log_lines: list[str] = []
+
+    def _emit(progress_value: int, message: str) -> None:
+        log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        if progress_callback is not None:
+            progress_callback(int(progress_value), message)
+
     color_map = _well_color_map(records) if records else {}
+    _emit(8, "Подготовка входных данных anti-collision.")
     cache_key = _anti_collision_cache_key(
         successes=successes,
         model=uncertainty_model,
@@ -2034,25 +2083,148 @@ def _cached_anti_collision_view_model(
             and isinstance(recommendations, tuple)
             and isinstance(clusters, tuple)
         ):
+            _emit(100, "Использован кэш anti-collision анализа.")
+            st.session_state["wt_anticollision_last_run"] = {
+                "cached": True,
+                "runtime_s": float(perf_counter() - started_at),
+                "log_lines": tuple(log_lines),
+                "pair_count": int(analysis.pair_count),
+                "overlap_count": int(analysis.overlapping_pair_count),
+                "recommendation_count": int(len(recommendations)),
+                "cluster_count": int(len(clusters)),
+            }
             return analysis, recommendations, clusters
-    analysis = _build_anti_collision_analysis(
-        successes,
-        model=uncertainty_model,
-        name_to_color=color_map,
-        reference_wells=reference_wells,
-    )
-    recommendations = build_anti_collision_recommendations(
-        analysis,
-        well_context_by_name=_build_anticollision_well_contexts(successes),
-    )
-    clusters = build_anti_collision_recommendation_clusters(recommendations)
+    try:
+        _emit(30, "Расчёт anti-collision модели.")
+        analysis = _build_anti_collision_analysis(
+            successes,
+            model=uncertainty_model,
+            name_to_color=color_map,
+            reference_wells=reference_wells,
+        )
+        _emit(72, "Построение рекомендаций anti-collision.")
+        recommendations = build_anti_collision_recommendations(
+            analysis,
+            well_context_by_name=_build_anticollision_well_contexts(successes),
+        )
+        _emit(88, "Кластеризация рекомендаций anti-collision.")
+        clusters = build_anti_collision_recommendation_clusters(recommendations)
+    except Exception as exc:
+        _store_anticollision_failure_state(
+            exc,
+            started_at=started_at,
+            log_lines=tuple(log_lines),
+        )
+        raise
     st.session_state["wt_anticollision_analysis_cache"] = {
         "key": cache_key,
         "analysis": analysis,
         "recommendations": recommendations,
         "clusters": clusters,
     }
+    _emit(100, "Расчёт Anti-collision завершён.")
+    st.session_state["wt_anticollision_last_run"] = {
+        "cached": False,
+        "runtime_s": float(perf_counter() - started_at),
+        "log_lines": tuple(log_lines),
+        "pair_count": int(analysis.pair_count),
+        "overlap_count": int(analysis.overlapping_pair_count),
+        "recommendation_count": int(len(recommendations)),
+        "cluster_count": int(len(clusters)),
+    }
     return analysis, recommendations, clusters
+
+
+def _render_status_run_log(
+    *,
+    title: str,
+    state_payload: Mapping[str, object] | None,
+    empty_message: str,
+) -> None:
+    with st.expander(title, expanded=False):
+        if not isinstance(state_payload, Mapping):
+            st.caption(empty_message)
+            return
+        cached = bool(state_payload.get("cached"))
+        runtime_s = state_payload.get("runtime_s")
+        top_cols = st.columns(4, gap="small")
+        top_cols[0].metric("Статус", "Кэш" if cached else "Выполнен")
+        top_cols[1].metric(
+            "Время, с",
+            "—" if runtime_s is None else f"{float(runtime_s):.2f}",
+        )
+        if "pair_count" in state_payload:
+            top_cols[2].metric("Пар", f"{int(state_payload.get('pair_count') or 0)}")
+        elif "well_count" in state_payload:
+            top_cols[2].metric("Скважин", f"{int(state_payload.get('well_count') or 0)}")
+        if "recommendation_count" in state_payload:
+            top_cols[3].metric(
+                "Рекомендаций",
+                f"{int(state_payload.get('recommendation_count') or 0)}",
+            )
+        elif "eligible_well_count" in state_payload:
+            top_cols[3].metric(
+                "В анализе",
+                f"{int(state_payload.get('eligible_well_count') or 0)}",
+            )
+        if "cluster_count" in state_payload or "overlap_count" in state_payload:
+            extra_cols = st.columns(2, gap="small")
+            extra_cols[0].metric(
+                "Overlap",
+                f"{int(state_payload.get('overlap_count') or 0)}",
+            )
+            extra_cols[1].metric(
+                "Кластеров",
+                f"{int(state_payload.get('cluster_count') or 0)}",
+            )
+        if "status" in state_payload:
+            st.caption(f"Статус результата: {str(state_payload.get('status'))}")
+        log_lines = tuple(state_payload.get("log_lines") or ())
+        if log_lines:
+            st.code("\n".join(str(item) for item in log_lines), language="text")
+
+
+def _run_actual_fund_calibration_with_status(
+    *,
+    actual_wells: tuple[ImportedTrajectoryWell, ...],
+    analyses: tuple[ActualFundWellAnalysis, ...],
+    base_preset: str,
+):
+    started_at = perf_counter()
+    log_lines: list[str] = []
+
+    def _emit(progress_bar, value: int, message: str) -> None:
+        log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        progress_bar.progress(int(value), text=message)
+
+    progress = st.progress(
+        5,
+        text="Подготовка калибровки пользовательской anti-collision функции...",
+    )
+    eligible_count = sum(1 for item in analyses if bool(item.metrics.is_analysis_eligible))
+    _emit(progress, 18, "Подготовка фактического фонда.")
+    _emit(progress, 34, "Фильтрация невалидных, не-горизонтальных и pilot `_PL` скважин.")
+    result = calibrate_uncertainty_from_actual_fund(
+        actual_wells=actual_wells,
+        analyses=analyses,
+        base_model=planning_uncertainty_model_for_preset(base_preset),
+        base_preset=base_preset,
+    )
+    _emit(progress, 82, "Подгонка пользовательской anti-collision функции.")
+    if getattr(result, "custom_model", None) is not None:
+        _emit(progress, 100, "Пользовательская anti-collision функция построена.")
+    else:
+        _emit(progress, 100, "Расчёт пользовательской anti-collision функции завершён.")
+    progress.empty()
+    st.session_state["wt_actual_fund_calibration_run"] = {
+        "cached": False,
+        "runtime_s": float(perf_counter() - started_at),
+        "log_lines": tuple(log_lines),
+        "status": str(getattr(result, "status", "")),
+        "well_count": int(len(actual_wells)),
+        "eligible_well_count": int(eligible_count),
+    }
+    return result
 
 
 def _trajectory_interval_points(
@@ -2217,6 +2389,7 @@ def _reference_welltrack_path_key(kind: str) -> str:
 def _clear_actual_fund_calibration_state() -> None:
     st.session_state["wt_actual_fund_calibration_result"] = None
     st.session_state["wt_actual_fund_custom_model"] = None
+    st.session_state["wt_actual_fund_calibration_run"] = None
     if (
         str(st.session_state.get("wt_anticollision_uncertainty_preset", "")).strip()
         == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
@@ -2279,6 +2452,7 @@ def _reference_wells_from_state() -> tuple[ImportedTrajectoryWell, ...]:
 
 def _reset_anticollision_view_state(*, clear_prepared: bool) -> None:
     st.session_state["wt_anticollision_analysis_cache"] = {}
+    st.session_state["wt_anticollision_last_run"] = None
     if not clear_prepared:
         return
     st.session_state["wt_prepared_well_overrides"] = {}
@@ -2362,7 +2536,10 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_actual_fund_base_preset", DEFAULT_UNCERTAINTY_PRESET)
     st.session_state.setdefault("wt_actual_fund_calibration_result", None)
     st.session_state.setdefault("wt_actual_fund_custom_model", None)
+    st.session_state.setdefault("wt_actual_fund_calibration_run", None)
+    st.session_state.setdefault("wt_anticollision_last_run", None)
     st.session_state.setdefault("wt_t1_t3_last_resolution", None)
+    st.session_state.setdefault("wt_t1_t3_acknowledged_well_names", ())
     if str(st.session_state.get("wt_results_view_mode", "")).strip() not in {
         "Отдельная скважина",
         "Все скважины",
@@ -3833,6 +4010,7 @@ def _render_anticollision_panel(
     records: list[WelltrackRecord],
     focus_pad_id: str,
 ) -> None:
+    panel_started_at = perf_counter()
     reference_wells = _reference_wells_from_state()
     if len(successes) + len(reference_wells) < 2:
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
@@ -3866,12 +4044,36 @@ def _render_anticollision_panel(
         selected_preset,
         custom_model=custom_actual_fund_model,
     )
-    analysis, recommendations, clusters = _cached_anti_collision_view_model(
-        successes=successes,
-        uncertainty_model=uncertainty_model,
-        records=records,
-        reference_wells=reference_wells,
+    anti_collision_progress = st.progress(
+        8,
+        text="Подготовка anti-collision анализа...",
     )
+
+    def _anti_collision_progress_update(value: int, text: str) -> None:
+        anti_collision_progress.progress(int(value), text=text)
+
+    try:
+        analysis, recommendations, clusters = _cached_anti_collision_view_model(
+            successes=successes,
+            uncertainty_model=uncertainty_model,
+            records=records,
+            reference_wells=reference_wells,
+            progress_callback=_anti_collision_progress_update,
+        )
+    except Exception as exc:
+        anti_collision_progress.empty()
+        _store_anticollision_failure_state(exc, started_at=panel_started_at)
+        st.error(
+            "Не удалось построить anti-collision анализ. Проверьте лог расчёта ниже."
+        )
+        _render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        st.caption(f"{type(exc).__name__}: {exc}")
+        return
+    anti_collision_progress.empty()
     focus_pad_well_names = _focus_pad_well_names(
         records=records,
         focus_pad_id=focus_pad_id,
@@ -3897,6 +4099,11 @@ def _render_anticollision_panel(
     st.caption(
         f"Пресет: {uncertainty_preset_label(selected_preset)}. "
         f"{anti_collision_method_caption(uncertainty_model)}"
+    )
+    _render_status_run_log(
+        title="Лог расчёта Anti-collision",
+        state_payload=st.session_state.get("wt_anticollision_last_run"),
+        empty_message="Anti-collision анализ ещё не запускался.",
     )
     selected_render_mode = st.selectbox(
         "3D-режим отображения",
@@ -3951,30 +4158,43 @@ def _render_anticollision_panel(
         st.markdown(_sf_help_markdown())
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
-    anticollision_3d_figure = _all_wells_anticollision_3d_figure(
-        analysis,
-        previous_successes_by_name=previous_successes_by_name,
-        focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-        render_mode=selected_render_mode,
-    )
-    _render_plotly_or_three_3d(
-        container=chart_col1,
-        figure=anticollision_3d_figure,
-        backend=selected_3d_backend,
-        height=660,
-        payload_overrides=_anticollision_three_payload_overrides(
-            records=records,
-            analysis=analysis,
-        ),
-    )
-    chart_col2.plotly_chart(
-        _all_wells_anticollision_plan_figure(
+    try:
+        anticollision_3d_figure = _all_wells_anticollision_3d_figure(
             analysis,
             previous_successes_by_name=previous_successes_by_name,
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-        ),
-        width="stretch",
-    )
+            render_mode=selected_render_mode,
+        )
+        _render_plotly_or_three_3d(
+            container=chart_col1,
+            figure=anticollision_3d_figure,
+            backend=selected_3d_backend,
+            height=660,
+            payload_overrides=_anticollision_three_payload_overrides(
+                records=records,
+                analysis=analysis,
+            ),
+        )
+        chart_col2.plotly_chart(
+            _all_wells_anticollision_plan_figure(
+                analysis,
+                previous_successes_by_name=previous_successes_by_name,
+                focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
+            ),
+            width="stretch",
+        )
+    except Exception as exc:
+        _store_anticollision_failure_state(exc, started_at=panel_started_at)
+        st.error(
+            "Не удалось отрисовать anti-collision визуализацию. Проверьте лог расчёта ниже."
+        )
+        _render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        st.caption(f"{type(exc).__name__}: {exc}")
+        return
     _render_last_anticollision_resolution(current_preset=selected_preset)
 
     if not analysis.zones:
@@ -5289,17 +5509,21 @@ def _store_parsed_records(records: list[WelltrackRecord]) -> bool:
 
 
 def _auto_apply_pad_layout_if_shared_surface(records: list[WelltrackRecord]) -> bool:
-    pads = detect_well_pads(records)
-    well_count_with_surface = sum(1 for record in records if record.points)
-    if well_count_with_surface <= 1:
-        return False
-    if len(pads) != 1:
-        return False
-    if len(pads[0].wells) != well_count_with_surface:
-        return False
-
     pads = _ensure_pad_configs(base_records=list(records))
+    metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
+    auto_layout_pad_ids = {
+        str(pad.pad_id)
+        for pad in pads
+        if len(pad.wells) > 1
+        and not bool(
+            getattr(metadata.get(str(pad.pad_id)), "source_surfaces_defined", False)
+        )
+    }
+    if not auto_layout_pad_ids:
+        return False
     plan_map = _build_pad_plan_map(pads)
+    if not any(str(pad_id) in auto_layout_pad_ids for pad_id in plan_map):
+        return False
     updated_records = apply_pad_layout(
         records=list(records),
         pads=pads,
@@ -5394,7 +5618,7 @@ def _handle_import_actions(
                 status.write(f"Собрано скважин из таблицы: {len(records)}.")
                 if auto_layout_applied:
                     status.write(
-                        "Обнаружен общий исходный устьевой S: устья автоматически "
+                        "Обнаружены кусты с общим исходным S: устья автоматически "
                         "разведены по параметрам блока 'Кусты и расчет устьев'. "
                         "При необходимости можно нажать 'Вернуть исходные устья'."
                     )
@@ -5431,7 +5655,7 @@ def _handle_import_actions(
             status.write(f"Найдено блоков WELLTRACK: {len(records)}.")
             if auto_layout_applied:
                 status.write(
-                    "Обнаружен общий исходный устьевой S: устья автоматически "
+                    "Обнаружены кусты с общим исходным S: устья автоматически "
                     "разведены по параметрам блока 'Кусты и расчет устьев'. "
                     "При необходимости можно нажать 'Вернуть исходные устья'."
                 )
@@ -6530,9 +6754,9 @@ def _render_actual_fund_analysis_panel(
             icon=":material/tune:",
             width="stretch",
         ):
-            result = calibrate_uncertainty_from_actual_fund(
+            result = _run_actual_fund_calibration_with_status(
                 actual_wells=actual_wells,
-                base_model=planning_uncertainty_model_for_preset(calibration_base_preset),
+                analyses=analyses,
                 base_preset=calibration_base_preset,
             )
             st.session_state["wt_actual_fund_calibration_result"] = result
@@ -6603,6 +6827,11 @@ def _render_actual_fund_analysis_panel(
                 st.success(str(calibration_result.note))
             else:
                 st.info(str(calibration_result.note))
+        _render_status_run_log(
+            title="Лог расчёта пользовательской Anti-collision функции",
+            state_payload=st.session_state.get("wt_actual_fund_calibration_run"),
+            empty_message="Пользовательская anti-collision функция ещё не рассчитывалась.",
+        )
 
 
 def _render_reference_trajectory_panel() -> None:
@@ -6684,20 +6913,30 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
 
 
 def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
-    resolution_message = _t1_t3_order_resolution_message()
-    if resolution_message is not None:
-        level, message = resolution_message
-        if level == "success":
-            st.success(message)
-        else:
-            st.info(message)
-
-    issues = detect_t1_t3_order_issues(records, min_delta_m=WT_T1T3_MIN_DELTA_M)
-    if not issues:
-        return
-
     with st.container(border=True):
         st.markdown("### Проверка порядка t1/t3")
+        resolution_message = _t1_t3_order_resolution_message()
+        if resolution_message is not None:
+            level, message = resolution_message
+            if level == "success":
+                st.success(message)
+            else:
+                st.info(message)
+        detected_issues = detect_t1_t3_order_issues(records, min_delta_m=WT_T1T3_MIN_DELTA_M)
+        acknowledged_well_names = _t1_t3_order_acknowledged_well_names()
+        issues = [
+            item for item in detected_issues if str(item.well_name) not in acknowledged_well_names
+        ]
+        if not issues:
+            if detected_issues:
+                st.info(
+                    "Активных предупреждений по порядку `t1/t3` нет. "
+                    "Для отмеченных скважин текущий порядок оставлен без изменений."
+                )
+            else:
+                st.success("Проверка порядка t1/t3 — OK.")
+            return
+
         st.warning(
             "Найдены скважины, где `t1` дальше от устья `S` (куста) по горизонтальному "
             "отходу, чем `t3`. Вероятно, порядок точек `t1/t3` перепутан."
@@ -6757,6 +6996,9 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
                 records=list(original_records),
                 well_names=target_names,
             )
+            _set_t1_t3_order_acknowledged_well_names(
+                _t1_t3_order_acknowledged_well_names() - target_names
+            )
             _set_t1_t3_order_resolution(
                 action="fixed",
                 well_names=target_names,
@@ -6769,9 +7011,13 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             icon=":material/do_not_disturb:",
             width="stretch",
         ):
+            kept_well_names = {str(item.well_name) for item in issues}
+            _set_t1_t3_order_acknowledged_well_names(
+                _t1_t3_order_acknowledged_well_names() | kept_well_names
+            )
             _set_t1_t3_order_resolution(
                 action="kept",
-                well_names={str(item.well_name) for item in issues},
+                well_names=kept_well_names,
             )
             st.toast("Текущий порядок t1/t3 оставлен без изменений.")
             st.rerun()
@@ -6783,9 +7029,25 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
 
 def _clear_t1_t3_order_resolution_state() -> None:
     st.session_state["wt_t1_t3_last_resolution"] = None
+    st.session_state["wt_t1_t3_acknowledged_well_names"] = ()
     for key in list(st.session_state.keys()):
         if str(key).startswith("wt_t1_t3_fix_"):
             del st.session_state[key]
+
+
+def _set_t1_t3_order_acknowledged_well_names(
+    well_names: set[str] | list[str] | tuple[str, ...],
+) -> None:
+    st.session_state["wt_t1_t3_acknowledged_well_names"] = tuple(
+        sorted(str(name) for name in well_names if str(name).strip())
+    )
+
+
+def _t1_t3_order_acknowledged_well_names() -> set[str]:
+    raw_value = st.session_state.get("wt_t1_t3_acknowledged_well_names")
+    if not isinstance(raw_value, (tuple, list, set)):
+        return set()
+    return {str(item) for item in raw_value if str(item).strip()}
 
 
 def _set_t1_t3_order_resolution(

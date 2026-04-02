@@ -217,11 +217,17 @@ class TrajectoryPlanner:
         )
 
         _emit_progress(progress_callback, "Планировщик: формирование выходной инклинометрии.", 0.96)
-        output = compute_positions_min_curv(
-            trajectory.stations(md_step_m=config.md_step_m),
-            start=surface,
-        )
-        output = add_dls(output)
+        try:
+            output = compute_positions_min_curv(
+                trajectory.stations(md_step_m=config.md_step_m),
+                start=surface,
+            )
+            output = add_dls(output)
+        except ValueError as exc:
+            raise PlanningError(
+                "Не удалось построить выходную инклинометрию методом минимальной кривизны. "
+                f"Причина: {exc}"
+            ) from exc
         _emit_progress(progress_callback, "Планировщик: результат готов.", 1.00)
 
         return PlannerResult(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import app
 import pandas as pd
 import pytest
-from pywp import Point3D
+from pywp import Point3D, TrajectoryConfig
 from streamlit.testing.v1 import AppTest
 from pywp.ui_utils import arrow_safe_text_dataframe, format_run_log_line
 
@@ -130,6 +130,19 @@ def test_current_input_signature_tracks_plan_and_actual_profiles(monkeypatch: py
     assert signature_after_plan != signature_after_actual
 
 
+def test_validate_input_rejects_invalid_t1_t3_geometry() -> None:
+    errors = app._validate_input(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(0.0, 0.0, 2400.0),
+        t3=Point3D(0.0, 0.0, 2300.0),
+        config=TrajectoryConfig(),
+    )
+
+    assert "t3 должен быть глубже t1 по TVD." in errors
+    assert "Точки t1 и t3 должны различаться в плане." in errors
+    assert "Точка t1 должна отличаться от устья S в плане." in errors
+
+
 def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
     at = AppTest.from_file("app.py")
     at.session_state["last_result"] = {"broken": True}
@@ -137,3 +150,4 @@ def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
 
     warning_values = [str(widget.value) for widget in at.warning]
     assert any("устарел или поврежден" in value for value in warning_values)
+    assert any("ValueError" in value for value in warning_values)

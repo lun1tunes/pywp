@@ -302,11 +302,12 @@ def test_calibration_reuses_prebuilt_analyses_without_recomputing_metrics(
 
     result = calibrate_uncertainty_from_actual_fund(
         actual_wells=wells,
+        analyses=analyses,
         base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
         base_preset=DEFAULT_UNCERTAINTY_PRESET,
     )
 
-    assert analysis_call_count == 1
+    assert analysis_call_count == 0
     assert result.status == CALIBRATION_STATUS_READY
 
 

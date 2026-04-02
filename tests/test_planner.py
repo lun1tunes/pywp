@@ -81,6 +81,25 @@ def test_translated_surface_coordinates_preserve_exact_endpoint_validation() -> 
     assert float(result.summary["t3_exact_y_m"]) == pytest.approx(7413139.0, abs=1e-4)
 
 
+def test_planner_wraps_minimum_curvature_output_errors_as_planning_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    def _boom(*args: object, **kwargs: object):
+        raise ValueError("dogleg angle is too close to 180 degrees")
+
+    monkeypatch.setattr(planner_module, "compute_positions_min_curv", _boom)
+
+    with pytest.raises(PlanningError, match="минимальной кривизны"):
+        TrajectoryPlanner().plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=_fast_config(kop_min_vertical_m=550.0),
+        )
+
+
 def test_higher_min_vertical_pushes_kop_up_deterministically() -> None:
     config_low = _fast_config(kop_min_vertical_m=550.0)
     config_high = _fast_config(kop_min_vertical_m=900.0)

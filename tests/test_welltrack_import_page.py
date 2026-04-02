@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -80,6 +81,27 @@ def _bad_order_records() -> list[WelltrackRecord]:
                 WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
                 WelltrackPoint(x=500.0, y=0.0, z=2400.0, md=2400.0),
                 WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+
+
+def _two_bad_order_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="BAD-1",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1200.0, y=0.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="BAD-2",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1100.0, y=0.0, z=2450.0, md=2450.0),
+                WelltrackPoint(x=650.0, y=0.0, z=2550.0, md=3550.0),
             ),
         ),
     ]
@@ -242,6 +264,44 @@ def test_records_overview_dataframe_uses_explicit_green_red_status_icons() -> No
     assert "Не хватает одной из точек" in str(overview_df.iloc[1]["Проблема"])
 
 
+def test_analysis_reference_wells_rebuilds_surface_as_current_point3d() -> None:
+    page = _load_welltrack_page_module()
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "INC_deg": [0.0, 90.0],
+            "AZI_deg": [0.0, 90.0],
+            "X_m": [100.0, 1100.0],
+            "Y_m": [200.0, 200.0],
+            "Z_m": [5.0, 5.0],
+        }
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            SimpleNamespace(
+                name="REF-1",
+                well_kind="approved",
+                stations=stations,
+                surface=SimpleNamespace(x=100.0, y=200.0, z=5.0),
+                is_reference_only=True,
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    reference_wells = page._analysis_reference_wells(analysis)
+
+    assert len(reference_wells) == 1
+    assert isinstance(reference_wells[0].surface, Point3D)
+    assert reference_wells[0].surface == Point3D(x=100.0, y=200.0, z=5.0)
+
+
 def test_records_overview_dataframe_detects_missing_surface_s_by_surface_z_heuristic() -> None:
     page = _load_welltrack_page_module()
     missing_surface = WelltrackRecord(
@@ -288,6 +348,60 @@ def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> N
     button_labels = {str(widget.label) for widget in at.button}
     assert "Исправить порядок для выбранных скважин" in button_labels
     assert "Оставить все точки без изменений" in button_labels
+
+
+def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+
+    assert any(
+        "Проверка порядка t1/t3 — OK." in str(widget.value)
+        for widget in at.success
+    )
+
+
+def test_welltrack_page_hides_t1_t3_warning_after_keep_action() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _bad_order_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+    _click_button(at, "Оставить все точки без изменений")
+    at.run(timeout=120)
+
+    assert any(
+        "Порядок t1/t3 оставлен без изменений для скважин: BAD-1."
+        in str(widget.value)
+        for widget in at.info
+    )
+    assert not any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+
+
+def test_welltrack_page_shows_only_remaining_t1_t3_issue_after_partial_fix() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _two_bad_order_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_t1_t3_fix_BAD-1"] = True
+    at.session_state["wt_t1_t3_fix_BAD-2"] = False
+
+    at.run(timeout=120)
+    _click_button(at, "Исправить порядок для выбранных скважин")
+    at.run(timeout=120)
+
+    assert any(
+        "Порядок t1/t3 изменился для скважин: BAD-1." in str(widget.value)
+        for widget in at.success
+    )
+    assert any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+    markdown_values = [str(widget.value) for widget in at.markdown]
+    assert any("`BAD-2`" in value for value in markdown_values)
+    assert not any("`BAD-1`" in value for value in markdown_values)
 
 
 def _successful_plan(
@@ -881,6 +995,23 @@ def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_res
     assert reset_surfaces == original_surfaces
     assert at.session_state["wt_pad_last_applied_at"] == ""
     assert at.session_state["wt_pad_auto_applied_on_import"] is False
+
+
+def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface() -> None:
+    page = _load_welltrack_page_module()
+    page._init_state()
+
+    records = _multi_pad_records()
+    applied = page._auto_apply_pad_layout_if_shared_surface(list(records))
+
+    assert applied is True
+    updated_records = page.st.session_state["wt_records"]
+    updated_surfaces = _surface_points(updated_records)
+    assert len(set(updated_surfaces)) == 4
+    assert updated_surfaces[0] != updated_surfaces[1]
+    assert updated_surfaces[2] != updated_surfaces[3]
+    assert page.st.session_state["wt_pad_auto_applied_on_import"] is True
+    assert page.st.session_state["wt_pad_last_applied_at"] != ""
 
 
 def test_pad_config_defaults_to_center_anchor_mode() -> None:
@@ -1750,6 +1881,7 @@ def test_build_last_anticollision_resolution_reports_sf_after() -> None:
 
 def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(monkeypatch) -> None:
     page = _load_welltrack_page_module()
+    page._init_state()
     calls = {"analysis": 0}
     analysis = AntiCollisionAnalysis(
         wells=(),
@@ -1784,15 +1916,22 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(m
         uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
         records=[],
     )
+    assert first[0] is analysis
+    first_run = page.st.session_state["wt_anticollision_last_run"]
+    assert bool(first_run["cached"]) is False
+    assert int(first_run["pair_count"]) == 0
+    assert "Расчёт Anti-collision завершён." in "\n".join(first_run["log_lines"])
+
     second = page._cached_anti_collision_view_model(
         successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
         uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
         records=[],
     )
-
-    assert first[0] is analysis
     assert second[0] is analysis
     assert calls["analysis"] == 1
+    second_run = page.st.session_state["wt_anticollision_last_run"]
+    assert bool(second_run["cached"]) is True
+    assert "Использован кэш anti-collision анализа." in "\n".join(second_run["log_lines"])
 
 
 def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> None:

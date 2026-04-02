@@ -229,12 +229,12 @@ def _render_ptc_reference_section(wt: ModuleType) -> None:
 
     approved_wells = tuple(wt._reference_kind_wells(wt.REFERENCE_WELL_APPROVED))
     if approved_wells:
-        st.markdown("#### Просмотр утвержденной проектной скважины")
-        wt._render_reference_well_detail(
-            wt.build_actual_fund_well_analyses(approved_wells),
-            select_label="Просмотр утвержденной проектной скважины",
-            selected_key="wt_approved_fund_selected_well",
-        )
+        with st.expander("Просмотр загруженных утверждённых проектных скважин", expanded=False):
+            wt._render_reference_well_detail(
+                wt.build_actual_fund_well_analyses(approved_wells),
+                select_label="Просмотр утвержденной проектной скважины",
+                selected_key="wt_approved_fund_selected_well",
+            )
 
 
 def _render_ptc_run_section(wt: ModuleType, *, records: list[object]) -> None:
@@ -378,18 +378,32 @@ def _render_ptc_anticollision_panel(
         selected_preset,
         custom_model=custom_actual_fund_model,
     )
-    anti_collision_progress = st.progress(
-        8,
-        text="Подготовка anti-collision анализа...",
-    )
-    anti_collision_progress.progress(32, text="Расчёт Anti-collision...")
-    analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
-        successes=successes,
-        uncertainty_model=uncertainty_model,
-        records=records,
-        reference_wells=reference_wells,
-    )
-    anti_collision_progress.progress(100, text="Расчёт Anti-collision завершён.")
+
+    anti_collision_progress = st.progress(8, text="Подготовка anti-collision анализа...")
+
+    def _anti_collision_progress_update(value: int, text: str) -> None:
+        anti_collision_progress.progress(int(value), text=text)
+    try:
+        analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
+            successes=successes,
+            uncertainty_model=uncertainty_model,
+            records=records,
+            reference_wells=reference_wells,
+            progress_callback=_anti_collision_progress_update,
+        )
+    except Exception as exc:
+        anti_collision_progress.empty()
+        wt._store_anticollision_failure_state(exc)
+        st.error(
+            "Не удалось построить anti-collision анализ. Проверьте лог расчёта ниже."
+        )
+        wt._render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        st.caption(f"{type(exc).__name__}: {exc}")
+        return
     anti_collision_progress.empty()
     focus_pad_well_names = wt._focus_pad_well_names(
         records=records,
@@ -412,6 +426,11 @@ def _render_ptc_anticollision_panel(
         f"Пресет: {wt.uncertainty_preset_label(selected_preset)}. "
         f"{wt.anti_collision_method_caption(uncertainty_model)}"
     )
+    wt._render_status_run_log(
+        title="Лог расчёта Anti-collision",
+        state_payload=st.session_state.get("wt_anticollision_last_run"),
+        empty_message="Anti-collision анализ ещё не запускался.",
+    )
 
     m1, m2, m3, m4 = st.columns(4, gap="small")
     m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
@@ -423,30 +442,43 @@ def _render_ptc_anticollision_panel(
         st.markdown(wt._sf_help_markdown())
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
-    anticollision_3d_figure = wt._all_wells_anticollision_3d_figure(
-        analysis,
-        previous_successes_by_name={},
-        focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-        render_mode=wt.WT_3D_RENDER_DETAIL,
-    )
-    wt._render_plotly_or_three_3d(
-        container=chart_col1,
-        figure=anticollision_3d_figure,
-        backend=wt.WT_3D_BACKEND_THREE_LOCAL,
-        height=660,
-        payload_overrides=wt._anticollision_three_payload_overrides(
-            records=records,
-            analysis=analysis,
-        ),
-    )
-    chart_col2.plotly_chart(
-        wt._all_wells_anticollision_plan_figure(
+    try:
+        anticollision_3d_figure = wt._all_wells_anticollision_3d_figure(
             analysis,
             previous_successes_by_name={},
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-        ),
-        width="stretch",
-    )
+            render_mode=wt.WT_3D_RENDER_DETAIL,
+        )
+        wt._render_plotly_or_three_3d(
+            container=chart_col1,
+            figure=anticollision_3d_figure,
+            backend=wt.WT_3D_BACKEND_THREE_LOCAL,
+            height=660,
+            payload_overrides=wt._anticollision_three_payload_overrides(
+                records=records,
+                analysis=analysis,
+            ),
+        )
+        chart_col2.plotly_chart(
+            wt._all_wells_anticollision_plan_figure(
+                analysis,
+                previous_successes_by_name={},
+                focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
+            ),
+            width="stretch",
+        )
+    except Exception as exc:
+        wt._store_anticollision_failure_state(exc)
+        st.error(
+            "Не удалось отрисовать anti-collision визуализацию. Проверьте лог расчёта ниже."
+        )
+        wt._render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        st.caption(f"{type(exc).__name__}: {exc}")
+        return
 
     if not analysis.zones:
         st.success(

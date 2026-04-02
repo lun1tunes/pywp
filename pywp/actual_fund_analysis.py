@@ -793,9 +793,11 @@ def calibrate_uncertainty_from_actual_fund(
     actual_wells: Iterable[ImportedTrajectoryWell],
     base_model: PlanningUncertaintyModel,
     base_preset: str = DEFAULT_UNCERTAINTY_PRESET,
+    analyses: tuple[ActualFundWellAnalysis, ...] | None = None,
 ) -> ActualFundCalibrationResult:
     actual_well_list = list(actual_wells)
-    analyses = build_actual_fund_well_analyses(actual_well_list)
+    if analyses is None:
+        analyses = build_actual_fund_well_analyses(actual_well_list)
     reconstructed_by_name = {
         str(item.name): item.survey
         for item in analyses

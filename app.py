@@ -365,6 +365,7 @@ def _clear_profile_import_state() -> None:
     st.session_state["plan_csb_import_text"] = ""
     st.session_state["actual_profile_import_text"] = ""
     st.session_state["actual_trajectory_import_text"] = ""
+    _bump_profile_version(plan=True, actual=True)
 
 
 def _init_state() -> None:
@@ -405,6 +406,8 @@ def _init_state() -> None:
     st.session_state.setdefault("last_runtime_s", None)
     st.session_state.setdefault("last_input_signature", None)
     st.session_state.setdefault("last_run_log_lines", [])
+    st.session_state.setdefault("plan_csb_version", 0)
+    st.session_state.setdefault("actual_profile_version", 0)
     st.session_state.setdefault("points_import_text", "")
     st.session_state.setdefault("plan_csb_import_text", "")
     st.session_state.setdefault("plan_csb_df", None)
@@ -430,6 +433,15 @@ def _clear_result() -> None:
     st.session_state["last_run_log_lines"] = []
 
 
+def _bump_profile_version(*, plan: bool = False, actual: bool = False) -> None:
+    if plan:
+        st.session_state["plan_csb_version"] = int(st.session_state.get("plan_csb_version", 0)) + 1
+    if actual:
+        st.session_state["actual_profile_version"] = int(
+            st.session_state.get("actual_profile_version", 0)
+        ) + 1
+
+
 def _current_input_signature() -> tuple[object, ...]:
     point_keys = (
         "surface_x",
@@ -444,21 +456,33 @@ def _current_input_signature() -> tuple[object, ...]:
     )
     signature = [float(st.session_state[key]) for key in point_keys]
     signature.extend(APP_CALC_PARAMS.state_signature())
-    signature.append(_dataframe_signature(st.session_state.get("plan_csb_df")))
+    signature.append(
+        _dataframe_signature(
+            st.session_state.get("plan_csb_df"),
+            version=int(st.session_state.get("plan_csb_version", 0)),
+        )
+    )
     actual_profile = st.session_state.get("actual_profile_df")
     if actual_profile is None:
         actual_profile = st.session_state.get("actual_trajectory_df")
-    signature.append(_dataframe_signature(actual_profile))
+    signature.append(
+        _dataframe_signature(
+            actual_profile,
+            version=int(st.session_state.get("actual_profile_version", 0)),
+        )
+    )
     return tuple(signature)
 
 
-def _dataframe_signature(df: object) -> tuple[object, ...] | None:
+def _dataframe_signature(df: object, *, version: int = 0) -> tuple[object, ...] | None:
     if not isinstance(df, pd.DataFrame) or len(df) == 0:
         return None
     return (
+        int(version),
+        int(id(df)),
+        int(len(df)),
         tuple(str(column) for column in df.columns),
         tuple(str(dtype) for dtype in df.dtypes),
-        int(pd.util.hash_pandas_object(df, index=True).sum()),
     )
 
 
@@ -493,6 +517,12 @@ def _validate_input(
         errors.append("t1 должен быть ниже устья S по TVD.")
     if t3.z <= surface.z:
         errors.append("t3 должен быть ниже устья S по TVD.")
+    if t3.z <= t1.z:
+        errors.append("t3 должен быть глубже t1 по TVD.")
+    if horizontal_offset_m(point=t1, reference=t3) <= 1e-6:
+        errors.append("Точки t1 и t3 должны различаться в плане.")
+    if horizontal_offset_m(point=t1, reference=surface) <= 1e-6:
+        errors.append("Точка t1 должна отличаться от устья S в плане.")
     if config.kop_min_vertical_m >= max(0.0, t1.z - surface.z):
         errors.append("Мин VERTICAL до KOP должен быть меньше TVD до t1.")
     if config.md_step_m < config.md_step_control_m:
@@ -508,6 +538,7 @@ def _run_planner(
     t3: Point3D,
     config: TrajectoryConfig,
     progress_callback: Callable[[str, float], None] | None = None,
+    baseline_error_callback: Callable[[str], None] | None = None,
 ) -> None:
     planner = TrajectoryPlanner()
     result = planner.plan(
@@ -523,6 +554,7 @@ def _run_planner(
         t1=t1,
         t3=t3,
         config=config,
+        on_error=baseline_error_callback,
     )
 
     st.session_state["last_result"] = {
@@ -761,6 +793,7 @@ def _render_point_config_block() -> None:
                         import_errors.append(f"План ЦСБ: {exc}")
                     else:
                         st.session_state["plan_csb_df"] = plan_df
+                        _bump_profile_version(plan=True)
                 if fact_text:
                     try:
                         actual_df = _parse_actual_trajectory_import_text(fact_text)
@@ -768,6 +801,7 @@ def _render_point_config_block() -> None:
                         import_errors.append(f"Фактический профиль: {exc}")
                     else:
                         st.session_state["actual_profile_df"] = actual_df
+                        _bump_profile_version(actual=True)
                 if not plan_text and not fact_text:
                     import_errors.append(
                         "Заполните хотя бы одно поле: План ЦСБ или Фактический профиль."
@@ -943,6 +977,9 @@ def _run_planner_if_clicked(
                 t3=t3_input,
                 config=config_input,
                 progress_callback=planner_progress,
+                baseline_error_callback=lambda message: log_lines.append(
+                    format_run_log_line(run_started_s, message)
+                ),
             )
             elapsed_s = perf_counter() - started
             st.session_state["last_runtime_s"] = float(elapsed_s)
@@ -962,6 +999,16 @@ def _run_planner_if_clicked(
         )
         log_lines.append(err_msg)
         phase_placeholder.error("Расчет завершился ошибкой")
+    except Exception as exc:
+        message = f"{exc.__class__.__name__}: {exc}".strip().rstrip(":")
+        st.session_state["last_error"] = message
+        st.session_state["last_runtime_s"] = None
+        err_msg = format_run_log_line(
+            run_started_s,
+            f"Непредвиденная ошибка расчета: {message}",
+        )
+        log_lines.append(err_msg)
+        phase_placeholder.error("Расчет завершился внутренней ошибкой")
     finally:
         st.session_state["last_run_log_lines"] = log_lines
         progress.empty()
@@ -1041,10 +1088,11 @@ def _render_last_result() -> None:
 
     try:
         well_view = _build_single_well_result_view(last_result=last_result)
-    except Exception:
+    except (TypeError, ValueError, KeyError) as exc:
         _clear_result()
         st.warning(
-            "Предыдущий результат устарел или поврежден. Выполните расчет заново."
+            "Предыдущий результат устарел или поврежден. "
+            f"Причина: {exc.__class__.__name__}: {exc}. Выполните расчет заново."
         )
         return
     t1_horizontal_offset_m = render_key_metrics(

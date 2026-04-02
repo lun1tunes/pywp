@@ -266,17 +266,12 @@ def analyze_anti_collision(
                 pair_filter=pair_filter,
             ):
                 continue
+            pair_count += 1
             if _pair_prefilter_xy_far_apart(
                 lateral_envelope_a=lateral_envelopes[well_a.name],
                 lateral_envelope_b=lateral_envelopes[well_b.name],
             ):
                 continue
-            if _pair_prefilter_terminal_far_apart(
-                lateral_envelope_a=lateral_envelopes[well_a.name],
-                lateral_envelope_b=lateral_envelopes[well_b.name],
-            ):
-                continue
-            pair_count += 1
             pair_corridors = _pair_overlap_corridors(
                 well_a=well_a,
                 well_b=well_b,

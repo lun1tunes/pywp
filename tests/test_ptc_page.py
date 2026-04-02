@@ -214,6 +214,9 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
 
     at.run(timeout=120)
 
+    expander_labels = {str(widget.label) for widget in at.expander}
+    assert "Просмотр загруженных утверждённых проектных скважин" in expander_labels
+
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     assert "Просмотр фактической скважины" in selectbox_labels
     assert "Просмотр утвержденной проектной скважины" in selectbox_labels

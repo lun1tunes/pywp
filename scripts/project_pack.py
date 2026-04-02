@@ -26,6 +26,7 @@ INCLUDED_FILE_EXTENSIONS = {
     ".md",
     ".ini",
     ".cfg",
+    ".toml",
     ".yaml",
     ".yml",
     ".json",

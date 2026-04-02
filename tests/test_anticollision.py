@@ -222,7 +222,7 @@ def test_analyze_anti_collision_skips_distant_pair_before_corridor_scan(
         build_overlap_geometry=False,
     )
 
-    assert analysis.pair_count == 0
+    assert analysis.pair_count == 1
     assert analysis.overlapping_pair_count == 0
     assert not analysis.corridors
 
@@ -279,7 +279,7 @@ def test_analyze_anti_collision_keeps_near_pair_after_xy_prefilter(
     assert seen_pairs == [("WELL-A", "WELL-B")]
 
 
-def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_scan(
+def test_analyze_anti_collision_does_not_skip_pair_by_terminal_geometry_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     well_a = build_anti_collision_well(
@@ -341,8 +341,17 @@ def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_sc
     ) -> anticollision_module._AntiCollisionLateralEnvelope:
         return envelope_by_name[str(well.name)]
 
-    def _unexpected_pair_scan(**_: object) -> list[AntiCollisionCorridor]:
-        raise AssertionError("pair should be skipped by terminal prefilter")
+    seen_pairs: list[tuple[str, str]] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: object,
+        well_b: object,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        assert build_overlap_geometry is False
+        seen_pairs.append((str(getattr(well_a, "name")), str(getattr(well_b, "name"))))
+        return []
 
     monkeypatch.setattr(
         anticollision_module,
@@ -352,7 +361,7 @@ def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_sc
     monkeypatch.setattr(
         anticollision_module,
         "_pair_overlap_corridors",
-        _unexpected_pair_scan,
+        _record_pair_scan,
     )
 
     analysis = analyze_anti_collision(
@@ -360,9 +369,10 @@ def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_sc
         build_overlap_geometry=False,
     )
 
-    assert analysis.pair_count == 0
+    assert analysis.pair_count == 1
     assert analysis.overlapping_pair_count == 0
     assert not analysis.corridors
+    assert seen_pairs == [("WELL-A", "WELL-B")]
 
 
 def test_analyze_anti_collision_rejects_overlap_geometry_without_display_overlay() -> None:

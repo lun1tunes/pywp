@@ -157,3 +157,18 @@ def test_kop_depth_function_state_roundtrip_updates_signature(monkeypatch) -> No
 
     clear_kop_min_vertical_function(prefix="wt_cfg_")
     assert kop_min_vertical_mode(prefix="wt_cfg_") == "constant"
+
+
+def test_invalid_kop_depth_function_payload_reverts_to_constant(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    fake_st.session_state["wt_cfg_kop_min_vertical_mode"] = "depth_function"
+    fake_st.session_state["wt_cfg_kop_min_vertical_function_payload"] = {"broken": True}
+
+    restored = kop_min_vertical_function_from_state(prefix="wt_cfg_")
+
+    assert restored is None
+    assert kop_min_vertical_mode(prefix="wt_cfg_") == "constant"
