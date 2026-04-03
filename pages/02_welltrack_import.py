@@ -7052,7 +7052,7 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             "Найдены скважины, где `t1` дальше от устья `S` (куста) по горизонтальному "
             "отходу, чем `t3`. Вероятно, порядок точек `t1/t3` перепутан."
         )
-        header_cols = st.columns([0.9, 1.4, 1.1, 1.1, 1.1], gap="small")
+        header_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 3.0], gap="small")
         header_cols[0].markdown(
             "<div style='text-align: center;'><strong>Исправить</strong></div>",
             unsafe_allow_html=True,
@@ -7069,7 +7069,7 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             well_name = str(item.well_name)
             checkbox_key = f"wt_t1_t3_fix_{well_name}"
             st.session_state.setdefault(checkbox_key, True)
-            row_cols = st.columns([0.9, 1.4, 1.1, 1.1, 1.1], gap="small")
+            row_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 3.0], gap="small")
             checkbox_cols = row_cols[0].columns([1.0, 0.8, 1.0], gap="small")
             checkbox_cols[1].checkbox(
                 f"Исправить {well_name}",
