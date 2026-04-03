@@ -155,13 +155,13 @@ def parse_welltrack_points_table(
     has_non_empty_row = False
 
     for row_no, raw_row in enumerate(rows, start=1):
-        row = {str(key).strip().lower(): value for key, value in dict(raw_row).items()}
+        row = _normalize_table_row(dict(raw_row))
 
-        name_raw = _table_row_value(row, "wellname", "well", "name")
+        name_raw = _table_row_value(row, "wellname", "well_name", "well", "name")
         point_raw = _table_row_value(row, "point", "pointname", "point_name")
-        x_raw = _table_row_value(row, "x")
-        y_raw = _table_row_value(row, "y")
-        z_raw = _table_row_value(row, "z")
+        x_raw = _table_row_value(row, "x", "x_m", "east", "easting")
+        y_raw = _table_row_value(row, "y", "y_m", "north", "northing")
+        z_raw = _table_row_value(row, "z", "z_m", "tvd", "z_tvd", "z_tvd_m")
 
         if all(_is_blank_table_value(value) for value in (name_raw, point_raw, x_raw, y_raw, z_raw)):
             continue
@@ -270,6 +270,16 @@ def _table_row_value(row: Mapping[str, object], *keys: str) -> object:
     return None
 
 
+def _normalize_table_row(row: Mapping[object, object]) -> dict[str, object]:
+    normalized: dict[str, object] = {}
+    for raw_key, value in row.items():
+        key = re.sub(r"[\s\-/(),.:]+", "_", str(raw_key).strip().lower()).strip("_")
+        if not key:
+            continue
+        normalized[key] = value
+    return normalized
+
+
 def _is_blank_table_value(value: object) -> bool:
     if value is None:
         return True
@@ -304,7 +314,7 @@ def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float
             f"Табличный WELLTRACK: пустое значение {field_name} в строке {row_no}."
         )
     try:
-        number = float(value)
+        number = float(_normalize_table_float_text(value))
     except (TypeError, ValueError) as exc:
         raise WelltrackParseError(
             f"Табличный WELLTRACK: {field_name} в строке {row_no} не является числом."
@@ -314,6 +324,28 @@ def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float
             f"Табличный WELLTRACK: {field_name} в строке {row_no} должно быть конечным числом."
         )
     return number
+
+
+def _normalize_table_float_text(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return text
+    text = (
+        text.replace("\u00A0", "")
+        .replace("\u202F", "")
+        .replace(" ", "")
+        .replace("'", "")
+    )
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
+    return text
 
 
 def _parse_well_name(rest: str, line_no: int) -> tuple[str, str]:

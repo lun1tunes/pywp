@@ -1,3 +1,8 @@
+===BEGIN_FILE===	.streamlit/config.toml	35
+[browser]
+gatherUsageStats = false
+
+===END_FILE===
 ===BEGIN_FILE===	.vscode/settings.json	126
 {
     "python.formatting.provider": "black",
@@ -52,7 +57,7 @@ python scripts/run_tests.py full
 - Если `python3 -m venv .venv` падает с ошибкой про `ensurepip`, установите пакет `python3-venv` для вашей версии Python.
 
 ===END_FILE===
-===BEGIN_FILE===	app.py	42140
+===BEGIN_FILE===	app.py	44146
 from __future__ import annotations
 
 from datetime import datetime
@@ -420,6 +425,7 @@ def _clear_profile_import_state() -> None:
     st.session_state["plan_csb_import_text"] = ""
     st.session_state["actual_profile_import_text"] = ""
     st.session_state["actual_trajectory_import_text"] = ""
+    _bump_profile_version(plan=True, actual=True)
 
 
 def _init_state() -> None:
@@ -460,6 +466,8 @@ def _init_state() -> None:
     st.session_state.setdefault("last_runtime_s", None)
     st.session_state.setdefault("last_input_signature", None)
     st.session_state.setdefault("last_run_log_lines", [])
+    st.session_state.setdefault("plan_csb_version", 0)
+    st.session_state.setdefault("actual_profile_version", 0)
     st.session_state.setdefault("points_import_text", "")
     st.session_state.setdefault("plan_csb_import_text", "")
     st.session_state.setdefault("plan_csb_df", None)
@@ -485,6 +493,15 @@ def _clear_result() -> None:
     st.session_state["last_run_log_lines"] = []
 
 
+def _bump_profile_version(*, plan: bool = False, actual: bool = False) -> None:
+    if plan:
+        st.session_state["plan_csb_version"] = int(st.session_state.get("plan_csb_version", 0)) + 1
+    if actual:
+        st.session_state["actual_profile_version"] = int(
+            st.session_state.get("actual_profile_version", 0)
+        ) + 1
+
+
 def _current_input_signature() -> tuple[object, ...]:
     point_keys = (
         "surface_x",
@@ -499,21 +516,33 @@ def _current_input_signature() -> tuple[object, ...]:
     )
     signature = [float(st.session_state[key]) for key in point_keys]
     signature.extend(APP_CALC_PARAMS.state_signature())
-    signature.append(_dataframe_signature(st.session_state.get("plan_csb_df")))
+    signature.append(
+        _dataframe_signature(
+            st.session_state.get("plan_csb_df"),
+            version=int(st.session_state.get("plan_csb_version", 0)),
+        )
+    )
     actual_profile = st.session_state.get("actual_profile_df")
     if actual_profile is None:
         actual_profile = st.session_state.get("actual_trajectory_df")
-    signature.append(_dataframe_signature(actual_profile))
+    signature.append(
+        _dataframe_signature(
+            actual_profile,
+            version=int(st.session_state.get("actual_profile_version", 0)),
+        )
+    )
     return tuple(signature)
 
 
-def _dataframe_signature(df: object) -> tuple[object, ...] | None:
+def _dataframe_signature(df: object, *, version: int = 0) -> tuple[object, ...] | None:
     if not isinstance(df, pd.DataFrame) or len(df) == 0:
         return None
     return (
+        int(version),
+        int(id(df)),
+        int(len(df)),
         tuple(str(column) for column in df.columns),
         tuple(str(dtype) for dtype in df.dtypes),
-        int(pd.util.hash_pandas_object(df, index=True).sum()),
     )
 
 
@@ -548,6 +577,12 @@ def _validate_input(
         errors.append("t1 должен быть ниже устья S по TVD.")
     if t3.z <= surface.z:
         errors.append("t3 должен быть ниже устья S по TVD.")
+    if t3.z <= t1.z:
+        errors.append("t3 должен быть глубже t1 по TVD.")
+    if horizontal_offset_m(point=t1, reference=t3) <= 1e-6:
+        errors.append("Точки t1 и t3 должны различаться в плане.")
+    if horizontal_offset_m(point=t1, reference=surface) <= 1e-6:
+        errors.append("Точка t1 должна отличаться от устья S в плане.")
     if config.kop_min_vertical_m >= max(0.0, t1.z - surface.z):
         errors.append("Мин VERTICAL до KOP должен быть меньше TVD до t1.")
     if config.md_step_m < config.md_step_control_m:
@@ -563,6 +598,7 @@ def _run_planner(
     t3: Point3D,
     config: TrajectoryConfig,
     progress_callback: Callable[[str, float], None] | None = None,
+    baseline_error_callback: Callable[[str], None] | None = None,
 ) -> None:
     planner = TrajectoryPlanner()
     result = planner.plan(
@@ -578,6 +614,7 @@ def _run_planner(
         t1=t1,
         t3=t3,
         config=config,
+        on_error=baseline_error_callback,
     )
 
     st.session_state["last_result"] = {
@@ -816,6 +853,7 @@ def _render_point_config_block() -> None:
                         import_errors.append(f"План ЦСБ: {exc}")
                     else:
                         st.session_state["plan_csb_df"] = plan_df
+                        _bump_profile_version(plan=True)
                 if fact_text:
                     try:
                         actual_df = _parse_actual_trajectory_import_text(fact_text)
@@ -823,6 +861,7 @@ def _render_point_config_block() -> None:
                         import_errors.append(f"Фактический профиль: {exc}")
                     else:
                         st.session_state["actual_profile_df"] = actual_df
+                        _bump_profile_version(actual=True)
                 if not plan_text and not fact_text:
                     import_errors.append(
                         "Заполните хотя бы одно поле: План ЦСБ или Фактический профиль."
@@ -998,6 +1037,9 @@ def _run_planner_if_clicked(
                 t3=t3_input,
                 config=config_input,
                 progress_callback=planner_progress,
+                baseline_error_callback=lambda message: log_lines.append(
+                    format_run_log_line(run_started_s, message)
+                ),
             )
             elapsed_s = perf_counter() - started
             st.session_state["last_runtime_s"] = float(elapsed_s)
@@ -1017,6 +1059,16 @@ def _run_planner_if_clicked(
         )
         log_lines.append(err_msg)
         phase_placeholder.error("Расчет завершился ошибкой")
+    except Exception as exc:
+        message = f"{exc.__class__.__name__}: {exc}".strip().rstrip(":")
+        st.session_state["last_error"] = message
+        st.session_state["last_runtime_s"] = None
+        err_msg = format_run_log_line(
+            run_started_s,
+            f"Непредвиденная ошибка расчета: {message}",
+        )
+        log_lines.append(err_msg)
+        phase_placeholder.error("Расчет завершился внутренней ошибкой")
     finally:
         st.session_state["last_run_log_lines"] = log_lines
         progress.empty()
@@ -1096,10 +1148,11 @@ def _render_last_result() -> None:
 
     try:
         well_view = _build_single_well_result_view(last_result=last_result)
-    except Exception:
+    except (TypeError, ValueError, KeyError) as exc:
         _clear_result()
         st.warning(
-            "Предыдущий результат устарел или поврежден. Выполните расчет заново."
+            "Предыдущий результат устарел или поврежден. "
+            f"Причина: {exc.__class__.__name__}: {exc}. Выполните расчет заново."
         )
         return
     t1_horizontal_offset_m = render_key_metrics(
@@ -1928,7 +1981,7 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/02_welltrack_import.py	334609
+===BEGIN_FILE===	pages/02_welltrack_import.py	350053
 from __future__ import annotations
 
 import colorsys
@@ -1936,8 +1989,9 @@ from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 from pathlib import Path
+import re
 from time import perf_counter
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -2831,7 +2885,11 @@ def _analysis_reference_wells(
             name=str(well.name),
             kind=str(well.well_kind),
             stations=well.stations,
-            surface=well.surface,
+            surface=Point3D(
+                x=float(well.surface.x),
+                y=float(well.surface.y),
+                z=float(well.surface.z),
+            ),
             azimuth_deg=0.0,
         )
         for well in analysis.wells
@@ -3937,18 +3995,63 @@ def _anti_collision_cache_key(
     return digest.hexdigest()
 
 
+def _store_anticollision_failure_state(
+    exc: Exception,
+    *,
+    started_at: float | None = None,
+    log_lines: Iterable[str] = (),
+) -> None:
+    previous_state = st.session_state.get("wt_anticollision_last_run")
+    previous_payload = previous_state if isinstance(previous_state, Mapping) else {}
+    merged_log_lines = [str(item) for item in (previous_payload.get("log_lines") or ())]
+    for item in log_lines:
+        text = str(item)
+        if text:
+            merged_log_lines.append(text)
+    error_line = (
+        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"Ошибка anti-collision: {type(exc).__name__}: {exc}"
+    )
+    if not merged_log_lines or merged_log_lines[-1] != error_line:
+        merged_log_lines.append(error_line)
+    st.session_state["wt_anticollision_last_run"] = {
+        "cached": False,
+        "runtime_s": (
+            float(perf_counter() - float(started_at))
+            if started_at is not None
+            else previous_payload.get("runtime_s")
+        ),
+        "log_lines": tuple(merged_log_lines),
+        "pair_count": int(previous_payload.get("pair_count") or 0),
+        "overlap_count": int(previous_payload.get("overlap_count") or 0),
+        "recommendation_count": int(previous_payload.get("recommendation_count") or 0),
+        "cluster_count": int(previous_payload.get("cluster_count") or 0),
+        "status": f"Ошибка: {type(exc).__name__}",
+    }
+
+
 def _cached_anti_collision_view_model(
     *,
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
     records: list[WelltrackRecord],
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> tuple[
     AntiCollisionAnalysis,
     tuple[AntiCollisionRecommendation, ...],
     tuple[AntiCollisionRecommendationCluster, ...],
 ]:
+    started_at = perf_counter()
+    log_lines: list[str] = []
+
+    def _emit(progress_value: int, message: str) -> None:
+        log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        if progress_callback is not None:
+            progress_callback(int(progress_value), message)
+
     color_map = _well_color_map(records) if records else {}
+    _emit(8, "Подготовка входных данных anti-collision.")
     cache_key = _anti_collision_cache_key(
         successes=successes,
         model=uncertainty_model,
@@ -3965,25 +4068,161 @@ def _cached_anti_collision_view_model(
             and isinstance(recommendations, tuple)
             and isinstance(clusters, tuple)
         ):
+            _emit(100, "Использован кэш anti-collision анализа.")
+            st.session_state["wt_anticollision_last_run"] = {
+                "cached": True,
+                "runtime_s": float(perf_counter() - started_at),
+                "log_lines": tuple(log_lines),
+                "pair_count": int(analysis.pair_count),
+                "overlap_count": int(analysis.overlapping_pair_count),
+                "recommendation_count": int(len(recommendations)),
+                "cluster_count": int(len(clusters)),
+            }
             return analysis, recommendations, clusters
-    analysis = _build_anti_collision_analysis(
-        successes,
-        model=uncertainty_model,
-        name_to_color=color_map,
-        reference_wells=reference_wells,
-    )
-    recommendations = build_anti_collision_recommendations(
-        analysis,
-        well_context_by_name=_build_anticollision_well_contexts(successes),
-    )
-    clusters = build_anti_collision_recommendation_clusters(recommendations)
+    try:
+        _emit(30, "Расчёт anti-collision модели.")
+        analysis = _build_anti_collision_analysis(
+            successes,
+            model=uncertainty_model,
+            name_to_color=color_map,
+            reference_wells=reference_wells,
+        )
+        _emit(72, "Построение рекомендаций anti-collision.")
+        recommendations = build_anti_collision_recommendations(
+            analysis,
+            well_context_by_name=_build_anticollision_well_contexts(successes),
+        )
+        _emit(88, "Кластеризация рекомендаций anti-collision.")
+        clusters = build_anti_collision_recommendation_clusters(recommendations)
+    except Exception as exc:
+        _store_anticollision_failure_state(
+            exc,
+            started_at=started_at,
+            log_lines=tuple(log_lines),
+        )
+        raise
     st.session_state["wt_anticollision_analysis_cache"] = {
         "key": cache_key,
         "analysis": analysis,
         "recommendations": recommendations,
         "clusters": clusters,
     }
+    _emit(100, "Расчёт Anti-collision завершён.")
+    st.session_state["wt_anticollision_last_run"] = {
+        "cached": False,
+        "runtime_s": float(perf_counter() - started_at),
+        "log_lines": tuple(log_lines),
+        "pair_count": int(analysis.pair_count),
+        "overlap_count": int(analysis.overlapping_pair_count),
+        "recommendation_count": int(len(recommendations)),
+        "cluster_count": int(len(clusters)),
+    }
     return analysis, recommendations, clusters
+
+
+def _render_status_run_log(
+    *,
+    title: str,
+    state_payload: Mapping[str, object] | None,
+    empty_message: str,
+) -> None:
+    with st.expander(title, expanded=False):
+        if not isinstance(state_payload, Mapping):
+            st.caption(empty_message)
+            return
+        cached = bool(state_payload.get("cached"))
+        runtime_s = state_payload.get("runtime_s")
+        top_cols = st.columns(4, gap="small")
+        top_cols[0].metric("Статус", "Кэш" if cached else "Выполнен")
+        top_cols[1].metric(
+            "Время, с",
+            "—" if runtime_s is None else f"{float(runtime_s):.2f}",
+        )
+        if "pair_count" in state_payload:
+            top_cols[2].metric("Пар", f"{int(state_payload.get('pair_count') or 0)}")
+        elif "well_count" in state_payload:
+            top_cols[2].metric("Скважин", f"{int(state_payload.get('well_count') or 0)}")
+        if "recommendation_count" in state_payload:
+            top_cols[3].metric(
+                "Рекомендаций",
+                f"{int(state_payload.get('recommendation_count') or 0)}",
+            )
+        elif "eligible_well_count" in state_payload:
+            top_cols[3].metric(
+                "В анализе",
+                f"{int(state_payload.get('eligible_well_count') or 0)}",
+            )
+        if "cluster_count" in state_payload or "overlap_count" in state_payload:
+            extra_cols = st.columns(2, gap="small")
+            extra_cols[0].metric(
+                "Overlap",
+                f"{int(state_payload.get('overlap_count') or 0)}",
+            )
+            extra_cols[1].metric(
+                "Кластеров",
+                f"{int(state_payload.get('cluster_count') or 0)}",
+            )
+        if "status" in state_payload:
+            st.caption(f"Статус результата: {str(state_payload.get('status'))}")
+        log_lines = tuple(state_payload.get("log_lines") or ())
+        if log_lines:
+            st.code("\n".join(str(item) for item in log_lines), language="text")
+
+
+def _run_actual_fund_calibration_with_status(
+    *,
+    actual_wells: tuple[ImportedTrajectoryWell, ...],
+    analyses: tuple[ActualFundWellAnalysis, ...],
+    base_preset: str,
+):
+    started_at = perf_counter()
+    log_lines: list[str] = []
+
+    def _emit(progress_bar, value: int, message: str) -> None:
+        log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        progress_bar.progress(int(value), text=message)
+
+    progress = st.progress(
+        5,
+        text="Подготовка калибровки пользовательской anti-collision функции...",
+    )
+    eligible_count = sum(1 for item in analyses if bool(item.metrics.is_analysis_eligible))
+    _emit(progress, 18, "Подготовка фактического фонда.")
+    _emit(progress, 34, "Фильтрация невалидных, не-горизонтальных и pilot `_PL` скважин.")
+    try:
+        result = calibrate_uncertainty_from_actual_fund(
+            actual_wells=actual_wells,
+            analyses=analyses,
+            base_model=planning_uncertainty_model_for_preset(base_preset),
+            base_preset=base_preset,
+        )
+    except Exception as exc:
+        _emit(progress, 100, f"Ошибка калибровки: {type(exc).__name__}: {exc}")
+        progress.empty()
+        st.session_state["wt_actual_fund_calibration_run"] = {
+            "cached": False,
+            "runtime_s": float(perf_counter() - started_at),
+            "log_lines": tuple(log_lines),
+            "status": f"Ошибка: {type(exc).__name__}",
+            "well_count": int(len(actual_wells)),
+            "eligible_well_count": int(eligible_count),
+        }
+        raise
+    _emit(progress, 82, "Подгонка пользовательской anti-collision функции.")
+    if getattr(result, "custom_model", None) is not None:
+        _emit(progress, 100, "Пользовательская anti-collision функция построена.")
+    else:
+        _emit(progress, 100, "Расчёт пользовательской anti-collision функции завершён.")
+    progress.empty()
+    st.session_state["wt_actual_fund_calibration_run"] = {
+        "cached": False,
+        "runtime_s": float(perf_counter() - started_at),
+        "log_lines": tuple(log_lines),
+        "status": str(getattr(result, "status", "")),
+        "well_count": int(len(actual_wells)),
+        "eligible_well_count": int(eligible_count),
+    }
+    return result
 
 
 def _trajectory_interval_points(
@@ -4086,7 +4325,8 @@ def _empty_source_table_df() -> pd.DataFrame:
 def _normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataFrame:
     if table_df is None:
         return _empty_source_table_df()
-    normalized_df = pd.DataFrame(table_df).copy()
+    normalized_df = _coerce_source_table_df_columns(pd.DataFrame(table_df).copy())
+    normalized_df = _expand_single_column_source_table_df(normalized_df)
     if "Point" in normalized_df.columns:
         normalized_df["Point"] = normalized_df["Point"].map(
             lambda value: (
@@ -4095,7 +4335,84 @@ def _normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataF
                 else value
             )
         )
-    return normalized_df
+    for column in ("Wellname", "Point", "X", "Y", "Z"):
+        if column not in normalized_df.columns:
+            normalized_df[column] = "" if column in {"Wellname", "Point"} else np.nan
+    return normalized_df.loc[:, ["Wellname", "Point", "X", "Y", "Z"]]
+
+
+def _coerce_source_table_df_columns(table_df: pd.DataFrame) -> pd.DataFrame:
+    alias_map = {
+        "wellname": "Wellname",
+        "well_name": "Wellname",
+        "well name": "Wellname",
+        "well": "Wellname",
+        "name": "Wellname",
+        "point": "Point",
+        "pointname": "Point",
+        "point_name": "Point",
+        "point name": "Point",
+        "точка": "Point",
+        "x": "X",
+        "east": "X",
+        "easting": "X",
+        "x_m": "X",
+        "y": "Y",
+        "north": "Y",
+        "northing": "Y",
+        "y_m": "Y",
+        "z": "Z",
+        "tvd": "Z",
+        "z_tvd": "Z",
+        "z_m": "Z",
+    }
+    renamed: dict[object, str] = {}
+    for raw_column in list(table_df.columns):
+        column_text = str(raw_column).strip()
+        normalized = re.sub(r"[\s\-/(),.:]+", "_", column_text.lower()).strip("_")
+        if column_text.lower().startswith("unnamed"):
+            continue
+        if normalized in alias_map:
+            renamed[raw_column] = alias_map[normalized]
+            continue
+        if column_text in {"Wellname", "Point", "X", "Y", "Z"}:
+            renamed[raw_column] = column_text
+    kept_columns = [column for column in table_df.columns if column in renamed]
+    if not kept_columns and len(table_df.columns) == 1:
+        return table_df
+    if kept_columns:
+        table_df = table_df.loc[:, kept_columns].rename(columns=renamed)
+    return table_df
+
+
+def _expand_single_column_source_table_df(table_df: pd.DataFrame) -> pd.DataFrame:
+    if len(table_df.columns) != 1:
+        return table_df
+    series = table_df.iloc[:, 0]
+    non_blank_values = [
+        str(value).strip()
+        for value in series
+        if not pd.isna(value) and str(value).strip()
+    ]
+    if not non_blank_values:
+        return table_df
+    if not any("\t" in value or ";" in value for value in non_blank_values):
+        return table_df
+    rows: list[dict[str, object]] = []
+    for raw_value in non_blank_values:
+        tokens = [token.strip() for token in re.split(r"[\t;]+", raw_value) if token.strip()]
+        if len(tokens) not in {5, 6}:
+            return table_df
+        rows.append(
+            {
+                "Wellname": tokens[0],
+                "Point": tokens[1],
+                "X": tokens[2],
+                "Y": tokens[3],
+                "Z": tokens[4],
+            }
+        )
+    return pd.DataFrame(rows, columns=["Wellname", "Point", "X", "Y", "Z"])
 
 
 def _empty_reference_trajectory_df() -> pd.DataFrame:
@@ -4148,6 +4465,7 @@ def _reference_welltrack_path_key(kind: str) -> str:
 def _clear_actual_fund_calibration_state() -> None:
     st.session_state["wt_actual_fund_calibration_result"] = None
     st.session_state["wt_actual_fund_custom_model"] = None
+    st.session_state["wt_actual_fund_calibration_run"] = None
     if (
         str(st.session_state.get("wt_anticollision_uncertainty_preset", "")).strip()
         == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
@@ -4210,6 +4528,7 @@ def _reference_wells_from_state() -> tuple[ImportedTrajectoryWell, ...]:
 
 def _reset_anticollision_view_state(*, clear_prepared: bool) -> None:
     st.session_state["wt_anticollision_analysis_cache"] = {}
+    st.session_state["wt_anticollision_last_run"] = None
     if not clear_prepared:
         return
     st.session_state["wt_prepared_well_overrides"] = {}
@@ -4293,7 +4612,10 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_actual_fund_base_preset", DEFAULT_UNCERTAINTY_PRESET)
     st.session_state.setdefault("wt_actual_fund_calibration_result", None)
     st.session_state.setdefault("wt_actual_fund_custom_model", None)
+    st.session_state.setdefault("wt_actual_fund_calibration_run", None)
+    st.session_state.setdefault("wt_anticollision_last_run", None)
     st.session_state.setdefault("wt_t1_t3_last_resolution", None)
+    st.session_state.setdefault("wt_t1_t3_acknowledged_well_names", ())
     if str(st.session_state.get("wt_results_view_mode", "")).strip() not in {
         "Отдельная скважина",
         "Все скважины",
@@ -5764,6 +6086,7 @@ def _render_anticollision_panel(
     records: list[WelltrackRecord],
     focus_pad_id: str,
 ) -> None:
+    panel_started_at = perf_counter()
     reference_wells = _reference_wells_from_state()
     if len(successes) + len(reference_wells) < 2:
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
@@ -5797,12 +6120,36 @@ def _render_anticollision_panel(
         selected_preset,
         custom_model=custom_actual_fund_model,
     )
-    analysis, recommendations, clusters = _cached_anti_collision_view_model(
-        successes=successes,
-        uncertainty_model=uncertainty_model,
-        records=records,
-        reference_wells=reference_wells,
+    anti_collision_progress = st.progress(
+        8,
+        text="Подготовка anti-collision анализа...",
     )
+
+    def _anti_collision_progress_update(value: int, text: str) -> None:
+        anti_collision_progress.progress(int(value), text=text)
+
+    try:
+        analysis, recommendations, clusters = _cached_anti_collision_view_model(
+            successes=successes,
+            uncertainty_model=uncertainty_model,
+            records=records,
+            reference_wells=reference_wells,
+            progress_callback=_anti_collision_progress_update,
+        )
+    except Exception as exc:
+        anti_collision_progress.empty()
+        _store_anticollision_failure_state(exc, started_at=panel_started_at)
+        st.error(
+            "Не удалось построить anti-collision анализ. Проверьте лог расчёта ниже."
+        )
+        _render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        st.caption(f"{type(exc).__name__}: {exc}")
+        return
+    anti_collision_progress.empty()
     focus_pad_well_names = _focus_pad_well_names(
         records=records,
         focus_pad_id=focus_pad_id,
@@ -5828,6 +6175,11 @@ def _render_anticollision_panel(
     st.caption(
         f"Пресет: {uncertainty_preset_label(selected_preset)}. "
         f"{anti_collision_method_caption(uncertainty_model)}"
+    )
+    _render_status_run_log(
+        title="Лог расчёта Anti-collision",
+        state_payload=st.session_state.get("wt_anticollision_last_run"),
+        empty_message="Anti-collision анализ ещё не запускался.",
     )
     selected_render_mode = st.selectbox(
         "3D-режим отображения",
@@ -5882,30 +6234,43 @@ def _render_anticollision_panel(
         st.markdown(_sf_help_markdown())
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
-    anticollision_3d_figure = _all_wells_anticollision_3d_figure(
-        analysis,
-        previous_successes_by_name=previous_successes_by_name,
-        focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-        render_mode=selected_render_mode,
-    )
-    _render_plotly_or_three_3d(
-        container=chart_col1,
-        figure=anticollision_3d_figure,
-        backend=selected_3d_backend,
-        height=660,
-        payload_overrides=_anticollision_three_payload_overrides(
-            records=records,
-            analysis=analysis,
-        ),
-    )
-    chart_col2.plotly_chart(
-        _all_wells_anticollision_plan_figure(
+    try:
+        anticollision_3d_figure = _all_wells_anticollision_3d_figure(
             analysis,
             previous_successes_by_name=previous_successes_by_name,
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-        ),
-        width="stretch",
-    )
+            render_mode=selected_render_mode,
+        )
+        _render_plotly_or_three_3d(
+            container=chart_col1,
+            figure=anticollision_3d_figure,
+            backend=selected_3d_backend,
+            height=660,
+            payload_overrides=_anticollision_three_payload_overrides(
+                records=records,
+                analysis=analysis,
+            ),
+        )
+        chart_col2.plotly_chart(
+            _all_wells_anticollision_plan_figure(
+                analysis,
+                previous_successes_by_name=previous_successes_by_name,
+                focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
+            ),
+            width="stretch",
+        )
+    except Exception as exc:
+        _store_anticollision_failure_state(exc, started_at=panel_started_at)
+        st.error(
+            "Не удалось отрисовать anti-collision визуализацию. Проверьте лог расчёта ниже."
+        )
+        _render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        st.caption(f"{type(exc).__name__}: {exc}")
+        return
     _render_last_anticollision_resolution(current_preset=selected_preset)
 
     if not analysis.zones:
@@ -7220,17 +7585,21 @@ def _store_parsed_records(records: list[WelltrackRecord]) -> bool:
 
 
 def _auto_apply_pad_layout_if_shared_surface(records: list[WelltrackRecord]) -> bool:
-    pads = detect_well_pads(records)
-    well_count_with_surface = sum(1 for record in records if record.points)
-    if well_count_with_surface <= 1:
-        return False
-    if len(pads) != 1:
-        return False
-    if len(pads[0].wells) != well_count_with_surface:
-        return False
-
     pads = _ensure_pad_configs(base_records=list(records))
+    metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
+    auto_layout_pad_ids = {
+        str(pad.pad_id)
+        for pad in pads
+        if len(pad.wells) > 1
+        and not bool(
+            getattr(metadata.get(str(pad.pad_id)), "source_surfaces_defined", False)
+        )
+    }
+    if not auto_layout_pad_ids:
+        return False
     plan_map = _build_pad_plan_map(pads)
+    if not any(str(pad_id) in auto_layout_pad_ids for pad_id in plan_map):
+        return False
     updated_records = apply_pad_layout(
         records=list(records),
         pads=pads,
@@ -7325,7 +7694,7 @@ def _handle_import_actions(
                 status.write(f"Собрано скважин из таблицы: {len(records)}.")
                 if auto_layout_applied:
                     status.write(
-                        "Обнаружен общий исходный устьевой S: устья автоматически "
+                        "Обнаружены кусты с общим исходным S: устья автоматически "
                         "разведены по параметрам блока 'Кусты и расчет устьев'. "
                         "При необходимости можно нажать 'Вернуть исходные устья'."
                     )
@@ -7362,7 +7731,7 @@ def _handle_import_actions(
             status.write(f"Найдено блоков WELLTRACK: {len(records)}.")
             if auto_layout_applied:
                 status.write(
-                    "Обнаружен общий исходный устьевой S: устья автоматически "
+                    "Обнаружены кусты с общим исходным S: устья автоматически "
                     "разведены по параметрам блока 'Кусты и расчет устьев'. "
                     "При необходимости можно нажать 'Вернуть исходные устья'."
                 )
@@ -8319,7 +8688,15 @@ def _render_actual_fund_analysis_panel(
         return
 
     if analyses is None:
-        analyses = _actual_fund_analyses(actual_wells)
+        try:
+            analyses = _actual_fund_analyses(actual_wells)
+        except Exception as exc:
+            with st.expander("Анализ фактического фонда", expanded=False):
+                st.error(
+                    "Не удалось построить анализ фактического фонда для загруженных скважин."
+                )
+                st.caption(f"{type(exc).__name__}: {exc}")
+            return
     metrics = tuple(item.metrics for item in analyses)
     eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
     excluded_horizontal_metrics = [
@@ -8384,8 +8761,9 @@ def _render_actual_fund_analysis_panel(
         if kop_depth_function is not None:
             st.markdown("#### KOP / TVD по фактическому фонду")
             st.caption(
-                "Скважины сгруппированы по глубине входа в горизонталь. По медианам "
-                "этих групп строится функция KOP / TVD, которую можно применить к "
+                "Скважины сгруппированы по глубине входа в горизонталь. Для каждой "
+                "группы якорь функции берётся как `min + 1σ` после отсечения явных "
+                "выбросов. Полученная функция KOP / TVD применяется к "
                 "рассчитываемым скважинам через глубину `t1`."
             )
             figure = _actual_fund_kop_depth_figure(metrics)
@@ -8461,22 +8839,32 @@ def _render_actual_fund_analysis_panel(
             icon=":material/tune:",
             width="stretch",
         ):
-            result = calibrate_uncertainty_from_actual_fund(
-                actual_wells=actual_wells,
-                base_model=planning_uncertainty_model_for_preset(calibration_base_preset),
-                base_preset=calibration_base_preset,
-            )
-            st.session_state["wt_actual_fund_calibration_result"] = result
-            st.session_state["wt_actual_fund_custom_model"] = result.custom_model
-            if result.custom_model is not None:
-                st.session_state["wt_anticollision_uncertainty_preset"] = (
-                    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
+            try:
+                result = _run_actual_fund_calibration_with_status(
+                    actual_wells=actual_wells,
+                    analyses=analyses,
+                    base_preset=calibration_base_preset,
                 )
-                _reset_anticollision_view_state(clear_prepared=False)
-                st.toast(
-                    "Пользовательская функция конусов построена и выбрана в anti-collision."
+            except Exception as exc:
+                st.session_state["wt_actual_fund_calibration_result"] = None
+                st.session_state["wt_actual_fund_custom_model"] = None
+                st.error(
+                    "Не удалось откалибровать пользовательскую anti-collision функцию. "
+                    "Проверьте лог расчёта ниже."
                 )
-            st.rerun()
+                st.caption(f"{type(exc).__name__}: {exc}")
+            else:
+                st.session_state["wt_actual_fund_calibration_result"] = result
+                st.session_state["wt_actual_fund_custom_model"] = result.custom_model
+                if result.custom_model is not None:
+                    st.session_state["wt_anticollision_uncertainty_preset"] = (
+                        UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
+                    )
+                    _reset_anticollision_view_state(clear_prepared=False)
+                    st.toast(
+                        "Пользовательская функция конусов построена и выбрана в anti-collision."
+                    )
+                st.rerun()
 
         calibration_result = st.session_state.get("wt_actual_fund_calibration_result")
         if calibration_result is not None:
@@ -8534,6 +8922,11 @@ def _render_actual_fund_analysis_panel(
                 st.success(str(calibration_result.note))
             else:
                 st.info(str(calibration_result.note))
+        _render_status_run_log(
+            title="Лог расчёта пользовательской Anti-collision функции",
+            state_payload=st.session_state.get("wt_actual_fund_calibration_run"),
+            empty_message="Пользовательская anti-collision функция ещё не рассчитывалась.",
+        )
 
 
 def _render_reference_trajectory_panel() -> None:
@@ -8615,20 +9008,30 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
 
 
 def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
-    resolution_message = _t1_t3_order_resolution_message()
-    if resolution_message is not None:
-        level, message = resolution_message
-        if level == "success":
-            st.success(message)
-        else:
-            st.info(message)
-
-    issues = detect_t1_t3_order_issues(records, min_delta_m=WT_T1T3_MIN_DELTA_M)
-    if not issues:
-        return
-
     with st.container(border=True):
         st.markdown("### Проверка порядка t1/t3")
+        resolution_message = _t1_t3_order_resolution_message()
+        if resolution_message is not None:
+            level, message = resolution_message
+            if level == "success":
+                st.success(message)
+            else:
+                st.info(message)
+        detected_issues = detect_t1_t3_order_issues(records, min_delta_m=WT_T1T3_MIN_DELTA_M)
+        acknowledged_well_names = _t1_t3_order_acknowledged_well_names()
+        issues = [
+            item for item in detected_issues if str(item.well_name) not in acknowledged_well_names
+        ]
+        if not issues:
+            if detected_issues:
+                st.info(
+                    "Активных предупреждений по порядку `t1/t3` нет. "
+                    "Для отмеченных скважин текущий порядок оставлен без изменений."
+                )
+            else:
+                st.success("Проверка порядка t1/t3 — OK.")
+            return
+
         st.warning(
             "Найдены скважины, где `t1` дальше от устья `S` (куста) по горизонтальному "
             "отходу, чем `t3`. Вероятно, порядок точек `t1/t3` перепутан."
@@ -8688,6 +9091,9 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
                 records=list(original_records),
                 well_names=target_names,
             )
+            _set_t1_t3_order_acknowledged_well_names(
+                _t1_t3_order_acknowledged_well_names() - target_names
+            )
             _set_t1_t3_order_resolution(
                 action="fixed",
                 well_names=target_names,
@@ -8700,9 +9106,13 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             icon=":material/do_not_disturb:",
             width="stretch",
         ):
+            kept_well_names = {str(item.well_name) for item in issues}
+            _set_t1_t3_order_acknowledged_well_names(
+                _t1_t3_order_acknowledged_well_names() | kept_well_names
+            )
             _set_t1_t3_order_resolution(
                 action="kept",
-                well_names={str(item.well_name) for item in issues},
+                well_names=kept_well_names,
             )
             st.toast("Текущий порядок t1/t3 оставлен без изменений.")
             st.rerun()
@@ -8714,9 +9124,25 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
 
 def _clear_t1_t3_order_resolution_state() -> None:
     st.session_state["wt_t1_t3_last_resolution"] = None
+    st.session_state["wt_t1_t3_acknowledged_well_names"] = ()
     for key in list(st.session_state.keys()):
         if str(key).startswith("wt_t1_t3_fix_"):
             del st.session_state[key]
+
+
+def _set_t1_t3_order_acknowledged_well_names(
+    well_names: set[str] | list[str] | tuple[str, ...],
+) -> None:
+    st.session_state["wt_t1_t3_acknowledged_well_names"] = tuple(
+        sorted(str(name) for name in well_names if str(name).strip())
+    )
+
+
+def _t1_t3_order_acknowledged_well_names() -> set[str]:
+    raw_value = st.session_state.get("wt_t1_t3_acknowledged_well_names")
+    if not isinstance(raw_value, (tuple, list, set)):
+        return set()
+    return {str(item) for item in raw_value if str(item).strip()}
 
 
 def _set_t1_t3_order_resolution(
@@ -10616,7 +11042,7 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/03_ptc.py	23592
+===BEGIN_FILE===	pages/03_ptc.py	25400
 from __future__ import annotations
 
 from functools import lru_cache
@@ -10848,12 +11274,20 @@ def _render_ptc_reference_section(wt: ModuleType) -> None:
 
     approved_wells = tuple(wt._reference_kind_wells(wt.REFERENCE_WELL_APPROVED))
     if approved_wells:
-        st.markdown("#### Просмотр утвержденной проектной скважины")
-        wt._render_reference_well_detail(
-            wt.build_actual_fund_well_analyses(approved_wells),
-            select_label="Просмотр утвержденной проектной скважины",
-            selected_key="wt_approved_fund_selected_well",
-        )
+        with st.expander("Просмотр загруженных утверждённых проектных скважин", expanded=False):
+            try:
+                approved_analyses = wt.build_actual_fund_well_analyses(approved_wells)
+            except Exception as exc:
+                st.error(
+                    "Не удалось построить просмотр утверждённого проектного фонда."
+                )
+                st.caption(f"{type(exc).__name__}: {exc}")
+            else:
+                wt._render_reference_well_detail(
+                    approved_analyses,
+                    select_label="Просмотр утвержденной проектной скважины",
+                    selected_key="wt_approved_fund_selected_well",
+                )
 
 
 def _render_ptc_run_section(wt: ModuleType, *, records: list[object]) -> None:
@@ -10997,18 +11431,32 @@ def _render_ptc_anticollision_panel(
         selected_preset,
         custom_model=custom_actual_fund_model,
     )
-    anti_collision_progress = st.progress(
-        8,
-        text="Подготовка anti-collision анализа...",
-    )
-    anti_collision_progress.progress(32, text="Расчёт Anti-collision...")
-    analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
-        successes=successes,
-        uncertainty_model=uncertainty_model,
-        records=records,
-        reference_wells=reference_wells,
-    )
-    anti_collision_progress.progress(100, text="Расчёт Anti-collision завершён.")
+
+    anti_collision_progress = st.progress(8, text="Подготовка anti-collision анализа...")
+
+    def _anti_collision_progress_update(value: int, text: str) -> None:
+        anti_collision_progress.progress(int(value), text=text)
+    try:
+        analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
+            successes=successes,
+            uncertainty_model=uncertainty_model,
+            records=records,
+            reference_wells=reference_wells,
+            progress_callback=_anti_collision_progress_update,
+        )
+    except Exception as exc:
+        anti_collision_progress.empty()
+        wt._store_anticollision_failure_state(exc)
+        st.error(
+            "Не удалось построить anti-collision анализ. Проверьте лог расчёта ниже."
+        )
+        wt._render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        st.caption(f"{type(exc).__name__}: {exc}")
+        return
     anti_collision_progress.empty()
     focus_pad_well_names = wt._focus_pad_well_names(
         records=records,
@@ -11031,6 +11479,11 @@ def _render_ptc_anticollision_panel(
         f"Пресет: {wt.uncertainty_preset_label(selected_preset)}. "
         f"{wt.anti_collision_method_caption(uncertainty_model)}"
     )
+    wt._render_status_run_log(
+        title="Лог расчёта Anti-collision",
+        state_payload=st.session_state.get("wt_anticollision_last_run"),
+        empty_message="Anti-collision анализ ещё не запускался.",
+    )
 
     m1, m2, m3, m4 = st.columns(4, gap="small")
     m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
@@ -11042,30 +11495,43 @@ def _render_ptc_anticollision_panel(
         st.markdown(wt._sf_help_markdown())
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
-    anticollision_3d_figure = wt._all_wells_anticollision_3d_figure(
-        analysis,
-        previous_successes_by_name={},
-        focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-        render_mode=wt.WT_3D_RENDER_DETAIL,
-    )
-    wt._render_plotly_or_three_3d(
-        container=chart_col1,
-        figure=anticollision_3d_figure,
-        backend=wt.WT_3D_BACKEND_THREE_LOCAL,
-        height=660,
-        payload_overrides=wt._anticollision_three_payload_overrides(
-            records=records,
-            analysis=analysis,
-        ),
-    )
-    chart_col2.plotly_chart(
-        wt._all_wells_anticollision_plan_figure(
+    try:
+        anticollision_3d_figure = wt._all_wells_anticollision_3d_figure(
             analysis,
             previous_successes_by_name={},
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-        ),
-        width="stretch",
-    )
+            render_mode=wt.WT_3D_RENDER_DETAIL,
+        )
+        wt._render_plotly_or_three_3d(
+            container=chart_col1,
+            figure=anticollision_3d_figure,
+            backend=wt.WT_3D_BACKEND_THREE_LOCAL,
+            height=660,
+            payload_overrides=wt._anticollision_three_payload_overrides(
+                records=records,
+                analysis=analysis,
+            ),
+        )
+        chart_col2.plotly_chart(
+            wt._all_wells_anticollision_plan_figure(
+                analysis,
+                previous_successes_by_name={},
+                focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
+            ),
+            width="stretch",
+        )
+    except Exception as exc:
+        wt._store_anticollision_failure_state(exc)
+        st.error(
+            "Не удалось отрисовать anti-collision визуализацию. Проверьте лог расчёта ниже."
+        )
+        wt._render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        st.caption(f"{type(exc).__name__}: {exc}")
+        return
 
     if not analysis.zones:
         st.success(
@@ -11266,6 +11732,38 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
+===BEGIN_FILE===	pyproject.toml	560
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pywp"
+version = "0.1.0"
+description = "Well trajectory planner and Streamlit visualizer"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Codex" }]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "pydantic>=2,<3",
+  "scipy>=1.10",
+  "plotly>=5.18",
+  "streamlit==1.54.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-xdist>=3.6"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pywp*"]
+
+===END_FILE===
 ===BEGIN_FILE===	pytest.ini	259
 [pytest]
 testpaths = tests
@@ -11289,7 +11787,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/actual_fund_analysis.py	57511
+===BEGIN_FILE===	pywp/actual_fund_analysis.py	59203
 from __future__ import annotations
 
 import re
@@ -11381,6 +11879,8 @@ class ActualFundDepthClusterSummary(FrozenArbitraryModel):
     depth_to_tvd_m: float
     median_horizontal_entry_tvd_m: float
     median_kop_md_m: float
+    anchor_horizontal_entry_tvd_m: float
+    anchor_kop_md_m: float
     well_names: tuple[str, ...]
 
 
@@ -11462,6 +11962,7 @@ ZONE_LABELS: dict[str, str] = {
 
 HORIZONTAL_ENTRY_MIN_INC_DEG = 70.0
 DEPTH_CLUSTER_REL_TOLERANCE = 0.08
+DEPTH_CLUSTER_OUTLIER_IQR_FACTOR = 2.5
 
 
 def actual_well_family_name(name: object) -> str:
@@ -11832,6 +12333,8 @@ def summarize_actual_fund_by_depth(
             [float(item.kop_md_m) for item in cluster_items],
             dtype=float,
         )
+        filtered_depths = _filter_depth_cluster_outliers(depths)
+        filtered_kops = _filter_depth_cluster_outliers(kops)
         summaries.append(
             ActualFundDepthClusterSummary(
                 cluster_id=f"DEPTH-{index:02d}",
@@ -11840,6 +12343,8 @@ def summarize_actual_fund_by_depth(
                 depth_to_tvd_m=float(np.max(depths)),
                 median_horizontal_entry_tvd_m=float(np.median(depths)),
                 median_kop_md_m=float(np.median(kops)),
+                anchor_horizontal_entry_tvd_m=_cluster_anchor_value(filtered_depths),
+                anchor_kop_md_m=_cluster_anchor_value(filtered_kops),
                 well_names=tuple(str(item.name) for item in cluster_items),
             )
         )
@@ -11856,8 +12361,8 @@ def actual_fund_depth_rows(
             "Глубинный кластер": item.cluster_id,
             "Скважин": item.well_count,
             "TVD диапазон, м": f"{float(item.depth_from_tvd_m):.0f} - {float(item.depth_to_tvd_m):.0f}",
-            "Медианный TVD входа, м": float(item.median_horizontal_entry_tvd_m),
-            "Медианный KOP MD, м": float(item.median_kop_md_m),
+            "Якорный TVD входа, м": float(item.anchor_horizontal_entry_tvd_m),
+            "Якорный KOP MD, м": float(item.anchor_kop_md_m),
             "Скважины": ", ".join(item.well_names),
         }
         for item in summarize_actual_fund_by_depth(
@@ -11878,23 +12383,55 @@ def build_actual_fund_kop_depth_function(
     )
     if not clusters:
         return None
-    depths = tuple(float(item.median_horizontal_entry_tvd_m) for item in clusters)
-    kops = tuple(float(item.median_kop_md_m) for item in clusters)
+    depths = tuple(float(item.anchor_horizontal_entry_tvd_m) for item in clusters)
+    kops = tuple(float(item.anchor_kop_md_m) for item in clusters)
     if len(clusters) == 1:
         return ActualFundKopDepthFunction(
             mode="constant",
             cluster_count=1,
             anchor_depths_tvd_m=depths,
             anchor_kop_md_m=kops,
-            note="Один глубинный кластер: функция вырождается в константу.",
+            note=(
+                "Один глубинный кластер: функция вырождается в константу "
+                "по якорю min + 1σ после отсечения явных выбросов."
+            ),
         )
     return ActualFundKopDepthFunction(
         mode="piecewise_linear",
         cluster_count=len(clusters),
         anchor_depths_tvd_m=depths,
         anchor_kop_md_m=kops,
-        note="KOP(TVD) задан кусочно-линейно по медианам глубинных кластеров.",
+        note=(
+            "KOP(TVD) задан кусочно-линейно по якорям глубинных кластеров: "
+            "min + 1σ после отсечения явных выбросов."
+        ),
     )
+
+
+def _filter_depth_cluster_outliers(values: np.ndarray) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size < 4:
+        return array
+    q1, q3 = np.percentile(array, [25.0, 75.0])
+    iqr = float(q3 - q1)
+    if not np.isfinite(iqr) or iqr <= 1e-9:
+        return array
+    lower = float(q1 - DEPTH_CLUSTER_OUTLIER_IQR_FACTOR * iqr)
+    upper = float(q3 + DEPTH_CLUSTER_OUTLIER_IQR_FACTOR * iqr)
+    filtered = array[(array >= lower) & (array <= upper)]
+    return filtered if filtered.size >= 2 else array
+
+
+def _cluster_anchor_value(values: np.ndarray) -> float:
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        raise ValueError("Cluster anchor cannot be built from empty values.")
+    min_value = float(np.min(array))
+    std_value = float(np.std(array, ddof=0)) if array.size > 1 else 0.0
+    anchor = min_value + max(std_value, 0.0)
+    return float(np.clip(anchor, min_value, float(np.max(array))))
 
 
 def summarize_actual_fund_by_pad(
@@ -12085,9 +12622,11 @@ def calibrate_uncertainty_from_actual_fund(
     actual_wells: Iterable[ImportedTrajectoryWell],
     base_model: PlanningUncertaintyModel,
     base_preset: str = DEFAULT_UNCERTAINTY_PRESET,
+    analyses: tuple[ActualFundWellAnalysis, ...] | None = None,
 ) -> ActualFundCalibrationResult:
     actual_well_list = list(actual_wells)
-    analyses = build_actual_fund_well_analyses(actual_well_list)
+    if analyses is None:
+        analyses = build_actual_fund_well_analyses(actual_well_list)
     reconstructed_by_name = {
         str(item.name): item.survey
         for item in analyses
@@ -12824,7 +13363,7 @@ def _weighted_modal_inclination(
     return float(best_bin)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	59456
+===BEGIN_FILE===	pywp/anticollision.py	59231
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13093,17 +13632,12 @@ def analyze_anti_collision(
                 pair_filter=pair_filter,
             ):
                 continue
+            pair_count += 1
             if _pair_prefilter_xy_far_apart(
                 lateral_envelope_a=lateral_envelopes[well_a.name],
                 lateral_envelope_b=lateral_envelopes[well_b.name],
             ):
                 continue
-            if _pair_prefilter_terminal_far_apart(
-                lateral_envelope_a=lateral_envelopes[well_a.name],
-                lateral_envelope_b=lateral_envelopes[well_b.name],
-            ):
-                continue
-            pair_count += 1
             pair_corridors = _pair_overlap_corridors(
                 well_a=well_a,
                 well_b=well_b,
@@ -17712,7 +18246,7 @@ def reference_table_rows() -> list[dict[str, str | float]]:
     return rows
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/eclipse_welltrack.py	12603
+===BEGIN_FILE===	pywp/eclipse_welltrack.py	13619
 from __future__ import annotations
 
 import math
@@ -17870,13 +18404,13 @@ def parse_welltrack_points_table(
     has_non_empty_row = False
 
     for row_no, raw_row in enumerate(rows, start=1):
-        row = {str(key).strip().lower(): value for key, value in dict(raw_row).items()}
+        row = _normalize_table_row(dict(raw_row))
 
-        name_raw = _table_row_value(row, "wellname", "well", "name")
+        name_raw = _table_row_value(row, "wellname", "well_name", "well", "name")
         point_raw = _table_row_value(row, "point", "pointname", "point_name")
-        x_raw = _table_row_value(row, "x")
-        y_raw = _table_row_value(row, "y")
-        z_raw = _table_row_value(row, "z")
+        x_raw = _table_row_value(row, "x", "x_m", "east", "easting")
+        y_raw = _table_row_value(row, "y", "y_m", "north", "northing")
+        z_raw = _table_row_value(row, "z", "z_m", "tvd", "z_tvd", "z_tvd_m")
 
         if all(_is_blank_table_value(value) for value in (name_raw, point_raw, x_raw, y_raw, z_raw)):
             continue
@@ -17985,6 +18519,16 @@ def _table_row_value(row: Mapping[str, object], *keys: str) -> object:
     return None
 
 
+def _normalize_table_row(row: Mapping[object, object]) -> dict[str, object]:
+    normalized: dict[str, object] = {}
+    for raw_key, value in row.items():
+        key = re.sub(r"[\s\-/(),.:]+", "_", str(raw_key).strip().lower()).strip("_")
+        if not key:
+            continue
+        normalized[key] = value
+    return normalized
+
+
 def _is_blank_table_value(value: object) -> bool:
     if value is None:
         return True
@@ -18019,7 +18563,7 @@ def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float
             f"Табличный WELLTRACK: пустое значение {field_name} в строке {row_no}."
         )
     try:
-        number = float(value)
+        number = float(_normalize_table_float_text(value))
     except (TypeError, ValueError) as exc:
         raise WelltrackParseError(
             f"Табличный WELLTRACK: {field_name} в строке {row_no} не является числом."
@@ -18029,6 +18573,28 @@ def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float
             f"Табличный WELLTRACK: {field_name} в строке {row_no} должно быть конечным числом."
         )
     return number
+
+
+def _normalize_table_float_text(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return text
+    text = (
+        text.replace("\u00A0", "")
+        .replace("\u202F", "")
+        .replace(" ", "")
+        .replace("'", "")
+    )
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
+    return text
 
 
 def _parse_well_name(rest: str, line_no: int) -> tuple[str, str]:
@@ -18460,11 +19026,12 @@ class PlannerResult(FrozenArbitraryModel):
     md_t1_m: float
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/optimization_reference.py	1070
+===BEGIN_FILE===	pywp/optimization_reference.py	1475
 from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
+from typing import Callable
 
 from pywp.models import OPTIMIZATION_NONE, Point3D, SummaryDict, TrajectoryConfig
 from pywp.planner import PlanningError, TrajectoryPlanner
@@ -18483,6 +19050,8 @@ def compute_unoptimized_reference(
     t1: Point3D,
     t3: Point3D,
     config: TrajectoryConfig,
+    progress_callback: Callable[[str, float], None] | None = None,
+    on_error: Callable[[str], None] | None = None,
 ) -> OptimizationReference | None:
     if str(config.optimization_mode) == OPTIMIZATION_NONE:
         return None
@@ -18490,19 +19059,24 @@ def compute_unoptimized_reference(
     reference_config = config.validated_copy(optimization_mode=OPTIMIZATION_NONE)
     started = perf_counter()
     try:
+        if progress_callback is not None:
+            progress_callback("Расчёт baseline без оптимизации...", 0.0)
         result = planner.plan(
             surface=surface,
             t1=t1,
             t3=t3,
             config=reference_config,
+            progress_callback=progress_callback,
         )
     except (PlanningError, ValueError):
+        if on_error is not None:
+            on_error("Baseline без оптимизации не построен.")
         return None
     elapsed_s = perf_counter() - started
     return OptimizationReference(summary=result.summary, runtime_s=float(elapsed_s))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner.py	143620
+===BEGIN_FILE===	pywp/planner.py	143870
 from __future__ import annotations
 
 from typing import Callable
@@ -18722,11 +19296,17 @@ class TrajectoryPlanner:
         )
 
         _emit_progress(progress_callback, "Планировщик: формирование выходной инклинометрии.", 0.96)
-        output = compute_positions_min_curv(
-            trajectory.stations(md_step_m=config.md_step_m),
-            start=surface,
-        )
-        output = add_dls(output)
+        try:
+            output = compute_positions_min_curv(
+                trajectory.stations(md_step_m=config.md_step_m),
+                start=surface,
+            )
+            output = add_dls(output)
+        except ValueError as exc:
+            raise PlanningError(
+                "Не удалось построить выходную инклинометрию методом минимальной кривизны. "
+                f"Причина: {exc}"
+            ) from exc
         _emit_progress(progress_callback, "Планировщик: результат готов.", 1.00)
 
         return PlannerResult(
@@ -22678,7 +23258,7 @@ def _scaled_progress_callback(
     return wrapped
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner_validation.py	21777
+===BEGIN_FILE===	pywp/planner_validation.py	22009
 from __future__ import annotations
 
 import numpy as np
@@ -23232,11 +23812,17 @@ def _build_validated_control_and_summary(
         evaluation=_evaluate_profile_endpoints(params=params),
         surface=surface,
     )
-    control = compute_positions_min_curv(
-        trajectory.stations(md_step_m=config.md_step_control_m),
-        start=surface,
-    )
-    control = add_dls(control)
+    try:
+        control = compute_positions_min_curv(
+            trajectory.stations(md_step_m=config.md_step_control_m),
+            start=surface,
+        )
+        control = add_dls(control)
+    except ValueError as exc:
+        raise PlanningError(
+            "Не удалось сформировать контрольную инклинометрию методом минимальной кривизны. "
+            f"Причина: {exc}"
+        ) from exc
     classification = classify_well(
         gv_m=geometry.z1_m,
         horizontal_offset_t1_m=horizontal_offset_t1_m,
@@ -27637,7 +28223,7 @@ class WellTrajectory:
         return stations
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_calc_params.py	18048
+===BEGIN_FILE===	pywp/ui_calc_params.py	18121
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27778,7 +28364,8 @@ def kop_min_vertical_function_from_state(
     if isinstance(payload, dict):
         try:
             return ActualFundKopDepthFunction(**payload)
-        except Exception:
+        except (TypeError, ValueError):
+            clear_kop_min_vertical_function(prefix=prefix)
             return None
     return None
 
@@ -33569,7 +34156,7 @@ if __name__ == "__main__":
     main()
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/project_pack.py	4713
+===BEGIN_FILE===	scripts/project_pack.py	4742
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -33598,6 +34185,7 @@ INCLUDED_FILE_EXTENSIONS = {
     ".md",
     ".ini",
     ".cfg",
+    ".toml",
     ".yaml",
     ".yml",
     ".json",
@@ -33726,7 +34314,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root = Path(args.root).resolve()
-    archive = (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
+    archive = (
+        (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
+    )
 
     if args.mode == "pack":
         pack(root, archive)
@@ -52059,7 +52649,7 @@ else:
 pg.run()
 ```
 ===END_FILE===
-===BEGIN_FILE===	tests/test_actual_fund_analysis.py	13392
+===BEGIN_FILE===	tests/test_actual_fund_analysis.py	16530
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -52070,6 +52660,7 @@ import pytest
 
 import pywp.actual_fund_analysis as actual_fund_analysis_module
 from pywp.actual_fund_analysis import (
+    ActualFundWellMetrics,
     CALIBRATION_STATUS_READY,
     _reconstruct_actual_survey,
     actual_well_family_name,
@@ -52364,11 +52955,12 @@ def test_calibration_reuses_prebuilt_analyses_without_recomputing_metrics(
 
     result = calibrate_uncertainty_from_actual_fund(
         actual_wells=wells,
+        analyses=analyses,
         base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
         base_preset=DEFAULT_UNCERTAINTY_PRESET,
     )
 
-    assert analysis_call_count == 1
+    assert analysis_call_count == 0
     assert result.status == CALIBRATION_STATUS_READY
 
 
@@ -52389,11 +52981,107 @@ def test_depth_cluster_summary_and_kop_function_build_from_generated_dataset() -
     assert kop_function is not None
     assert kop_function.mode == "piecewise_linear"
     assert tuple(round(value, 1) for value in kop_function.anchor_depths_tvd_m) == tuple(
-        round(float(cluster.median_horizontal_entry_tvd_m), 1) for cluster in clusters
+        round(float(cluster.anchor_horizontal_entry_tvd_m), 1) for cluster in clusters
     )
 
+
+def test_depth_cluster_anchor_uses_min_plus_std_after_outlier_filter() -> None:
+    metrics = (
+        ActualFundWellMetrics(
+            name="A",
+            family_name="A",
+            pad_group="1",
+            is_horizontal=True,
+            md_total_m=0.0,
+            tvd_end_m=0.0,
+            lateral_departure_m=0.0,
+            kop_md_m=800.0,
+            kop_tvd_m=700.0,
+            horizontal_entry_md_m=2000.0,
+            horizontal_entry_tvd_m=1800.0,
+            horizontal_length_m=1000.0,
+            hold_inc_deg=45.0,
+            hold_azi_deg=90.0,
+            hold_length_m=300.0,
+            max_inc_deg=90.0,
+            max_dls_deg_per_30m=2.0,
+            max_build_dls_before_hold_deg_per_30m=2.0,
+            is_analysis_eligible=True,
+        ),
+        ActualFundWellMetrics(
+            name="B",
+            family_name="B",
+            pad_group="1",
+            is_horizontal=True,
+            md_total_m=0.0,
+            tvd_end_m=0.0,
+            lateral_departure_m=0.0,
+            kop_md_m=820.0,
+            kop_tvd_m=710.0,
+            horizontal_entry_md_m=2000.0,
+            horizontal_entry_tvd_m=1820.0,
+            horizontal_length_m=1000.0,
+            hold_inc_deg=45.0,
+            hold_azi_deg=90.0,
+            hold_length_m=300.0,
+            max_inc_deg=90.0,
+            max_dls_deg_per_30m=2.0,
+            max_build_dls_before_hold_deg_per_30m=2.0,
+            is_analysis_eligible=True,
+        ),
+        ActualFundWellMetrics(
+            name="C",
+            family_name="C",
+            pad_group="1",
+            is_horizontal=True,
+            md_total_m=0.0,
+            tvd_end_m=0.0,
+            lateral_departure_m=0.0,
+            kop_md_m=840.0,
+            kop_tvd_m=720.0,
+            horizontal_entry_md_m=2000.0,
+            horizontal_entry_tvd_m=1840.0,
+            horizontal_length_m=1000.0,
+            hold_inc_deg=45.0,
+            hold_azi_deg=90.0,
+            hold_length_m=300.0,
+            max_inc_deg=90.0,
+            max_dls_deg_per_30m=2.0,
+            max_build_dls_before_hold_deg_per_30m=2.0,
+            is_analysis_eligible=True,
+        ),
+        ActualFundWellMetrics(
+            name="OUTLIER",
+            family_name="OUTLIER",
+            pad_group="1",
+            is_horizontal=True,
+            md_total_m=0.0,
+            tvd_end_m=0.0,
+            lateral_departure_m=0.0,
+            kop_md_m=1400.0,
+            kop_tvd_m=1300.0,
+            horizontal_entry_md_m=2000.0,
+            horizontal_entry_tvd_m=1950.0,
+            horizontal_length_m=1000.0,
+            hold_inc_deg=45.0,
+            hold_azi_deg=90.0,
+            hold_length_m=300.0,
+            max_inc_deg=90.0,
+            max_dls_deg_per_30m=2.0,
+            max_build_dls_before_hold_deg_per_30m=2.0,
+            is_analysis_eligible=True,
+        ),
+    )
+
+    clusters = summarize_actual_fund_by_depth(metrics, relative_tolerance=0.5)
+
+    assert len(clusters) == 1
+    cluster = clusters[0]
+    assert cluster.anchor_horizontal_entry_tvd_m < 2000.0
+    assert cluster.anchor_kop_md_m < 900.0
+
 ===END_FILE===
-===BEGIN_FILE===	tests/test_anticollision.py	63813
+===BEGIN_FILE===	tests/test_anticollision.py	64058
 from __future__ import annotations
 
 import numpy as np
@@ -52618,7 +53306,7 @@ def test_analyze_anti_collision_skips_distant_pair_before_corridor_scan(
         build_overlap_geometry=False,
     )
 
-    assert analysis.pair_count == 0
+    assert analysis.pair_count == 1
     assert analysis.overlapping_pair_count == 0
     assert not analysis.corridors
 
@@ -52675,7 +53363,7 @@ def test_analyze_anti_collision_keeps_near_pair_after_xy_prefilter(
     assert seen_pairs == [("WELL-A", "WELL-B")]
 
 
-def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_scan(
+def test_analyze_anti_collision_does_not_skip_pair_by_terminal_geometry_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     well_a = build_anti_collision_well(
@@ -52737,8 +53425,17 @@ def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_sc
     ) -> anticollision_module._AntiCollisionLateralEnvelope:
         return envelope_by_name[str(well.name)]
 
-    def _unexpected_pair_scan(**_: object) -> list[AntiCollisionCorridor]:
-        raise AssertionError("pair should be skipped by terminal prefilter")
+    seen_pairs: list[tuple[str, str]] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: object,
+        well_b: object,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        assert build_overlap_geometry is False
+        seen_pairs.append((str(getattr(well_a, "name")), str(getattr(well_b, "name"))))
+        return []
 
     monkeypatch.setattr(
         anticollision_module,
@@ -52748,7 +53445,7 @@ def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_sc
     monkeypatch.setattr(
         anticollision_module,
         "_pair_overlap_corridors",
-        _unexpected_pair_scan,
+        _record_pair_scan,
     )
 
     analysis = analyze_anti_collision(
@@ -52756,9 +53453,10 @@ def test_analyze_anti_collision_skips_pair_by_terminal_cutoff_before_corridor_sc
         build_overlap_geometry=False,
     )
 
-    assert analysis.pair_count == 0
+    assert analysis.pair_count == 1
     assert analysis.overlapping_pair_count == 0
     assert not analysis.corridors
+    assert seen_pairs == [("WELL-A", "WELL-B")]
 
 
 def test_analyze_anti_collision_rejects_overlap_geometry_without_display_overlay() -> None:
@@ -54389,13 +55087,13 @@ def test_sample_profile_stations_in_md_window_matches_full_trajectory_reference(
         assert sampled[column].tolist() == pytest.approx(reference[column].tolist(), abs=1.0)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_app.py	4855
+===BEGIN_FILE===	tests/test_app.py	5390
 from __future__ import annotations
 
 import app
 import pandas as pd
 import pytest
-from pywp import Point3D
+from pywp import Point3D, TrajectoryConfig
 from streamlit.testing.v1 import AppTest
 from pywp.ui_utils import arrow_safe_text_dataframe, format_run_log_line
 
@@ -54522,6 +55220,19 @@ def test_current_input_signature_tracks_plan_and_actual_profiles(monkeypatch: py
     assert signature_after_plan != signature_after_actual
 
 
+def test_validate_input_rejects_invalid_t1_t3_geometry() -> None:
+    errors = app._validate_input(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(0.0, 0.0, 2400.0),
+        t3=Point3D(0.0, 0.0, 2300.0),
+        config=TrajectoryConfig(),
+    )
+
+    assert "t3 должен быть глубже t1 по TVD." in errors
+    assert "Точки t1 и t3 должны различаться в плане." in errors
+    assert "Точка t1 должна отличаться от устья S в плане." in errors
+
+
 def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
     at = AppTest.from_file("app.py")
     at.session_state["last_result"] = {"broken": True}
@@ -54529,6 +55240,7 @@ def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
 
     warning_values = [str(widget.value) for widget in at.warning]
     assert any("устарел или поврежден" in value for value in warning_values)
+    assert any("ValueError" in value for value in warning_values)
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_classification.py	3084
@@ -54812,7 +55524,36 @@ def test_minimum_curvature_increment_rejects_near_180_degree_dogleg() -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_planner.py	63313
+===BEGIN_FILE===	tests/test_optimization_reference.py	813
+from __future__ import annotations
+
+from pywp.models import Point3D, TrajectoryConfig
+from pywp.optimization_reference import compute_unoptimized_reference
+from pywp.planner import PlanningError
+
+
+class _FailingPlanner:
+    def plan(self, **_: object):
+        raise PlanningError("baseline failed")
+
+
+def test_compute_unoptimized_reference_reports_error_callback_on_failure() -> None:
+    errors: list[str] = []
+
+    result = compute_unoptimized_reference(
+        planner=_FailingPlanner(),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=TrajectoryConfig(optimization_mode="minimize_md"),
+        on_error=errors.append,
+    )
+
+    assert result is None
+    assert errors == ["Baseline без оптимизации не построен."]
+
+===END_FILE===
+===BEGIN_FILE===	tests/test_planner.py	63986
 from __future__ import annotations
 
 from pathlib import Path
@@ -54894,6 +55635,25 @@ def test_translated_surface_coordinates_preserve_exact_endpoint_validation() -> 
     assert float(result.summary["t1_exact_y_m"]) == pytest.approx(7411939.0, abs=1e-4)
     assert float(result.summary["t3_exact_x_m"]) == pytest.approx(600363.0, abs=1e-4)
     assert float(result.summary["t3_exact_y_m"]) == pytest.approx(7413139.0, abs=1e-4)
+
+
+def test_planner_wraps_minimum_curvature_output_errors_as_planning_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    def _boom(*args: object, **kwargs: object):
+        raise ValueError("dogleg angle is too close to 180 degrees")
+
+    monkeypatch.setattr(planner_module, "compute_positions_min_curv", _boom)
+
+    with pytest.raises(PlanningError, match="минимальной кривизны"):
+        TrajectoryPlanner().plan(
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(600.0, 800.0, 2400.0),
+            t3=Point3D(1500.0, 2000.0, 2500.0),
+            config=_fast_config(kop_min_vertical_m=550.0),
+        )
 
 
 def test_higher_min_vertical_pushes_kop_up_deterministically() -> None:
@@ -56805,7 +57565,7 @@ def test_default_3d_camera_matches_plotly_default_eye() -> None:
     assert DEFAULT_3D_CAMERA["eye"] == {"x": 1.25, "y": 1.25, "z": 1.25}
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_project_pack.py	4487
+===BEGIN_FILE===	tests/test_project_pack.py	4646
 from __future__ import annotations
 
 import importlib.util
@@ -56840,6 +57600,7 @@ def test_collect_files_skips_excluded_and_poetry(tmp_path: Path) -> None:
     (root / "pyproject.toml").write_text("[project]\nname='pywp'\n", encoding="utf-8")
     (root / ".streamlit" / "config.toml").write_text("[theme]\n", encoding="utf-8")
     (root / "tools" / "viewer.json").write_text('{"ok": true}\n', encoding="utf-8")
+    (root / "tools" / "sample.inc").write_text("WELLTRACK 'A'\n/\n", encoding="utf-8")
     (root / "tools" / "template.html").write_text("<html></html>\n", encoding="utf-8")
     (root / "tools" / "widget.js").write_text("console.log('ok')\n", encoding="utf-8")
     (root / "tools" / "theme.css").write_text("body{}\n", encoding="utf-8")
@@ -56864,6 +57625,7 @@ def test_collect_files_skips_excluded_and_poetry(tmp_path: Path) -> None:
         "requirements-dev.txt",
         "requirements.txt",
         "tools/notes.md",
+        "tools/sample.inc",
         "tools/template.html",
         "tools/theme.css",
         "tools/viewer.json",
@@ -56887,6 +57649,7 @@ def test_pack_and_unpack_restore_contents(tmp_path: Path) -> None:
         ".streamlit/config.toml": "[theme]\nbase='light'\n",
         "pywp/three_viewer_assets/vendor/OrbitControls.js": "window.OrbitControls = {};\n",
         "viewer.json": '{"version": 1}\n',
+        "sample.inc": "WELLTRACK 'A'\n/\n",
     }
     for relative_path, content in original_files.items():
         target = root / relative_path
@@ -56920,7 +57683,7 @@ def test_collect_files_excludes_custom_archive_inside_root(tmp_path: Path) -> No
     assert relative == ["app.py"]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_page.py	7493
+===BEGIN_FILE===	tests/test_ptc_page.py	7646
 from __future__ import annotations
 
 import pandas as pd
@@ -57137,6 +57900,9 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
 
     at.run(timeout=120)
 
+    expander_labels = {str(widget.label) for widget in at.expander}
+    assert "Просмотр загруженных утверждённых проектных скважин" in expander_labels
+
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     assert "Просмотр фактической скважины" in selectbox_labels
     assert "Просмотр утвержденной проектной скважины" in selectbox_labels
@@ -57171,9 +57937,9 @@ def test_generated_actual_fund_depth_cluster_welltracks_are_clusterable() -> Non
     assert kop_function is not None
     assert kop_function.mode == "piecewise_linear"
     assert tuple(round(value, 1) for value in kop_function.anchor_kop_md_m) == (
-        round(float(clusters[0].median_kop_md_m), 1),
-        round(float(clusters[1].median_kop_md_m), 1),
-        round(float(clusters[2].median_kop_md_m), 1),
+        round(float(clusters[0].anchor_kop_md_m), 1),
+        round(float(clusters[1].anchor_kop_md_m), 1),
+        round(float(clusters[2].anchor_kop_md_m), 1),
     )
 
 ===END_FILE===
@@ -57618,7 +58384,7 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     assert " B " in second
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ui_calc_params.py	5828
+===BEGIN_FILE===	tests/test_ui_calc_params.py	6385
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -57777,6 +58543,21 @@ def test_kop_depth_function_state_roundtrip_updates_signature(monkeypatch) -> No
     assert binding.state_signature() != baseline_signature
 
     clear_kop_min_vertical_function(prefix="wt_cfg_")
+    assert kop_min_vertical_mode(prefix="wt_cfg_") == "constant"
+
+
+def test_invalid_kop_depth_function_payload_reverts_to_constant(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    fake_st.session_state["wt_cfg_kop_min_vertical_mode"] = "depth_function"
+    fake_st.session_state["wt_cfg_kop_min_vertical_function_payload"] = {"broken": True}
+
+    restored = kop_min_vertical_function_from_state(prefix="wt_cfg_")
+
+    assert restored is None
     assert kop_min_vertical_mode(prefix="wt_cfg_") == "constant"
 
 ===END_FILE===
@@ -61730,11 +62511,12 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	137350
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	142953
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -61813,6 +62595,27 @@ def _bad_order_records() -> list[WelltrackRecord]:
                 WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
                 WelltrackPoint(x=500.0, y=0.0, z=2400.0, md=2400.0),
                 WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+
+
+def _two_bad_order_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="BAD-1",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1200.0, y=0.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="BAD-2",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1100.0, y=0.0, z=2450.0, md=2450.0),
+                WelltrackPoint(x=650.0, y=0.0, z=2550.0, md=3550.0),
             ),
         ),
     ]
@@ -61975,6 +62778,44 @@ def test_records_overview_dataframe_uses_explicit_green_red_status_icons() -> No
     assert "Не хватает одной из точек" in str(overview_df.iloc[1]["Проблема"])
 
 
+def test_analysis_reference_wells_rebuilds_surface_as_current_point3d() -> None:
+    page = _load_welltrack_page_module()
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "INC_deg": [0.0, 90.0],
+            "AZI_deg": [0.0, 90.0],
+            "X_m": [100.0, 1100.0],
+            "Y_m": [200.0, 200.0],
+            "Z_m": [5.0, 5.0],
+        }
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            SimpleNamespace(
+                name="REF-1",
+                well_kind="approved",
+                stations=stations,
+                surface=SimpleNamespace(x=100.0, y=200.0, z=5.0),
+                is_reference_only=True,
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    reference_wells = page._analysis_reference_wells(analysis)
+
+    assert len(reference_wells) == 1
+    assert isinstance(reference_wells[0].surface, Point3D)
+    assert reference_wells[0].surface == Point3D(x=100.0, y=200.0, z=5.0)
+
+
 def test_records_overview_dataframe_detects_missing_surface_s_by_surface_z_heuristic() -> None:
     page = _load_welltrack_page_module()
     missing_surface = WelltrackRecord(
@@ -62021,6 +62862,60 @@ def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> N
     button_labels = {str(widget.label) for widget in at.button}
     assert "Исправить порядок для выбранных скважин" in button_labels
     assert "Оставить все точки без изменений" in button_labels
+
+
+def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+
+    assert any(
+        "Проверка порядка t1/t3 — OK." in str(widget.value)
+        for widget in at.success
+    )
+
+
+def test_welltrack_page_hides_t1_t3_warning_after_keep_action() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _bad_order_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+    _click_button(at, "Оставить все точки без изменений")
+    at.run(timeout=120)
+
+    assert any(
+        "Порядок t1/t3 оставлен без изменений для скважин: BAD-1."
+        in str(widget.value)
+        for widget in at.info
+    )
+    assert not any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+
+
+def test_welltrack_page_shows_only_remaining_t1_t3_issue_after_partial_fix() -> None:
+    at = AppTest.from_file("pages/02_welltrack_import.py")
+    records = _two_bad_order_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_t1_t3_fix_BAD-1"] = True
+    at.session_state["wt_t1_t3_fix_BAD-2"] = False
+
+    at.run(timeout=120)
+    _click_button(at, "Исправить порядок для выбранных скважин")
+    at.run(timeout=120)
+
+    assert any(
+        "Порядок t1/t3 изменился для скважин: BAD-1." in str(widget.value)
+        for widget in at.success
+    )
+    assert any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+    markdown_values = [str(widget.value) for widget in at.markdown]
+    assert any("`BAD-2`" in value for value in markdown_values)
+    assert not any("`BAD-1`" in value for value in markdown_values)
 
 
 def _successful_plan(
@@ -62616,6 +63511,23 @@ def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_res
     assert at.session_state["wt_pad_auto_applied_on_import"] is False
 
 
+def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface() -> None:
+    page = _load_welltrack_page_module()
+    page._init_state()
+
+    records = _multi_pad_records()
+    applied = page._auto_apply_pad_layout_if_shared_surface(list(records))
+
+    assert applied is True
+    updated_records = page.st.session_state["wt_records"]
+    updated_surfaces = _surface_points(updated_records)
+    assert len(set(updated_surfaces)) == 4
+    assert updated_surfaces[0] != updated_surfaces[1]
+    assert updated_surfaces[2] != updated_surfaces[3]
+    assert page.st.session_state["wt_pad_auto_applied_on_import"] is True
+    assert page.st.session_state["wt_pad_last_applied_at"] != ""
+
+
 def test_pad_config_defaults_to_center_anchor_mode() -> None:
     page = _load_welltrack_page_module()
     pads = page.detect_well_pads(_multi_pad_records())
@@ -62693,6 +63605,26 @@ def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
     assert [record.name for record in records] == ["TAB-01", "TAB-02"]
     assert records[0].points[1].x == pytest.approx(600.0)
     assert records[1].points[2].y == pytest.approx(1980.0)
+
+
+def test_normalize_source_table_df_for_ui_accepts_excel_like_single_column_rows() -> None:
+    page = _load_welltrack_page_module()
+
+    normalized = page._normalize_source_table_df_for_ui(
+        pd.DataFrame(
+            {
+                "Column 1": [
+                    "TAB-01\tS\t0\t0\t0",
+                    "TAB-01\tt1\t600,5\t800,25\t2400,75",
+                    "TAB-01\tt3\t1500\t2000\t2500",
+                ]
+            }
+        )
+    )
+
+    assert list(normalized.columns) == ["Wellname", "Point", "X", "Y", "Z"]
+    assert normalized.iloc[0].to_dict()["Point"] == "S"
+    assert str(normalized.iloc[1]["X"]) == "600,5"
 
 
 def test_normalize_source_table_df_for_ui_uses_s_for_surface_point() -> None:
@@ -63483,6 +64415,7 @@ def test_build_last_anticollision_resolution_reports_sf_after() -> None:
 
 def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(monkeypatch) -> None:
     page = _load_welltrack_page_module()
+    page._init_state()
     calls = {"analysis": 0}
     analysis = AntiCollisionAnalysis(
         wells=(),
@@ -63517,15 +64450,22 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(m
         uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
         records=[],
     )
+    assert first[0] is analysis
+    first_run = page.st.session_state["wt_anticollision_last_run"]
+    assert bool(first_run["cached"]) is False
+    assert int(first_run["pair_count"]) == 0
+    assert "Расчёт Anti-collision завершён." in "\n".join(first_run["log_lines"])
+
     second = page._cached_anti_collision_view_model(
         successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
         uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
         records=[],
     )
-
-    assert first[0] is analysis
     assert second[0] is analysis
     assert calls["analysis"] == 1
+    second_run = page.st.session_state["wt_anticollision_last_run"]
+    assert bool(second_run["cached"]) is True
+    assert "Использован кэш anti-collision анализа." in "\n".join(second_run["log_lines"])
 
 
 def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> None:
@@ -65323,7 +66263,7 @@ def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_con
     assert "DLS: %{customdata[1]:.2f} deg/30м" in str(conflict_segments[0].hovertemplate)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_parser.py	5495
+===BEGIN_FILE===	tests/test_welltrack_parser.py	6342
 from __future__ import annotations
 
 from pathlib import Path
@@ -65482,6 +66422,33 @@ def test_parse_welltrack_points_table_reports_expected_s_in_unsupported_point_er
                 {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
             ]
         )
+
+
+def test_parse_welltrack_points_table_accepts_excel_style_numeric_strings() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Well name": "WELL-A", "Point name": "S", "X": "0", "Y": "0", "Z": "0"},
+            {
+                "Well name": "WELL-A",
+                "Point name": "t1",
+                "X": "600,5",
+                "Y": "800,25",
+                "Z": "2 400,75",
+            },
+            {
+                "Well name": "WELL-A",
+                "Point name": "t3",
+                "X": "1'500,5",
+                "Y": "2 000,0",
+                "Z": "2500,0",
+            },
+        ]
+    )
+
+    assert len(records) == 1
+    assert records[0].points[1].x == pytest.approx(600.5)
+    assert records[0].points[1].z == pytest.approx(2400.75)
+    assert records[0].points[2].x == pytest.approx(1500.5)
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_welltrack_quality.py	2100

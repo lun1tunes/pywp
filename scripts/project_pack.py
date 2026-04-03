@@ -155,7 +155,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root = Path(args.root).resolve()
-    archive = (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
+    archive = (
+        (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
+    )
 
     if args.mode == "pack":
         pack(root, archive)

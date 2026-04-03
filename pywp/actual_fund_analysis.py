@@ -89,6 +89,8 @@ class ActualFundDepthClusterSummary(FrozenArbitraryModel):
     depth_to_tvd_m: float
     median_horizontal_entry_tvd_m: float
     median_kop_md_m: float
+    anchor_horizontal_entry_tvd_m: float
+    anchor_kop_md_m: float
     well_names: tuple[str, ...]
 
 
@@ -170,6 +172,7 @@ ZONE_LABELS: dict[str, str] = {
 
 HORIZONTAL_ENTRY_MIN_INC_DEG = 70.0
 DEPTH_CLUSTER_REL_TOLERANCE = 0.08
+DEPTH_CLUSTER_OUTLIER_IQR_FACTOR = 2.5
 
 
 def actual_well_family_name(name: object) -> str:
@@ -540,6 +543,8 @@ def summarize_actual_fund_by_depth(
             [float(item.kop_md_m) for item in cluster_items],
             dtype=float,
         )
+        filtered_depths = _filter_depth_cluster_outliers(depths)
+        filtered_kops = _filter_depth_cluster_outliers(kops)
         summaries.append(
             ActualFundDepthClusterSummary(
                 cluster_id=f"DEPTH-{index:02d}",
@@ -548,6 +553,8 @@ def summarize_actual_fund_by_depth(
                 depth_to_tvd_m=float(np.max(depths)),
                 median_horizontal_entry_tvd_m=float(np.median(depths)),
                 median_kop_md_m=float(np.median(kops)),
+                anchor_horizontal_entry_tvd_m=_cluster_anchor_value(filtered_depths),
+                anchor_kop_md_m=_cluster_anchor_value(filtered_kops),
                 well_names=tuple(str(item.name) for item in cluster_items),
             )
         )
@@ -564,8 +571,8 @@ def actual_fund_depth_rows(
             "Глубинный кластер": item.cluster_id,
             "Скважин": item.well_count,
             "TVD диапазон, м": f"{float(item.depth_from_tvd_m):.0f} - {float(item.depth_to_tvd_m):.0f}",
-            "Медианный TVD входа, м": float(item.median_horizontal_entry_tvd_m),
-            "Медианный KOP MD, м": float(item.median_kop_md_m),
+            "Якорный TVD входа, м": float(item.anchor_horizontal_entry_tvd_m),
+            "Якорный KOP MD, м": float(item.anchor_kop_md_m),
             "Скважины": ", ".join(item.well_names),
         }
         for item in summarize_actual_fund_by_depth(
@@ -586,23 +593,55 @@ def build_actual_fund_kop_depth_function(
     )
     if not clusters:
         return None
-    depths = tuple(float(item.median_horizontal_entry_tvd_m) for item in clusters)
-    kops = tuple(float(item.median_kop_md_m) for item in clusters)
+    depths = tuple(float(item.anchor_horizontal_entry_tvd_m) for item in clusters)
+    kops = tuple(float(item.anchor_kop_md_m) for item in clusters)
     if len(clusters) == 1:
         return ActualFundKopDepthFunction(
             mode="constant",
             cluster_count=1,
             anchor_depths_tvd_m=depths,
             anchor_kop_md_m=kops,
-            note="Один глубинный кластер: функция вырождается в константу.",
+            note=(
+                "Один глубинный кластер: функция вырождается в константу "
+                "по якорю min + 1σ после отсечения явных выбросов."
+            ),
         )
     return ActualFundKopDepthFunction(
         mode="piecewise_linear",
         cluster_count=len(clusters),
         anchor_depths_tvd_m=depths,
         anchor_kop_md_m=kops,
-        note="KOP(TVD) задан кусочно-линейно по медианам глубинных кластеров.",
+        note=(
+            "KOP(TVD) задан кусочно-линейно по якорям глубинных кластеров: "
+            "min + 1σ после отсечения явных выбросов."
+        ),
     )
+
+
+def _filter_depth_cluster_outliers(values: np.ndarray) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size < 4:
+        return array
+    q1, q3 = np.percentile(array, [25.0, 75.0])
+    iqr = float(q3 - q1)
+    if not np.isfinite(iqr) or iqr <= 1e-9:
+        return array
+    lower = float(q1 - DEPTH_CLUSTER_OUTLIER_IQR_FACTOR * iqr)
+    upper = float(q3 + DEPTH_CLUSTER_OUTLIER_IQR_FACTOR * iqr)
+    filtered = array[(array >= lower) & (array <= upper)]
+    return filtered if filtered.size >= 2 else array
+
+
+def _cluster_anchor_value(values: np.ndarray) -> float:
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        raise ValueError("Cluster anchor cannot be built from empty values.")
+    min_value = float(np.min(array))
+    std_value = float(np.std(array, ddof=0)) if array.size > 1 else 0.0
+    anchor = min_value + max(std_value, 0.0)
+    return float(np.clip(anchor, min_value, float(np.max(array))))
 
 
 def summarize_actual_fund_by_pad(

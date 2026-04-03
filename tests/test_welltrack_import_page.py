@@ -1093,6 +1093,26 @@ def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
     assert records[1].points[2].y == pytest.approx(1980.0)
 
 
+def test_normalize_source_table_df_for_ui_accepts_excel_like_single_column_rows() -> None:
+    page = _load_welltrack_page_module()
+
+    normalized = page._normalize_source_table_df_for_ui(
+        pd.DataFrame(
+            {
+                "Column 1": [
+                    "TAB-01\tS\t0\t0\t0",
+                    "TAB-01\tt1\t600,5\t800,25\t2400,75",
+                    "TAB-01\tt3\t1500\t2000\t2500",
+                ]
+            }
+        )
+    )
+
+    assert list(normalized.columns) == ["Wellname", "Point", "X", "Y", "Z"]
+    assert normalized.iloc[0].to_dict()["Point"] == "S"
+    assert str(normalized.iloc[1]["X"]) == "600,5"
+
+
 def test_normalize_source_table_df_for_ui_uses_s_for_surface_point() -> None:
     page = _load_welltrack_page_module()
     normalized = page._normalize_source_table_df_for_ui(

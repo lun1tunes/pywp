@@ -26,7 +26,7 @@ def test_generated_actual_fund_depth_cluster_welltracks_are_clusterable() -> Non
     assert kop_function is not None
     assert kop_function.mode == "piecewise_linear"
     assert tuple(round(value, 1) for value in kop_function.anchor_kop_md_m) == (
-        round(float(clusters[0].median_kop_md_m), 1),
-        round(float(clusters[1].median_kop_md_m), 1),
-        round(float(clusters[2].median_kop_md_m), 1),
+        round(float(clusters[0].anchor_kop_md_m), 1),
+        round(float(clusters[1].anchor_kop_md_m), 1),
+        round(float(clusters[2].anchor_kop_md_m), 1),
     )

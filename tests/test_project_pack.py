@@ -32,6 +32,7 @@ def test_collect_files_skips_excluded_and_poetry(tmp_path: Path) -> None:
     (root / "pyproject.toml").write_text("[project]\nname='pywp'\n", encoding="utf-8")
     (root / ".streamlit" / "config.toml").write_text("[theme]\n", encoding="utf-8")
     (root / "tools" / "viewer.json").write_text('{"ok": true}\n', encoding="utf-8")
+    (root / "tools" / "sample.inc").write_text("WELLTRACK 'A'\n/\n", encoding="utf-8")
     (root / "tools" / "template.html").write_text("<html></html>\n", encoding="utf-8")
     (root / "tools" / "widget.js").write_text("console.log('ok')\n", encoding="utf-8")
     (root / "tools" / "theme.css").write_text("body{}\n", encoding="utf-8")
@@ -56,6 +57,7 @@ def test_collect_files_skips_excluded_and_poetry(tmp_path: Path) -> None:
         "requirements-dev.txt",
         "requirements.txt",
         "tools/notes.md",
+        "tools/sample.inc",
         "tools/template.html",
         "tools/theme.css",
         "tools/viewer.json",
@@ -79,6 +81,7 @@ def test_pack_and_unpack_restore_contents(tmp_path: Path) -> None:
         ".streamlit/config.toml": "[theme]\nbase='light'\n",
         "pywp/three_viewer_assets/vendor/OrbitControls.js": "window.OrbitControls = {};\n",
         "viewer.json": '{"version": 1}\n',
+        "sample.inc": "WELLTRACK 'A'\n/\n",
     }
     for relative_path, content in original_files.items():
         target = root / relative_path

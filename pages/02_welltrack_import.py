@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 from pathlib import Path
+import re
 from time import perf_counter
 from typing import Callable, Iterable, Mapping
 
@@ -2204,12 +2205,25 @@ def _run_actual_fund_calibration_with_status(
     eligible_count = sum(1 for item in analyses if bool(item.metrics.is_analysis_eligible))
     _emit(progress, 18, "Подготовка фактического фонда.")
     _emit(progress, 34, "Фильтрация невалидных, не-горизонтальных и pilot `_PL` скважин.")
-    result = calibrate_uncertainty_from_actual_fund(
-        actual_wells=actual_wells,
-        analyses=analyses,
-        base_model=planning_uncertainty_model_for_preset(base_preset),
-        base_preset=base_preset,
-    )
+    try:
+        result = calibrate_uncertainty_from_actual_fund(
+            actual_wells=actual_wells,
+            analyses=analyses,
+            base_model=planning_uncertainty_model_for_preset(base_preset),
+            base_preset=base_preset,
+        )
+    except Exception as exc:
+        _emit(progress, 100, f"Ошибка калибровки: {type(exc).__name__}: {exc}")
+        progress.empty()
+        st.session_state["wt_actual_fund_calibration_run"] = {
+            "cached": False,
+            "runtime_s": float(perf_counter() - started_at),
+            "log_lines": tuple(log_lines),
+            "status": f"Ошибка: {type(exc).__name__}",
+            "well_count": int(len(actual_wells)),
+            "eligible_well_count": int(eligible_count),
+        }
+        raise
     _emit(progress, 82, "Подгонка пользовательской anti-collision функции.")
     if getattr(result, "custom_model", None) is not None:
         _emit(progress, 100, "Пользовательская anti-collision функция построена.")
@@ -2327,7 +2341,8 @@ def _empty_source_table_df() -> pd.DataFrame:
 def _normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataFrame:
     if table_df is None:
         return _empty_source_table_df()
-    normalized_df = pd.DataFrame(table_df).copy()
+    normalized_df = _coerce_source_table_df_columns(pd.DataFrame(table_df).copy())
+    normalized_df = _expand_single_column_source_table_df(normalized_df)
     if "Point" in normalized_df.columns:
         normalized_df["Point"] = normalized_df["Point"].map(
             lambda value: (
@@ -2336,7 +2351,84 @@ def _normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataF
                 else value
             )
         )
-    return normalized_df
+    for column in ("Wellname", "Point", "X", "Y", "Z"):
+        if column not in normalized_df.columns:
+            normalized_df[column] = "" if column in {"Wellname", "Point"} else np.nan
+    return normalized_df.loc[:, ["Wellname", "Point", "X", "Y", "Z"]]
+
+
+def _coerce_source_table_df_columns(table_df: pd.DataFrame) -> pd.DataFrame:
+    alias_map = {
+        "wellname": "Wellname",
+        "well_name": "Wellname",
+        "well name": "Wellname",
+        "well": "Wellname",
+        "name": "Wellname",
+        "point": "Point",
+        "pointname": "Point",
+        "point_name": "Point",
+        "point name": "Point",
+        "точка": "Point",
+        "x": "X",
+        "east": "X",
+        "easting": "X",
+        "x_m": "X",
+        "y": "Y",
+        "north": "Y",
+        "northing": "Y",
+        "y_m": "Y",
+        "z": "Z",
+        "tvd": "Z",
+        "z_tvd": "Z",
+        "z_m": "Z",
+    }
+    renamed: dict[object, str] = {}
+    for raw_column in list(table_df.columns):
+        column_text = str(raw_column).strip()
+        normalized = re.sub(r"[\s\-/(),.:]+", "_", column_text.lower()).strip("_")
+        if column_text.lower().startswith("unnamed"):
+            continue
+        if normalized in alias_map:
+            renamed[raw_column] = alias_map[normalized]
+            continue
+        if column_text in {"Wellname", "Point", "X", "Y", "Z"}:
+            renamed[raw_column] = column_text
+    kept_columns = [column for column in table_df.columns if column in renamed]
+    if not kept_columns and len(table_df.columns) == 1:
+        return table_df
+    if kept_columns:
+        table_df = table_df.loc[:, kept_columns].rename(columns=renamed)
+    return table_df
+
+
+def _expand_single_column_source_table_df(table_df: pd.DataFrame) -> pd.DataFrame:
+    if len(table_df.columns) != 1:
+        return table_df
+    series = table_df.iloc[:, 0]
+    non_blank_values = [
+        str(value).strip()
+        for value in series
+        if not pd.isna(value) and str(value).strip()
+    ]
+    if not non_blank_values:
+        return table_df
+    if not any("\t" in value or ";" in value for value in non_blank_values):
+        return table_df
+    rows: list[dict[str, object]] = []
+    for raw_value in non_blank_values:
+        tokens = [token.strip() for token in re.split(r"[\t;]+", raw_value) if token.strip()]
+        if len(tokens) not in {5, 6}:
+            return table_df
+        rows.append(
+            {
+                "Wellname": tokens[0],
+                "Point": tokens[1],
+                "X": tokens[2],
+                "Y": tokens[3],
+                "Z": tokens[4],
+            }
+        )
+    return pd.DataFrame(rows, columns=["Wellname", "Point", "X", "Y", "Z"])
 
 
 def _empty_reference_trajectory_df() -> pd.DataFrame:
@@ -6612,7 +6704,15 @@ def _render_actual_fund_analysis_panel(
         return
 
     if analyses is None:
-        analyses = _actual_fund_analyses(actual_wells)
+        try:
+            analyses = _actual_fund_analyses(actual_wells)
+        except Exception as exc:
+            with st.expander("Анализ фактического фонда", expanded=False):
+                st.error(
+                    "Не удалось построить анализ фактического фонда для загруженных скважин."
+                )
+                st.caption(f"{type(exc).__name__}: {exc}")
+            return
     metrics = tuple(item.metrics for item in analyses)
     eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
     excluded_horizontal_metrics = [
@@ -6677,8 +6777,9 @@ def _render_actual_fund_analysis_panel(
         if kop_depth_function is not None:
             st.markdown("#### KOP / TVD по фактическому фонду")
             st.caption(
-                "Скважины сгруппированы по глубине входа в горизонталь. По медианам "
-                "этих групп строится функция KOP / TVD, которую можно применить к "
+                "Скважины сгруппированы по глубине входа в горизонталь. Для каждой "
+                "группы якорь функции берётся как `min + 1σ` после отсечения явных "
+                "выбросов. Полученная функция KOP / TVD применяется к "
                 "рассчитываемым скважинам через глубину `t1`."
             )
             figure = _actual_fund_kop_depth_figure(metrics)
@@ -6754,22 +6855,32 @@ def _render_actual_fund_analysis_panel(
             icon=":material/tune:",
             width="stretch",
         ):
-            result = _run_actual_fund_calibration_with_status(
-                actual_wells=actual_wells,
-                analyses=analyses,
-                base_preset=calibration_base_preset,
-            )
-            st.session_state["wt_actual_fund_calibration_result"] = result
-            st.session_state["wt_actual_fund_custom_model"] = result.custom_model
-            if result.custom_model is not None:
-                st.session_state["wt_anticollision_uncertainty_preset"] = (
-                    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
+            try:
+                result = _run_actual_fund_calibration_with_status(
+                    actual_wells=actual_wells,
+                    analyses=analyses,
+                    base_preset=calibration_base_preset,
                 )
-                _reset_anticollision_view_state(clear_prepared=False)
-                st.toast(
-                    "Пользовательская функция конусов построена и выбрана в anti-collision."
+            except Exception as exc:
+                st.session_state["wt_actual_fund_calibration_result"] = None
+                st.session_state["wt_actual_fund_custom_model"] = None
+                st.error(
+                    "Не удалось откалибровать пользовательскую anti-collision функцию. "
+                    "Проверьте лог расчёта ниже."
                 )
-            st.rerun()
+                st.caption(f"{type(exc).__name__}: {exc}")
+            else:
+                st.session_state["wt_actual_fund_calibration_result"] = result
+                st.session_state["wt_actual_fund_custom_model"] = result.custom_model
+                if result.custom_model is not None:
+                    st.session_state["wt_anticollision_uncertainty_preset"] = (
+                        UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
+                    )
+                    _reset_anticollision_view_state(clear_prepared=False)
+                    st.toast(
+                        "Пользовательская функция конусов построена и выбрана в anti-collision."
+                    )
+                st.rerun()
 
         calibration_result = st.session_state.get("wt_actual_fund_calibration_result")
         if calibration_result is not None:

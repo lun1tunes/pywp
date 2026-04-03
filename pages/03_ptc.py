@@ -230,11 +230,19 @@ def _render_ptc_reference_section(wt: ModuleType) -> None:
     approved_wells = tuple(wt._reference_kind_wells(wt.REFERENCE_WELL_APPROVED))
     if approved_wells:
         with st.expander("Просмотр загруженных утверждённых проектных скважин", expanded=False):
-            wt._render_reference_well_detail(
-                wt.build_actual_fund_well_analyses(approved_wells),
-                select_label="Просмотр утвержденной проектной скважины",
-                selected_key="wt_approved_fund_selected_well",
-            )
+            try:
+                approved_analyses = wt.build_actual_fund_well_analyses(approved_wells)
+            except Exception as exc:
+                st.error(
+                    "Не удалось построить просмотр утверждённого проектного фонда."
+                )
+                st.caption(f"{type(exc).__name__}: {exc}")
+            else:
+                wt._render_reference_well_detail(
+                    approved_analyses,
+                    select_label="Просмотр утвержденной проектной скважины",
+                    selected_key="wt_approved_fund_selected_well",
+                )
 
 
 def _render_ptc_run_section(wt: ModuleType, *, records: list[object]) -> None:

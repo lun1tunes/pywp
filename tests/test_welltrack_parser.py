@@ -156,3 +156,30 @@ def test_parse_welltrack_points_table_reports_expected_s_in_unsupported_point_er
                 {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
             ]
         )
+
+
+def test_parse_welltrack_points_table_accepts_excel_style_numeric_strings() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Well name": "WELL-A", "Point name": "S", "X": "0", "Y": "0", "Z": "0"},
+            {
+                "Well name": "WELL-A",
+                "Point name": "t1",
+                "X": "600,5",
+                "Y": "800,25",
+                "Z": "2 400,75",
+            },
+            {
+                "Well name": "WELL-A",
+                "Point name": "t3",
+                "X": "1'500,5",
+                "Y": "2 000,0",
+                "Z": "2500,0",
+            },
+        ]
+    )
+
+    assert len(records) == 1
+    assert records[0].points[1].x == pytest.approx(600.5)
+    assert records[0].points[1].z == pytest.approx(2400.75)
+    assert records[0].points[2].x == pytest.approx(1500.5)

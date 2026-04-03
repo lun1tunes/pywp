@@ -8,6 +8,7 @@ import pytest
 
 import pywp.actual_fund_analysis as actual_fund_analysis_module
 from pywp.actual_fund_analysis import (
+    ActualFundWellMetrics,
     CALIBRATION_STATUS_READY,
     _reconstruct_actual_survey,
     actual_well_family_name,
@@ -328,5 +329,101 @@ def test_depth_cluster_summary_and_kop_function_build_from_generated_dataset() -
     assert kop_function is not None
     assert kop_function.mode == "piecewise_linear"
     assert tuple(round(value, 1) for value in kop_function.anchor_depths_tvd_m) == tuple(
-        round(float(cluster.median_horizontal_entry_tvd_m), 1) for cluster in clusters
+        round(float(cluster.anchor_horizontal_entry_tvd_m), 1) for cluster in clusters
     )
+
+
+def test_depth_cluster_anchor_uses_min_plus_std_after_outlier_filter() -> None:
+    metrics = (
+        ActualFundWellMetrics(
+            name="A",
+            family_name="A",
+            pad_group="1",
+            is_horizontal=True,
+            md_total_m=0.0,
+            tvd_end_m=0.0,
+            lateral_departure_m=0.0,
+            kop_md_m=800.0,
+            kop_tvd_m=700.0,
+            horizontal_entry_md_m=2000.0,
+            horizontal_entry_tvd_m=1800.0,
+            horizontal_length_m=1000.0,
+            hold_inc_deg=45.0,
+            hold_azi_deg=90.0,
+            hold_length_m=300.0,
+            max_inc_deg=90.0,
+            max_dls_deg_per_30m=2.0,
+            max_build_dls_before_hold_deg_per_30m=2.0,
+            is_analysis_eligible=True,
+        ),
+        ActualFundWellMetrics(
+            name="B",
+            family_name="B",
+            pad_group="1",
+            is_horizontal=True,
+            md_total_m=0.0,
+            tvd_end_m=0.0,
+            lateral_departure_m=0.0,
+            kop_md_m=820.0,
+            kop_tvd_m=710.0,
+            horizontal_entry_md_m=2000.0,
+            horizontal_entry_tvd_m=1820.0,
+            horizontal_length_m=1000.0,
+            hold_inc_deg=45.0,
+            hold_azi_deg=90.0,
+            hold_length_m=300.0,
+            max_inc_deg=90.0,
+            max_dls_deg_per_30m=2.0,
+            max_build_dls_before_hold_deg_per_30m=2.0,
+            is_analysis_eligible=True,
+        ),
+        ActualFundWellMetrics(
+            name="C",
+            family_name="C",
+            pad_group="1",
+            is_horizontal=True,
+            md_total_m=0.0,
+            tvd_end_m=0.0,
+            lateral_departure_m=0.0,
+            kop_md_m=840.0,
+            kop_tvd_m=720.0,
+            horizontal_entry_md_m=2000.0,
+            horizontal_entry_tvd_m=1840.0,
+            horizontal_length_m=1000.0,
+            hold_inc_deg=45.0,
+            hold_azi_deg=90.0,
+            hold_length_m=300.0,
+            max_inc_deg=90.0,
+            max_dls_deg_per_30m=2.0,
+            max_build_dls_before_hold_deg_per_30m=2.0,
+            is_analysis_eligible=True,
+        ),
+        ActualFundWellMetrics(
+            name="OUTLIER",
+            family_name="OUTLIER",
+            pad_group="1",
+            is_horizontal=True,
+            md_total_m=0.0,
+            tvd_end_m=0.0,
+            lateral_departure_m=0.0,
+            kop_md_m=1400.0,
+            kop_tvd_m=1300.0,
+            horizontal_entry_md_m=2000.0,
+            horizontal_entry_tvd_m=1950.0,
+            horizontal_length_m=1000.0,
+            hold_inc_deg=45.0,
+            hold_azi_deg=90.0,
+            hold_length_m=300.0,
+            max_inc_deg=90.0,
+            max_dls_deg_per_30m=2.0,
+            max_build_dls_before_hold_deg_per_30m=2.0,
+            is_analysis_eligible=True,
+        ),
+    )
+
+    clusters = summarize_actual_fund_by_depth(metrics, relative_tolerance=0.5)
+
+    assert len(clusters) == 1
+    cluster = clusters[0]
+    assert cluster.anchor_horizontal_entry_tvd_m < 2000.0
+    assert cluster.anchor_kop_md_m < 900.0
