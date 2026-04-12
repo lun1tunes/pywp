@@ -359,7 +359,7 @@ def _parse_well_name(rest: str, line_no: int) -> tuple[str, str]:
         if end_quote_idx < 0:
             raise WelltrackParseError(f"Unclosed quoted well name at line {line_no}.")
         name = tail[1:end_quote_idx].strip()
-        remainder = tail[end_quote_idx + 1 :].strip()
+        remainder = tail[end_quote_idx + 1:].strip()
         if not name:
             raise WelltrackParseError(f"Empty quoted well name at line {line_no}.")
         return name, remainder

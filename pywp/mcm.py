@@ -3,10 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from pywp.constants import DEG2RAD, RAD2DEG
 from pywp.models import Point3D
-
-DEG2RAD = np.pi / 180.0
-RAD2DEG = 180.0 / np.pi
 _DOGLEG_SINGULARITY_TOL_RAD = 1e-3
 
 

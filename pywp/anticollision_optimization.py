@@ -9,13 +9,12 @@ from pywp.mcm import minimum_curvature_increment
 from pywp.models import Point3D
 from pywp.planner_types import ProfileParameters
 from pywp.planner_validation import _build_trajectory
+from pywp.constants import SMALL
 from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     PlanningUncertaintyModel,
     station_uncertainty_covariance_xyz_many,
 )
-
-SMALL = 1e-9
 AntiCollisionSegment = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]
 
 

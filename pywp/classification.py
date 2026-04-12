@@ -116,7 +116,7 @@ def _resolve_rule_column(field_name: str) -> list[float]:
             continue
 
         fallback: float | None = None
-        for right in CLASSIFICATION_RULES[idx + 1 :]:
+        for right in CLASSIFICATION_RULES[idx + 1:]:
             candidate = _optional_rule_value(right, field_name)
             if candidate is not None:
                 fallback = float(candidate)

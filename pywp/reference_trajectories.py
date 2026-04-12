@@ -8,6 +8,7 @@ from typing import Iterable, Mapping
 import numpy as np
 import pandas as pd
 
+from pywp.constants import SMALL
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackRecord,
@@ -69,7 +70,9 @@ def parse_reference_trajectory_table(
         if default_kind is not None
         else None
     )
-    grouped_rows: dict[tuple[str, str], list[tuple[int, float, float, float, float]]] = {}
+    grouped_rows: dict[
+        tuple[str, str], list[tuple[int, float, float, float, float]]
+    ] = {}
     group_order: list[tuple[str, str]] = []
     has_non_empty_row = False
 
@@ -125,7 +128,10 @@ def parse_reference_trajectory_table(
             )
         sorted_rows = sorted(point_rows, key=lambda item: float(item[4]))
         md_values = [float(item[4]) for item in sorted_rows]
-        if any(md_values[index + 1] <= md_values[index] + 1e-9 for index in range(len(md_values) - 1)):
+        if any(
+            md_values[index + 1] <= md_values[index] + SMALL
+            for index in range(len(md_values) - 1)
+        ):
             raise WelltrackParseError(
                 f"Таблица дополнительных скважин: MD для '{well_name}' должны быть строго возрастающими."
             )
@@ -326,7 +332,7 @@ def build_reference_trajectory_stations(
         raise WelltrackParseError(
             "все значения X, Y, Z и MD должны быть конечными числами"
         )
-    if np.any(np.diff(md_values) <= 1e-9):
+    if np.any(np.diff(md_values) <= SMALL):
         raise WelltrackParseError("MD должен строго возрастать по траектории")
 
     tangent_x = _local_derivative(md_values, x_values)
@@ -399,18 +405,22 @@ def _infer_reference_azimuth_deg(stations: pd.DataFrame) -> float:
     dx = np.diff(x_values)
     dy = np.diff(y_values)
     lengths = np.hypot(dx, dy)
-    valid = lengths > 1e-9
+    valid = lengths > SMALL
     if not np.any(valid):
         return 0.0
     first_index = int(np.argmax(valid))
-    return float((np.degrees(np.arctan2(dx[first_index], dy[first_index])) + 360.0) % 360.0)
+    return float(
+        (np.degrees(np.arctan2(dx[first_index], dy[first_index])) + 360.0) % 360.0
+    )
 
 
 def _local_derivative(md_values: np.ndarray, values: np.ndarray) -> np.ndarray:
     result = np.zeros_like(values, dtype=float)
     if len(values) == 2:
         delta_md = float(md_values[1] - md_values[0])
-        slope = 0.0 if abs(delta_md) <= 1e-12 else float(values[1] - values[0]) / delta_md
+        slope = (
+            0.0 if abs(delta_md) <= 1e-12 else float(values[1] - values[0]) / delta_md
+        )
         result[:] = slope
         return result
     for index in range(len(values)):
@@ -424,7 +434,11 @@ def _local_derivative(md_values: np.ndarray, values: np.ndarray) -> np.ndarray:
             left = index - 1
             right = index + 1
         delta_md = float(md_values[right] - md_values[left])
-        result[index] = 0.0 if abs(delta_md) <= 1e-12 else float(values[right] - values[left]) / delta_md
+        result[index] = (
+            0.0
+            if abs(delta_md) <= 1e-12
+            else float(values[right] - values[left]) / delta_md
+        )
     return result
 
 

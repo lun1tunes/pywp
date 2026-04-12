@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from pywp.classification import TRAJECTORY_REVERSE_DIRECTION
+from pywp.constants import DEG2RAD, RAD2DEG, SMALL
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.planner_types import PlanningError, SectionGeometry
-
-DEG2RAD = np.pi / 180.0
-RAD2DEG = 180.0 / np.pi
-SMALL = 1e-9
 
 
 def _normalize_azimuth_deg(azimuth_deg: float) -> float:
@@ -135,17 +131,3 @@ def _build_section_geometry(
         t1_north_m=float(t1.y - surface.y),
         t1_tvd_m=float(t1.z - surface.z),
     )
-
-
-def _is_geometry_coplanar(geometry: SectionGeometry, tolerance_m: float) -> bool:
-    return bool(abs(geometry.t1_cross_m) <= tolerance_m and abs(geometry.t3_cross_m) <= tolerance_m)
-
-
-def _is_zero_azimuth_turn_geometry(
-    geometry: SectionGeometry,
-    target_direction: str,
-    tolerance_m: float,
-) -> bool:
-    if str(target_direction) == TRAJECTORY_REVERSE_DIRECTION:
-        return False
-    return _is_geometry_coplanar(geometry=geometry, tolerance_m=tolerance_m)

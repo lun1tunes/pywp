@@ -5,9 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from pywp.constants import DEG2RAD
 from pywp.models import Point3D
-
-DEG2RAD = np.pi / 180.0
 _REQUIRED_STATION_COLUMNS = frozenset({"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"})
 UNCERTAINTY_PRESET_OPTIMISTIC = "optimistic"
 UNCERTAINTY_PRESET_ORDINARY_MWD = "ordinary_mwd"
@@ -72,6 +71,7 @@ class PlanningUncertaintyModel:
             raise ValueError("min_refined_step_m must be positive.")
         if float(self.min_refined_step_m) > float(self.sample_step_m):
             raise ValueError("min_refined_step_m must be <= sample_step_m.")
+
 
 PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
     UNCERTAINTY_PRESET_OPTIMISTIC: PlanningUncertaintyModel(

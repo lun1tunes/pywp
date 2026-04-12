@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,9 +10,12 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from pywp import ptc_core as wt_import_module
-
 from pywp.actual_fund_analysis import ActualFundKopDepthFunction
-from pywp.anticollision import AntiCollisionAnalysis, AntiCollisionCorridor, build_anti_collision_well
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    AntiCollisionCorridor,
+    build_anti_collision_well,
+)
 from pywp.anticollision_optimization import (
     AntiCollisionOptimizationContext,
     build_anti_collision_reference_path,
@@ -21,16 +25,20 @@ from pywp.anticollision_recommendations import (
     build_anti_collision_recommendations,
 )
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.models import Point3D, TrajectoryConfig
 from pywp.mcm import compute_positions_min_curv
+from pywp.models import Point3D, TrajectoryConfig
 from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.reference_trajectories import parse_reference_trajectory_table
-from pywp.ui_calc_params import clear_kop_min_vertical_function, set_kop_min_vertical_function
+from pywp.ui_calc_params import (
+    clear_kop_min_vertical_function,
+    set_kop_min_vertical_function,
+)
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
     UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND,
     planning_uncertainty_model_for_preset,
 )
+from pywp.well_pad import detect_well_pads
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 pytestmark = pytest.mark.integration
@@ -227,7 +235,11 @@ def _click_button(at: AppTest, label: str) -> None:
 
 def _surface_points(records: list[WelltrackRecord]) -> list[tuple[float, float, float]]:
     return [
-        (float(record.points[0].x), float(record.points[0].y), float(record.points[0].z))
+        (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
         for record in records
         if record.points
     ]
@@ -289,7 +301,9 @@ def test_analysis_reference_wells_rebuilds_surface_as_current_point3d() -> None:
     assert reference_wells[0].surface == Point3D(x=100.0, y=200.0, z=5.0)
 
 
-def test_records_overview_dataframe_detects_missing_surface_s_by_surface_z_heuristic() -> None:
+def test_records_overview_dataframe_detects_missing_surface_s_by_surface_z_heuristic() -> (
+    None
+):
     page = wt_import_module
     missing_surface = WelltrackRecord(
         name="NO-S",
@@ -346,8 +360,7 @@ def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None
     at.run(timeout=120)
 
     assert any(
-        "Проверка порядка t1/t3 — OK." in str(widget.value)
-        for widget in at.success
+        "Проверка порядка t1/t3 — OK." in str(widget.value) for widget in at.success
     )
 
 
@@ -362,11 +375,12 @@ def test_welltrack_page_hides_t1_t3_warning_after_keep_action() -> None:
     at.run(timeout=120)
 
     assert any(
-        "Порядок t1/t3 оставлен без изменений для скважин: BAD-1."
-        in str(widget.value)
+        "Порядок t1/t3 оставлен без изменений для скважин: BAD-1." in str(widget.value)
         for widget in at.info
     )
-    assert not any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+    assert not any(
+        "Вероятно, порядок точек" in str(widget.value) for widget in at.warning
+    )
 
 
 def test_welltrack_page_shows_only_remaining_t1_t3_issue_after_partial_fix() -> None:
@@ -511,7 +525,13 @@ def _vertical_successful_plan(
             "INC_deg": [0.0, 0.0, 0.0, 20.0, 55.0],
             "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0],
             "X_m": [0.0, 0.0, 0.0, 60.0, 340.0],
-            "Y_m": [y_offset_m, y_offset_m, y_offset_m, lateral_y_t1_m, lateral_y_end_m],
+            "Y_m": [
+                y_offset_m,
+                y_offset_m,
+                y_offset_m,
+                lateral_y_t1_m,
+                lateral_y_end_m,
+            ],
             "Z_m": [0.0, 500.0, 1000.0, 1450.0, 1750.0],
             "DLS_deg_per_30m": [0.0, 0.0, 0.0, 3.0, 3.0],
             "segment": ["VERTICAL", "VERTICAL", "VERTICAL", "BUILD1", "BUILD1"],
@@ -529,12 +549,54 @@ def _reference_wells():
     return tuple(
         parse_reference_trajectory_table(
             [
-                {"Wellname": "FACT-1", "Type": "actual", "X": 0.0, "Y": 25.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "FACT-1", "Type": "actual", "X": 900.0, "Y": 25.0, "Z": 300.0, "MD": 950.0},
-                {"Wellname": "FACT-1", "Type": "actual", "X": 1800.0, "Y": 25.0, "Z": 400.0, "MD": 1900.0},
-                {"Wellname": "APP-1", "Type": "approved", "X": 0.0, "Y": -35.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "APP-1", "Type": "approved", "X": 850.0, "Y": -35.0, "Z": 250.0, "MD": 900.0},
-                {"Wellname": "APP-1", "Type": "approved", "X": 1750.0, "Y": -35.0, "Z": 350.0, "MD": 1850.0},
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 25.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 900.0,
+                    "Y": 25.0,
+                    "Z": 300.0,
+                    "MD": 950.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 1800.0,
+                    "Y": 25.0,
+                    "Z": 400.0,
+                    "MD": 1900.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": "approved",
+                    "X": 0.0,
+                    "Y": -35.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": "approved",
+                    "X": 850.0,
+                    "Y": -35.0,
+                    "Z": 250.0,
+                    "MD": 900.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": "approved",
+                    "X": 1750.0,
+                    "Y": -35.0,
+                    "Z": 350.0,
+                    "MD": 1850.0,
+                },
             ]
         )
     )
@@ -544,10 +606,38 @@ def _far_reference_wells():
     return tuple(
         parse_reference_trajectory_table(
             [
-                {"Wellname": "FACT-FAR", "Type": "actual", "X": 50000.0, "Y": 50000.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "FACT-FAR", "Type": "actual", "X": 52000.0, "Y": 50000.0, "Z": 300.0, "MD": 2100.0},
-                {"Wellname": "APP-FAR", "Type": "approved", "X": -45000.0, "Y": -42000.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "APP-FAR", "Type": "approved", "X": -43000.0, "Y": -42000.0, "Z": 280.0, "MD": 2050.0},
+                {
+                    "Wellname": "FACT-FAR",
+                    "Type": "actual",
+                    "X": 50000.0,
+                    "Y": 50000.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-FAR",
+                    "Type": "actual",
+                    "X": 52000.0,
+                    "Y": 50000.0,
+                    "Z": 300.0,
+                    "MD": 2100.0,
+                },
+                {
+                    "Wellname": "APP-FAR",
+                    "Type": "approved",
+                    "X": -45000.0,
+                    "Y": -42000.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "APP-FAR",
+                    "Type": "approved",
+                    "X": -43000.0,
+                    "Y": -42000.0,
+                    "Z": 280.0,
+                    "MD": 2050.0,
+                },
             ]
         )
     )
@@ -557,11 +647,46 @@ def _horizontal_reference_well():
     return tuple(
         parse_reference_trajectory_table(
             [
-                {"Wellname": "FACT-H", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "FACT-H", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
-                {"Wellname": "FACT-H", "Type": "actual", "X": 100.0, "Y": 0.0, "Z": 1100.0, "MD": 1600.0},
-                {"Wellname": "FACT-H", "Type": "actual", "X": 700.0, "Y": 0.0, "Z": 1150.0, "MD": 2200.0},
-                {"Wellname": "FACT-H", "Type": "actual", "X": 1300.0, "Y": 0.0, "Z": 1200.0, "MD": 2800.0},
+                {
+                    "Wellname": "FACT-H",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-H",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 1000.0,
+                    "MD": 1000.0,
+                },
+                {
+                    "Wellname": "FACT-H",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 0.0,
+                    "Z": 1100.0,
+                    "MD": 1600.0,
+                },
+                {
+                    "Wellname": "FACT-H",
+                    "Type": "actual",
+                    "X": 700.0,
+                    "Y": 0.0,
+                    "Z": 1150.0,
+                    "MD": 2200.0,
+                },
+                {
+                    "Wellname": "FACT-H",
+                    "Type": "actual",
+                    "X": 1300.0,
+                    "Y": 0.0,
+                    "Z": 1200.0,
+                    "MD": 2800.0,
+                },
             ]
         )
     )
@@ -672,7 +797,9 @@ def test_welltrack_general_run_can_add_pad_to_existing_selection() -> None:
     ]
 
 
-def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_pad() -> None:
+def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_pad() -> (
+    None
+):
     page = wt_import_module
     records = _multi_pad_records()
     successes = [
@@ -699,9 +826,18 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
     focus_targets = dict(overrides["focus_targets"])
     hidden_labels = set(str(item) for item in overrides["hidden_flat_legend_labels"])
 
-    assert [str(item["label"]) for item in legend_tree] == ["Куст PAD-01", "Куст PAD-02"]
-    assert [str(child["label"]) for child in legend_tree[0]["children"]] == ["PAD1-A", "PAD1-B"]
-    assert [str(child["label"]) for child in legend_tree[1]["children"]] == ["PAD2-A", "PAD2-B"]
+    assert [str(item["label"]) for item in legend_tree] == [
+        "Куст PAD-01",
+        "Куст PAD-02",
+    ]
+    assert [str(child["label"]) for child in legend_tree[0]["children"]] == [
+        "PAD1-A",
+        "PAD1-B",
+    ]
+    assert [str(child["label"]) for child in legend_tree[1]["children"]] == [
+        "PAD2-A",
+        "PAD2-B",
+    ]
     assert set(focus_targets) == {
         "pad::PAD-01",
         "pad::PAD-02",
@@ -729,7 +865,9 @@ def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> Non
             {
                 "id": "pad::PAD-01",
                 "label": "Куст PAD-01",
-                "children": [{"id": "well::PAD1-A", "label": "PAD1-A", "color": "#22c55e"}],
+                "children": [
+                    {"id": "well::PAD1-A", "label": "PAD1-A", "color": "#22c55e"}
+                ],
             }
         ],
         focus_targets={"pad::PAD-01": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}},
@@ -775,9 +913,7 @@ def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
         for color_b in first_colors[index + 1 :]:
             red_b, green_b, blue_b = _rgb_triplet(color_b)
             distance = (
-                abs(red_a - red_b)
-                + abs(green_a - green_b)
-                + abs(blue_a - blue_b)
+                abs(red_a - red_b) + abs(green_a - green_b) + abs(blue_a - blue_b)
             )
             assert distance >= 115
 
@@ -909,10 +1045,14 @@ def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> Non
     assert [widget.label for widget in at.metric].count("Без замечаний") == 1
     assert [widget.label for widget in at.metric].count("С предупреждениями") == 1
     checkbox_labels = [widget.label for widget in at.checkbox]
-    assert "Использовать отдельные параметры для повторного расчета" not in checkbox_labels
+    assert (
+        "Использовать отдельные параметры для повторного расчета" not in checkbox_labels
+    )
 
 
-def test_welltrack_successful_batch_run_clears_stale_error_and_updates_selection_on_next_run() -> None:
+def test_welltrack_successful_batch_run_clears_stale_error_and_updates_selection_on_next_run() -> (
+    None
+):
     at = AppTest.from_file("pages/03_ptc.py")
     records = _records()
     at.session_state["wt_records"] = records
@@ -965,7 +1105,9 @@ def test_welltrack_page_keeps_single_general_run_form_after_results_exist() -> N
     assert "Скважины для повторного расчета" not in multiselect_labels
 
 
-def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_reset() -> None:
+def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_reset() -> (
+    None
+):
     at = AppTest.from_file("pages/03_ptc.py")
     at.session_state["wt_source_mode"] = "Файл по пути"
     at.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS2.INC"
@@ -998,7 +1140,9 @@ def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_res
     assert at.session_state["wt_pad_auto_applied_on_import"] is False
 
 
-def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface() -> None:
+def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface() -> (
+    None
+):
     page = wt_import_module
     page._init_state()
 
@@ -1017,7 +1161,7 @@ def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface(
 
 def test_pad_config_defaults_to_center_anchor_mode() -> None:
     page = wt_import_module
-    pads = page.detect_well_pads(_multi_pad_records())
+    pads = detect_well_pads(_multi_pad_records())
 
     defaults = page._pad_config_defaults(pads[0])
 
@@ -1036,9 +1180,13 @@ def test_project_pads_for_ui_groups_prepositioned_surfaces_into_single_pad() -> 
     assert bool(metadata[str(pads[1].pad_id)].source_surfaces_defined) is True
 
 
-def test_project_pads_for_ui_detects_submeter_surface_offsets_as_prepositioned() -> None:
+def test_project_pads_for_ui_detects_submeter_surface_offsets_as_prepositioned() -> (
+    None
+):
     page = wt_import_module
-    page.st.session_state["wt_records_original"] = list(_submeter_prepositioned_pad_records())
+    page.st.session_state["wt_records_original"] = list(
+        _submeter_prepositioned_pad_records()
+    )
 
     pads = page._project_pads_for_ui(_submeter_prepositioned_pad_records())
 
@@ -1056,7 +1204,9 @@ def test_build_pad_plan_map_skips_prepositioned_source_surface_pads() -> None:
     assert plan_map == {}
 
 
-def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference() -> None:
+def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference() -> (
+    None
+):
     at = AppTest.from_file("pages/03_ptc.py")
     records = _prepositioned_pad_records()
     at.session_state["wt_records"] = records
@@ -1077,10 +1227,22 @@ def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
         [
             {"Wellname": "TAB-01", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
             {"Wellname": "TAB-01", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
-            {"Wellname": "TAB-01", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {
+                "Wellname": "TAB-01",
+                "Point": "t3",
+                "X": 1500.0,
+                "Y": 2000.0,
+                "Z": 2500.0,
+            },
             {"Wellname": "TAB-02", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
             {"Wellname": "TAB-02", "Point": "t1", "X": 650.0, "Y": 780.0, "Z": 2300.0},
-            {"Wellname": "TAB-02", "Point": "t3", "X": 1550.0, "Y": 1980.0, "Z": 2400.0},
+            {
+                "Wellname": "TAB-02",
+                "Point": "t3",
+                "X": 1550.0,
+                "Y": 1980.0,
+                "Z": 2400.0,
+            },
         ]
     )
 
@@ -1094,7 +1256,9 @@ def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
     assert records[1].points[2].y == pytest.approx(1980.0)
 
 
-def test_normalize_source_table_df_for_ui_accepts_excel_like_single_column_rows() -> None:
+def test_normalize_source_table_df_for_ui_accepts_excel_like_single_column_rows() -> (
+    None
+):
     page = wt_import_module
 
     normalized = page._normalize_source_table_df_for_ui(
@@ -1119,9 +1283,21 @@ def test_normalize_source_table_df_for_ui_uses_s_for_surface_point() -> None:
     normalized = page._normalize_source_table_df_for_ui(
         pd.DataFrame(
             [
-                {"Wellname": "TAB-01", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {
+                    "Wellname": "TAB-01",
+                    "Point": "wellhead",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                },
                 {"Wellname": "TAB-01", "Point": "s", "X": 1.0, "Y": 2.0, "Z": 0.0},
-                {"Wellname": "TAB-01", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+                {
+                    "Wellname": "TAB-01",
+                    "Point": "t1",
+                    "X": 600.0,
+                    "Y": 800.0,
+                    "Z": 2400.0,
+                },
             ]
         )
     )
@@ -1242,7 +1418,9 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
     )
 
 
-def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_available() -> None:
+def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_available() -> (
+    None
+):
     at = AppTest.from_file("pages/03_ptc.py")
     records = _records()[:2]
     at.session_state["wt_records"] = records
@@ -1255,8 +1433,8 @@ def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_availab
         _successful_plan(name="WELL-A", y_offset_m=0.0),
         _successful_plan(name="WELL-B", y_offset_m=5.0),
     ]
-    at.session_state["wt_actual_fund_custom_model"] = planning_uncertainty_model_for_preset(
-        DEFAULT_UNCERTAINTY_PRESET
+    at.session_state["wt_actual_fund_custom_model"] = (
+        planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
     )
     at.session_state["wt_anticollision_uncertainty_preset"] = (
         UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
@@ -1286,7 +1464,9 @@ def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:
     at.run(timeout=120)
 
     detail_selectboxes = [
-        widget for widget in at.selectbox if widget.label == "Просмотр фактической скважины"
+        widget
+        for widget in at.selectbox
+        if widget.label == "Просмотр фактической скважины"
     ]
     assert detail_selectboxes
     assert str(detail_selectboxes[0].value) == "FACT-H"
@@ -1305,7 +1485,9 @@ def test_actual_fund_vertical_profile_uses_explicit_reversed_tvd_range() -> None
     assert str(figure.layout.xaxis.title.text) == "Координата по разрезу (м)"
 
 
-def test_actual_fund_plan_figure_uses_equalized_xy_view_without_embedded_title() -> None:
+def test_actual_fund_plan_figure_uses_equalized_xy_view_without_embedded_title() -> (
+    None
+):
     page = wt_import_module
     detail = page.build_actual_fund_well_analyses(list(_horizontal_reference_well()))[0]
 
@@ -1317,7 +1499,9 @@ def test_actual_fund_plan_figure_uses_equalized_xy_view_without_embedded_title()
 
 def test_actual_fund_profile_prefers_horizontal_azimuth_over_hold_azimuth() -> None:
     page = wt_import_module
-    detail = page.build_actual_fund_well_analyses(list(_turned_horizontal_reference_well()))[0]
+    detail = page.build_actual_fund_well_analyses(
+        list(_turned_horizontal_reference_well())
+    )[0]
 
     assert detail.metrics.hold_azi_deg is not None
     assert float(detail.metrics.hold_azi_deg) < 10.0
@@ -1327,7 +1511,9 @@ def test_actual_fund_profile_prefers_horizontal_azimuth_over_hold_azimuth() -> N
     assert 75.0 <= profile_azimuth <= 105.0
 
     figure = page._actual_fund_vertical_profile_figure(detail)
-    horizontal_trace = next(trace for trace in figure.data if str(trace.name) == "Горизонтальный")
+    horizontal_trace = next(
+        trace for trace in figure.data if str(trace.name) == "Горизонтальный"
+    )
     horizontal_x = np.asarray(horizontal_trace.x, dtype=float)
     assert float(np.max(horizontal_x) - np.min(horizontal_x)) > 300.0
 
@@ -1376,7 +1562,9 @@ def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> 
         anchor_kop_md_m=(780.0, 1180.0, 1680.0),
         note="test",
     )
-    set_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix, kop_function=kop_function)
+    set_kop_min_vertical_function(
+        prefix=page.WT_CALC_PARAMS.prefix, kop_function=kop_function
+    )
     base_config = TrajectoryConfig()
     records = {record.name: record for record in _records()}
 
@@ -1439,7 +1627,9 @@ def test_focus_all_wells_trajectory_results_sets_detail_three_defaults() -> None
     assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
 
 
-@pytest.mark.skip(reason="PTC page does not render view mode radio buttons present on the removed welltrack_import page")
+@pytest.mark.skip(
+    reason="PTC page does not render view mode radio buttons present on the removed welltrack_import page"
+)
 def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
     at = AppTest.from_file("pages/03_ptc.py")
     records = _records()
@@ -1474,13 +1664,17 @@ def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
         widget for widget in at.radio if widget.label == "Режим просмотра результатов"
     )
     all_wells_mode = next(
-        widget for widget in at.radio if widget.label == "Режим отображения всех скважин"
+        widget
+        for widget in at.radio
+        if widget.label == "Режим отображения всех скважин"
     )
     assert str(result_mode.value) == "Все скважины"
     assert str(all_wells_mode.value) == "Anti-collision"
 
 
-@pytest.mark.skip(reason="PTC page does not render single-event anticollision rerun selectbox present on the removed welltrack_import page")
+@pytest.mark.skip(
+    reason="PTC page does not render single-event anticollision rerun selectbox present on the removed welltrack_import page"
+)
 def test_welltrack_page_prepares_vertical_anticollision_rerun_plan() -> None:
     at = AppTest.from_file("pages/03_ptc.py")
     records = _records()[:2]
@@ -1611,7 +1805,9 @@ def test_build_prepared_trajectory_optimization_context_uses_pair_intervals() ->
         recommendation=recommendation,
         moving_success=successes[1],
         reference_success=successes[0],
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         all_successes=successes,
     )
 
@@ -1623,7 +1819,9 @@ def test_build_prepared_trajectory_optimization_context_uses_pair_intervals() ->
     assert context.references[0].md_end_m == pytest.approx(1700.0)
 
 
-def test_build_prepared_trajectory_optimization_context_includes_other_well_cones() -> None:
+def test_build_prepared_trajectory_optimization_context_includes_other_well_cones() -> (
+    None
+):
     page = wt_import_module
     analysis = AntiCollisionAnalysis(
         wells=(),
@@ -1674,7 +1872,9 @@ def test_build_prepared_trajectory_optimization_context_includes_other_well_cone
         recommendation=recommendation,
         moving_success=successes[1],
         reference_success=successes[0],
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         all_successes=successes,
     )
 
@@ -1732,7 +1932,9 @@ def test_build_prepared_late_trajectory_context_marks_build2_adjustment() -> Non
         recommendation=recommendation,
         moving_success=successes[0],
         reference_success=successes[1],
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         all_successes=successes,
     )
 
@@ -1802,7 +2004,9 @@ def test_format_prepared_override_scope_shows_local_mode_for_selected_wells() ->
         ),
     }
 
-    rows = page._format_prepared_override_scope(selected_names=["WELL-A", "WELL-B", "WELL-C"])
+    rows = page._format_prepared_override_scope(
+        selected_names=["WELL-A", "WELL-B", "WELL-C"]
+    )
 
     assert rows == [
         {
@@ -1891,7 +2095,9 @@ def test_build_last_anticollision_resolution_reports_sf_after() -> None:
             _successful_plan(name="WELL-A", y_offset_m=0.0),
             _successful_plan(name="WELL-B", y_offset_m=400.0),
         ],
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         uncertainty_preset=DEFAULT_UNCERTAINTY_PRESET,
     )
 
@@ -1902,7 +2108,9 @@ def test_build_last_anticollision_resolution_reports_sf_after() -> None:
     assert str(resolution["uncertainty_preset"]) == DEFAULT_UNCERTAINTY_PRESET
 
 
-def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(monkeypatch) -> None:
+def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(
+    monkeypatch,
+) -> None:
     page = wt_import_module
     page._init_state()
     calls = {"analysis": 0}
@@ -1936,7 +2144,9 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(m
 
     first = page._cached_anti_collision_view_model(
         successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         records=[],
     )
     assert first[0] is analysis
@@ -1947,14 +2157,18 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(m
 
     second = page._cached_anti_collision_view_model(
         successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         records=[],
     )
     assert second[0] is analysis
     assert calls["analysis"] == 1
     second_run = page.st.session_state["wt_anticollision_last_run"]
     assert bool(second_run["cached"]) is True
-    assert "Использован кэш anti-collision анализа." in "\n".join(second_run["log_lines"])
+    assert "Использован кэш anti-collision анализа." in "\n".join(
+        second_run["log_lines"]
+    )
 
 
 def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> None:
@@ -1978,7 +2192,10 @@ def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> Non
                 label_a_values=("", ""),
                 label_b_values=("", ""),
                 midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
                 separation_factor_values=np.array([0.78, 0.74], dtype=float),
                 overlap_depth_values_m=np.array([7.0, 8.0], dtype=float),
@@ -1998,8 +2215,13 @@ def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> Non
                 md_b_values_m=np.array([1800.0, 2250.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [30.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[20.0, 0.0, 0.0], [30.0, 0.0, 0.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
                 separation_factor_values=np.array([0.76, 0.71], dtype=float),
                 overlap_depth_values_m=np.array([9.0, 10.0], dtype=float),
@@ -2026,7 +2248,9 @@ def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> Non
     page._prepare_rerun_from_cluster(
         clusters[0],
         successes=successes,
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
     )
 
     prepared = page.st.session_state["wt_prepared_well_overrides"]
@@ -2038,13 +2262,19 @@ def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> Non
     assert float(context.candidate_md_end_m) == pytest.approx(2250.0)
     assert {str(item.well_name) for item in context.references} == {"WELL-A", "WELL-B"}
     assert {
-        str(item.well_name) for item in prepared["WELL-B"]["optimization_context"].references
+        str(item.well_name)
+        for item in prepared["WELL-B"]["optimization_context"].references
     } == {"WELL-A", "WELL-C"}
     assert {
-        str(item.well_name) for item in prepared["WELL-A"]["optimization_context"].references
+        str(item.well_name)
+        for item in prepared["WELL-A"]["optimization_context"].references
     } == {"WELL-B", "WELL-C"}
     assert str(payload["source"]).startswith("ac-cluster-")
-    assert page.st.session_state["wt_pending_selected_names"] == ["WELL-C", "WELL-B", "WELL-A"]
+    assert page.st.session_state["wt_pending_selected_names"] == [
+        "WELL-C",
+        "WELL-B",
+        "WELL-A",
+    ]
     snapshot = dict(page.st.session_state["wt_prepared_recommendation_snapshot"])
     assert str(snapshot["kind"]) == "cluster"
     assert len(tuple(snapshot["items"])) == 2
@@ -2071,7 +2301,10 @@ def test_prepare_rerun_from_cluster_persists_pad_scoped_target_wells() -> None:
                 label_a_values=("", ""),
                 label_b_values=("", ""),
                 midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
                 separation_factor_values=np.array([0.78, 0.74], dtype=float),
                 overlap_depth_values_m=np.array([7.0, 8.0], dtype=float),
@@ -2154,7 +2387,10 @@ def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() ->
                 label_a_values=("t1",),
                 label_b_values=("t1",),
                 midpoint_xyz=np.array([[0.0, 0.0, 2400.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([8.0], dtype=float),
                 separation_factor_values=np.array([0.63], dtype=float),
                 overlap_depth_values_m=np.array([12.0], dtype=float),
@@ -2174,8 +2410,13 @@ def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() ->
                 md_b_values_m=np.array([1750.0, 2200.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
                 separation_factor_values=np.array([0.79, 0.74], dtype=float),
                 overlap_depth_values_m=np.array([7.0, 9.0], dtype=float),
@@ -2202,7 +2443,9 @@ def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() ->
     page._prepare_rerun_from_cluster(
         clusters[0],
         successes=successes,
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
     )
 
     assert page.st.session_state["wt_prepared_well_overrides"] == {}
@@ -2214,7 +2457,9 @@ def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() ->
     assert "spacing целей" in str(page.st.session_state["wt_prepared_override_message"])
 
 
-def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_well_plan() -> None:
+def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_well_plan() -> (
+    None
+):
     page = wt_import_module
     well_a_stations = pd.DataFrame(
         {
@@ -2297,8 +2542,13 @@ def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_we
                 md_b_values_m=np.array([410.0, 710.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
                 separation_factor_values=np.array([0.82, 0.78], dtype=float),
                 overlap_depth_values_m=np.array([5.0, 7.0], dtype=float),
@@ -2318,8 +2568,13 @@ def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_we
                 md_b_values_m=np.array([1700.0, 2000.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
                 separation_factor_values=np.array([0.76, 0.73], dtype=float),
                 overlap_depth_values_m=np.array([7.0, 9.0], dtype=float),
@@ -2333,8 +2588,12 @@ def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_we
         worst_separation_factor=0.73,
     )
     successes = [
-        _successful_plan(name="WELL-A", y_offset_m=0.0, kop_md_m=700.0, stations=well_a_stations),
-        _successful_plan(name="WELL-B", y_offset_m=10.0, kop_md_m=900.0, stations=well_b_stations),
+        _successful_plan(
+            name="WELL-A", y_offset_m=0.0, kop_md_m=700.0, stations=well_a_stations
+        ),
+        _successful_plan(
+            name="WELL-B", y_offset_m=10.0, kop_md_m=900.0, stations=well_b_stations
+        ),
         _successful_plan(name="WELL-C", y_offset_m=0.0, kop_md_m=650.0),
     ]
     recommendations = build_anti_collision_recommendations(
@@ -2346,7 +2605,9 @@ def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_we
     page._prepare_rerun_from_cluster(
         clusters[0],
         successes=successes,
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
     )
 
     prepared = page.st.session_state["wt_prepared_well_overrides"]
@@ -2356,12 +2617,16 @@ def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_we
     assert context is not None
     assert bool(context.prefer_lower_kop) is True
     assert bool(context.prefer_higher_build1) is True
-    assert str(payload["update_fields"]["optimization_mode"]) == "anti_collision_avoidance"
+    assert (
+        str(payload["update_fields"]["optimization_mode"]) == "anti_collision_avoidance"
+    )
     assert "cone-aware rerun" in str(payload["reason"])
     assert "anti-collision avoidance rerun" in str(payload["reason"])
 
 
-def test_prepare_rerun_from_cluster_stages_mixed_well_to_early_kop_build1_first() -> None:
+def test_prepare_rerun_from_cluster_stages_mixed_well_to_early_kop_build1_first() -> (
+    None
+):
     page = wt_import_module
     well_a_stations = pd.DataFrame(
         {
@@ -2444,8 +2709,13 @@ def test_prepare_rerun_from_cluster_stages_mixed_well_to_early_kop_build1_first(
                 md_b_values_m=np.array([410.0, 710.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([6.0, 6.0], dtype=float),
                 separation_factor_values=np.array([0.60, 0.55], dtype=float),
                 overlap_depth_values_m=np.array([6.0, 7.0], dtype=float),
@@ -2465,8 +2735,13 @@ def test_prepare_rerun_from_cluster_stages_mixed_well_to_early_kop_build1_first(
                 md_b_values_m=np.array([1700.0, 2000.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
                 separation_factor_values=np.array([0.82, 0.80], dtype=float),
                 overlap_depth_values_m=np.array([4.0, 4.0], dtype=float),
@@ -2507,7 +2782,9 @@ def test_prepare_rerun_from_cluster_stages_mixed_well_to_early_kop_build1_first(
     page._prepare_rerun_from_cluster(
         clusters[0],
         successes=successes,
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
     )
 
     payload = dict(page.st.session_state["wt_prepared_well_overrides"]["WELL-A"])
@@ -2520,7 +2797,9 @@ def test_prepare_rerun_from_cluster_stages_mixed_well_to_early_kop_build1_first(
     assert "WELL-C" not in str(payload["reason"])
 
 
-def test_build_selected_optimization_contexts_rebuilds_prepared_context_from_current_successes() -> None:
+def test_build_selected_optimization_contexts_rebuilds_prepared_context_from_current_successes() -> (
+    None
+):
     page = wt_import_module
     legacy_reference_stations = pd.DataFrame(
         {
@@ -2537,7 +2816,9 @@ def test_build_selected_optimization_contexts_rebuilds_prepared_context_from_cur
         candidate_md_end_m=2000.0,
         sf_target=1.0,
         sample_step_m=50.0,
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         references=(
             build_anti_collision_reference_path(
                 well_name="WELL-A",
@@ -2566,12 +2847,16 @@ def test_build_selected_optimization_contexts_rebuilds_prepared_context_from_cur
     assert "WELL-B" in contexts
     rebuilt_context = contexts["WELL-B"]
     assert float(rebuilt_context.references[0].xyz_m[-1, 0]) == pytest.approx(2000.0)
-    stored_context = page.st.session_state["wt_prepared_well_overrides"]["WELL-B"]["optimization_context"]
+    stored_context = page.st.session_state["wt_prepared_well_overrides"]["WELL-B"][
+        "optimization_context"
+    ]
     assert isinstance(stored_context, AntiCollisionOptimizationContext)
     assert float(stored_context.references[0].xyz_m[-1, 0]) == pytest.approx(2000.0)
 
 
-def test_ensure_selected_success_baseline_populates_lazy_reference_and_caches_it(monkeypatch) -> None:
+def test_ensure_selected_success_baseline_populates_lazy_reference_and_caches_it(
+    monkeypatch,
+) -> None:
     page = wt_import_module
     optimized = _successful_plan(
         name="WELL-OPT",
@@ -2661,7 +2946,9 @@ def test_build_last_anticollision_resolution_supports_cluster_snapshot() -> None
             _successful_plan(name="WELL-B", y_offset_m=300.0),
             _successful_plan(name="WELL-C", y_offset_m=600.0),
         ],
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         uncertainty_preset=DEFAULT_UNCERTAINTY_PRESET,
     )
 
@@ -2673,7 +2960,9 @@ def test_build_last_anticollision_resolution_supports_cluster_snapshot() -> None
     assert tuple(resolution["items"]) == ()
 
 
-def test_build_last_anticollision_resolution_cluster_rescans_current_conflicts_beyond_snapshot_windows() -> None:
+def test_build_last_anticollision_resolution_cluster_rescans_current_conflicts_beyond_snapshot_windows() -> (
+    None
+):
     page = wt_import_module
     resolution = page._build_last_anticollision_resolution(
         snapshot={
@@ -2721,7 +3010,9 @@ def test_build_last_anticollision_resolution_cluster_rescans_current_conflicts_b
             _successful_plan(name="WELL-C", y_offset_m=600.0),
             _successful_plan(name="WELL-D", y_offset_m=5.0),
         ],
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
         uncertainty_preset=DEFAULT_UNCERTAINTY_PRESET,
     )
 
@@ -2740,7 +3031,9 @@ def test_build_last_anticollision_resolution_cluster_rescans_current_conflicts_b
     )
 
 
-def test_prepare_rerun_from_recommendation_skips_trajectory_override_without_context() -> None:
+def test_prepare_rerun_from_recommendation_skips_trajectory_override_without_context() -> (
+    None
+):
     page = wt_import_module
     analysis = AntiCollisionAnalysis(
         wells=(),
@@ -2792,11 +3085,15 @@ def test_prepare_rerun_from_recommendation_skips_trajectory_override_without_con
     page._prepare_rerun_from_recommendation(
         recommendation,
         successes=successes,
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
     )
 
     assert page.st.session_state["wt_prepared_well_overrides"] == {}
-    assert "контекст" in str(page.st.session_state["wt_prepared_override_message"]).lower()
+    assert (
+        "контекст" in str(page.st.session_state["wt_prepared_override_message"]).lower()
+    )
     assert page.st.session_state["wt_pending_selected_names"] is None
 
 
@@ -2821,7 +3118,10 @@ def test_prepare_rerun_from_recommendation_builds_two_well_pair_plan() -> None:
                 label_a_values=("", ""),
                 label_b_values=("", ""),
                 midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
                 separation_factor_values=np.array([0.72, 0.69], dtype=float),
                 overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
@@ -2847,7 +3147,9 @@ def test_prepare_rerun_from_recommendation_builds_two_well_pair_plan() -> None:
     page._prepare_rerun_from_recommendation(
         recommendation,
         successes=successes,
-        uncertainty_model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
     )
 
     prepared = dict(page.st.session_state["wt_prepared_well_overrides"])
@@ -2909,10 +3211,14 @@ def test_anticollision_figures_draw_previous_trajectories_as_dashed_overlay() ->
     )
 
     previous_3d = [
-        trace for trace in figure_3d.data if str(trace.name).endswith(": до anti-collision")
+        trace
+        for trace in figure_3d.data
+        if str(trace.name).endswith(": до anti-collision")
     ]
     previous_plan = [
-        trace for trace in figure_plan.data if str(trace.name).endswith(": до anti-collision")
+        trace
+        for trace in figure_plan.data
+        if str(trace.name).endswith(": до anti-collision")
     ]
     assert len(previous_3d) == 1
     assert len(previous_plan) == 1
@@ -2932,7 +3238,9 @@ def test_all_wells_3d_figure_uses_default_camera() -> None:
     assert figure.layout.scene.camera.to_plotly_json() == DEFAULT_3D_CAMERA
 
 
-def test_all_wells_overview_figures_show_targets_for_failed_wells_without_fake_trajectory() -> None:
+def test_all_wells_overview_figures_show_targets_for_failed_wells_without_fake_trajectory() -> (
+    None
+):
     page = wt_import_module
     records = _records()
     summary_rows = [
@@ -3017,8 +3325,14 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     assert "FACT-1 (Фактическая)" in trace_names_plan
     assert "APP-1 (Проектная утвержденная)" in trace_names_plan
 
-    fact_3d = next(trace for trace in figure_3d.data if str(trace.name) == "FACT-1 (Фактическая)")
-    approved_3d = next(trace for trace in figure_3d.data if str(trace.name) == "APP-1 (Проектная утвержденная)")
+    fact_3d = next(
+        trace for trace in figure_3d.data if str(trace.name) == "FACT-1 (Фактическая)"
+    )
+    approved_3d = next(
+        trace
+        for trace in figure_3d.data
+        if str(trace.name) == "APP-1 (Проектная утвержденная)"
+    )
     assert str(fact_3d.line.color) == "#6B7280"
     assert str(approved_3d.line.color) == "#C62828"
     fact_label_3d = next(
@@ -3035,7 +3349,9 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     assert str(approved_label_3d.textfont.color) == "#C62828"
 
 
-def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> None:
+def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> (
+    None
+):
     page = wt_import_module
     horizontal_well = _horizontal_reference_well()[0]
 
@@ -3047,18 +3363,76 @@ def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells()
     assert float(anchor[2]) == pytest.approx(1150.0)
 
 
-def test_reference_pad_labels_group_surface_points_by_chain_and_numeric_prefix() -> None:
+def test_reference_pad_labels_group_surface_points_by_chain_and_numeric_prefix() -> (
+    None
+):
     page = wt_import_module
     reference_wells = parse_reference_trajectory_table(
         [
-            {"Wellname": "8012", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-            {"Wellname": "8012", "Type": "actual", "X": 100.0, "Y": 0.0, "Z": 50.0, "MD": 120.0},
-            {"Wellname": "8013", "Type": "actual", "X": 250.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-            {"Wellname": "8013", "Type": "actual", "X": 340.0, "Y": 0.0, "Z": 60.0, "MD": 120.0},
-            {"Wellname": "8014", "Type": "actual", "X": 530.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-            {"Wellname": "8014", "Type": "actual", "X": 620.0, "Y": 0.0, "Z": 60.0, "MD": 120.0},
-            {"Wellname": "9001", "Type": "approved", "X": 1200.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-            {"Wellname": "9001", "Type": "approved", "X": 1300.0, "Y": 0.0, "Z": 60.0, "MD": 120.0},
+            {
+                "Wellname": "8012",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "8012",
+                "Type": "actual",
+                "X": 100.0,
+                "Y": 0.0,
+                "Z": 50.0,
+                "MD": 120.0,
+            },
+            {
+                "Wellname": "8013",
+                "Type": "actual",
+                "X": 250.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "8013",
+                "Type": "actual",
+                "X": 340.0,
+                "Y": 0.0,
+                "Z": 60.0,
+                "MD": 120.0,
+            },
+            {
+                "Wellname": "8014",
+                "Type": "actual",
+                "X": 530.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "8014",
+                "Type": "actual",
+                "X": 620.0,
+                "Y": 0.0,
+                "Z": 60.0,
+                "MD": 120.0,
+            },
+            {
+                "Wellname": "9001",
+                "Type": "approved",
+                "X": 1200.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9001",
+                "Type": "approved",
+                "X": 1300.0,
+                "Y": 0.0,
+                "Z": 60.0,
+                "MD": 120.0,
+            },
         ]
     )
 
@@ -3088,9 +3462,15 @@ def test_all_wells_overview_figures_ignore_far_reference_wells_for_axis_zoom() -
         reference_wells=_far_reference_wells(),
     )
 
-    assert tuple(base_3d.layout.scene.xaxis.range) == tuple(far_ref_3d.layout.scene.xaxis.range)
-    assert tuple(base_3d.layout.scene.yaxis.range) == tuple(far_ref_3d.layout.scene.yaxis.range)
-    assert tuple(base_3d.layout.scene.zaxis.range) == tuple(far_ref_3d.layout.scene.zaxis.range)
+    assert tuple(base_3d.layout.scene.xaxis.range) == tuple(
+        far_ref_3d.layout.scene.xaxis.range
+    )
+    assert tuple(base_3d.layout.scene.yaxis.range) == tuple(
+        far_ref_3d.layout.scene.yaxis.range
+    )
+    assert tuple(base_3d.layout.scene.zaxis.range) == tuple(
+        far_ref_3d.layout.scene.zaxis.range
+    )
     assert tuple(base_plan.layout.xaxis.range) == tuple(far_ref_plan.layout.xaxis.range)
     assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
@@ -3104,7 +3484,9 @@ def test_focus_pad_well_names_return_selected_pad_members_only() -> None:
     assert focus_names == ("PAD2-A", "PAD2-B")
 
 
-def test_all_wells_figures_focus_camera_on_selected_pad_without_hiding_other_pads() -> None:
+def test_all_wells_figures_focus_camera_on_selected_pad_without_hiding_other_pads() -> (
+    None
+):
     page = wt_import_module
     successes = [
         _successful_plan_xy(name="PAD1-A", x_offset_m=0.0, y_offset_m=0.0),
@@ -3128,7 +3510,9 @@ def test_all_wells_figures_focus_camera_on_selected_pad_without_hiding_other_pad
     assert any(str(trace.name) == "PAD2-B" for trace in figure_plan.data)
 
 
-def test_anticollision_figures_include_reference_trajectory_wells_without_target_markers() -> None:
+def test_anticollision_figures_include_reference_trajectory_wells_without_target_markers() -> (
+    None
+):
     page = wt_import_module
     reference_wells = _reference_wells()
     analysis = page._build_anti_collision_analysis(
@@ -3144,11 +3528,21 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
     figure_plan = page._all_wells_anticollision_plan_figure(analysis)
 
     assert any(str(trace.name) == "FACT-1 (Фактическая)" for trace in figure_3d.data)
-    assert any(str(trace.name) == "APP-1 (Проектная утвержденная)" for trace in figure_3d.data)
-    assert not any("FACT-1 (Фактическая): цели" == str(trace.name) for trace in figure_3d.data)
-    assert not any("APP-1 (Проектная утвержденная): цели" == str(trace.name) for trace in figure_plan.data)
+    assert any(
+        str(trace.name) == "APP-1 (Проектная утвержденная)" for trace in figure_3d.data
+    )
+    assert not any(
+        "FACT-1 (Фактическая): цели" == str(trace.name) for trace in figure_3d.data
+    )
+    assert not any(
+        "APP-1 (Проектная утвержденная): цели" == str(trace.name)
+        for trace in figure_plan.data
+    )
     assert any(str(trace.name) == "Фактическая: подписи" for trace in figure_3d.data)
-    assert any(str(trace.name) == "Проектная утвержденная: подписи" for trace in figure_plan.data)
+    assert any(
+        str(trace.name) == "Проектная утвержденная: подписи"
+        for trace in figure_plan.data
+    )
 
 
 def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
@@ -3169,9 +3563,15 @@ def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> Non
     far_ref_3d = page._all_wells_anticollision_3d_figure(far_ref_analysis)
     far_ref_plan = page._all_wells_anticollision_plan_figure(far_ref_analysis)
 
-    assert tuple(base_3d.layout.scene.xaxis.range) == tuple(far_ref_3d.layout.scene.xaxis.range)
-    assert tuple(base_3d.layout.scene.yaxis.range) == tuple(far_ref_3d.layout.scene.yaxis.range)
-    assert tuple(base_3d.layout.scene.zaxis.range) == tuple(far_ref_3d.layout.scene.zaxis.range)
+    assert tuple(base_3d.layout.scene.xaxis.range) == tuple(
+        far_ref_3d.layout.scene.xaxis.range
+    )
+    assert tuple(base_3d.layout.scene.yaxis.range) == tuple(
+        far_ref_3d.layout.scene.yaxis.range
+    )
+    assert tuple(base_3d.layout.scene.zaxis.range) == tuple(
+        far_ref_3d.layout.scene.zaxis.range
+    )
     assert tuple(base_plan.layout.xaxis.range) == tuple(far_ref_plan.layout.xaxis.range)
     assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
@@ -3191,15 +3591,45 @@ def test_all_wells_3d_figure_aggregates_reference_wells_in_fast_mode() -> None:
     assert "APP-1 (Проектная утвержденная)" not in trace_names
 
 
-def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_fast_mode() -> None:
+def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_fast_mode() -> (
+    None
+):
     page = wt_import_module
     far_reference_wells = tuple(
         parse_reference_trajectory_table(
             [
-                {"Wellname": "FACT-FAR", "Type": "actual", "X": 9000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "FACT-FAR", "Type": "actual", "X": 9000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
-                {"Wellname": "APP-FAR", "Type": "approved", "X": 12000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "APP-FAR", "Type": "approved", "X": 12000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+                {
+                    "Wellname": "FACT-FAR",
+                    "Type": "actual",
+                    "X": 9000.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-FAR",
+                    "Type": "actual",
+                    "X": 9000.0,
+                    "Y": 0.0,
+                    "Z": 2000.0,
+                    "MD": 2000.0,
+                },
+                {
+                    "Wellname": "APP-FAR",
+                    "Type": "approved",
+                    "X": 12000.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "APP-FAR",
+                    "Type": "approved",
+                    "X": 12000.0,
+                    "Y": 0.0,
+                    "Z": 2000.0,
+                    "MD": 2000.0,
+                },
             ]
         )
     )
@@ -3279,7 +3709,9 @@ def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
         assert "WELL-B: t1 label" in trace_names
 
 
-def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend() -> None:
+def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend() -> (
+    None
+):
     page = wt_import_module
     success = _successful_plan(name="WELL-A", y_offset_m=0.0)
     figure = page._all_wells_3d_figure(
@@ -3312,7 +3744,9 @@ def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend(
     ]
 
 
-def test_three_legend_tree_stays_calculated_only_when_reference_pad_labels_exist() -> None:
+def test_three_legend_tree_stays_calculated_only_when_reference_pad_labels_exist() -> (
+    None
+):
     page = wt_import_module
     overrides = page._trajectory_three_payload_overrides(
         records=_multi_pad_records(),
@@ -3333,7 +3767,10 @@ def test_three_legend_tree_stays_calculated_only_when_reference_pad_labels_exist
 
     legend_tree = list(overrides["legend_tree"])
 
-    assert [str(item["label"]) for item in legend_tree] == ["Куст PAD-01", "Куст PAD-02"]
+    assert [str(item["label"]) for item in legend_tree] == [
+        "Куст PAD-01",
+        "Куст PAD-02",
+    ]
     flat_child_labels = [
         str(child["label"])
         for group in legend_tree
@@ -3378,13 +3815,19 @@ def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> N
     assert any(str(item["label"]) == "WELL-A" for item in payload["legend"])
 
 
-def test_plotly_3d_figure_to_three_payload_preserves_hover_metadata_for_tooltip() -> None:
+def test_plotly_3d_figure_to_three_payload_preserves_hover_metadata_for_tooltip() -> (
+    None
+):
     page = wt_import_module
-    figure = page._all_wells_3d_figure([_successful_plan(name="WELL-A", y_offset_m=0.0)])
+    figure = page._all_wells_3d_figure(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    )
 
     payload = page._plotly_3d_figure_to_three_payload(figure)
 
-    hover_only_points = [item for item in payload["points"] if bool(item.get("hover_only"))]
+    hover_only_points = [
+        item for item in payload["points"] if bool(item.get("hover_only"))
+    ]
     assert hover_only_points
     first_hover = hover_only_points[0]["hover"][0]
     assert first_hover["name"] == "WELL-A"
@@ -3568,12 +4011,20 @@ def test_plotly_3d_payload_decimates_reference_hover_points() -> None:
     )
 
     payload = page._scatter3d_trace_to_three_payload(trace)
-    hover_only_points = [item for item in payload["points"] if bool(item.get("hover_only"))]
+    hover_only_points = [
+        item for item in payload["points"] if bool(item.get("hover_only"))
+    ]
 
     assert len(hover_only_points) == 1
     assert str(hover_only_points[0]["role"]) == "reference_hover"
-    assert len(hover_only_points[0]["points"]) == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
-    assert len(hover_only_points[0]["hover"]) == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+    assert (
+        len(hover_only_points[0]["points"])
+        == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+    )
+    assert (
+        len(hover_only_points[0]["hover"])
+        == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+    )
 
 
 def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
@@ -3581,10 +4032,38 @@ def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
     reference_wells = tuple(
         parse_reference_trajectory_table(
             [
-                {"Wellname": "FACT-NEAR", "Type": "actual", "X": 2200.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "FACT-NEAR", "Type": "actual", "X": 2200.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
-                {"Wellname": "FACT-FAR", "Type": "actual", "X": 8000.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "FACT-FAR", "Type": "actual", "X": 8000.0, "Y": 0.0, "Z": 2000.0, "MD": 2000.0},
+                {
+                    "Wellname": "FACT-NEAR",
+                    "Type": "actual",
+                    "X": 2200.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-NEAR",
+                    "Type": "actual",
+                    "X": 2200.0,
+                    "Y": 0.0,
+                    "Z": 2000.0,
+                    "MD": 2000.0,
+                },
+                {
+                    "Wellname": "FACT-FAR",
+                    "Type": "actual",
+                    "X": 8000.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-FAR",
+                    "Type": "actual",
+                    "X": 8000.0,
+                    "Y": 0.0,
+                    "Z": 2000.0,
+                    "MD": 2000.0,
+                },
             ]
         )
     )
@@ -3599,9 +4078,7 @@ def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
         render_mode=page.WT_3D_RENDER_FAST,
     )
     mesh_names = {
-        str(trace.name)
-        for trace in figure.data
-        if isinstance(trace, go.Mesh3d)
+        str(trace.name) for trace in figure.data if isinstance(trace, go.Mesh3d)
     }
 
     assert "FACT-NEAR (Фактическая) cone" in mesh_names
@@ -3610,7 +4087,9 @@ def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
 
 def test_plotly_3d_figure_to_three_payload_preserves_custom_camera() -> None:
     page = wt_import_module
-    figure = page._all_wells_3d_figure([_successful_plan(name="WELL-A", y_offset_m=0.0)])
+    figure = page._all_wells_3d_figure(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    )
     custom_camera = {
         "up": {"x": 0.0, "y": 0.0, "z": 1.0},
         "center": {"x": 0.15, "y": -0.05, "z": 0.0},
@@ -3665,7 +4144,9 @@ def test_batch_summary_display_df_reorders_and_shortens_summary_columns() -> Non
     assert "Рестарты решателя" not in display_df.columns
 
 
-def test_anticollision_figures_render_overlap_corridor_and_red_conflict_segments() -> None:
+def test_anticollision_figures_render_overlap_corridor_and_red_conflict_segments() -> (
+    None
+):
     page = wt_import_module
     analysis = page._build_anti_collision_analysis(
         [
@@ -3678,9 +4159,7 @@ def test_anticollision_figures_render_overlap_corridor_and_red_conflict_segments
     figure_plan = page._all_wells_anticollision_plan_figure(analysis)
 
     overlap_3d_traces = [
-        trace
-        for trace in figure_3d.data
-        if str(trace.name) == "Общая зона overlap"
+        trace for trace in figure_3d.data if str(trace.name) == "Общая зона overlap"
     ]
     conflict_3d_traces = [
         trace
@@ -3688,9 +4167,7 @@ def test_anticollision_figures_render_overlap_corridor_and_red_conflict_segments
         if str(trace.name) == "Конфликтный участок ствола"
     ]
     overlap_plan_traces = [
-        trace
-        for trace in figure_plan.data
-        if str(trace.name) == "Общая зона overlap"
+        trace for trace in figure_plan.data if str(trace.name) == "Общая зона overlap"
     ]
     conflict_plan_traces = [
         trace
@@ -3704,10 +4181,14 @@ def test_anticollision_figures_render_overlap_corridor_and_red_conflict_segments
     assert conflict_plan_traces
     assert all("198, 40, 40" in str(trace.line.color) for trace in conflict_3d_traces)
     assert all("198, 40, 40" in str(trace.line.color) for trace in conflict_plan_traces)
-    assert all(str(getattr(trace, "hoverinfo", "")) == "skip" for trace in overlap_plan_traces)
+    assert all(
+        str(getattr(trace, "hoverinfo", "")) == "skip" for trace in overlap_plan_traces
+    )
 
 
-def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_conflict_segments() -> None:
+def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_conflict_segments() -> (
+    None
+):
     page = wt_import_module
     analysis = page._build_anti_collision_analysis(
         [
@@ -3719,13 +4200,17 @@ def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_con
     figure_3d = page._all_wells_anticollision_3d_figure(analysis)
 
     cone_meshes = [
-        trace for trace in figure_3d.data if str(trace.type) == "mesh3d" and "cone" in str(trace.name)
+        trace
+        for trace in figure_3d.data
+        if str(trace.type) == "mesh3d" and "cone" in str(trace.name)
     ]
     overlap_meshes = [
         trace for trace in figure_3d.data if str(trace.name) == "Общая зона overlap"
     ]
     well_lines = [
-        trace for trace in figure_3d.data if str(trace.type) == "scatter3d" and str(trace.name) == "WELL-A"
+        trace
+        for trace in figure_3d.data
+        if str(trace.type) == "scatter3d" and str(trace.name) == "WELL-A"
     ]
     target_markers = [
         trace
@@ -3735,13 +4220,16 @@ def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_con
     conflict_segments = [
         trace
         for trace in figure_3d.data
-        if str(trace.type) == "scatter3d" and str(trace.name) == "Конфликтный участок ствола"
+        if str(trace.type) == "scatter3d"
+        and str(trace.name) == "Конфликтный участок ствола"
     ]
 
     assert cone_meshes
     assert overlap_meshes
     assert all(str(getattr(trace, "hoverinfo", "")) == "skip" for trace in cone_meshes)
-    assert all(str(getattr(trace, "hoverinfo", "")) == "skip" for trace in overlap_meshes)
+    assert all(
+        str(getattr(trace, "hoverinfo", "")) == "skip" for trace in overlap_meshes
+    )
     assert well_lines
     assert "DLS: %{customdata[1]:.2f} deg/30м" in str(well_lines[0].hovertemplate)
     assert "INC: %{customdata[2]:.2f} deg" in str(well_lines[0].hovertemplate)
@@ -3749,4 +4237,6 @@ def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_con
     assert target_markers
     assert "Точка: %{customdata[0]}" in str(target_markers[0].hovertemplate)
     assert conflict_segments
-    assert "DLS: %{customdata[1]:.2f} deg/30м" in str(conflict_segments[0].hovertemplate)
+    assert "DLS: %{customdata[1]:.2f} deg/30м" in str(
+        conflict_segments[0].hovertemplate
+    )

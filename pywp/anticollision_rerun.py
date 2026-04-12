@@ -749,7 +749,7 @@ def build_cluster_prepared_overrides(
                     reference_windows[str(reference_name)] = (
                         min(float(current_window[0]), float(reference_md_start_m)),
                         max(float(current_window[1]), float(reference_md_end_m)),
-                )
+                    )
                 entry["reference_windows"] = reference_windows
                 reasons = list(entry["reasons"])
                 reasons.append(str(suggestion.reason))

@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from typing import Callable
 
 
+from pywp.classification import TRAJECTORY_REVERSE_DIRECTION
+
+
 class PlanningError(RuntimeError):
     pass
 
@@ -23,6 +26,14 @@ class SectionGeometry:
     t1_east_m: float
     t1_north_m: float
     t1_tvd_m: float
+
+    def is_coplanar(self, tolerance_m: float) -> bool:
+        return bool(abs(self.t1_cross_m) <= tolerance_m and abs(self.t3_cross_m) <= tolerance_m)
+
+    def is_zero_azimuth_turn(self, target_direction: str, tolerance_m: float) -> bool:
+        if str(target_direction) == TRAJECTORY_REVERSE_DIRECTION:
+            return False
+        return self.is_coplanar(tolerance_m=tolerance_m)
 
 
 @dataclass(frozen=True)

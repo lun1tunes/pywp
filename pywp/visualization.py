@@ -18,9 +18,8 @@ from pywp.uncertainty import (
     build_uncertainty_tube_mesh,
     uncertainty_ribbon_polygon,
 )
+from pywp.constants import DEG2RAD
 from pywp.ui_utils import dls_to_pi
-
-DEG2RAD = np.pi / 180.0
 TRAJECTORY_COLOR_PRIMARY = "#C1121F"
 PLAN_CSB_COLOR = "#0B6E4F"
 ACTUAL_PROFILE_COLOR = "#111111"
@@ -978,8 +977,8 @@ def section_view_figure(
                     z_values=actual_df["Z_m"].to_numpy(dtype=float),
                 ),
                 hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
         )
-    )
     if uncertainty_overlay is not None and uncertainty_overlay.samples:
         _add_uncertainty_plan_or_section_traces(
             fig,
@@ -1089,7 +1088,7 @@ def dls_figure(
             y1 = dls_values[idx]
             if np.isnan(y0) or np.isnan(y1):
                 continue
-            transition_df = df.iloc[idx - 1 : idx + 1]
+            transition_df = df.iloc[idx - 1: idx + 1]
             fig.add_trace(
                 go.Scatter(
                     x=[md_values[idx - 1], md_values[idx]],

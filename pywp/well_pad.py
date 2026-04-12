@@ -5,6 +5,7 @@ from typing import Iterable
 
 import numpy as np
 
+from pywp.constants import SMALL
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
@@ -13,7 +14,7 @@ from pywp.eclipse_welltrack import (
 from pywp.models import Point3D
 from pywp.pydantic_base import FrozenModel
 
-_EPS = 1e-9
+_EPS = SMALL
 _PCA_AXIS_DOMINANCE_RATIO_MIN = 1.05
 PAD_SURFACE_ANCHOR_FIRST = "first"
 PAD_SURFACE_ANCHOR_CENTER = "center"
@@ -136,7 +137,9 @@ def estimate_pad_nds_azimuth_deg(
         dy = float(wells[0].midpoint_y - surface_y)
         return _vector_to_azimuth_deg(dx=dx, dy=dy)
 
-    points = np.array([(well.midpoint_x, well.midpoint_y) for well in wells], dtype=float)
+    points = np.array(
+        [(well.midpoint_x, well.midpoint_y) for well in wells], dtype=float
+    )
     centroid = np.mean(points, axis=0)
     centered = points - centroid
     covariance = centered.T @ centered
@@ -198,7 +201,9 @@ def apply_pad_layout(
     plan_by_pad_id: dict[str, PadLayoutPlan],
 ) -> list[WelltrackRecord]:
     updated_records = list(records)
-    name_to_index = {str(record.name): index for index, record in enumerate(updated_records)}
+    name_to_index = {
+        str(record.name): index for index, record in enumerate(updated_records)
+    }
 
     for pad in pads:
         plan = plan_by_pad_id.get(str(pad.pad_id))
@@ -207,8 +212,12 @@ def apply_pad_layout(
 
         spacing_m = float(max(plan.spacing_m, 0.0))
         ux, uy = _azimuth_to_unit_xy(azimuth_deg=float(plan.nds_azimuth_deg))
-        ordered = ordered_pad_wells(pad=pad, nds_azimuth_deg=float(plan.nds_azimuth_deg))
-        anchor_mode = str(getattr(plan, "surface_anchor_mode", PAD_SURFACE_ANCHOR_FIRST))
+        ordered = ordered_pad_wells(
+            pad=pad, nds_azimuth_deg=float(plan.nds_azimuth_deg)
+        )
+        anchor_mode = str(
+            getattr(plan, "surface_anchor_mode", PAD_SURFACE_ANCHOR_FIRST)
+        )
         center_slot_index = 0.5 * float(max(len(ordered) - 1, 0))
 
         for slot_index, well in enumerate(ordered):
@@ -238,7 +247,9 @@ def apply_pad_layout(
     return updated_records
 
 
-def _surface_key(*, x: float, y: float, z: float, tolerance_m: float) -> tuple[int, int, int]:
+def _surface_key(
+    *, x: float, y: float, z: float, tolerance_m: float
+) -> tuple[int, int, int]:
     tol = float(max(tolerance_m, _EPS))
     return (
         int(round(x / tol)),

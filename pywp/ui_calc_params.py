@@ -30,6 +30,7 @@ _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
 _STR_SUFFIXES: tuple[str, ...] = ("optimization_mode", "turn_solver_mode")
 _BOOL_SUFFIXES: tuple[str, ...] = ()
 
+
 def calc_param_defaults() -> dict[str, float | int | str | bool]:
     """Build UI defaults directly from TrajectoryConfig defaults."""
 

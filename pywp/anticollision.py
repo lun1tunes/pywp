@@ -6,6 +6,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from pywp.constants import SMALL
 from pywp.models import Point3D
 from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
@@ -185,9 +186,7 @@ def build_anti_collision_well(
         else (float(stations["MD_m"].iloc[-1]) if len(stations) else None)
     )
     required_md_values = tuple(
-        float(value)
-        for value in (md_t1_m, md_t3_m)
-        if value is not None
+        float(value) for value in (md_t1_m, md_t3_m) if value is not None
     )
     if include_display_geometry:
         overlay = build_uncertainty_overlay(
@@ -250,8 +249,7 @@ def analyze_anti_collision(
                     "build_overlap_geometry=True requires wells built with display geometry."
                 )
     lateral_envelopes = {
-        well.name: _lateral_envelope_for_prefilter(well)
-        for well in ordered_wells
+        well.name: _lateral_envelope_for_prefilter(well) for well in ordered_wells
     }
     corridors: list[AntiCollisionCorridor] = []
     zones: list[AntiCollisionZone] = []
@@ -278,7 +276,9 @@ def analyze_anti_collision(
                 build_overlap_geometry=build_overlap_geometry,
             )
             corridors.extend(pair_corridors)
-            zones.extend(_corridor_summary_zone(corridor) for corridor in pair_corridors)
+            zones.extend(
+                _corridor_summary_zone(corridor) for corridor in pair_corridors
+            )
 
     zones = sorted(
         zones,
@@ -290,7 +290,9 @@ def analyze_anti_collision(
             str(zone.well_b),
         ),
     )
-    pair_keys = {tuple(sorted((corridor.well_a, corridor.well_b))) for corridor in corridors}
+    pair_keys = {
+        tuple(sorted((corridor.well_a, corridor.well_b))) for corridor in corridors
+    }
     target_pair_keys = {
         tuple(sorted((corridor.well_a, corridor.well_b)))
         for corridor in corridors
@@ -300,7 +302,10 @@ def analyze_anti_collision(
         None
         if not corridors
         else float(
-            min(float(np.min(corridor.separation_factor_values)) for corridor in corridors)
+            min(
+                float(np.min(corridor.separation_factor_values))
+                for corridor in corridors
+            )
         )
     )
     return AntiCollisionAnalysis(
@@ -321,10 +326,7 @@ def _should_analyze_pair(
     well_b: AntiCollisionWell,
     pair_filter: Callable[[AntiCollisionWell, AntiCollisionWell], bool] | None = None,
 ) -> bool:
-    if (
-        bool(well_a.is_reference_only)
-        and bool(well_b.is_reference_only)
-    ):
+    if bool(well_a.is_reference_only) and bool(well_b.is_reference_only):
         return False
     if pair_filter is not None and not bool(pair_filter(well_a, well_b)):
         return False
@@ -341,8 +343,12 @@ def _lateral_envelope_for_prefilter(
         x_values = x_values[finite_mask]
         y_values = y_values[finite_mask]
     else:
-        x_values = np.asarray([sample.center_xyz[0] for sample in well.samples], dtype=float)
-        y_values = np.asarray([sample.center_xyz[1] for sample in well.samples], dtype=float)
+        x_values = np.asarray(
+            [sample.center_xyz[0] for sample in well.samples], dtype=float
+        )
+        y_values = np.asarray(
+            [sample.center_xyz[1] for sample in well.samples], dtype=float
+        )
     if x_values.size == 0 or y_values.size == 0:
         surface_x = float(well.surface.x)
         surface_y = float(well.surface.y)
@@ -460,23 +466,30 @@ def _pair_prefilter_terminal_far_apart(
 ) -> bool:
     surface_xy_distance_m = float(
         np.hypot(
-            float(lateral_envelope_a.surface_x_m) - float(lateral_envelope_b.surface_x_m),
-            float(lateral_envelope_a.surface_y_m) - float(lateral_envelope_b.surface_y_m),
+            float(lateral_envelope_a.surface_x_m)
+            - float(lateral_envelope_b.surface_x_m),
+            float(lateral_envelope_a.surface_y_m)
+            - float(lateral_envelope_b.surface_y_m),
         )
     )
     terminal_xy_distance_m = float(
         np.hypot(
-            float(lateral_envelope_a.terminal_x_m) - float(lateral_envelope_b.terminal_x_m),
-            float(lateral_envelope_a.terminal_y_m) - float(lateral_envelope_b.terminal_y_m),
+            float(lateral_envelope_a.terminal_x_m)
+            - float(lateral_envelope_b.terminal_x_m),
+            float(lateral_envelope_a.terminal_y_m)
+            - float(lateral_envelope_b.terminal_y_m),
         )
     )
     terminal_3d_distance_m = float(
         np.linalg.norm(
             np.asarray(
                 [
-                    float(lateral_envelope_a.terminal_x_m) - float(lateral_envelope_b.terminal_x_m),
-                    float(lateral_envelope_a.terminal_y_m) - float(lateral_envelope_b.terminal_y_m),
-                    float(lateral_envelope_a.terminal_z_m) - float(lateral_envelope_b.terminal_z_m),
+                    float(lateral_envelope_a.terminal_x_m)
+                    - float(lateral_envelope_b.terminal_x_m),
+                    float(lateral_envelope_a.terminal_y_m)
+                    - float(lateral_envelope_b.terminal_y_m),
+                    float(lateral_envelope_a.terminal_z_m)
+                    - float(lateral_envelope_b.terminal_z_m),
                 ],
                 dtype=float,
             )
@@ -490,8 +503,12 @@ def _pair_prefilter_terminal_far_apart(
         float(lateral_envelope_a.terminal_spatial_radius_m),
         float(lateral_envelope_b.terminal_spatial_radius_m),
     )
-    xy_cutoff_m = float(_PAIR_TERMINAL_PREFILTER_DIAMETER_FACTOR) * terminal_xy_diameter_m
-    spatial_cutoff_m = float(_PAIR_TERMINAL_PREFILTER_DIAMETER_FACTOR) * terminal_3d_diameter_m
+    xy_cutoff_m = (
+        float(_PAIR_TERMINAL_PREFILTER_DIAMETER_FACTOR) * terminal_xy_diameter_m
+    )
+    spatial_cutoff_m = (
+        float(_PAIR_TERMINAL_PREFILTER_DIAMETER_FACTOR) * terminal_3d_diameter_m
+    )
     if surface_xy_distance_m <= xy_cutoff_m:
         return False
     return bool(
@@ -599,7 +616,7 @@ def collision_corridor_plan_polygon(
         center_xy = np.asarray(centers_xy[index], dtype=float)
         tangent_xy = _centerline_tangent_xy(centers_xy, index)
         tangent_norm = float(np.linalg.norm(tangent_xy))
-        if tangent_norm <= 1e-9:
+        if tangent_norm <= SMALL:
             tangent_xy = np.array([1.0, 0.0], dtype=float)
             tangent_norm = 1.0
         tangent_xy = tangent_xy / tangent_norm
@@ -769,13 +786,13 @@ def _covariance_from_ring(
     confidence_scale: float,
 ) -> np.ndarray:
     ring_open = np.asarray(ring_xyz, dtype=float)
-    if len(ring_open) >= 2 and np.allclose(ring_open[0], ring_open[-1], atol=1e-9):
+    if len(ring_open) >= 2 and np.allclose(ring_open[0], ring_open[-1], atol=SMALL):
         ring_open = ring_open[:-1]
     if ring_open.ndim != 2 or ring_open.shape[1] != 3 or len(ring_open) < 3:
         return np.zeros((3, 3), dtype=float)
     offsets = ring_open - np.asarray(center_xyz, dtype=float)[None, :]
     boundary_covariance = np.cov(offsets.T, bias=True)
-    scale = float(max(confidence_scale, 1e-9))
+    scale = float(max(confidence_scale, SMALL))
     return 2.0 * np.asarray(boundary_covariance, dtype=float) / (scale * scale)
 
 
@@ -800,8 +817,12 @@ def _pair_overlap_corridors(
     if not well_a.samples or not well_b.samples:
         return []
 
-    centers_a = np.asarray([sample.center_xyz for sample in well_a.samples], dtype=float)
-    centers_b = np.asarray([sample.center_xyz for sample in well_b.samples], dtype=float)
+    centers_a = np.asarray(
+        [sample.center_xyz for sample in well_a.samples], dtype=float
+    )
+    centers_b = np.asarray(
+        [sample.center_xyz for sample in well_b.samples], dtype=float
+    )
     covariances_a = np.asarray(
         [np.asarray(sample.covariance_xyz, dtype=float) for sample in well_a.samples],
         dtype=float,
@@ -818,12 +839,14 @@ def _pair_overlap_corridors(
         delta,
         distance[:, :, None],
         out=direction,
-        where=distance[:, :, None] > 1e-9,
+        where=distance[:, :, None] > SMALL,
     )
 
-    zero_mask = distance <= 1e-9
+    zero_mask = distance <= SMALL
     if np.any(zero_mask):
-        combined_covariance = covariances_a[:, None, :, :] + covariances_b[None, :, :, :]
+        combined_covariance = (
+            covariances_a[:, None, :, :] + covariances_b[None, :, :, :]
+        )
         zero_covariance = combined_covariance[zero_mask]
         eigenvalues, eigenvectors = np.linalg.eigh(zero_covariance)
         principal_indices = np.argmax(eigenvalues, axis=1)
@@ -833,7 +856,9 @@ def _pair_overlap_corridors(
             axis=2,
         )[:, :, 0]
         principal_norm = np.linalg.norm(principal_vectors, axis=1)
-        degenerate_mask = (np.max(eigenvalues, axis=1) <= 1e-12) | (principal_norm <= 1e-12)
+        degenerate_mask = (np.max(eigenvalues, axis=1) <= 1e-12) | (
+            principal_norm <= 1e-12
+        )
         if np.any(degenerate_mask):
             principal_vectors[degenerate_mask] = np.array([1.0, 0.0, 0.0], dtype=float)
             principal_norm[degenerate_mask] = 1.0
@@ -851,17 +876,17 @@ def _pair_overlap_corridors(
         covariances_b,
         direction,
     )
-    confidence_scale = float(max(well_a.overlay.model.confidence_scale, 1e-9))
+    confidence_scale = float(max(well_a.overlay.model.confidence_scale, SMALL))
     combined_radius = confidence_scale * np.sqrt(np.clip(combined_sigma2, 0.0, None))
-    overlap_mask = (combined_radius > 1e-9) & (distance <= combined_radius)
+    overlap_mask = (combined_radius > SMALL) & (distance <= combined_radius)
     if not np.any(overlap_mask):
         return []
 
     score = np.divide(
         distance,
-        np.maximum(combined_radius, 1e-9),
+        np.maximum(combined_radius, SMALL),
         out=np.full_like(distance, np.inf, dtype=float),
-        where=combined_radius > 1e-9,
+        where=combined_radius > SMALL,
     )
     row_best_j = np.argmin(score, axis=1)
     col_best_i = np.argmin(score, axis=0)
@@ -925,10 +950,13 @@ def _build_pair_corridors(
             label_a=well_a.samples[int(prev_a)].target_label,
             label_b=well_b.samples[int(prev_b)].target_label,
         )
-        if _pairs_are_contiguous(
-            previous_pair=(prev_a, prev_b),
-            next_pair=(int(index_a), int(index_b)),
-        ) and previous_key == next_key:
+        if (
+            _pairs_are_contiguous(
+                previous_pair=(prev_a, prev_b),
+                next_pair=(int(index_a), int(index_b)),
+            )
+            and previous_key == next_key
+        ):
             current_pairs.append((int(index_a), int(index_b)))
             continue
         corridors.append(
@@ -1014,7 +1042,7 @@ def _build_single_corridor(
         overlap_depth_m = float(max(combined_radius_m - center_distance_m, 0.0))
         sf = (
             float(center_distance_m / combined_radius_m)
-            if combined_radius_m > 1e-9
+            if combined_radius_m > SMALL
             else float("inf")
         )
         midpoint_points.append(
@@ -1078,7 +1106,9 @@ def _build_single_corridor(
         label_a_values=tuple(label_a_values),
         label_b_values=tuple(label_b_values),
         midpoint_xyz=np.asarray(midpoint_points, dtype=float),
-        overlap_rings_xyz=tuple(np.asarray(ring, dtype=float) for ring in overlap_rings_xyz),
+        overlap_rings_xyz=tuple(
+            np.asarray(ring, dtype=float) for ring in overlap_rings_xyz
+        ),
         overlap_core_radius_m=np.asarray(core_radii, dtype=float),
         separation_factor_values=np.asarray(sf_values, dtype=float),
         overlap_depth_values_m=np.asarray(overlap_depth_values, dtype=float),
@@ -1154,7 +1184,7 @@ def _overlap_ring_between_samples(
 
 def _open_ring(ring_xyz: np.ndarray) -> np.ndarray:
     ring = np.asarray(ring_xyz, dtype=float)
-    if len(ring) >= 2 and np.allclose(ring[0], ring[-1], atol=1e-9):
+    if len(ring) >= 2 and np.allclose(ring[0], ring[-1], atol=SMALL):
         return ring[:-1]
     return ring
 
@@ -1172,13 +1202,13 @@ def _shared_overlap_plane_basis(
         normal_b = -normal_b
     normal = normal_a + normal_b
     normal_norm = float(np.linalg.norm(normal))
-    if normal_norm <= 1e-9:
-        normal = normal_a if float(np.linalg.norm(normal_a)) > 1e-9 else normal_b
+    if normal_norm <= SMALL:
+        normal = normal_a if float(np.linalg.norm(normal_a)) > SMALL else normal_b
         normal_norm = float(np.linalg.norm(normal))
-    if normal_norm <= 1e-9:
+    if normal_norm <= SMALL:
         normal = center_b - center_a
         normal_norm = float(np.linalg.norm(normal))
-    if normal_norm <= 1e-9:
+    if normal_norm <= SMALL:
         normal = np.array([0.0, 0.0, 1.0], dtype=float)
         normal_norm = 1.0
     normal = normal / normal_norm
@@ -1186,7 +1216,9 @@ def _shared_overlap_plane_basis(
 
 
 def _ring_plane_normal(ring_xyz: np.ndarray, center_xyz: np.ndarray) -> np.ndarray:
-    offsets = np.asarray(ring_xyz, dtype=float) - np.asarray(center_xyz, dtype=float)[None, :]
+    offsets = (
+        np.asarray(ring_xyz, dtype=float) - np.asarray(center_xyz, dtype=float)[None, :]
+    )
     if len(offsets) < 3:
         return np.array([0.0, 0.0, 1.0], dtype=float)
     _, _, vh = np.linalg.svd(offsets, full_matrices=False)
@@ -1194,7 +1226,7 @@ def _ring_plane_normal(ring_xyz: np.ndarray, center_xyz: np.ndarray) -> np.ndarr
         return np.array([0.0, 0.0, 1.0], dtype=float)
     normal = np.asarray(vh[-1], dtype=float)
     normal_norm = float(np.linalg.norm(normal))
-    if normal_norm <= 1e-9:
+    if normal_norm <= SMALL:
         return np.array([0.0, 0.0, 1.0], dtype=float)
     return normal / normal_norm
 
@@ -1205,7 +1237,9 @@ def _project_ring_to_plane(
     basis_u: np.ndarray,
     basis_v: np.ndarray,
 ) -> np.ndarray:
-    offsets = np.asarray(ring_xyz, dtype=float) - np.asarray(center_xyz, dtype=float)[None, :]
+    offsets = (
+        np.asarray(ring_xyz, dtype=float) - np.asarray(center_xyz, dtype=float)[None, :]
+    )
     return np.column_stack(
         [
             offsets @ np.asarray(basis_u, dtype=float),
@@ -1216,7 +1250,7 @@ def _project_ring_to_plane(
 
 def _ensure_ccw_convex_polygon(polygon_2d: np.ndarray) -> np.ndarray:
     polygon = np.asarray(polygon_2d, dtype=float)
-    if len(polygon) >= 2 and np.allclose(polygon[0], polygon[-1], atol=1e-9):
+    if len(polygon) >= 2 and np.allclose(polygon[0], polygon[-1], atol=SMALL):
         polygon = polygon[:-1]
     if len(polygon) < 3:
         return polygon
@@ -1244,7 +1278,7 @@ def _convex_polygon_intersection(
     def inside(point: np.ndarray, edge_start: np.ndarray, edge_end: np.ndarray) -> bool:
         edge = edge_end - edge_start
         rel = point - edge_start
-        return float(edge[0] * rel[1] - edge[1] * rel[0]) >= -1e-9
+        return float(edge[0] * rel[1] - edge[1] * rel[0]) >= -SMALL
 
     def intersection(
         start: np.ndarray,
@@ -1289,7 +1323,9 @@ def _convex_polygon_intersection(
     return _ensure_ccw_convex_polygon(output)
 
 
-def _resample_closed_polygon_2d(polygon_2d: np.ndarray, *, point_count: int) -> np.ndarray:
+def _resample_closed_polygon_2d(
+    polygon_2d: np.ndarray, *, point_count: int
+) -> np.ndarray:
     polygon = _ensure_ccw_convex_polygon(np.asarray(polygon_2d, dtype=float))
     if len(polygon) < 3:
         return polygon
@@ -1297,16 +1333,18 @@ def _resample_closed_polygon_2d(polygon_2d: np.ndarray, *, point_count: int) -> 
     segment_vectors = np.diff(closed, axis=0)
     segment_lengths = np.linalg.norm(segment_vectors, axis=1)
     perimeter = float(np.sum(segment_lengths))
-    if perimeter <= 1e-9:
+    if perimeter <= SMALL:
         return polygon
-    target_distances = np.linspace(0.0, perimeter, int(max(point_count, 12)), endpoint=False)
+    target_distances = np.linspace(
+        0.0, perimeter, int(max(point_count, 12)), endpoint=False
+    )
     cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)])
     resampled: list[np.ndarray] = []
     segment_index = 0
     for distance in target_distances:
         while (
             segment_index < len(segment_lengths) - 1
-            and cumulative[segment_index + 1] < distance - 1e-9
+            and cumulative[segment_index + 1] < distance - SMALL
         ):
             segment_index += 1
         segment_start = closed[segment_index]
@@ -1326,7 +1364,9 @@ def _fallback_circle_ring(
     radius_m: float,
     point_count: int,
 ) -> np.ndarray:
-    basis_u, basis_v = _stable_normal_plane_basis(np.array([0.0, 0.0, 1.0], dtype=float))
+    basis_u, basis_v = _stable_normal_plane_basis(
+        np.array([0.0, 0.0, 1.0], dtype=float)
+    )
     angles = np.linspace(0.0, 2.0 * np.pi, int(max(point_count, 12)), endpoint=False)
     radius = float(max(radius_m, 1.0))
     return (
@@ -1344,7 +1384,7 @@ def _corridor_summary_zone(corridor: AntiCollisionCorridor) -> AntiCollisionZone
     overlap_depth_m = float(overlap_depth_values[worst_index])
     separation_factor = float(corridor.separation_factor_values[worst_index])
     combined_radius_m = (
-        overlap_depth_m / max(1.0 - separation_factor, 1e-9)
+        overlap_depth_m / max(1.0 - separation_factor, SMALL)
         if separation_factor < 1.0
         else overlap_depth_m
     )
@@ -1371,7 +1411,9 @@ def _corridor_summary_zone(corridor: AntiCollisionCorridor) -> AntiCollisionZone
     )
 
 
-def _corridor_to_report_event(corridor: AntiCollisionCorridor) -> AntiCollisionReportEvent:
+def _corridor_to_report_event(
+    corridor: AntiCollisionCorridor,
+) -> AntiCollisionReportEvent:
     return AntiCollisionReportEvent(
         well_a=str(corridor.well_a),
         well_b=str(corridor.well_b),
@@ -1403,8 +1445,12 @@ def _report_events_can_merge(
         or str(event.label_b) != str(corridor.label_b)
     ):
         return False
-    overlap_or_touch_a = float(corridor.md_a_start_m) <= float(event.md_a_end_m) + tolerance_m
-    overlap_or_touch_b = float(corridor.md_b_start_m) <= float(event.md_b_end_m) + tolerance_m
+    overlap_or_touch_a = (
+        float(corridor.md_a_start_m) <= float(event.md_a_end_m) + tolerance_m
+    )
+    overlap_or_touch_b = (
+        float(corridor.md_b_start_m) <= float(event.md_b_end_m) + tolerance_m
+    )
     return bool(overlap_or_touch_a and overlap_or_touch_b)
 
 
@@ -1438,7 +1484,9 @@ def _merge_report_event_with_corridor(
 def _corridor_merge_tolerance_m(
     wells: tuple[AntiCollisionWell, ...],
 ) -> float:
-    return float(max((well.overlay.model.sample_step_m for well in wells), default=100.0) * 1.05)
+    return float(
+        max((well.overlay.model.sample_step_m for well in wells), default=100.0) * 1.05
+    )
 
 
 def _md_interval_label(md_start_m: float, md_end_m: float) -> str:
@@ -1509,10 +1557,14 @@ def _collect_well_overlap_segments(
                     well_name=current.well_name,
                     md_start_m=float(current.md_start_m),
                     md_end_m=max(float(current.md_end_m), float(segment.md_end_m)),
-                    classification=current.classification
-                    if int(current.priority_rank) <= int(segment.priority_rank)
-                    else segment.classification,
-                    priority_rank=min(int(current.priority_rank), int(segment.priority_rank)),
+                    classification=(
+                        current.classification
+                        if int(current.priority_rank) <= int(segment.priority_rank)
+                        else segment.classification
+                    ),
+                    priority_rank=min(
+                        int(current.priority_rank), int(segment.priority_rank)
+                    ),
                 )
                 continue
             merged.append(current)
@@ -1582,7 +1634,9 @@ def _centerline_tangent_xyz(centers_xyz: np.ndarray, index: int) -> np.ndarray:
     )
 
 
-def _stable_normal_plane_basis(tangent_xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _stable_normal_plane_basis(
+    tangent_xyz: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     tangent = np.asarray(tangent_xyz, dtype=float)
     tangent_norm = float(np.linalg.norm(tangent))
     if tangent_norm <= 1e-12:
@@ -1621,8 +1675,10 @@ def _align_ring_for_continuity(
     for candidate_base in (current, current[::-1]):
         for shift in range(current.shape[0]):
             candidate = np.roll(candidate_base, shift=shift, axis=0)
-            candidate_cost = float(np.mean(np.linalg.norm(candidate - previous, axis=1)))
-            if candidate_cost + 1e-9 < best_cost:
+            candidate_cost = float(
+                np.mean(np.linalg.norm(candidate - previous, axis=1))
+            )
+            if candidate_cost + SMALL < best_cost:
                 best_ring = candidate
                 best_cost = candidate_cost
     return best_ring

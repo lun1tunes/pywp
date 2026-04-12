@@ -26,9 +26,8 @@ from pywp.planner_types import (
     TurnSearchSettings,
 )
 from pywp.segments import BuildSegment, HoldSegment, HorizontalSegment, VerticalSegment
+from pywp.constants import SMALL
 from pywp.trajectory import WellTrajectory
-
-SMALL = 1e-9
 DLS_VALIDATION_TOLERANCE_DEG_PER_30M = 0.01
 TRAJECTORY_MODEL_LABEL = "Unified J Profile + Build + Azimuth Turn"
 

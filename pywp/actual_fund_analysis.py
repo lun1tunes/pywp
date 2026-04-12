@@ -8,10 +8,12 @@ import numpy as np
 import pandas as pd
 
 from pywp.anticollision import (
+    AntiCollisionAnalysis,
     analyze_anti_collision,
     anti_collision_report_events,
     build_anti_collision_well,
 )
+from pywp.constants import SMALL
 from pywp.mcm import add_dls, wrap_azimuth_deg
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.reference_trajectories import ImportedTrajectoryWell
@@ -204,7 +206,10 @@ def actual_well_is_horizontal(stations: pd.DataFrame) -> bool:
     survey = _reconstruct_actual_survey(stations)
     interval = _terminal_horizontal_interval(survey)
     max_inc = float(np.nanmax(survey["INC_deg"].to_numpy(dtype=float)))
-    return bool(max_inc >= HORIZONTAL_INC_THRESHOLD_DEG and interval[2] >= HORIZONTAL_MIN_INTERVAL_M)
+    return bool(
+        max_inc >= HORIZONTAL_INC_THRESHOLD_DEG
+        and interval[2] >= HORIZONTAL_MIN_INTERVAL_M
+    )
 
 
 def build_actual_fund_well_analysis(
@@ -234,8 +239,8 @@ def _analyze_actual_well(actual_well: ImportedTrajectoryWell) -> ActualFundWellA
     x_values = stations["X_m"].to_numpy(dtype=float)
     y_values = stations["Y_m"].to_numpy(dtype=float)
     inc_values = stations["INC_deg"].to_numpy(dtype=float)
-    terminal_horizontal_start_md, _, terminal_horizontal_length_m = _terminal_horizontal_interval(
-        stations
+    terminal_horizontal_start_md, _, terminal_horizontal_length_m = (
+        _terminal_horizontal_interval(stations)
     )
     provisional_hold_start_md, provisional_hold_end_md, _, _ = _detect_hold_interval(
         stations=stations,
@@ -277,11 +282,13 @@ def _analyze_actual_well(actual_well: ImportedTrajectoryWell) -> ActualFundWellA
     build_limit_md = (
         float(hold_start_md)
         if hold_start_md is not None
-        else float(horizontal_entry_md)
-        if horizontal_entry_md is not None
-        else float(md_values[-1])
+        else (
+            float(horizontal_entry_md)
+            if horizontal_entry_md is not None
+            else float(md_values[-1])
+        )
     )
-    build_mask = md_values <= build_limit_md + 1e-9
+    build_mask = md_values <= build_limit_md + SMALL
     max_dls = _robust_max_dls(stations)
     max_build_dls = _robust_max_dls(stations.loc[build_mask].reset_index(drop=True))
     exclusion_reason = _analysis_exclusion_reason(
@@ -366,7 +373,7 @@ def _build_zone_summaries(
             return
         start_value = float(start_m)
         end_value = float(end_m)
-        if end_value <= start_value + 1e-9:
+        if end_value <= start_value + SMALL:
             return
         intervals.append((zone_key, start_value, end_value))
 
@@ -375,18 +382,23 @@ def _build_zone_summaries(
     else:
         kop_md = float(min(max(kop_md_m, md_start), md_end))
         add_interval(ZONE_VERTICAL, md_start, kop_md)
-        if hold_start_md_m is not None and hold_start_md_m > kop_md + 1e-9:
+        if hold_start_md_m is not None and hold_start_md_m > kop_md + SMALL:
             add_interval(ZONE_BUILD1, kop_md, hold_start_md_m)
-        elif horizontal_entry_md_m is not None and horizontal_entry_md_m > kop_md + 1e-9:
+        elif (
+            horizontal_entry_md_m is not None and horizontal_entry_md_m > kop_md + SMALL
+        ):
             add_interval(ZONE_BUILD1, kop_md, horizontal_entry_md_m)
         else:
             add_interval(ZONE_BUILD1, kop_md, md_end)
 
         if hold_start_md_m is not None and hold_end_md_m is not None:
             add_interval(ZONE_HOLD, hold_start_md_m, hold_end_md_m)
-            if horizontal_entry_md_m is not None and horizontal_entry_md_m > hold_end_md_m + 1e-9:
+            if (
+                horizontal_entry_md_m is not None
+                and horizontal_entry_md_m > hold_end_md_m + SMALL
+            ):
                 add_interval(ZONE_BUILD2, hold_end_md_m, horizontal_entry_md_m)
-            elif hold_end_md_m < md_end - 1e-9 and horizontal_entry_md_m is None:
+            elif hold_end_md_m < md_end - SMALL and horizontal_entry_md_m is None:
                 add_interval(ZONE_BUILD2, hold_end_md_m, md_end)
 
         if horizontal_entry_md_m is not None:
@@ -435,7 +447,9 @@ def _annotate_actual_fund_survey(
             (
                 item
                 for item in zone_summaries
-                if float(item.md_from_m) - 1e-9 <= float(md_value) <= float(item.md_to_m) + 1e-9
+                if float(item.md_from_m) - SMALL
+                <= float(md_value)
+                <= float(item.md_to_m) + SMALL
             ),
             None,
         )
@@ -625,7 +639,7 @@ def _filter_depth_cluster_outliers(values: np.ndarray) -> np.ndarray:
         return array
     q1, q3 = np.percentile(array, [25.0, 75.0])
     iqr = float(q3 - q1)
-    if not np.isfinite(iqr) or iqr <= 1e-9:
+    if not np.isfinite(iqr) or iqr <= SMALL:
         return array
     lower = float(q1 - DEPTH_CLUSTER_OUTLIER_IQR_FACTOR * iqr)
     upper = float(q3 + DEPTH_CLUSTER_OUTLIER_IQR_FACTOR * iqr)
@@ -660,10 +674,18 @@ def summarize_actual_fund_by_pad(
                 pad_group=pad_group,
                 well_count=len(items),
                 horizontal_well_count=len(horizontal_items),
-                median_kop_md_m=_median_or_none(item.kop_md_m for item in horizontal_items),
-                median_hold_inc_deg=_median_or_none(item.hold_inc_deg for item in horizontal_items),
-                median_hold_length_m=_median_or_none(item.hold_length_m for item in horizontal_items),
-                max_pi_deg_per_30m=_max_or_none(item.max_dls_deg_per_30m for item in horizontal_items),
+                median_kop_md_m=_median_or_none(
+                    item.kop_md_m for item in horizontal_items
+                ),
+                median_hold_inc_deg=_median_or_none(
+                    item.hold_inc_deg for item in horizontal_items
+                ),
+                median_hold_length_m=_median_or_none(
+                    item.hold_length_m for item in horizontal_items
+                ),
+                max_pi_deg_per_30m=_max_or_none(
+                    item.max_dls_deg_per_30m for item in horizontal_items
+                ),
                 median_horizontal_length_m=_median_or_none(
                     item.horizontal_length_m for item in horizontal_items
                 ),
@@ -743,7 +765,7 @@ def _retained_uncertainty_score(
                 float(candidate_model.sigma_inc_deg) / float(base_model.sigma_inc_deg),
                 float(candidate_model.sigma_azi_deg) / float(base_model.sigma_azi_deg),
                 float(candidate_model.sigma_lateral_drift_m_per_1000m)
-                / max(float(base_model.sigma_lateral_drift_m_per_1000m), 1e-9),
+                / max(float(base_model.sigma_lateral_drift_m_per_1000m), SMALL),
                 float(candidate_model.confidence_scale)
                 / float(base_model.confidence_scale),
             ]
@@ -837,10 +859,7 @@ def calibrate_uncertainty_from_actual_fund(
     actual_well_list = list(actual_wells)
     if analyses is None:
         analyses = build_actual_fund_well_analyses(actual_well_list)
-    reconstructed_by_name = {
-        str(item.name): item.survey
-        for item in analyses
-    }
+    reconstructed_by_name = {str(item.name): item.survey for item in analyses}
     metrics = tuple(item.metrics for item in analyses)
     eligible_metric_names = {
         item.name for item in metrics if bool(item.is_analysis_eligible)
@@ -875,8 +894,7 @@ def calibrate_uncertainty_from_actual_fund(
         )
 
     family_by_name = {
-        str(well.name): actual_well_family_name(well.name)
-        for well in eligible_wells
+        str(well.name): actual_well_family_name(well.name) for well in eligible_wells
     }
     skipped_same_family_pairs = sum(
         1
@@ -928,14 +946,17 @@ def calibrate_uncertainty_from_actual_fund(
         "angular_relaxed",
         "drift_relaxed",
     )
-    best_candidate: tuple[
-        float,
-        PlanningUncertaintyModel,
-        "AntiCollisionAnalysis",
-        tuple[tuple[str, str], ...],
-        str,
-        float,
-    ] | None = None
+    best_candidate: (
+        tuple[
+            float,
+            PlanningUncertaintyModel,
+            "AntiCollisionAnalysis",
+            tuple[tuple[str, str], ...],
+            str,
+            float,
+        ]
+        | None
+    ) = None
     for ignored_pair_keys in ignore_options:
         ignored_pair_key_set = set(ignored_pair_keys)
         for shape_key in shape_keys:
@@ -978,7 +999,9 @@ def calibrate_uncertainty_from_actual_fund(
         if ignored_candidates:
             note += (
                 " Пробовали игнорировать до двух экстремально близких пар: "
-                + ", ".join(_calibration_pair_label(pair_key) for pair_key in ignored_candidates)
+                + ", ".join(
+                    _calibration_pair_label(pair_key) for pair_key in ignored_candidates
+                )
                 + "."
             )
         return ActualFundCalibrationResult(
@@ -995,7 +1018,9 @@ def calibrate_uncertainty_from_actual_fund(
             note=note,
         )
 
-    _, custom_model, analysis_after, ignored_pair_keys, shape_key, scale_factor = best_candidate
+    _, custom_model, analysis_after, ignored_pair_keys, shape_key, scale_factor = (
+        best_candidate
+    )
     note_parts = [
         "Пользовательская модель построена как empirical field-fit относительно "
         f"базового пресета '{base_preset}'.",
@@ -1004,11 +1029,15 @@ def calibrate_uncertainty_from_actual_fund(
         "глобальной шкалой.",
     ]
     if excluded_pilot_well_count:
-        note_parts.append(f"Из fit исключены пилоты `_PL`: {excluded_pilot_well_count}.")
+        note_parts.append(
+            f"Из fit исключены пилоты `_PL`: {excluded_pilot_well_count}."
+        )
     if ignored_pair_keys:
         note_parts.append(
             "Сознательно проигнорированы экстремально близкие пары: "
-            + ", ".join(_calibration_pair_label(pair_key) for pair_key in ignored_pair_keys)
+            + ", ".join(
+                _calibration_pair_label(pair_key) for pair_key in ignored_pair_keys
+            )
             + "."
         )
     note_parts.append(
@@ -1036,7 +1065,9 @@ def calibrate_uncertainty_from_actual_fund(
     )
 
 
-def _terminal_horizontal_interval(stations: pd.DataFrame) -> tuple[float | None, float | None, float]:
+def _terminal_horizontal_interval(
+    stations: pd.DataFrame,
+) -> tuple[float | None, float | None, float]:
     md_values = stations["MD_m"].to_numpy(dtype=float)
     inc_values = stations["INC_deg"].to_numpy(dtype=float)
     if len(md_values) == 0:
@@ -1051,7 +1082,9 @@ def _terminal_horizontal_interval(stations: pd.DataFrame) -> tuple[float | None,
     ]
     if not candidates:
         return None, None, 0.0
-    best_start, best_end, best_length = max(candidates, key=lambda item: (item[2], item[1]))
+    best_start, best_end, best_length = max(
+        candidates, key=lambda item: (item[2], item[1])
+    )
     return float(best_start), float(best_end), float(best_length)
 
 
@@ -1067,9 +1100,15 @@ def _detect_horizontal_entry_md(
     md_values = stations["MD_m"].to_numpy(dtype=float)
     inc_values = stations["INC_deg"].to_numpy(dtype=float)
     dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
-    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    step_m = (
+        float(np.median(np.diff(md_values)))
+        if len(md_values) > 1
+        else ACTUAL_FUND_RESAMPLE_STEP_M
+    )
     window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
-    stable_dls = _rolling_median(np.where(np.isfinite(dls_values), dls_values, 0.0), window_size=window_size)
+    stable_dls = _rolling_median(
+        np.where(np.isfinite(dls_values), dls_values, 0.0), window_size=window_size
+    )
     tail_length_m = max(HORIZONTAL_MIN_INTERVAL_M, 120.0)
     tail_mask = md_values >= float(md_values[-1]) - tail_length_m
     tail_dls = stable_dls[tail_mask & np.isfinite(stable_dls)]
@@ -1087,12 +1126,10 @@ def _detect_horizontal_entry_md(
     search_start_md = (
         float(hold_end_md_m)
         if hold_end_md_m is not None
-        else float(kop_md_m)
-        if kop_md_m is not None
-        else float(md_values[0])
+        else float(kop_md_m) if kop_md_m is not None else float(md_values[0])
     )
     horizontal_mask = (
-        (md_values >= search_start_md - 1e-9)
+        (md_values >= search_start_md - SMALL)
         & (stable_dls <= horizontal_dls_threshold)
         & (inc_values >= HORIZONTAL_ENTRY_MIN_INC_DEG)
     )
@@ -1123,10 +1160,12 @@ def _first_threshold_crossing_md(
         right_value = float(values[index])
         if left_value < threshold <= right_value:
             delta = float(right_value - left_value)
-            if abs(delta) <= 1e-9:
+            if abs(delta) <= SMALL:
                 return float(md_values[index])
             alpha = float((threshold - left_value) / delta)
-            return float(md_values[index - 1] + alpha * (md_values[index] - md_values[index - 1]))
+            return float(
+                md_values[index - 1] + alpha * (md_values[index] - md_values[index - 1])
+            )
     return None
 
 
@@ -1136,7 +1175,6 @@ def _detect_kop_md(
     hold_start_md_m: float | None,
 ) -> float | None:
     md_values = stations["MD_m"].to_numpy(dtype=float)
-    inc_values = stations["INC_deg"].to_numpy(dtype=float)
     if len(md_values) < 2:
         return None
 
@@ -1146,11 +1184,9 @@ def _detect_kop_md(
         stable_inc=stable_inc,
     )
     search_limit_md = (
-        float(hold_start_md_m)
-        if hold_start_md_m is not None
-        else float(md_values[-1])
+        float(hold_start_md_m) if hold_start_md_m is not None else float(md_values[-1])
     )
-    pre_hold_mask = md_values <= search_limit_md + 1e-9
+    pre_hold_mask = md_values <= search_limit_md + SMALL
     if not np.any(pre_hold_mask):
         return None
 
@@ -1196,24 +1232,39 @@ def _interp_1d(md_values: np.ndarray, values: np.ndarray, md_m: float) -> float:
 def _interpolate_row(stations: pd.DataFrame, md_m: float) -> dict[str, float]:
     md_values = stations["MD_m"].to_numpy(dtype=float)
     return {
-        column: float(np.interp(float(md_m), md_values, stations[column].to_numpy(dtype=float)))
-        for column in ("MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m", "DLS_deg_per_30m")
+        column: float(
+            np.interp(float(md_m), md_values, stations[column].to_numpy(dtype=float))
+        )
+        for column in (
+            "MD_m",
+            "INC_deg",
+            "AZI_deg",
+            "X_m",
+            "Y_m",
+            "Z_m",
+            "DLS_deg_per_30m",
+        )
     }
 
 
-def _survey_interval(stations: pd.DataFrame, start_md_m: float, end_md_m: float) -> pd.DataFrame:
-    if end_md_m <= start_md_m + 1e-9:
+def _survey_interval(
+    stations: pd.DataFrame, start_md_m: float, end_md_m: float
+) -> pd.DataFrame:
+    if end_md_m <= start_md_m + SMALL:
         return pd.DataFrame(columns=stations.columns)
     interval = stations.loc[
-        (stations["MD_m"] >= float(start_md_m) - 1e-9)
-        & (stations["MD_m"] <= float(end_md_m) + 1e-9)
+        (stations["MD_m"] >= float(start_md_m) - SMALL)
+        & (stations["MD_m"] <= float(end_md_m) + SMALL)
     ].copy()
-    if interval.empty or abs(float(interval["MD_m"].iloc[0]) - float(start_md_m)) > 1e-9:
+    if (
+        interval.empty
+        or abs(float(interval["MD_m"].iloc[0]) - float(start_md_m)) > SMALL
+    ):
         interval = pd.concat(
             [pd.DataFrame([_interpolate_row(stations, float(start_md_m))]), interval],
             ignore_index=True,
         )
-    if abs(float(interval["MD_m"].iloc[-1]) - float(end_md_m)) > 1e-9:
+    if abs(float(interval["MD_m"].iloc[-1]) - float(end_md_m)) > SMALL:
         interval = pd.concat(
             [interval, pd.DataFrame([_interpolate_row(stations, float(end_md_m))])],
             ignore_index=True,
@@ -1239,14 +1290,18 @@ def _circular_median_deg(values_deg: np.ndarray) -> float | None:
 
 
 def _median_or_none(values: Iterable[float | None]) -> float | None:
-    finite = np.asarray([float(value) for value in values if value is not None], dtype=float)
+    finite = np.asarray(
+        [float(value) for value in values if value is not None], dtype=float
+    )
     if len(finite) == 0:
         return None
     return float(np.median(finite))
 
 
 def _max_or_none(values: Iterable[float | None]) -> float | None:
-    finite = np.asarray([float(value) for value in values if value is not None], dtype=float)
+    finite = np.asarray(
+        [float(value) for value in values if value is not None], dtype=float
+    )
     if len(finite) == 0:
         return None
     return float(np.max(finite))
@@ -1283,7 +1338,8 @@ def _analysis_exclusion_reason(
         return "Аномально высокий устойчивый ПИ по стволу"
     if (
         max_build_dls_before_hold_deg_per_30m is not None
-        and float(max_build_dls_before_hold_deg_per_30m) > MAX_REASONABLE_ACTUAL_DLS_DEG_PER_30M
+        and float(max_build_dls_before_hold_deg_per_30m)
+        > MAX_REASONABLE_ACTUAL_DLS_DEG_PER_30M
     ):
         return "Аномально высокий устойчивый ПИ до HOLD"
     return None
@@ -1331,7 +1387,9 @@ def _reconstruct_actual_survey(
 
     horizontal = np.hypot(direction_grid[:, 0], direction_grid[:, 1])
     inc_deg = np.degrees(np.arctan2(horizontal, direction_grid[:, 2]))
-    azi_deg = wrap_azimuth_deg(np.degrees(np.arctan2(direction_grid[:, 0], direction_grid[:, 1])))
+    azi_deg = wrap_azimuth_deg(
+        np.degrees(np.arctan2(direction_grid[:, 0], direction_grid[:, 1]))
+    )
 
     rebuilt = pd.DataFrame(
         {
@@ -1347,12 +1405,14 @@ def _reconstruct_actual_survey(
     return add_dls(rebuilt)
 
 
-def _station_direction_vectors(md_values: np.ndarray, positions: np.ndarray) -> np.ndarray:
+def _station_direction_vectors(
+    md_values: np.ndarray, positions: np.ndarray
+) -> np.ndarray:
     delta_md = np.diff(md_values)
     segment_vectors = np.diff(positions, axis=0)
     segment_norms = np.linalg.norm(segment_vectors, axis=1)
     segment_directions = np.zeros_like(segment_vectors, dtype=float)
-    valid = segment_norms > 1e-9
+    valid = segment_norms > SMALL
     if np.any(valid):
         segment_directions[valid] = segment_vectors[valid] / segment_norms[valid, None]
         last_valid = np.array([0.0, 0.0, 1.0], dtype=float)
@@ -1365,7 +1425,7 @@ def _station_direction_vectors(md_values: np.ndarray, positions: np.ndarray) -> 
         for index in range(len(segment_directions) - 1, -1, -1):
             if valid[index]:
                 next_valid = segment_directions[index]
-            elif np.linalg.norm(segment_directions[index]) <= 1e-9:
+            elif np.linalg.norm(segment_directions[index]) <= SMALL:
                 segment_directions[index] = next_valid
     else:
         segment_directions[:] = np.array([0.0, 0.0, 1.0], dtype=float)
@@ -1375,9 +1435,12 @@ def _station_direction_vectors(md_values: np.ndarray, positions: np.ndarray) -> 
     for index in range(1, len(md_values) - 1):
         left_weight = float(delta_md[index - 1])
         right_weight = float(delta_md[index])
-        weighted = left_weight * segment_directions[index - 1] + right_weight * segment_directions[index]
+        weighted = (
+            left_weight * segment_directions[index - 1]
+            + right_weight * segment_directions[index]
+        )
         norm = float(np.linalg.norm(weighted))
-        if norm <= 1e-9:
+        if norm <= SMALL:
             station_directions[index] = segment_directions[index]
         else:
             station_directions[index] = weighted / norm
@@ -1396,17 +1459,19 @@ def _normalize_vectors(vectors: np.ndarray) -> np.ndarray:
 def _regular_md_grid(md_values: np.ndarray, step_m: float) -> np.ndarray:
     start_md = float(md_values[0])
     end_md = float(md_values[-1])
-    if end_md <= start_md + 1e-9:
+    if end_md <= start_md + SMALL:
         return np.asarray([start_md, end_md], dtype=float)
     grid = np.arange(start_md, end_md, float(step_m), dtype=float)
-    if len(grid) == 0 or abs(grid[0] - start_md) > 1e-9:
+    if len(grid) == 0 or abs(grid[0] - start_md) > SMALL:
         grid = np.concatenate([[start_md], grid])
-    if abs(grid[-1] - end_md) > 1e-9:
+    if abs(grid[-1] - end_md) > SMALL:
         grid = np.concatenate([grid, [end_md]])
     return grid
 
 
-def _mask_intervals(md_values: np.ndarray, mask: np.ndarray) -> list[tuple[float, float, float]]:
+def _mask_intervals(
+    md_values: np.ndarray, mask: np.ndarray
+) -> list[tuple[float, float, float]]:
     intervals: list[tuple[float, float, float]] = []
     current_start_index: int | None = None
     for index, is_active in enumerate(mask.tolist()):
@@ -1443,9 +1508,15 @@ def _robust_max_dls(stations: pd.DataFrame) -> float | None:
     finite_mask = np.isfinite(dls_values)
     if not np.any(finite_mask):
         return None
-    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    step_m = (
+        float(np.median(np.diff(md_values)))
+        if len(md_values) > 1
+        else ACTUAL_FUND_RESAMPLE_STEP_M
+    )
     window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
-    smoothed = _rolling_median(np.where(finite_mask, dls_values, 0.0), window_size=window_size)
+    smoothed = _rolling_median(
+        np.where(finite_mask, dls_values, 0.0), window_size=window_size
+    )
     finite_smoothed = smoothed[np.isfinite(smoothed)]
     if len(finite_smoothed) == 0:
         return None
@@ -1457,7 +1528,11 @@ def _stable_inc_values(stations: pd.DataFrame) -> np.ndarray:
     md_values = stations["MD_m"].to_numpy(dtype=float)
     if len(inc_values) == 0:
         return np.asarray([], dtype=float)
-    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    step_m = (
+        float(np.median(np.diff(md_values)))
+        if len(md_values) > 1
+        else ACTUAL_FUND_RESAMPLE_STEP_M
+    )
     window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
     return _rolling_median(inc_values, window_size=window_size)
 
@@ -1477,7 +1552,7 @@ def _stable_inc_build_rate_deg_per_30m(
     delta_md = np.diff(md_values)
     delta_inc = np.diff(np.asarray(stable_inc, dtype=float))
     segment_rate = np.zeros(len(delta_md), dtype=float)
-    valid = delta_md > 1e-9
+    valid = delta_md > SMALL
     segment_rate[valid] = np.maximum(delta_inc[valid], 0.0) / delta_md[valid] * 30.0
     station_rate = np.zeros(len(md_values), dtype=float)
     station_rate[0] = segment_rate[0]
@@ -1494,7 +1569,6 @@ def _detect_hold_interval(
     horizontal_entry_md_m: float | None,
 ) -> tuple[float | None, float | None, float | None, float | None]:
     md_values = stations["MD_m"].to_numpy(dtype=float)
-    inc_values = stations["INC_deg"].to_numpy(dtype=float)
     azi_values = stations["AZI_deg"].to_numpy(dtype=float)
     dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
 
@@ -1504,9 +1578,7 @@ def _detect_hold_interval(
         else float(md_values[-1])
     )
     search_start_md = (
-        float(kop_md_m) + 10.0
-        if kop_md_m is not None
-        else float(md_values[0]) + 10.0
+        float(kop_md_m) + 10.0 if kop_md_m is not None else float(md_values[0]) + 10.0
     )
     stable_inc = _stable_inc_values(stations)
     candidate_mask = (
@@ -1520,9 +1592,15 @@ def _detect_hold_interval(
     if not np.any(candidate_mask):
         return None, None, None, None
 
-    step_m = float(np.median(np.diff(md_values))) if len(md_values) > 1 else ACTUAL_FUND_RESAMPLE_STEP_M
+    step_m = (
+        float(np.median(np.diff(md_values)))
+        if len(md_values) > 1
+        else ACTUAL_FUND_RESAMPLE_STEP_M
+    )
     window_size = max(3, int(round(ROBUST_DLS_WINDOW_M / max(step_m, 1.0))))
-    stable_dls = _rolling_median(np.where(np.isfinite(dls_values), dls_values, 0.0), window_size=window_size)
+    stable_dls = _rolling_median(
+        np.where(np.isfinite(dls_values), dls_values, 0.0), window_size=window_size
+    )
     weighted_mode_inc = _weighted_modal_inclination(
         md_values=md_values,
         inc_values=stable_inc,
@@ -1544,7 +1622,7 @@ def _detect_hold_interval(
     if not intervals:
         return None, None, None, None
     start_md, end_md, _ = max(intervals, key=lambda item: (item[2], -item[0]))
-    interval_mask = (md_values >= start_md - 1e-9) & (md_values <= end_md + 1e-9)
+    interval_mask = (md_values >= start_md - SMALL) & (md_values <= end_md + SMALL)
     hold_inc = float(np.median(stable_inc[interval_mask]))
     hold_azi = _circular_median_deg(azi_values[interval_mask])
     return float(start_md), float(end_md), hold_inc, hold_azi

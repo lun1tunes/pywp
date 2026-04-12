@@ -6,6 +6,8 @@ from typing import Annotated, Literal
 import pandas as pd
 from pydantic import Field, field_validator, model_validator
 
+from pywp.constants import SMALL
+from pywp.planner_types import PlanningError
 from pywp.pydantic_base import FrozenArbitraryModel, FrozenModel
 
 OPTIMIZATION_NONE = "none"
@@ -168,6 +170,52 @@ class TrajectoryConfig(FrozenModel):
         return {
             segment_name: float(limits[segment_name]) for segment_name in _SEGMENT_DLS_ORDER
         }
+
+    def validate_for_planning(self) -> None:
+        """Validate configuration limits that cannot be checked via isolated Pydantic fields."""
+        if self.md_step_m <= 0.0 or self.md_step_control_m <= 0.0:
+            raise PlanningError("MD steps must be positive.")
+        if self.lateral_tolerance_m <= 0.0:
+            raise PlanningError("lateral_tolerance_m must be positive.")
+        if self.vertical_tolerance_m <= 0.0:
+            raise PlanningError("vertical_tolerance_m must be positive.")
+        if self.entry_inc_target_deg <= 0.0 or self.entry_inc_target_deg >= 90.0:
+            raise PlanningError("entry_inc_target_deg must be in (0, 90).")
+        if self.kop_min_vertical_m < 0.0:
+            raise PlanningError("kop_min_vertical_m must be non-negative.")
+        if self.entry_inc_tolerance_deg < 0.0:
+            raise PlanningError("entry_inc_tolerance_deg must be non-negative.")
+        if self.max_inc_deg <= 0.0 or self.max_inc_deg > 120.0:
+            raise PlanningError("max_inc_deg must be in (0, 120].")
+        if self.entry_inc_target_deg > self.max_inc_deg + SMALL:
+            raise PlanningError("entry_inc_target_deg cannot exceed max_inc_deg.")
+        if self.dls_build_min_deg_per_30m < 0.0:
+            raise PlanningError("dls_build_min_deg_per_30m cannot be negative.")
+        if self.dls_build_max_deg_per_30m < 0.0:
+            raise PlanningError("dls_build_max_deg_per_30m cannot be negative.")
+        if self.dls_build_min_deg_per_30m > self.dls_build_max_deg_per_30m:
+            raise PlanningError(
+                "dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m."
+            )
+        if self.max_total_md_postcheck_m <= 0.0:
+            raise PlanningError("max_total_md_postcheck_m must be positive.")
+        if self.min_structural_segment_m <= 0.0:
+            raise PlanningError("min_structural_segment_m must be positive.")
+        if self.min_structural_segment_m < self.md_step_control_m:
+            raise PlanningError("min_structural_segment_m must be >= md_step_control_m.")
+        try:
+            turn_solver_max_restarts = float(self.turn_solver_max_restarts)
+        except (TypeError, ValueError) as exc:
+            raise PlanningError(
+                "turn_solver_max_restarts must be a non-negative integer."
+            ) from exc
+        if int(turn_solver_max_restarts) != turn_solver_max_restarts:
+            raise PlanningError("turn_solver_max_restarts must be an integer.")
+        if int(turn_solver_max_restarts) < 0:
+            raise PlanningError("turn_solver_max_restarts must be non-negative.")
+        for segment, limit in self.dls_limits_deg_per_30m.items():
+            if limit < 0.0:
+                raise PlanningError(f"DLS limit for segment {segment} cannot be negative.")
 
     @model_validator(mode="after")
     def _validate_and_sync_limits(self) -> "TrajectoryConfig":

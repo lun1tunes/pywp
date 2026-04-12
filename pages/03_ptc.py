@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from pywp import ptc_core as wt
+from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_well_panels import render_run_log_panel
 from pywp.ui_well_result import (
@@ -626,7 +627,7 @@ def run_page() -> None:
     _render_ptc_run_section(records=records)
 
     if st.session_state.get("wt_last_error"):
-        wt.render_solver_diagnostics(st.session_state["wt_last_error"])
+        render_solver_diagnostics(st.session_state["wt_last_error"])
 
     st.markdown("## 5. Результаты расчёта")
     render_run_log_panel(

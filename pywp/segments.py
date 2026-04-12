@@ -5,9 +5,8 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pandas as pd
 
+from pywp.constants import RAD2DEG
 from pywp.mcm import dogleg_angle_rad
-
-RAD2DEG = 180.0 / np.pi
 
 
 def _make_md_grid(md_start: float, length_m: float, md_step_m: float) -> np.ndarray:
