@@ -33,6 +33,7 @@ INCLUDED_FILE_EXTENSIONS = {
     ".html",
     ".js",
     ".css",
+    ".inc",
 }
 
 INCLUDED_FILE_NAMES = {}

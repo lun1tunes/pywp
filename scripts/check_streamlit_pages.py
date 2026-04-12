@@ -100,80 +100,88 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
             f"solver method is '{app_turn_solver}' but expected '{expected_turn_solver}'."
         )
 
-    wt_at = AppTest.from_file(str(project_root / "pages" / "02_welltrack_import.py")).run()
-    parse_buttons = [button for button in wt_at.button if button.label == "Прочитать WELLTRACK"]
-    if not parse_buttons:
-        errors.append("pages/02_welltrack_import.py: parse button not found.")
+    # Check PTC page instead of removed welltrack_import page.
+    # PTC page only renders the calc-param form when records are loaded,
+    # so we must provide a real welltrack source before clicking import.
+    ptc_at = AppTest.from_file(str(project_root / "pages" / "03_ptc.py"))
+    ptc_at.session_state["wt_source_mode"] = "Файл по пути"
+    ptc_at.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS.INC"
+    ptc_at.run()
+    import_buttons = [button for button in ptc_at.button if button.label == "Импорт целей"]
+    if not import_buttons:
+        errors.append("pages/03_ptc.py: import button not found.")
         return errors
-    parse_buttons[0].click()
-    wt_at.run()
+    import_buttons[0].click()
+    ptc_at.run()
     for label, expected_value in expected.items():
-        actual = _find_number_value(wt_at, label)
+        actual = _find_number_value(ptc_at, label)
         if actual is None:
             errors.append(
-                f"pages/02_welltrack_import.py: input '{label}' not found after parse."
+                f"pages/03_ptc.py: input '{label}' not found after import."
             )
             continue
         if abs(float(actual) - float(expected_value)) > 1e-9:
             errors.append(
-                "pages/02_welltrack_import.py: "
+                "pages/03_ptc.py: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
-    wt_turn_solver = _find_selectbox_value(wt_at, turn_solver_label)
-    if wt_turn_solver is None:
+    ptc_turn_solver = _find_selectbox_value(ptc_at, turn_solver_label)
+    if ptc_turn_solver is None:
         errors.append(
-            "pages/02_welltrack_import.py: solver method selectbox not found after parse."
+            "pages/03_ptc.py: solver method selectbox not found after import."
         )
-    elif wt_turn_solver != expected_turn_solver:
+    elif ptc_turn_solver != expected_turn_solver:
         errors.append(
-            "pages/02_welltrack_import.py: "
-            f"solver method is '{wt_turn_solver}' but expected '{expected_turn_solver}'."
+            "pages/03_ptc.py: "
+            f"solver method is '{ptc_turn_solver}' but expected '{expected_turn_solver}'."
         )
 
     # Regression check: even with stale legacy keys in state, defaults must recover
     # without requiring manual "reset params" click.
-    wt_legacy = AppTest.from_file(
-        str(project_root / "pages" / "02_welltrack_import.py")
+    ptc_legacy = AppTest.from_file(
+        str(project_root / "pages" / "03_ptc.py")
     )
+    ptc_legacy.session_state["wt_source_mode"] = "Файл по пути"
+    ptc_legacy.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS.INC"
     calc_defaults = calc_param_defaults()
     for key, value in _WT_LEGACY_MIN_VALUES.items():
-        wt_legacy.session_state[key] = value
-    wt_legacy.session_state["wt_cfg___calc_param_defaults_signature__"] = tuple(
+        ptc_legacy.session_state[key] = value
+    ptc_legacy.session_state["wt_cfg___calc_param_defaults_signature__"] = tuple(
         (key, calc_defaults[key]) for key in sorted(calc_defaults.keys())
     )
-    wt_legacy.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 2
-    wt_legacy.run()
-    legacy_parse_buttons = [
-        button for button in wt_legacy.button if button.label == "Прочитать WELLTRACK"
+    ptc_legacy.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 2
+    ptc_legacy.run()
+    legacy_import_buttons = [
+        button for button in ptc_legacy.button if button.label == "Импорт целей"
     ]
-    if not legacy_parse_buttons:
+    if not legacy_import_buttons:
         errors.append(
-            "pages/02_welltrack_import.py: parse button not found (legacy check)."
+            "pages/03_ptc.py: import button not found (legacy check)."
         )
         return errors
-    legacy_parse_buttons[0].click()
-    wt_legacy.run()
+    legacy_import_buttons[0].click()
+    ptc_legacy.run()
     for label, expected_value in expected.items():
-        actual = _find_number_value(wt_legacy, label)
+        actual = _find_number_value(ptc_legacy, label)
         if actual is None:
             errors.append(
-                "pages/02_welltrack_import.py: "
-                f"input '{label}' not found after parse (legacy check)."
+                "pages/03_ptc.py: "
+                f"input '{label}' not found after import (legacy check)."
             )
             continue
         if abs(float(actual) - float(expected_value)) > 1e-9:
             errors.append(
-                "pages/02_welltrack_import.py legacy recovery: "
+                "pages/03_ptc.py legacy recovery: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
-    legacy_turn_solver = _find_selectbox_value(wt_legacy, turn_solver_label)
+    legacy_turn_solver = _find_selectbox_value(ptc_legacy, turn_solver_label)
     if legacy_turn_solver is None:
         errors.append(
-            "pages/02_welltrack_import.py: solver method selectbox not found (legacy check)."
+            "pages/03_ptc.py: solver method selectbox not found (legacy check)."
         )
     elif legacy_turn_solver != expected_turn_solver:
         errors.append(
-            "pages/02_welltrack_import.py legacy recovery: "
+            "pages/03_ptc.py legacy recovery: "
             f"solver method is '{legacy_turn_solver}' but expected '{expected_turn_solver}'."
         )
     return errors
@@ -266,7 +274,7 @@ def main() -> int:
         failed = True
         print(f"[FAIL] calc defaults sync: {defaults_errors[0]}")
     else:
-        print("[ OK ] calc defaults sync (app + welltrack)")
+        print("[ OK ] calc defaults sync (app + ptc)")
 
     if failed:
         print("\nStreamlit smoke-check failed.")

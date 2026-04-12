@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-from functools import lru_cache
-import importlib.util
-from pathlib import Path
-import sys
-from types import ModuleType
-
 import pandas as pd
 import streamlit as st
 
+from pywp import ptc_core as wt
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_well_panels import render_run_log_panel
 from pywp.ui_well_result import (
@@ -19,30 +14,7 @@ from pywp.ui_well_result import (
 )
 
 
-@lru_cache(maxsize=4)
-def _load_welltrack_import_module_cached(
-    page_path_str: str,
-    mtime_ns: int,
-) -> ModuleType:
-    module_name = f"_ptc_welltrack_import_shared_{mtime_ns}"
-    spec = importlib.util.spec_from_file_location(module_name, page_path_str)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Не удалось загрузить модуль WELLTRACK import.")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_welltrack_import_module() -> ModuleType:
-    page_path = Path(__file__).with_name("02_welltrack_import.py")
-    return _load_welltrack_import_module_cached(
-        str(page_path),
-        int(page_path.stat().st_mtime_ns),
-    )
-
-
-def _force_ptc_defaults(wt: ModuleType) -> None:
+def _force_ptc_defaults() -> None:
     st.session_state["wt_log_verbosity"] = str(wt.WT_LOG_COMPACT)
     st.session_state["wt_3d_render_mode"] = str(wt.WT_3D_RENDER_DETAIL)
     st.session_state["wt_3d_backend"] = str(wt.WT_3D_BACKEND_THREE_LOCAL)
@@ -55,7 +27,7 @@ def _force_ptc_defaults(wt: ModuleType) -> None:
         st.session_state["wt_prepared_recommendation_snapshot"] = None
 
 
-def _render_ptc_import_section(wt: ModuleType) -> None:
+def _render_ptc_import_section() -> None:
     st.markdown("## 1. Импорт целей")
     st.caption(
         "Загрузите целевые точки скважин в формате WELLTRACK. После успешного "
@@ -76,7 +48,7 @@ def _render_ptc_import_section(wt: ModuleType) -> None:
     )
 
 
-def _render_ptc_reference_kind_import_block(wt: ModuleType, *, kind: str) -> None:
+def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
     title = wt._reference_kind_title(kind)
     state_mode_key = f"ptc_reference_source_mode::{kind}"
     st.session_state.setdefault(state_mode_key, "Путь к WELLTRACK")
@@ -174,7 +146,7 @@ def _render_ptc_reference_kind_import_block(wt: ModuleType, *, kind: str) -> Non
         st.caption("Скважины этого типа не загружены.")
 
 
-def _render_ptc_reference_section(wt: ModuleType) -> None:
+def _render_ptc_reference_section() -> None:
     st.markdown("## 3. Загрузка фактического фонда")
     st.caption(
         "Если на месторождении уже есть фактический фонд или утверждённый "
@@ -183,10 +155,10 @@ def _render_ptc_reference_section(wt: ModuleType) -> None:
     c1, c2 = st.columns(2, gap="medium")
     with c1:
         st.markdown("### Фактический фонд")
-        _render_ptc_reference_kind_import_block(wt, kind=wt.REFERENCE_WELL_ACTUAL)
+        _render_ptc_reference_kind_import_block(kind=wt.REFERENCE_WELL_ACTUAL)
     with c2:
         st.markdown("### Утверждённый проектный фонд")
-        _render_ptc_reference_kind_import_block(wt, kind=wt.REFERENCE_WELL_APPROVED)
+        _render_ptc_reference_kind_import_block(kind=wt.REFERENCE_WELL_APPROVED)
 
     reference_wells = tuple(wt._reference_wells_from_state())
     if reference_wells:
@@ -245,7 +217,7 @@ def _render_ptc_reference_section(wt: ModuleType) -> None:
                 )
 
 
-def _render_ptc_run_section(wt: ModuleType, *, records: list[object]) -> None:
+def _render_ptc_run_section(*, records: list[object]) -> None:
     st.markdown("## 4. Расчёт траекторий")
     st.caption("Детализация лога зафиксирована: краткий режим.")
     summary_rows = st.session_state.get("wt_summary_rows")
@@ -351,7 +323,6 @@ def _render_ptc_run_section(wt: ModuleType, *, records: list[object]) -> None:
 
 
 def _render_ptc_anticollision_panel(
-    wt: ModuleType,
     *,
     successes: list[object],
     records: list[object],
@@ -526,7 +497,6 @@ def _render_ptc_anticollision_panel(
 
 
 def _render_ptc_success_tabs(
-    wt: ModuleType,
     *,
     successes: list[object],
     records: list[object],
@@ -618,7 +588,6 @@ def _render_ptc_success_tabs(
     )
 
     _render_ptc_anticollision_panel(
-        wt,
         successes=successes,
         records=records,
         focus_pad_id=focus_pad_id,
@@ -626,10 +595,9 @@ def _render_ptc_success_tabs(
 
 
 def run_page() -> None:
-    wt = _load_welltrack_import_module()
     st.set_page_config(page_title="PTC", layout="wide")
     wt._init_state()
-    _force_ptc_defaults(wt)
+    _force_ptc_defaults()
     apply_page_style(max_width_px=1700)
     render_hero(
         title="PTC",
@@ -638,7 +606,7 @@ def run_page() -> None:
         max_content_width_px=760,
     )
 
-    _render_ptc_import_section(wt)
+    _render_ptc_import_section()
     records = st.session_state.get("wt_records")
     if records is None:
         st.info("Загрузите цели и нажмите «Импорт целей».")
@@ -654,8 +622,8 @@ def run_page() -> None:
     wt._render_t1_t3_order_panel(records=records)
     wt._render_pad_layout_panel(records=records)
 
-    _render_ptc_reference_section(wt)
-    _render_ptc_run_section(wt, records=records)
+    _render_ptc_reference_section()
+    _render_ptc_run_section(records=records)
 
     if st.session_state.get("wt_last_error"):
         wt.render_solver_diagnostics(st.session_state["wt_last_error"])
@@ -676,7 +644,6 @@ def run_page() -> None:
         st.warning("Все выбранные скважины завершились ошибками расчёта.")
         return
     _render_ptc_success_tabs(
-        wt,
         successes=successes,
         records=list(records),
         summary_rows=list(summary_rows),

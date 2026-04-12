@@ -35,7 +35,7 @@ def _selectbox_value(at: AppTest, label: str) -> str | None:
 
 
 def test_welltrack_defaults_recover_from_legacy_keys() -> None:
-    at = AppTest.from_file("pages/02_welltrack_import.py")
+    at = AppTest.from_file("pages/03_ptc.py")
     defaults = calc_param_defaults()
     for key, value in LEGACY_MIN_VALUES.items():
         at.session_state[key] = value
@@ -45,9 +45,9 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
     at.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 4
 
     at.run()
-    parse_buttons = [button for button in at.button if button.label == "Прочитать WELLTRACK"]
-    assert parse_buttons, "Кнопка парсинга WELLTRACK не найдена."
-    parse_buttons[0].click()
+    import_buttons = [button for button in at.button if button.label == "Импорт целей"]
+    assert import_buttons, "Кнопка импорта целей не найдена."
+    import_buttons[0].click()
     at.run()
 
     label_to_suffix = {
