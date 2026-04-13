@@ -30,7 +30,7 @@ _WT_LEGACY_MIN_VALUES: dict[str, float] = {
 def _collect_page_files(project_root: Path) -> list[Path]:
     pages_dir = project_root / "pages"
     page_files = sorted(pages_dir.glob("*.py"))
-    return [project_root / "app.py", *page_files]
+    return [project_root / "pages/02_single_well.py", *page_files]
 
 
 def _check_page(path: Path) -> list[str]:
@@ -80,36 +80,36 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
     errors: list[str] = []
     expected_turn_solver = str(TrajectoryConfig().turn_solver_mode)
 
-    app_at = AppTest.from_file(str(project_root / "app.py")).run()
+    app_at = AppTest.from_file(str(project_root / "pages/02_single_well.py")).run()
     for label, expected_value in expected.items():
         actual = _find_number_value(app_at, label)
         if actual is None:
-            errors.append(f"app.py: input '{label}' not found.")
+            errors.append(f"pages/02_single_well.py: input '{label}' not found.")
             continue
         if abs(float(actual) - float(expected_value)) > 1e-9:
             errors.append(
-                f"app.py: '{label}'={actual} but expected {expected_value}."
+                f"pages/02_single_well.py: '{label}'={actual} but expected {expected_value}."
             )
     turn_solver_label = "Метод решателя"
     app_turn_solver = _find_selectbox_value(app_at, turn_solver_label)
     if app_turn_solver is None:
-        errors.append("app.py: solver method selectbox not found.")
+        errors.append("pages/02_single_well.py: solver method selectbox not found.")
     elif app_turn_solver != expected_turn_solver:
         errors.append(
-            "app.py: "
+            "pages/02_single_well.py: "
             f"solver method is '{app_turn_solver}' but expected '{expected_turn_solver}'."
         )
 
     # Check PTC page instead of removed welltrack_import page.
     # PTC page only renders the calc-param form when records are loaded,
     # so we must provide a real welltrack source before clicking import.
-    ptc_at = AppTest.from_file(str(project_root / "pages" / "03_ptc.py"))
+    ptc_at = AppTest.from_file(str(project_root / "pages" / "01_trajectory_constructor.py"))
     ptc_at.session_state["wt_source_mode"] = "Файл по пути"
     ptc_at.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS.INC"
     ptc_at.run()
     import_buttons = [button for button in ptc_at.button if button.label == "Импорт целей"]
     if not import_buttons:
-        errors.append("pages/03_ptc.py: import button not found.")
+        errors.append("pages/01_trajectory_constructor.py: import button not found.")
         return errors
     import_buttons[0].click()
     ptc_at.run()
@@ -117,29 +117,29 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
         actual = _find_number_value(ptc_at, label)
         if actual is None:
             errors.append(
-                f"pages/03_ptc.py: input '{label}' not found after import."
+                f"pages/01_trajectory_constructor.py: input '{label}' not found after import."
             )
             continue
         if abs(float(actual) - float(expected_value)) > 1e-9:
             errors.append(
-                "pages/03_ptc.py: "
+                "pages/01_trajectory_constructor.py: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
     ptc_turn_solver = _find_selectbox_value(ptc_at, turn_solver_label)
     if ptc_turn_solver is None:
         errors.append(
-            "pages/03_ptc.py: solver method selectbox not found after import."
+            "pages/01_trajectory_constructor.py: solver method selectbox not found after import."
         )
     elif ptc_turn_solver != expected_turn_solver:
         errors.append(
-            "pages/03_ptc.py: "
+            "pages/01_trajectory_constructor.py: "
             f"solver method is '{ptc_turn_solver}' but expected '{expected_turn_solver}'."
         )
 
     # Regression check: even with stale legacy keys in state, defaults must recover
     # without requiring manual "reset params" click.
     ptc_legacy = AppTest.from_file(
-        str(project_root / "pages" / "03_ptc.py")
+        str(project_root / "pages" / "01_trajectory_constructor.py")
     )
     ptc_legacy.session_state["wt_source_mode"] = "Файл по пути"
     ptc_legacy.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS.INC"
@@ -156,7 +156,7 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
     ]
     if not legacy_import_buttons:
         errors.append(
-            "pages/03_ptc.py: import button not found (legacy check)."
+            "pages/01_trajectory_constructor.py: import button not found (legacy check)."
         )
         return errors
     legacy_import_buttons[0].click()
@@ -165,23 +165,23 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
         actual = _find_number_value(ptc_legacy, label)
         if actual is None:
             errors.append(
-                "pages/03_ptc.py: "
+                "pages/01_trajectory_constructor.py: "
                 f"input '{label}' not found after import (legacy check)."
             )
             continue
         if abs(float(actual) - float(expected_value)) > 1e-9:
             errors.append(
-                "pages/03_ptc.py legacy recovery: "
+                "pages/01_trajectory_constructor.py legacy recovery: "
                 f"'{label}'={actual} but expected {expected_value}."
             )
     legacy_turn_solver = _find_selectbox_value(ptc_legacy, turn_solver_label)
     if legacy_turn_solver is None:
         errors.append(
-            "pages/03_ptc.py: solver method selectbox not found (legacy check)."
+            "pages/01_trajectory_constructor.py: solver method selectbox not found (legacy check)."
         )
     elif legacy_turn_solver != expected_turn_solver:
         errors.append(
-            "pages/03_ptc.py legacy recovery: "
+            "pages/01_trajectory_constructor.py legacy recovery: "
             f"solver method is '{legacy_turn_solver}' but expected '{expected_turn_solver}'."
         )
     return errors
@@ -205,7 +205,7 @@ def _check_server_boot(project_root: Path, timeout_s: float = 25.0) -> str | Non
     cmd = [
         _streamlit_binary(project_root),
         "run",
-        "app.py",
+        "pages/02_single_well.py",
         "--server.headless",
         "true",
         "--server.port",
@@ -250,9 +250,9 @@ def main() -> int:
     boot_error = _check_server_boot(project_root=project_root)
     if boot_error is not None:
         failed = True
-        print(f"[FAIL] app.py server boot: {boot_error}")
+        print(f"[FAIL] pages/02_single_well.py server boot: {boot_error}")
     else:
-        print("[ OK ] app.py server boot")
+        print("[ OK ] pages/02_single_well.py server boot")
 
     for page_file in page_files:
         rel = page_file.relative_to(project_root)

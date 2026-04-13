@@ -107,7 +107,11 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
                         kind=kind,
                     )
                 else:
-                    payload = b"" if uploaded_file is None else uploaded_file.getvalue()
+                    payload = (
+                        b""
+                        if uploaded_file is None
+                        else uploaded_file.getvalue()
+                    )
                     parsed = wt.parse_reference_trajectory_welltrack_text(
                         wt._decode_welltrack_payload(
                             payload,
@@ -159,7 +163,9 @@ def _render_ptc_reference_section() -> None:
         _render_ptc_reference_kind_import_block(kind=wt.REFERENCE_WELL_ACTUAL)
     with c2:
         st.markdown("### Утверждённый проектный фонд")
-        _render_ptc_reference_kind_import_block(kind=wt.REFERENCE_WELL_APPROVED)
+        _render_ptc_reference_kind_import_block(
+            kind=wt.REFERENCE_WELL_APPROVED
+        )
 
     reference_wells = tuple(wt._reference_wells_from_state())
     if reference_wells:
@@ -183,9 +189,13 @@ def _render_ptc_reference_section() -> None:
                     pd.DataFrame(
                         [
                             {
-                                "Скважина": wt.reference_well_display_label(item),
+                                "Скважина": wt.reference_well_display_label(
+                                    item
+                                ),
                                 "Точек": int(len(item.stations)),
-                                "MD max, м": float(item.stations["MD_m"].iloc[-1]),
+                                "MD max, м": float(
+                                    item.stations["MD_m"].iloc[-1]
+                                ),
                             }
                             for item in reference_wells
                         ]
@@ -200,11 +210,18 @@ def _render_ptc_reference_section() -> None:
         analyses = wt._actual_fund_analyses(actual_wells)
         wt._render_actual_fund_analysis_panel(analyses=analyses)
 
-    approved_wells = tuple(wt._reference_kind_wells(wt.REFERENCE_WELL_APPROVED))
+    approved_wells = tuple(
+        wt._reference_kind_wells(wt.REFERENCE_WELL_APPROVED)
+    )
     if approved_wells:
-        with st.expander("Просмотр загруженных утверждённых проектных скважин", expanded=False):
+        with st.expander(
+            "Просмотр загруженных утверждённых проектных скважин",
+            expanded=False,
+        ):
             try:
-                approved_analyses = wt.build_actual_fund_well_analyses(approved_wells)
+                approved_analyses = wt.build_actual_fund_well_analyses(
+                    approved_wells
+                )
             except Exception as exc:
                 st.error(
                     "Не удалось построить просмотр утверждённого проектного фонда."
@@ -222,18 +239,26 @@ def _render_ptc_run_section(*, records: list[object]) -> None:
     st.markdown("## 4. Расчёт траекторий")
     st.caption("Детализация лога зафиксирована: краткий режим.")
     summary_rows = st.session_state.get("wt_summary_rows")
-    wt._render_batch_selection_status(records=records, summary_rows=summary_rows)
+    wt._render_batch_selection_status(
+        records=records, summary_rows=summary_rows
+    )
     all_names, _ = wt._sync_selection_state(records=records)
     pads, _, well_names_by_pad_id = wt._pad_membership(records)
     pad_ids = [str(pad.pad_id) for pad in pads]
-    if pad_ids and str(st.session_state.get("wt_batch_select_pad_id", "")).strip() not in pad_ids:
+    if (
+        pad_ids
+        and str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
+        not in pad_ids
+    ):
         st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
 
     with st.form("ptc_run_form", clear_on_submit=False):
-        select_col, pad_col, action_col, pad_add_col, pad_only_col = st.columns(
-            [5.0, 2.4, 1.2, 1.45, 1.45],
-            gap="small",
-            vertical_alignment="bottom",
+        select_col, pad_col, action_col, pad_add_col, pad_only_col = (
+            st.columns(
+                [5.0, 2.4, 1.2, 1.45, 1.45],
+                gap="small",
+                vertical_alignment="bottom",
+            )
         )
         with select_col:
             st.multiselect(
@@ -253,7 +278,11 @@ def _render_ptc_run_section(*, records: list[object]) -> None:
                     "Куст",
                     options=pad_ids,
                     format_func=lambda value: wt._pad_display_label(
-                        next(pad for pad in pads if str(pad.pad_id) == str(value))
+                        next(
+                            pad
+                            for pad in pads
+                            if str(pad.pad_id) == str(value)
+                        )
                     ),
                     key="wt_batch_select_pad_id",
                 )
@@ -291,16 +320,25 @@ def _render_ptc_run_section(*, records: list[object]) -> None:
         st.session_state["wt_pending_selected_names"] = list(all_names)
         st.rerun()
     if add_pad_clicked:
-        selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
+        selected_pad_id = str(
+            st.session_state.get("wt_batch_select_pad_id", "")
+        ).strip()
         current_selected = [
             str(name) for name in st.session_state.get("wt_selected_names", [])
         ]
         st.session_state["wt_pending_selected_names"] = list(
-            dict.fromkeys([*current_selected, *well_names_by_pad_id.get(selected_pad_id, ())])
+            dict.fromkeys(
+                [
+                    *current_selected,
+                    *well_names_by_pad_id.get(selected_pad_id, ()),
+                ]
+            )
         )
         st.rerun()
     if replace_with_pad_clicked:
-        selected_pad_id = str(st.session_state.get("wt_batch_select_pad_id", "")).strip()
+        selected_pad_id = str(
+            st.session_state.get("wt_batch_select_pad_id", "")
+        ).strip()
         st.session_state["wt_pending_selected_names"] = list(
             well_names_by_pad_id.get(selected_pad_id, ())
         )
@@ -309,15 +347,19 @@ def _render_ptc_run_section(*, records: list[object]) -> None:
     wt._run_batch_if_clicked(
         requests=[
             wt._BatchRunRequest(
-                selected_names=list(st.session_state.get("wt_selected_names", [])),
+                selected_names=list(
+                    st.session_state.get("wt_selected_names", [])
+                ),
                 config=config,
                 run_clicked=bool(run_clicked),
             )
         ],
         records=records,
     )
-    if run_clicked and st.session_state.get("wt_summary_rows") and not st.session_state.get(
-        "wt_last_error"
+    if (
+        run_clicked
+        and st.session_state.get("wt_summary_rows")
+        and not st.session_state.get("wt_last_error")
     ):
         st.session_state["wt_results_view_mode"] = "Все скважины"
         st.session_state["wt_results_all_view_mode"] = "Anti-collision"
@@ -331,7 +373,9 @@ def _render_ptc_anticollision_panel(
 ) -> None:
     reference_wells = wt._reference_wells_from_state()
     if len(successes) + len(reference_wells) < 2:
-        st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
+        st.info(
+            "Для anti-collision нужно минимум две успешно рассчитанные скважины."
+        )
         return
 
     custom_actual_fund_model = wt._actual_fund_custom_model_from_state()
@@ -359,17 +403,22 @@ def _render_ptc_anticollision_panel(
         custom_model=custom_actual_fund_model,
     )
 
-    anti_collision_progress = st.progress(8, text="Подготовка anti-collision анализа...")
+    anti_collision_progress = st.progress(
+        8, text="Подготовка anti-collision анализа..."
+    )
 
     def _anti_collision_progress_update(value: int, text: str) -> None:
         anti_collision_progress.progress(int(value), text=text)
+
     try:
-        analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
-            successes=successes,
-            uncertainty_model=uncertainty_model,
-            records=records,
-            reference_wells=reference_wells,
-            progress_callback=_anti_collision_progress_update,
+        analysis, recommendations, clusters = (
+            wt._cached_anti_collision_view_model(
+                successes=successes,
+                uncertainty_model=uncertainty_model,
+                records=records,
+                reference_wells=reference_wells,
+                progress_callback=_anti_collision_progress_update,
+            )
         )
     except Exception as exc:
         anti_collision_progress.empty()
@@ -415,18 +464,94 @@ def _render_ptc_anticollision_panel(
     m1, m2, m3, m4 = st.columns(4, gap="small")
     m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
     m2.metric("Пар с overlap", f"{int(analysis.overlapping_pair_count)}")
-    m3.metric("Пересечения в t1/t3", f"{int(analysis.target_overlap_pair_count)}")
+    m3.metric(
+        "Пересечения в t1/t3", f"{int(analysis.target_overlap_pair_count)}"
+    )
     worst_sf = analysis.worst_separation_factor
-    m4.metric("Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}")
+    m4.metric(
+        "Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}"
+    )
     with st.expander("Что такое SF?", expanded=False):
         st.markdown(wt._sf_help_markdown())
+
+    if focus_pad_well_names and len(focus_pad_well_names) >= 2:
+        st.markdown("### Оптимизация расстановки")
+        st.caption(
+            "Автоматический подбор порядка скважин на кусте для минимизации коллизий без изменения профиля (KOP, TVD)."
+        )
+        if st.button(
+            "✨ Оптимизировать порядок скважин на кусту",
+            type="primary",
+            use_container_width=True,
+        ):
+            from pywp.pad_optimization import optimize_pad_order
+
+            opt_progress = st.progress(0, text="Инициализация оптимизации...")
+
+            def opt_callback(percent: int, msg: str) -> None:
+                opt_progress.progress(int(percent), text=msg)
+
+            config_by_name = {
+                s.name: s.config
+                for s in successes
+                if s.name in focus_pad_well_names
+            }
+            success_dict = {s.name: s for s in successes}
+
+            new_records, new_success_dict, improved = optimize_pad_order(
+                records=records,
+                success_dict=success_dict,
+                pad_well_names=focus_pad_well_names,
+                uncertainty_model=uncertainty_model,
+                reference_wells=list(reference_wells),
+                config_by_name=config_by_name,
+                progress_callback=opt_callback,
+            )
+
+            if improved:
+                from pywp.welltrack_batch import (
+                    WelltrackBatchPlanner,
+                    merge_batch_results,
+                )
+
+                new_rows = []
+                for r in new_records:
+                    if r.name in new_success_dict:
+                        new_rows.append(
+                            WelltrackBatchPlanner._row_from_success(
+                                record=r, success=new_success_dict[r.name]
+                            )
+                        )
+
+                merged_rows, merged_successes = merge_batch_results(
+                    records=new_records,
+                    existing_rows=st.session_state.get("wt_summary_rows"),
+                    existing_successes=st.session_state.get("wt_successes"),
+                    new_rows=new_rows,
+                    new_successes=list(new_success_dict.values()),
+                )
+
+                st.session_state["wt_records"] = new_records
+                st.session_state["wt_successes"] = merged_successes
+                st.session_state["wt_summary_rows"] = merged_rows
+                wt._reset_anticollision_view_state(clear_prepared=True)
+                opt_progress.progress(
+                    100, text="Оптимизация завершена! Применяем изменения..."
+                )
+                st.rerun()
+            else:
+                opt_progress.progress(
+                    100,
+                    text="Текущий порядок уже оптимален (или улучшить не удалось).",
+                )
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     try:
         anticollision_3d_figure = wt._all_wells_anticollision_3d_figure(
             analysis,
             previous_successes_by_name={},
-            focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
+            focus_well_names=focus_anticollision_well_names
+            or focus_pad_well_names,
             render_mode=wt.WT_3D_RENDER_DETAIL,
         )
         wt._render_plotly_or_three_3d(
@@ -443,7 +568,8 @@ def _render_ptc_anticollision_panel(
             wt._all_wells_anticollision_plan_figure(
                 analysis,
                 previous_successes_by_name={},
-                focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
+                focus_well_names=focus_anticollision_well_names
+                or focus_pad_well_names,
             ),
             width="stretch",
         )
@@ -466,14 +592,18 @@ def _render_ptc_anticollision_panel(
         )
         return
 
-    target_zones = [zone for zone in analysis.zones if int(zone.priority_rank) < 2]
+    target_zones = [
+        zone for zone in analysis.zones if int(zone.priority_rank) < 2
+    ]
     if target_zones:
         st.warning(
             "Найдены пересечения, затрагивающие точки целей t1/t3. Они вынесены "
             "в начало отчета и должны разбираться в первую очередь."
         )
     else:
-        st.warning("Найдены пересечения 2σ конусов неопределенности по траекториям.")
+        st.warning(
+            "Найдены пересечения 2σ конусов неопределенности по траекториям."
+        )
 
     report_rows = (
         wt._report_rows_from_recommendations(visible_recommendations)
@@ -490,7 +620,9 @@ def _render_ptc_anticollision_panel(
     st.markdown("### Рекомендации")
     st.dataframe(
         wt.arrow_safe_text_dataframe(
-            pd.DataFrame(wt.anti_collision_recommendation_rows(visible_recommendations))
+            pd.DataFrame(
+                wt.anti_collision_recommendation_rows(visible_recommendations)
+            )
         ),
         width="stretch",
         hide_index=True,
@@ -511,7 +643,9 @@ def _render_ptc_success_tabs(
         label_visibility="collapsed",
     )
     if str(view_mode) == "Отдельная скважина":
-        selected_name = st.selectbox("Скважина", options=[item.name for item in successes])
+        selected_name = st.selectbox(
+            "Скважина", options=[item.name for item in successes]
+        )
         selected = wt._ensure_selected_success_baseline(
             selected_name=str(selected_name),
             successes=successes,
@@ -534,7 +668,9 @@ def _render_ptc_success_tabs(
                 if str(selected.md_postcheck_message).strip()
                 else ()
             ),
-            trajectory_line_dash="dash" if bool(selected.md_postcheck_exceeded) else "solid",
+            trajectory_line_dash=(
+                "dash" if bool(selected.md_postcheck_exceeded) else "solid"
+            ),
         )
         t1_horizontal_offset_m = render_key_metrics(
             view=well_view,
@@ -560,13 +696,20 @@ def _render_ptc_success_tabs(
 
     pads, _, _ = wt._pad_membership(records)
     if len(pads) > 1:
-        focus_options = [wt.WT_PAD_FOCUS_ALL, *(str(pad.pad_id) for pad in pads)]
+        focus_options = [
+            wt.WT_PAD_FOCUS_ALL,
+            *(str(pad.pad_id) for pad in pads),
+        ]
         normalized_focus_pad_id = wt._normalize_focus_pad_id(
             records=records,
             requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
         )
-        if normalized_focus_pad_id != str(st.session_state.get("wt_results_focus_pad_id", "")):
-            st.session_state["wt_results_focus_pad_id"] = normalized_focus_pad_id
+        if normalized_focus_pad_id != str(
+            st.session_state.get("wt_results_focus_pad_id", "")
+        ):
+            st.session_state["wt_results_focus_pad_id"] = (
+                normalized_focus_pad_id
+            )
         st.selectbox(
             "Фокус камеры по кусту",
             options=focus_options,
@@ -583,10 +726,10 @@ def _render_ptc_success_tabs(
         records=records,
         requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
     )
-    focus_pad_well_names = wt._focus_pad_well_names(
-        records=records,
-        focus_pad_id=focus_pad_id,
-    )
+    #     focus_pad_well_names = wt._focus_pad_well_names(
+    #         records=records,
+    #         focus_pad_id=focus_pad_id,
+    #     )
 
     _render_ptc_anticollision_panel(
         successes=successes,
@@ -638,7 +781,9 @@ def run_page() -> None:
     summary_rows = st.session_state.get("wt_summary_rows")
     successes = st.session_state.get("wt_successes")
     if not summary_rows:
-        render_small_note("Результаты расчёта появятся после запуска расчёта траекторий.")
+        render_small_note(
+            "Результаты расчёта появятся после запуска расчёта траекторий."
+        )
         return
     wt._render_batch_summary(summary_rows=summary_rows)
     if not successes:

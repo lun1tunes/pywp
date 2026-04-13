@@ -1686,8 +1686,6 @@ def _three_legend_tree_payload(
     if not visible_set:
         return [], {}, set()
     pads, _, well_names_by_pad_id = _pad_membership(records)
-    if len(pads) <= 1:
-        return [], {}, set()
     tree: list[dict[str, object]] = []
     focus_targets: dict[str, dict[str, list[float]]] = {}
     hidden_flat_legend_labels: set[str] = set()
@@ -1926,10 +1924,25 @@ def _anticollision_three_payload_overrides(
         well_bounds_by_name=well_bounds_by_name,
         name_to_color=name_to_color,
     )
+    collisions = [
+        {
+            "id": f"collision::{zone.well_a}::{zone.well_b}::{idx}",
+            "well_a": str(zone.well_a),
+            "well_b": str(zone.well_b),
+            "label": f"{zone.well_a} ↔ {zone.well_b}",
+            "classification": str(zone.classification),
+            "priority_rank": int(zone.priority_rank),
+            "hotspot": list(zone.hotspot_xyz),
+            "separation_factor": float(zone.separation_factor),
+            "center_distance_m": float(zone.center_distance_m),
+        }
+        for idx, zone in enumerate(analysis.zones)
+    ]
     return {
         "legend_tree": legend_tree,
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
+        "collisions": collisions,
     }
 
 

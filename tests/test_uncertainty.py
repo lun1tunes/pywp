@@ -332,7 +332,7 @@ def test_uncertainty_ribbon_regression_stays_locally_continuous_on_turn_case() -
     ribbon = uncertainty_ribbon_polygon(overlay, projection="plan")
     sample_count = len(overlay.samples)
     positive_side = np.asarray(ribbon[:sample_count], dtype=float)
-    negative_side = np.asarray(ribbon[sample_count : sample_count * 2], dtype=float)[::-1]
+    negative_side = np.asarray(ribbon[sample_count: sample_count * 2], dtype=float)[::-1]
     centers = np.asarray([sample.center_plan_xy for sample in overlay.samples], dtype=float)
 
     center_step_max = float(np.max(np.linalg.norm(np.diff(centers, axis=0), axis=1)))

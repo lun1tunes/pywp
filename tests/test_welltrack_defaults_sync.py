@@ -35,7 +35,7 @@ def _selectbox_value(at: AppTest, label: str) -> str | None:
 
 
 def test_welltrack_defaults_recover_from_legacy_keys() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     defaults = calc_param_defaults()
     for key, value in LEGACY_MIN_VALUES.items():
         at.session_state[key] = value

@@ -1156,7 +1156,7 @@ def test_anti_collision_candidate_can_focus_late_build2_without_moving_early_pro
         prefer_keep_build1=True,
         prefer_adjust_build2=True,
     )
-    improved_vector = planner_module._candidate_to_search_vector(
+    _ = planner_module._candidate_to_search_vector(
         candidate=improved_candidate,
         zero_azimuth_turn=False,
         lower_dls_deg_per_30m=0.1,

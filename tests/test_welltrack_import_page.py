@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -339,7 +338,7 @@ def test_t1_t3_resolution_message_reports_fixed_and_kept_wells() -> None:
 
 
 def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _bad_order_records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -352,7 +351,7 @@ def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> N
 
 
 def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -365,7 +364,7 @@ def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None
 
 
 def test_welltrack_page_hides_t1_t3_warning_after_keep_action() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _bad_order_records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -384,7 +383,7 @@ def test_welltrack_page_hides_t1_t3_warning_after_keep_action() -> None:
 
 
 def test_welltrack_page_shows_only_remaining_t1_t3_issue_after_partial_fix() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _two_bad_order_records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -719,7 +718,7 @@ def _turned_horizontal_reference_well():
 
 
 def test_welltrack_page_shows_only_general_run_before_results() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -734,7 +733,7 @@ def test_welltrack_page_shows_only_general_run_before_results() -> None:
 
 
 def test_welltrack_general_run_select_all_restores_full_selection() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -754,7 +753,7 @@ def test_welltrack_general_run_select_all_restores_full_selection() -> None:
 
 
 def test_welltrack_general_run_can_replace_selection_with_single_pad() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _multi_pad_records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -775,7 +774,7 @@ def test_welltrack_general_run_can_replace_selection_with_single_pad() -> None:
 
 
 def test_welltrack_general_run_can_add_pad_to_existing_selection() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _multi_pad_records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -910,7 +909,7 @@ def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
     first_colors = palette[:8]
     for index, color_a in enumerate(first_colors):
         red_a, green_a, blue_a = _rgb_triplet(color_a)
-        for color_b in first_colors[index + 1 :]:
+        for color_b in first_colors[index + 1:]:
             red_b, green_b, blue_b = _rgb_triplet(color_b)
             distance = (
                 abs(red_a - red_b) + abs(green_a - green_b) + abs(blue_a - blue_b)
@@ -921,7 +920,7 @@ def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
 def test_reference_trajectory_text_import_populates_reference_wells_state(
     tmp_path,
 ) -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -970,7 +969,7 @@ def test_reference_trajectory_text_import_populates_reference_wells_state(
 def test_reference_trajectory_welltrack_path_import_populates_reference_wells_state(
     tmp_path,
 ) -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1000,7 +999,7 @@ def test_reference_trajectory_welltrack_path_import_populates_reference_wells_st
 
 
 def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1053,7 +1052,7 @@ def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> Non
 def test_welltrack_successful_batch_run_clears_stale_error_and_updates_selection_on_next_run() -> (
     None
 ):
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1075,7 +1074,7 @@ def test_welltrack_successful_batch_run_clears_stale_error_and_updates_selection
 
 
 def test_welltrack_page_keeps_single_general_run_form_after_results_exist() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1108,7 +1107,7 @@ def test_welltrack_page_keeps_single_general_run_form_after_results_exist() -> N
 def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_reset() -> (
     None
 ):
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     at.session_state["wt_source_mode"] = "Файл по пути"
     at.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS2.INC"
 
@@ -1207,7 +1206,7 @@ def test_build_pad_plan_map_skips_prepositioned_source_surface_pads() -> None:
 def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference() -> (
     None
 ):
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _prepositioned_pad_records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1221,7 +1220,7 @@ def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference()
 
 
 def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     at.session_state["wt_source_mode"] = "Вставить таблицу"
     at.session_state["wt_source_table_df"] = pd.DataFrame(
         [
@@ -1306,7 +1305,7 @@ def test_normalize_source_table_df_for_ui_uses_s_for_surface_point() -> None:
 
 
 def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()[:2]
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1359,7 +1358,7 @@ def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> 
 
 
 def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()[:2]
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1421,7 +1420,7 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
 def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_available() -> (
     None
 ):
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()[:2]
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1455,7 +1454,7 @@ def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_availab
 
 
 def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()[:2]
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1631,7 +1630,7 @@ def test_focus_all_wells_trajectory_results_sets_detail_three_defaults() -> None
     reason="PTC page does not render view mode radio buttons present on the removed welltrack_import page"
 )
 def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -1676,7 +1675,7 @@ def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
     reason="PTC page does not render single-event anticollision rerun selectbox present on the removed welltrack_import page"
 )
 def test_welltrack_page_prepares_vertical_anticollision_rerun_plan() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()[:2]
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records

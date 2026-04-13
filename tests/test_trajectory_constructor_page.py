@@ -5,7 +5,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.models import TrajectoryConfig
+from pywp.models import TrajectoryConfig, Point3D
 from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -135,7 +135,7 @@ def _reference_wells():
 
 
 def test_ptc_page_shows_user_facing_import_and_run_controls() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     at.run()
 
     button_labels = {str(widget.label) for widget in at.button}
@@ -144,7 +144,7 @@ def test_ptc_page_shows_user_facing_import_and_run_controls() -> None:
 
 
 def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sections() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
@@ -181,7 +181,7 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
 
 
 def test_ptc_page_wraps_reference_well_table_into_expander() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     reference_wells = _reference_wells()
     at.session_state["wt_records"] = records
@@ -200,7 +200,7 @@ def test_ptc_page_wraps_reference_well_table_into_expander() -> None:
 
 
 def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
-    at = AppTest.from_file("pages/03_ptc.py")
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
     reference_wells = _reference_wells()
     at.session_state["wt_records"] = records
@@ -220,3 +220,7 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     assert "Просмотр фактической скважины" in selectbox_labels
     assert "Просмотр утвержденной проектной скважины" in selectbox_labels
+
+
+
+

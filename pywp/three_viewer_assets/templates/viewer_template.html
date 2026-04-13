@@ -133,6 +133,98 @@
         display: none;
       }
 
+      #collisions-panel {
+        position: absolute;
+        top: 52px;
+        left: 10px;
+        width: 220px;
+        max-height: calc(100% - 62px);
+        overflow: auto;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.95);
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
+        z-index: 3;
+      }
+
+      #collisions-panel:empty {
+        display: none;
+      }
+
+      #collisions-panel.is-collapsed {
+        display: none;
+      }
+
+      .collisions-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 8px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+      }
+
+      .collisions-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
+      .collisions-count {
+        font-size: 11px;
+        color: #64748b;
+        background: rgba(15, 23, 42, 0.06);
+        padding: 2px 6px;
+        border-radius: 6px;
+      }
+
+      .collision-item {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin: 0 0 6px 0;
+        padding: 6px 8px;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.02);
+        cursor: pointer;
+        transition: background 0.15s ease;
+      }
+
+      .collision-item:hover {
+        background: rgba(37, 99, 235, 0.08);
+      }
+
+      .collision-item:last-child {
+        margin-bottom: 0;
+      }
+
+      .collision-label {
+        font-size: 11px;
+        font-weight: 600;
+        color: #0f172a;
+        line-height: 1.3;
+      }
+
+      .collision-meta {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10px;
+        color: #64748b;
+      }
+
+      .collision-class {
+        padding: 1px 4px;
+        border-radius: 4px;
+        background: rgba(239, 68, 68, 0.12);
+        color: #dc2626;
+        font-weight: 600;
+      }
+
+      .collision-sf {
+        font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+      }
+
       .legend-item {
         display: flex;
         align-items: center;
@@ -314,6 +406,7 @@
       </div>
       <div id="axes-gizmo"></div>
       <div id="label-layer"></div>
+      <div id="collisions-panel"></div>
       <div id="legend"></div>
       <div id="tooltip"></div>
     </div>
@@ -341,6 +434,7 @@
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
         const axesGizmoElement = document.getElementById("axes-gizmo");
+        const collisionsPanelElement = document.getElementById("collisions-panel");
         const Z_DISPLAY_SIGN = -1.0;
         const scene = new THREE.Scene();
         const backgroundColor = String(payload.background || "#ffffff");
@@ -756,6 +850,73 @@
           if (legendToggleButton && legendElement.innerHTML.trim() !== "") {
             legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
           }
+        }
+
+        function renderCollisions() {
+          if (!collisionsPanelElement) {
+            return;
+          }
+          collisionsPanelElement.innerHTML = "";
+          const collisions = Array.isArray(payload.collisions) ? payload.collisions : [];
+          if (collisions.length === 0) {
+            return;
+          }
+          const header = document.createElement("div");
+          header.className = "collisions-header";
+          const title = document.createElement("div");
+          title.className = "collisions-title";
+          title.textContent = "Collisions";
+          header.appendChild(title);
+          const count = document.createElement("div");
+          count.className = "collisions-count";
+          count.textContent = String(collisions.length);
+          header.appendChild(count);
+          collisionsPanelElement.appendChild(header);
+          collisions.forEach((collision) => {
+            const item = document.createElement("div");
+            item.className = "collision-item";
+            const label = document.createElement("div");
+            label.className = "collision-label";
+            label.textContent = String(collision.label || "");
+            item.appendChild(label);
+            const meta = document.createElement("div");
+            meta.className = "collision-meta";
+            const classification = document.createElement("span");
+            classification.className = "collision-class";
+            classification.textContent = String(collision.classification || "");
+            meta.appendChild(classification);
+            if (Number.isFinite(collision.separation_factor)) {
+              const sf = document.createElement("span");
+              sf.className = "collision-sf";
+              sf.textContent = `SF: ${Number(collision.separation_factor).toFixed(2)}`;
+              meta.appendChild(sf);
+            }
+            item.appendChild(meta);
+            item.addEventListener("click", () => {
+              const hotspot = collision.hotspot;
+              if (Array.isArray(hotspot) && hotspot.length >= 3) {
+                const targetCenter = new THREE.Vector3(
+                  Number(hotspot[0] || 0),
+                  Number(hotspot[1] || 0),
+                  Number(hotspot[2] || 0) * Z_DISPLAY_SIGN,
+                );
+                const offsetDistance = Math.max(
+                  Number(payload.focus_collision_distance_m || 50),
+                  10,
+                );
+                camera.position.set(
+                  targetCenter.x + offsetDistance * 0.8,
+                  targetCenter.y + offsetDistance * 0.6,
+                  targetCenter.z + offsetDistance * 0.4,
+                );
+                controls.target.copy(targetCenter);
+                camera.updateProjectionMatrix();
+                controls.update();
+                requestRender();
+              }
+            });
+            collisionsPanelElement.appendChild(item);
+          });
         }
 
         function addLine(item) {
@@ -1214,6 +1375,7 @@
         resize();
         fitCamera();
         syncLegendVisibility();
+        renderCollisions();
         startAnimationLoop();
       })();
     </script>

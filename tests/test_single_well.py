@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import app
 import pandas as pd
 import pytest
 from pywp import Point3D, TrajectoryConfig
 from streamlit.testing.v1 import AppTest
 from pywp.ui_utils import arrow_safe_text_dataframe, format_run_log_line
+import importlib
+app = importlib.import_module("pages.02_single_well")
 
 
 def test_streamlit_entrypoint_exists() -> None:
@@ -13,7 +14,7 @@ def test_streamlit_entrypoint_exists() -> None:
 
 
 def test_app_page_does_not_render_solver_profiling_expander() -> None:
-    at = AppTest.from_file("app.py")
+    at = AppTest.from_file("pages/02_single_well.py")
     at.run(timeout=120)
 
     expander_labels = [str(widget.label) for widget in at.expander]
@@ -144,7 +145,7 @@ def test_validate_input_rejects_invalid_t1_t3_geometry() -> None:
 
 
 def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
-    at = AppTest.from_file("app.py")
+    at = AppTest.from_file("pages/02_single_well.py")
     at.session_state["last_result"] = {"broken": True}
     at.run(timeout=120)
 
