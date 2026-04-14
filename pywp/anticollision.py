@@ -517,11 +517,53 @@ def _pair_prefilter_terminal_far_apart(
     )
 
 
+def _segment_types_for_interval(
+    analysis: AntiCollisionAnalysis,
+    well_name: str,
+    md_start_m: float,
+    md_end_m: float,
+) -> str:
+    """Extract segment type names (VERTICAL, HOLD, BUILD1, etc.) for given MD interval.
+
+    Returns comma-separated unique segment types that overlap with the interval.
+    """
+    segments: list[str] = []
+    for segment in analysis.well_segments:
+        if segment.well_name != well_name:
+            continue
+        # Check if segment overlaps with the interval
+        if segment.md_end_m < md_start_m or segment.md_start_m > md_end_m:
+            continue
+        segments.append(segment.classification)
+    if not segments:
+        return "—"
+    # Remove duplicates while preserving order
+    seen: set[str] = set()
+    unique_segments: list[str] = []
+    for seg in segments:
+        if seg not in seen:
+            seen.add(seg)
+            unique_segments.append(seg)
+    return ", ".join(unique_segments)
+
+
 def anti_collision_report_rows(
     analysis: AntiCollisionAnalysis,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for event in anti_collision_report_events(analysis):
+        segment_a = _segment_types_for_interval(
+            analysis,
+            event.well_a,
+            event.md_a_start_m,
+            event.md_a_end_m,
+        )
+        segment_b = _segment_types_for_interval(
+            analysis,
+            event.well_b,
+            event.md_b_start_m,
+            event.md_b_end_m,
+        )
         rows.append(
             {
                 "Приоритет": _priority_label_from_parts(
@@ -529,10 +571,8 @@ def anti_collision_report_rows(
                 ),
                 "Скважина A": event.well_a,
                 "Скважина B": event.well_b,
-                "Область": _zone_location_label_from_parts(
-                    label_a=event.label_a,
-                    label_b=event.label_b,
-                ),
+                "Участок A": segment_a,
+                "Участок B": segment_b,
                 "Интервал A, м": _md_interval_label(
                     float(event.md_a_start_m),
                     float(event.md_a_end_m),

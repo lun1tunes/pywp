@@ -475,77 +475,6 @@ def _render_ptc_anticollision_panel(
     with st.expander("Что такое SF?", expanded=False):
         st.markdown(wt._sf_help_markdown())
 
-    if focus_pad_well_names and len(focus_pad_well_names) >= 2:
-        st.markdown("### Оптимизация расстановки")
-        st.caption(
-            "Автоматический подбор порядка скважин на кусте для минимизации коллизий без изменения профиля (KOP, TVD)."
-        )
-        if st.button(
-            "✨ Оптимизировать порядок скважин на кусту",
-            type="primary",
-            use_container_width=True,
-        ):
-            from pywp.pad_optimization import optimize_pad_order
-
-            opt_progress = st.progress(0, text="Инициализация оптимизации...")
-
-            def opt_callback(percent: int, msg: str) -> None:
-                opt_progress.progress(int(percent), text=msg)
-
-            config_by_name = {
-                s.name: s.config
-                for s in successes
-                if s.name in focus_pad_well_names
-            }
-            success_dict = {s.name: s for s in successes}
-
-            new_records, new_success_dict, improved = optimize_pad_order(
-                records=records,
-                success_dict=success_dict,
-                pad_well_names=focus_pad_well_names,
-                uncertainty_model=uncertainty_model,
-                reference_wells=list(reference_wells),
-                config_by_name=config_by_name,
-                progress_callback=opt_callback,
-            )
-
-            if improved:
-                from pywp.welltrack_batch import (
-                    WelltrackBatchPlanner,
-                    merge_batch_results,
-                )
-
-                new_rows = []
-                for r in new_records:
-                    if r.name in new_success_dict:
-                        new_rows.append(
-                            WelltrackBatchPlanner._row_from_success(
-                                record=r, success=new_success_dict[r.name]
-                            )
-                        )
-
-                merged_rows, merged_successes = merge_batch_results(
-                    records=new_records,
-                    existing_rows=st.session_state.get("wt_summary_rows"),
-                    existing_successes=st.session_state.get("wt_successes"),
-                    new_rows=new_rows,
-                    new_successes=list(new_success_dict.values()),
-                )
-
-                st.session_state["wt_records"] = new_records
-                st.session_state["wt_successes"] = merged_successes
-                st.session_state["wt_summary_rows"] = merged_rows
-                wt._reset_anticollision_view_state(clear_prepared=True)
-                opt_progress.progress(
-                    100, text="Оптимизация завершена! Применяем изменения..."
-                )
-                st.rerun()
-            else:
-                opt_progress.progress(
-                    100,
-                    text="Текущий порядок уже оптимален (или улучшить не удалось).",
-                )
-
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     try:
         anticollision_3d_figure = wt._all_wells_anticollision_3d_figure(
@@ -628,6 +557,77 @@ def _render_ptc_anticollision_panel(
         width="stretch",
         hide_index=True,
     )
+
+    if focus_pad_well_names and len(focus_pad_well_names) >= 2:
+        st.markdown("### Оптимизация расстановки")
+        st.caption(
+            "Автоматический подбор порядка скважин на кусте для минимизации коллизий без изменения профиля (KOP, TVD)."
+        )
+        if st.button(
+            "✨ Оптимизировать порядок скважин на кусту",
+            type="primary",
+            use_container_width=True,
+        ):
+            from pywp.pad_optimization import optimize_pad_order
+
+            opt_progress = st.progress(0, text="Инициализация оптимизации...")
+
+            def opt_callback(percent: int, msg: str) -> None:
+                opt_progress.progress(int(percent), text=msg)
+
+            config_by_name = {
+                s.name: s.config
+                for s in successes
+                if s.name in focus_pad_well_names
+            }
+            success_dict = {s.name: s for s in successes}
+
+            new_records, new_success_dict, improved = optimize_pad_order(
+                records=records,
+                success_dict=success_dict,
+                pad_well_names=focus_pad_well_names,
+                uncertainty_model=uncertainty_model,
+                reference_wells=list(reference_wells),
+                config_by_name=config_by_name,
+                progress_callback=opt_callback,
+            )
+
+            if improved:
+                from pywp.welltrack_batch import (
+                    WelltrackBatchPlanner,
+                    merge_batch_results,
+                )
+
+                new_rows = []
+                for r in new_records:
+                    if r.name in new_success_dict:
+                        new_rows.append(
+                            WelltrackBatchPlanner._row_from_success(
+                                record=r, success=new_success_dict[r.name]
+                            )
+                        )
+
+                merged_rows, merged_successes = merge_batch_results(
+                    records=new_records,
+                    existing_rows=st.session_state.get("wt_summary_rows"),
+                    existing_successes=st.session_state.get("wt_successes"),
+                    new_rows=new_rows,
+                    new_successes=list(new_success_dict.values()),
+                )
+
+                st.session_state["wt_records"] = new_records
+                st.session_state["wt_successes"] = merged_successes
+                st.session_state["wt_summary_rows"] = merged_rows
+                wt._reset_anticollision_view_state(clear_prepared=True)
+                opt_progress.progress(
+                    100, text="Оптимизация завершена! Применяем изменения..."
+                )
+                st.rerun()
+            else:
+                opt_progress.progress(
+                    100,
+                    text="Текущий порядок уже оптимален (или улучшить не удалось).",
+                )
 
 
 def _render_ptc_success_tabs(
