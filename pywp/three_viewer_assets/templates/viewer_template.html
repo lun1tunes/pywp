@@ -223,6 +223,36 @@
 
       .collision-sf {
         font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+        font-size: 10px;
+        color: #0f172a;
+        font-weight: 600;
+      }
+
+      .collision-meta-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .segment-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 1px 4px;
+        border-radius: 3px;
+        font-size: 9px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        background: rgba(15, 23, 42, 0.08);
+        color: #334155;
+        border: 1px solid rgba(15, 23, 42, 0.12);
+      }
+
+      .segment-arrow {
+        font-size: 10px;
+        color: #94a3b8;
+        padding: 0 2px;
       }
 
       .legend-item {
@@ -879,19 +909,59 @@
             label.className = "collision-label";
             label.textContent = String(collision.label || "");
             item.appendChild(label);
-            const meta = document.createElement("div");
-            meta.className = "collision-meta";
-            const classification = document.createElement("span");
-            classification.className = "collision-class";
-            classification.textContent = String(collision.classification || "");
-            meta.appendChild(classification);
+
+            // Meta row: SF + segments in one line
+            const metaRow = document.createElement("div");
+            metaRow.className = "collision-meta-row";
+
+            // SF
             if (Number.isFinite(collision.separation_factor)) {
               const sf = document.createElement("span");
               sf.className = "collision-sf";
               sf.textContent = `SF: ${Number(collision.separation_factor).toFixed(2)}`;
-              meta.appendChild(sf);
+              metaRow.appendChild(sf);
             }
-            item.appendChild(meta);
+
+            function createBadge(text) {
+              const badge = document.createElement("span");
+              badge.className = "segment-badge";
+              badge.textContent = String(text || "—").toUpperCase();
+              return badge;
+            }
+
+            // Parse multiple segments (comma-separated)
+            const segA = String(collision.segment_a || "—");
+            const segB = String(collision.segment_b || "—");
+
+            // Create badge for segment A (handle multiple segments)
+            segA.split(",").forEach((s, i) => {
+              if (i > 0) {
+                const plus = document.createElement("span");
+                plus.style.cssText = "font-size:8px;color:#94a3b8;";
+                plus.textContent = "+";
+                metaRow.appendChild(plus);
+              }
+              metaRow.appendChild(createBadge(s.trim()));
+            });
+
+            // Arrow
+            const arrow = document.createElement("span");
+            arrow.className = "segment-arrow";
+            arrow.textContent = "↔";
+            metaRow.appendChild(arrow);
+
+            // Create badge for segment B (handle multiple segments)
+            segB.split(",").forEach((s, i) => {
+              if (i > 0) {
+                const plus = document.createElement("span");
+                plus.style.cssText = "font-size:8px;color:#94a3b8;";
+                plus.textContent = "+";
+                metaRow.appendChild(plus);
+              }
+              metaRow.appendChild(createBadge(s.trim()));
+            });
+
+            item.appendChild(metaRow);
             item.addEventListener("click", () => {
               const hotspot = collision.hotspot;
               if (Array.isArray(hotspot) && hotspot.length >= 3) {

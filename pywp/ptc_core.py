@@ -2047,20 +2047,37 @@ def _anticollision_three_payload_overrides(
         well_bounds_by_name=well_bounds_by_name,
         name_to_color=name_to_color,
     )
-    collisions = [
-        {
-            "id": f"collision::{zone.well_a}::{zone.well_b}::{idx}",
-            "well_a": str(zone.well_a),
-            "well_b": str(zone.well_b),
-            "label": f"{zone.well_a} ↔ {zone.well_b}",
-            "classification": str(zone.classification),
-            "priority_rank": int(zone.priority_rank),
-            "hotspot": list(zone.hotspot_xyz),
-            "separation_factor": float(zone.separation_factor),
-            "center_distance_m": float(zone.center_distance_m),
-        }
-        for idx, zone in enumerate(analysis.zones)
-    ]
+    collisions = []
+    for idx, zone in enumerate(analysis.zones):
+        from pywp.anticollision import _segment_types_for_interval
+
+        segment_a = _segment_types_for_interval(
+            analysis,
+            str(zone.well_a),
+            float(zone.md_a_m) - 50,
+            float(zone.md_a_m) + 50,
+        )
+        segment_b = _segment_types_for_interval(
+            analysis,
+            str(zone.well_b),
+            float(zone.md_b_m) - 50,
+            float(zone.md_b_m) + 50,
+        )
+        collisions.append(
+            {
+                "id": f"collision::{zone.well_a}::{zone.well_b}::{idx}",
+                "well_a": str(zone.well_a),
+                "well_b": str(zone.well_b),
+                "label": f"{zone.well_a} ↔ {zone.well_b}",
+                "classification": str(zone.classification),
+                "priority_rank": int(zone.priority_rank),
+                "hotspot": list(zone.hotspot_xyz),
+                "separation_factor": float(zone.separation_factor),
+                "center_distance_m": float(zone.center_distance_m),
+                "segment_a": segment_a,
+                "segment_b": segment_b,
+            }
+        )
     return {
         "legend_tree": legend_tree,
         "focus_targets": focus_targets,

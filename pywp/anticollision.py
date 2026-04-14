@@ -526,24 +526,53 @@ def _segment_types_for_interval(
     """Extract segment type names (VERTICAL, HOLD, BUILD1, etc.) for given MD interval.
 
     Returns comma-separated unique segment types that overlap with the interval.
+    Uses the stations dataframe from AntiCollisionWell to get actual segment types.
     """
-    segments: list[str] = []
-    for segment in analysis.well_segments:
-        if segment.well_name != well_name:
-            continue
-        # Check if segment overlaps with the interval
-        if segment.md_end_m < md_start_m or segment.md_start_m > md_end_m:
-            continue
-        segments.append(segment.classification)
-    if not segments:
+    # Find the well in analysis
+    well = None
+    for w in analysis.wells:
+        if w.name == well_name:
+            well = w
+            break
+    if well is None or well.stations is None or well.stations.empty:
+        # Fallback to well_segments if stations not available
+        segments: list[str] = []
+        for segment in analysis.well_segments:
+            if segment.well_name != well_name:
+                continue
+            if segment.md_end_m < md_start_m or segment.md_start_m > md_end_m:
+                continue
+            segments.append(segment.classification)
+        if not segments:
+            return "—"
+        seen: set[str] = set()
+        unique_segments: list[str] = []
+        for seg in segments:
+            if seg not in seen:
+                seen.add(seg)
+                unique_segments.append(seg)
+        return ", ".join(unique_segments)
+
+    # Use stations dataframe to get segment types
+    df = well.stations
+    if "segment" not in df.columns:
         return "—"
+
+    # Filter stations within the MD interval
+    mask = (df["MD_m"] >= md_start_m) & (df["MD_m"] <= md_end_m)
+    segment_names = df.loc[mask, "segment"].dropna().astype(str).tolist()
+
+    if not segment_names:
+        return "—"
+
     # Remove duplicates while preserving order
     seen: set[str] = set()
     unique_segments: list[str] = []
-    for seg in segments:
-        if seg not in seen:
-            seen.add(seg)
-            unique_segments.append(seg)
+    for seg in segment_names:
+        seg_upper = seg.upper()
+        if seg_upper not in seen:
+            seen.add(seg_upper)
+            unique_segments.append(seg_upper)
     return ", ".join(unique_segments)
 
 
