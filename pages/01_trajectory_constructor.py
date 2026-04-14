@@ -536,7 +536,7 @@ def _render_ptc_anticollision_panel(
         )
 
     report_rows = (
-        wt._report_rows_from_recommendations(visible_recommendations)
+        wt._report_rows_from_recommendations(visible_recommendations, analysis)
         if focus_pad_well_names
         else wt.anti_collision_report_rows(analysis)
     )

@@ -901,8 +901,8 @@
                   Number(hotspot[2] || 0) * Z_DISPLAY_SIGN,
                 );
                 const offsetDistance = Math.max(
-                  Number(payload.focus_collision_distance_m || 250),
-                  50,
+                  Number(payload.focus_collision_distance_m || 750),
+                  100,
                 );
                 camera.position.set(
                   targetCenter.x + offsetDistance * 0.8,

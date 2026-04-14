@@ -8399,15 +8399,35 @@ def _recommendations_for_clusters(
 
 def _report_rows_from_recommendations(
     recommendations: tuple[AntiCollisionRecommendation, ...],
+    analysis: AntiCollisionAnalysis | None = None,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for item in recommendations:
+        # Extract segment types if analysis is provided
+        segment_a = "—"
+        segment_b = "—"
+        if analysis is not None:
+            from pywp.anticollision import _segment_types_for_interval
+
+            segment_a = _segment_types_for_interval(
+                analysis,
+                str(item.well_a),
+                float(item.md_a_start_m),
+                float(item.md_a_end_m),
+            )
+            segment_b = _segment_types_for_interval(
+                analysis,
+                str(item.well_b),
+                float(item.md_b_start_m),
+                float(item.md_b_end_m),
+            )
         rows.append(
             {
                 "Приоритет": str(item.priority_rank),
                 "Скважина A": str(item.well_a),
                 "Скважина B": str(item.well_b),
-                "Область": str(item.area_label),
+                "Участок A": segment_a,
+                "Участок B": segment_b,
                 "Интервал A, м": _md_interval_label(
                     float(item.md_a_start_m),
                     float(item.md_a_end_m),
