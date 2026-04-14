@@ -370,6 +370,7 @@ def _render_ptc_anticollision_panel(
     successes: list[object],
     records: list[object],
     focus_pad_id: str,
+    focus_pad_well_names: list[str],
 ) -> None:
     reference_wells = wt._reference_wells_from_state()
     if len(successes) + len(reference_wells) < 2:
@@ -726,15 +727,16 @@ def _render_ptc_success_tabs(
         records=records,
         requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
     )
-    #     focus_pad_well_names = wt._focus_pad_well_names(
-    #         records=records,
-    #         focus_pad_id=focus_pad_id,
-    #     )
+    focus_pad_well_names = wt._focus_pad_well_names(
+        records=records,
+        focus_pad_id=focus_pad_id,
+    )
 
     _render_ptc_anticollision_panel(
         successes=successes,
         records=records,
         focus_pad_id=focus_pad_id,
+        focus_pad_well_names=focus_pad_well_names,
     )
 
 
