@@ -22,18 +22,18 @@ EXCLUDED_DIR_NAMES = {
 
 INCLUDED_FILE_EXTENSIONS = {
     ".py",
-    ".txt",
-    ".md",
+    # ".txt",
+    # ".md",
     ".ini",
     ".cfg",
-    ".toml",
+    # ".toml",
     ".yaml",
     ".yml",
     ".json",
     ".html",
     ".js",
     ".css",
-    ".inc",
+    # ".inc",
 }
 
 INCLUDED_FILE_NAMES = {}

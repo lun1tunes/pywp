@@ -11,12 +11,16 @@ _REQUIRED_STATION_COLUMNS = frozenset({"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m
 UNCERTAINTY_PRESET_OPTIMISTIC = "optimistic"
 UNCERTAINTY_PRESET_ORDINARY_MWD = "ordinary_mwd"
 UNCERTAINTY_PRESET_CONSERVATIVE = "conservative"
+UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC = "mwd_poor_magnetic"
+UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC = "mwd_unknown_magnetic"
 UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND = "custom_actual_fund"
 DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_ORDINARY_MWD
 UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
     UNCERTAINTY_PRESET_OPTIMISTIC: "Оптимистичный",
     UNCERTAINTY_PRESET_ORDINARY_MWD: "Обычный MWD",
     UNCERTAINTY_PRESET_CONSERVATIVE: "Консервативный",
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: "MWD POOR magnetic (ISCWSA)",
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: "MWD Unknown magnetic (ISCWSA)",
 }
 _UNCERTAINTY_PRESET_LABELS: dict[str, str] = {
     **UNCERTAINTY_PRESET_OPTIONS,
@@ -88,6 +92,20 @@ PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
         sigma_inc_deg=0.45,
         sigma_azi_deg=0.90,
         sigma_lateral_drift_m_per_1000m=18.0,
+    ),
+    # ISCWSA MWD POOR magnetic: global geomagnetic model with high declination uncertainty
+    # (~1.0-1.5° dec error, affecting azimuth significantly at higher inclinations)
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: PlanningUncertaintyModel(
+        sigma_inc_deg=0.35,
+        sigma_azi_deg=1.20,
+        sigma_lateral_drift_m_per_1000m=15.0,
+    ),
+    # ISCWSA MWD Unknown magnetic: worst-case assumption for magnetic reference quality
+    # (~1.5-2.5° dec error, very conservative for anti-collision planning)
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: PlanningUncertaintyModel(
+        sigma_inc_deg=0.40,
+        sigma_azi_deg=1.80,
+        sigma_lateral_drift_m_per_1000m=20.0,
     ),
 }
 DEFAULT_PLANNING_UNCERTAINTY_MODEL = PLANNING_UNCERTAINTY_PRESET_MODELS[
