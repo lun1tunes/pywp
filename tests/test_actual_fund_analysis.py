@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 import numpy as np
 import pandas as pd
 import pytest
 
-import pywp.actual_fund_analysis as actual_fund_analysis_module
 from pywp.actual_fund_analysis import (
     ActualFundWellMetrics,
-    CALIBRATION_STATUS_READY,
     _reconstruct_actual_survey,
     actual_well_family_name,
     actual_well_is_horizontal,
@@ -17,13 +13,11 @@ from pywp.actual_fund_analysis import (
     build_actual_fund_kop_depth_function,
     build_actual_fund_well_analysis,
     build_actual_fund_well_metrics,
-    calibrate_uncertainty_from_actual_fund,
     summarize_actual_fund_by_depth,
 )
 from pywp.mcm import compute_positions_min_curv
 from pywp.models import Point3D
 from pywp.reference_trajectories import parse_reference_trajectory_table
-from pywp.uncertainty import DEFAULT_UNCERTAINTY_PRESET, DEFAULT_PLANNING_UNCERTAINTY_MODEL
 
 
 def _actual_wells():
@@ -114,27 +108,6 @@ def _synthetic_noisy_vertical_hold_actual_well(name: str = "9003") -> tuple:
         for _, row in positioned.iterrows()
     ]
     return tuple(parse_reference_trajectory_table(rows))
-
-
-def _synthetic_close_pair_actual_wells() -> tuple:
-    return tuple(
-        parse_reference_trajectory_table(
-            [
-                {"Wellname": "8001", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "8001", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
-                {"Wellname": "8001", "Type": "actual", "X": 1000.0, "Y": 0.0, "Z": 1000.0, "MD": 2000.0},
-                {"Wellname": "8001", "Type": "actual", "X": 2000.0, "Y": 0.0, "Z": 1000.0, "MD": 3000.0},
-                {"Wellname": "8002", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "8002", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
-                {"Wellname": "8002", "Type": "actual", "X": 1000.0, "Y": 0.0, "Z": 1000.0, "MD": 2000.0},
-                {"Wellname": "8002", "Type": "actual", "X": 2000.0, "Y": 0.0, "Z": 1000.0, "MD": 3000.0},
-                {"Wellname": "8003", "Type": "actual", "X": 0.0, "Y": 220.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "8003", "Type": "actual", "X": 0.0, "Y": 220.0, "Z": 1000.0, "MD": 1000.0},
-                {"Wellname": "8003", "Type": "actual", "X": 1000.0, "Y": 220.0, "Z": 1000.0, "MD": 2000.0},
-                {"Wellname": "8003", "Type": "actual", "X": 2000.0, "Y": 220.0, "Z": 1000.0, "MD": 3000.0},
-            ]
-        )
-    )
 
 
 def test_actual_well_family_and_pad_group_extract_numeric_prefixes() -> None:
@@ -236,80 +209,6 @@ def test_reconstruct_actual_survey_respects_custom_resample_step() -> None:
     assert md_values[0] == 0.0
     assert md_values[-1] == float(well.stations["MD_m"].iloc[-1])
     assert np.allclose(np.diff(md_values[:-1]), 25.0)
-
-
-def test_calibration_excludes_same_family_pairs_and_builds_custom_model() -> None:
-    wells = _actual_wells()
-    result = calibrate_uncertainty_from_actual_fund(
-        actual_wells=wells,
-        base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
-        base_preset=DEFAULT_UNCERTAINTY_PRESET,
-    )
-
-    assert result.status == CALIBRATION_STATUS_READY
-    assert result.custom_model is not None
-    assert result.scale_factor is not None
-    assert result.scale_factor < 1.0
-    assert result.excluded_pilot_well_count == 1
-    assert result.skipped_same_family_pair_count == 0
-    assert result.analyzed_pair_count == 1
-    assert result.overlapping_pair_count_before >= result.overlapping_pair_count_after
-
-
-def test_calibration_can_ignore_single_extreme_close_pair_and_still_build_model() -> None:
-    wells = _synthetic_close_pair_actual_wells()
-
-    result = calibrate_uncertainty_from_actual_fund(
-        actual_wells=wells,
-        base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
-        base_preset=DEFAULT_UNCERTAINTY_PRESET,
-    )
-
-    assert result.status == CALIBRATION_STATUS_READY
-    assert result.custom_model is not None
-    assert result.ignored_close_pair_count == 1
-    assert result.ignored_close_pairs == ("8001 ↔ 8002",)
-    assert result.overlapping_pair_count_after == 0
-
-
-def test_calibration_reuses_prebuilt_analyses_without_recomputing_metrics(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    wells = _actual_wells()
-    analyses = actual_fund_analysis_module.build_actual_fund_well_analyses(wells)
-    analysis_call_count = 0
-
-    def _fake_build_actual_fund_well_analyses(
-        actual_wells: Iterable[object],
-    ) -> tuple[actual_fund_analysis_module.ActualFundWellAnalysis, ...]:
-        nonlocal analysis_call_count
-        analysis_call_count += 1
-        assert len(tuple(actual_wells)) == len(wells)
-        return analyses
-
-    def _unexpected_metrics_call(*_: object, **__: object) -> tuple[object, ...]:
-        raise AssertionError("calibration should reuse metrics from prebuilt analyses")
-
-    monkeypatch.setattr(
-        actual_fund_analysis_module,
-        "build_actual_fund_well_analyses",
-        _fake_build_actual_fund_well_analyses,
-    )
-    monkeypatch.setattr(
-        actual_fund_analysis_module,
-        "build_actual_fund_well_metrics",
-        _unexpected_metrics_call,
-    )
-
-    result = calibrate_uncertainty_from_actual_fund(
-        actual_wells=wells,
-        analyses=analyses,
-        base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
-        base_preset=DEFAULT_UNCERTAINTY_PRESET,
-    )
-
-    assert analysis_call_count == 0
-    assert result.status == CALIBRATION_STATUS_READY
 
 
 def test_depth_cluster_summary_and_kop_function_build_from_generated_dataset() -> None:

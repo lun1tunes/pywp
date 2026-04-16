@@ -10,9 +10,8 @@ from pywp.uncertainty import (
     _continuous_extreme_index,
     _open_closed_ring,
     DEFAULT_UNCERTAINTY_PRESET,
-    UNCERTAINTY_PRESET_CONSERVATIVE,
-    UNCERTAINTY_PRESET_OPTIMISTIC,
-    fitted_uncertainty_model,
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC,
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC,
     planning_uncertainty_model_for_preset,
     PlanningUncertaintyModel,
     build_uncertainty_overlay,
@@ -154,8 +153,8 @@ def test_default_mwd_proxy_radii_are_in_engineering_range_for_5_to_6km_md() -> N
         inc_deg=86.0,
     )
 
-    assert 130.0 <= semi_inc_m <= 170.0
-    assert 150.0 <= semi_azi_m <= 190.0
+    assert 70.0 <= semi_inc_m <= 110.0
+    assert 120.0 <= semi_azi_m <= 165.0
 
 
 def test_vertical_uncertainty_before_kop_is_not_overinflated_by_lateral_drift() -> None:
@@ -164,7 +163,7 @@ def test_vertical_uncertainty_before_kop_is_not_overinflated_by_lateral_drift() 
         inc_deg=0.0,
     )
 
-    assert 5.0 <= semi_inc_m <= 7.0
+    assert 2.5 <= semi_inc_m <= 5.0
     assert semi_azi_m == pytest.approx(semi_inc_m, abs=1e-9)
 
 
@@ -184,51 +183,26 @@ def test_lateral_drift_contribution_grows_with_inclination() -> None:
 
 def test_uncertainty_presets_are_normalized_and_monotonic() -> None:
     assert normalize_uncertainty_preset("unknown") == DEFAULT_UNCERTAINTY_PRESET
-    assert uncertainty_preset_label(UNCERTAINTY_PRESET_OPTIMISTIC) == "Оптимистичный"
+    assert uncertainty_preset_label(UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC) == "MWD POOR magnetic (ISCWSA)"
 
-    optimistic_model = planning_uncertainty_model_for_preset(UNCERTAINTY_PRESET_OPTIMISTIC)
-    conservative_model = planning_uncertainty_model_for_preset(
-        UNCERTAINTY_PRESET_CONSERVATIVE
+    poor_model = planning_uncertainty_model_for_preset(UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC)
+    unknown_model = planning_uncertainty_model_for_preset(
+        UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
     )
 
-    optimistic_inc_m, optimistic_azi_m = station_uncertainty_axes_m(
+    poor_inc_m, poor_azi_m = station_uncertainty_axes_m(
         md_m=4000.0,
         inc_deg=86.0,
-        model=optimistic_model,
+        model=poor_model,
     )
-    conservative_inc_m, conservative_azi_m = station_uncertainty_axes_m(
+    unknown_inc_m, unknown_azi_m = station_uncertainty_axes_m(
         md_m=4000.0,
         inc_deg=86.0,
-        model=conservative_model,
+        model=unknown_model,
     )
 
-    assert conservative_inc_m > optimistic_inc_m
-    assert conservative_azi_m > optimistic_azi_m
-
-
-def test_fitted_uncertainty_model_supports_independent_axis_scaling_and_floors() -> None:
-    base = PlanningUncertaintyModel(
-        sigma_inc_deg=0.30,
-        sigma_azi_deg=0.60,
-        sigma_lateral_drift_m_per_1000m=12.0,
-        confidence_scale=2.0,
-    )
-
-    fitted = fitted_uncertainty_model(
-        base,
-        sigma_inc_scale=0.50,
-        sigma_azi_scale=0.75,
-        sigma_lateral_drift_scale=0.25,
-        confidence_scale_factor=0.80,
-        sigma_inc_floor_deg=0.05,
-        sigma_azi_floor_deg=0.10,
-        sigma_lateral_drift_floor_m_per_1000m=1.5,
-    )
-
-    assert float(fitted.sigma_inc_deg) == pytest.approx(0.20, abs=1e-9)
-    assert float(fitted.sigma_azi_deg) == pytest.approx(0.55, abs=1e-9)
-    assert float(fitted.sigma_lateral_drift_m_per_1000m) == pytest.approx(4.5, abs=1e-9)
-    assert float(fitted.confidence_scale) == pytest.approx(1.6, abs=1e-9)
+    assert unknown_inc_m > poor_inc_m
+    assert unknown_azi_m > poor_azi_m
 
 
 def test_uncertainty_ribbon_and_tube_mesh_are_continuous() -> None:

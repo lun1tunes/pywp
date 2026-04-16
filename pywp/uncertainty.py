@@ -7,24 +7,14 @@ import pandas as pd
 
 from pywp.constants import DEG2RAD
 from pywp.models import Point3D
+
 _REQUIRED_STATION_COLUMNS = frozenset({"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"})
-UNCERTAINTY_PRESET_OPTIMISTIC = "optimistic"
-UNCERTAINTY_PRESET_ORDINARY_MWD = "ordinary_mwd"
-UNCERTAINTY_PRESET_CONSERVATIVE = "conservative"
 UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC = "mwd_poor_magnetic"
 UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC = "mwd_unknown_magnetic"
-UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND = "custom_actual_fund"
-DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_ORDINARY_MWD
+DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
 UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
-    UNCERTAINTY_PRESET_OPTIMISTIC: "Оптимистичный",
-    UNCERTAINTY_PRESET_ORDINARY_MWD: "Обычный MWD",
-    UNCERTAINTY_PRESET_CONSERVATIVE: "Консервативный",
     UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: "MWD POOR magnetic (ISCWSA)",
     UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: "MWD Unknown magnetic (ISCWSA)",
-}
-_UNCERTAINTY_PRESET_LABELS: dict[str, str] = {
-    **UNCERTAINTY_PRESET_OPTIONS,
-    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND: "Пользовательская (по фактическому фонду)",
 }
 
 
@@ -78,27 +68,13 @@ class PlanningUncertaintyModel:
 
 
 PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
-    UNCERTAINTY_PRESET_OPTIMISTIC: PlanningUncertaintyModel(
-        sigma_inc_deg=0.20,
-        sigma_azi_deg=0.40,
-        sigma_lateral_drift_m_per_1000m=6.0,
-    ),
-    UNCERTAINTY_PRESET_ORDINARY_MWD: PlanningUncertaintyModel(
-        sigma_inc_deg=0.30,
-        sigma_azi_deg=0.60,
-        sigma_lateral_drift_m_per_1000m=12.0,
-    ),
-    UNCERTAINTY_PRESET_CONSERVATIVE: PlanningUncertaintyModel(
-        sigma_inc_deg=0.45,
-        sigma_azi_deg=0.90,
-        sigma_lateral_drift_m_per_1000m=18.0,
-    ),
     # ISCWSA MWD POOR magnetic: global geomagnetic model with high declination uncertainty
     # (~1.0-1.5° dec error, affecting azimuth significantly at higher inclinations)
     UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: PlanningUncertaintyModel(
         sigma_inc_deg=0.35,
         sigma_azi_deg=1.20,
         sigma_lateral_drift_m_per_1000m=15.0,
+        confidence_scale=1.0,
     ),
     # ISCWSA MWD Unknown magnetic: worst-case assumption for magnetic reference quality
     # (~1.5-2.5° dec error, very conservative for anti-collision planning)
@@ -106,6 +82,7 @@ PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
         sigma_inc_deg=0.40,
         sigma_azi_deg=1.80,
         sigma_lateral_drift_m_per_1000m=20.0,
+        confidence_scale=1.0,
     ),
 }
 DEFAULT_PLANNING_UNCERTAINTY_MODEL = PLANNING_UNCERTAINTY_PRESET_MODELS[
@@ -153,12 +130,8 @@ class UncertaintyTubeMesh:
 
 def normalize_uncertainty_preset(
     preset: object,
-    *,
-    allow_custom: bool = False,
 ) -> str:
     preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
-    if allow_custom and preset_key == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND:
-        return preset_key
     if preset_key in PLANNING_UNCERTAINTY_PRESET_MODELS:
         return preset_key
     return DEFAULT_UNCERTAINTY_PRESET
@@ -166,68 +139,16 @@ def normalize_uncertainty_preset(
 
 def planning_uncertainty_model_for_preset(
     preset: object,
-    *,
-    custom_model: PlanningUncertaintyModel | None = None,
 ) -> PlanningUncertaintyModel:
-    normalized = normalize_uncertainty_preset(
-        preset,
-        allow_custom=custom_model is not None,
-    )
-    if normalized == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND and custom_model is not None:
-        return custom_model
+    normalized = normalize_uncertainty_preset(preset)
     return PLANNING_UNCERTAINTY_PRESET_MODELS[normalized]
-
-
-def fitted_uncertainty_model(
-    base_model: PlanningUncertaintyModel,
-    *,
-    sigma_inc_scale: float = 1.0,
-    sigma_azi_scale: float = 1.0,
-    sigma_lateral_drift_scale: float = 1.0,
-    confidence_scale_factor: float = 1.0,
-    sigma_inc_floor_deg: float = 0.0,
-    sigma_azi_floor_deg: float = 0.0,
-    sigma_lateral_drift_floor_m_per_1000m: float = 0.0,
-) -> PlanningUncertaintyModel:
-    inc_scale = float(sigma_inc_scale)
-    azi_scale = float(sigma_azi_scale)
-    drift_scale = float(sigma_lateral_drift_scale)
-    confidence_factor = float(confidence_scale_factor)
-    inc_floor = float(sigma_inc_floor_deg)
-    azi_floor = float(sigma_azi_floor_deg)
-    drift_floor = float(sigma_lateral_drift_floor_m_per_1000m)
-    if min(inc_scale, azi_scale, drift_scale, confidence_factor) <= 0.0:
-        raise ValueError("Uncertainty fit scales must be positive.")
-    if min(inc_floor, azi_floor, drift_floor) < 0.0:
-        raise ValueError("Uncertainty fit floors cannot be negative.")
-
-    return base_model.__class__(
-        sigma_inc_deg=inc_floor + float(base_model.sigma_inc_deg) * inc_scale,
-        sigma_azi_deg=azi_floor + float(base_model.sigma_azi_deg) * azi_scale,
-        sigma_lateral_drift_m_per_1000m=(
-            drift_floor
-            + float(base_model.sigma_lateral_drift_m_per_1000m) * drift_scale
-        ),
-        confidence_scale=float(base_model.confidence_scale) * confidence_factor,
-        sample_step_m=float(base_model.sample_step_m),
-        max_display_ellipses=int(base_model.max_display_ellipses),
-        ellipse_points=int(base_model.ellipse_points),
-        min_display_radius_m=float(base_model.min_display_radius_m),
-        near_vertical_isotropic_threshold_deg=float(
-            base_model.near_vertical_isotropic_threshold_deg
-        ),
-        directional_refine_threshold_deg=float(
-            base_model.directional_refine_threshold_deg
-        ),
-        min_refined_step_m=float(base_model.min_refined_step_m),
-    )
 
 
 def uncertainty_preset_label(preset: object) -> str:
     preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
-    return _UNCERTAINTY_PRESET_LABELS.get(
+    return UNCERTAINTY_PRESET_OPTIONS.get(
         preset_key,
-        _UNCERTAINTY_PRESET_LABELS[DEFAULT_UNCERTAINTY_PRESET],
+        UNCERTAINTY_PRESET_OPTIONS[DEFAULT_UNCERTAINTY_PRESET],
     )
 
 

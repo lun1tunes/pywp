@@ -379,16 +379,12 @@ def _render_ptc_anticollision_panel(
         )
         return
 
-    custom_actual_fund_model = wt._actual_fund_custom_model_from_state()
     preset_options = list(wt.UNCERTAINTY_PRESET_OPTIONS.keys())
-    if custom_actual_fund_model is not None:
-        preset_options.append(wt.UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND)
     normalized_preset = wt.normalize_uncertainty_preset(
         st.session_state.get(
             "wt_anticollision_uncertainty_preset",
             wt.DEFAULT_UNCERTAINTY_PRESET,
         ),
-        allow_custom=custom_actual_fund_model is not None,
     )
     if normalized_preset not in preset_options:
         normalized_preset = wt.DEFAULT_UNCERTAINTY_PRESET
@@ -399,10 +395,7 @@ def _render_ptc_anticollision_panel(
         format_func=wt.uncertainty_preset_label,
         key="wt_anticollision_uncertainty_preset",
     )
-    uncertainty_model = wt.planning_uncertainty_model_for_preset(
-        selected_preset,
-        custom_model=custom_actual_fund_model,
-    )
+    uncertainty_model = wt.planning_uncertainty_model_for_preset(selected_preset)
 
     anti_collision_progress = st.progress(
         8, text="Подготовка anti-collision анализа..."

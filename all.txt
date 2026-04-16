@@ -30873,7 +30873,7 @@ def render_result_tables(
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/uncertainty.py	39472
+===BEGIN_FILE===	pywp/uncertainty.py	38722
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30884,17 +30884,11 @@ import pandas as pd
 from pywp.constants import DEG2RAD
 from pywp.models import Point3D
 _REQUIRED_STATION_COLUMNS = frozenset({"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"})
-UNCERTAINTY_PRESET_OPTIMISTIC = "optimistic"
-UNCERTAINTY_PRESET_ORDINARY_MWD = "ordinary_mwd"
-UNCERTAINTY_PRESET_CONSERVATIVE = "conservative"
 UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC = "mwd_poor_magnetic"
 UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC = "mwd_unknown_magnetic"
 UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND = "custom_actual_fund"
-DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_ORDINARY_MWD
+DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
 UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
-    UNCERTAINTY_PRESET_OPTIMISTIC: "Оптимистичный",
-    UNCERTAINTY_PRESET_ORDINARY_MWD: "Обычный MWD",
-    UNCERTAINTY_PRESET_CONSERVATIVE: "Консервативный",
     UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: "MWD POOR magnetic (ISCWSA)",
     UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: "MWD Unknown magnetic (ISCWSA)",
 }
@@ -30954,27 +30948,13 @@ class PlanningUncertaintyModel:
 
 
 PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
-    UNCERTAINTY_PRESET_OPTIMISTIC: PlanningUncertaintyModel(
-        sigma_inc_deg=0.20,
-        sigma_azi_deg=0.40,
-        sigma_lateral_drift_m_per_1000m=6.0,
-    ),
-    UNCERTAINTY_PRESET_ORDINARY_MWD: PlanningUncertaintyModel(
-        sigma_inc_deg=0.30,
-        sigma_azi_deg=0.60,
-        sigma_lateral_drift_m_per_1000m=12.0,
-    ),
-    UNCERTAINTY_PRESET_CONSERVATIVE: PlanningUncertaintyModel(
-        sigma_inc_deg=0.45,
-        sigma_azi_deg=0.90,
-        sigma_lateral_drift_m_per_1000m=18.0,
-    ),
     # ISCWSA MWD POOR magnetic: global geomagnetic model with high declination uncertainty
     # (~1.0-1.5° dec error, affecting azimuth significantly at higher inclinations)
     UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: PlanningUncertaintyModel(
         sigma_inc_deg=0.35,
         sigma_azi_deg=1.20,
         sigma_lateral_drift_m_per_1000m=15.0,
+        confidence_scale=1.0,
     ),
     # ISCWSA MWD Unknown magnetic: worst-case assumption for magnetic reference quality
     # (~1.5-2.5° dec error, very conservative for anti-collision planning)
@@ -30982,6 +30962,7 @@ PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
         sigma_inc_deg=0.40,
         sigma_azi_deg=1.80,
         sigma_lateral_drift_m_per_1000m=20.0,
+        confidence_scale=1.0,
     ),
 }
 DEFAULT_PLANNING_UNCERTAINTY_MODEL = PLANNING_UNCERTAINTY_PRESET_MODELS[
@@ -35678,7 +35659,7 @@ from pywp.anticollision import AntiCollisionWell
 print(AntiCollisionWell)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_actual_fund_analysis.py	16530
+===BEGIN_FILE===	tests/test_actual_fund_analysis.py	16714
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -35704,7 +35685,14 @@ from pywp.actual_fund_analysis import (
 from pywp.mcm import compute_positions_min_curv
 from pywp.models import Point3D
 from pywp.reference_trajectories import parse_reference_trajectory_table
-from pywp.uncertainty import DEFAULT_UNCERTAINTY_PRESET, DEFAULT_PLANNING_UNCERTAINTY_MODEL
+from pywp.uncertainty import DEFAULT_UNCERTAINTY_PRESET, DEFAULT_PLANNING_UNCERTAINTY_MODEL, PlanningUncertaintyModel
+
+_CALIBRATION_TEST_BASE_MODEL = PlanningUncertaintyModel(
+    sigma_inc_deg=0.30,
+    sigma_azi_deg=0.60,
+    sigma_lateral_drift_m_per_1000m=12.0,
+    confidence_scale=2.0,
+)
 
 
 def _actual_wells():
@@ -35923,7 +35911,7 @@ def test_calibration_excludes_same_family_pairs_and_builds_custom_model() -> Non
     wells = _actual_wells()
     result = calibrate_uncertainty_from_actual_fund(
         actual_wells=wells,
-        base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        base_model=_CALIBRATION_TEST_BASE_MODEL,
         base_preset=DEFAULT_UNCERTAINTY_PRESET,
     )
 
@@ -35942,7 +35930,7 @@ def test_calibration_can_ignore_single_extreme_close_pair_and_still_build_model(
 
     result = calibrate_uncertainty_from_actual_fund(
         actual_wells=wells,
-        base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        base_model=_CALIBRATION_TEST_BASE_MODEL,
         base_preset=DEFAULT_UNCERTAINTY_PRESET,
     )
 
@@ -35985,7 +35973,7 @@ def test_calibration_reuses_prebuilt_analyses_without_recomputing_metrics(
     result = calibrate_uncertainty_from_actual_fund(
         actual_wells=wells,
         analyses=analyses,
-        base_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        base_model=_CALIBRATION_TEST_BASE_MODEL,
         base_preset=DEFAULT_UNCERTAINTY_PRESET,
     )
 
@@ -41978,7 +41966,7 @@ def test_build_key_metrics_rows_shows_reference_without_optimization_when_availa
     assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение без оптимизации"] == "0.90 / 0.90 / 0.90 deg/10m"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_uncertainty.py	13963
+===BEGIN_FILE===	tests/test_uncertainty.py	13946
 from __future__ import annotations
 
 import numpy as np
@@ -41991,8 +41979,8 @@ from pywp.uncertainty import (
     _continuous_extreme_index,
     _open_closed_ring,
     DEFAULT_UNCERTAINTY_PRESET,
-    UNCERTAINTY_PRESET_CONSERVATIVE,
-    UNCERTAINTY_PRESET_OPTIMISTIC,
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC,
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC,
     fitted_uncertainty_model,
     planning_uncertainty_model_for_preset,
     PlanningUncertaintyModel,
@@ -42135,8 +42123,8 @@ def test_default_mwd_proxy_radii_are_in_engineering_range_for_5_to_6km_md() -> N
         inc_deg=86.0,
     )
 
-    assert 130.0 <= semi_inc_m <= 170.0
-    assert 150.0 <= semi_azi_m <= 190.0
+    assert 70.0 <= semi_inc_m <= 110.0
+    assert 120.0 <= semi_azi_m <= 165.0
 
 
 def test_vertical_uncertainty_before_kop_is_not_overinflated_by_lateral_drift() -> None:
@@ -42145,7 +42133,7 @@ def test_vertical_uncertainty_before_kop_is_not_overinflated_by_lateral_drift() 
         inc_deg=0.0,
     )
 
-    assert 5.0 <= semi_inc_m <= 7.0
+    assert 2.5 <= semi_inc_m <= 5.0
     assert semi_azi_m == pytest.approx(semi_inc_m, abs=1e-9)
 
 
@@ -42165,26 +42153,26 @@ def test_lateral_drift_contribution_grows_with_inclination() -> None:
 
 def test_uncertainty_presets_are_normalized_and_monotonic() -> None:
     assert normalize_uncertainty_preset("unknown") == DEFAULT_UNCERTAINTY_PRESET
-    assert uncertainty_preset_label(UNCERTAINTY_PRESET_OPTIMISTIC) == "Оптимистичный"
+    assert uncertainty_preset_label(UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC) == "MWD POOR magnetic (ISCWSA)"
 
-    optimistic_model = planning_uncertainty_model_for_preset(UNCERTAINTY_PRESET_OPTIMISTIC)
-    conservative_model = planning_uncertainty_model_for_preset(
-        UNCERTAINTY_PRESET_CONSERVATIVE
+    poor_model = planning_uncertainty_model_for_preset(UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC)
+    unknown_model = planning_uncertainty_model_for_preset(
+        UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
     )
 
-    optimistic_inc_m, optimistic_azi_m = station_uncertainty_axes_m(
+    poor_inc_m, poor_azi_m = station_uncertainty_axes_m(
         md_m=4000.0,
         inc_deg=86.0,
-        model=optimistic_model,
+        model=poor_model,
     )
-    conservative_inc_m, conservative_azi_m = station_uncertainty_axes_m(
+    unknown_inc_m, unknown_azi_m = station_uncertainty_axes_m(
         md_m=4000.0,
         inc_deg=86.0,
-        model=conservative_model,
+        model=unknown_model,
     )
 
-    assert conservative_inc_m > optimistic_inc_m
-    assert conservative_azi_m > optimistic_azi_m
+    assert unknown_inc_m > poor_inc_m
+    assert unknown_azi_m > poor_azi_m
 
 
 def test_fitted_uncertainty_model_supports_independent_axis_scaling_and_floors() -> None:

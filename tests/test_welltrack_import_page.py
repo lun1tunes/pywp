@@ -34,7 +34,6 @@ from pywp.ui_calc_params import (
 )
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
-    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND,
     planning_uncertainty_model_for_preset,
 )
 from pywp.well_pad import detect_well_pads
@@ -1415,42 +1414,6 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
         str(at.session_state["wt_anticollision_uncertainty_preset"])
         == DEFAULT_UNCERTAINTY_PRESET
     )
-
-
-def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_available() -> (
-    None
-):
-    at = AppTest.from_file("pages/01_trajectory_constructor.py")
-    records = _records()[:2]
-    at.session_state["wt_records"] = records
-    at.session_state["wt_records_original"] = records
-    at.session_state["wt_summary_rows"] = [
-        {"Скважина": "WELL-A", "Статус": "OK"},
-        {"Скважина": "WELL-B", "Статус": "OK"},
-    ]
-    at.session_state["wt_successes"] = [
-        _successful_plan(name="WELL-A", y_offset_m=0.0),
-        _successful_plan(name="WELL-B", y_offset_m=5.0),
-    ]
-    at.session_state["wt_actual_fund_custom_model"] = (
-        planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
-    )
-    at.session_state["wt_anticollision_uncertainty_preset"] = (
-        UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
-    )
-    at.session_state["wt_results_view_mode"] = "Все скважины"
-    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
-
-    at.run(timeout=120)
-
-    preset_widgets = [
-        widget
-        for widget in at.selectbox
-        if widget.label == "Пресет неопределенности для anti-collision"
-    ]
-    assert preset_widgets
-    assert str(preset_widgets[0].value) == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
-    assert "Пользовательская (по фактическому фонду)" in list(preset_widgets[0].options)
 
 
 def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:

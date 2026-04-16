@@ -16,7 +16,6 @@ import streamlit as st
 
 from pywp import TrajectoryConfig, TrajectoryPlanner
 from pywp.actual_fund_analysis import (
-    CALIBRATION_STATUS_READY,
     ZONE_BUILD2,
     ZONE_HOLD,
     ZONE_HORIZONTAL,
@@ -27,7 +26,6 @@ from pywp.actual_fund_analysis import (
     actual_fund_pad_rows,
     build_actual_fund_kop_depth_function,
     build_actual_fund_well_analyses,
-    calibrate_uncertainty_from_actual_fund,
     summarize_actual_fund_by_depth,
 )
 from pywp.anticollision import (
@@ -128,7 +126,6 @@ from pywp.ui_well_result import (
 )
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
-    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND,
     UNCERTAINTY_PRESET_OPTIONS,
     PlanningUncertaintyModel,
     build_uncertainty_tube_mesh,
@@ -2401,74 +2398,6 @@ def _render_status_run_log(
             )
 
 
-def _run_actual_fund_calibration_with_status(
-    *,
-    actual_wells: tuple[ImportedTrajectoryWell, ...],
-    analyses: tuple[ActualFundWellAnalysis, ...],
-    base_preset: str,
-):
-    started_at = perf_counter()
-    log_lines: list[str] = []
-
-    def _emit(progress_bar, value: int, message: str) -> None:
-        log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
-        progress_bar.progress(int(value), text=message)
-
-    progress = st.progress(
-        5,
-        text="Подготовка калибровки пользовательской anti-collision функции...",
-    )
-    eligible_count = sum(
-        1 for item in analyses if bool(item.metrics.is_analysis_eligible)
-    )
-    _emit(progress, 18, "Подготовка фактического фонда.")
-    _emit(
-        progress,
-        34,
-        "Фильтрация невалидных, не-горизонтальных и pilot `_PL` скважин.",
-    )
-    try:
-        result = calibrate_uncertainty_from_actual_fund(
-            actual_wells=actual_wells,
-            analyses=analyses,
-            base_model=planning_uncertainty_model_for_preset(base_preset),
-            base_preset=base_preset,
-        )
-    except Exception as exc:
-        _emit(progress, 100, f"Ошибка калибровки: {type(exc).__name__}: {exc}")
-        progress.empty()
-        st.session_state["wt_actual_fund_calibration_run"] = {
-            "cached": False,
-            "runtime_s": float(perf_counter() - started_at),
-            "log_lines": tuple(log_lines),
-            "status": f"Ошибка: {type(exc).__name__}",
-            "well_count": int(len(actual_wells)),
-            "eligible_well_count": int(eligible_count),
-        }
-        raise
-    _emit(progress, 82, "Подгонка пользовательской anti-collision функции.")
-    if getattr(result, "custom_model", None) is not None:
-        _emit(
-            progress, 100, "Пользовательская anti-collision функция построена."
-        )
-    else:
-        _emit(
-            progress,
-            100,
-            "Расчёт пользовательской anti-collision функции завершён.",
-        )
-    progress.empty()
-    st.session_state["wt_actual_fund_calibration_run"] = {
-        "cached": False,
-        "runtime_s": float(perf_counter() - started_at),
-        "log_lines": tuple(log_lines),
-        "status": str(getattr(result, "status", "")),
-        "well_count": int(len(actual_wells)),
-        "eligible_well_count": int(eligible_count),
-    }
-    return result
-
-
 def _trajectory_interval_points(
     stations: pd.DataFrame,
     *,
@@ -2744,26 +2673,6 @@ def _reference_welltrack_path_key(kind: str) -> str:
     return f"wt_reference_{str(kind)}_welltrack_path"
 
 
-def _clear_actual_fund_calibration_state() -> None:
-    st.session_state["wt_actual_fund_calibration_result"] = None
-    st.session_state["wt_actual_fund_custom_model"] = None
-    st.session_state["wt_actual_fund_calibration_run"] = None
-    if (
-        str(
-            st.session_state.get("wt_anticollision_uncertainty_preset", "")
-        ).strip()
-        == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
-    ):
-        st.session_state["wt_anticollision_uncertainty_preset"] = (
-            DEFAULT_UNCERTAINTY_PRESET
-        )
-
-
-def _actual_fund_custom_model_from_state() -> PlanningUncertaintyModel | None:
-    model = st.session_state.get("wt_actual_fund_custom_model")
-    return model if isinstance(model, PlanningUncertaintyModel) else None
-
-
 def _set_reference_wells_for_kind(
     *,
     kind: str,
@@ -2785,8 +2694,6 @@ def _set_reference_wells_for_kind(
     st.session_state["wt_reference_wells"] = tuple(actual_wells) + tuple(
         approved_wells
     )
-    if normalized_kind == REFERENCE_WELL_ACTUAL:
-        _clear_actual_fund_calibration_state()
 
 
 def _reference_wells_from_state() -> tuple[ImportedTrajectoryWell, ...]:
@@ -2918,12 +2825,6 @@ def _init_state() -> None:
     st.session_state.setdefault(
         "wt_actual_fund_analysis_view_mode", "По скважинам"
     )
-    st.session_state.setdefault(
-        "wt_actual_fund_base_preset", DEFAULT_UNCERTAINTY_PRESET
-    )
-    st.session_state.setdefault("wt_actual_fund_calibration_result", None)
-    st.session_state.setdefault("wt_actual_fund_custom_model", None)
-    st.session_state.setdefault("wt_actual_fund_calibration_run", None)
     st.session_state.setdefault("wt_anticollision_last_run", None)
     st.session_state.setdefault("wt_t1_t3_last_resolution", None)
     st.session_state.setdefault("wt_t1_t3_acknowledged_well_names", ())
@@ -2961,7 +2862,6 @@ def _init_state() -> None:
                 "wt_anticollision_uncertainty_preset",
                 DEFAULT_UNCERTAINTY_PRESET,
             ),
-            allow_custom=_actual_fund_custom_model_from_state() is not None,
         )
     )
     st.session_state.setdefault("wt_prepared_well_overrides", {})
@@ -4555,16 +4455,12 @@ def _render_anticollision_panel(
         )
         return
 
-    custom_actual_fund_model = _actual_fund_custom_model_from_state()
     preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
-    if custom_actual_fund_model is not None:
-        preset_options.append(UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND)
     normalized_preset = normalize_uncertainty_preset(
         st.session_state.get(
             "wt_anticollision_uncertainty_preset",
             DEFAULT_UNCERTAINTY_PRESET,
         ),
-        allow_custom=custom_actual_fund_model is not None,
     )
     if normalized_preset not in preset_options:
         normalized_preset = DEFAULT_UNCERTAINTY_PRESET
@@ -4579,10 +4475,7 @@ def _render_anticollision_panel(
             "для batch anti-collision анализа."
         ),
     )
-    uncertainty_model = planning_uncertainty_model_for_preset(
-        selected_preset,
-        custom_model=custom_actual_fund_model,
-    )
+    uncertainty_model = planning_uncertainty_model_for_preset(selected_preset)
     anti_collision_progress = st.progress(
         8,
         text="Подготовка anti-collision анализа...",
@@ -6262,7 +6155,6 @@ def _handle_import_actions(
         st.session_state[
             _reference_wells_state_key(REFERENCE_WELL_APPROVED)
         ] = ()
-        _clear_actual_fund_calibration_state()
         st.session_state["wt_selected_names"] = []
         st.session_state["wt_loaded_at"] = ""
         _clear_t1_t3_order_resolution_state()
@@ -7441,15 +7333,11 @@ def _render_actual_fund_analysis_panel(
 
     with st.expander("Анализ фактического фонда", expanded=False):
         st.caption(
-            "В анализ попадают только фактические скважины. Для калибровки "
-            "учитываются только горизонтальные скважины без аномалий: если у "
-            "горизонтальной скважины не удаётся устойчиво выделить `KOP / HOLD / "
-            "терминальный high-angle interval` или получается аномально высокий "
-            "устойчивый `ПИ`, такая скважина исключается из анализа и калибровки. "
-            "Пилоты `_PL` в пользовательский anti-collision fit не попадают. "
-            "Пары одного семейства вида `7401` / `7401_PL` / `7401_2` из calibration-scan "
-            "исключаются. В тяжёлых кейсах алгоритм может осознанно пренебречь "
-            "1–2 экстремально близкими парами и явно показать это в результате. "
+            "В анализ попадают только фактические скважины. Учитываются только "
+            "горизонтальные скважины без аномалий: если у горизонтальной скважины "
+            "не удаётся устойчиво выделить `KOP / HOLD / терминальный high-angle "
+            "interval` или получается аномально высокий устойчивый `ПИ`, такая "
+            "скважина исключается из анализа. "
             "Группировка по кустам строится по ведущему числовому коду "
             "скважины без двух последних цифр: `6101/6102/6103 -> 61`, `8203/8210 -> 82`."
         )
@@ -7561,127 +7449,6 @@ def _render_actual_fund_analysis_panel(
             "используют ту же сегментацию, что и aggregate-анализ."
         )
         _render_actual_fund_well_detail(analyses)
-
-        st.markdown("#### Калибровка пользовательской функции конусов")
-        st.caption(
-            "Это не formal ISCWSA toolcode calibration, а planning-level field fit: "
-            "алгоритм может независимо подстраивать INC/AZI/drift и confidence-scale "
-            "относительно базового пресета так, чтобы ложные overlap по фактическому "
-            "горизонтальному фонду не доминировали."
-        )
-        calibration_base_preset = st.selectbox(
-            "Базовый пресет для калибровки",
-            options=list(UNCERTAINTY_PRESET_OPTIONS.keys()),
-            format_func=uncertainty_preset_label,
-            key="wt_actual_fund_base_preset",
-        )
-        if st.button(
-            "Откалибровать пользовательскую функцию",
-            icon=":material/tune:",
-            width="stretch",
-        ):
-            try:
-                result = _run_actual_fund_calibration_with_status(
-                    actual_wells=actual_wells,
-                    analyses=analyses,
-                    base_preset=calibration_base_preset,
-                )
-            except Exception as exc:
-                st.session_state["wt_actual_fund_calibration_result"] = None
-                st.session_state["wt_actual_fund_custom_model"] = None
-                st.error(
-                    "Не удалось откалибровать пользовательскую anti-collision функцию. "
-                    "Проверьте лог расчёта ниже."
-                )
-                st.caption(f"{type(exc).__name__}: {exc}")
-            else:
-                st.session_state["wt_actual_fund_calibration_result"] = result
-                st.session_state["wt_actual_fund_custom_model"] = (
-                    result.custom_model
-                )
-                if result.custom_model is not None:
-                    st.session_state["wt_anticollision_uncertainty_preset"] = (
-                        UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
-                    )
-                    _reset_anticollision_view_state(clear_prepared=False)
-                    st.toast(
-                        "Пользовательская функция конусов построена и выбрана в anti-collision."
-                    )
-                st.rerun()
-
-        calibration_result = st.session_state.get(
-            "wt_actual_fund_calibration_result"
-        )
-        if calibration_result is not None:
-            c1, c2, c3, c4 = st.columns(4, gap="small")
-            c1.metric(
-                "Проверено пар",
-                f"{int(calibration_result.analyzed_pair_count)}",
-            )
-            c2.metric(
-                "Пропущено пар одного семейства",
-                f"{int(calibration_result.skipped_same_family_pair_count)}",
-            )
-            c3.metric(
-                "Overlap до",
-                f"{int(calibration_result.overlapping_pair_count_before)}",
-            )
-            c4.metric(
-                "Overlap после",
-                (
-                    "—"
-                    if calibration_result.overlapping_pair_count_after is None
-                    else f"{int(calibration_result.overlapping_pair_count_after)}"
-                ),
-            )
-            x1, x2 = st.columns(2, gap="small")
-            x1.metric(
-                "Исключено пилотов `_PL`",
-                f"{int(calibration_result.excluded_pilot_well_count)}",
-            )
-            x2.metric(
-                "Осознанно проигнорировано пар",
-                f"{int(calibration_result.ignored_close_pair_count)}",
-            )
-            scale_label = (
-                "—"
-                if calibration_result.scale_factor is None
-                else f"{float(calibration_result.scale_factor):.2f}"
-            )
-            worst_before = (
-                "—"
-                if calibration_result.worst_separation_factor_before is None
-                else f"{float(calibration_result.worst_separation_factor_before):.2f}"
-            )
-            worst_after = (
-                "—"
-                if calibration_result.worst_separation_factor_after is None
-                else f"{float(calibration_result.worst_separation_factor_after):.2f}"
-            )
-            st.caption(
-                f"Статус: {str(calibration_result.status)}. "
-                f"Scale={scale_label}, SF до={worst_before}, SF после={worst_after}. "
-                f"База: {uncertainty_preset_label(calibration_result.base_preset)}."
-            )
-            if calibration_result.ignored_close_pairs:
-                st.caption(
-                    "Проигнорированные экстремально близкие пары: "
-                    + ", ".join(
-                        str(item)
-                        for item in calibration_result.ignored_close_pairs
-                    )
-                )
-            if str(calibration_result.status) == CALIBRATION_STATUS_READY:
-                st.success(str(calibration_result.note))
-            else:
-                st.info(str(calibration_result.note))
-        _render_status_run_log(
-            title="Лог расчёта пользовательской Anti-collision функции",
-            state_payload=st.session_state.get(
-                "wt_actual_fund_calibration_run"
-            ),
-            empty_message="Пользовательская anti-collision функция ещё не рассчитывалась.",
-        )
 
 
 def _render_reference_trajectory_panel() -> None:
