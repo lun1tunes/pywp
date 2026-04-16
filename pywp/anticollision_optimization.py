@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from pywp.mcm import minimum_curvature_increment
-from pywp.models import Point3D
+from pywp.models import INTERPOLATION_RODRIGUES, Point3D
 from pywp.planner_types import ProfileParameters
 from pywp.planner_validation import _build_trajectory
 from pywp.constants import SMALL
@@ -54,6 +54,7 @@ class AntiCollisionOptimizationContext:
     prefer_adjust_build2: bool = False
     baseline_kop_vertical_m: float | None = None
     baseline_build1_dls_deg_per_30m: float | None = None
+    interpolation_method: str = INTERPOLATION_RODRIGUES
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,7 @@ def evaluate_candidate_anti_collision_clearance(
         md_start_m=float(context.candidate_md_start_m),
         md_end_m=float(context.candidate_md_end_m),
         sample_step_m=float(context.sample_step_m),
+        interpolation_method=str(context.interpolation_method),
     )
     return evaluate_stations_anti_collision_clearance(
         stations=sampled_candidate,
@@ -594,11 +596,12 @@ def sample_profile_stations_in_md_window(
     md_start_m: float,
     md_end_m: float,
     sample_step_m: float,
+    interpolation_method: str = INTERPOLATION_RODRIGUES,
 ) -> pd.DataFrame:
     start_md = float(max(md_start_m, 0.0))
     end_md = float(max(md_end_m, start_md))
     sample_step = float(max(sample_step_m, 1.0))
-    segments = tuple(_profile_segment_specs(candidate=candidate))
+    segments = tuple(_profile_segment_specs(candidate=candidate, interpolation_method=interpolation_method))
     grid = _sample_md_grid(
         md_start_m=start_md,
         md_end_m=end_md,
@@ -695,8 +698,9 @@ def sample_profile_stations_in_md_window(
 def _profile_segment_specs(
     *,
     candidate: ProfileParameters,
+    interpolation_method: str = INTERPOLATION_RODRIGUES,
 ) -> list[dict[str, float | str]]:
-    trajectory = _build_trajectory(params=candidate)
+    trajectory = _build_trajectory(params=candidate, interpolation_method=interpolation_method)
     specs: list[dict[str, float | str]] = []
     md_start = 0.0
     for segment in trajectory.segments:

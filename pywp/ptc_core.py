@@ -158,7 +158,7 @@ from pywp.welltrack_quality import (
     swap_t1_t3_for_wells,
 )
 
-DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS3.INC")
+DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS4.INC")
 WT_UI_DEFAULTS_VERSION = 16
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
@@ -196,7 +196,7 @@ WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = 24
 WT_THREE_MAX_LABELS = 48
 WT_THREE_MAX_REFERENCE_LABELS = 12
 WT_PAD_FOCUS_ALL = "__all_pads__"
-WT_IMPORT_WELLHEAD_Z_TOLERANCE_M = 50.0
+WT_IMPORT_WELLHEAD_Z_TOLERANCE_M = 100.0
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
     "wt_cfg_md_step_control_m": "wt_cfg_md_control",
@@ -3367,7 +3367,7 @@ def _all_wells_plan_figure(
                 y=stations["Y_m"],
                 mode="lines",
                 name=name,
-                line={"width": 4, "color": line_color, "dash": line_dash},
+                line={"width": 1.5, "color": line_color, "dash": line_dash},
                 customdata=np.column_stack(
                     [
                         stations["Z_m"].to_numpy(dtype=float),
@@ -3448,7 +3448,7 @@ def _all_wells_plan_figure(
                 mode="lines",
                 name=reference_well_display_label(reference_well),
                 showlegend=False,
-                line={"width": 3.5, "color": line_color},
+                line={"width": 2, "color": line_color},
                 customdata=np.column_stack(
                     [stations["MD_m"].to_numpy(dtype=float)]
                 ),
@@ -4207,7 +4207,7 @@ def _all_wells_anticollision_plan_figure(
                 name=well_label,
                 legendgroup=str(well.name),
                 showlegend=not bool(well.is_reference_only),
-                line={"width": 4, "color": str(well.color)},
+                line={"width": 1.5, "color": str(well.color)},
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
@@ -6343,7 +6343,7 @@ def _record_import_problem_text(record: WelltrackRecord) -> str:
         has_surface_like_point = _record_has_surface_like_point(record)
         if not has_surface_like_point:
             problems.append(
-                "Не найдена точка `S`: среди точек нет `Z` около поверхности (±50 м)."
+                "Не найдена точка `S`: среди точек нет `Z` около поверхности (±100 м)."
             )
         elif not _record_first_point_is_surface_like(record):
             problems.append("Первая точка не похожа на устье `S`.")

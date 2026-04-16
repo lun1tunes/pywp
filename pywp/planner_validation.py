@@ -169,7 +169,10 @@ def _target_delta_components(
     return dx_m, dy_m, dz_m, lateral_distance_m, vertical_distance_m, distance_m
 
 
-def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
+def _build_trajectory(
+    params: ProfileParameters,
+    interpolation_method: str = "rodrigues",
+) -> WellTrajectory:
     segments = [
         VerticalSegment(
             length_m=params.kop_vertical_m,
@@ -185,6 +188,7 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 dls_deg_per_30m=params.dls_build1_deg_per_30m,
                 azi_deg=params.azimuth_hold_deg,
                 name="BUILD1",
+                interpolation_method=interpolation_method,
             )
         )
     if params.hold_length_m > SMALL:
@@ -205,6 +209,7 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 azi_deg=params.azimuth_hold_deg,
                 azi_to_deg=params.azimuth_entry_deg,
                 name="BUILD2",
+                interpolation_method=interpolation_method,
             )
         )
     if (
@@ -218,6 +223,7 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 dls_deg_per_30m=params.horizontal_dls_deg_per_30m,
                 azi_deg=params.azimuth_entry_deg,
                 name="HORIZONTAL",
+                interpolation_method=interpolation_method,
             )
         )
     if params.horizontal_hold_length_m > SMALL:
@@ -545,7 +551,7 @@ def _build_validated_control_and_summary(
     turn_search_settings: TurnSearchSettings | None,
     turn_restarts_used: int,
 ) -> tuple[WellTrajectory, pd.DataFrame, dict[str, float | str]]:
-    trajectory = _build_trajectory(params=params)
+    trajectory = _build_trajectory(params=params, interpolation_method=str(getattr(config, "interpolation_method", "rodrigues")))
     endpoint_eval = _offset_endpoint_evaluation(
         evaluation=_evaluate_profile_endpoints(params=params),
         surface=surface,

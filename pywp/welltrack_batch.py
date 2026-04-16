@@ -150,6 +150,7 @@ def rebuild_optimization_context(
             if context.baseline_build1_dls_deg_per_30m is not None
             else None
         ),
+        interpolation_method=str(context.interpolation_method),
     )
 
 

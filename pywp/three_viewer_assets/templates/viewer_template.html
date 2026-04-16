@@ -50,10 +50,7 @@
       }
 
       #legend-toggle-wrap {
-        position: absolute;
-        top: 52px;
-        right: 10px;
-        z-index: 4;
+        display: none;
       }
 
       #axes-gizmo {
@@ -115,59 +112,144 @@
         position: absolute;
         top: 52px;
         right: 10px;
-        max-width: 260px;
+        width: 240px;
         max-height: calc(100% - 62px);
-        overflow: auto;
-        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.95);
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
-        z-index: 3;
+        z-index: 5;
+        will-change: transform;
       }
 
       #legend:empty {
         display: none;
       }
 
-      #legend.is-collapsed {
+      #legend.is-collapsed .legend-body {
         display: none;
+      }
+
+      #legend.is-collapsed {
+        max-height: none;
+      }
+
+      .legend-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        cursor: grab;
+        user-select: none;
+        border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+        flex-shrink: 0;
+      }
+
+      .legend-header:active {
+        cursor: grabbing;
+      }
+
+      .legend-header-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #0f172a;
+        flex: 1;
+      }
+
+      .legend-header-action {
+        font-size: 11px;
+        color: #2563eb;
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0;
+        font-weight: 600;
+        flex-shrink: 0;
+      }
+
+      .legend-header-action:hover {
+        text-decoration: underline;
+      }
+
+      .legend-collapse-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0 2px;
+        font-size: 14px;
+        line-height: 1;
+        color: #64748b;
+        flex-shrink: 0;
+        transition: transform 0.2s ease;
+      }
+
+      .legend-collapse-btn:hover {
+        color: #0f172a;
+      }
+
+      .legend-collapse-btn.is-collapsed {
+        transform: rotate(-90deg);
+      }
+
+      .legend-body {
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        padding: 6px 12px 10px;
+        flex: 1;
+        min-height: 0;
       }
 
       #collisions-panel {
         position: absolute;
         top: 52px;
         left: 10px;
-        width: 220px;
+        width: 230px;
         max-height: calc(100% - 62px);
-        overflow: auto;
-        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.95);
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
-        z-index: 3;
+        z-index: 5;
+        will-change: transform;
       }
 
       #collisions-panel:empty {
         display: none;
       }
 
-      #collisions-panel.is-collapsed {
+      #collisions-panel.is-collapsed .collisions-body {
         display: none;
+      }
+
+      #collisions-panel.is-collapsed {
+        max-height: none;
       }
 
       .collisions-header {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        margin-bottom: 8px;
-        padding-bottom: 6px;
+        gap: 6px;
+        padding: 8px 12px;
+        cursor: grab;
+        user-select: none;
         border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+        flex-shrink: 0;
+      }
+
+      .collisions-header:active {
+        cursor: grabbing;
       }
 
       .collisions-title {
         font-size: 12px;
         font-weight: 700;
         color: #0f172a;
+        flex: 1;
       }
 
       .collisions-count {
@@ -176,6 +258,36 @@
         background: rgba(15, 23, 42, 0.06);
         padding: 2px 6px;
         border-radius: 6px;
+        flex-shrink: 0;
+      }
+
+      .collisions-collapse-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0 2px;
+        font-size: 14px;
+        line-height: 1;
+        color: #64748b;
+        flex-shrink: 0;
+        transition: transform 0.2s ease;
+      }
+
+      .collisions-collapse-btn:hover {
+        color: #0f172a;
+      }
+
+      .collisions-collapse-btn.is-collapsed {
+        transform: rotate(-90deg);
+      }
+
+      .collisions-body {
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        padding: 6px 12px 10px;
+        flex: 1;
+        min-height: 0;
       }
 
       .collision-item {
@@ -459,7 +571,6 @@
         const root = document.getElementById("root");
         const labelLayerElement = document.getElementById("label-layer");
         const legendElement = document.getElementById("legend");
-        const legendToggleButton = document.getElementById("legend-toggle-btn");
         const tooltipElement = document.getElementById("tooltip");
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
@@ -529,7 +640,6 @@
         let idleFrameCount = 0;
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
-        let legendCollapsed = false;
         let legendTreeExpanded = true;
         let interactionActive = false;
         const hasTreeLegend =
@@ -819,14 +929,100 @@
         function renderLegend() {
           legendElement.innerHTML = "";
           const flatItems = Array.isArray(payload.legend) ? payload.legend : [];
+          const hasContent = hasTreeLegend || (Array.isArray(flatItems) && flatItems.length > 0);
+          if (!hasContent) {
+            return;
+          }
+
+          // --- Header: title + optional tree-toggle action + collapse button ---
+          var legendPanelCollapsed = false;
+          const header = document.createElement("div");
+          header.className = "legend-header";
+          const title = document.createElement("div");
+          title.className = "legend-header-title";
+          title.textContent = "Legend";
+          header.appendChild(title);
+
+          var treeActionBtn = null;
           if (hasTreeLegend) {
-            if (legendToggleButton) {
-              legendToggleButton.style.display = "inline-flex";
-              legendToggleButton.textContent = legendTreeExpanded
-                ? "Свернуть всё"
-                : "Развернуть всё";
-            }
-            legendElement.classList.remove("is-collapsed");
+            treeActionBtn = document.createElement("button");
+            treeActionBtn.type = "button";
+            treeActionBtn.className = "legend-header-action";
+            treeActionBtn.textContent = legendTreeExpanded ? "Свернуть всё" : "Развернуть всё";
+            treeActionBtn.addEventListener("click", function (e) {
+              e.stopPropagation();
+              legendTreeExpanded = !legendTreeExpanded;
+              syncLegendVisibility();
+            });
+            header.appendChild(treeActionBtn);
+          }
+
+          const collapseBtn = document.createElement("button");
+          collapseBtn.className = "legend-collapse-btn";
+          collapseBtn.textContent = "\u25BC";
+          collapseBtn.title = "Свернуть / развернуть";
+          collapseBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            legendPanelCollapsed = !legendPanelCollapsed;
+            legendElement.classList.toggle("is-collapsed", legendPanelCollapsed);
+            collapseBtn.classList.toggle("is-collapsed", legendPanelCollapsed);
+          });
+          header.appendChild(collapseBtn);
+          legendElement.appendChild(header);
+
+          // --- Drag-to-move on header ---
+          (function initLegendDrag() {
+            var dragging = false;
+            var startX = 0;
+            var startY = 0;
+            var panelStartLeft = 0;
+            var panelStartTop = 0;
+
+            header.addEventListener("pointerdown", function (e) {
+              if (e.target === collapseBtn || e.target === treeActionBtn) return;
+              dragging = true;
+              startX = e.clientX;
+              startY = e.clientY;
+              var rect = legendElement.getBoundingClientRect();
+              var parentRect = legendElement.offsetParent
+                ? legendElement.offsetParent.getBoundingClientRect()
+                : { left: 0, top: 0 };
+              panelStartLeft = rect.left - parentRect.left;
+              panelStartTop = rect.top - parentRect.top;
+              header.setPointerCapture(e.pointerId);
+              e.preventDefault();
+            });
+
+            header.addEventListener("pointermove", function (e) {
+              if (!dragging) return;
+              var dx = e.clientX - startX;
+              var dy = e.clientY - startY;
+              var newLeft = panelStartLeft + dx;
+              var newTop = panelStartTop + dy;
+              var parent = legendElement.offsetParent || document.documentElement;
+              var maxLeft = parent.clientWidth - legendElement.offsetWidth;
+              var maxTop = parent.clientHeight - legendElement.offsetHeight;
+              newLeft = Math.max(0, Math.min(newLeft, maxLeft));
+              newTop = Math.max(0, Math.min(newTop, maxTop));
+              legendElement.style.left = newLeft + "px";
+              legendElement.style.top = newTop + "px";
+              legendElement.style.right = "auto";
+            });
+
+            header.addEventListener("pointerup", function () {
+              dragging = false;
+            });
+
+            header.addEventListener("pointercancel", function () {
+              dragging = false;
+            });
+          })();
+
+          // --- Scrollable body ---
+          const body = document.createElement("div");
+          body.className = "legend-body";
+
+          if (hasTreeLegend) {
             payload.legend_tree.forEach((group) => {
               const groupWrap = document.createElement("div");
               groupWrap.className = "legend-group";
@@ -840,7 +1036,7 @@
                 childrenWrap.appendChild(createTreeNodeButton(child, "well"));
               });
               groupWrap.appendChild(childrenWrap);
-              legendElement.appendChild(groupWrap);
+              body.appendChild(groupWrap);
             });
             if (flatItems.length > 0) {
               const flatSection = document.createElement("div");
@@ -848,38 +1044,19 @@
               flatItems.forEach((item) => {
                 flatSection.appendChild(createFlatLegendRow(item));
               });
-              legendElement.appendChild(flatSection);
+              body.appendChild(flatSection);
             }
-            return;
+          } else {
+            flatItems.forEach((item) => {
+              body.appendChild(createFlatLegendRow(item));
+            });
           }
-          if (!Array.isArray(flatItems) || flatItems.length === 0) {
-            if (legendToggleButton) {
-              legendToggleButton.style.display = "none";
-            }
-            return;
-          }
-          if (legendToggleButton) {
-            legendToggleButton.style.display = "inline-flex";
-            legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
-          }
-          flatItems.forEach((item) => {
-            legendElement.appendChild(createFlatLegendRow(item));
-          });
+
+          legendElement.appendChild(body);
         }
 
         function syncLegendVisibility() {
           renderLegend();
-          if (hasTreeLegend) {
-            return;
-          }
-          if (legendCollapsed) {
-            legendElement.classList.add("is-collapsed");
-          } else {
-            legendElement.classList.remove("is-collapsed");
-          }
-          if (legendToggleButton && legendElement.innerHTML.trim() !== "") {
-            legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
-          }
         }
 
         function renderCollisions() {
@@ -891,6 +1068,9 @@
           if (collisions.length === 0) {
             return;
           }
+
+          // --- Header: title + count + collapse button ---
+          let collisionsPanelCollapsed = false;
           const header = document.createElement("div");
           header.className = "collisions-header";
           const title = document.createElement("div");
@@ -901,7 +1081,70 @@
           count.className = "collisions-count";
           count.textContent = String(collisions.length);
           header.appendChild(count);
+          const collapseBtn = document.createElement("button");
+          collapseBtn.className = "collisions-collapse-btn";
+          collapseBtn.textContent = "▼";
+          collapseBtn.title = "Свернуть / развернуть";
+          collapseBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            collisionsPanelCollapsed = !collisionsPanelCollapsed;
+            collisionsPanelElement.classList.toggle("is-collapsed", collisionsPanelCollapsed);
+            collapseBtn.classList.toggle("is-collapsed", collisionsPanelCollapsed);
+          });
+          header.appendChild(collapseBtn);
           collisionsPanelElement.appendChild(header);
+
+          // --- Drag-to-move on header ---
+          (function initDrag() {
+            let dragging = false;
+            let startX = 0;
+            let startY = 0;
+            let panelStartLeft = 0;
+            let panelStartTop = 0;
+
+            header.addEventListener("pointerdown", function (e) {
+              if (e.target === collapseBtn) return;
+              dragging = true;
+              startX = e.clientX;
+              startY = e.clientY;
+              const rect = collisionsPanelElement.getBoundingClientRect();
+              const parentRect = collisionsPanelElement.offsetParent
+                ? collisionsPanelElement.offsetParent.getBoundingClientRect()
+                : { left: 0, top: 0 };
+              panelStartLeft = rect.left - parentRect.left;
+              panelStartTop = rect.top - parentRect.top;
+              header.setPointerCapture(e.pointerId);
+              e.preventDefault();
+            });
+
+            header.addEventListener("pointermove", function (e) {
+              if (!dragging) return;
+              const dx = e.clientX - startX;
+              const dy = e.clientY - startY;
+              var newLeft = panelStartLeft + dx;
+              var newTop = panelStartTop + dy;
+              var parent = collisionsPanelElement.offsetParent || document.documentElement;
+              var maxLeft = parent.clientWidth - collisionsPanelElement.offsetWidth;
+              var maxTop = parent.clientHeight - collisionsPanelElement.offsetHeight;
+              newLeft = Math.max(0, Math.min(newLeft, maxLeft));
+              newTop = Math.max(0, Math.min(newTop, maxTop));
+              collisionsPanelElement.style.left = newLeft + "px";
+              collisionsPanelElement.style.top = newTop + "px";
+            });
+
+            header.addEventListener("pointerup", function () {
+              dragging = false;
+            });
+
+            header.addEventListener("pointercancel", function () {
+              dragging = false;
+            });
+          })();
+
+          // --- Scrollable body ---
+          const body = document.createElement("div");
+          body.className = "collisions-body";
+
           collisions.forEach((collision) => {
             const item = document.createElement("div");
             item.className = "collision-item";
@@ -985,8 +1228,9 @@
                 requestRender();
               }
             });
-            collisionsPanelElement.appendChild(item);
+            body.appendChild(item);
           });
+          collisionsPanelElement.appendChild(body);
         }
 
         function addLine(item) {
@@ -1432,16 +1676,6 @@
         if (fullscreenButton) {
           fullscreenButton.addEventListener("click", enterFullscreen);
         }
-        if (legendToggleButton) {
-          legendToggleButton.addEventListener("click", () => {
-            if (hasTreeLegend) {
-              legendTreeExpanded = !legendTreeExpanded;
-            } else {
-              legendCollapsed = !legendCollapsed;
-            }
-            syncLegendVisibility();
-          });
-        }
         resize();
         fitCamera();
         syncLegendVisibility();
@@ -1451,5 +1685,3 @@
     </script>
   </body>
 </html>
-
-// added

@@ -473,6 +473,7 @@ def build_prepared_optimization_context(
             if baseline_build1_dls_deg_per_30m is not None
             else None
         ),
+        interpolation_method=str(getattr(moving_success.config, "interpolation_method", "rodrigues")),
     )
 
 
@@ -925,6 +926,11 @@ def build_cluster_prepared_overrides(
                         is not None
                     )
                     else None
+                ),
+                interpolation_method=(
+                    str(getattr(success_by_name[well_name].config, "interpolation_method", "rodrigues"))
+                    if success_by_name.get(well_name) is not None
+                    else "rodrigues"
                 ),
             )
             prepared[well_name] = {

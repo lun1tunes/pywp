@@ -31,6 +31,11 @@ TURN_SOLVER_DE_HYBRID = "de_hybrid"
 ALLOWED_TURN_SOLVER_MODES = (TURN_SOLVER_LEAST_SQUARES, TURN_SOLVER_DE_HYBRID)
 TurnSolverMode = Literal["least_squares", "de_hybrid"]
 
+INTERPOLATION_SLERP = "slerp"
+INTERPOLATION_RODRIGUES = "rodrigues"
+ALLOWED_INTERPOLATION_METHODS = (INTERPOLATION_RODRIGUES, INTERPOLATION_SLERP)
+InterpolationMethod = Literal["rodrigues", "slerp"]
+
 DEFAULT_BUILD_DLS_MAX_DEG_PER_30M = 3.0
 
 _SEGMENT_DLS_ORDER: tuple[str, ...] = (
@@ -113,6 +118,7 @@ class TrajectoryConfig(FrozenModel):
     optimization_mode: OptimizationMode = OPTIMIZATION_MINIMIZE_MD
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_max_restarts: NonNegativeInt = 2
+    interpolation_method: InterpolationMethod = INTERPOLATION_RODRIGUES
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: PositiveFiniteScalar = 30.0
 

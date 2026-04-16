@@ -8,6 +8,7 @@ import streamlit as st
 from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp import TrajectoryConfig
 from pywp.planner_config import (
+    INTERPOLATION_METHOD_OPTIONS,
     OPTIMIZATION_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_trajectory_config,
@@ -27,7 +28,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "kop_min_vertical",
 )
 _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
-_STR_SUFFIXES: tuple[str, ...] = ("optimization_mode", "turn_solver_mode")
+_STR_SUFFIXES: tuple[str, ...] = ("optimization_mode", "turn_solver_mode", "interpolation_method")
 _BOOL_SUFFIXES: tuple[str, ...] = ()
 
 
@@ -49,12 +50,13 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "optimization_mode": str(cfg.optimization_mode),
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
         "turn_solver_mode": str(cfg.turn_solver_mode),
+        "interpolation_method": str(cfg.interpolation_method),
     }
 
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 10
+_DEFAULTS_SCHEMA_VERSION = 11
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
@@ -299,6 +301,7 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         optimization_mode=str(_state_value(prefix, "optimization_mode")),
         turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
         turn_solver_mode=str(_state_value(prefix, "turn_solver_mode")),
+        interpolation_method=str(_state_value(prefix, "interpolation_method")),
     )
 
 
@@ -445,6 +448,16 @@ def render_calc_params_block(
             help=(
                 "Least Squares (TRF) — быстрый дефолт. "
                 "DE Hybrid — тяжелее, но может помочь на сложной геометрии."
+            ),
+        )
+        st.selectbox(
+            "Интерполяция BUILD",
+            options=list(INTERPOLATION_METHOD_OPTIONS.keys()),
+            key=_state_key(prefix, "interpolation_method"),
+            format_func=lambda key: INTERPOLATION_METHOD_OPTIONS[str(key)],
+            help=(
+                "Rodrigues — численно стабильная формула вращения, рекомендуется. "
+                "SLERP — классическая сферическая линейная интерполяция."
             ),
         )
         st.number_input(

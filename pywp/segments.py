@@ -8,6 +8,10 @@ import pandas as pd
 from pywp.constants import RAD2DEG
 from pywp.mcm import dogleg_angle_rad
 
+INTERPOLATION_SLERP = "slerp"
+INTERPOLATION_RODRIGUES = "rodrigues"
+DEFAULT_INTERPOLATION_METHOD = INTERPOLATION_RODRIGUES
+
 
 def _make_md_grid(md_start: float, length_m: float, md_step_m: float) -> np.ndarray:
     if length_m <= 1e-9:
@@ -87,6 +91,7 @@ class BuildSegment(Segment):
         azi_deg: float,
         azi_to_deg: float | None = None,
         name: str = "BUILD",
+        interpolation_method: str = DEFAULT_INTERPOLATION_METHOD,
     ):
         self.inc_from_deg = float(inc_from_deg)
         self.inc_to_deg = float(inc_to_deg)
@@ -94,6 +99,7 @@ class BuildSegment(Segment):
         self.azi_from_deg = float(azi_deg)
         self.azi_to_deg = float(azi_deg if azi_to_deg is None else azi_to_deg)
         self.name = name
+        self.interpolation_method = str(interpolation_method)
 
     @property
     def length_m(self) -> float:
@@ -119,7 +125,15 @@ class BuildSegment(Segment):
             t = (md - md_start) / self.length_m
             direction_from = _direction_vector(inc_deg=self.inc_from_deg, azi_deg=self.azi_from_deg)
             direction_to = _direction_vector(inc_deg=self.inc_to_deg, azi_deg=self.azi_to_deg)
-            directions = _slerp_directions(direction_from=direction_from, direction_to=direction_to, t=t)
+            if self.interpolation_method == INTERPOLATION_SLERP:
+                directions = _slerp_directions(direction_from=direction_from, direction_to=direction_to, t=t)
+            elif self.interpolation_method == INTERPOLATION_RODRIGUES:
+                directions = _rodrigues_directions(direction_from=direction_from, direction_to=direction_to, t=t)
+            else:
+                raise ValueError(
+                    f"Unknown interpolation_method: {self.interpolation_method!r}. "
+                    f"Expected {INTERPOLATION_SLERP!r} or {INTERPOLATION_RODRIGUES!r}."
+                )
             inc, azi = _angles_from_directions(directions=directions)
 
         return pd.DataFrame(
@@ -148,6 +162,38 @@ def _direction_vector(inc_deg: float, azi_deg: float) -> np.ndarray:
         ],
         dtype=float,
     )
+
+
+def _rodrigues_directions(direction_from: np.ndarray, direction_to: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Interpolate directions using Rodrigues' rotation formula.
+
+    Numerically superior to SLERP when the dogleg angle approaches pi,
+    because the evaluation never divides by sin(dogleg) per-point — only
+    a one-time cross-product normalisation is needed.
+    """
+    start = direction_from / np.linalg.norm(direction_from)
+    end = direction_to / np.linalg.norm(direction_to)
+    dot = float(np.clip(np.dot(start, end), -1.0, 1.0))
+    theta = float(np.arccos(dot))
+    t_vec = np.asarray(t, dtype=float).reshape(-1)
+
+    if theta <= 1e-12:
+        vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
+    else:
+        cross = np.cross(start, end)
+        cross_norm = float(np.linalg.norm(cross))
+        if cross_norm < 1e-10:
+            # start ≈ ±end — degenerate; fall back to constant direction.
+            vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
+        else:
+            rot_axis = cross / cross_norm
+            in_plane = np.cross(rot_axis, start)
+            angles = (t_vec * theta).reshape(-1, 1)
+            vectors = np.cos(angles) * start[None, :] + np.sin(angles) * in_plane[None, :]
+
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms = np.where(norms <= 1e-12, 1.0, norms)
+    return vectors / norms
 
 
 def _slerp_directions(direction_from: np.ndarray, direction_to: np.ndarray, t: np.ndarray) -> np.ndarray:
