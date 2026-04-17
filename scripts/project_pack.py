@@ -20,6 +20,10 @@ EXCLUDED_DIR_NAMES = {
     ".idea",
 }
 
+EXCLUDED_FILE_PATHS = {
+    ".windsurf/workflows/check_and_pack.yaml",
+}
+
 INCLUDED_FILE_EXTENSIONS = {
     ".py",
     # ".txt",
@@ -43,6 +47,8 @@ def should_skip_path(path: Path, root: Path) -> bool:
     rel = path.relative_to(root)
     parts = set(rel.parts)
     if parts & EXCLUDED_DIR_NAMES:
+        return True
+    if rel.as_posix() in EXCLUDED_FILE_PATHS:
         return True
     return False
 

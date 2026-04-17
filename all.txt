@@ -15,7 +15,7 @@ st.title("Главная страница")
 st.info("Выберите приложение в боковом меню.")
 
 ===END_FILE===
-===BEGIN_FILE===	pages/01_trajectory_constructor.py	28484
+===BEGIN_FILE===	pages/01_trajectory_constructor.py	28173
 from __future__ import annotations
 
 import pandas as pd
@@ -397,16 +397,12 @@ def _render_ptc_anticollision_panel(
         )
         return
 
-    custom_actual_fund_model = wt._actual_fund_custom_model_from_state()
     preset_options = list(wt.UNCERTAINTY_PRESET_OPTIONS.keys())
-    if custom_actual_fund_model is not None:
-        preset_options.append(wt.UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND)
     normalized_preset = wt.normalize_uncertainty_preset(
         st.session_state.get(
             "wt_anticollision_uncertainty_preset",
             wt.DEFAULT_UNCERTAINTY_PRESET,
         ),
-        allow_custom=custom_actual_fund_model is not None,
     )
     if normalized_preset not in preset_options:
         normalized_preset = wt.DEFAULT_UNCERTAINTY_PRESET
@@ -417,10 +413,7 @@ def _render_ptc_anticollision_panel(
         format_func=wt.uncertainty_preset_label,
         key="wt_anticollision_uncertainty_preset",
     )
-    uncertainty_model = wt.planning_uncertainty_model_for_preset(
-        selected_preset,
-        custom_model=custom_actual_fund_model,
-    )
+    uncertainty_model = wt.planning_uncertainty_model_for_preset(selected_preset)
 
     anti_collision_progress = st.progress(
         8, text="Подготовка anti-collision анализа..."
@@ -1000,7 +993,7 @@ COMPLEXITY_SELECTOR_LABELS = {
     COMPLEXITY_COMPLEX: "Сложная",
     COMPLEXITY_VERY_COMPLEX: "Очень сложная",
 }
-UI_DEFAULTS_VERSION = 10
+UI_DEFAULTS_VERSION = 11
 APP_CALC_PARAMS = CalcParamBinding(prefix="")
 
 
@@ -2127,31 +2120,20 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/actual_fund_analysis.py	60030
+===BEGIN_FILE===	pywp/actual_fund_analysis.py	44269
 from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Iterable, Mapping
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
 
-from pywp.anticollision import (
-    AntiCollisionAnalysis,
-    analyze_anti_collision,
-    anti_collision_report_events,
-    build_anti_collision_well,
-)
 from pywp.constants import SMALL
 from pywp.mcm import add_dls, wrap_azimuth_deg
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.reference_trajectories import ImportedTrajectoryWell
-from pywp.uncertainty import (
-    DEFAULT_UNCERTAINTY_PRESET,
-    PlanningUncertaintyModel,
-    fitted_uncertainty_model,
-)
 
 HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 HORIZONTAL_MIN_INTERVAL_M = 100.0
@@ -2164,20 +2146,10 @@ HOLD_MIN_INC_DEG = 8.0
 HOLD_STABLE_DLS_THRESHOLD_DEG_PER_30M = 1.5
 ROBUST_DLS_WINDOW_M = 60.0
 MAX_REASONABLE_ACTUAL_DLS_DEG_PER_30M = 6.0
-MIN_CUSTOM_ACTUAL_FUND_SCALE = 0.35
-MIN_CUSTOM_ACTUAL_FUND_SEARCH_SCALE = 0.12
 KOP_BUILD_RATE_THRESHOLD_DEG_PER_30M = 0.55
 KOP_MIN_BUILD_INTERVAL_M = 60.0
 KOP_VERTICAL_BASELINE_MAX_INC_DEG = 10.0
 KOP_INC_BUFFER_DEG = 3.0
-MAX_IGNORED_CLOSE_CALIBRATION_PAIRS = 2
-IGNORABLE_CLOSE_PAIR_SF_THRESHOLD = 0.35
-IGNORABLE_CLOSE_PAIR_OVERLAP_M = 25.0
-
-CALIBRATION_STATUS_READY = "ready"
-CALIBRATION_STATUS_NO_CHANGE = "no_change"
-CALIBRATION_STATUS_INSUFFICIENT = "insufficient"
-CALIBRATION_STATUS_TOO_AGGRESSIVE = "too_aggressive"
 
 
 class ActualFundWellMetrics(FrozenArbitraryModel):
@@ -2268,24 +2240,6 @@ class ActualFundWellAnalysis(FrozenArbitraryModel):
     survey: pd.DataFrame
     zone_summaries: tuple[ActualFundZoneSummary, ...]
 
-
-class ActualFundCalibrationResult(FrozenArbitraryModel):
-    status: str
-    base_preset: str
-    scale_factor: float | None
-    custom_model: PlanningUncertaintyModel | None = None
-    actual_well_count: int
-    horizontal_well_count: int
-    analyzed_pair_count: int
-    skipped_same_family_pair_count: int
-    overlapping_pair_count_before: int
-    overlapping_pair_count_after: int | None = None
-    worst_separation_factor_before: float | None = None
-    worst_separation_factor_after: float | None = None
-    excluded_pilot_well_count: int = 0
-    ignored_close_pair_count: int = 0
-    ignored_close_pairs: tuple[str, ...] = ()
-    note: str = ""
 
 
 ZONE_VERTICAL = "vertical"
@@ -2822,377 +2776,6 @@ def summarize_actual_fund_by_pad(
             )
         )
     return tuple(summaries)
-
-
-def _calibration_pair_key(well_a: str, well_b: str) -> tuple[str, str]:
-    return tuple(sorted((str(well_a), str(well_b))))
-
-
-def _calibration_pair_label(pair_key: tuple[str, str]) -> str:
-    return f"{pair_key[0]} ↔ {pair_key[1]}"
-
-
-def _calibration_pair_filter(
-    *,
-    family_by_name: Mapping[str, str],
-    ignored_pair_keys: set[tuple[str, str]],
-):
-    def pair_filter(left, right) -> bool:
-        left_name = str(left.name)
-        right_name = str(right.name)
-        if family_by_name[left_name] == family_by_name[right_name]:
-            return False
-        if _calibration_pair_key(left_name, right_name) in ignored_pair_keys:
-            return False
-        return True
-
-    return pair_filter
-
-
-def _build_calibration_analysis(
-    *,
-    eligible_wells: list[ImportedTrajectoryWell],
-    reconstructed_by_name: Mapping[str, pd.DataFrame],
-    model: PlanningUncertaintyModel,
-    ignored_pair_keys: set[tuple[str, str]],
-    family_by_name: Mapping[str, str],
-) -> "AntiCollisionAnalysis":
-    return analyze_anti_collision(
-        [
-            build_anti_collision_well(
-                name=well.name,
-                color="#6B7280",
-                stations=reconstructed_by_name[str(well.name)],
-                surface=well.surface,
-                t1=None,
-                t3=None,
-                azimuth_deg=float(well.azimuth_deg),
-                md_t1_m=None,
-                md_t3_m=None,
-                model=model,
-                include_display_geometry=False,
-                well_kind="actual",
-                is_reference_only=False,
-            )
-            for well in eligible_wells
-        ],
-        build_overlap_geometry=False,
-        pair_filter=_calibration_pair_filter(
-            family_by_name=family_by_name,
-            ignored_pair_keys=ignored_pair_keys,
-        ),
-    )
-
-
-def _retained_uncertainty_score(
-    *,
-    base_model: PlanningUncertaintyModel,
-    candidate_model: PlanningUncertaintyModel,
-) -> float:
-    return float(
-        np.mean(
-            [
-                float(candidate_model.sigma_inc_deg) / float(base_model.sigma_inc_deg),
-                float(candidate_model.sigma_azi_deg) / float(base_model.sigma_azi_deg),
-                float(candidate_model.sigma_lateral_drift_m_per_1000m)
-                / max(float(base_model.sigma_lateral_drift_m_per_1000m), SMALL),
-                float(candidate_model.confidence_scale)
-                / float(base_model.confidence_scale),
-            ]
-        )
-    )
-
-
-def _calibration_candidate_model(
-    *,
-    base_model: PlanningUncertaintyModel,
-    shape_key: str,
-    alpha: float,
-) -> PlanningUncertaintyModel:
-    alpha_value = float(alpha)
-    if shape_key == "uniform":
-        return fitted_uncertainty_model(
-            base_model,
-            sigma_inc_scale=alpha_value,
-            sigma_azi_scale=alpha_value,
-            sigma_lateral_drift_scale=alpha_value,
-            confidence_scale_factor=max(alpha_value, 0.10),
-        )
-    if shape_key == "azi_drift_relaxed":
-        return fitted_uncertainty_model(
-            base_model,
-            sigma_inc_scale=max(alpha_value**0.90, 0.05),
-            sigma_azi_scale=max(alpha_value**1.25, 0.05),
-            sigma_lateral_drift_scale=max(alpha_value**1.35, 0.05),
-            confidence_scale_factor=max(alpha_value**1.08, 0.10),
-        )
-    if shape_key == "angular_relaxed":
-        return fitted_uncertainty_model(
-            base_model,
-            sigma_inc_scale=max(alpha_value**1.05, 0.05),
-            sigma_azi_scale=max(alpha_value**1.20, 0.05),
-            sigma_lateral_drift_scale=max(alpha_value**1.10, 0.05),
-            confidence_scale_factor=max(alpha_value**1.05, 0.10),
-        )
-    if shape_key == "drift_relaxed":
-        return fitted_uncertainty_model(
-            base_model,
-            sigma_inc_scale=max(alpha_value**0.95, 0.05),
-            sigma_azi_scale=max(alpha_value**1.05, 0.05),
-            sigma_lateral_drift_scale=max(alpha_value**1.55, 0.05),
-            confidence_scale_factor=max(alpha_value**1.03, 0.10),
-        )
-    raise ValueError(f"Unsupported calibration shape: {shape_key}")
-
-
-def _ignorable_close_pair_keys(
-    analysis: "AntiCollisionAnalysis",
-) -> tuple[tuple[str, str], ...]:
-    candidates: list[tuple[tuple[str, str], float, float]] = []
-    for event in anti_collision_report_events(analysis):
-        min_sf = float(event.min_separation_factor)
-        max_overlap = float(event.max_overlap_depth_m)
-        if (
-            min_sf <= IGNORABLE_CLOSE_PAIR_SF_THRESHOLD
-            or max_overlap >= IGNORABLE_CLOSE_PAIR_OVERLAP_M
-        ):
-            candidates.append(
-                (
-                    _calibration_pair_key(str(event.well_a), str(event.well_b)),
-                    min_sf,
-                    max_overlap,
-                )
-            )
-    candidates = sorted(
-        candidates,
-        key=lambda item: (item[1], -item[2], item[0][0], item[0][1]),
-    )
-    unique_keys: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for pair_key, _, _ in candidates:
-        if pair_key in seen:
-            continue
-        seen.add(pair_key)
-        unique_keys.append(pair_key)
-        if len(unique_keys) >= MAX_IGNORED_CLOSE_CALIBRATION_PAIRS:
-            break
-    return tuple(unique_keys)
-
-
-def calibrate_uncertainty_from_actual_fund(
-    *,
-    actual_wells: Iterable[ImportedTrajectoryWell],
-    base_model: PlanningUncertaintyModel,
-    base_preset: str = DEFAULT_UNCERTAINTY_PRESET,
-    analyses: tuple[ActualFundWellAnalysis, ...] | None = None,
-) -> ActualFundCalibrationResult:
-    actual_well_list = list(actual_wells)
-    if analyses is None:
-        analyses = build_actual_fund_well_analyses(actual_well_list)
-    reconstructed_by_name = {str(item.name): item.survey for item in analyses}
-    metrics = tuple(item.metrics for item in analyses)
-    eligible_metric_names = {
-        item.name for item in metrics if bool(item.is_analysis_eligible)
-    }
-    excluded_pilot_metric_names = {
-        item.name
-        for item in metrics
-        if bool(item.is_analysis_eligible) and actual_well_is_pilot_name(item.name)
-    }
-    eligible_wells = [
-        well
-        for well in actual_well_list
-        if str(well.name) in eligible_metric_names
-        and str(well.name) not in excluded_pilot_metric_names
-    ]
-    excluded_pilot_well_count = len(excluded_pilot_metric_names)
-    if len(eligible_wells) < 2:
-        return ActualFundCalibrationResult(
-            status=CALIBRATION_STATUS_INSUFFICIENT,
-            base_preset=str(base_preset),
-            scale_factor=None,
-            actual_well_count=len(actual_well_list),
-            horizontal_well_count=len(eligible_wells),
-            analyzed_pair_count=0,
-            skipped_same_family_pair_count=0,
-            overlapping_pair_count_before=0,
-            excluded_pilot_well_count=excluded_pilot_well_count,
-            note=(
-                "Для калибровки нужны минимум две фактические горизонтальные "
-                "скважины без аномалий анализа и без пилотов `_PL`."
-            ),
-        )
-
-    family_by_name = {
-        str(well.name): actual_well_family_name(well.name) for well in eligible_wells
-    }
-    skipped_same_family_pairs = sum(
-        1
-        for left_index in range(len(eligible_wells))
-        for right_index in range(left_index + 1, len(eligible_wells))
-        if family_by_name[str(eligible_wells[left_index].name)]
-        == family_by_name[str(eligible_wells[right_index].name)]
-    )
-    analysis_before = _build_calibration_analysis(
-        eligible_wells=eligible_wells,
-        reconstructed_by_name=reconstructed_by_name,
-        model=base_model,
-        ignored_pair_keys=set(),
-        family_by_name=family_by_name,
-    )
-    worst_sf_before = analysis_before.worst_separation_factor
-    if worst_sf_before is None or float(worst_sf_before) >= 0.999:
-        note = (
-            "Текущая модель уже не даёт overlap по фактическому горизонтальному фонду. "
-            "Дополнительная пользовательская калибровка не требуется."
-        )
-        if excluded_pilot_well_count:
-            note += f" Из fit исключены пилоты `_PL`: {excluded_pilot_well_count}."
-        return ActualFundCalibrationResult(
-            status=CALIBRATION_STATUS_NO_CHANGE,
-            base_preset=str(base_preset),
-            scale_factor=1.0,
-            actual_well_count=len(actual_well_list),
-            horizontal_well_count=len(eligible_wells),
-            analyzed_pair_count=int(analysis_before.pair_count),
-            skipped_same_family_pair_count=int(skipped_same_family_pairs),
-            overlapping_pair_count_before=int(analysis_before.overlapping_pair_count),
-            overlapping_pair_count_after=int(analysis_before.overlapping_pair_count),
-            worst_separation_factor_before=worst_sf_before,
-            worst_separation_factor_after=worst_sf_before,
-            excluded_pilot_well_count=excluded_pilot_well_count,
-            note=note,
-        )
-
-    ignored_candidates = _ignorable_close_pair_keys(analysis_before)
-    ignore_options: list[tuple[tuple[str, str], ...]] = [()]
-    for count in range(1, len(ignored_candidates) + 1):
-        ignore_options.append(tuple(ignored_candidates[:count]))
-
-    search_alphas = np.linspace(1.0, MIN_CUSTOM_ACTUAL_FUND_SEARCH_SCALE, num=18)
-    shape_keys = (
-        "uniform",
-        "azi_drift_relaxed",
-        "angular_relaxed",
-        "drift_relaxed",
-    )
-    best_candidate: (
-        tuple[
-            float,
-            PlanningUncertaintyModel,
-            "AntiCollisionAnalysis",
-            tuple[tuple[str, str], ...],
-            str,
-            float,
-        ]
-        | None
-    ) = None
-    for ignored_pair_keys in ignore_options:
-        ignored_pair_key_set = set(ignored_pair_keys)
-        for shape_key in shape_keys:
-            for alpha in search_alphas.tolist():
-                candidate_model = _calibration_candidate_model(
-                    base_model=base_model,
-                    shape_key=shape_key,
-                    alpha=float(alpha),
-                )
-                analysis_after = _build_calibration_analysis(
-                    eligible_wells=eligible_wells,
-                    reconstructed_by_name=reconstructed_by_name,
-                    model=candidate_model,
-                    ignored_pair_keys=ignored_pair_key_set,
-                    family_by_name=family_by_name,
-                )
-                if int(analysis_after.overlapping_pair_count) != 0:
-                    continue
-                retained_score = _retained_uncertainty_score(
-                    base_model=base_model,
-                    candidate_model=candidate_model,
-                )
-                score = retained_score - 0.12 * len(ignored_pair_keys)
-                if best_candidate is None or score > best_candidate[0]:
-                    best_candidate = (
-                        score,
-                        candidate_model,
-                        analysis_after,
-                        ignored_pair_keys,
-                        shape_key,
-                        float(alpha),
-                    )
-
-    if best_candidate is None:
-        note = (
-            "Автоматическая пользовательская функция не построена: даже после "
-            "адаптивного ослабления INC/AZI/drift и исключения пилотов `_PL` "
-            "ложные overlap по фактическому фонду остаются слишком жёсткими."
-        )
-        if ignored_candidates:
-            note += (
-                " Пробовали игнорировать до двух экстремально близких пар: "
-                + ", ".join(
-                    _calibration_pair_label(pair_key) for pair_key in ignored_candidates
-                )
-                + "."
-            )
-        return ActualFundCalibrationResult(
-            status=CALIBRATION_STATUS_TOO_AGGRESSIVE,
-            base_preset=str(base_preset),
-            scale_factor=None,
-            actual_well_count=len(actual_well_list),
-            horizontal_well_count=len(eligible_wells),
-            analyzed_pair_count=int(analysis_before.pair_count),
-            skipped_same_family_pair_count=int(skipped_same_family_pairs),
-            overlapping_pair_count_before=int(analysis_before.overlapping_pair_count),
-            worst_separation_factor_before=worst_sf_before,
-            excluded_pilot_well_count=excluded_pilot_well_count,
-            note=note,
-        )
-
-    _, custom_model, analysis_after, ignored_pair_keys, shape_key, scale_factor = (
-        best_candidate
-    )
-    note_parts = [
-        "Пользовательская модель построена как empirical field-fit относительно "
-        f"базового пресета '{base_preset}'.",
-        f"Форма подгонки: {shape_key}, базовый scale={scale_factor:.2f}.",
-        "Алгоритм умеет независимо ослаблять INC/AZI/drift, а не только одной "
-        "глобальной шкалой.",
-    ]
-    if excluded_pilot_well_count:
-        note_parts.append(
-            f"Из fit исключены пилоты `_PL`: {excluded_pilot_well_count}."
-        )
-    if ignored_pair_keys:
-        note_parts.append(
-            "Сознательно проигнорированы экстремально близкие пары: "
-            + ", ".join(
-                _calibration_pair_label(pair_key) for pair_key in ignored_pair_keys
-            )
-            + "."
-        )
-    note_parts.append(
-        "Это planning-level fit по фактическому фонду, а не формальная ISCWSA toolcode calibration."
-    )
-    return ActualFundCalibrationResult(
-        status=CALIBRATION_STATUS_READY,
-        base_preset=str(base_preset),
-        scale_factor=scale_factor,
-        custom_model=custom_model,
-        actual_well_count=len(actual_well_list),
-        horizontal_well_count=len(eligible_wells),
-        analyzed_pair_count=int(analysis_before.pair_count),
-        skipped_same_family_pair_count=int(skipped_same_family_pairs),
-        overlapping_pair_count_before=int(analysis_before.overlapping_pair_count),
-        overlapping_pair_count_after=int(analysis_after.overlapping_pair_count),
-        worst_separation_factor_before=worst_sf_before,
-        worst_separation_factor_after=analysis_after.worst_separation_factor,
-        excluded_pilot_well_count=excluded_pilot_well_count,
-        ignored_close_pair_count=len(ignored_pair_keys),
-        ignored_close_pairs=tuple(
-            _calibration_pair_label(pair_key) for pair_key in ignored_pair_keys
-        ),
-        note=" ".join(note_parts),
-    )
 
 
 def _terminal_horizontal_interval(
@@ -3781,7 +3364,7 @@ def _weighted_modal_inclination(
     return float(best_bin)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	62141
+===BEGIN_FILE===	pywp/anticollision.py	63499
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -3898,6 +3481,7 @@ class AntiCollisionReportEvent:
     md_b_end_m: float
     min_separation_factor: float
     max_overlap_depth_m: float
+    min_center_distance_m: float
     merged_corridor_count: int
 
 
@@ -4396,7 +3980,7 @@ def anti_collision_report_rows(
                 ),
                 "SF min": float(event.min_separation_factor),
                 "Overlap max, м": float(event.max_overlap_depth_m),
-                "Смежных зон": int(event.merged_corridor_count),
+                "Мин. расстояние, м": float(event.min_center_distance_m),
             }
         )
     return rows
@@ -5267,6 +4851,16 @@ def _corridor_summary_zone(corridor: AntiCollisionCorridor) -> AntiCollisionZone
 def _corridor_to_report_event(
     corridor: AntiCollisionCorridor,
 ) -> AntiCollisionReportEvent:
+    sf_values = np.asarray(corridor.separation_factor_values, dtype=float)
+    overlap_depth_values = np.asarray(corridor.overlap_depth_values_m, dtype=float)
+    # For overlapping points (SF < 1): center_distance = SF * overlap_depth / (1 - SF)
+    # Avoid division by zero by masking SF >= 1 (shouldn't happen for corridor points)
+    safe_mask = sf_values < 0.999999
+    center_distances = np.full_like(sf_values, np.inf)
+    center_distances[safe_mask] = (
+        sf_values[safe_mask] * overlap_depth_values[safe_mask] / (1.0 - sf_values[safe_mask])
+    )
+    min_center_distance_m = float(np.min(center_distances))
     return AntiCollisionReportEvent(
         well_a=str(corridor.well_a),
         well_b=str(corridor.well_b),
@@ -5280,6 +4874,7 @@ def _corridor_to_report_event(
         md_b_end_m=float(corridor.md_b_end_m),
         min_separation_factor=float(np.min(corridor.separation_factor_values)),
         max_overlap_depth_m=float(np.max(corridor.overlap_depth_values_m)),
+        min_center_distance_m=min_center_distance_m,
         merged_corridor_count=1,
     )
 
@@ -5311,6 +4906,15 @@ def _merge_report_event_with_corridor(
     event: AntiCollisionReportEvent,
     corridor: AntiCollisionCorridor,
 ) -> AntiCollisionReportEvent:
+    # Compute min center distance for this corridor
+    sf_values = np.asarray(corridor.separation_factor_values, dtype=float)
+    overlap_depth_values = np.asarray(corridor.overlap_depth_values_m, dtype=float)
+    safe_mask = sf_values < 0.999999
+    center_distances = np.full_like(sf_values, np.inf)
+    center_distances[safe_mask] = (
+        sf_values[safe_mask] * overlap_depth_values[safe_mask] / (1.0 - sf_values[safe_mask])
+    )
+    corridor_min_center_distance = float(np.min(center_distances))
     return AntiCollisionReportEvent(
         well_a=event.well_a,
         well_b=event.well_b,
@@ -5329,6 +4933,10 @@ def _merge_report_event_with_corridor(
         max_overlap_depth_m=max(
             float(event.max_overlap_depth_m),
             float(np.max(corridor.overlap_depth_values_m)),
+        ),
+        min_center_distance_m=min(
+            float(event.min_center_distance_m),
+            corridor_min_center_distance,
         ),
         merged_corridor_count=int(event.merged_corridor_count) + 1,
     )
@@ -5537,7 +5145,7 @@ def _align_ring_for_continuity(
     return best_ring
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_optimization.py	28824
+===BEGIN_FILE===	pywp/anticollision_optimization.py	29169
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -5546,7 +5154,7 @@ import numpy as np
 import pandas as pd
 
 from pywp.mcm import minimum_curvature_increment
-from pywp.models import Point3D
+from pywp.models import INTERPOLATION_RODRIGUES, Point3D
 from pywp.planner_types import ProfileParameters
 from pywp.planner_validation import _build_trajectory
 from pywp.constants import SMALL
@@ -5594,6 +5202,7 @@ class AntiCollisionOptimizationContext:
     prefer_adjust_build2: bool = False
     baseline_kop_vertical_m: float | None = None
     baseline_build1_dls_deg_per_30m: float | None = None
+    interpolation_method: str = INTERPOLATION_RODRIGUES
 
 
 @dataclass(frozen=True)
@@ -5656,6 +5265,7 @@ def evaluate_candidate_anti_collision_clearance(
         md_start_m=float(context.candidate_md_start_m),
         md_end_m=float(context.candidate_md_end_m),
         sample_step_m=float(context.sample_step_m),
+        interpolation_method=str(context.interpolation_method),
     )
     return evaluate_stations_anti_collision_clearance(
         stations=sampled_candidate,
@@ -6134,11 +5744,12 @@ def sample_profile_stations_in_md_window(
     md_start_m: float,
     md_end_m: float,
     sample_step_m: float,
+    interpolation_method: str = INTERPOLATION_RODRIGUES,
 ) -> pd.DataFrame:
     start_md = float(max(md_start_m, 0.0))
     end_md = float(max(md_end_m, start_md))
     sample_step = float(max(sample_step_m, 1.0))
-    segments = tuple(_profile_segment_specs(candidate=candidate))
+    segments = tuple(_profile_segment_specs(candidate=candidate, interpolation_method=interpolation_method))
     grid = _sample_md_grid(
         md_start_m=start_md,
         md_end_m=end_md,
@@ -6235,8 +5846,9 @@ def sample_profile_stations_in_md_window(
 def _profile_segment_specs(
     *,
     candidate: ProfileParameters,
+    interpolation_method: str = INTERPOLATION_RODRIGUES,
 ) -> list[dict[str, float | str]]:
-    trajectory = _build_trajectory(params=candidate)
+    trajectory = _build_trajectory(params=candidate, interpolation_method=interpolation_method)
     specs: list[dict[str, float | str]] = []
     md_start = 0.0
     for segment in trajectory.segments:
@@ -6399,7 +6011,7 @@ def _sample_md_grid(
     return np.asarray(sorted(set(round(float(value), 6) for value in values)), dtype=float)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_recommendations.py	42472
+===BEGIN_FILE===	pywp/anticollision_recommendations.py	42924
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -6488,6 +6100,7 @@ class AntiCollisionRecommendation:
     md_b_end_m: float
     min_separation_factor: float
     max_overlap_depth_m: float
+    min_center_distance_m: float
     required_spacing_t1_m: float | None = None
     required_spacing_t3_m: float | None = None
 
@@ -6565,6 +6178,7 @@ def anti_collision_recommendation_rows(
                 "Интервал B, м": _md_interval_label(item.md_b_start_m, item.md_b_end_m),
                 "SF min": float(item.min_separation_factor),
                 "Overlap max, м": float(item.max_overlap_depth_m),
+                "Мин. расстояние, м": float(item.min_center_distance_m),
                 "Spacing t1, м": _nullable_float(item.required_spacing_t1_m),
                 "Spacing t3, м": _nullable_float(item.required_spacing_t3_m),
                 "Ожидаемый маневр": item.expected_maneuver,
@@ -6810,6 +6424,7 @@ def _build_single_recommendation(
             md_b_end_m=float(event.md_b_end_m),
             min_separation_factor=float(event.min_separation_factor),
             max_overlap_depth_m=float(event.max_overlap_depth_m),
+            min_center_distance_m=float(event.min_center_distance_m),
             required_spacing_t1_m=spacing_t1_m,
             required_spacing_t3_m=spacing_t3_m,
         )
@@ -6919,6 +6534,7 @@ def _build_single_recommendation(
             md_b_end_m=float(event.md_b_end_m),
             min_separation_factor=float(event.min_separation_factor),
             max_overlap_depth_m=float(event.max_overlap_depth_m),
+            min_center_distance_m=float(event.min_center_distance_m),
         )
 
     movable_well = _select_movable_well_for_trajectory_event(
@@ -6982,6 +6598,7 @@ def _build_single_recommendation(
             md_b_end_m=float(event.md_b_end_m),
             min_separation_factor=float(event.min_separation_factor),
             max_overlap_depth_m=float(event.max_overlap_depth_m),
+            min_center_distance_m=float(event.min_center_distance_m),
         )
     if movable_well is not None:
         secondary_well = (
@@ -7045,6 +6662,7 @@ def _build_single_recommendation(
             md_b_end_m=float(event.md_b_end_m),
             min_separation_factor=float(event.min_separation_factor),
             max_overlap_depth_m=float(event.max_overlap_depth_m),
+            min_center_distance_m=float(event.min_center_distance_m),
         )
 
     return AntiCollisionRecommendation(
@@ -7073,6 +6691,7 @@ def _build_single_recommendation(
         md_b_end_m=float(event.md_b_end_m),
         min_separation_factor=float(event.min_separation_factor),
         max_overlap_depth_m=float(event.max_overlap_depth_m),
+        min_center_distance_m=float(event.min_center_distance_m),
     )
 
 
@@ -7523,7 +7142,7 @@ def _nullable_float(value: float | None) -> float | str:
     return float(value)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_rerun.py	38867
+===BEGIN_FILE===	pywp/anticollision_rerun.py	39236
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7999,6 +7618,7 @@ def build_prepared_optimization_context(
             if baseline_build1_dls_deg_per_30m is not None
             else None
         ),
+        interpolation_method=str(getattr(moving_success.config, "interpolation_method", "rodrigues")),
     )
 
 
@@ -8451,6 +8071,11 @@ def build_cluster_prepared_overrides(
                         is not None
                     )
                     else None
+                ),
+                interpolation_method=(
+                    str(getattr(success_by_name[well_name].config, "interpolation_method", "rodrigues"))
+                    if success_by_name.get(well_name) is not None
+                    else "rodrigues"
                 ),
             )
             prepared[well_name] = {
@@ -9364,7 +8989,7 @@ def add_dls(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/models.py	10629
+===BEGIN_FILE===	pywp/models.py	10901
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -9397,6 +9022,11 @@ TURN_SOLVER_LEAST_SQUARES = "least_squares"
 TURN_SOLVER_DE_HYBRID = "de_hybrid"
 ALLOWED_TURN_SOLVER_MODES = (TURN_SOLVER_LEAST_SQUARES, TURN_SOLVER_DE_HYBRID)
 TurnSolverMode = Literal["least_squares", "de_hybrid"]
+
+INTERPOLATION_SLERP = "slerp"
+INTERPOLATION_RODRIGUES = "rodrigues"
+ALLOWED_INTERPOLATION_METHODS = (INTERPOLATION_RODRIGUES, INTERPOLATION_SLERP)
+InterpolationMethod = Literal["rodrigues", "slerp"]
 
 DEFAULT_BUILD_DLS_MAX_DEG_PER_30M = 3.0
 
@@ -9480,6 +9110,7 @@ class TrajectoryConfig(FrozenModel):
     optimization_mode: OptimizationMode = OPTIMIZATION_MINIMIZE_MD
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_max_restarts: NonNegativeInt = 2
+    interpolation_method: InterpolationMethod = INTERPOLATION_RODRIGUES
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: PositiveFiniteScalar = 30.0
 
@@ -9676,32 +9307,47 @@ def compute_unoptimized_reference(
     return OptimizationReference(summary=result.summary, runtime_s=float(elapsed_s))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/pad_optimization.py	7656
+===BEGIN_FILE===	pywp/pad_optimization.py	9581
 from __future__ import annotations
 
-import copy
+from time import perf_counter
 
 import numpy as np
 
-from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
-from pywp.ptc_core import _source_surface_xyz
-from pywp.welltrack_batch import SuccessfulWellPlan
-from pywp.anticollision_rerun import (
-    build_anti_collision_analysis_for_successes,
-)
-from pywp.uncertainty import PlanningUncertaintyModel
-from pywp.reference_trajectories import ImportedTrajectoryWell
-from pywp.planner import TrajectoryPlanner
 from pywp.anticollision import AntiCollisionAnalysis
+from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
+from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
+from pywp.models import TrajectoryConfig
+from pywp.planner import TrajectoryPlanner
+from pywp.reference_trajectories import ImportedTrajectoryWell
+from pywp.uncertainty import PlanningUncertaintyModel
+from pywp.welltrack_batch import SuccessfulWellPlan
+
+# Zones where both wells are at MD below this threshold are treated as
+# "near-surface" and excluded from the scoring metric.  On shared-surface
+# pads every well pair has SF≈0 at the surface, blinding the optimizer.
+_SURFACE_MD_THRESHOLD_M = 600.0
+
+# Minimum improvement in score to accept a swap (avoids noise).
+_IMPROVEMENT_EPS = 0.005
+
+# Maximum number of greedy iterations (each tests all viable swaps for the
+# worst actionable collision pair).
+_MAX_ITERATIONS = 8
+
+# Maximum number of distinct worst-zone pairs to try per iteration when the
+# top-1 worst zone cannot be improved.
+_MAX_WORST_ZONES_PER_ITERATION = 3
 
 
 def recalculate_well(
-    record: WelltrackRecord, config: TrajectoryConfig
+    record: WelltrackRecord, config: TrajectoryConfig,
 ) -> SuccessfulWellPlan | None:
-    from time import perf_counter
-
     start_t = perf_counter()
-    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    try:
+        surface, t1, t3 = welltrack_points_to_targets(record.points)
+    except (ValueError, IndexError):
+        return None
     planner = TrajectoryPlanner()
     try:
         result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
@@ -9721,24 +9367,110 @@ def recalculate_well(
         return None
 
 
+def _actionable_pad_zones(
+    analysis: AntiCollisionAnalysis,
+    pad_well_names: set[str],
+) -> list:
+    """Return pad-internal zones excluding near-surface overlaps."""
+    return [
+        z
+        for z in analysis.zones
+        if (
+            z.well_a in pad_well_names
+            and z.well_b in pad_well_names
+            and not (
+                float(z.md_a_m) <= _SURFACE_MD_THRESHOLD_M
+                and float(z.md_b_m) <= _SURFACE_MD_THRESHOLD_M
+            )
+        )
+    ]
+
+
 def score_analysis(
-    analysis: AntiCollisionAnalysis | None, pad_well_names: set[str]
+    analysis: AntiCollisionAnalysis | None,
+    pad_well_names: set[str],
 ) -> float:
-    """Evaluate severity of collisions specifically within the pad. Higher is better."""
+    """Evaluate collision severity within the pad.  Higher is better.
+
+    Near-surface zones (both wells MD ≤ threshold) are excluded so that
+    shared-surface pads don't produce a permanent SF=0 floor.
+    """
     if analysis is None:
         return float("-inf")
 
-    # We want to minimize the severity. We can use the sum of 1/SF for bad collisions, or minimum SF.
     pad_sfs = [
         float(z.separation_factor)
-        for z in analysis.zones
-        if z.well_a in pad_well_names and z.well_b in pad_well_names
+        for z in _actionable_pad_zones(analysis, pad_well_names)
     ]
     if not pad_sfs:
         return float("inf")
 
-    # Metric: primary min SF, secondary average SF
+    # Primary: worst (min) SF.  Secondary: mean SF (small weight to
+    # disambiguate ties and reward globally better arrangements).
     return float(min(pad_sfs)) + 0.001 * float(np.mean(pad_sfs))
+
+
+def _build_analysis(
+    successes: dict[str, SuccessfulWellPlan],
+    uncertainty_model: PlanningUncertaintyModel,
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> AntiCollisionAnalysis:
+    return build_anti_collision_analysis_for_successes(
+        tuple(successes.values()),
+        model=uncertainty_model,
+        reference_wells=reference_wells,
+    )
+
+
+def _swap_surfaces_and_recalculate(
+    records: list[WelltrackRecord],
+    successes: dict[str, SuccessfulWellPlan],
+    name_a: str,
+    name_b: str,
+    config_by_name: dict[str, TrajectoryConfig],
+) -> tuple[list[WelltrackRecord], dict[str, SuccessfulWellPlan]] | None:
+    """Swap surface points of two wells, recalculate both, return new state or None."""
+    g_a = next((i for i, r in enumerate(records) if r.name == name_a), None)
+    g_b = next((i for i, r in enumerate(records) if r.name == name_b), None)
+    if g_a is None or g_b is None:
+        return None
+
+    pts_a = records[g_a].points
+    pts_b = records[g_b].points
+    if not pts_a or not pts_b:
+        return None
+
+    # Skip if surfaces are identical (swap would be a no-op).
+    sa, sb = pts_a[0], pts_b[0]
+    if (
+        abs(float(sa.x) - float(sb.x)) < 0.01
+        and abs(float(sa.y) - float(sb.y)) < 0.01
+        and abs(float(sa.z) - float(sb.z)) < 0.01
+    ):
+        return None
+
+    new_records = list(records)  # shallow copy — only replace swapped entries
+    new_records[g_a] = WelltrackRecord(
+        name=records[g_a].name, points=(pts_b[0], *pts_a[1:]),
+    )
+    new_records[g_b] = WelltrackRecord(
+        name=records[g_b].name, points=(pts_a[0], *pts_b[1:]),
+    )
+
+    cfg_a = config_by_name.get(name_a)
+    cfg_b = config_by_name.get(name_b)
+    if cfg_a is None or cfg_b is None:
+        return None
+
+    r_a = recalculate_well(new_records[g_a], cfg_a)
+    r_b = recalculate_well(new_records[g_b], cfg_b)
+    if r_a is None or r_b is None:
+        return None
+
+    new_successes = dict(successes)
+    new_successes[r_a.name] = r_a
+    new_successes[r_b.name] = r_b
+    return new_records, new_successes
 
 
 def optimize_pad_order(
@@ -9751,153 +9483,103 @@ def optimize_pad_order(
     progress_callback: callable,
 ) -> tuple[list[WelltrackRecord], dict[str, SuccessfulWellPlan], bool]:
 
-    pad_records = [r for r in records if r.name in pad_well_names and r.name in success_dict]
-    if len(pad_records) < 2:
+    pad_names = {
+        str(name)
+        for name in pad_well_names
+        if str(name) in success_dict
+    }
+    if len(pad_names) < 2:
         return records, success_dict, False
 
-    slots = [_source_surface_xyz(r) for r in pad_records]
-    if any(s is None for s in slots):
+    # Check that at least 2 distinct surface locations exist; otherwise
+    # swapping surfaces is a no-op and we can exit early.
+    surface_set: set[tuple[float, float, float]] = set()
+    for r in records:
+        if r.name in pad_names and r.points:
+            s = r.points[0]
+            surface_set.add((round(float(s.x), 2), round(float(s.y), 2), round(float(s.z), 2)))
+    if len(surface_set) < 2:
+        progress_callback(100, "Все скважины на одной точке — перестановка не даст эффекта.")
         return records, success_dict, False
 
-    current_analysis = build_anti_collision_analysis_for_successes(
-        tuple(success_dict.values()),
-        model=uncertainty_model,
-        reference_wells=tuple(reference_wells),
-    )
-    current_score = score_analysis(current_analysis, pad_well_names)
+    ref_wells = tuple(reference_wells)
+    analysis = _build_analysis(success_dict, uncertainty_model, ref_wells)
+    best_score = score_analysis(analysis, pad_names)
 
-    best_score = current_score
-    best_records = copy.deepcopy(records)
-    best_successes = copy.deepcopy(success_dict)
-
-    # Simple heuristic: sort slots by principal component to find "extremes"
-    coords = np.array(slots)
-    mean = np.mean(coords, axis=0)
-    centered = coords - mean
-    u, s, vh = np.linalg.svd(centered, full_matrices=False)
-    pc1 = vh[0]
-    projections = centered @ pc1
-
-    # Sort slots by projection
-    slot_indices = np.argsort(projections)
-    end_slots = [slot_indices[0], slot_indices[-1]]
-
-    iteration = 0
-    max_iterations = 5
+    best_records = list(records)
+    best_successes = dict(success_dict)
     improved = False
+    tried_pairs: set[tuple[str, str]] = set()
 
-    progress_callback(0, f"Начальный SF: {best_score:.2f}...")
+    progress_callback(0, f"Начальный score: {best_score:.3f}...")
 
-    while iteration < max_iterations:
-        iteration += 1
-
-        # Find worst collision pair on the pad
-        current_analysis = build_anti_collision_analysis_for_successes(
-            tuple(best_successes.values()),
-            model=uncertainty_model,
-            reference_wells=tuple(reference_wells),
-        )
-        pad_zones = [
-            z
-            for z in current_analysis.zones
-            if z.well_a in pad_well_names and z.well_b in pad_well_names
-        ]
-        if not pad_zones:
+    for iteration in range(1, _MAX_ITERATIONS + 1):
+        analysis = _build_analysis(best_successes, uncertainty_model, ref_wells)
+        actionable = _actionable_pad_zones(analysis, pad_names)
+        if not actionable:
             break
 
-        pad_zones.sort(key=lambda z: float(z.separation_factor))
-        worst_zone = pad_zones[0]
-        wa, wb = worst_zone.well_a, worst_zone.well_b
+        actionable.sort(key=lambda z: float(z.separation_factor))
 
-        progress_callback(
-            int(iteration * 100 / max_iterations), f"Анализ {wa} и {wb}..."
-        )
+        # Try up to _MAX_WORST_ZONES_PER_ITERATION distinct worst-zone pairs.
+        swap_accepted = False
+        seen_pairs_this_iter: set[tuple[str, str]] = set()
 
-        # Try swapping them to the furthest slots if they are not already there
-        # We need the indices of wa and wb in the current pad_records
-        wa_idx = next(i for i, r in enumerate(pad_records) if r.name == wa)
-        wb_idx = next(i for i, r in enumerate(pad_records) if r.name == wb)
-
-        # Possible candidates to swap with: ends of the pad
-        swap_candidates = []
-        for end_slot_idx in end_slots:
-            if end_slot_idx != wa_idx and end_slot_idx != wb_idx:
-                swap_candidates.append((wa_idx, end_slot_idx))
-                swap_candidates.append((wb_idx, end_slot_idx))
-
-        # Also try just swapping wa and wb directly
-        swap_candidates.append((wa_idx, wb_idx))
-
-        swap_found = False
-        for idx1, idx2 in swap_candidates:
-            # Try swap
-            test_records = copy.deepcopy(best_records)
-            test_successes = copy.deepcopy(best_successes)
-
-            # Find the actual global indices
-            g_idx1 = next(
-                i
-                for i, r in enumerate(test_records)
-                if r.name == pad_records[idx1].name
-            )
-            g_idx2 = next(
-                i
-                for i, r in enumerate(test_records)
-                if r.name == pad_records[idx2].name
-            )
-
-            # Swap surface points
-            pts1 = test_records[g_idx1].points
-            pts2 = test_records[g_idx2].points
-
-            new_pts1 = (pts2[0], *pts1[1:])
-            new_pts2 = (pts1[0], *pts2[1:])
-
-            test_records[g_idx1] = WelltrackRecord(
-                name=test_records[g_idx1].name, points=new_pts1
-            )
-            test_records[g_idx2] = WelltrackRecord(
-                name=test_records[g_idx2].name, points=new_pts2
-            )
-
-            r1 = recalculate_well(
-                test_records[g_idx1], config_by_name[test_records[g_idx1].name]
-            )
-            r2 = recalculate_well(
-                test_records[g_idx2], config_by_name[test_records[g_idx2].name]
-            )
-
-            if r1 is None or r2 is None:
+        for zone in actionable[:_MAX_WORST_ZONES_PER_ITERATION]:
+            wa, wb = str(zone.well_a), str(zone.well_b)
+            pair_key = tuple(sorted((wa, wb)))
+            if pair_key in seen_pairs_this_iter:
                 continue
+            seen_pairs_this_iter.add(pair_key)
 
-            test_successes[r1.name] = r1
-            test_successes[r2.name] = r2
-
-            test_analysis = build_anti_collision_analysis_for_successes(
-                tuple(test_successes.values()),
-                model=uncertainty_model,
-                reference_wells=tuple(reference_wells),
+            progress_callback(
+                int(iteration * 100 / _MAX_ITERATIONS),
+                f"Итерация {iteration}: анализ {wa} ↔ {wb} (SF={float(zone.separation_factor):.3f})...",
             )
-            test_score = score_analysis(test_analysis, pad_well_names)
 
-            if test_score > best_score + 0.01:
-                best_score = test_score
-                best_records = test_records
-                best_successes = test_successes
+            # Generate all distinct swaps involving wa or wb with any other
+            # pad well whose surface differs.
+            other_names = sorted(pad_names - {wa, wb})
+            swap_candidates: list[tuple[str, str]] = []
+            for other in other_names:
+                swap_candidates.append((wa, other))
+                swap_candidates.append((wb, other))
+            swap_candidates.append((wa, wb))
 
-                # Update pad_records reference for next iteration
-                pad_records = [
-                    r for r in best_records if r.name in pad_well_names
-                ]
-                swap_found = True
+            best_candidate = None
+            best_candidate_score = best_score
+
+            for name_1, name_2 in swap_candidates:
+                ck = tuple(sorted((name_1, name_2)))
+                if ck in tried_pairs:
+                    continue
+                tried_pairs.add(ck)
+
+                result = _swap_surfaces_and_recalculate(
+                    best_records, best_successes, name_1, name_2, config_by_name,
+                )
+                if result is None:
+                    continue
+
+                cand_records, cand_successes = result
+                cand_analysis = _build_analysis(cand_successes, uncertainty_model, ref_wells)
+                cand_score = score_analysis(cand_analysis, pad_names)
+
+                if cand_score > best_candidate_score + _IMPROVEMENT_EPS:
+                    best_candidate_score = cand_score
+                    best_candidate = (cand_records, cand_successes)
+
+            if best_candidate is not None:
+                best_records, best_successes = best_candidate
+                best_score = best_candidate_score
+                swap_accepted = True
                 improved = True
-                break
+                break  # restart from updated state
 
-        if not swap_found:
-            # If no swap for the worst pair improved things, we are likely stuck in a local minimum for this heuristic.
+        if not swap_accepted:
             break
 
-    progress_callback(100, f"Готово! Лучший SF: {best_score:.2f}")
+    progress_callback(100, f"Готово! Лучший score: {best_score:.3f}")
     return best_records, best_successes, improved
 
 ===END_FILE===
@@ -13825,10 +13507,12 @@ def _clip_to_bounds(
     return clipped
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner_config.py	2979
+===BEGIN_FILE===	pywp/planner_config.py	3289
 from __future__ import annotations
 
 from pywp.models import (
+    INTERPOLATION_RODRIGUES,
+    INTERPOLATION_SLERP,
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
@@ -13854,6 +13538,11 @@ _INTERNAL_OPTIMIZATION_DISPLAY_OPTIONS = {
 TURN_SOLVER_OPTIONS = {
     TURN_SOLVER_LEAST_SQUARES: "Least Squares (TRF, рекомендуется)",
     TURN_SOLVER_DE_HYBRID: "DE Hybrid (глобальный + локальный)",
+}
+
+INTERPOLATION_METHOD_OPTIONS = {
+    INTERPOLATION_RODRIGUES: "Rodrigues (рекомендуется)",
+    INTERPOLATION_SLERP: "SLERP (классический)",
 }
 
 
@@ -13897,6 +13586,7 @@ def build_trajectory_config(
     turn_solver_mode: str,
     turn_solver_max_restarts: int,
     max_total_md_postcheck_m: float = 6500.0,
+    interpolation_method: str = INTERPOLATION_RODRIGUES,
 ) -> TrajectoryConfig:
     max_build = float(max(dls_build_max_deg_per_30m, 0.0))
     return TrajectoryConfig(
@@ -13914,6 +13604,7 @@ def build_trajectory_config(
         turn_solver_mode=str(turn_solver_mode),
         turn_solver_max_restarts=int(turn_solver_max_restarts),
         max_total_md_postcheck_m=float(max_total_md_postcheck_m),
+        interpolation_method=str(interpolation_method),
         dls_limits_deg_per_30m=build_segment_dls_limits(
             build_dls_max_deg_per_30m=max_build
         ),
@@ -14237,7 +13928,7 @@ def _scaled_progress_callback(
     return wrapped
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner_validation.py	22028
+===BEGIN_FILE===	pywp/planner_validation.py	22337
 from __future__ import annotations
 
 import numpy as np
@@ -14409,7 +14100,10 @@ def _target_delta_components(
     return dx_m, dy_m, dz_m, lateral_distance_m, vertical_distance_m, distance_m
 
 
-def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
+def _build_trajectory(
+    params: ProfileParameters,
+    interpolation_method: str = "rodrigues",
+) -> WellTrajectory:
     segments = [
         VerticalSegment(
             length_m=params.kop_vertical_m,
@@ -14425,6 +14119,7 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 dls_deg_per_30m=params.dls_build1_deg_per_30m,
                 azi_deg=params.azimuth_hold_deg,
                 name="BUILD1",
+                interpolation_method=interpolation_method,
             )
         )
     if params.hold_length_m > SMALL:
@@ -14445,6 +14140,7 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 azi_deg=params.azimuth_hold_deg,
                 azi_to_deg=params.azimuth_entry_deg,
                 name="BUILD2",
+                interpolation_method=interpolation_method,
             )
         )
     if (
@@ -14458,6 +14154,7 @@ def _build_trajectory(params: ProfileParameters) -> WellTrajectory:
                 dls_deg_per_30m=params.horizontal_dls_deg_per_30m,
                 azi_deg=params.azimuth_entry_deg,
                 name="HORIZONTAL",
+                interpolation_method=interpolation_method,
             )
         )
     if params.horizontal_hold_length_m > SMALL:
@@ -14785,7 +14482,7 @@ def _build_validated_control_and_summary(
     turn_search_settings: TurnSearchSettings | None,
     turn_restarts_used: int,
 ) -> tuple[WellTrajectory, pd.DataFrame, dict[str, float | str]]:
-    trajectory = _build_trajectory(params=params)
+    trajectory = _build_trajectory(params=params, interpolation_method=str(getattr(config, "interpolation_method", "rodrigues")))
     endpoint_eval = _offset_endpoint_evaluation(
         evaluation=_evaluate_profile_endpoints(params=params),
         surface=surface,
@@ -14952,7 +14649,7 @@ def default_plotly_chart_config() -> dict[str, object]:
     }
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	362172
+===BEGIN_FILE===	pywp/ptc_core.py	353950
 from __future__ import annotations
 
 import colorsys
@@ -14971,7 +14668,6 @@ import streamlit as st
 
 from pywp import TrajectoryConfig, TrajectoryPlanner
 from pywp.actual_fund_analysis import (
-    CALIBRATION_STATUS_READY,
     ZONE_BUILD2,
     ZONE_HOLD,
     ZONE_HORIZONTAL,
@@ -14982,7 +14678,6 @@ from pywp.actual_fund_analysis import (
     actual_fund_pad_rows,
     build_actual_fund_kop_depth_function,
     build_actual_fund_well_analyses,
-    calibrate_uncertainty_from_actual_fund,
     summarize_actual_fund_by_depth,
 )
 from pywp.anticollision import (
@@ -15083,7 +14778,6 @@ from pywp.ui_well_result import (
 )
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
-    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND,
     UNCERTAINTY_PRESET_OPTIONS,
     PlanningUncertaintyModel,
     build_uncertainty_tube_mesh,
@@ -15116,7 +14810,7 @@ from pywp.welltrack_quality import (
     swap_t1_t3_for_wells,
 )
 
-DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS3.INC")
+DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS4.INC")
 WT_UI_DEFAULTS_VERSION = 16
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
@@ -15154,7 +14848,7 @@ WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = 24
 WT_THREE_MAX_LABELS = 48
 WT_THREE_MAX_REFERENCE_LABELS = 12
 WT_PAD_FOCUS_ALL = "__all_pads__"
-WT_IMPORT_WELLHEAD_Z_TOLERANCE_M = 50.0
+WT_IMPORT_WELLHEAD_Z_TOLERANCE_M = 100.0
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
     "wt_cfg_md_step_control_m": "wt_cfg_md_control",
@@ -17356,74 +17050,6 @@ def _render_status_run_log(
             )
 
 
-def _run_actual_fund_calibration_with_status(
-    *,
-    actual_wells: tuple[ImportedTrajectoryWell, ...],
-    analyses: tuple[ActualFundWellAnalysis, ...],
-    base_preset: str,
-):
-    started_at = perf_counter()
-    log_lines: list[str] = []
-
-    def _emit(progress_bar, value: int, message: str) -> None:
-        log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
-        progress_bar.progress(int(value), text=message)
-
-    progress = st.progress(
-        5,
-        text="Подготовка калибровки пользовательской anti-collision функции...",
-    )
-    eligible_count = sum(
-        1 for item in analyses if bool(item.metrics.is_analysis_eligible)
-    )
-    _emit(progress, 18, "Подготовка фактического фонда.")
-    _emit(
-        progress,
-        34,
-        "Фильтрация невалидных, не-горизонтальных и pilot `_PL` скважин.",
-    )
-    try:
-        result = calibrate_uncertainty_from_actual_fund(
-            actual_wells=actual_wells,
-            analyses=analyses,
-            base_model=planning_uncertainty_model_for_preset(base_preset),
-            base_preset=base_preset,
-        )
-    except Exception as exc:
-        _emit(progress, 100, f"Ошибка калибровки: {type(exc).__name__}: {exc}")
-        progress.empty()
-        st.session_state["wt_actual_fund_calibration_run"] = {
-            "cached": False,
-            "runtime_s": float(perf_counter() - started_at),
-            "log_lines": tuple(log_lines),
-            "status": f"Ошибка: {type(exc).__name__}",
-            "well_count": int(len(actual_wells)),
-            "eligible_well_count": int(eligible_count),
-        }
-        raise
-    _emit(progress, 82, "Подгонка пользовательской anti-collision функции.")
-    if getattr(result, "custom_model", None) is not None:
-        _emit(
-            progress, 100, "Пользовательская anti-collision функция построена."
-        )
-    else:
-        _emit(
-            progress,
-            100,
-            "Расчёт пользовательской anti-collision функции завершён.",
-        )
-    progress.empty()
-    st.session_state["wt_actual_fund_calibration_run"] = {
-        "cached": False,
-        "runtime_s": float(perf_counter() - started_at),
-        "log_lines": tuple(log_lines),
-        "status": str(getattr(result, "status", "")),
-        "well_count": int(len(actual_wells)),
-        "eligible_well_count": int(eligible_count),
-    }
-    return result
-
-
 def _trajectory_interval_points(
     stations: pd.DataFrame,
     *,
@@ -17699,26 +17325,6 @@ def _reference_welltrack_path_key(kind: str) -> str:
     return f"wt_reference_{str(kind)}_welltrack_path"
 
 
-def _clear_actual_fund_calibration_state() -> None:
-    st.session_state["wt_actual_fund_calibration_result"] = None
-    st.session_state["wt_actual_fund_custom_model"] = None
-    st.session_state["wt_actual_fund_calibration_run"] = None
-    if (
-        str(
-            st.session_state.get("wt_anticollision_uncertainty_preset", "")
-        ).strip()
-        == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
-    ):
-        st.session_state["wt_anticollision_uncertainty_preset"] = (
-            DEFAULT_UNCERTAINTY_PRESET
-        )
-
-
-def _actual_fund_custom_model_from_state() -> PlanningUncertaintyModel | None:
-    model = st.session_state.get("wt_actual_fund_custom_model")
-    return model if isinstance(model, PlanningUncertaintyModel) else None
-
-
 def _set_reference_wells_for_kind(
     *,
     kind: str,
@@ -17740,8 +17346,6 @@ def _set_reference_wells_for_kind(
     st.session_state["wt_reference_wells"] = tuple(actual_wells) + tuple(
         approved_wells
     )
-    if normalized_kind == REFERENCE_WELL_ACTUAL:
-        _clear_actual_fund_calibration_state()
 
 
 def _reference_wells_from_state() -> tuple[ImportedTrajectoryWell, ...]:
@@ -17873,12 +17477,6 @@ def _init_state() -> None:
     st.session_state.setdefault(
         "wt_actual_fund_analysis_view_mode", "По скважинам"
     )
-    st.session_state.setdefault(
-        "wt_actual_fund_base_preset", DEFAULT_UNCERTAINTY_PRESET
-    )
-    st.session_state.setdefault("wt_actual_fund_calibration_result", None)
-    st.session_state.setdefault("wt_actual_fund_custom_model", None)
-    st.session_state.setdefault("wt_actual_fund_calibration_run", None)
     st.session_state.setdefault("wt_anticollision_last_run", None)
     st.session_state.setdefault("wt_t1_t3_last_resolution", None)
     st.session_state.setdefault("wt_t1_t3_acknowledged_well_names", ())
@@ -17916,7 +17514,6 @@ def _init_state() -> None:
                 "wt_anticollision_uncertainty_preset",
                 DEFAULT_UNCERTAINTY_PRESET,
             ),
-            allow_custom=_actual_fund_custom_model_from_state() is not None,
         )
     )
     st.session_state.setdefault("wt_prepared_well_overrides", {})
@@ -18422,7 +18019,7 @@ def _all_wells_plan_figure(
                 y=stations["Y_m"],
                 mode="lines",
                 name=name,
-                line={"width": 4, "color": line_color, "dash": line_dash},
+                line={"width": 1.5, "color": line_color, "dash": line_dash},
                 customdata=np.column_stack(
                     [
                         stations["Z_m"].to_numpy(dtype=float),
@@ -18503,7 +18100,7 @@ def _all_wells_plan_figure(
                 mode="lines",
                 name=reference_well_display_label(reference_well),
                 showlegend=False,
-                line={"width": 3.5, "color": line_color},
+                line={"width": 2, "color": line_color},
                 customdata=np.column_stack(
                     [stations["MD_m"].to_numpy(dtype=float)]
                 ),
@@ -19262,7 +18859,7 @@ def _all_wells_anticollision_plan_figure(
                 name=well_label,
                 legendgroup=str(well.name),
                 showlegend=not bool(well.is_reference_only),
-                line={"width": 4, "color": str(well.color)},
+                line={"width": 1.5, "color": str(well.color)},
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
@@ -19510,16 +19107,12 @@ def _render_anticollision_panel(
         )
         return
 
-    custom_actual_fund_model = _actual_fund_custom_model_from_state()
     preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
-    if custom_actual_fund_model is not None:
-        preset_options.append(UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND)
     normalized_preset = normalize_uncertainty_preset(
         st.session_state.get(
             "wt_anticollision_uncertainty_preset",
             DEFAULT_UNCERTAINTY_PRESET,
         ),
-        allow_custom=custom_actual_fund_model is not None,
     )
     if normalized_preset not in preset_options:
         normalized_preset = DEFAULT_UNCERTAINTY_PRESET
@@ -19534,10 +19127,7 @@ def _render_anticollision_panel(
             "для batch anti-collision анализа."
         ),
     )
-    uncertainty_model = planning_uncertainty_model_for_preset(
-        selected_preset,
-        custom_model=custom_actual_fund_model,
-    )
+    uncertainty_model = planning_uncertainty_model_for_preset(selected_preset)
     anti_collision_progress = st.progress(
         8,
         text="Подготовка anti-collision анализа...",
@@ -19754,8 +19344,8 @@ def _render_anticollision_panel(
                 "Overlap max, м",
                 format="%.2f",
             ),
-            "Смежных зон": st.column_config.NumberColumn(
-                "Смежных зон", format="%d"
+            "Мин. расстояние, м": st.column_config.NumberColumn(
+                "Мин. расстояние, м", format="%.2f"
             ),
         },
     )
@@ -21217,7 +20807,6 @@ def _handle_import_actions(
         st.session_state[
             _reference_wells_state_key(REFERENCE_WELL_APPROVED)
         ] = ()
-        _clear_actual_fund_calibration_state()
         st.session_state["wt_selected_names"] = []
         st.session_state["wt_loaded_at"] = ""
         _clear_t1_t3_order_resolution_state()
@@ -21406,7 +20995,7 @@ def _record_import_problem_text(record: WelltrackRecord) -> str:
         has_surface_like_point = _record_has_surface_like_point(record)
         if not has_surface_like_point:
             problems.append(
-                "Не найдена точка `S`: среди точек нет `Z` около поверхности (±50 м)."
+                "Не найдена точка `S`: среди точек нет `Z` около поверхности (±100 м)."
             )
         elif not _record_first_point_is_surface_like(record):
             problems.append("Первая точка не похожа на устье `S`.")
@@ -22396,15 +21985,11 @@ def _render_actual_fund_analysis_panel(
 
     with st.expander("Анализ фактического фонда", expanded=False):
         st.caption(
-            "В анализ попадают только фактические скважины. Для калибровки "
-            "учитываются только горизонтальные скважины без аномалий: если у "
-            "горизонтальной скважины не удаётся устойчиво выделить `KOP / HOLD / "
-            "терминальный high-angle interval` или получается аномально высокий "
-            "устойчивый `ПИ`, такая скважина исключается из анализа и калибровки. "
-            "Пилоты `_PL` в пользовательский anti-collision fit не попадают. "
-            "Пары одного семейства вида `7401` / `7401_PL` / `7401_2` из calibration-scan "
-            "исключаются. В тяжёлых кейсах алгоритм может осознанно пренебречь "
-            "1–2 экстремально близкими парами и явно показать это в результате. "
+            "В анализ попадают только фактические скважины. Учитываются только "
+            "горизонтальные скважины без аномалий: если у горизонтальной скважины "
+            "не удаётся устойчиво выделить `KOP / HOLD / терминальный high-angle "
+            "interval` или получается аномально высокий устойчивый `ПИ`, такая "
+            "скважина исключается из анализа. "
             "Группировка по кустам строится по ведущему числовому коду "
             "скважины без двух последних цифр: `6101/6102/6103 -> 61`, `8203/8210 -> 82`."
         )
@@ -22516,127 +22101,6 @@ def _render_actual_fund_analysis_panel(
             "используют ту же сегментацию, что и aggregate-анализ."
         )
         _render_actual_fund_well_detail(analyses)
-
-        st.markdown("#### Калибровка пользовательской функции конусов")
-        st.caption(
-            "Это не formal ISCWSA toolcode calibration, а planning-level field fit: "
-            "алгоритм может независимо подстраивать INC/AZI/drift и confidence-scale "
-            "относительно базового пресета так, чтобы ложные overlap по фактическому "
-            "горизонтальному фонду не доминировали."
-        )
-        calibration_base_preset = st.selectbox(
-            "Базовый пресет для калибровки",
-            options=list(UNCERTAINTY_PRESET_OPTIONS.keys()),
-            format_func=uncertainty_preset_label,
-            key="wt_actual_fund_base_preset",
-        )
-        if st.button(
-            "Откалибровать пользовательскую функцию",
-            icon=":material/tune:",
-            width="stretch",
-        ):
-            try:
-                result = _run_actual_fund_calibration_with_status(
-                    actual_wells=actual_wells,
-                    analyses=analyses,
-                    base_preset=calibration_base_preset,
-                )
-            except Exception as exc:
-                st.session_state["wt_actual_fund_calibration_result"] = None
-                st.session_state["wt_actual_fund_custom_model"] = None
-                st.error(
-                    "Не удалось откалибровать пользовательскую anti-collision функцию. "
-                    "Проверьте лог расчёта ниже."
-                )
-                st.caption(f"{type(exc).__name__}: {exc}")
-            else:
-                st.session_state["wt_actual_fund_calibration_result"] = result
-                st.session_state["wt_actual_fund_custom_model"] = (
-                    result.custom_model
-                )
-                if result.custom_model is not None:
-                    st.session_state["wt_anticollision_uncertainty_preset"] = (
-                        UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
-                    )
-                    _reset_anticollision_view_state(clear_prepared=False)
-                    st.toast(
-                        "Пользовательская функция конусов построена и выбрана в anti-collision."
-                    )
-                st.rerun()
-
-        calibration_result = st.session_state.get(
-            "wt_actual_fund_calibration_result"
-        )
-        if calibration_result is not None:
-            c1, c2, c3, c4 = st.columns(4, gap="small")
-            c1.metric(
-                "Проверено пар",
-                f"{int(calibration_result.analyzed_pair_count)}",
-            )
-            c2.metric(
-                "Пропущено пар одного семейства",
-                f"{int(calibration_result.skipped_same_family_pair_count)}",
-            )
-            c3.metric(
-                "Overlap до",
-                f"{int(calibration_result.overlapping_pair_count_before)}",
-            )
-            c4.metric(
-                "Overlap после",
-                (
-                    "—"
-                    if calibration_result.overlapping_pair_count_after is None
-                    else f"{int(calibration_result.overlapping_pair_count_after)}"
-                ),
-            )
-            x1, x2 = st.columns(2, gap="small")
-            x1.metric(
-                "Исключено пилотов `_PL`",
-                f"{int(calibration_result.excluded_pilot_well_count)}",
-            )
-            x2.metric(
-                "Осознанно проигнорировано пар",
-                f"{int(calibration_result.ignored_close_pair_count)}",
-            )
-            scale_label = (
-                "—"
-                if calibration_result.scale_factor is None
-                else f"{float(calibration_result.scale_factor):.2f}"
-            )
-            worst_before = (
-                "—"
-                if calibration_result.worst_separation_factor_before is None
-                else f"{float(calibration_result.worst_separation_factor_before):.2f}"
-            )
-            worst_after = (
-                "—"
-                if calibration_result.worst_separation_factor_after is None
-                else f"{float(calibration_result.worst_separation_factor_after):.2f}"
-            )
-            st.caption(
-                f"Статус: {str(calibration_result.status)}. "
-                f"Scale={scale_label}, SF до={worst_before}, SF после={worst_after}. "
-                f"База: {uncertainty_preset_label(calibration_result.base_preset)}."
-            )
-            if calibration_result.ignored_close_pairs:
-                st.caption(
-                    "Проигнорированные экстремально близкие пары: "
-                    + ", ".join(
-                        str(item)
-                        for item in calibration_result.ignored_close_pairs
-                    )
-                )
-            if str(calibration_result.status) == CALIBRATION_STATUS_READY:
-                st.success(str(calibration_result.note))
-            else:
-                st.info(str(calibration_result.note))
-        _render_status_run_log(
-            title="Лог расчёта пользовательской Anti-collision функции",
-            state_payload=st.session_state.get(
-                "wt_actual_fund_calibration_run"
-            ),
-            empty_message="Пользовательская anti-collision функция ещё не рассчитывалась.",
-        )
 
 
 def _render_reference_trajectory_panel() -> None:
@@ -23410,7 +22874,7 @@ def _report_rows_from_recommendations(
                 ),
                 "SF min": float(item.min_separation_factor),
                 "Overlap max, м": float(item.max_overlap_depth_m),
-                "Смежных зон": 1,
+                "Мин. расстояние, м": float(item.min_center_distance_m),
             }
         )
     return rows
@@ -24528,6 +23992,31 @@ def _render_batch_log() -> None:
     render_run_log_panel(st.session_state.get("wt_last_run_log_lines"))
 
 
+def _build_batch_survey_csv(
+    successes: list[SuccessfulWellPlan],
+) -> bytes:
+    """Build combined CSV with inclinometry data for all successful wells."""
+    if not successes:
+        return b""
+    frames: list[pd.DataFrame] = []
+    for success in successes:
+        stations = success.stations.copy()
+        if stations.empty:
+            continue
+        stations.insert(0, "well_name", str(success.name))
+        if "DLS_deg_per_30m" in stations.columns:
+            from pywp.ui_utils import dls_to_pi
+            stations["PI_deg_per_10m"] = dls_to_pi(
+                stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+            )
+            stations = stations.drop(columns=["DLS_deg_per_30m"])
+        frames.append(stations)
+    if not frames:
+        return b""
+    combined = pd.concat(frames, ignore_index=True)
+    return combined.to_csv(index=False).encode("utf-8")
+
+
 def _render_batch_summary(
     summary_rows: list[dict[str, object]],
 ) -> pd.DataFrame:
@@ -24659,14 +24148,28 @@ def _render_batch_summary(
             ),
         },
     )
-    st.download_button(
-        "Скачать сводку (CSV)",
-        data=display_df.to_csv(index=False).encode("utf-8"),
-        file_name="welltrack_summary.csv",
-        mime="text/csv",
-        icon=":material/download:",
-        width="content",
-    )
+    btn_cols = st.columns([1, 1])
+    with btn_cols[0]:
+        st.download_button(
+            "Скачать сводку (CSV)",
+            data=display_df.to_csv(index=False).encode("utf-8"),
+            file_name="welltrack_summary.csv",
+            mime="text/csv",
+            icon=":material/download:",
+            use_container_width=True,
+        )
+    with btn_cols[1]:
+        successes = st.session_state.get("wt_successes") or []
+        survey_data = _build_batch_survey_csv(successes)
+        st.download_button(
+            "Скачать инклинометрию (CSV)",
+            data=survey_data or b"",
+            file_name="welltrack_survey_all.csv",
+            mime="text/csv",
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not survey_data,
+        )
     return summary_df
 
 
@@ -25450,7 +24953,7 @@ def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float
     return number
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/segments.py	5950
+===BEGIN_FILE===	pywp/segments.py	8090
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -25460,6 +24963,10 @@ import pandas as pd
 
 from pywp.constants import RAD2DEG
 from pywp.mcm import dogleg_angle_rad
+
+INTERPOLATION_SLERP = "slerp"
+INTERPOLATION_RODRIGUES = "rodrigues"
+DEFAULT_INTERPOLATION_METHOD = INTERPOLATION_RODRIGUES
 
 
 def _make_md_grid(md_start: float, length_m: float, md_step_m: float) -> np.ndarray:
@@ -25540,6 +25047,7 @@ class BuildSegment(Segment):
         azi_deg: float,
         azi_to_deg: float | None = None,
         name: str = "BUILD",
+        interpolation_method: str = DEFAULT_INTERPOLATION_METHOD,
     ):
         self.inc_from_deg = float(inc_from_deg)
         self.inc_to_deg = float(inc_to_deg)
@@ -25547,6 +25055,7 @@ class BuildSegment(Segment):
         self.azi_from_deg = float(azi_deg)
         self.azi_to_deg = float(azi_deg if azi_to_deg is None else azi_to_deg)
         self.name = name
+        self.interpolation_method = str(interpolation_method)
 
     @property
     def length_m(self) -> float:
@@ -25572,7 +25081,15 @@ class BuildSegment(Segment):
             t = (md - md_start) / self.length_m
             direction_from = _direction_vector(inc_deg=self.inc_from_deg, azi_deg=self.azi_from_deg)
             direction_to = _direction_vector(inc_deg=self.inc_to_deg, azi_deg=self.azi_to_deg)
-            directions = _slerp_directions(direction_from=direction_from, direction_to=direction_to, t=t)
+            if self.interpolation_method == INTERPOLATION_SLERP:
+                directions = _slerp_directions(direction_from=direction_from, direction_to=direction_to, t=t)
+            elif self.interpolation_method == INTERPOLATION_RODRIGUES:
+                directions = _rodrigues_directions(direction_from=direction_from, direction_to=direction_to, t=t)
+            else:
+                raise ValueError(
+                    f"Unknown interpolation_method: {self.interpolation_method!r}. "
+                    f"Expected {INTERPOLATION_SLERP!r} or {INTERPOLATION_RODRIGUES!r}."
+                )
             inc, azi = _angles_from_directions(directions=directions)
 
         return pd.DataFrame(
@@ -25601,6 +25118,38 @@ def _direction_vector(inc_deg: float, azi_deg: float) -> np.ndarray:
         ],
         dtype=float,
     )
+
+
+def _rodrigues_directions(direction_from: np.ndarray, direction_to: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Interpolate directions using Rodrigues' rotation formula.
+
+    Numerically superior to SLERP when the dogleg angle approaches pi,
+    because the evaluation never divides by sin(dogleg) per-point — only
+    a one-time cross-product normalisation is needed.
+    """
+    start = direction_from / np.linalg.norm(direction_from)
+    end = direction_to / np.linalg.norm(direction_to)
+    dot = float(np.clip(np.dot(start, end), -1.0, 1.0))
+    theta = float(np.arccos(dot))
+    t_vec = np.asarray(t, dtype=float).reshape(-1)
+
+    if theta <= 1e-12:
+        vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
+    else:
+        cross = np.cross(start, end)
+        cross_norm = float(np.linalg.norm(cross))
+        if cross_norm < 1e-10:
+            # start ≈ ±end — degenerate; fall back to constant direction.
+            vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
+        else:
+            rot_axis = cross / cross_norm
+            in_plane = np.cross(rot_axis, start)
+            angles = (t_vec * theta).reshape(-1, 1)
+            vectors = np.cos(angles) * start[None, :] + np.sin(angles) * in_plane[None, :]
+
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms = np.where(norms <= 1e-12, 1.0, norms)
+    return vectors / norms
 
 
 def _slerp_directions(direction_from: np.ndarray, direction_to: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -26064,7 +25613,363 @@ def render_local_three_scene(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	48262
+===BEGIN_FILE===	pywp/three_viewer_assets/fast_replan.js	12117
+/**
+ * fast_replan.js — Client-side analytical trajectory recalculation.
+ *
+ * Provides instant visual feedback when the user drags control points
+ * (t1, t3) in the Three.js 3D viewer.  The result is geometrically
+ * approximate — a full Python solver replan should follow on mouse-up.
+ *
+ * Coordinate convention:
+ *   X = East, Y = North, Z = TVD (positive downward in data,
+ *   but displayed as -Z in Three.js via Z_DISPLAY_SIGN).
+ *
+ * Architecture:
+ *   1. Python sends the initial trajectory as payload.lines[].
+ *   2. On drag, JS calls fastReplan(surface, t1New, t3New, config)
+ *      which returns an array of [x, y, z] points (data coords).
+ *   3. The caller replaces the BufferGeometry of the target line.
+ *   4. On mouse-up, Python re-runs the full solver with the new
+ *      t1/t3, and the JS trajectory is replaced by the exact result.
+ *
+ * Usage (inside viewer_template.html, after scene is initialised):
+ *
+ *   const replan = new FastReplan({
+ *     surface: [surfX, surfY, surfZ],
+ *     config: {
+ *       entryIncTargetDeg: 86,
+ *       maxIncDeg: 95,
+ *       dlsBuildMaxDegPer30m: 3.0,
+ *       kopMinVerticalM: 550,
+ *     },
+ *   });
+ *
+ *   // On drag tick:
+ *   const pts = replan.compute([t1x, t1y, t1z], [t3x, t3y, t3z]);
+ *   updateLineGeometry(trajectoryLine, pts);
+ *
+ * STATUS: skeleton — functions contain analytical formulas but are not
+ * yet wired into the viewer event loop.  Integration will happen when
+ * the interactive control-point editor is implemented.
+ */
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const DEG2RAD = Math.PI / 180.0;
+const RAD2DEG = 180.0 / Math.PI;
+const SMALL = 1e-9;
+
+// ---------------------------------------------------------------------------
+// Vector helpers (3-element arrays)
+// ---------------------------------------------------------------------------
+function v3Sub(a, b) {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function v3Dot(a, b) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function v3Cross(a, b) {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function v3Len(v) {
+  return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+function v3Scale(v, s) {
+  return [v[0] * s, v[1] * s, v[2] * s];
+}
+
+function v3Add(a, b) {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
+
+function v3Normalise(v) {
+  const len = v3Len(v);
+  return len > SMALL ? v3Scale(v, 1.0 / len) : [0, 0, 1];
+}
+
+// ---------------------------------------------------------------------------
+// Direction vector from INC/AZI (degrees) — same convention as Python
+// [sin(inc)*cos(azi), sin(inc)*sin(azi), cos(inc)]
+// This gives X=East component, Y=North component, Z=vertical component.
+// ---------------------------------------------------------------------------
+function directionVector(incDeg, aziDeg) {
+  const incR = incDeg * DEG2RAD;
+  const aziR = aziDeg * DEG2RAD;
+  return [
+    Math.sin(incR) * Math.cos(aziR),
+    Math.sin(incR) * Math.sin(aziR),
+    Math.cos(incR),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Rodrigues rotation: interpolate direction from d1 to d2 at parameter t.
+// Returns a unit direction vector.
+// ---------------------------------------------------------------------------
+function rodriguesInterp(d1, d2, t) {
+  const dot = Math.max(-1, Math.min(1, v3Dot(d1, d2)));
+  const theta = Math.acos(dot);
+  if (theta < 1e-12) {
+    return d1.slice();
+  }
+  const cross = v3Cross(d1, d2);
+  const crossLen = v3Len(cross);
+  if (crossLen < 1e-10) {
+    return d1.slice();
+  }
+  const rotAxis = v3Scale(cross, 1.0 / crossLen);
+  const inPlane = v3Cross(rotAxis, d1);
+  const angle = t * theta;
+  return v3Normalise(
+    v3Add(v3Scale(d1, Math.cos(angle)), v3Scale(inPlane, Math.sin(angle)))
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Minimum curvature position increment (single interval).
+// Returns [dN, dE, dTVD].
+// ---------------------------------------------------------------------------
+function minCurvIncrement(dMD, inc1Deg, azi1Deg, inc2Deg, azi2Deg) {
+  const i1 = inc1Deg * DEG2RAD;
+  const i2 = inc2Deg * DEG2RAD;
+  const a1 = azi1Deg * DEG2RAD;
+  const a2 = azi2Deg * DEG2RAD;
+  const cosBeta =
+    Math.cos(i1) * Math.cos(i2) +
+    Math.sin(i1) * Math.sin(i2) * Math.cos(a2 - a1);
+  const beta = Math.acos(Math.max(-1, Math.min(1, cosBeta)));
+  let rf = 1.0;
+  if (Math.abs(beta) > 1e-6) {
+    rf = (2.0 / beta) * Math.tan(beta / 2.0);
+  }
+  const half = (dMD / 2.0) * rf;
+  const dN = half * (Math.sin(i1) * Math.cos(a1) + Math.sin(i2) * Math.cos(a2));
+  const dE = half * (Math.sin(i1) * Math.sin(a1) + Math.sin(i2) * Math.sin(a2));
+  const dZ = half * (Math.cos(i1) + Math.cos(i2));
+  return [dN, dE, dZ];
+}
+
+// ---------------------------------------------------------------------------
+// Fast analytical trajectory: J-profile (VERTICAL → BUILD → HORIZONTAL)
+//
+// Input:  surface [x,y,z], t1 [x,y,z], t3 [x,y,z], config {}
+// Output: array of [x, y, z] points in data coordinates (E, N, TVD)
+// ---------------------------------------------------------------------------
+function fastReplanPoints(surface, t1, t3, config) {
+  const entryIncDeg = config.entryIncTargetDeg || 86.0;
+  const maxIncDeg = config.maxIncDeg || 95.0;
+  const dlsBuild = config.dlsBuildMaxDegPer30m || 3.0;
+  const kopMin = config.kopMinVerticalM || 550.0;
+  const mdStep = config.mdStepM || 30.0;
+
+  // --- Section geometry ---
+  const dNt1t3 = t3[1] - t1[1]; // North
+  const dEt1t3 = t3[0] - t1[0]; // East
+  const horizDist = Math.sqrt(dNt1t3 * dNt1t3 + dEt1t3 * dEt1t3);
+  if (horizDist < SMALL) {
+    return [surface, t1, t3]; // degenerate
+  }
+  const aziEntryRad = Math.atan2(dEt1t3, dNt1t3);
+  const aziEntryDeg = ((aziEntryRad * RAD2DEG) % 360 + 360) % 360;
+
+  // Project surface→t1 onto section plane
+  const dNst1 = t1[1] - surface[1];
+  const dEst1 = t1[0] - surface[0];
+  const cosAz = Math.cos(aziEntryRad);
+  const sinAz = Math.sin(aziEntryRad);
+  const s1 = dNst1 * cosAz + dEst1 * sinAz; // along-section
+  const z1 = t1[2] - surface[2]; // TVD offset
+
+  if (z1 <= 0 || s1 <= SMALL) {
+    return [surface, t1, t3]; // infeasible
+  }
+
+  // --- J-profile geometry ---
+  const incEntryRad = entryIncDeg * DEG2RAD;
+  const oneMinusCos = 1.0 - Math.cos(incEntryRad);
+  const sinInc = Math.sin(incEntryRad);
+
+  let radiusM, jDls, kopVertical, buildLength;
+
+  if (oneMinusCos > SMALL && s1 > SMALL) {
+    radiusM = s1 / oneMinusCos;
+    jDls = 30.0 * RAD2DEG / radiusM;
+    kopVertical = z1 - radiusM * sinInc;
+    buildLength = radiusM * incEntryRad;
+  }
+
+  // Fallback if J-profile DLS too high or KOP negative
+  if (!radiusM || jDls > dlsBuild * 1.2 || kopVertical < 0) {
+    radiusM = 30.0 * RAD2DEG / dlsBuild;
+    kopVertical = Math.max(kopMin, z1 - radiusM * sinInc);
+    if (kopVertical < 0) kopVertical = 0;
+    buildLength = radiusM * incEntryRad;
+    jDls = dlsBuild;
+  }
+
+  // --- Generate stations ---
+  const stations = []; // each: {md, incDeg, aziDeg}
+  let md = 0;
+
+  // VERTICAL section
+  const vertEnd = Math.max(kopVertical, 0);
+  for (let m = 0; m <= vertEnd; m += mdStep) {
+    stations.push({ md: m, incDeg: 0, aziDeg: aziEntryDeg });
+  }
+  if (stations.length === 0 || stations[stations.length - 1].md < vertEnd) {
+    stations.push({ md: vertEnd, incDeg: 0, aziDeg: aziEntryDeg });
+  }
+  md = vertEnd;
+
+  // BUILD section (Rodrigues interpolation at mdStep intervals)
+  if (buildLength > SMALL) {
+    const d1 = directionVector(0, aziEntryDeg);
+    const d2 = directionVector(entryIncDeg, aziEntryDeg);
+    const nSteps = Math.max(1, Math.ceil(buildLength / mdStep));
+    const dt = 1.0 / nSteps;
+    for (let i = 1; i <= nSteps; i++) {
+      const t = i * dt;
+      const dVec = rodriguesInterp(d1, d2, t);
+      const incR = Math.acos(Math.max(-1, Math.min(1, dVec[2])));
+      const aziR = Math.atan2(dVec[1], dVec[0]);
+      const incDeg = incR * RAD2DEG;
+      const aziDeg = ((aziR * RAD2DEG) % 360 + 360) % 360;
+      md += buildLength * dt;
+      stations.push({ md, incDeg, aziDeg });
+    }
+  }
+
+  // HORIZONTAL hold (t1 → t3) — straight at entry inclination
+  const ds13 =
+    (t3[1] - t1[1]) * cosAz +
+    (t3[0] - t1[0]) * sinAz;
+  const dz13 = t3[2] - t1[2];
+  const holdInc = entryIncDeg;
+  const sinH = Math.sin(holdInc * DEG2RAD);
+  const cosH = Math.cos(holdInc * DEG2RAD);
+  let holdLength = ds13 * sinH + dz13 * cosH;
+  if (holdLength < 0) holdLength = Math.sqrt(ds13 * ds13 + dz13 * dz13);
+
+  if (holdLength > SMALL) {
+    const nSteps = Math.max(1, Math.ceil(holdLength / mdStep));
+    const stepLen = holdLength / nSteps;
+    for (let i = 1; i <= nSteps; i++) {
+      md += stepLen;
+      stations.push({ md, incDeg: holdInc, aziDeg: aziEntryDeg });
+    }
+  }
+
+  // --- Convert MD/INC/AZI → XYZ via minimum curvature ---
+  const points = [[surface[0], surface[1], surface[2]]];
+  let curN = surface[1];
+  let curE = surface[0];
+  let curZ = surface[2];
+
+  for (let i = 1; i < stations.length; i++) {
+    const prev = stations[i - 1];
+    const curr = stations[i];
+    const dMD = curr.md - prev.md;
+    if (dMD <= 0) continue;
+    const [dN, dE, dZ] = minCurvIncrement(
+      dMD,
+      prev.incDeg,
+      prev.aziDeg,
+      curr.incDeg,
+      curr.aziDeg
+    );
+    curN += dN;
+    curE += dE;
+    curZ += dZ;
+    points.push([curE, curN, curZ]); // [X=East, Y=North, Z=TVD]
+  }
+
+  return points;
+}
+
+// ---------------------------------------------------------------------------
+// Geometry update helper: replace a THREE.LineSegments buffer in-place.
+// ---------------------------------------------------------------------------
+function updateLineGeometry(lineObject, points, zDisplaySign) {
+  const sign = zDisplaySign || -1.0;
+  if (!lineObject || !lineObject.geometry || points.length < 2) return;
+
+  const positions = [];
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    positions.push(prev[0], prev[1], prev[2] * sign);
+    positions.push(curr[0], curr[1], curr[2] * sign);
+  }
+
+  const attr = lineObject.geometry.getAttribute("position");
+  if (attr && attr.count * 3 === positions.length) {
+    // Same vertex count — update in place (no allocation).
+    attr.array.set(positions);
+    attr.needsUpdate = true;
+  } else {
+    // Different vertex count — recreate attribute.
+    lineObject.geometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(new Float32Array(positions), 3)
+    );
+  }
+  lineObject.geometry.computeBoundingSphere();
+}
+
+// ---------------------------------------------------------------------------
+// FastReplan class — holds config, exposes compute().
+// ---------------------------------------------------------------------------
+class FastReplan {
+  /**
+   * @param {Object} options
+   * @param {number[]} options.surface  [x, y, z] surface location
+   * @param {Object}   options.config   Planning config (see top-of-file doc)
+   */
+  constructor(options) {
+    this.surface = options.surface || [0, 0, 0];
+    this.config = Object.assign(
+      {
+        entryIncTargetDeg: 86,
+        maxIncDeg: 95,
+        dlsBuildMaxDegPer30m: 3.0,
+        kopMinVerticalM: 550,
+        mdStepM: 30,
+      },
+      options.config || {}
+    );
+  }
+
+  /**
+   * Compute an analytical trajectory for the given control points.
+   *
+   * @param {number[]} t1  [x, y, z] entry point
+   * @param {number[]} t3  [x, y, z] target point
+   * @returns {number[][]} Array of [x, y, z] points in data coordinates
+   */
+  compute(t1, t3) {
+    return fastReplanPoints(this.surface, t1, t3, this.config);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Export for use inside the viewer IIFE.
+// These will be available when this file is injected into the template.
+// ---------------------------------------------------------------------------
+// window.FastReplan = FastReplan;
+// window.updateLineGeometry = updateLineGeometry;
+
+===END_FILE===
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	54979
 <!doctype html>
 <html lang="en">
   <head>
@@ -26117,10 +26022,7 @@ def render_local_three_scene(
       }
 
       #legend-toggle-wrap {
-        position: absolute;
-        top: 52px;
-        right: 10px;
-        z-index: 4;
+        display: none;
       }
 
       #axes-gizmo {
@@ -26182,59 +26084,129 @@ def render_local_three_scene(
         position: absolute;
         top: 52px;
         right: 10px;
-        max-width: 260px;
+        width: 240px;
         max-height: calc(100% - 62px);
-        overflow: auto;
-        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.95);
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
-        z-index: 3;
+        z-index: 5;
+        will-change: transform;
       }
 
       #legend:empty {
         display: none;
       }
 
-      #legend.is-collapsed {
+      #legend.is-collapsed .legend-body {
         display: none;
+      }
+
+      #legend.is-collapsed {
+        max-height: none;
+      }
+
+      .legend-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        cursor: grab;
+        user-select: none;
+        border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+        flex-shrink: 0;
+      }
+
+      .legend-header:active {
+        cursor: grabbing;
+      }
+
+      .legend-header-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #0f172a;
+        flex: 1;
+      }
+
+      .legend-collapse-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0 2px;
+        font-size: 14px;
+        line-height: 1;
+        color: #64748b;
+        flex-shrink: 0;
+        transition: transform 0.2s ease;
+      }
+
+      .legend-collapse-btn:hover {
+        color: #0f172a;
+      }
+
+      .legend-collapse-btn.is-collapsed {
+        transform: rotate(-90deg);
+      }
+
+      .legend-body {
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        padding: 6px 12px 10px;
+        flex: 1;
+        min-height: 0;
       }
 
       #collisions-panel {
         position: absolute;
         top: 52px;
         left: 10px;
-        width: 220px;
+        width: 230px;
         max-height: calc(100% - 62px);
-        overflow: auto;
-        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.95);
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
-        z-index: 3;
+        z-index: 5;
+        will-change: transform;
       }
 
       #collisions-panel:empty {
         display: none;
       }
 
-      #collisions-panel.is-collapsed {
+      #collisions-panel.is-collapsed .collisions-body {
         display: none;
+      }
+
+      #collisions-panel.is-collapsed {
+        max-height: none;
       }
 
       .collisions-header {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        margin-bottom: 8px;
-        padding-bottom: 6px;
+        gap: 6px;
+        padding: 8px 12px;
+        cursor: grab;
+        user-select: none;
         border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+        flex-shrink: 0;
+      }
+
+      .collisions-header:active {
+        cursor: grabbing;
       }
 
       .collisions-title {
         font-size: 12px;
         font-weight: 700;
         color: #0f172a;
+        flex: 1;
       }
 
       .collisions-count {
@@ -26243,6 +26215,36 @@ def render_local_three_scene(
         background: rgba(15, 23, 42, 0.06);
         padding: 2px 6px;
         border-radius: 6px;
+        flex-shrink: 0;
+      }
+
+      .collisions-collapse-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0 2px;
+        font-size: 14px;
+        line-height: 1;
+        color: #64748b;
+        flex-shrink: 0;
+        transition: transform 0.2s ease;
+      }
+
+      .collisions-collapse-btn:hover {
+        color: #0f172a;
+      }
+
+      .collisions-collapse-btn.is-collapsed {
+        transform: rotate(-90deg);
+      }
+
+      .collisions-body {
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        padding: 6px 12px 10px;
+        flex: 1;
+        min-height: 0;
       }
 
       .collision-item {
@@ -26526,7 +26528,6 @@ def render_local_three_scene(
         const root = document.getElementById("root");
         const labelLayerElement = document.getElementById("label-layer");
         const legendElement = document.getElementById("legend");
-        const legendToggleButton = document.getElementById("legend-toggle-btn");
         const tooltipElement = document.getElementById("tooltip");
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
@@ -26596,7 +26597,6 @@ def render_local_three_scene(
         let idleFrameCount = 0;
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
-        let legendCollapsed = false;
         let legendTreeExpanded = true;
         let interactionActive = false;
         const hasTreeLegend =
@@ -26886,14 +26886,86 @@ def render_local_three_scene(
         function renderLegend() {
           legendElement.innerHTML = "";
           const flatItems = Array.isArray(payload.legend) ? payload.legend : [];
+          const hasContent = hasTreeLegend || (Array.isArray(flatItems) && flatItems.length > 0);
+          if (!hasContent) {
+            return;
+          }
+
+          // --- Header: title + optional tree-toggle action + collapse button ---
+          var legendPanelCollapsed = false;
+          const header = document.createElement("div");
+          header.className = "legend-header";
+          const title = document.createElement("div");
+          title.className = "legend-header-title";
+          title.textContent = "Legend";
+          header.appendChild(title);
+
+          const collapseBtn = document.createElement("button");
+          collapseBtn.className = "legend-collapse-btn";
+          collapseBtn.textContent = "\u25BC";
+          collapseBtn.title = "Свернуть / развернуть";
+          collapseBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            legendPanelCollapsed = !legendPanelCollapsed;
+            legendElement.classList.toggle("is-collapsed", legendPanelCollapsed);
+            collapseBtn.classList.toggle("is-collapsed", legendPanelCollapsed);
+          });
+          header.appendChild(collapseBtn);
+          legendElement.appendChild(header);
+
+          // --- Drag-to-move on header ---
+          (function initLegendDrag() {
+            var dragging = false;
+            var startX = 0;
+            var startY = 0;
+            var panelStartLeft = 0;
+            var panelStartTop = 0;
+
+            header.addEventListener("pointerdown", function (e) {
+              if (e.target === collapseBtn) return;
+              dragging = true;
+              startX = e.clientX;
+              startY = e.clientY;
+              var rect = legendElement.getBoundingClientRect();
+              var parentRect = legendElement.offsetParent
+                ? legendElement.offsetParent.getBoundingClientRect()
+                : { left: 0, top: 0 };
+              panelStartLeft = rect.left - parentRect.left;
+              panelStartTop = rect.top - parentRect.top;
+              header.setPointerCapture(e.pointerId);
+              e.preventDefault();
+            });
+
+            header.addEventListener("pointermove", function (e) {
+              if (!dragging) return;
+              var dx = e.clientX - startX;
+              var dy = e.clientY - startY;
+              var newLeft = panelStartLeft + dx;
+              var newTop = panelStartTop + dy;
+              var parent = legendElement.offsetParent || document.documentElement;
+              var maxLeft = parent.clientWidth - legendElement.offsetWidth;
+              var maxTop = parent.clientHeight - legendElement.offsetHeight;
+              newLeft = Math.max(0, Math.min(newLeft, maxLeft));
+              newTop = Math.max(0, Math.min(newTop, maxTop));
+              legendElement.style.left = newLeft + "px";
+              legendElement.style.top = newTop + "px";
+              legendElement.style.right = "auto";
+            });
+
+            header.addEventListener("pointerup", function () {
+              dragging = false;
+            });
+
+            header.addEventListener("pointercancel", function () {
+              dragging = false;
+            });
+          })();
+
+          // --- Scrollable body ---
+          const body = document.createElement("div");
+          body.className = "legend-body";
+
           if (hasTreeLegend) {
-            if (legendToggleButton) {
-              legendToggleButton.style.display = "inline-flex";
-              legendToggleButton.textContent = legendTreeExpanded
-                ? "Свернуть всё"
-                : "Развернуть всё";
-            }
-            legendElement.classList.remove("is-collapsed");
             payload.legend_tree.forEach((group) => {
               const groupWrap = document.createElement("div");
               groupWrap.className = "legend-group";
@@ -26907,7 +26979,7 @@ def render_local_three_scene(
                 childrenWrap.appendChild(createTreeNodeButton(child, "well"));
               });
               groupWrap.appendChild(childrenWrap);
-              legendElement.appendChild(groupWrap);
+              body.appendChild(groupWrap);
             });
             if (flatItems.length > 0) {
               const flatSection = document.createElement("div");
@@ -26915,38 +26987,19 @@ def render_local_three_scene(
               flatItems.forEach((item) => {
                 flatSection.appendChild(createFlatLegendRow(item));
               });
-              legendElement.appendChild(flatSection);
+              body.appendChild(flatSection);
             }
-            return;
+          } else {
+            flatItems.forEach((item) => {
+              body.appendChild(createFlatLegendRow(item));
+            });
           }
-          if (!Array.isArray(flatItems) || flatItems.length === 0) {
-            if (legendToggleButton) {
-              legendToggleButton.style.display = "none";
-            }
-            return;
-          }
-          if (legendToggleButton) {
-            legendToggleButton.style.display = "inline-flex";
-            legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
-          }
-          flatItems.forEach((item) => {
-            legendElement.appendChild(createFlatLegendRow(item));
-          });
+
+          legendElement.appendChild(body);
         }
 
         function syncLegendVisibility() {
           renderLegend();
-          if (hasTreeLegend) {
-            return;
-          }
-          if (legendCollapsed) {
-            legendElement.classList.add("is-collapsed");
-          } else {
-            legendElement.classList.remove("is-collapsed");
-          }
-          if (legendToggleButton && legendElement.innerHTML.trim() !== "") {
-            legendToggleButton.textContent = legendCollapsed ? "Show legend" : "Hide legend";
-          }
         }
 
         function renderCollisions() {
@@ -26958,6 +27011,9 @@ def render_local_three_scene(
           if (collisions.length === 0) {
             return;
           }
+
+          // --- Header: title + count + collapse button ---
+          let collisionsPanelCollapsed = false;
           const header = document.createElement("div");
           header.className = "collisions-header";
           const title = document.createElement("div");
@@ -26968,7 +27024,70 @@ def render_local_three_scene(
           count.className = "collisions-count";
           count.textContent = String(collisions.length);
           header.appendChild(count);
+          const collapseBtn = document.createElement("button");
+          collapseBtn.className = "collisions-collapse-btn";
+          collapseBtn.textContent = "▼";
+          collapseBtn.title = "Свернуть / развернуть";
+          collapseBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            collisionsPanelCollapsed = !collisionsPanelCollapsed;
+            collisionsPanelElement.classList.toggle("is-collapsed", collisionsPanelCollapsed);
+            collapseBtn.classList.toggle("is-collapsed", collisionsPanelCollapsed);
+          });
+          header.appendChild(collapseBtn);
           collisionsPanelElement.appendChild(header);
+
+          // --- Drag-to-move on header ---
+          (function initDrag() {
+            let dragging = false;
+            let startX = 0;
+            let startY = 0;
+            let panelStartLeft = 0;
+            let panelStartTop = 0;
+
+            header.addEventListener("pointerdown", function (e) {
+              if (e.target === collapseBtn) return;
+              dragging = true;
+              startX = e.clientX;
+              startY = e.clientY;
+              const rect = collisionsPanelElement.getBoundingClientRect();
+              const parentRect = collisionsPanelElement.offsetParent
+                ? collisionsPanelElement.offsetParent.getBoundingClientRect()
+                : { left: 0, top: 0 };
+              panelStartLeft = rect.left - parentRect.left;
+              panelStartTop = rect.top - parentRect.top;
+              header.setPointerCapture(e.pointerId);
+              e.preventDefault();
+            });
+
+            header.addEventListener("pointermove", function (e) {
+              if (!dragging) return;
+              const dx = e.clientX - startX;
+              const dy = e.clientY - startY;
+              var newLeft = panelStartLeft + dx;
+              var newTop = panelStartTop + dy;
+              var parent = collisionsPanelElement.offsetParent || document.documentElement;
+              var maxLeft = parent.clientWidth - collisionsPanelElement.offsetWidth;
+              var maxTop = parent.clientHeight - collisionsPanelElement.offsetHeight;
+              newLeft = Math.max(0, Math.min(newLeft, maxLeft));
+              newTop = Math.max(0, Math.min(newTop, maxTop));
+              collisionsPanelElement.style.left = newLeft + "px";
+              collisionsPanelElement.style.top = newTop + "px";
+            });
+
+            header.addEventListener("pointerup", function () {
+              dragging = false;
+            });
+
+            header.addEventListener("pointercancel", function () {
+              dragging = false;
+            });
+          })();
+
+          // --- Scrollable body ---
+          const body = document.createElement("div");
+          body.className = "collisions-body";
+
           collisions.forEach((collision) => {
             const item = document.createElement("div");
             item.className = "collision-item";
@@ -27052,8 +27171,9 @@ def render_local_three_scene(
                 requestRender();
               }
             });
-            collisionsPanelElement.appendChild(item);
+            body.appendChild(item);
           });
+          collisionsPanelElement.appendChild(body);
         }
 
         function addLine(item) {
@@ -27499,16 +27619,6 @@ def render_local_three_scene(
         if (fullscreenButton) {
           fullscreenButton.addEventListener("click", enterFullscreen);
         }
-        if (legendToggleButton) {
-          legendToggleButton.addEventListener("click", () => {
-            if (hasTreeLegend) {
-              legendTreeExpanded = !legendTreeExpanded;
-            } else {
-              legendCollapsed = !legendCollapsed;
-            }
-            syncLegendVisibility();
-          });
-        }
         resize();
         fitCamera();
         syncLegendVisibility();
@@ -27518,8 +27628,6 @@ def render_local_three_scene(
     </script>
   </body>
 </html>
-
-// added
 ===END_FILE===
 ===BEGIN_FILE===	pywp/three_viewer_assets/vendor/OrbitControls.js	26375
 ( function () {
@@ -29402,7 +29510,7 @@ class WellTrajectory:
         return stations
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_calc_params.py	18122
+===BEGIN_FILE===	pywp/ui_calc_params.py	18780
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29413,6 +29521,7 @@ import streamlit as st
 from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp import TrajectoryConfig
 from pywp.planner_config import (
+    INTERPOLATION_METHOD_OPTIONS,
     OPTIMIZATION_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_trajectory_config,
@@ -29432,7 +29541,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "kop_min_vertical",
 )
 _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
-_STR_SUFFIXES: tuple[str, ...] = ("optimization_mode", "turn_solver_mode")
+_STR_SUFFIXES: tuple[str, ...] = ("optimization_mode", "turn_solver_mode", "interpolation_method")
 _BOOL_SUFFIXES: tuple[str, ...] = ()
 
 
@@ -29454,12 +29563,13 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "optimization_mode": str(cfg.optimization_mode),
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
         "turn_solver_mode": str(cfg.turn_solver_mode),
+        "interpolation_method": str(cfg.interpolation_method),
     }
 
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 10
+_DEFAULTS_SCHEMA_VERSION = 11
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
@@ -29704,6 +29814,7 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         optimization_mode=str(_state_value(prefix, "optimization_mode")),
         turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
         turn_solver_mode=str(_state_value(prefix, "turn_solver_mode")),
+        interpolation_method=str(_state_value(prefix, "interpolation_method")),
     )
 
 
@@ -29850,6 +29961,16 @@ def render_calc_params_block(
             help=(
                 "Least Squares (TRF) — быстрый дефолт. "
                 "DE Hybrid — тяжелее, но может помочь на сложной геометрии."
+            ),
+        )
+        st.selectbox(
+            "Интерполяция BUILD",
+            options=list(INTERPOLATION_METHOD_OPTIONS.keys()),
+            key=_state_key(prefix, "interpolation_method"),
+            format_func=lambda key: INTERPOLATION_METHOD_OPTIONS[str(key)],
+            help=(
+                "Rodrigues — численно стабильная формула вращения, рекомендуется. "
+                "SLERP — классическая сферическая линейная интерполяция."
             ),
         )
         st.number_input(
@@ -30873,7 +30994,7 @@ def render_result_tables(
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/uncertainty.py	38722
+===BEGIN_FILE===	pywp/uncertainty.py	36124
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30883,18 +31004,14 @@ import pandas as pd
 
 from pywp.constants import DEG2RAD
 from pywp.models import Point3D
+
 _REQUIRED_STATION_COLUMNS = frozenset({"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"})
 UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC = "mwd_poor_magnetic"
 UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC = "mwd_unknown_magnetic"
-UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND = "custom_actual_fund"
 DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
 UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
     UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: "MWD POOR magnetic (ISCWSA)",
     UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: "MWD Unknown magnetic (ISCWSA)",
-}
-_UNCERTAINTY_PRESET_LABELS: dict[str, str] = {
-    **UNCERTAINTY_PRESET_OPTIONS,
-    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND: "Пользовательская (по фактическому фонду)",
 }
 
 
@@ -31010,12 +31127,8 @@ class UncertaintyTubeMesh:
 
 def normalize_uncertainty_preset(
     preset: object,
-    *,
-    allow_custom: bool = False,
 ) -> str:
     preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
-    if allow_custom and preset_key == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND:
-        return preset_key
     if preset_key in PLANNING_UNCERTAINTY_PRESET_MODELS:
         return preset_key
     return DEFAULT_UNCERTAINTY_PRESET
@@ -31023,68 +31136,16 @@ def normalize_uncertainty_preset(
 
 def planning_uncertainty_model_for_preset(
     preset: object,
-    *,
-    custom_model: PlanningUncertaintyModel | None = None,
 ) -> PlanningUncertaintyModel:
-    normalized = normalize_uncertainty_preset(
-        preset,
-        allow_custom=custom_model is not None,
-    )
-    if normalized == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND and custom_model is not None:
-        return custom_model
+    normalized = normalize_uncertainty_preset(preset)
     return PLANNING_UNCERTAINTY_PRESET_MODELS[normalized]
-
-
-def fitted_uncertainty_model(
-    base_model: PlanningUncertaintyModel,
-    *,
-    sigma_inc_scale: float = 1.0,
-    sigma_azi_scale: float = 1.0,
-    sigma_lateral_drift_scale: float = 1.0,
-    confidence_scale_factor: float = 1.0,
-    sigma_inc_floor_deg: float = 0.0,
-    sigma_azi_floor_deg: float = 0.0,
-    sigma_lateral_drift_floor_m_per_1000m: float = 0.0,
-) -> PlanningUncertaintyModel:
-    inc_scale = float(sigma_inc_scale)
-    azi_scale = float(sigma_azi_scale)
-    drift_scale = float(sigma_lateral_drift_scale)
-    confidence_factor = float(confidence_scale_factor)
-    inc_floor = float(sigma_inc_floor_deg)
-    azi_floor = float(sigma_azi_floor_deg)
-    drift_floor = float(sigma_lateral_drift_floor_m_per_1000m)
-    if min(inc_scale, azi_scale, drift_scale, confidence_factor) <= 0.0:
-        raise ValueError("Uncertainty fit scales must be positive.")
-    if min(inc_floor, azi_floor, drift_floor) < 0.0:
-        raise ValueError("Uncertainty fit floors cannot be negative.")
-
-    return base_model.__class__(
-        sigma_inc_deg=inc_floor + float(base_model.sigma_inc_deg) * inc_scale,
-        sigma_azi_deg=azi_floor + float(base_model.sigma_azi_deg) * azi_scale,
-        sigma_lateral_drift_m_per_1000m=(
-            drift_floor
-            + float(base_model.sigma_lateral_drift_m_per_1000m) * drift_scale
-        ),
-        confidence_scale=float(base_model.confidence_scale) * confidence_factor,
-        sample_step_m=float(base_model.sample_step_m),
-        max_display_ellipses=int(base_model.max_display_ellipses),
-        ellipse_points=int(base_model.ellipse_points),
-        min_display_radius_m=float(base_model.min_display_radius_m),
-        near_vertical_isotropic_threshold_deg=float(
-            base_model.near_vertical_isotropic_threshold_deg
-        ),
-        directional_refine_threshold_deg=float(
-            base_model.directional_refine_threshold_deg
-        ),
-        min_refined_step_m=float(base_model.min_refined_step_m),
-    )
 
 
 def uncertainty_preset_label(preset: object) -> str:
     preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
-    return _UNCERTAINTY_PRESET_LABELS.get(
+    return UNCERTAINTY_PRESET_OPTIONS.get(
         preset_key,
-        _UNCERTAINTY_PRESET_LABELS[DEFAULT_UNCERTAINTY_PRESET],
+        UNCERTAINTY_PRESET_OPTIONS[DEFAULT_UNCERTAINTY_PRESET],
     )
 
 
@@ -33387,7 +33448,7 @@ def _vector_to_azimuth_deg(*, dx: float, dy: float) -> float:
     return float(math.degrees(math.atan2(float(dx), float(dy))) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_batch.py	49660
+===BEGIN_FILE===	pywp/welltrack_batch.py	49724
 from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Mapping
@@ -33540,6 +33601,7 @@ def rebuild_optimization_context(
             if context.baseline_build1_dls_deg_per_30m is not None
             else None
         ),
+        interpolation_method=str(context.interpolation_method),
     )
 
 
@@ -35408,179 +35470,6 @@ if __name__ == "__main__":
     main()
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/project_pack.py	4762
-#!/usr/bin/env python3
-from __future__ import annotations
-
-import argparse
-from pathlib import Path
-
-
-ARCHIVE_FILE = "all.txt"
-BEGIN = "===BEGIN_FILE==="
-END = "===END_FILE==="
-
-EXCLUDED_DIR_NAMES = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".idea",
-}
-
-INCLUDED_FILE_EXTENSIONS = {
-    ".py",
-    # ".txt",
-    # ".md",
-    ".ini",
-    ".cfg",
-    # ".toml",
-    ".yaml",
-    ".yml",
-    ".json",
-    ".html",
-    ".js",
-    ".css",
-    # ".inc",
-}
-
-INCLUDED_FILE_NAMES = {}
-
-
-def should_skip_path(path: Path, root: Path) -> bool:
-    rel = path.relative_to(root)
-    parts = set(rel.parts)
-    if parts & EXCLUDED_DIR_NAMES:
-        return True
-    return False
-
-
-def should_include_path(path: Path) -> bool:
-    if path.name in INCLUDED_FILE_NAMES:
-        return True
-    return path.suffix.lower() in INCLUDED_FILE_EXTENSIONS
-
-
-def collect_files(root: Path, *, archive_path: Path | None = None) -> list[Path]:
-    files: list[Path] = []
-    archive_resolved = archive_path.resolve() if archive_path is not None else None
-    default_archive_resolved = (root / ARCHIVE_FILE).resolve()
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if should_skip_path(path, root):
-            continue
-        if not should_include_path(path):
-            continue
-        resolved_path = path.resolve()
-        if resolved_path == default_archive_resolved:
-            continue
-        if archive_resolved is not None and resolved_path == archive_resolved:
-            continue
-        files.append(path)
-
-    return sorted(set(files), key=lambda p: str(p.relative_to(root)))
-
-
-def pack(root: Path, output_file: Path) -> None:
-    files = collect_files(root, archive_path=output_file)
-    with output_file.open("w", encoding="utf-8", newline="") as out:
-        for path in files:
-            rel = path.relative_to(root).as_posix()
-            content = path.read_text(encoding="utf-8")
-            out.write(f"{BEGIN}\t{rel}\t{len(content)}\n")
-            out.write(content)
-            out.write("\n")
-            out.write(f"{END}\n")
-
-    print(f"Packed {len(files)} files into {output_file}")
-
-
-def unpack(root: Path, input_file: Path) -> None:
-    if not input_file.exists():
-        raise FileNotFoundError(f"Archive file not found: {input_file}")
-
-    restored = 0
-
-    with input_file.open("r", encoding="utf-8") as src:
-        while True:
-            header = src.readline()
-            if not header:
-                break
-            if not header.startswith(f"{BEGIN}\t"):
-                raise ValueError("Invalid archive format: malformed BEGIN header")
-
-            payload = header.rstrip("\n").split("\t", maxsplit=2)
-            if len(payload) != 3:
-                raise ValueError("Invalid archive format: malformed BEGIN payload")
-            _, rel_path, raw_len = payload
-            content_len = int(raw_len)
-
-            content = src.read(content_len)
-            if len(content) != content_len:
-                raise ValueError("Invalid archive format: truncated file content")
-
-            separator = src.read(1)
-            if separator != "\n":
-                raise ValueError("Invalid archive format: missing content separator")
-
-            end_line = src.readline().rstrip("\n")
-            if end_line != END:
-                raise ValueError("Invalid archive format: missing END marker")
-
-            target = root / rel_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-            restored += 1
-
-    print(f"Restored {restored} files from {input_file}")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Pack project text sources/config/assets (Python, HTML/JS/CSS, JSON/TOML,"
-            " Markdown, WELLTRACK .inc, etc.) to all.txt and unpack back."
-        )
-    )
-    parser.add_argument(
-        "mode",
-        choices=("pack", "unpack"),
-        help="pack: create all.txt, unpack: restore files from all.txt",
-    )
-    parser.add_argument(
-        "--root",
-        default=".",
-        help="Project root directory (default: current directory)",
-    )
-    parser.add_argument(
-        "--archive",
-        default=None,
-        help=f"Archive file path (default: <root>/{ARCHIVE_FILE})",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    root = Path(args.root).resolve()
-    archive = (
-        (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
-    )
-
-    if args.mode == "pack":
-        pack(root, archive)
-    else:
-        unpack(root, archive)
-
-
-if __name__ == "__main__":
-    main()
-
-===END_FILE===
 ===BEGIN_FILE===	scripts/run_tests.py	1847
 #!/usr/bin/env python3
 from __future__ import annotations
@@ -35659,19 +35548,15 @@ from pywp.anticollision import AntiCollisionWell
 print(AntiCollisionWell)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_actual_fund_analysis.py	16714
+===BEGIN_FILE===	tests/test_actual_fund_analysis.py	12206
 from __future__ import annotations
-
-from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
 import pytest
 
-import pywp.actual_fund_analysis as actual_fund_analysis_module
 from pywp.actual_fund_analysis import (
     ActualFundWellMetrics,
-    CALIBRATION_STATUS_READY,
     _reconstruct_actual_survey,
     actual_well_family_name,
     actual_well_is_horizontal,
@@ -35679,20 +35564,11 @@ from pywp.actual_fund_analysis import (
     build_actual_fund_kop_depth_function,
     build_actual_fund_well_analysis,
     build_actual_fund_well_metrics,
-    calibrate_uncertainty_from_actual_fund,
     summarize_actual_fund_by_depth,
 )
 from pywp.mcm import compute_positions_min_curv
 from pywp.models import Point3D
 from pywp.reference_trajectories import parse_reference_trajectory_table
-from pywp.uncertainty import DEFAULT_UNCERTAINTY_PRESET, DEFAULT_PLANNING_UNCERTAINTY_MODEL, PlanningUncertaintyModel
-
-_CALIBRATION_TEST_BASE_MODEL = PlanningUncertaintyModel(
-    sigma_inc_deg=0.30,
-    sigma_azi_deg=0.60,
-    sigma_lateral_drift_m_per_1000m=12.0,
-    confidence_scale=2.0,
-)
 
 
 def _actual_wells():
@@ -35783,27 +35659,6 @@ def _synthetic_noisy_vertical_hold_actual_well(name: str = "9003") -> tuple:
         for _, row in positioned.iterrows()
     ]
     return tuple(parse_reference_trajectory_table(rows))
-
-
-def _synthetic_close_pair_actual_wells() -> tuple:
-    return tuple(
-        parse_reference_trajectory_table(
-            [
-                {"Wellname": "8001", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "8001", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
-                {"Wellname": "8001", "Type": "actual", "X": 1000.0, "Y": 0.0, "Z": 1000.0, "MD": 2000.0},
-                {"Wellname": "8001", "Type": "actual", "X": 2000.0, "Y": 0.0, "Z": 1000.0, "MD": 3000.0},
-                {"Wellname": "8002", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "8002", "Type": "actual", "X": 0.0, "Y": 0.0, "Z": 1000.0, "MD": 1000.0},
-                {"Wellname": "8002", "Type": "actual", "X": 1000.0, "Y": 0.0, "Z": 1000.0, "MD": 2000.0},
-                {"Wellname": "8002", "Type": "actual", "X": 2000.0, "Y": 0.0, "Z": 1000.0, "MD": 3000.0},
-                {"Wellname": "8003", "Type": "actual", "X": 0.0, "Y": 220.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "8003", "Type": "actual", "X": 0.0, "Y": 220.0, "Z": 1000.0, "MD": 1000.0},
-                {"Wellname": "8003", "Type": "actual", "X": 1000.0, "Y": 220.0, "Z": 1000.0, "MD": 2000.0},
-                {"Wellname": "8003", "Type": "actual", "X": 2000.0, "Y": 220.0, "Z": 1000.0, "MD": 3000.0},
-            ]
-        )
-    )
 
 
 def test_actual_well_family_and_pad_group_extract_numeric_prefixes() -> None:
@@ -35905,80 +35760,6 @@ def test_reconstruct_actual_survey_respects_custom_resample_step() -> None:
     assert md_values[0] == 0.0
     assert md_values[-1] == float(well.stations["MD_m"].iloc[-1])
     assert np.allclose(np.diff(md_values[:-1]), 25.0)
-
-
-def test_calibration_excludes_same_family_pairs_and_builds_custom_model() -> None:
-    wells = _actual_wells()
-    result = calibrate_uncertainty_from_actual_fund(
-        actual_wells=wells,
-        base_model=_CALIBRATION_TEST_BASE_MODEL,
-        base_preset=DEFAULT_UNCERTAINTY_PRESET,
-    )
-
-    assert result.status == CALIBRATION_STATUS_READY
-    assert result.custom_model is not None
-    assert result.scale_factor is not None
-    assert result.scale_factor < 1.0
-    assert result.excluded_pilot_well_count == 1
-    assert result.skipped_same_family_pair_count == 0
-    assert result.analyzed_pair_count == 1
-    assert result.overlapping_pair_count_before >= result.overlapping_pair_count_after
-
-
-def test_calibration_can_ignore_single_extreme_close_pair_and_still_build_model() -> None:
-    wells = _synthetic_close_pair_actual_wells()
-
-    result = calibrate_uncertainty_from_actual_fund(
-        actual_wells=wells,
-        base_model=_CALIBRATION_TEST_BASE_MODEL,
-        base_preset=DEFAULT_UNCERTAINTY_PRESET,
-    )
-
-    assert result.status == CALIBRATION_STATUS_READY
-    assert result.custom_model is not None
-    assert result.ignored_close_pair_count == 1
-    assert result.ignored_close_pairs == ("8001 ↔ 8002",)
-    assert result.overlapping_pair_count_after == 0
-
-
-def test_calibration_reuses_prebuilt_analyses_without_recomputing_metrics(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    wells = _actual_wells()
-    analyses = actual_fund_analysis_module.build_actual_fund_well_analyses(wells)
-    analysis_call_count = 0
-
-    def _fake_build_actual_fund_well_analyses(
-        actual_wells: Iterable[object],
-    ) -> tuple[actual_fund_analysis_module.ActualFundWellAnalysis, ...]:
-        nonlocal analysis_call_count
-        analysis_call_count += 1
-        assert len(tuple(actual_wells)) == len(wells)
-        return analyses
-
-    def _unexpected_metrics_call(*_: object, **__: object) -> tuple[object, ...]:
-        raise AssertionError("calibration should reuse metrics from prebuilt analyses")
-
-    monkeypatch.setattr(
-        actual_fund_analysis_module,
-        "build_actual_fund_well_analyses",
-        _fake_build_actual_fund_well_analyses,
-    )
-    monkeypatch.setattr(
-        actual_fund_analysis_module,
-        "build_actual_fund_well_metrics",
-        _unexpected_metrics_call,
-    )
-
-    result = calibrate_uncertainty_from_actual_fund(
-        actual_wells=wells,
-        analyses=analyses,
-        base_model=_CALIBRATION_TEST_BASE_MODEL,
-        base_preset=DEFAULT_UNCERTAINTY_PRESET,
-    )
-
-    assert analysis_call_count == 0
-    assert result.status == CALIBRATION_STATUS_READY
 
 
 def test_depth_cluster_summary_and_kop_function_build_from_generated_dataset() -> None:
@@ -36098,7 +35879,7 @@ def test_depth_cluster_anchor_uses_min_plus_std_after_outlier_filter() -> None:
     assert cluster.anchor_kop_md_m < 900.0
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_anticollision.py	64058
+===BEGIN_FILE===	tests/test_anticollision.py	64110
 from __future__ import annotations
 
 import numpy as np
@@ -36827,7 +36608,8 @@ def test_report_merges_adjacent_corridors_into_single_event() -> None:
     assert events[0].merged_corridor_count == 2
     assert rows[0]["Интервал A, м"] == "4200 - 4300"
     assert rows[0]["Интервал B, м"] == "4100 - 4200"
-    assert rows[0]["Смежных зон"] == 2
+    assert "Мин. расстояние, м" in rows[0]
+    assert rows[0]["Мин. расстояние, м"] >= 0.0
 
 
 def test_recommendations_prioritize_target_spacing_for_target_overlap() -> None:
@@ -40837,7 +40619,7 @@ def test_parse_reference_trajectory_welltrack_text_builds_reference_wells() -> N
     assert wells[0].name == "APP-1"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_segments.py	1545
+===BEGIN_FILE===	tests/test_segments.py	7246
 from __future__ import annotations
 
 import numpy as np
@@ -40845,7 +40627,16 @@ import pytest
 
 from pywp.mcm import add_dls, compute_positions_min_curv, dogleg_angle_rad
 from pywp.models import Point3D
-from pywp.segments import BuildSegment
+from pywp import models as _models
+from pywp.segments import (
+    BuildSegment,
+    DEFAULT_INTERPOLATION_METHOD,
+    INTERPOLATION_RODRIGUES,
+    INTERPOLATION_SLERP,
+    _direction_vector,
+    _rodrigues_directions,
+    _slerp_directions,
+)
 
 
 def test_build_segment_length_uses_spatial_dogleg() -> None:
@@ -40885,6 +40676,141 @@ def test_build_segment_generates_azimuth_turn_and_target_dls() -> None:
     build_dls = stations["DLS_deg_per_30m"].dropna()
     assert len(build_dls) > 10
     assert float(build_dls.mean()) == pytest.approx(4.0, rel=0.03)
+
+
+# ---------------------------------------------------------------------------
+# Rodrigues vs SLERP equivalence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "inc_from,azi_from,inc_to,azi_to",
+    [
+        (0.1, 0.0, 60.0, 0.0),       # simple inclination build
+        (25.0, 15.0, 70.0, 55.0),     # combined inc + azi turn
+        (40.0, 20.0, 40.0, 50.0),     # pure azimuth turn
+        (10.0, 350.0, 80.0, 20.0),    # azimuth wrap around north
+        (85.0, 120.0, 86.0, 121.0),   # small dogleg
+    ],
+)
+def test_rodrigues_matches_slerp(inc_from: float, azi_from: float, inc_to: float, azi_to: float) -> None:
+    """Rodrigues and SLERP must produce identical directions for normal doglegs."""
+    d_from = _direction_vector(inc_from, azi_from)
+    d_to = _direction_vector(inc_to, azi_to)
+    t = np.linspace(0.0, 1.0, 50)
+
+    rod = _rodrigues_directions(d_from, d_to, t)
+    slp = _slerp_directions(d_from, d_to, t)
+
+    np.testing.assert_allclose(rod, slp, atol=1e-10)
+
+
+def test_rodrigues_matches_slerp_build_segment_stations() -> None:
+    """Full MCM pipeline must give identical positions for both methods."""
+    kwargs = dict(
+        inc_from_deg=25.0, inc_to_deg=70.0, dls_deg_per_30m=4.0,
+        azi_deg=15.0, azi_to_deg=55.0, name="BUILD2",
+    )
+    seg_rod = BuildSegment(**kwargs, interpolation_method=INTERPOLATION_RODRIGUES)
+    seg_slp = BuildSegment(**kwargs, interpolation_method=INTERPOLATION_SLERP)
+    origin = Point3D(0.0, 0.0, 0.0)
+
+    st_rod = compute_positions_min_curv(seg_rod.generate(0.0, 1.0), start=origin)
+    st_slp = compute_positions_min_curv(seg_slp.generate(0.0, 1.0), start=origin)
+
+    np.testing.assert_allclose(
+        st_rod[["N_m", "E_m", "TVD_m"]].to_numpy(),
+        st_slp[["N_m", "E_m", "TVD_m"]].to_numpy(),
+        atol=1e-6,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rodrigues near-pi stability
+# ---------------------------------------------------------------------------
+
+
+def test_rodrigues_near_pi_dogleg_is_stable() -> None:
+    """Rodrigues must not produce NaN/inf for dogleg close to 180 degrees.
+
+    SLERP divides by sin(theta) which blows up near pi; Rodrigues does not.
+    """
+    d_from = _direction_vector(inc_deg=1.0, azi_deg=0.0)
+    d_to = _direction_vector(inc_deg=179.0, azi_deg=0.0)  # ~178 deg dogleg
+    t = np.linspace(0.0, 1.0, 100)
+
+    result = _rodrigues_directions(d_from, d_to, t)
+
+    assert np.all(np.isfinite(result)), "Rodrigues produced non-finite values near pi"
+    # All vectors must be unit length.
+    norms = np.linalg.norm(result, axis=1)
+    np.testing.assert_allclose(norms, 1.0, atol=1e-10)
+    # Endpoints must match.
+    np.testing.assert_allclose(result[0], d_from / np.linalg.norm(d_from), atol=1e-10)
+    np.testing.assert_allclose(result[-1], d_to / np.linalg.norm(d_to), atol=1e-10)
+
+
+def test_rodrigues_zero_dogleg() -> None:
+    """When start == end, all interpolated directions must equal start."""
+    d = _direction_vector(inc_deg=45.0, azi_deg=120.0)
+    t = np.linspace(0.0, 1.0, 20)
+    result = _rodrigues_directions(d, d, t)
+    for row in result:
+        np.testing.assert_allclose(row, d / np.linalg.norm(d), atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Default method and parameter dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_default_interpolation_method_is_rodrigues() -> None:
+    assert DEFAULT_INTERPOLATION_METHOD == INTERPOLATION_RODRIGUES
+
+
+def test_build_segment_default_uses_rodrigues() -> None:
+    seg = BuildSegment(inc_from_deg=10.0, inc_to_deg=60.0, dls_deg_per_30m=3.0, azi_deg=0.0)
+    assert seg.interpolation_method == INTERPOLATION_RODRIGUES
+
+
+def test_build_segment_slerp_override() -> None:
+    seg = BuildSegment(
+        inc_from_deg=10.0, inc_to_deg=60.0, dls_deg_per_30m=3.0,
+        azi_deg=0.0, interpolation_method=INTERPOLATION_SLERP,
+    )
+    assert seg.interpolation_method == INTERPOLATION_SLERP
+
+
+def test_build_segment_rodrigues_constant_dls() -> None:
+    """Rodrigues-interpolated BUILD must yield constant DLS (same as SLERP test above)."""
+    seg = BuildSegment(
+        inc_from_deg=25.0, inc_to_deg=70.0, dls_deg_per_30m=4.0,
+        azi_deg=15.0, azi_to_deg=55.0, name="BUILD2",
+        interpolation_method=INTERPOLATION_RODRIGUES,
+    )
+    stations = seg.generate(md_start=0.0, md_step_m=1.0)
+    stations = add_dls(compute_positions_min_curv(stations, start=Point3D(0.0, 0.0, 0.0)))
+
+    assert stations["INC_deg"].iloc[0] == pytest.approx(25.0, abs=1e-6)
+    assert stations["INC_deg"].iloc[-1] == pytest.approx(70.0, abs=1e-6)
+    build_dls = stations["DLS_deg_per_30m"].dropna()
+    assert len(build_dls) > 10
+    assert float(build_dls.mean()) == pytest.approx(4.0, rel=0.03)
+
+
+def test_interpolation_constants_match_models() -> None:
+    """Ensure segments.py and models.py interpolation constants stay in sync."""
+    assert INTERPOLATION_SLERP == _models.INTERPOLATION_SLERP
+    assert INTERPOLATION_RODRIGUES == _models.INTERPOLATION_RODRIGUES
+
+
+def test_build_segment_rejects_unknown_interpolation_method() -> None:
+    seg = BuildSegment(
+        inc_from_deg=0.0, inc_to_deg=30.0, dls_deg_per_30m=3.0,
+        azi_deg=90.0, interpolation_method="unknown_method",
+    )
+    with pytest.raises(ValueError, match="Unknown interpolation_method"):
+        seg.generate(md_start=0.0, md_step_m=10.0)
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_single_well.py	5484
@@ -41966,7 +41892,7 @@ def test_build_key_metrics_rows_shows_reference_without_optimization_when_availa
     assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение без оптимизации"] == "0.90 / 0.90 / 0.90 deg/10m"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_uncertainty.py	13946
+===BEGIN_FILE===	tests/test_uncertainty.py	13024
 from __future__ import annotations
 
 import numpy as np
@@ -41981,7 +41907,6 @@ from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
     UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC,
     UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC,
-    fitted_uncertainty_model,
     planning_uncertainty_model_for_preset,
     PlanningUncertaintyModel,
     build_uncertainty_overlay,
@@ -42173,31 +42098,6 @@ def test_uncertainty_presets_are_normalized_and_monotonic() -> None:
 
     assert unknown_inc_m > poor_inc_m
     assert unknown_azi_m > poor_azi_m
-
-
-def test_fitted_uncertainty_model_supports_independent_axis_scaling_and_floors() -> None:
-    base = PlanningUncertaintyModel(
-        sigma_inc_deg=0.30,
-        sigma_azi_deg=0.60,
-        sigma_lateral_drift_m_per_1000m=12.0,
-        confidence_scale=2.0,
-    )
-
-    fitted = fitted_uncertainty_model(
-        base,
-        sigma_inc_scale=0.50,
-        sigma_azi_scale=0.75,
-        sigma_lateral_drift_scale=0.25,
-        confidence_scale_factor=0.80,
-        sigma_inc_floor_deg=0.05,
-        sigma_azi_floor_deg=0.10,
-        sigma_lateral_drift_floor_m_per_1000m=1.5,
-    )
-
-    assert float(fitted.sigma_inc_deg) == pytest.approx(0.20, abs=1e-9)
-    assert float(fitted.sigma_azi_deg) == pytest.approx(0.55, abs=1e-9)
-    assert float(fitted.sigma_lateral_drift_m_per_1000m) == pytest.approx(4.5, abs=1e-9)
-    assert float(fitted.confidence_scale) == pytest.approx(1.6, abs=1e-9)
 
 
 def test_uncertainty_ribbon_and_tube_mesh_are_continuous() -> None:
@@ -45624,7 +45524,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	149152
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	147750
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -45661,7 +45561,6 @@ from pywp.ui_calc_params import (
 )
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
-    UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND,
     planning_uncertainty_model_for_preset,
 )
 from pywp.well_pad import detect_well_pads
@@ -47042,42 +46941,6 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
         str(at.session_state["wt_anticollision_uncertainty_preset"])
         == DEFAULT_UNCERTAINTY_PRESET
     )
-
-
-def test_welltrack_page_shows_custom_actual_fund_uncertainty_preset_when_available() -> (
-    None
-):
-    at = AppTest.from_file("pages/01_trajectory_constructor.py")
-    records = _records()[:2]
-    at.session_state["wt_records"] = records
-    at.session_state["wt_records_original"] = records
-    at.session_state["wt_summary_rows"] = [
-        {"Скважина": "WELL-A", "Статус": "OK"},
-        {"Скважина": "WELL-B", "Статус": "OK"},
-    ]
-    at.session_state["wt_successes"] = [
-        _successful_plan(name="WELL-A", y_offset_m=0.0),
-        _successful_plan(name="WELL-B", y_offset_m=5.0),
-    ]
-    at.session_state["wt_actual_fund_custom_model"] = (
-        planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
-    )
-    at.session_state["wt_anticollision_uncertainty_preset"] = (
-        UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
-    )
-    at.session_state["wt_results_view_mode"] = "Все скважины"
-    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
-
-    at.run(timeout=120)
-
-    preset_widgets = [
-        widget
-        for widget in at.selectbox
-        if widget.label == "Пресет неопределенности для anti-collision"
-    ]
-    assert preset_widgets
-    assert str(preset_widgets[0].value) == UNCERTAINTY_PRESET_CUSTOM_ACTUAL_FUND
-    assert "Пользовательская (по фактическому фонду)" in list(preset_widgets[0].options)
 
 
 def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:
