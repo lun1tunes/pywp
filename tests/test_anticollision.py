@@ -726,7 +726,8 @@ def test_report_merges_adjacent_corridors_into_single_event() -> None:
     assert events[0].merged_corridor_count == 2
     assert rows[0]["Интервал A, м"] == "4200 - 4300"
     assert rows[0]["Интервал B, м"] == "4100 - 4200"
-    assert rows[0]["Смежных зон"] == 2
+    assert "Мин. расстояние, м" in rows[0]
+    assert rows[0]["Мин. расстояние, м"] >= 0.0
 
 
 def test_recommendations_prioritize_target_spacing_for_target_overlap() -> None:

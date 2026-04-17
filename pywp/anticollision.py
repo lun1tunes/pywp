@@ -114,6 +114,7 @@ class AntiCollisionReportEvent:
     md_b_end_m: float
     min_separation_factor: float
     max_overlap_depth_m: float
+    min_center_distance_m: float
     merged_corridor_count: int
 
 
@@ -612,7 +613,7 @@ def anti_collision_report_rows(
                 ),
                 "SF min": float(event.min_separation_factor),
                 "Overlap max, м": float(event.max_overlap_depth_m),
-                "Смежных зон": int(event.merged_corridor_count),
+                "Мин. расстояние, м": float(event.min_center_distance_m),
             }
         )
     return rows
@@ -1483,6 +1484,16 @@ def _corridor_summary_zone(corridor: AntiCollisionCorridor) -> AntiCollisionZone
 def _corridor_to_report_event(
     corridor: AntiCollisionCorridor,
 ) -> AntiCollisionReportEvent:
+    sf_values = np.asarray(corridor.separation_factor_values, dtype=float)
+    overlap_depth_values = np.asarray(corridor.overlap_depth_values_m, dtype=float)
+    # For overlapping points (SF < 1): center_distance = SF * overlap_depth / (1 - SF)
+    # Avoid division by zero by masking SF >= 1 (shouldn't happen for corridor points)
+    safe_mask = sf_values < 0.999999
+    center_distances = np.full_like(sf_values, np.inf)
+    center_distances[safe_mask] = (
+        sf_values[safe_mask] * overlap_depth_values[safe_mask] / (1.0 - sf_values[safe_mask])
+    )
+    min_center_distance_m = float(np.min(center_distances))
     return AntiCollisionReportEvent(
         well_a=str(corridor.well_a),
         well_b=str(corridor.well_b),
@@ -1496,6 +1507,7 @@ def _corridor_to_report_event(
         md_b_end_m=float(corridor.md_b_end_m),
         min_separation_factor=float(np.min(corridor.separation_factor_values)),
         max_overlap_depth_m=float(np.max(corridor.overlap_depth_values_m)),
+        min_center_distance_m=min_center_distance_m,
         merged_corridor_count=1,
     )
 
@@ -1527,6 +1539,15 @@ def _merge_report_event_with_corridor(
     event: AntiCollisionReportEvent,
     corridor: AntiCollisionCorridor,
 ) -> AntiCollisionReportEvent:
+    # Compute min center distance for this corridor
+    sf_values = np.asarray(corridor.separation_factor_values, dtype=float)
+    overlap_depth_values = np.asarray(corridor.overlap_depth_values_m, dtype=float)
+    safe_mask = sf_values < 0.999999
+    center_distances = np.full_like(sf_values, np.inf)
+    center_distances[safe_mask] = (
+        sf_values[safe_mask] * overlap_depth_values[safe_mask] / (1.0 - sf_values[safe_mask])
+    )
+    corridor_min_center_distance = float(np.min(center_distances))
     return AntiCollisionReportEvent(
         well_a=event.well_a,
         well_b=event.well_b,
@@ -1545,6 +1566,10 @@ def _merge_report_event_with_corridor(
         max_overlap_depth_m=max(
             float(event.max_overlap_depth_m),
             float(np.max(corridor.overlap_depth_values_m)),
+        ),
+        min_center_distance_m=min(
+            float(event.min_center_distance_m),
+            corridor_min_center_distance,
         ),
         merged_corridor_count=int(event.merged_corridor_count) + 1,
     )

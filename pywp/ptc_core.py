@@ -4692,8 +4692,8 @@ def _render_anticollision_panel(
                 "Overlap max, м",
                 format="%.2f",
             ),
-            "Смежных зон": st.column_config.NumberColumn(
-                "Смежных зон", format="%d"
+            "Мин. расстояние, м": st.column_config.NumberColumn(
+                "Мин. расстояние, м", format="%.2f"
             ),
         },
     )
@@ -8222,7 +8222,7 @@ def _report_rows_from_recommendations(
                 ),
                 "SF min": float(item.min_separation_factor),
                 "Overlap max, м": float(item.max_overlap_depth_m),
-                "Смежных зон": 1,
+                "Мин. расстояние, м": float(item.min_center_distance_m),
             }
         )
     return rows
@@ -9340,6 +9340,31 @@ def _render_batch_log() -> None:
     render_run_log_panel(st.session_state.get("wt_last_run_log_lines"))
 
 
+def _build_batch_survey_csv(
+    successes: list[SuccessfulWellPlan],
+) -> bytes:
+    """Build combined CSV with inclinometry data for all successful wells."""
+    if not successes:
+        return b""
+    frames: list[pd.DataFrame] = []
+    for success in successes:
+        stations = success.stations.copy()
+        if stations.empty:
+            continue
+        stations.insert(0, "well_name", str(success.name))
+        if "DLS_deg_per_30m" in stations.columns:
+            from pywp.ui_utils import dls_to_pi
+            stations["PI_deg_per_10m"] = dls_to_pi(
+                stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+            )
+            stations = stations.drop(columns=["DLS_deg_per_30m"])
+        frames.append(stations)
+    if not frames:
+        return b""
+    combined = pd.concat(frames, ignore_index=True)
+    return combined.to_csv(index=False).encode("utf-8")
+
+
 def _render_batch_summary(
     summary_rows: list[dict[str, object]],
 ) -> pd.DataFrame:
@@ -9471,14 +9496,28 @@ def _render_batch_summary(
             ),
         },
     )
-    st.download_button(
-        "Скачать сводку (CSV)",
-        data=display_df.to_csv(index=False).encode("utf-8"),
-        file_name="welltrack_summary.csv",
-        mime="text/csv",
-        icon=":material/download:",
-        width="content",
-    )
+    btn_cols = st.columns([1, 1])
+    with btn_cols[0]:
+        st.download_button(
+            "Скачать сводку (CSV)",
+            data=display_df.to_csv(index=False).encode("utf-8"),
+            file_name="welltrack_summary.csv",
+            mime="text/csv",
+            icon=":material/download:",
+            use_container_width=True,
+        )
+    with btn_cols[1]:
+        successes = st.session_state.get("wt_successes") or []
+        survey_data = _build_batch_survey_csv(successes)
+        st.download_button(
+            "Скачать инклинометрию (CSV)",
+            data=survey_data or b"",
+            file_name="welltrack_survey_all.csv",
+            mime="text/csv",
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not survey_data,
+        )
     return summary_df
 
 

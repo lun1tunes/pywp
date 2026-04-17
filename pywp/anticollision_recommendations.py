@@ -86,6 +86,7 @@ class AntiCollisionRecommendation:
     md_b_end_m: float
     min_separation_factor: float
     max_overlap_depth_m: float
+    min_center_distance_m: float
     required_spacing_t1_m: float | None = None
     required_spacing_t3_m: float | None = None
 
@@ -163,6 +164,7 @@ def anti_collision_recommendation_rows(
                 "Интервал B, м": _md_interval_label(item.md_b_start_m, item.md_b_end_m),
                 "SF min": float(item.min_separation_factor),
                 "Overlap max, м": float(item.max_overlap_depth_m),
+                "Мин. расстояние, м": float(item.min_center_distance_m),
                 "Spacing t1, м": _nullable_float(item.required_spacing_t1_m),
                 "Spacing t3, м": _nullable_float(item.required_spacing_t3_m),
                 "Ожидаемый маневр": item.expected_maneuver,
@@ -408,6 +410,7 @@ def _build_single_recommendation(
             md_b_end_m=float(event.md_b_end_m),
             min_separation_factor=float(event.min_separation_factor),
             max_overlap_depth_m=float(event.max_overlap_depth_m),
+            min_center_distance_m=float(event.min_center_distance_m),
             required_spacing_t1_m=spacing_t1_m,
             required_spacing_t3_m=spacing_t3_m,
         )
@@ -517,6 +520,7 @@ def _build_single_recommendation(
             md_b_end_m=float(event.md_b_end_m),
             min_separation_factor=float(event.min_separation_factor),
             max_overlap_depth_m=float(event.max_overlap_depth_m),
+            min_center_distance_m=float(event.min_center_distance_m),
         )
 
     movable_well = _select_movable_well_for_trajectory_event(
@@ -580,6 +584,7 @@ def _build_single_recommendation(
             md_b_end_m=float(event.md_b_end_m),
             min_separation_factor=float(event.min_separation_factor),
             max_overlap_depth_m=float(event.max_overlap_depth_m),
+            min_center_distance_m=float(event.min_center_distance_m),
         )
     if movable_well is not None:
         secondary_well = (
@@ -643,6 +648,7 @@ def _build_single_recommendation(
             md_b_end_m=float(event.md_b_end_m),
             min_separation_factor=float(event.min_separation_factor),
             max_overlap_depth_m=float(event.max_overlap_depth_m),
+            min_center_distance_m=float(event.min_center_distance_m),
         )
 
     return AntiCollisionRecommendation(
@@ -671,6 +677,7 @@ def _build_single_recommendation(
         md_b_end_m=float(event.md_b_end_m),
         min_separation_factor=float(event.min_separation_factor),
         max_overlap_depth_m=float(event.max_overlap_depth_m),
+        min_center_distance_m=float(event.min_center_distance_m),
     )
 
 

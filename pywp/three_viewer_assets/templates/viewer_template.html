@@ -158,21 +158,6 @@
         flex: 1;
       }
 
-      .legend-header-action {
-        font-size: 11px;
-        color: #2563eb;
-        background: none;
-        border: none;
-        cursor: pointer;
-        padding: 0;
-        font-weight: 600;
-        flex-shrink: 0;
-      }
-
-      .legend-header-action:hover {
-        text-decoration: underline;
-      }
-
       .legend-collapse-btn {
         background: none;
         border: none;
@@ -943,20 +928,6 @@
           title.textContent = "Legend";
           header.appendChild(title);
 
-          var treeActionBtn = null;
-          if (hasTreeLegend) {
-            treeActionBtn = document.createElement("button");
-            treeActionBtn.type = "button";
-            treeActionBtn.className = "legend-header-action";
-            treeActionBtn.textContent = legendTreeExpanded ? "Свернуть всё" : "Развернуть всё";
-            treeActionBtn.addEventListener("click", function (e) {
-              e.stopPropagation();
-              legendTreeExpanded = !legendTreeExpanded;
-              syncLegendVisibility();
-            });
-            header.appendChild(treeActionBtn);
-          }
-
           const collapseBtn = document.createElement("button");
           collapseBtn.className = "legend-collapse-btn";
           collapseBtn.textContent = "\u25BC";
@@ -979,7 +950,7 @@
             var panelStartTop = 0;
 
             header.addEventListener("pointerdown", function (e) {
-              if (e.target === collapseBtn || e.target === treeActionBtn) return;
+              if (e.target === collapseBtn) return;
               dragging = true;
               startX = e.clientX;
               startY = e.clientY;
