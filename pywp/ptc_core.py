@@ -30,6 +30,7 @@ from pywp.actual_fund_analysis import (
 )
 from pywp.anticollision import (
     AntiCollisionAnalysis,
+    AntiCollisionZone,
     anti_collision_method_caption,
     anti_collision_report_rows,
     collision_corridor_plan_polygon,
@@ -2044,33 +2045,66 @@ def _anticollision_three_payload_overrides(
         well_bounds_by_name=well_bounds_by_name,
         name_to_color=name_to_color,
     )
-    collisions = []
-    for idx, zone in enumerate(analysis.zones):
-        from pywp.anticollision import _segment_types_for_interval
+    from pywp.anticollision import (
+        _segment_types_for_interval,
+        anti_collision_report_events,
+    )
 
+    events = anti_collision_report_events(analysis)
+    # Build a lookup: (well_a, well_b) -> list of zones for hotspot resolution
+    zone_lookup: dict[tuple[str, str], list[AntiCollisionZone]] = {}
+    for zone in analysis.zones:
+        key = (str(zone.well_a), str(zone.well_b))
+        zone_lookup.setdefault(key, []).append(zone)
+
+    collisions = []
+    for idx, event in enumerate(events):
         segment_a = _segment_types_for_interval(
             analysis,
-            str(zone.well_a),
-            float(zone.md_a_m) - 50,
-            float(zone.md_a_m) + 50,
+            str(event.well_a),
+            float(event.md_a_start_m),
+            float(event.md_a_end_m),
         )
         segment_b = _segment_types_for_interval(
             analysis,
-            str(zone.well_b),
-            float(zone.md_b_m) - 50,
-            float(zone.md_b_m) + 50,
+            str(event.well_b),
+            float(event.md_b_start_m),
+            float(event.md_b_end_m),
+        )
+        # Pick hotspot from the zone with worst SF within this event's MD range
+        candidate_zones = zone_lookup.get(
+            (str(event.well_a), str(event.well_b)), []
+        )
+        best_zone = None
+        for zone in candidate_zones:
+            if (
+                float(zone.md_a_m) >= float(event.md_a_start_m) - 1.0
+                and float(zone.md_a_m) <= float(event.md_a_end_m) + 1.0
+                and float(zone.md_b_m) >= float(event.md_b_start_m) - 1.0
+                and float(zone.md_b_m) <= float(event.md_b_end_m) + 1.0
+            ):
+                if best_zone is None or float(zone.separation_factor) < float(
+                    best_zone.separation_factor
+                ):
+                    best_zone = zone
+        if best_zone is None and candidate_zones:
+            best_zone = min(
+                candidate_zones, key=lambda z: float(z.separation_factor)
+            )
+        hotspot = (
+            list(best_zone.hotspot_xyz) if best_zone is not None else [0.0, 0.0, 0.0]
         )
         collisions.append(
             {
-                "id": f"collision::{zone.well_a}::{zone.well_b}::{idx}",
-                "well_a": str(zone.well_a),
-                "well_b": str(zone.well_b),
-                "label": f"{zone.well_a} ↔ {zone.well_b}",
-                "classification": str(zone.classification),
-                "priority_rank": int(zone.priority_rank),
-                "hotspot": list(zone.hotspot_xyz),
-                "separation_factor": float(zone.separation_factor),
-                "center_distance_m": float(zone.center_distance_m),
+                "id": f"collision::{event.well_a}::{event.well_b}::{idx}",
+                "well_a": str(event.well_a),
+                "well_b": str(event.well_b),
+                "label": f"{event.well_a} ↔ {event.well_b}",
+                "classification": str(event.classification),
+                "priority_rank": int(event.priority_rank),
+                "hotspot": hotspot,
+                "separation_factor": float(event.min_separation_factor),
+                "center_distance_m": float(event.min_center_distance_m),
                 "segment_a": segment_a,
                 "segment_b": segment_b,
             }
