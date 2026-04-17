@@ -74,6 +74,7 @@ from pywp.anticollision_rerun import (
 from pywp.constants import SMALL
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
+    WelltrackPoint,
     WelltrackRecord,
     decode_welltrack_bytes,
     parse_welltrack_points_table,
@@ -1843,6 +1844,7 @@ def _augment_three_payload(
     focus_targets: Mapping[str, dict[str, list[float]]] | None = None,
     hidden_flat_legend_labels: set[str] | None = None,
     collisions: list[dict[str, object]] | None = None,
+    edit_wells: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     updated = dict(payload)
     if legend_tree:
@@ -1862,6 +1864,8 @@ def _augment_three_payload(
         ]
     if collisions is not None:
         updated["collisions"] = list(collisions)
+    if edit_wells is not None:
+        updated["edit_wells"] = list(edit_wells)
     return updated
 
 
@@ -1958,6 +1962,7 @@ def _render_plotly_or_three_3d(
                     )
                 ),
                 collisions=payload_overrides.get("collisions"),
+                edit_wells=payload_overrides.get("edit_wells"),
             )
         with container:
             render_local_three_scene(
@@ -1973,6 +1978,47 @@ def _render_plotly_or_three_3d(
         config=trajectory_plotly_chart_config(),
         width="stretch",
     )
+
+
+def _build_edit_wells_payload(
+    successes: list[SuccessfulWellPlan],
+    name_to_color: Mapping[str, str],
+) -> list[dict[str, object]]:
+    edit_wells: list[dict[str, object]] = []
+    for success in successes:
+        config = success.config
+        edit_wells.append(
+            {
+                "name": str(success.name),
+                "surface": [
+                    float(success.surface.x),
+                    float(success.surface.y),
+                    float(success.surface.z),
+                ],
+                "t1": [
+                    float(success.t1.x),
+                    float(success.t1.y),
+                    float(success.t1.z),
+                ],
+                "t3": [
+                    float(success.t3.x),
+                    float(success.t3.y),
+                    float(success.t3.z),
+                ],
+                "color": str(
+                    name_to_color.get(str(success.name), "#2563eb")
+                ),
+                "config": {
+                    "entry_inc_target_deg": float(config.entry_inc_target_deg),
+                    "max_inc_deg": float(config.max_inc_deg),
+                    "dls_build_max_deg_per_30m": float(
+                        config.dls_build_max_deg_per_30m
+                    ),
+                    "kop_min_vertical_m": float(config.kop_min_vertical_m),
+                },
+            }
+        )
+    return edit_wells
 
 
 def _trajectory_three_payload_overrides(
@@ -2001,6 +2047,7 @@ def _trajectory_three_payload_overrides(
         "legend_tree": legend_tree,
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
+        "edit_wells": _build_edit_wells_payload(successes, name_to_color),
     }
 
 
@@ -2906,6 +2953,79 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_anticollision_resolution", None)
     st.session_state.setdefault("wt_last_anticollision_previous_successes", {})
     st.session_state.setdefault("wt_anticollision_analysis_cache", {})
+    _apply_edit_targets_from_query_params()
+
+
+def _apply_edit_targets_from_query_params() -> None:
+    import json as _json
+
+    params = st.query_params
+    raw = params.get("edit_targets", "")
+    if not raw:
+        return
+    # Clear the query param so it doesn't persist
+    try:
+        del params["edit_targets"]
+    except Exception:
+        pass
+    try:
+        changes = _json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    if not isinstance(changes, list) or not changes:
+        return
+    records = st.session_state.get("wt_records")
+    if not records:
+        return
+    change_map: dict[str, dict[str, list[float]]] = {}
+    for entry in changes:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        t1 = entry.get("t1")
+        t3 = entry.get("t3")
+        if name and isinstance(t1, list) and isinstance(t3, list):
+            change_map[name] = {"t1": t1, "t3": t3}
+    if not change_map:
+        return
+    updated_records: list[WelltrackRecord] = []
+    updated_names: list[str] = []
+    for record in records:
+        if str(record.name) not in change_map:
+            updated_records.append(record)
+            continue
+        delta = change_map[str(record.name)]
+        new_t1 = delta["t1"]
+        new_t3 = delta["t3"]
+        if len(record.points) != 3 or len(new_t1) < 3 or len(new_t3) < 3:
+            updated_records.append(record)
+            continue
+        old_points = record.points
+        new_points = (
+            old_points[0],
+            WelltrackPoint(
+                x=float(new_t1[0]),
+                y=float(new_t1[1]),
+                z=float(new_t1[2]),
+                md=float(old_points[1].md),
+            ),
+            WelltrackPoint(
+                x=float(new_t3[0]),
+                y=float(new_t3[1]),
+                z=float(new_t3[2]),
+                md=float(old_points[2].md),
+            ),
+        )
+        updated_records.append(
+            WelltrackRecord(name=record.name, points=new_points)
+        )
+        updated_names.append(str(record.name))
+    if updated_names:
+        st.session_state["wt_records"] = updated_records
+        st.session_state["wt_edit_targets_applied"] = updated_names
+        # Clear stale calculation results so old trajectories don't conflict
+        st.session_state["wt_successes"] = None
+        st.session_state["wt_summary_rows"] = None
 
 
 def _clear_results() -> None:

@@ -746,6 +746,13 @@ def run_page() -> None:
     )
 
     _render_ptc_import_section()
+    _edit_applied = st.session_state.pop("wt_edit_targets_applied", None)
+    if _edit_applied:
+        st.toast(
+            f"Цели обновлены из 3D-редактора: {', '.join(_edit_applied)}. "
+            "Запустите пересчёт для уточнения траекторий.",
+            icon="✎",
+        )
     records = st.session_state.get("wt_records")
     if records is None:
         st.info("Загрузите цели и нажмите «Импорт целей».")

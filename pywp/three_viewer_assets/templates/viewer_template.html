@@ -518,15 +518,131 @@
           monospace;
         color: #111827;
       }
+
+      /* --- Edit mode --- */
+      .toolbar-btn.is-active {
+        background: #2563eb;
+        color: #ffffff;
+        border-color: #1d4ed8;
+      }
+
+      .toolbar-btn.is-active:hover {
+        background: #1d4ed8;
+      }
+
+      #edit-plane-selector {
+        display: none;
+        position: absolute;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 6;
+        background: rgba(255,255,255,0.97);
+        border-radius: 10px;
+        box-shadow: 0 6px 18px rgba(15,23,42,0.10);
+        padding: 4px;
+        gap: 2px;
+      }
+
+      #edit-plane-selector.is-visible {
+        display: flex;
+      }
+
+      .plane-btn {
+        border: 1px solid transparent;
+        background: transparent;
+        color: #475569;
+        border-radius: 8px;
+        padding: 5px 12px;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .plane-btn:hover {
+        background: rgba(37,99,235,0.06);
+      }
+
+      .plane-btn.is-active {
+        background: #2563eb;
+        color: #ffffff;
+        border-color: #1d4ed8;
+      }
+
+      #edit-save-btn {
+        display: none;
+        position: absolute;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 6;
+        border: 1px solid #16a34a;
+        background: #22c55e;
+        color: #ffffff;
+        border-radius: 10px;
+        padding: 8px 20px;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: 0 6px 18px rgba(22,163,74,0.25);
+        transition: all 0.15s ease;
+      }
+
+      #edit-save-btn:hover {
+        background: #16a34a;
+      }
+
+      #edit-save-btn.is-visible {
+        display: block;
+      }
+
+      #edit-warning-toast {
+        display: none;
+        position: absolute;
+        bottom: 54px;
+        right: 14px;
+        z-index: 6;
+        max-width: 280px;
+        background: rgba(255,255,255,0.97);
+        border-left: 3px solid #f59e0b;
+        border-radius: 8px;
+        box-shadow: 0 6px 18px rgba(15,23,42,0.10);
+        padding: 10px 14px;
+        font-size: 11px;
+        line-height: 1.45;
+        color: #475569;
+        pointer-events: none;
+      }
+
+      #edit-warning-toast.is-visible {
+        display: block;
+        animation: fadeInUp 0.3s ease;
+      }
+
+      @keyframes fadeInUp {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
     </style>
   </head>
   <body>
     <div id="root">
       <div id="toolbar-left">
         <button id="fit-camera-btn" class="toolbar-btn" type="button" title="Подогнать сцену под кадр">Fit</button>
+        <button id="edit-targets-btn" class="toolbar-btn" type="button" title="Изменить цели t1/t3" style="display:none">✎ Цели</button>
       </div>
       <div id="toolbar-right">
         <button id="fullscreen-btn" class="toolbar-btn" type="button" title="Развернуть на весь экран">⛶</button>
+      </div>
+      <div id="edit-plane-selector">
+        <button class="plane-btn is-active" data-plane="depth" type="button">По глубине</button>
+        <button class="plane-btn" data-plane="x" type="button">Вдоль 0X</button>
+        <button class="plane-btn" data-plane="y" type="button">Вдоль 0Y</button>
+      </div>
+      <button id="edit-save-btn" type="button">Сохранить изменения</button>
+      <div id="edit-warning-toast">
+        ⚠ Для скорректированных скважин показана предварительная траектория — для уточнения требуется пересчёт.
       </div>
       <div id="legend-toggle-wrap">
         <button id="legend-toggle-btn" class="toolbar-btn" type="button" title="Свернуть или развернуть легенду">Legend</button>
@@ -542,6 +658,9 @@
     </script>
     <script>
       __ORBIT_CONTROLS__
+    </script>
+    <script>
+      __FAST_REPLAN__
     </script>
     <script id="scene-payload" type="application/json">
       __SCENE_PAYLOAD__
@@ -1647,6 +1766,299 @@
         if (fullscreenButton) {
           fullscreenButton.addEventListener("click", enterFullscreen);
         }
+
+        // =====================================================================
+        // Interactive target editing
+        // =====================================================================
+        const editWells = Array.isArray(payload.edit_wells) ? payload.edit_wells : [];
+        const editTargetsBtn = document.getElementById("edit-targets-btn");
+        const editPlaneSelector = document.getElementById("edit-plane-selector");
+        const editSaveBtn = document.getElementById("edit-save-btn");
+        const editWarningToast = document.getElementById("edit-warning-toast");
+
+        if (editWells.length > 0 && editTargetsBtn) {
+          editTargetsBtn.style.display = "";
+        }
+
+        let editModeActive = false;
+        let editPlane = "depth"; // "depth" | "x" | "y"
+        const editHandles = []; // {mesh, wellIndex, pointType, dataPos[3]}
+        const editReplanners = []; // FastReplan per well
+        const editLineObjects = []; // THREE.LineSegments per well for preview
+        const editOriginalT1 = []; // original t1 [x,y,z] per well
+        const editOriginalT3 = []; // original t3 [x,y,z] per well
+        const editCurrentT1 = []; // current (dragged) t1 per well
+        const editCurrentT3 = []; // current (dragged) t3 per well
+        const editDirtyFlags = []; // boolean per well
+        let editDragHandle = null;
+        let editDragPlane = null; // THREE.Plane for constrained drag
+        let editDragOffset = new THREE.Vector3();
+        let editHasAnyChange = false;
+
+        function initEditHandles() {
+          const handleGeometry = new THREE.SphereGeometry(1.0, 16, 12);
+          editWells.forEach((well, idx) => {
+            const surface = well.surface || [0, 0, 0];
+            const t1 = well.t1 || [0, 0, 0];
+            const t3 = well.t3 || [0, 0, 0];
+            const color = well.color || "#2563eb";
+            const config = well.config || {};
+
+            editOriginalT1.push(t1.slice());
+            editOriginalT3.push(t3.slice());
+            editCurrentT1.push(t1.slice());
+            editCurrentT3.push(t3.slice());
+            editDirtyFlags.push(false);
+
+            // Create FastReplan instance
+            editReplanners.push(new FastReplan({
+              surface: surface,
+              config: {
+                entryIncTargetDeg: config.entry_inc_target_deg || 86,
+                maxIncDeg: config.max_inc_deg || 95,
+                dlsBuildMaxDegPer30m: config.dls_build_max_deg_per_30m || 3.0,
+                kopMinVerticalM: config.kop_min_vertical_m || 550,
+                mdStepM: 30,
+              },
+            }));
+
+            // t1 handle
+            const t1Mat = new THREE.MeshBasicMaterial({
+              color: color,
+              transparent: true,
+              opacity: 0.85,
+              depthTest: true,
+            });
+            const t1Mesh = new THREE.Mesh(handleGeometry, t1Mat);
+            t1Mesh.position.copy(displayPoint(t1));
+            t1Mesh.visible = false;
+            t1Mesh.renderOrder = 10;
+            scene.add(t1Mesh);
+            editHandles.push({
+              mesh: t1Mesh,
+              wellIndex: idx,
+              pointType: "t1",
+              dataPos: t1.slice(),
+            });
+
+            // t3 handle
+            const t3Mat = new THREE.MeshBasicMaterial({
+              color: color,
+              transparent: true,
+              opacity: 0.85,
+              depthTest: true,
+            });
+            const t3Mesh = new THREE.Mesh(handleGeometry, t3Mat);
+            t3Mesh.position.copy(displayPoint(t3));
+            t3Mesh.visible = false;
+            t3Mesh.renderOrder = 10;
+            scene.add(t3Mesh);
+            editHandles.push({
+              mesh: t3Mesh,
+              wellIndex: idx,
+              pointType: "t3",
+              dataPos: t3.slice(),
+            });
+
+            // Preview line (initially empty, hidden)
+            const lineGeometry = new THREE.BufferGeometry();
+            const lineMaterial = new THREE.LineBasicMaterial({
+              color: color,
+              transparent: true,
+              opacity: 0.6,
+              linewidth: 1,
+            });
+            const lineObj = new THREE.LineSegments(lineGeometry, lineMaterial);
+            lineObj.visible = false;
+            lineObj.renderOrder = 9;
+            scene.add(lineObj);
+            editLineObjects.push(lineObj);
+          });
+        }
+
+        function updateHandleScales() {
+          const handleScale = Math.max(maxSpan * 0.012, 12.0);
+          editHandles.forEach((h) => {
+            h.mesh.scale.setScalar(handleScale);
+          });
+        }
+
+        function setEditMode(active) {
+          editModeActive = active;
+          editTargetsBtn.classList.toggle("is-active", active);
+          editPlaneSelector.classList.toggle("is-visible", active);
+          editHandles.forEach((h) => {
+            h.mesh.visible = active;
+          });
+          if (!active) {
+            editSaveBtn.classList.remove("is-visible");
+            editWarningToast.classList.remove("is-visible");
+            editLineObjects.forEach((lo) => { lo.visible = false; });
+          }
+          updateHandleScales();
+          requestRender();
+        }
+
+        function setEditPlane(plane) {
+          editPlane = plane;
+          editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
+            btn.classList.toggle("is-active", btn.dataset.plane === plane);
+          });
+        }
+
+        function rebuildPreviewTrajectory(wellIndex) {
+          const replanner = editReplanners[wellIndex];
+          const t1 = editCurrentT1[wellIndex];
+          const t3 = editCurrentT3[wellIndex];
+          const pts = replanner.compute(t1, t3);
+          updateLineGeometry(editLineObjects[wellIndex], pts, Z_DISPLAY_SIGN);
+          editLineObjects[wellIndex].visible = true;
+        }
+
+        function showEditFeedback() {
+          editHasAnyChange = editDirtyFlags.some(Boolean);
+          editSaveBtn.classList.toggle("is-visible", editHasAnyChange);
+          editWarningToast.classList.toggle("is-visible", editHasAnyChange);
+        }
+
+        function buildEditDragPlane(handle) {
+          // Build a THREE.Plane for the drag constraint
+          const pos = handle.mesh.position.clone();
+          if (editPlane === "depth") {
+            // Constrain to camera view plane projected along Z
+            const camDir = camera.getWorldDirection(new THREE.Vector3());
+            const flatDir = new THREE.Vector3(camDir.x, camDir.y, 0);
+            if (flatDir.length() < 0.01) {
+              return new THREE.Plane(new THREE.Vector3(0, 1, 0), -pos.y);
+            }
+            flatDir.normalize();
+            const normal = new THREE.Vector3(-flatDir.y, flatDir.x, 0).normalize();
+            return new THREE.Plane(normal, -normal.dot(pos));
+          } else if (editPlane === "x") {
+            // Constrain to XZ plane (Y = const)
+            return new THREE.Plane(new THREE.Vector3(0, 1, 0), -pos.y);
+          } else {
+            // Constrain to YZ plane (X = const)
+            return new THREE.Plane(new THREE.Vector3(1, 0, 0), -pos.x);
+          }
+        }
+
+        function getIntersection(event, plane) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          const mouse = new THREE.Vector2(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1,
+          );
+          const ray = new THREE.Raycaster();
+          ray.setFromCamera(mouse, camera);
+          const target = new THREE.Vector3();
+          return ray.ray.intersectPlane(plane, target);
+        }
+
+        function onEditPointerDown(event) {
+          if (!editModeActive) return;
+          const rect = renderer.domElement.getBoundingClientRect();
+          const mouse = new THREE.Vector2(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1,
+          );
+          const ray = new THREE.Raycaster();
+          ray.setFromCamera(mouse, camera);
+          const meshes = editHandles.map((h) => h.mesh);
+          const hits = ray.intersectObjects(meshes, false);
+          if (!hits.length) return;
+          const hitMesh = hits[0].object;
+          const handle = editHandles.find((h) => h.mesh === hitMesh);
+          if (!handle) return;
+          event.preventDefault();
+          event.stopPropagation();
+          controls.enabled = false;
+          editDragHandle = handle;
+          editDragPlane = buildEditDragPlane(handle);
+          const intersection = getIntersection(event, editDragPlane);
+          if (intersection) {
+            editDragOffset.copy(handle.mesh.position).sub(intersection);
+          }
+          renderer.domElement.setPointerCapture(event.pointerId);
+        }
+
+        function onEditPointerMove(event) {
+          if (!editDragHandle || !editDragPlane) return;
+          const intersection = getIntersection(event, editDragPlane);
+          if (!intersection) return;
+          const newPos = intersection.add(editDragOffset);
+          editDragHandle.mesh.position.copy(newPos);
+          // Convert display coords back to data coords
+          const dataX = newPos.x;
+          const dataY = newPos.y;
+          const dataZ = newPos.z * Z_DISPLAY_SIGN;
+          editDragHandle.dataPos = [dataX, dataY, dataZ];
+          const wi = editDragHandle.wellIndex;
+          if (editDragHandle.pointType === "t1") {
+            editCurrentT1[wi] = [dataX, dataY, dataZ];
+          } else {
+            editCurrentT3[wi] = [dataX, dataY, dataZ];
+          }
+          editDirtyFlags[wi] = true;
+          rebuildPreviewTrajectory(wi);
+          showEditFeedback();
+          requestRender();
+        }
+
+        function onEditPointerUp(event) {
+          if (!editDragHandle) return;
+          controls.enabled = true;
+          editDragHandle = null;
+          editDragPlane = null;
+          renderer.domElement.releasePointerCapture(event.pointerId);
+        }
+
+        function onEditSave() {
+          // Collect changes
+          const changes = [];
+          editWells.forEach((well, idx) => {
+            if (!editDirtyFlags[idx]) return;
+            changes.push({
+              name: well.name,
+              t1: editCurrentT1[idx].map((v) => Math.round(v * 100) / 100),
+              t3: editCurrentT3[idx].map((v) => Math.round(v * 100) / 100),
+            });
+          });
+          if (changes.length === 0) return;
+          // Visual feedback
+          editSaveBtn.textContent = "✓ Сохранено";
+          editSaveBtn.style.background = "#16a34a";
+          // Navigate parent to current URL with edit_targets query param
+          try {
+            const encoded = encodeURIComponent(JSON.stringify(changes));
+            const parentUrl = new URL(window.parent.location.href);
+            parentUrl.searchParams.set("edit_targets", encoded);
+            window.parent.location.href = parentUrl.toString();
+          } catch (e) {
+            // Fallback: copy to clipboard
+            try {
+              navigator.clipboard.writeText(JSON.stringify(changes, null, 2));
+              editSaveBtn.textContent = "Скопировано в буфер";
+            } catch (e2) { /* ignore */ }
+          }
+        }
+
+        if (editWells.length > 0) {
+          initEditHandles();
+          editTargetsBtn.addEventListener("click", () => {
+            setEditMode(!editModeActive);
+          });
+          editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              setEditPlane(btn.dataset.plane);
+            });
+          });
+          editSaveBtn.addEventListener("click", onEditSave);
+          renderer.domElement.addEventListener("pointerdown", onEditPointerDown);
+          renderer.domElement.addEventListener("pointermove", onEditPointerMove);
+          renderer.domElement.addEventListener("pointerup", onEditPointerUp);
+        }
+
         resize();
         fitCamera();
         syncLegendVisibility();

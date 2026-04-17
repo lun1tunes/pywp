@@ -35,11 +35,16 @@ def _orbit_controls_text() -> str:
     return _read_text_with_mtime(_VENDOR_DIR / "OrbitControls.js")
 
 
+def _fast_replan_text() -> str:
+    return _read_text_with_mtime(_ASSETS_DIR / "fast_replan.js")
+
+
 def _viewer_template_with_libraries() -> str:
     return (
         _viewer_template_text()
         .replace("__THREE_LIBRARY__", _three_library_text())
         .replace("__ORBIT_CONTROLS__", _orbit_controls_text())
+        .replace("__FAST_REPLAN__", _fast_replan_text())
     )
 
 

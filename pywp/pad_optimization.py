@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 from time import perf_counter
 
 import numpy as np
 
-from pywp.anticollision import AntiCollisionAnalysis
-from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    AntiCollisionWell,
+    analyze_anti_collision,
+    build_anti_collision_well,
+)
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import TrajectoryConfig
 from pywp.planner import TrajectoryPlanner
-from pywp.reference_trajectories import ImportedTrajectoryWell
+from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_KIND_COLORS
 from pywp.uncertainty import PlanningUncertaintyModel
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -100,16 +106,57 @@ def score_analysis(
     return float(min(pad_sfs)) + 0.001 * float(np.mean(pad_sfs))
 
 
-def _build_analysis(
-    successes: dict[str, SuccessfulWellPlan],
-    uncertainty_model: PlanningUncertaintyModel,
-    reference_wells: tuple[ImportedTrajectoryWell, ...],
-) -> AntiCollisionAnalysis:
-    return build_anti_collision_analysis_for_successes(
-        tuple(successes.values()),
-        model=uncertainty_model,
-        reference_wells=reference_wells,
+# ---------------------------------------------------------------------------
+#  Lightweight AC-well builder (no display geometry — fast).
+# ---------------------------------------------------------------------------
+def _build_ac_well_light(
+    success: SuccessfulWellPlan,
+    model: PlanningUncertaintyModel,
+) -> AntiCollisionWell:
+    return build_anti_collision_well(
+        name=success.name,
+        color="#A0A0A0",
+        stations=success.stations,
+        surface=success.surface,
+        t1=success.t1,
+        t3=success.t3,
+        azimuth_deg=float(success.azimuth_deg),
+        md_t1_m=float(success.md_t1_m),
+        model=model,
+        include_display_geometry=False,
+        well_kind="project",
+        is_reference_only=False,
     )
+
+
+def _build_ref_ac_well_light(
+    ref: ImportedTrajectoryWell,
+    model: PlanningUncertaintyModel,
+) -> AntiCollisionWell:
+    return build_anti_collision_well(
+        name=ref.name,
+        color=REFERENCE_WELL_KIND_COLORS.get(str(ref.kind), "#A0A0A0"),
+        stations=ref.stations,
+        surface=ref.surface,
+        t1=None,
+        t3=None,
+        azimuth_deg=float(ref.azimuth_deg),
+        md_t1_m=None,
+        md_t3_m=None,
+        model=model,
+        include_display_geometry=False,
+        well_kind=str(ref.kind),
+        is_reference_only=True,
+    )
+
+
+def _analyze_from_ac_wells(
+    ac_wells: dict[str, AntiCollisionWell],
+    ref_ac_wells: tuple[AntiCollisionWell, ...],
+) -> AntiCollisionAnalysis:
+    """Run pairwise analysis from pre-built AC well objects (no geometry)."""
+    all_wells = list(ac_wells.values()) + list(ref_ac_wells)
+    return analyze_anti_collision(all_wells, build_overlap_geometry=False)
 
 
 def _swap_surfaces_and_recalculate(
@@ -118,6 +165,7 @@ def _swap_surfaces_and_recalculate(
     name_a: str,
     name_b: str,
     config_by_name: dict[str, TrajectoryConfig],
+    pool: ProcessPoolExecutor | None = None,
 ) -> tuple[list[WelltrackRecord], dict[str, SuccessfulWellPlan]] | None:
     """Swap surface points of two wells, recalculate both, return new state or None."""
     g_a = next((i for i, r in enumerate(records) if r.name == name_a), None)
@@ -152,8 +200,16 @@ def _swap_surfaces_and_recalculate(
     if cfg_a is None or cfg_b is None:
         return None
 
-    r_a = recalculate_well(new_records[g_a], cfg_a)
-    r_b = recalculate_well(new_records[g_b], cfg_b)
+    # Parallel trajectory recalculation — the two wells are independent.
+    if pool is not None:
+        future_a = pool.submit(recalculate_well, new_records[g_a], cfg_a)
+        future_b = pool.submit(recalculate_well, new_records[g_b], cfg_b)
+        r_a = future_a.result()
+        r_b = future_b.result()
+    else:
+        r_a = recalculate_well(new_records[g_a], cfg_a)
+        r_b = recalculate_well(new_records[g_b], cfg_b)
+
     if r_a is None or r_b is None:
         return None
 
@@ -193,7 +249,23 @@ def optimize_pad_order(
         return records, success_dict, False
 
     ref_wells = tuple(reference_wells)
-    analysis = _build_analysis(success_dict, uncertainty_model, ref_wells)
+    # Use "forkserver" to avoid deadlocks when forking inside Streamlit's
+    # threaded environment (the default "fork" can copy locked mutexes from
+    # numpy / BLAS threads).
+    _mp_ctx = multiprocessing.get_context("forkserver")
+    pool = ProcessPoolExecutor(max_workers=2, mp_context=_mp_ctx)
+
+    # --- Pre-build lightweight AC wells (no display geometry). ---
+    # Reused across candidates; only swapped wells are rebuilt.
+    ref_ac_wells = tuple(
+        _build_ref_ac_well_light(rw, uncertainty_model) for rw in ref_wells
+    )
+    ac_well_cache: dict[str, AntiCollisionWell] = {
+        name: _build_ac_well_light(success_dict[name], uncertainty_model)
+        for name in success_dict
+    }
+
+    analysis = _analyze_from_ac_wells(ac_well_cache, ref_ac_wells)
     best_score = score_analysis(analysis, pad_names)
 
     best_records = list(records)
@@ -203,71 +275,87 @@ def optimize_pad_order(
 
     progress_callback(0, f"Начальный score: {best_score:.3f}...")
 
-    for iteration in range(1, _MAX_ITERATIONS + 1):
-        analysis = _build_analysis(best_successes, uncertainty_model, ref_wells)
-        actionable = _actionable_pad_zones(analysis, pad_names)
-        if not actionable:
-            break
+    try:
+        for iteration in range(1, _MAX_ITERATIONS + 1):
+            analysis = _analyze_from_ac_wells(ac_well_cache, ref_ac_wells)
+            actionable = _actionable_pad_zones(analysis, pad_names)
+            if not actionable:
+                break
 
-        actionable.sort(key=lambda z: float(z.separation_factor))
+            actionable.sort(key=lambda z: float(z.separation_factor))
 
-        # Try up to _MAX_WORST_ZONES_PER_ITERATION distinct worst-zone pairs.
-        swap_accepted = False
-        seen_pairs_this_iter: set[tuple[str, str]] = set()
+            # Try up to _MAX_WORST_ZONES_PER_ITERATION distinct worst-zone pairs.
+            swap_accepted = False
+            seen_pairs_this_iter: set[tuple[str, str]] = set()
 
-        for zone in actionable[:_MAX_WORST_ZONES_PER_ITERATION]:
-            wa, wb = str(zone.well_a), str(zone.well_b)
-            pair_key = tuple(sorted((wa, wb)))
-            if pair_key in seen_pairs_this_iter:
-                continue
-            seen_pairs_this_iter.add(pair_key)
-
-            progress_callback(
-                int(iteration * 100 / _MAX_ITERATIONS),
-                f"Итерация {iteration}: анализ {wa} ↔ {wb} (SF={float(zone.separation_factor):.3f})...",
-            )
-
-            # Generate all distinct swaps involving wa or wb with any other
-            # pad well whose surface differs.
-            other_names = sorted(pad_names - {wa, wb})
-            swap_candidates: list[tuple[str, str]] = []
-            for other in other_names:
-                swap_candidates.append((wa, other))
-                swap_candidates.append((wb, other))
-            swap_candidates.append((wa, wb))
-
-            best_candidate = None
-            best_candidate_score = best_score
-
-            for name_1, name_2 in swap_candidates:
-                ck = tuple(sorted((name_1, name_2)))
-                if ck in tried_pairs:
+            for zone in actionable[:_MAX_WORST_ZONES_PER_ITERATION]:
+                wa, wb = str(zone.well_a), str(zone.well_b)
+                pair_key = tuple(sorted((wa, wb)))
+                if pair_key in seen_pairs_this_iter:
                     continue
-                tried_pairs.add(ck)
+                seen_pairs_this_iter.add(pair_key)
 
-                result = _swap_surfaces_and_recalculate(
-                    best_records, best_successes, name_1, name_2, config_by_name,
+                progress_callback(
+                    int(iteration * 100 / _MAX_ITERATIONS),
+                    f"Итерация {iteration}: анализ {wa} ↔ {wb} (SF={float(zone.separation_factor):.3f})...",
                 )
-                if result is None:
-                    continue
 
-                cand_records, cand_successes = result
-                cand_analysis = _build_analysis(cand_successes, uncertainty_model, ref_wells)
-                cand_score = score_analysis(cand_analysis, pad_names)
+                # Generate all distinct swaps involving wa or wb with any other
+                # pad well whose surface differs.
+                other_names = sorted(pad_names - {wa, wb})
+                swap_candidates: list[tuple[str, str]] = []
+                for other in other_names:
+                    swap_candidates.append((wa, other))
+                    swap_candidates.append((wb, other))
+                swap_candidates.append((wa, wb))
 
-                if cand_score > best_candidate_score + _IMPROVEMENT_EPS:
-                    best_candidate_score = cand_score
-                    best_candidate = (cand_records, cand_successes)
+                best_candidate = None
+                best_candidate_score = best_score
+                best_candidate_ac_updates: dict[str, AntiCollisionWell] | None = None
 
-            if best_candidate is not None:
-                best_records, best_successes = best_candidate
-                best_score = best_candidate_score
-                swap_accepted = True
-                improved = True
-                break  # restart from updated state
+                for name_1, name_2 in swap_candidates:
+                    ck = tuple(sorted((name_1, name_2)))
+                    if ck in tried_pairs:
+                        continue
+                    tried_pairs.add(ck)
 
-        if not swap_accepted:
-            break
+                    result = _swap_surfaces_and_recalculate(
+                        best_records, best_successes, name_1, name_2, config_by_name,
+                        pool=pool,
+                    )
+                    if result is None:
+                        continue
+
+                    cand_records, cand_successes = result
+
+                    # Incremental AC well update: only rebuild the 2 changed wells.
+                    ac_well_1 = _build_ac_well_light(cand_successes[name_1], uncertainty_model)
+                    ac_well_2 = _build_ac_well_light(cand_successes[name_2], uncertainty_model)
+                    cand_ac_wells = dict(ac_well_cache)
+                    cand_ac_wells[name_1] = ac_well_1
+                    cand_ac_wells[name_2] = ac_well_2
+
+                    cand_analysis = _analyze_from_ac_wells(cand_ac_wells, ref_ac_wells)
+                    cand_score = score_analysis(cand_analysis, pad_names)
+
+                    if cand_score > best_candidate_score + _IMPROVEMENT_EPS:
+                        best_candidate_score = cand_score
+                        best_candidate = (cand_records, cand_successes)
+                        best_candidate_ac_updates = {name_1: ac_well_1, name_2: ac_well_2}
+
+                if best_candidate is not None:
+                    best_records, best_successes = best_candidate
+                    best_score = best_candidate_score
+                    # Update the AC well cache with the accepted swap.
+                    ac_well_cache.update(best_candidate_ac_updates)
+                    swap_accepted = True
+                    improved = True
+                    break  # restart from updated state
+
+            if not swap_accepted:
+                break
+    finally:
+        pool.shutdown(wait=True)
 
     progress_callback(100, f"Готово! Лучший score: {best_score:.3f}")
     return best_records, best_successes, improved
