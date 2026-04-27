@@ -34,7 +34,7 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("hold_length_m", "Длина HOLD, м"),
     ("build1_dls_selected_deg_per_30m", "Выбранный BUILD1 ПИ, deg/10m"),
     ("build2_dls_selected_deg_per_30m", "Выбранный BUILD2 ПИ, deg/10m"),
-    ("horizontal_length_m", "Длина горизонтального ствола, м"),
+    ("horizontal_length_m", "Длина ГС, м"),
     ("kop_md_m", "KOP MD, м"),
     ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
     ("max_inc_actual_deg", "Макс INC фактический, deg"),
@@ -317,7 +317,7 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
             ),
         },
         {
-            "Показатель": "Длина HORIZONTAL",
+            "Показатель": "Длина ГС",
             "Значение": format_distance(float(summary["horizontal_length_m"])),
             "Значение без оптимизации": baseline_value(
                 lambda candidate: format_distance(float(candidate.get("horizontal_length_m", 0.0)))
@@ -590,7 +590,7 @@ def render_result_tables(
             main_rows.insert(
                 5,
                 {
-                    "Показатель": "Горизонтальный отход t1, м",
+                    "Показатель": "Отход t1, м",
                     "Значение": _format_summary_value(
                         "t1_horizontal_offset_m",
                         summary_visible["t1_horizontal_offset_m"],

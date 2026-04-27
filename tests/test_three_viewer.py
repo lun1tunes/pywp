@@ -45,8 +45,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
     assert "function fitCameraToRawBounds(rawBounds)" in html
-    assert '"Свернуть всё"' in html
-    assert '"Развернуть всё"' in html
+    assert "Свернуть / развернуть" in html
     assert "legend-node-btn legend-node-pad" in html
     assert "legend-node-btn legend-node-well" in html
     assert "function ensureCircleMarkerTexture()" in html

@@ -678,9 +678,9 @@ class WelltrackBatchPlanner:
             "Модель траектории": "—",
             "Классификация целей": "—",
             "Сложность": "—",
-            "Горизонтальный отход t1, м": "—",
+            "Отход t1, м": "—",
             "KOP MD, м": "—",
-            "Длина HORIZONTAL, м": "—",
+            "Длина ГС, м": "—",
             "INC в t1, deg": "—",
             "ЗУ HOLD, deg": "—",
             "Макс ПИ, deg/10m": "—",
@@ -987,10 +987,10 @@ class WelltrackBatchPlanner:
                     summary.get("trajectory_target_direction", "—")
                 ),
                 "Сложность": str(summary.get("well_complexity", "—")),
-                "Горизонтальный отход t1, м": f"{t1_offset:.2f}",
+                "Отход t1, м": f"{t1_offset:.2f}",
                 "Мин VERTICAL до KOP, м": f"{float(success.config.kop_min_vertical_m):.2f}",
                 "KOP MD, м": f"{float(summary.get('kop_md_m', 0.0)):.2f}",
-                "Длина HORIZONTAL, м": (
+                "Длина ГС, м": (
                     f"{float(summary.get('horizontal_length_m', 0.0)):.2f}"
                 ),
                 "INC в t1, deg": f"{float(summary.get('entry_inc_deg', 0.0)):.2f}",

@@ -89,7 +89,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
 
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
-    assert int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 10
+    assert int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 11
 
 
 def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
@@ -112,7 +112,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
-        int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 10
+        int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"]) == 11
     )
 
 

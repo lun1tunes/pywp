@@ -439,10 +439,10 @@ def actual_fund_metrics_rows(
             "MD, м": item.md_total_m,
             "KOP MD, м": item.kop_md_m,
             "KOP TVD, м": item.kop_tvd_m,
-            "Вход в горизонталь, MD": item.horizontal_entry_md_m,
-            "Вход в горизонталь, TVD": item.horizontal_entry_tvd_m,
-            "Горизонталь, м": item.horizontal_length_m,
-            "Зенит HOLD, deg": item.hold_inc_deg,
+            "Вход в ГС, MD": item.horizontal_entry_md_m,
+            "Вход в ГС, TVD": item.horizontal_entry_tvd_m,
+            "Длина ГС, м": item.horizontal_length_m,
+            "ЗУ HOLD, deg": item.hold_inc_deg,
             "Азимут HOLD, deg": item.hold_azi_deg,
             "HOLD, м": item.hold_length_m,
             "Макс INC, deg": item.max_inc_deg,
@@ -466,7 +466,7 @@ def actual_fund_pad_rows(
             "Медианный HOLD INC, deg": item.median_hold_inc_deg,
             "Медианный HOLD, м": item.median_hold_length_m,
             "Макс ПИ, deg/30м": item.max_pi_deg_per_30m,
-            "Медианная горизонталь, м": item.median_horizontal_length_m,
+            "Медианная длина ГС, м": item.median_horizontal_length_m,
         }
         for item in summaries
     ]
@@ -546,8 +546,8 @@ def actual_fund_depth_rows(
             "Глубинный кластер": item.cluster_id,
             "Скважин": item.well_count,
             "TVD диапазон, м": f"{float(item.depth_from_tvd_m):.0f} - {float(item.depth_to_tvd_m):.0f}",
-            "Якорный TVD входа, м": float(item.anchor_horizontal_entry_tvd_m),
-            "Якорный KOP MD, м": float(item.anchor_kop_md_m),
+            "Опорный TVD входа, м": float(item.anchor_horizontal_entry_tvd_m),
+            "Опорный KOP MD, м": float(item.anchor_kop_md_m),
             "Скважины": ", ".join(item.well_names),
         }
         for item in summarize_actual_fund_by_depth(
@@ -577,8 +577,8 @@ def build_actual_fund_kop_depth_function(
             anchor_depths_tvd_m=depths,
             anchor_kop_md_m=kops,
             note=(
-                "Один глубинный кластер: функция вырождается в константу "
-                "по якорю min + 1σ после отсечения явных выбросов."
+                "Один глубинный кластер — KOP задан как константа "
+                "(min + 1σ по выборке без выбросов)."
             ),
         )
     return ActualFundKopDepthFunction(
@@ -587,8 +587,8 @@ def build_actual_fund_kop_depth_function(
         anchor_depths_tvd_m=depths,
         anchor_kop_md_m=kops,
         note=(
-            "KOP(TVD) задан кусочно-линейно по якорям глубинных кластеров: "
-            "min + 1σ после отсечения явных выбросов."
+            "KOP(TVD) задан кусочно-линейно по опорным точкам глубинных кластеров "
+            "(min + 1σ по выборке без выбросов)."
         ),
     )
 
@@ -910,7 +910,7 @@ def _analysis_exclusion_reason(
     max_build_dls_before_hold_deg_per_30m: float | None,
 ) -> str | None:
     if not bool(is_horizontal):
-        return "Не горизонтальная"
+        return "Наклонно-направленная (не ГС)"
     if kop_md_m is None:
         return "Не удалось определить KOP"
     if (
@@ -918,7 +918,7 @@ def _analysis_exclusion_reason(
         or horizontal_entry_tvd_m is None
         or float(horizontal_length_m) < HORIZONTAL_MIN_INTERVAL_M
     ):
-        return "Не удалось выделить терминальный горизонтальный участок"
+        return "Не удалось выделить горизонтальный ствол"
     if hold_inc_deg is None or float(hold_length_m) < HOLD_MIN_INTERVAL_M:
         return "Не удалось устойчиво выделить HOLD"
     if (

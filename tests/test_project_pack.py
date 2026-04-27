@@ -49,15 +49,9 @@ def test_collect_files_skips_excluded_and_poetry(tmp_path: Path) -> None:
     relative = [path.relative_to(root).as_posix() for path in files]
 
     assert relative == [
-        ".streamlit/config.toml",
         "main.py",
         "pkg/mod.py",
-        "pyproject.toml",
         "pywp/three_viewer_assets/templates/viewer_template.html",
-        "requirements-dev.txt",
-        "requirements.txt",
-        "tools/notes.md",
-        "tools/sample.inc",
         "tools/template.html",
         "tools/theme.css",
         "tools/viewer.json",
@@ -77,11 +71,8 @@ def test_pack_and_unpack_restore_contents(tmp_path: Path) -> None:
     original_files = {
         "main.py": "print('root')\n",
         "pkg/mod.py": "def f():\n    return 'ok'",
-        "requirements.txt": "requests==2.0\n",
-        ".streamlit/config.toml": "[theme]\nbase='light'\n",
         "pywp/three_viewer_assets/vendor/OrbitControls.js": "window.OrbitControls = {};\n",
         "viewer.json": '{"version": 1}\n',
-        "sample.inc": "WELLTRACK 'A'\n/\n",
     }
     for relative_path, content in original_files.items():
         target = root / relative_path

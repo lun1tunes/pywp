@@ -214,8 +214,7 @@ DEFAULT_PAD_SURFACE_ANCHOR_MODE = PAD_SURFACE_ANCHOR_CENTER
 _BATCH_SUMMARY_RENAME_COLUMNS: dict[str, str] = {
     "Рестарты решателя": "Рестарты",
     "Классификация целей": "Цели",
-    "Горизонтальный отход t1, м": "Отход t1, м",
-    "Длина HORIZONTAL, м": "HORIZONTAL, м",
+    "Длина ГС, м": "ГС, м",
 }
 _BATCH_SUMMARY_DISPLAY_ORDER: tuple[str, ...] = (
     "Скважина",
@@ -225,7 +224,7 @@ _BATCH_SUMMARY_DISPLAY_ORDER: tuple[str, ...] = (
     "Отход t1, м",
     "Мин VERTICAL до KOP, м",
     "KOP MD, м",
-    "HORIZONTAL, м",
+    "ГС, м",
     "INC в t1, deg",
     "ЗУ HOLD, deg",
     "Макс ПИ, deg/10m",
@@ -7030,10 +7029,10 @@ def _actual_fund_kop_depth_figure(
                 x=line_depths,
                 y=line_kops,
                 mode="lines",
-                name="Функция KOP / TVD",
+                name="KOP(TVD)",
                 line={"color": "#0F172A", "width": 2},
                 hovertemplate=(
-                    "Функция KOP / TVD"
+                    "KOP(TVD)"
                     "<br>TVD=%{x:.1f} м"
                     "<br>KOP=%{y:.1f} м"
                     "<extra></extra>"
@@ -7045,10 +7044,10 @@ def _actual_fund_kop_depth_figure(
                 x=anchor_depths,
                 y=anchor_kops,
                 mode="markers",
-                name="Якоря функции",
+                name="Опорные точки",
                 marker={"size": 8, "symbol": "diamond", "color": "#111827"},
                 hovertemplate=(
-                    "Якорь функции"
+                    "Опорная точка"
                     "<br>TVD=%{x:.1f} м"
                     "<br>KOP=%{y:.1f} м"
                     "<extra></extra>"
@@ -7057,7 +7056,7 @@ def _actual_fund_kop_depth_figure(
         )
 
     fig.update_layout(
-        xaxis_title="TVD входа в горизонталь, м",
+        xaxis_title="TVD входа в ГС, м",
         yaxis_title="KOP MD, м",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
         margin={"l": 20, "r": 20, "t": 24, "b": 20},
@@ -7174,7 +7173,7 @@ def _actual_fund_plan_figure(detail: ActualFundWellAnalysis) -> go.Figure:
                     ]
                 ],
                 hovertemplate=(
-                    "Старт горизонтального участка"
+                    "Вход в ГС"
                     "<br>MD=%{customdata[0]:.1f} м"
                     "<br>Z=%{customdata[1]:.1f} м"
                     "<br>DLS=%{customdata[2]:.2f} deg/30м"
@@ -7323,7 +7322,7 @@ def _actual_fund_vertical_profile_figure(
                     ]
                 ],
                 hovertemplate=(
-                    "Старт горизонтального участка"
+                    "Вход в ГС"
                     "<br>MD=%{customdata[0]:.1f} м"
                     "<br>Z=%{customdata[1]:.1f} м"
                     "<br>DLS=%{customdata[2]:.2f} deg/30м"
@@ -7389,7 +7388,7 @@ def _render_reference_well_detail(
         "—" if metrics.kop_md_m is None else f"{float(metrics.kop_md_m):.0f}",
     )
     m3.metric(
-        "Вход в горизонталь, MD",
+        "Вход в ГС, MD",
         (
             "—"
             if metrics.horizontal_entry_md_m is None
@@ -7397,7 +7396,7 @@ def _render_reference_well_detail(
         ),
     )
     m4.metric(
-        "Горизонталь, м",
+        "Длина ГС, м",
         (
             "—"
             if not metrics.is_horizontal
@@ -7414,7 +7413,7 @@ def _render_reference_well_detail(
     )
     if not bool(metrics.is_analysis_eligible):
         st.info(
-            "Скважина исключена из aggregate-анализа и калибровки: "
+            "Скважина исключена из общего анализа: "
             f"{metrics.analysis_exclusion_reason or 'без пояснения'}."
         )
 
@@ -7487,13 +7486,8 @@ def _render_actual_fund_analysis_panel(
 
     with st.expander("Анализ фактического фонда", expanded=False):
         st.caption(
-            "В анализ попадают только фактические скважины. Учитываются только "
-            "горизонтальные скважины без аномалий: если у горизонтальной скважины "
-            "не удаётся устойчиво выделить `KOP / HOLD / терминальный high-angle "
-            "interval` или получается аномально высокий устойчивый `ПИ`, такая "
-            "скважина исключается из анализа. "
-            "Группировка по кустам строится по ведущему числовому коду "
-            "скважины без двух последних цифр: `6101/6102/6103 -> 61`, `8203/8210 -> 82`."
+            "Учитываются только горизонтальные скважины с читаемым профилем "
+            "(KOP, HOLD, ГС и ПИ в норме). Скважины с аномалиями исключаются."
         )
         a1, a2, a3, a4, a5 = st.columns(5, gap="small")
         a1.metric("Фактических скважин", f"{len(actual_wells)}")
@@ -7510,8 +7504,8 @@ def _render_actual_fund_analysis_panel(
         a5.metric("Глубинных кластеров", f"{len(depth_clusters)}")
         if excluded_horizontal_metrics:
             st.info(
-                "Из анализа исключено горизонтальных скважин: "
-                f"{len(excluded_horizontal_metrics)}. Причины видны в таблице."
+                f"Исключено скважин: {len(excluded_horizontal_metrics)}. "
+                "Причины — в таблице."
             )
 
         view_mode = st.radio(
@@ -7533,12 +7527,11 @@ def _render_actual_fund_analysis_panel(
         )
 
         if kop_depth_function is not None:
-            st.markdown("#### KOP / TVD по фактическому фонду")
+            st.markdown("#### KOP(TVD) по фактическому фонду")
             st.caption(
-                "Скважины сгруппированы по глубине входа в горизонталь. Для каждой "
-                "группы якорь функции берётся как `min + 1σ` после отсечения явных "
-                "выбросов. Полученная функция KOP / TVD применяется к "
-                "рассчитываемым скважинам через глубину `t1`."
+                "Скважины сгруппированы по TVD входа в ГС. "
+                "Для каждого кластера опорный KOP = min + 1σ (без выбросов). "
+                "Полученная зависимость применяется к проектным скважинам через TVD t1."
             )
             figure = _actual_fund_kop_depth_figure(metrics)
             if figure is not None:
@@ -7548,7 +7541,7 @@ def _render_actual_fund_analysis_panel(
                 st.caption(str(kop_depth_function.note))
                 if kop_depth_function.anchor_depths_tvd_m:
                     st.caption(
-                        "Якоря TVD → KOP: "
+                        "Опорные точки TVD → KOP: "
                         + ", ".join(
                             f"{float(depth):.0f} → {float(kop):.0f}"
                             for depth, kop in zip(
@@ -7715,8 +7708,8 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             return
 
         st.warning(
-            "Найдены скважины, где `t1` дальше от устья `S` (куста) по горизонтальному "
-            "отходу, чем `t3`. Вероятно, порядок точек `t1/t3` перепутан."
+            "Найдены скважины, где отход до t1 больше, чем до t3. "
+            "Вероятно, порядок точек t1/t3 перепутан."
         )
         header_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 3.0], gap="small")
         header_cols[0].markdown(
@@ -9596,13 +9589,8 @@ def _render_batch_summary(
                 format="%.2f",
                 width="small",
             ),
-            "KOP MD, м": st.column_config.NumberColumn(
-                "KOP MD, м",
-                format="%.2f",
-                width="small",
-            ),
-            "HORIZONTAL, м": st.column_config.NumberColumn(
-                "HORIZONTAL, м",
+            "\u0413\u0421, \u043c": st.column_config.NumberColumn(
+                "\u0413\u0421, \u043c",
                 format="%.2f",
                 width="small",
             ),

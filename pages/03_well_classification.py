@@ -97,10 +97,10 @@ def run_page() -> None:
     st.markdown("### Интерполяция и оценка для конкретной скважины")
     c1, c2, c3 = st.columns(3, gap="small")
     gv_m = c1.number_input(
-        "ГВ t1, м", min_value=1000.0, max_value=3600.0, value=2400.0, step=100.0
+        "\u0413\u0412 t1, \u043c", min_value=1000.0, max_value=3600.0, value=2400.0, step=100.0
     )
     horizontal_offset_t1_m = c2.number_input(
-        "Горизонтальный отход t1, м", min_value=0.0, value=1000.0, step=100.0
+        "\u041e\u0442\u0445\u043e\u0434 t1, \u043c", min_value=0.0, value=1000.0, step=100.0
     )
     hold_inc_deg = c3.number_input(
         "ЗУ секции HOLD, deg", min_value=0.0, max_value=89.0, value=20.0, step=5.0
