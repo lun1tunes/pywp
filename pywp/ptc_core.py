@@ -6555,7 +6555,7 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
         horizontal=True,
         label_visibility="collapsed",
     )
-    st.caption(_reference_kind_help(kind))
+    # st.caption(_reference_kind_help(kind))
 
     uploaded_xyz_file = None
     uploaded_welltrack_file = None
@@ -6599,19 +6599,19 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
             key=f"wt_reference_{kind}_welltrack_file",
         )
 
-    action_col, clear_col = st.columns([1.5, 1.0], gap="small")
+    action_col, clear_col = st.columns(2, gap="small")
     import_clicked = action_col.button(
         f"Импортировать {title.lower()}",
         key=f"wt_reference_import_{kind}",
         type="primary",
         icon=":material/upload_file:",
-        width="stretch",
+        use_container_width=True,
     )
     clear_clicked = clear_col.button(
         f"Очистить {title.lower()}",
         key=f"wt_reference_clear_{kind}",
         icon=":material/delete:",
-        width="stretch",
+        use_container_width=True,
     )
 
     if import_clicked:
@@ -8456,34 +8456,17 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
 
     with st.container(border=True):
         st.markdown("### Кусты и расчет устьев")
-        st.caption(
-            "Куст определяется по устьям `S`: если координаты совпадают, это обычный "
-            "layout-сценарий; если устья уже разнесены и связаны цепочкой расстояний "
-            f"до {int(WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M)} м, куст считается "
-            "заданным в исходных данных и показывается в справочном режиме. "
-            "Последовательность бурения строится по проекции середины (t1+t3)/2 вдоль НДС. "
-            "Авто НДС — это стартовая геометрическая оценка по главной оси облака "
-            "midpoint(t1, t3); для почти изотропных кустов она деградирует до "
-            "стабильного fallback по направлению S→центроид и должна считаться "
-            "рекомендацией, а не жестким инженерным решением."
-        )
-        st.caption(
-            "По умолчанию координата куста трактуется как центр раскладки: для "
-            "нечётного числа скважин это устье средней скважины, для чётного — "
-            "точка между двумя центральными устьями. Старый режим `S первой "
-            "скважины` сохранён как отдельная опция."
-        )
+        if bool(st.session_state.get("wt_pad_auto_applied_on_import", False)):
+            st.info(
+                "После импорта исходные устья скважин совпадали, "
+                "поэтому текущие координаты устьев были автоматически скорректированы. "
+                "Если нужно вернуться к исходным устьям, нажмите "
+                "'Вернуть исходные устья'."
+            )
         st.caption(
             f"Из исходных данных WELLTRACK / точек целей было определено кустов: {len(pads)}. "
             "Их параметры показаны в таблице ниже."
         )
-        if bool(st.session_state.get("wt_pad_auto_applied_on_import", False)):
-            st.info(
-                "После импорта исходные устья совпадали, поэтому текущие координаты S "
-                "были автоматически скорректированы по параметрам этого блока. "
-                "Если нужно вернуться к исходному WELLTRACK, нажмите "
-                "'Вернуть исходные устья'."
-            )
         pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
         pad_rows = [
             {
@@ -8564,11 +8547,11 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             )
 
         anchor_center = st.toggle(
-            "Координата куста = центр раскладки",
+            "Координата куста = центр расстановки",
             key=widget_keys["surface_anchor_center"],
             help=(
-                "Включено: введённые координаты S трактуются как центр куста. "
-                "Выключено: координаты S задают первую скважину в раскладке."
+                "Включено: введённые координаты устьев принимаются как центр куста. "
+                "Выключено: координаты устьев задают первую скважину на кусте."
             ),
             disabled=source_surfaces_defined,
         )

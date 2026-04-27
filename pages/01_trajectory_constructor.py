@@ -60,7 +60,7 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
         horizontal=True,
         label_visibility="collapsed",
     )
-    st.caption(str(wt._reference_kind_help(kind)))
+    # st.caption(str(wt._reference_kind_help(kind)))
 
     uploaded_file = None
     if mode == "Путь к WELLTRACK":
@@ -76,19 +76,19 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
             key=f"ptc_reference_{kind}_welltrack_file",
         )
 
-    action_col, clear_col = st.columns([1.5, 1.0], gap="small")
+    action_col, clear_col = st.columns(2, gap="small")
     import_clicked = action_col.button(
         f"Загрузить {title.lower()}",
         key=f"ptc_reference_import_{kind}",
         type="primary",
         icon=":material/upload_file:",
-        width="stretch",
+        use_container_width=True,
     )
     clear_clicked = clear_col.button(
         f"Очистить {title.lower()}",
         key=f"ptc_reference_clear_{kind}",
         icon=":material/delete:",
-        width="stretch",
+        use_container_width=True,
     )
 
     if import_clicked:
@@ -155,7 +155,7 @@ def _render_ptc_reference_section() -> None:
     st.markdown("## 3. Загрузка фактического фонда")
     st.caption(
         "Если на месторождении уже есть фактический фонд или утверждённый "
-        "проектный (проработанный в ЦСБ) - загрузите его в формате welltrack."
+        "проектный (проработанный в ЦСБ) - загрузите его в формате WELLTRACK."
     )
     c1, c2 = st.columns(2, gap="medium")
     with c1:
@@ -237,7 +237,6 @@ def _render_ptc_reference_section() -> None:
 
 def _render_ptc_run_section(*, records: list[object]) -> None:
     st.markdown("## 4. Расчёт траекторий")
-    st.caption("Детализация лога зафиксирована: краткий режим.")
     summary_rows = st.session_state.get("wt_summary_rows")
     wt._render_batch_selection_status(
         records=records, summary_rows=summary_rows
