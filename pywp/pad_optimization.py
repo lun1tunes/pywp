@@ -3,6 +3,7 @@ from __future__ import annotations
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from time import perf_counter
+from typing import Callable
 
 import numpy as np
 
@@ -226,7 +227,7 @@ def optimize_pad_order(
     uncertainty_model: PlanningUncertaintyModel,
     reference_wells: list[ImportedTrajectoryWell],
     config_by_name: dict[str, TrajectoryConfig],
-    progress_callback: callable,
+    progress_callback: Callable[[int, str], None],
 ) -> tuple[list[WelltrackRecord], dict[str, SuccessfulWellPlan], bool]:
 
     pad_names = {
