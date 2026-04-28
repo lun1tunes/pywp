@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable, Mapping, Sequence
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from pydantic import field_validator
 
@@ -463,6 +464,7 @@ def render_result_plots(
     title_trajectory: str | None,
     title_plan: str | None,
     border: bool = True,
+    render_3d_override: Callable[[object, go.Figure], None] | None = None,
 ) -> None:
     show_uncertainty = st.checkbox(
         "Показать конус неопределенности",
@@ -511,10 +513,10 @@ def render_result_plots(
             model=model,
             required_md_m=required_md_m,
         )
-        st.caption(
-            f"Пресет: {uncertainty_preset_label(selected_preset)}. "
-            f"{uncertainty_model_caption(uncertainty_overlay.model)}"
-        )
+        # st.caption(
+        #     f"Пресет: {uncertainty_preset_label(selected_preset)}. "
+        #     f"{uncertainty_model_caption(uncertainty_overlay.model)}"
+        # )
 
     render_trajectory_dls_panel(
         stations=view.stations,
@@ -530,6 +532,7 @@ def render_result_plots(
         plan_csb_stations=view.plan_csb_stations,
         actual_stations=view.actual_stations,
         uncertainty_overlay=uncertainty_overlay,
+        render_3d_override=render_3d_override,
     )
     render_plan_section_panel(
         stations=view.stations,

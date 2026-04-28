@@ -444,10 +444,10 @@ def _render_ptc_anticollision_panel(
         focus_pad_well_names=focus_pad_well_names,
     )
 
-    st.caption(
-        f"Пресет: {wt.uncertainty_preset_label(selected_preset)}. "
-        f"{wt.anti_collision_method_caption(uncertainty_model)}"
-    )
+    # st.caption(
+    #     f"Пресет: {wt.uncertainty_preset_label(selected_preset)}. "
+    #     f"{wt.anti_collision_method_caption(uncertainty_model)}"
+    # )
     wt._render_status_run_log(
         title="Лог расчёта Anti-collision",
         state_payload=st.session_state.get("wt_anticollision_last_run"),

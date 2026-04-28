@@ -2054,6 +2054,7 @@ def _anticollision_three_payload_overrides(
     *,
     records: list[WelltrackRecord],
     analysis: AntiCollisionAnalysis,
+    successes: list[SuccessfulWellPlan] | None = None,
 ) -> dict[str, object]:
     visible_names: list[str] = []
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
@@ -2155,12 +2156,15 @@ def _anticollision_three_payload_overrides(
                 "segment_b": segment_b,
             }
         )
-    return {
+    result: dict[str, object] = {
         "legend_tree": legend_tree,
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "collisions": collisions,
     }
+    if successes:
+        result["edit_wells"] = _build_edit_wells_payload(successes, name_to_color)
+    return result
 
 
 def _build_anti_collision_analysis(
@@ -4684,10 +4688,10 @@ def _render_anticollision_panel(
             or {}
         ).items()
     }
-    st.caption(
-        f"Пресет: {uncertainty_preset_label(selected_preset)}. "
-        f"{anti_collision_method_caption(uncertainty_model)}"
-    )
+    # st.caption(
+    #     f"Пресет: {uncertainty_preset_label(selected_preset)}. "
+    #     f"{anti_collision_method_caption(uncertainty_model)}"
+    # )
     _render_status_run_log(
         title="Лог расчёта Anti-collision",
         state_payload=st.session_state.get("wt_anticollision_last_run"),
@@ -4766,6 +4770,7 @@ def _render_anticollision_panel(
             payload_overrides=_anticollision_three_payload_overrides(
                 records=records,
                 analysis=analysis,
+                successes=successes,
             ),
         )
         chart_col2.plotly_chart(
@@ -9708,6 +9713,43 @@ def _render_success_tabs(
             selected_name=str(selected_name),
             successes=successes,
         )
+        selected_single_3d_backend = st.selectbox(
+            "3D backend",
+            options=list(WT_3D_BACKEND_OPTIONS),
+            key="wt_3d_backend",
+            help=(
+                "Plotly сохраняет привычные hover-подсказки. "
+                "Локальный Three.js backend быстрее и хранит все файлы локально."
+            ),
+        )
+        if str(selected_single_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+            if st.button(
+                "Пересоздать 3D viewer", key="wt_recreate_three_single"
+            ):
+                _bump_three_viewer_nonce()
+                st.rerun()
+
+        render_3d_override = None
+        if str(selected_single_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+            _single_well_name_to_color = {
+                str(selected.name): str(
+                    name_to_color.get(str(selected.name), "#2563eb")
+                ),
+            }
+
+            def render_3d_override(container: object, figure: go.Figure) -> None:
+                _render_plotly_or_three_3d(
+                    container=container,
+                    figure=figure,
+                    backend=WT_3D_BACKEND_THREE_LOCAL,
+                    height=560,
+                    payload_overrides={
+                        "edit_wells": _build_edit_wells_payload(
+                            [selected], _single_well_name_to_color,
+                        ),
+                    },
+                )
+
         well_view = SingleWellResultView(
             well_name=str(selected.name),
             surface=selected.surface,
@@ -9740,6 +9782,7 @@ def _render_success_tabs(
             title_trajectory=None,
             title_plan=None,
             border=True,
+            render_3d_override=render_3d_override,
         )
         render_result_tables(
             view=well_view,

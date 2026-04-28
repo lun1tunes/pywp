@@ -1776,8 +1776,10 @@
         const editSaveBtn = document.getElementById("edit-save-btn");
         const editWarningToast = document.getElementById("edit-warning-toast");
 
+        console.log("[3D Viewer] edit_wells count:", editWells.length, "btn found:", !!editTargetsBtn);
         if (editWells.length > 0 && editTargetsBtn) {
           editTargetsBtn.style.display = "";
+          console.log("[3D Viewer] edit-targets-btn shown");
         }
 
         let editModeActive = false;
