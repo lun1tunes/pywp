@@ -3,12 +3,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-
 from pywp.classification import TRAJECTORY_REVERSE_DIRECTION
 
 
 class PlanningError(RuntimeError):
+    """Raised when trajectory planning fails due to infeasible constraints or geometry."""
     pass
+
+
+__all__ = [
+    "PlanningError",
+    "SectionGeometry",
+    "ProfileParameters",
+    "PostEntrySection",
+    "TurnSearchSettings",
+    "OptimizationOutcome",
+    "TurnSolveResult",
+    "CandidateOptimizationEvaluation",
+    "EndpointState",
+    "ProfileEndpointEvaluation",
+    "ProgressCallback",
+    "_emit_progress",
+    "_scaled_progress_callback",
+]
 
 
 @dataclass(frozen=True)

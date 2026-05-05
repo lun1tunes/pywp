@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import logging
+
+# Suppress noisy Streamlit warnings BEFORE importing streamlit
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+
 import pandas as pd
 import streamlit as st
 
@@ -7,6 +13,13 @@ from pywp import ptc_core as wt
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_well_panels import render_run_log_panel
+from pywp.coordinate_integration import (
+    apply_crs_to_well_view,
+    get_crs_display_suffix,
+    get_selected_crs,
+    render_crs_sidebar,
+    should_auto_convert,
+)
 from pywp.ui_well_result import (
     SingleWellResultView,
     render_key_metrics,
@@ -309,6 +322,25 @@ def _render_ptc_run_section(*, records: list[object]) -> None:
         with st.expander("Параметры расчёта", expanded=False):
             config = wt._build_config_form(binding=wt.WT_CALC_PARAMS, title="")
 
+        _parallel_options = [
+            ("Без Multiprocessing", 0),
+            *((f"{n} процессов", n) for n in (2, 4, 6, 8, 12, 16, 24, 32)),
+        ]
+        _parallel_labels = [label for label, _ in _parallel_options]
+        _parallel_values = {label: value for label, value in _parallel_options}
+        _parallel_label = st.selectbox(
+            "Параллельный расчёт",
+            options=_parallel_labels,
+            index=0,
+            key="wt_parallel_workers_label_01_constructor",
+            help=(
+                "Количество параллельных процессов для batch-расчёта. "
+                "Ускоряет расчёт при большом числе скважин за счёт "
+                "использования нескольких ядер CPU."
+            ),
+        )
+        _parallel_workers = _parallel_values.get(str(_parallel_label), 0)
+
         run_clicked = st.form_submit_button(
             "Рассчитать траектории",
             type="primary",
@@ -351,6 +383,7 @@ def _render_ptc_run_section(*, records: list[object]) -> None:
                 ),
                 config=config,
                 run_clicked=bool(run_clicked),
+                parallel_workers=int(_parallel_workers),
             )
         ],
         records=records,
@@ -623,11 +656,14 @@ def _render_ptc_anticollision_panel(
 
 
 def _render_ptc_success_tabs(
-    *,
     successes: list[object],
     records: list[object],
     summary_rows: list[dict[str, object]],
 ) -> None:
+    """Render success tabs with coordinate system support."""
+    # Get selected CRS for coordinate transformation
+    selected_crs = get_selected_crs()
+    auto_convert = should_auto_convert()
     view_mode = st.radio(
         "Режим просмотра результатов",
         options=["Отдельная скважина", "Все скважины"],
@@ -639,7 +675,7 @@ def _render_ptc_success_tabs(
         selected_name = st.selectbox(
             "Скважина", options=[item.name for item in successes]
         )
-        selected = wt._ensure_selected_success_baseline(
+        selected = wt._find_selected_success(
             selected_name=str(selected_name),
             successes=successes,
         )
@@ -654,8 +690,6 @@ def _render_ptc_success_tabs(
             azimuth_deg=float(selected.azimuth_deg),
             md_t1_m=float(selected.md_t1_m),
             runtime_s=selected.runtime_s,
-            baseline_summary=selected.baseline_summary,
-            baseline_runtime_s=selected.baseline_runtime_s,
             issue_messages=(
                 (str(selected.md_postcheck_message),)
                 if str(selected.md_postcheck_message).strip()
@@ -665,6 +699,9 @@ def _render_ptc_success_tabs(
                 "dash" if bool(selected.md_postcheck_exceeded) else "solid"
             ),
         )
+        # Apply coordinate system transformation if enabled
+        if auto_convert:
+            well_view = apply_crs_to_well_view(well_view, selected_crs)
         t1_horizontal_offset_m = render_key_metrics(
             view=well_view,
             title="Ключевые показатели",
@@ -736,6 +773,9 @@ def run_page() -> None:
     st.set_page_config(page_title="PTC", layout="wide")
     wt._init_state()
     _force_ptc_defaults()
+
+    # Coordinate system selection in sidebar
+    render_crs_sidebar()
     apply_page_style(max_width_px=1700)
     render_hero(
         title="PTC",
@@ -773,7 +813,7 @@ def run_page() -> None:
     if st.session_state.get("wt_last_error"):
         render_solver_diagnostics(st.session_state["wt_last_error"])
 
-    st.markdown("## 5. Результаты расчёта")
+    st.markdown(f"## 5. Результаты расчёта{get_crs_display_suffix(get_selected_crs())}")
     render_run_log_panel(
         st.session_state.get("wt_last_run_log_lines"),
         border=False,

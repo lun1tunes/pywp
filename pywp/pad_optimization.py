@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from time import perf_counter
 from typing import Callable
@@ -35,6 +36,27 @@ _MAX_ITERATIONS = 8
 # Maximum number of distinct worst-zone pairs to try per iteration when the
 # top-1 worst zone cannot be improved.
 _MAX_WORST_ZONES_PER_ITERATION = 3
+
+
+def _recalculate_well_from_dicts(
+    record_dict: dict, config_dict: dict,
+) -> dict | None:
+    """Worker-safe version that accepts/returns plain dicts.
+
+    Streamlit's script rerunner can reload modules, making the Pydantic
+    class objects in the main process differ from those in ``sys.modules``.
+    Pickle checks identity and raises ``PicklingError``.  By serialising
+    to dicts before crossing the process boundary we avoid this entirely.
+    """
+    import logging
+    logging.getLogger("streamlit").setLevel(logging.ERROR)
+
+    record = WelltrackRecord.model_validate(record_dict)
+    config = TrajectoryConfig.model_validate(config_dict)
+    result = recalculate_well(record, config)
+    if result is None:
+        return None
+    return result.model_dump()
 
 
 def recalculate_well(
@@ -202,11 +224,23 @@ def _swap_surfaces_and_recalculate(
         return None
 
     # Parallel trajectory recalculation — the two wells are independent.
+    # We submit dicts to avoid PicklingError when Streamlit reloads modules
+    # (class identity changes between reruns).
     if pool is not None:
-        future_a = pool.submit(recalculate_well, new_records[g_a], cfg_a)
-        future_b = pool.submit(recalculate_well, new_records[g_b], cfg_b)
-        r_a = future_a.result()
-        r_b = future_b.result()
+        future_a = pool.submit(
+            _recalculate_well_from_dicts,
+            new_records[g_a].model_dump(),
+            cfg_a.model_dump(),
+        )
+        future_b = pool.submit(
+            _recalculate_well_from_dicts,
+            new_records[g_b].model_dump(),
+            cfg_b.model_dump(),
+        )
+        raw_a = future_a.result()
+        raw_b = future_b.result()
+        r_a = SuccessfulWellPlan.model_validate(raw_a) if raw_a is not None else None
+        r_b = SuccessfulWellPlan.model_validate(raw_b) if raw_b is not None else None
     else:
         r_a = recalculate_well(new_records[g_a], cfg_a)
         r_b = recalculate_well(new_records[g_b], cfg_b)
@@ -250,10 +284,12 @@ def optimize_pad_order(
         return records, success_dict, False
 
     ref_wells = tuple(reference_wells)
-    # Use "forkserver" to avoid deadlocks when forking inside Streamlit's
-    # threaded environment (the default "fork" can copy locked mutexes from
-    # numpy / BLAS threads).
-    _mp_ctx = multiprocessing.get_context("forkserver")
+    # Use "forkserver" on Linux to avoid deadlocks when forking inside
+    # Streamlit's threaded environment (the default "fork" can copy locked
+    # mutexes from numpy / BLAS threads).  On Windows / macOS only "spawn"
+    # is reliably available.
+    _mp_method = "spawn" if sys.platform == "win32" else "forkserver"
+    _mp_ctx = multiprocessing.get_context(_mp_method)
     pool = ProcessPoolExecutor(max_workers=2, mp_context=_mp_ctx)
 
     # --- Pre-build lightweight AC wells (no display geometry). ---

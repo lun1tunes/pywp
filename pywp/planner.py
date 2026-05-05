@@ -3836,6 +3836,9 @@ def _diagnose_same_direction_no_solution(
             f"Along-section offset to t1 is {geometry.s1_m:.2f} m. "
             "This is a reverse-entry geometry: tighter BUILD can shorten translation before t1 and make the target harder to reach."
         )
+    build_vertical_available_m = max(
+        geometry.z1_m - float(config.kop_min_vertical_m), 0.0
+    )
     if (
         np.isfinite(required_dls)
         and required_dls > 0.0
@@ -3843,12 +3846,21 @@ def _diagnose_same_direction_no_solution(
     ):
         messages.append(
             "BUILD DLS upper bound is insufficient for t1 reach: "
-            f"available max {upper_dls:.2f} deg/30m, required about {required_dls:.2f} deg/30m."
+            f"available max {upper_dls:.2f} deg/30m, required about {required_dls:.2f} deg/30m, "
+            f"build_vertical_available={build_vertical_available_m:.1f} m, "
+            f"kop_min_vertical={float(config.kop_min_vertical_m):.1f} m, "
+            f"t1_tvd={geometry.z1_m:.1f} m."
         )
     if config.kop_min_vertical_m >= geometry.z1_m - SMALL:
         messages.append(
             "Minimum VERTICAL before KOP is too deep for current t1 TVD. "
             f"kop_min_vertical={config.kop_min_vertical_m:.1f} m, t1 TVD={geometry.z1_m:.1f} m."
+        )
+    elif build_vertical_available_m < 0.25 * geometry.z1_m:
+        messages.append(
+            "Minimum VERTICAL before KOP leaves very little room for BUILD section. "
+            f"kop_min_vertical={config.kop_min_vertical_m:.1f} m, t1 TVD={geometry.z1_m:.1f} m, "
+            f"available BUILD vertical={build_vertical_available_m:.1f} m."
         )
     messages.extend(
         _diagnose_post_entry_constraints(

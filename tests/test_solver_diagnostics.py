@@ -78,6 +78,69 @@ def test_parse_solver_error_recommends_turn_restarts_for_turn_miss() -> None:
     assert "рестартов решателя" in rows[0]["Что изменить"]
 
 
+def test_parse_solver_error_build_dls_absurd_pi_shows_kop_recommendation() -> None:
+    """When PI is absurd (>15) and vertical is tight, show unphysical indicator."""
+    error_text = (
+        "No valid trajectory solution found within configured limits.\n"
+        "Reasons and actions:\n"
+        "- BUILD DLS upper bound is insufficient for t1 reach: "
+        "available max 3.00 deg/30m, required about 162.84 deg/30m, "
+        "build_vertical_available=10.6 m, kop_min_vertical=550.0 m, "
+        "t1_tvd=560.6 m.\n"
+    )
+    rows = diagnostics_rows_ru(error_text)
+    assert rows
+    # Unphysical PI > 15 shows ">15 deg/10m" instead of exact 54.28
+    assert ">15" in rows[0]["Причина"]
+    assert "нефизично" in rows[0]["Причина"]
+    assert "10.6" in rows[0]["Причина"]
+    assert "вертикального пространства" in rows[0]["Причина"]
+    # Should recommend reducing KOP as primary action
+    assert "Мин VERTICAL до KOP" in rows[0]["Что изменить"]
+    assert "основная причина" in rows[0]["Что изменить"]
+
+
+def test_parse_solver_error_build_dls_absurd_pi_with_space_shows_geometry_issue() -> None:
+    """When PI >15 and vertical space is plenty (>50m), show unphysical geometry issue."""
+    error_text = (
+        "No valid trajectory solution found within configured limits.\n"
+        "Reasons and actions:\n"
+        "- BUILD DLS upper bound is insufficient for t1 reach: "
+        "available max 3.00 deg/30m, required about 162.84 deg/30m, "
+        "build_vertical_available=1340.2 m, kop_min_vertical=550.0 m, "
+        "t1_tvd=1890.2 m.\n"
+    )
+    rows = diagnostics_rows_ru(error_text)
+    assert rows
+    # Unphysical PI > 15 shows ">15 deg/10m" with geometry context
+    assert ">15" in rows[0]["Причина"]
+    assert "нефизично высокий ПИ" in rows[0]["Причина"]
+    assert "1340.2" in rows[0]["Причина"]
+    assert "достаточно" in rows[0]["Причина"]  # "это достаточно"
+    assert "проблема в других ограничениях" in rows[0]["Причина"]
+    # Recommends checking horizontal offset, not KOP
+    assert "горизонтальный отход" in rows[0]["Что изменить"]
+
+
+def test_parse_solver_error_build_dls_moderate_pi_shows_value() -> None:
+    """When required PI is only moderately above max, show the numeric value."""
+    error_text = (
+        "No valid trajectory solution found within configured limits.\n"
+        "Reasons and actions:\n"
+        "- BUILD DLS upper bound is insufficient for t1 reach: "
+        "available max 3.00 deg/30m, required about 4.50 deg/30m, "
+        "build_vertical_available=800.0 m, kop_min_vertical=200.0 m, "
+        "t1_tvd=1000.0 m.\n"
+    )
+    rows = diagnostics_rows_ru(error_text)
+    assert rows
+    # Should show the PI value
+    assert "1.50" in rows[0]["Причина"]
+    assert "BUILD по ПИ" in rows[0]["Причина"]
+    # Should still mention KOP as one of the options
+    assert "Мин VERTICAL до KOP" in rows[0]["Что изменить"]
+
+
 def test_parse_solver_error_formats_exact_target_delta_for_direct_miss() -> None:
     text = (
         "Failed to hit t3 within tolerance. Miss=7.87 m, tolerance=2.00 m. "

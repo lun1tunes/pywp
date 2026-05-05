@@ -20,7 +20,6 @@ from pywp.classification import (
     trajectory_type_label,
 )
 from pywp.planner import PlanningError
-from pywp.optimization_reference import compute_unoptimized_reference
 from pywp.pydantic_base import FrozenModel
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
@@ -538,7 +537,6 @@ def _run_planner(
     t3: Point3D,
     config: TrajectoryConfig,
     progress_callback: Callable[[str, float], None] | None = None,
-    baseline_error_callback: Callable[[str], None] | None = None,
 ) -> None:
     planner = TrajectoryPlanner()
     result = planner.plan(
@@ -547,14 +545,6 @@ def _run_planner(
         t3=t3,
         config=config,
         progress_callback=progress_callback,
-    )
-    reference = compute_unoptimized_reference(
-        planner=planner,
-        surface=surface,
-        t1=t1,
-        t3=t3,
-        config=config,
-        on_error=baseline_error_callback,
     )
 
     st.session_state["last_result"] = {
@@ -566,8 +556,6 @@ def _run_planner(
         "summary": result.summary,
         "azimuth_deg": result.azimuth_deg,
         "md_t1_m": result.md_t1_m,
-        "baseline_summary": None if reference is None else reference.summary,
-        "baseline_runtime_s": None if reference is None else reference.runtime_s,
     }
     st.session_state["last_error"] = ""
     st.session_state["last_built_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -977,9 +965,6 @@ def _run_planner_if_clicked(
                 t3=t3_input,
                 config=config_input,
                 progress_callback=planner_progress,
-                baseline_error_callback=lambda message: log_lines.append(
-                    format_run_log_line(run_started_s, message)
-                ),
             )
             elapsed_s = perf_counter() - started
             st.session_state["last_runtime_s"] = float(elapsed_s)
@@ -1065,8 +1050,6 @@ def _build_single_well_result_view(
         azimuth_deg=float(last_result["azimuth_deg"]),
         md_t1_m=float(last_result["md_t1_m"]),
         runtime_s=st.session_state.get("last_runtime_s"),
-        baseline_summary=last_result.get("baseline_summary"),
-        baseline_runtime_s=last_result.get("baseline_runtime_s"),
         plan_csb_stations=plan_csb_df,
         actual_stations=actual_df,
     )

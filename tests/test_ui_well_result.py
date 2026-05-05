@@ -138,7 +138,7 @@ def test_uncertainty_preset_key_is_stable_per_well_name() -> None:
     assert uncertainty_preset_key(well_name="WELL-1") == "uncertainty_preset::WELL-1"
 
 
-def test_build_key_metrics_rows_uses_dash_for_no_problem_and_no_baseline() -> None:
+def test_build_key_metrics_rows_single_column_format() -> None:
     view = SingleWellResultView(
         well_name="WELL-1",
         surface=Point3D(0.0, 0.0, 0.0),
@@ -149,7 +149,7 @@ def test_build_key_metrics_rows_uses_dash_for_no_problem_and_no_baseline() -> No
             "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
             "trajectory_target_direction": "Цели в одном направлении",
             "well_complexity": "Обычная",
-            "optimization_mode": "none",
+            "optimization_mode": "minimize_md",
             "azimuth_turn_deg": 18.5,
             "entry_inc_deg": 86.0,
             "hold_inc_deg": 84.0,
@@ -167,91 +167,22 @@ def test_build_key_metrics_rows_uses_dash_for_no_problem_and_no_baseline() -> No
             "solver_turn_restarts_used": 0,
             "solver_turn_max_restarts": 2,
         },
-        config={"optimization_mode": "none"},
-        azimuth_deg=0.0,
-        md_t1_m=1000.0,
-        runtime_s=1.23,
-    )
-
-    rows = build_key_metrics_rows(view)
-    by_label = {row["Показатель"]: row for row in rows}
-
-    assert by_label["Проблемы"]["Значение"] == "-"
-    assert by_label["Проблемы"]["Значение без оптимизации"] == "-"
-    assert by_label["Рестарты решателя"]["Значение"] == "0 / 2"
-    assert by_label["Рестарты решателя"]["Значение без оптимизации"] == "-"
-    assert by_label["Время расчета"]["Значение"] == "1.23 с"
-    assert by_label["Время расчета"]["Значение без оптимизации"] == "-"
-    assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение"] == "1.00 / 1.00 / 1.00 deg/10m"
-
-
-def test_build_key_metrics_rows_shows_reference_without_optimization_when_available() -> None:
-    view = SingleWellResultView(
-        well_name="WELL-1",
-        surface=Point3D(0.0, 0.0, 0.0),
-        t1=Point3D(600.0, 800.0, 2400.0),
-        t3=Point3D(1500.0, 2000.0, 2500.0),
-        stations=pd.DataFrame({"MD_m": [0.0], "X_m": [0.0], "Y_m": [0.0], "Z_m": [0.0]}),
-        summary={
-            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
-            "trajectory_target_direction": "Цели в одном направлении",
-            "well_complexity": "Обычная",
-            "optimization_mode": "minimize_md",
-            "azimuth_turn_deg": 18.5,
-            "entry_inc_deg": 86.0,
-            "hold_inc_deg": 84.0,
-            "build_dls_selected_deg_per_30m": 3.0,
-            "build1_dls_selected_deg_per_30m": 3.0,
-            "build2_dls_selected_deg_per_30m": 2.4,
-            "max_dls_total_deg_per_30m": 3.0,
-            "kop_md_m": 560.0,
-            "horizontal_length_m": 1200.0,
-            "max_inc_actual_deg": 88.0,
-            "max_inc_deg": 95.0,
-            "md_total_m": 4300.0,
-            "max_total_md_postcheck_m": 6500.0,
-            "md_postcheck_excess_m": 0.0,
-            "solver_turn_restarts_used": 1,
-            "solver_turn_max_restarts": 2,
-        },
-        baseline_summary={
-            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
-            "trajectory_target_direction": "Цели в одном направлении",
-            "well_complexity": "Обычная",
-            "optimization_mode": "none",
-            "azimuth_turn_deg": 20.0,
-            "entry_inc_deg": 86.0,
-            "hold_inc_deg": 82.0,
-            "build_dls_selected_deg_per_30m": 2.7,
-            "build1_dls_selected_deg_per_30m": 2.7,
-            "build2_dls_selected_deg_per_30m": 2.7,
-            "max_dls_total_deg_per_30m": 2.7,
-            "kop_md_m": 610.0,
-            "horizontal_length_m": 1230.0,
-            "max_inc_actual_deg": 88.0,
-            "max_inc_deg": 95.0,
-            "md_total_m": 4410.0,
-            "max_total_md_postcheck_m": 6500.0,
-            "md_postcheck_excess_m": 0.0,
-            "solver_turn_restarts_used": 0,
-            "solver_turn_max_restarts": 2,
-        },
         config={"optimization_mode": "minimize_md"},
         azimuth_deg=0.0,
         md_t1_m=1000.0,
         runtime_s=1.23,
-        baseline_runtime_s=0.41,
     )
 
     rows = build_key_metrics_rows(view)
     by_label = {row["Показатель"]: row for row in rows}
 
-    assert by_label["Оптимизация"]["Значение"] != "-"
-    assert by_label["Оптимизация"]["Значение без оптимизации"] == "Без оптимизации"
+    # Only two columns: "Показатель" and "Значение"
+    for row in rows:
+        assert set(row.keys()) == {"Показатель", "Значение"}
+
+    assert by_label["Проблемы"]["Значение"] == "-"
+    assert by_label["Рестарты решателя"]["Значение"] == "0 / 2"
+    assert by_label["Время расчета"]["Значение"] == "1.23 с"
+    assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение"] == "1.00 / 1.00 / 1.00 deg/10m"
     assert by_label["Итоговая MD"]["Значение"] == "4300.00 m"
-    assert by_label["Итоговая MD"]["Значение без оптимизации"] == "4410.00 m"
-    assert by_label["Рестарты решателя"]["Значение"] == "1 / 2"
-    assert by_label["Рестарты решателя"]["Значение без оптимизации"] == "0 / 2"
-    assert by_label["Время расчета"]["Значение без оптимизации"] == "0.41 с"
-    assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение"] == "1.00 / 0.80 / 1.00 deg/10m"
-    assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение без оптимизации"] == "0.90 / 0.90 / 0.90 deg/10m"
+    assert by_label["Оптимизация"]["Значение"] == "Минимизация MD"

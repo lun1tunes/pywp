@@ -142,23 +142,82 @@ def _item_from_text(line: str) -> DiagnosticItem:
         )
 
     match = re.search(
-        rf"BUILD DLS upper bound is insufficient.*max ({_RE_FLOAT}) deg/30m, required about ({_RE_FLOAT}) deg/30m",
+        rf"BUILD DLS upper bound is insufficient.*max ({_RE_FLOAT}) deg/30m, required about ({_RE_FLOAT}) deg/30m"
+        rf"(?:,\s*build_vertical_available=({_RE_FLOAT}) m)?"
+        rf"(?:,\s*kop_min_vertical=({_RE_FLOAT}) m)?"
+        rf"(?:,\s*t1_tvd=({_RE_FLOAT}) m)?",
         text,
     )
     if match:
         dls_max, dls_req = match.group(1), match.group(2)
         pi_max = _pi_text_from_dls_text(dls_max)
-        pi_req = _pi_text_from_dls_text(dls_req)
-        return DiagnosticItem(
-            reason_ru=(
+        pi_req_f = float(dls_req) / 3.0
+        pi_max_f = float(dls_max) / 3.0
+        build_vert = match.group(3)
+        kop_min = match.group(4)
+        t1_tvd = match.group(5)
+
+        # When required PI is absurdly high AND available vertical is small,
+        # the bottleneck is insufficient BUILD vertical span.
+        # If vertical is sufficient but PI is still absurd, geometry is infeasible
+        # for other reasons (e.g., horizontal offset too large).
+        build_vert_f = float(build_vert) if build_vert is not None else float("inf")
+        is_absurd_pi = pi_req_f > 5.0 * max(pi_max_f, 0.1)
+        is_tight_vertical = build_vert_f < 50.0  # less than 50m is tight
+        # Physical limit: >15 deg/10m is unrealistic for any drilling
+        is_unphysical_pi = pi_req_f > 15.0
+
+        if is_absurd_pi and is_tight_vertical:
+            if is_unphysical_pi:
+                reason = (
+                    f"Недостаточно вертикального пространства для BUILD: "
+                    f"доступно {build_vert} м для набора угла "
+                    f"(это нефизично мало — требуется ПИ >15 deg/10m, "
+                    f"t1 TVD={t1_tvd or '?'} м, Мин VERTICAL до KOP={kop_min or '?'} м)."
+                )
+            else:
+                reason = (
+                    f"Недостаточно вертикального пространства для BUILD: "
+                    f"доступно {build_vert} м для набора угла "
+                    f"(требуется ПИ ~{pi_req_f:.1f} deg/10m, "
+                    f"t1 TVD={t1_tvd or '?'} м, Мин VERTICAL до KOP={kop_min or '?'} м)."
+                )
+            action = (
+                "Уменьшите параметр «Мин VERTICAL до KOP» — это основная причина. "
+                "Также можно увеличить max ПИ BUILD или углубить t1."
+            )
+        elif is_absurd_pi and not is_tight_vertical:
+            # Plenty of vertical but PI still absurd → geometry issue (horizontal offset, etc)
+            if is_unphysical_pi:
+                reason = (
+                    f"Геометрия t1 недостижима с текущими ограничениями: "
+                    f"требуется нефизично высокий ПИ (>15 deg/10m) при доступном max {pi_max} deg/10m. "
+                    f"(BUILD vertical доступно: {build_vert} м — это достаточно, "
+                    f"проблема в других ограничениях: горизонтальный отход или угол входа)."
+                )
+            else:
+                pi_req = _pi_text_from_dls_text(dls_req)
+                reason = (
+                    f"Геометрия t1 недостижима с текущими ограничениями: "
+                    f"требуется ~{pi_req} deg/10m при доступном max {pi_max} deg/10m. "
+                    f"(BUILD vertical доступно: {build_vert} м — это достаточно, "
+                    f"проблема в других ограничениях: горизонтальный отход или угол входа)."
+                )
+            action = (
+                "Уменьшите горизонтальный отход до t1, проверьте угол входа (entry INC), "
+                "или увеличьте max ПИ BUILD."
+            )
+        else:
+            pi_req = _pi_text_from_dls_text(dls_req)
+            reason = (
                 f"Ограничение BUILD по ПИ недостаточно для достижения t1: "
                 f"доступно max {pi_max} deg/10m, требуется примерно {pi_req} deg/10m."
-            ),
-            action_ru=(
-                "Увеличьте max ПИ BUILD, либо уменьшите горизонтальный отход до t1 "
-                "и/или увеличьте TVD t1."
-            ),
-        )
+            )
+            action = (
+                "Увеличьте max ПИ BUILD, уменьшите «Мин VERTICAL до KOP», "
+                "либо уменьшите горизонтальный отход до t1 и/или увеличьте TVD t1."
+            )
+        return DiagnosticItem(reason_ru=reason, action_ru=action)
 
     match = re.search(
         rf"DLS limit exceeded on segment ([A-Z0-9_]+):\s*({_RE_FLOAT})\s*>\s*({_RE_FLOAT})",
@@ -188,6 +247,22 @@ def _item_from_text(line: str) -> DiagnosticItem:
                 f"kop_min_vertical={kop} м при t1 TVD={tvd} м."
             ),
             action_ru="Уменьшите параметр «Мин VERTICAL до KOP, м» либо углубите t1.",
+        )
+
+    match = re.search(
+        rf"Minimum VERTICAL before KOP leaves very little room.*"
+        rf"kop_min_vertical=({_RE_FLOAT}) m, t1 TVD=({_RE_FLOAT}) m, "
+        rf"available BUILD vertical=({_RE_FLOAT}) m",
+        text,
+    )
+    if match:
+        kop, tvd, avail = match.group(1), match.group(2), match.group(3)
+        return DiagnosticItem(
+            reason_ru=(
+                f"Мин VERTICAL до KOP ({kop} м) оставляет мало места для BUILD: "
+                f"доступно {avail} м при t1 TVD={tvd} м."
+            ),
+            action_ru="Уменьшите параметр «Мин VERTICAL до KOP, м» — это даст больше пространства для набора угла.",
         )
 
     match = re.search(

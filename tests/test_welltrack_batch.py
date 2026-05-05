@@ -37,7 +37,6 @@ from pywp.uncertainty import (
 )
 from pywp.welltrack_batch import (
     DynamicClusterExecutionContext,
-    ensure_successful_plan_baseline,
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
     merge_batch_results,
@@ -1889,64 +1888,7 @@ def test_batch_planner_defers_unoptimized_reference_for_optimized_mode() -> None
     assert len(successes) == 1
     success = successes[0]
     assert success.runtime_s is not None
-    assert success.baseline_runtime_s is None
-    assert success.baseline_summary is None
     assert float(success.summary["md_total_m"]) == 2100.0
-
-
-def test_ensure_successful_plan_baseline_computes_reference_lazily() -> None:
-    class _OptimizationStubPlanner(_StubPlanner):
-        def plan(
-            self,
-            *,
-            surface: Any,
-            t1: Any,
-            t3: Any,
-            config: TrajectoryConfig,
-            progress_callback: Any = None,
-        ) -> PlannerResult:
-            result = super().plan(
-                surface=surface,
-                t1=t1,
-                t3=t3,
-                config=config,
-                progress_callback=progress_callback,
-            )
-            summary = dict(result.summary)
-            summary["optimization_mode"] = str(config.optimization_mode)
-            summary["md_total_m"] = 2100.0 if str(config.optimization_mode) != "none" else 2200.0
-            return PlannerResult(
-                stations=result.stations,
-                summary=summary,
-                azimuth_deg=result.azimuth_deg,
-                md_t1_m=result.md_t1_m,
-            )
-
-    success = SuccessfulWellPlan(
-        name="WELL-OPT",
-        surface={"x": 0.0, "y": 0.0, "z": 0.0},
-        t1={"x": 600.0, "y": 800.0, "z": 2400.0},
-        t3={"x": 1500.0, "y": 2000.0, "z": 2500.0},
-        stations=_StubPlanner().plan(
-            surface=Point3D(0.0, 0.0, 0.0),
-            t1=Point3D(600.0, 800.0, 2400.0),
-            t3=Point3D(1500.0, 2000.0, 2500.0),
-            config=_fast_batch_config(optimization_mode="minimize_md"),
-        ).stations,
-        summary={"md_total_m": 2100.0, "optimization_mode": "minimize_md"},
-        azimuth_deg=0.0,
-        md_t1_m=1000.0,
-        config=_fast_batch_config(optimization_mode="minimize_md"),
-    )
-
-    updated = ensure_successful_plan_baseline(
-        success=success,
-        planner=_OptimizationStubPlanner(),
-    )
-
-    assert updated.baseline_runtime_s is not None
-    assert updated.baseline_summary is not None
-    assert float(updated.baseline_summary["md_total_m"]) == 2200.0
 
 
 @pytest.mark.integration
@@ -2363,3 +2305,62 @@ def test_recommended_batch_selection_prefers_unresolved_wells_only() -> None:
 
     assert initial == ["WELL-A", "WELL-B", "WELL-C", "WELL-D"]
     assert follow_up == ["WELL-B", "WELL-C", "WELL-D"]
+
+
+@pytest.mark.integration
+def test_batch_planner_parallel_workers_produces_same_results() -> None:
+    """Parallel path should produce the same rows/successes as sequential."""
+    records = [
+        WelltrackRecord(
+            name="PAR-1",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="PAR-2",
+            points=(
+                WelltrackPoint(x=50.0, y=50.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=850.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1550.0, y=2050.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="PAR-BAD",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=100.0, z=1000.0, md=1000.0),
+            ),
+        ),
+    ]
+    config = TrajectoryConfig(
+        md_step_m=10.0,
+        md_step_control_m=2.0,
+        pos_tolerance_m=2.0,
+        turn_solver_max_restarts=0,
+    )
+    selected = {"PAR-1", "PAR-2", "PAR-BAD"}
+
+    done_names: list[str] = []
+
+    def on_done(_i: int, _t: int, name: str, _row: dict) -> None:
+        done_names.append(name)
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names=selected,
+        config=config,
+        record_done_callback=on_done,
+        parallel_workers=2,
+    )
+
+    by_name = {row["Скважина"]: row for row in rows}
+    assert by_name["PAR-1"]["Статус"] == "OK"
+    assert by_name["PAR-2"]["Статус"] == "OK"
+    assert by_name["PAR-BAD"]["Статус"] == "Ошибка формата"
+    assert len(successes) == 2
+    success_names = {s.name for s in successes}
+    assert success_names == {"PAR-1", "PAR-2"}
+    assert len(done_names) == 3

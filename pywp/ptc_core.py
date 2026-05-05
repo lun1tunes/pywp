@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import colorsys
 import hashlib
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +13,11 @@ from typing import Callable, Iterable, Mapping
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+
+# Suppress noisy Streamlit warnings BEFORE importing streamlit
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+
 import streamlit as st
 
 from pywp import TrajectoryConfig, TrajectoryPlanner
@@ -150,7 +156,6 @@ from pywp.welltrack_batch import (
     DynamicClusterExecutionContext,
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
-    ensure_successful_plan_baseline,
     merge_batch_results,
     rebuild_optimization_context,
     recommended_batch_selection,
@@ -241,6 +246,7 @@ class _BatchRunRequest:
     selected_names: list[str]
     config: TrajectoryConfig
     run_clicked: bool
+    parallel_workers: int = 0
 
 
 @dataclass(frozen=True)
@@ -9008,6 +9014,26 @@ def _render_batch_run_forms(
             binding=WT_CALC_PARAMS,
             title="Общие параметры расчета",
         )
+        _parallel_options = [
+            ("Без Multiprocessing", 0),
+            *(( f"{n} процессов", n) for n in (2, 4, 6, 8, 12, 16, 24, 32)),
+        ]
+        _parallel_labels = [label for label, _ in _parallel_options]
+        _parallel_values = {label: value for label, value in _parallel_options}
+        _parallel_label = st.selectbox(
+            "Параллельный расчёт",
+            options=_parallel_labels,
+            index=0,
+            key="wt_parallel_workers_label",
+            help=(
+                "Количество параллельных процессов для batch-расчёта. "
+                "Ускоряет расчёт при большом числе скважин за счёт "
+                "использования нескольких ядер CPU. При активном "
+                "anti-collision cluster-пересчёте параллелизм отключается "
+                "автоматически (скважины зависят друг от друга)."
+            ),
+        )
+        _parallel_workers = _parallel_values.get(str(_parallel_label), 0)
         run_clicked = st.form_submit_button(
             "Запустить / пересчитать выбранные скважины",
             type="primary",
@@ -9045,6 +9071,7 @@ def _render_batch_run_forms(
             selected_names=list(st.session_state.get("wt_selected_names", [])),
             config=config,
             run_clicked=bool(run_clicked),
+            parallel_workers=int(_parallel_workers),
         )
     )
     return requests
@@ -9241,6 +9268,15 @@ def _run_batch_if_clicked(
                     + ". Следующие скважины используют обновленные reference paths "
                     "уже пересчитанных шагов."
                 )
+            if int(request.parallel_workers) > 1 and dynamic_cluster_context is None:
+                append_log(
+                    f"Параллельный расчёт: {int(request.parallel_workers)} процессов."
+                )
+            elif int(request.parallel_workers) > 1 and dynamic_cluster_context is not None:
+                append_log(
+                    "Параллельный расчёт отключён: активен iterative cluster-aware "
+                    "режим (скважины зависят друг от друга)."
+                )
             if pad_layout_active:
                 append_log(
                     "Активна раскладка устьев по кустам: перед расчетом применены "
@@ -9347,6 +9383,7 @@ def _run_batch_if_clicked(
                 progress_callback=on_progress,
                 solver_progress_callback=on_solver_progress,
                 record_done_callback=on_record_done,
+                parallel_workers=int(request.parallel_workers),
             )
             batch_metadata = batch.last_evaluation_metadata
             skipped_policy_count = int(
@@ -9668,22 +9705,14 @@ def _batch_summary_display_df(summary_df: pd.DataFrame) -> pd.DataFrame:
     return display_df[ordered + trailing]
 
 
-def _ensure_selected_success_baseline(
+def _find_selected_success(
     *,
     selected_name: str,
     successes: list[SuccessfulWellPlan],
 ) -> SuccessfulWellPlan:
-    selected = next(
+    return next(
         item for item in successes if str(item.name) == str(selected_name)
     )
-    updated = ensure_successful_plan_baseline(success=selected)
-    if updated is selected:
-        return selected
-    st.session_state["wt_successes"] = [
-        updated if str(item.name) == str(selected_name) else item
-        for item in successes
-    ]
-    return updated
 
 
 def _render_success_tabs(
@@ -9709,7 +9738,7 @@ def _render_success_tabs(
         selected_name = st.selectbox(
             "Скважина", options=[item.name for item in successes]
         )
-        selected = _ensure_selected_success_baseline(
+        selected = _find_selected_success(
             selected_name=str(selected_name),
             successes=successes,
         )
@@ -9761,8 +9790,6 @@ def _render_success_tabs(
             azimuth_deg=float(selected.azimuth_deg),
             md_t1_m=float(selected.md_t1_m),
             runtime_s=selected.runtime_s,
-            baseline_summary=selected.baseline_summary,
-            baseline_runtime_s=selected.baseline_runtime_s,
             issue_messages=(
                 (str(selected.md_postcheck_message),)
                 if str(selected.md_postcheck_message).strip()

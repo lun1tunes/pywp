@@ -2816,37 +2816,6 @@ def test_build_selected_optimization_contexts_rebuilds_prepared_context_from_cur
     assert float(stored_context.references[0].xyz_m[-1, 0]) == pytest.approx(2000.0)
 
 
-def test_ensure_selected_success_baseline_populates_lazy_reference_and_caches_it(
-    monkeypatch,
-) -> None:
-    page = wt_import_module
-    optimized = _successful_plan(
-        name="WELL-OPT",
-        y_offset_m=0.0,
-        optimization_mode="minimize_md",
-    )
-    page.st.session_state["wt_successes"] = [optimized]
-    monkeypatch.setattr(
-        page,
-        "ensure_successful_plan_baseline",
-        lambda *, success: success.validated_copy(
-            baseline_summary={"md_total_m": 2200.0},
-            baseline_runtime_s=0.42,
-        ),
-    )
-
-    selected = page._ensure_selected_success_baseline(
-        selected_name="WELL-OPT",
-        successes=[optimized],
-    )
-
-    assert selected.baseline_summary is not None
-    assert selected.baseline_runtime_s is not None
-    cached = page.st.session_state["wt_successes"][0]
-    assert cached.baseline_summary is not None
-    assert cached.baseline_runtime_s is not None
-
-
 def test_selected_execution_order_prioritizes_cluster_action_steps() -> None:
     page = wt_import_module
     page.st.session_state["wt_prepared_recommendation_snapshot"] = {

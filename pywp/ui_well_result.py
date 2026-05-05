@@ -7,8 +7,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from pydantic import field_validator
 
-from pywp.models import OPTIMIZATION_NONE, Point3D, SummaryValue, TrajectoryConfig
-from pywp.planner_config import OPTIMIZATION_OPTIONS, optimization_display_label
+from pywp.models import Point3D, SummaryValue, TrajectoryConfig
+from pywp.planner_config import optimization_display_label
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
@@ -84,8 +84,6 @@ class SingleWellResultView(FrozenArbitraryModel):
     azimuth_deg: float
     md_t1_m: float
     runtime_s: float | None = None
-    baseline_summary: Mapping[str, SummaryValue] | None = None
-    baseline_runtime_s: float | None = None
     issue_messages: tuple[str, ...] = ()
     trajectory_line_dash: str = "solid"
     plan_csb_stations: pd.DataFrame | None = None
@@ -225,35 +223,19 @@ def _format_solver_restart_text(
 
 def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
     summary = view.summary
-    baseline_summary = view.baseline_summary
-    has_baseline = baseline_summary is not None
     t1_horizontal_offset_m = horizontal_offset_m(point=view.t1, reference=view.surface)
 
     optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
     optimization_label = optimization_display_label(optimization_mode)
-    baseline_optimization_label = (
-        OPTIMIZATION_OPTIONS.get(OPTIMIZATION_NONE, "Без оптимизации")
-        if has_baseline
-        else "-"
-    )
-
-    def baseline_value(formatter: Callable[[Mapping[str, SummaryValue]], str]) -> str:
-        if baseline_summary is None:
-            return "-"
-        return formatter(baseline_summary)
 
     rows = [
         {
             "Показатель": "Модель траектории",
             "Значение": _format_metric_text(summary.get("trajectory_type")),
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: _format_metric_text(candidate.get("trajectory_type"))
-            ),
         },
         {
             "Показатель": "Оптимизация",
             "Значение": optimization_label,
-            "Значение без оптимизации": baseline_optimization_label,
         },
         {
             "Показатель": "Цели / сложность",
@@ -261,38 +243,20 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
                 f"{_format_metric_text(summary.get('trajectory_target_direction'))} / "
                 f"{_format_metric_text(summary.get('well_complexity'))}"
             ),
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: (
-                    f"{_format_metric_text(candidate.get('trajectory_target_direction'))} / "
-                    f"{_format_metric_text(candidate.get('well_complexity'))}"
-                )
-            ),
         },
         {
             "Показатель": "Поворот по азимуту",
             "Значение": f"{float(summary.get('azimuth_turn_deg', 0.0)):.2f} deg",
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: f"{float(candidate.get('azimuth_turn_deg', 0.0)):.2f} deg"
-            ),
         },
         {
             "Показатель": "Отход t1",
             "Значение": format_distance(t1_horizontal_offset_m),
-            "Значение без оптимизации": (
-                format_distance(t1_horizontal_offset_m) if has_baseline else "-"
-            ),
         },
         {
             "Показатель": "INC t1 / ЗУ HOLD",
             "Значение": (
                 f"{float(summary['entry_inc_deg']):.2f} / "
                 f"{float(summary['hold_inc_deg']):.2f} deg"
-            ),
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: (
-                    f"{float(candidate.get('entry_inc_deg', 0.0)):.2f} / "
-                    f"{float(candidate.get('hold_inc_deg', 0.0)):.2f} deg"
-                )
             ),
         },
         {
@@ -302,27 +266,14 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
                 f"{dls_to_pi(float(summary.get('build2_dls_selected_deg_per_30m', summary.get('build_dls_selected_deg_per_30m', 0.0)))):.2f} / "
                 f"{dls_to_pi(float(summary['max_dls_total_deg_per_30m'])):.2f} deg/10m"
             ),
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: (
-                    f"{dls_to_pi(float(candidate.get('build1_dls_selected_deg_per_30m', candidate.get('build_dls_selected_deg_per_30m', 0.0)))):.2f} / "
-                    f"{dls_to_pi(float(candidate.get('build2_dls_selected_deg_per_30m', candidate.get('build_dls_selected_deg_per_30m', 0.0)))):.2f} / "
-                    f"{dls_to_pi(float(candidate.get('max_dls_total_deg_per_30m', 0.0))):.2f} deg/10m"
-                )
-            ),
         },
         {
             "Показатель": "KOP MD",
             "Значение": format_distance(float(summary["kop_md_m"])),
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: format_distance(float(candidate.get("kop_md_m", 0.0)))
-            ),
         },
         {
             "Показатель": "Длина ГС",
             "Значение": format_distance(float(summary["horizontal_length_m"])),
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: format_distance(float(candidate.get("horizontal_length_m", 0.0)))
-            ),
         },
         {
             "Показатель": "Макс INC факт / лимит",
@@ -330,24 +281,14 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
                 f"{float(summary['max_inc_actual_deg']):.2f} / "
                 f"{float(summary['max_inc_deg']):.2f} deg"
             ),
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: (
-                    f"{float(candidate.get('max_inc_actual_deg', 0.0)):.2f} / "
-                    f"{float(candidate.get('max_inc_deg', 0.0)):.2f} deg"
-                )
-            ),
         },
         {
             "Показатель": "Итоговая MD",
             "Значение": format_distance(float(summary["md_total_m"])),
-            "Значение без оптимизации": baseline_value(
-                lambda candidate: format_distance(float(candidate.get("md_total_m", 0.0)))
-            ),
         },
         {
             "Показатель": "Рестарты решателя",
             "Значение": _format_solver_restart_text(summary),
-            "Значение без оптимизации": baseline_value(_format_solver_restart_text),
         },
         {
             "Показатель": "Проблемы",
@@ -355,21 +296,12 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
                 summary=summary,
                 extra_messages=view.issue_messages,
             ),
-            "Значение без оптимизации": (
-                _format_issues_text(summary=baseline_summary)
-                if baseline_summary is not None
-                else "-"
-            ),
         },
         {
             "Показатель": "Время расчета",
             "Значение": _format_runtime_text(view.runtime_s),
-            "Значение без оптимизации": _format_runtime_text(view.baseline_runtime_s),
         },
     ]
-    if optimization_mode == OPTIMIZATION_NONE:
-        for row in rows:
-            row["Значение без оптимизации"] = "-"
     return rows
 
 
