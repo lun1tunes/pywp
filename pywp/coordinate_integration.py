@@ -120,8 +120,9 @@ def render_crs_sidebar() -> CoordinateSystem:
             index=_get_crs_index(current_crs),
             key=CRS_SELECTBOX_KEY,
             help=(
-                "Система координат для отображения координат в отчётах "
-                "и инклинометрии. По умолчанию: PNO-16 (Зона)."
+                "Система координат применяется только к CSV-выгрузкам "
+                "инклинометрии. Экранные точки, кусты, графики и таблицы "
+                "остаются в расчётной системе. По умолчанию: PNO-16 (Зона)."
             ),
         )
 
@@ -137,9 +138,9 @@ def render_crs_sidebar() -> CoordinateSystem:
             st.session_state[CRS_AUTO_CONVERT_KEY] = True
 
         st.toggle(
-            "Автопересчёт координат",
+            "Пересчитывать координаты в CSV",
             key=CRS_AUTO_CONVERT_KEY,
-            help="Автоматически пересчитывать координаты при смене CRS",
+            help="Автоматически пересчитывать только CSV инклинометрии при смене CRS",
         )
 
         # Show selected CRS info
@@ -185,25 +186,40 @@ def _can_transform_directly(from_crs: CoordinateSystem, to_crs: CoordinateSystem
     if from_crs == to_crs:
         return True
 
-    # PNO and LOCAL systems don't have EPSG codes - need local transformer
-    placeholder_systems = {
-        CoordinateSystem.PNO_13_ZONE,
-        CoordinateSystem.PNO_13_CM,
-        CoordinateSystem.PNO_16_ZONE,
-        CoordinateSystem.PNO_16_CM,
-        CoordinateSystem.LOCAL,
-    }
-
-    if from_crs in placeholder_systems or to_crs in placeholder_systems:
+    effective_from = _effective_pyproj_crs(from_crs)
+    effective_to = _effective_pyproj_crs(to_crs)
+    if effective_from is None or effective_to is None:
         return False
+    if effective_from == effective_to:
+        return True
 
-    # Both must have real EPSG values (not PNO-XX placeholder strings)
-    from_val = from_crs.value
-    to_val = to_crs.value
+    from_val = effective_from.value
+    to_val = effective_to.value
     return (
         from_val.startswith("EPSG:")
         and to_val.startswith("EPSG:")
     )
+
+
+def _effective_pyproj_crs(crs: CoordinateSystem) -> CoordinateSystem | None:
+    """Return the EPSG-backed CRS used for transformation.
+
+    PNO systems are labels over known base projected systems in this app. The
+    field-specific false easting/rotation parameters still need project setup,
+    but the zero-offset base CRS allows the UI to consistently transform display
+    coordinates instead of silently leaving every view unchanged.
+    """
+    if crs == CoordinateSystem.LOCAL:
+        return None
+    if crs == CoordinateSystem.PNO_16_ZONE:
+        return CoordinateSystem.PULKOVO_1942_ZONE_16
+    if crs == CoordinateSystem.PNO_16_CM:
+        return CoordinateSystem.PULKOVO_1995_CM_39E
+    if crs == CoordinateSystem.PNO_13_ZONE:
+        return CoordinateSystem.PULKOVO_1942_ZONE_13
+    if crs == CoordinateSystem.PNO_13_CM:
+        return CoordinateSystem.PULKOVO_1995_CM_39E
+    return crs
 
 
 def _transform_xy(
@@ -224,31 +240,38 @@ def _transform_xy(
     if transformer is None:
         return x, y
 
+    effective_from = _effective_pyproj_crs(from_crs)
+    effective_to = _effective_pyproj_crs(to_crs)
+    if effective_from is None or effective_to is None:
+        return x, y
+    if effective_from == effective_to:
+        return x, y
+
     if not _can_transform_directly(from_crs, to_crs):
         return x, y
 
     try:
-        if from_crs.is_geographic() and to_crs.is_geographic():
+        if effective_from.is_geographic() and effective_to.is_geographic():
             # Both geographic: lon/lat -> lon/lat
             result = transformer.transform(
                 GeodeticCoord(lat_deg=y, lon_deg=x),
-                from_crs, to_crs,
+                effective_from, effective_to,
             )
             if isinstance(result, GeodeticCoord):
                 return result.lon_deg, result.lat_deg
-        elif not from_crs.is_geographic() and not to_crs.is_geographic():
+        elif not effective_from.is_geographic() and not effective_to.is_geographic():
             # Both projected: easting/northing -> easting/northing
             result = transformer.transform(
                 ProjectedCoord(easting_m=x, northing_m=y),
-                from_crs, to_crs,
+                effective_from, effective_to,
             )
             if isinstance(result, ProjectedCoord):
                 return result.easting_m, result.northing_m
-        elif from_crs.is_geographic() and not to_crs.is_geographic():
+        elif effective_from.is_geographic() and not effective_to.is_geographic():
             # Geographic -> projected
             result = transformer.transform(
                 GeodeticCoord(lat_deg=y, lon_deg=x),
-                from_crs, to_crs,
+                effective_from, effective_to,
             )
             if isinstance(result, ProjectedCoord):
                 return result.easting_m, result.northing_m
@@ -256,7 +279,7 @@ def _transform_xy(
             # Projected -> geographic
             result = transformer.transform(
                 ProjectedCoord(easting_m=x, northing_m=y),
-                from_crs, to_crs,
+                effective_from, effective_to,
             )
             if isinstance(result, GeodeticCoord):
                 return result.lon_deg, result.lat_deg
@@ -297,7 +320,9 @@ def transform_point_to_crs(
 def transform_stations_to_crs(
     stations: pd.DataFrame,
     to_crs: CoordinateSystem,
-    from_crs: CoordinateSystem = CoordinateSystem.LOCAL,
+    from_crs: CoordinateSystem = DEFAULT_CRS,
+    *,
+    rename_columns: bool = True,
 ) -> pd.DataFrame:
     """Transform survey stations to target coordinate system.
 
@@ -308,7 +333,10 @@ def transform_stations_to_crs(
     Args:
         stations: DataFrame with X_m, Y_m, Z_m columns
         to_crs: Target coordinate system
-        from_crs: Source coordinate system (defaults to LOCAL)
+        from_crs: Source coordinate system (defaults to DEFAULT_CRS)
+        rename_columns: Rename X/Y/Z columns for display/export. Keep this
+            disabled for internal plotting data, because visualization code
+            expects the standard X_m/Y_m/Z_m names.
 
     Returns:
         Transformed stations DataFrame with renamed columns.
@@ -341,14 +369,15 @@ def transform_stations_to_crs(
         result["X_m"] = transformed[:, 0]
         result["Y_m"] = transformed[:, 1]
 
-    # Rename columns to reflect target CRS
-    if "X_m" in result.columns:
-        result = result.rename(columns={"X_m": f"X_{col_suffix}_m"})
-    if "Y_m" in result.columns:
-        result = result.rename(columns={"Y_m": f"Y_{col_suffix}_m"})
-    # Z is vertical depth (TVD) - always preserved
-    if "Z_m" in result.columns:
-        result = result.rename(columns={"Z_m": f"Z_TVD_m"})
+    if rename_columns:
+        xy_unit = "deg" if to_crs.is_geographic() else "m"
+        if "X_m" in result.columns:
+            result = result.rename(columns={"X_m": f"X_{col_suffix}_{xy_unit}"})
+        if "Y_m" in result.columns:
+            result = result.rename(columns={"Y_m": f"Y_{col_suffix}_{xy_unit}"})
+        # Z is vertical depth (TVD) - always preserved
+        if "Z_m" in result.columns:
+            result = result.rename(columns={"Z_m": "Z_TVD_m"})
 
     return result
 
@@ -431,7 +460,7 @@ def _build_transform_message(
 def apply_crs_to_well_view(
     view: SingleWellResultView,
     target_crs: CoordinateSystem,
-    source_crs: CoordinateSystem = CoordinateSystem.LOCAL,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> SingleWellResultView:
     """Apply coordinate system transformation to well result view.
 
@@ -443,7 +472,7 @@ def apply_crs_to_well_view(
     Args:
         view: Original well result view
         target_crs: Target coordinate system for display
-        source_crs: Source coordinate system of the data (defaults to LOCAL)
+        source_crs: Source coordinate system of the data (defaults to DEFAULT_CRS)
 
     Returns:
         Well view with transformed coordinates (or original with warning).
@@ -461,7 +490,12 @@ def apply_crs_to_well_view(
     t3_tx = transform_point_to_crs(view.t3, source_crs, target_crs)
 
     # Transform stations
-    stations_tx = transform_stations_to_crs(view.stations, target_crs, source_crs)
+    stations_tx = transform_stations_to_crs(
+        view.stations,
+        target_crs,
+        source_crs,
+        rename_columns=False,
+    )
 
     # Build new issue messages
     new_messages = list(view.issue_messages)
@@ -471,6 +505,7 @@ def apply_crs_to_well_view(
     # Update summary to indicate CRS used
     summary = dict(view.summary)
     summary["display_crs"] = get_crs_display_suffix(target_crs).strip("()")
+    summary["display_crs_xy_unit"] = "deg" if target_crs.is_geographic() else "м"
 
     # Build and return updated view
     return view.model_copy(
@@ -534,4 +569,5 @@ __all__ = [
     "CRS_OPTIONS",
     "_can_transform_directly",
     "_transform_xy",
+    "_effective_pyproj_crs",
 ]

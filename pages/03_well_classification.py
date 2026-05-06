@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
+
+# Suppress noisy Streamlit warnings BEFORE importing streamlit
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
+
 import streamlit as st
+from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
+
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
 from pywp.classification import (
     classify_well,
@@ -124,4 +135,8 @@ def run_page() -> None:
 
 
 if __name__ == "__main__":
+    if get_script_run_ctx(suppress_warning=True) is None:
+        raise SystemExit(
+            "Запустите приложение командой `streamlit run pages/03_well_classification.py`."
+        )
     run_page()

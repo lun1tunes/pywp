@@ -15,6 +15,7 @@ dependencies = [
   "pydantic>=2,<3",
   "scipy>=1.10",
   "plotly>=5.18",
+  "pyproj>=3.6,<4",
   "streamlit==1.54.0"
 ]
 
@@ -27,3 +28,11 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pywp*"]
+
+[tool.setuptools.package-data]
+pywp = [
+  "three_viewer_assets/*.js",
+  "three_viewer_assets/component/*.html",
+  "three_viewer_assets/templates/*.html",
+  "three_viewer_assets/vendor/*.js",
+]

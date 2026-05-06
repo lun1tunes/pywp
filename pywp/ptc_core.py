@@ -17,8 +17,11 @@ import plotly.graph_objects as go
 # Suppress noisy Streamlit warnings BEFORE importing streamlit
 logging.getLogger("streamlit").setLevel(logging.ERROR)
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
 import streamlit as st
+
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
 from pywp import TrajectoryConfig, TrajectoryPlanner
 from pywp.actual_fund_analysis import (
@@ -78,6 +81,12 @@ from pywp.anticollision_rerun import (
     recommendation_intervals_for_moving_well as recommendation_intervals_for_moving_well_shared,
 )
 from pywp.constants import SMALL
+from pywp.coordinate_integration import (
+    DEFAULT_CRS,
+    get_crs_display_suffix,
+    transform_stations_to_crs,
+)
+from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackPoint,
@@ -125,7 +134,7 @@ from pywp.ui_utils import (
     dls_to_pi,
     format_run_log_line,
 )
-from pywp.ui_well_panels import render_run_log_panel
+from pywp.ui_well_panels import render_run_log_panel, survey_export_dataframe
 from pywp.ui_well_result import (
     SingleWellResultView,
     render_key_metrics,
@@ -1970,13 +1979,20 @@ def _render_plotly_or_three_3d(
                 edit_wells=payload_overrides.get("edit_wells"),
             )
         with container:
-            render_local_three_scene(
+            edit_event = render_local_three_scene(
                 payload,
                 height=height,
                 instance_token=int(
                     st.session_state.get("wt_three_viewer_nonce", 0)
                 ),
+                key=str(
+                    (payload_overrides or {}).get("component_key")
+                    or payload.get("title")
+                    or f"three-{height}"
+                ),
             )
+        if _handle_three_edit_event(edit_event):
+            st.rerun()
         return
     container.plotly_chart(
         figure,
@@ -1992,6 +2008,30 @@ def _build_edit_wells_payload(
     edit_wells: list[dict[str, object]] = []
     for success in successes:
         config = success.config
+        base_points: list[list[float]] = []
+        station_columns = ("X_m", "Y_m", "Z_m")
+        if all(column in success.stations.columns for column in station_columns):
+            station_values = (
+                success.stations.loc[:, list(station_columns)]
+                .dropna()
+                .to_numpy(dtype=float)
+            )
+            if station_values.size:
+                if len(station_values) > 700:
+                    sample_indices = np.unique(
+                        np.linspace(
+                            0,
+                            len(station_values) - 1,
+                            num=700,
+                            dtype=int,
+                        )
+                    )
+                    station_values = station_values[sample_indices]
+                base_points = [
+                    [float(row[0]), float(row[1]), float(row[2])]
+                    for row in station_values
+                    if np.all(np.isfinite(row))
+                ]
         edit_wells.append(
             {
                 "name": str(success.name),
@@ -2013,6 +2053,7 @@ def _build_edit_wells_payload(
                 "color": str(
                     name_to_color.get(str(success.name), "#2563eb")
                 ),
+                "base_points": base_points,
                 "config": {
                     "entry_inc_target_deg": float(config.entry_inc_target_deg),
                     "max_inc_deg": float(config.max_inc_deg),
@@ -2053,6 +2094,7 @@ def _trajectory_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "edit_wells": _build_edit_wells_payload(successes, name_to_color),
+        "component_key": "trajectory-overview",
     }
 
 
@@ -2167,6 +2209,7 @@ def _anticollision_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "collisions": collisions,
+        "component_key": "anticollision-overview",
     }
     if successes:
         result["edit_wells"] = _build_edit_wells_payload(successes, name_to_color)
@@ -2980,33 +3023,59 @@ def _apply_edit_targets_from_query_params() -> None:
     try:
         changes = _json.loads(raw)
     except (ValueError, TypeError):
-        return
+        from urllib.parse import unquote as _unquote
+
+        try:
+            changes = _json.loads(_unquote(str(raw)))
+        except (ValueError, TypeError):
+            return
+    _apply_edit_targets_changes(changes, source="query")
+
+
+def _edit_target_point(value: object) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        point = [float(value[0]), float(value[1]), float(value[2])]
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isfinite(point)):
+        return None
+    return point
+
+
+def _apply_edit_targets_changes(
+    changes: object,
+    *,
+    source: str = "3d",
+) -> list[str]:
     if not isinstance(changes, list) or not changes:
-        return
+        return []
     records = st.session_state.get("wt_records")
     if not records:
-        return
+        return []
     change_map: dict[str, dict[str, list[float]]] = {}
     for entry in changes:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, Mapping):
             continue
         name = str(entry.get("name", "")).strip()
-        t1 = entry.get("t1")
-        t3 = entry.get("t3")
-        if name and isinstance(t1, list) and isinstance(t3, list):
+        t1 = _edit_target_point(entry.get("t1"))
+        t3 = _edit_target_point(entry.get("t3"))
+        if name and t1 is not None and t3 is not None:
             change_map[name] = {"t1": t1, "t3": t3}
     if not change_map:
-        return
+        return []
     updated_records: list[WelltrackRecord] = []
     updated_names: list[str] = []
     for record in records:
-        if str(record.name) not in change_map:
+        record_name = str(record.name)
+        if record_name not in change_map:
             updated_records.append(record)
             continue
-        delta = change_map[str(record.name)]
+        delta = change_map[record_name]
         new_t1 = delta["t1"]
         new_t3 = delta["t3"]
-        if len(record.points) != 3 or len(new_t1) < 3 or len(new_t3) < 3:
+        if len(record.points) != 3:
             updated_records.append(record)
             continue
         old_points = record.points
@@ -3028,13 +3097,46 @@ def _apply_edit_targets_from_query_params() -> None:
         updated_records.append(
             WelltrackRecord(name=record.name, points=new_points)
         )
-        updated_names.append(str(record.name))
-    if updated_names:
-        st.session_state["wt_records"] = updated_records
-        st.session_state["wt_edit_targets_applied"] = updated_names
-        # Clear stale calculation results so old trajectories don't conflict
-        st.session_state["wt_successes"] = None
-        st.session_state["wt_summary_rows"] = None
+        updated_names.append(record_name)
+    if not updated_names:
+        return []
+
+    st.session_state["wt_records"] = updated_records
+    st.session_state["wt_edit_targets_applied"] = updated_names
+    st.session_state["wt_edit_targets_highlight_names"] = updated_names
+    st.session_state["wt_edit_targets_last_source"] = str(source)
+    st.session_state["wt_edit_targets_highlight_version"] = (
+        int(st.session_state.get("wt_edit_targets_highlight_version", 0)) + 1
+    )
+    # Clear stale calculation results so old trajectories don't conflict with
+    # edited control points.
+    st.session_state["wt_successes"] = None
+    st.session_state["wt_summary_rows"] = None
+    st.session_state["wt_last_error"] = ""
+    st.session_state["wt_pending_selected_names"] = list(updated_names)
+    return updated_names
+
+
+def _handle_three_edit_event(event: object) -> bool:
+    if not isinstance(event, Mapping):
+        return False
+    if str(event.get("type") or "") != "pywp:editTargets":
+        return False
+    nonce = str(event.get("nonce") or "")
+    if nonce and nonce == str(
+        st.session_state.get("wt_last_edit_targets_nonce", "")
+    ):
+        return False
+    updated_names = _apply_edit_targets_changes(
+        event.get("changes"),
+        source="three_viewer",
+    )
+    if not updated_names:
+        return False
+    if nonce:
+        st.session_state["wt_last_edit_targets_nonce"] = nonce
+    _bump_three_viewer_nonce()
+    return True
 
 
 def _clear_results() -> None:
@@ -7657,10 +7759,20 @@ def _render_reference_trajectory_panel() -> None:
 
 
 def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
+    highlight_names = {
+        str(name)
+        for name in (st.session_state.get("wt_edit_targets_highlight_names") or [])
+        if str(name).strip()
+    }
     with st.expander(
         "Текущие точки скважин (используются в расчете, включая обновленные устья S)",
-        expanded=False,
+        expanded=bool(highlight_names),
     ):
+        if highlight_names:
+            st.success(
+                "Изменённые в 3D-редакторе точки t1/t3 подсвечены. "
+                "Запустите расчёт для обновления траекторий."
+            )
         raw_rows: list[dict[str, object]] = []
         for record in records:
             for idx, point in enumerate(record.points, start=1):
@@ -7682,8 +7794,26 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                         "Z/TVD, м": float(point.z),
                     }
                 )
+        raw_df = arrow_safe_text_dataframe(pd.DataFrame(raw_rows))
+        if highlight_names and not raw_df.empty:
+            highlight_mask = (
+                raw_df["Скважина"].astype(str).isin(highlight_names)
+                & raw_df["Точка"].astype(str).isin({"t1", "t3"})
+            )
+
+            def _highlight_edit_rows(row: pd.Series) -> list[str]:
+                if bool(highlight_mask.loc[row.name]):
+                    return [
+                        "background-color: rgba(34, 197, 94, 0.14); "
+                        "font-weight: 600;"
+                    ] * len(row)
+                return [""] * len(row)
+
+            table_payload = raw_df.style.apply(_highlight_edit_rows, axis=1)
+        else:
+            table_payload = raw_df
         st.dataframe(
-            arrow_safe_text_dataframe(pd.DataFrame(raw_rows)),
+            table_payload,
             width="stretch",
             hide_index=True,
         )
@@ -8472,30 +8602,30 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             "Их параметры показаны в таблице ниже."
         )
         pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
-        pad_rows = [
-            {
-                "Куст": str(pad.pad_id),
-                "Скважин": int(len(pad.wells)),
-                "Устья заданы": (
-                    "Да"
-                    if bool(
-                        getattr(
-                            pad_metadata.get(str(pad.pad_id)),
-                            "source_surfaces_defined",
-                            False,
+        pad_rows = []
+        for pad in pads:
+            cfg = _pad_config_for_ui(pad)
+            pad_rows.append(
+                {
+                    "Куст": str(pad.pad_id),
+                    "Скважин": int(len(pad.wells)),
+                    "Устья заданы": (
+                        "Да"
+                        if bool(
+                            getattr(
+                                pad_metadata.get(str(pad.pad_id)),
+                                "source_surfaces_defined",
+                                False,
+                            )
                         )
-                    )
-                    else "Нет"
-                ),
-                "Авто НДС, deg": float(
-                    _pad_config_for_ui(pad)["nds_azimuth_deg"]
-                ),
-                "S X, м": float(_pad_config_for_ui(pad)["first_surface_x"]),
-                "S Y, м": float(_pad_config_for_ui(pad)["first_surface_y"]),
-                "S Z, м": float(_pad_config_for_ui(pad)["first_surface_z"]),
-            }
-            for pad in pads
-        ]
+                        else "Нет"
+                    ),
+                    "Авто НДС, deg": float(cfg["nds_azimuth_deg"]),
+                    "S X, м": float(cfg["first_surface_x"]),
+                    "S Y, м": float(cfg["first_surface_y"]),
+                    "S Z, м": float(cfg["first_surface_z"]),
+                }
+            )
         st.dataframe(
             arrow_safe_text_dataframe(pd.DataFrame(pad_rows)),
             width="stretch",
@@ -9514,6 +9644,10 @@ def _render_batch_log() -> None:
 
 def _build_batch_survey_csv(
     successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> bytes:
     """Build combined CSV with inclinometry data for all successful wells."""
     if not successes:
@@ -9523,6 +9657,13 @@ def _build_batch_survey_csv(
         stations = success.stations.copy()
         if stations.empty:
             continue
+        if auto_convert and target_crs != source_crs:
+            stations = transform_stations_to_crs(
+                stations,
+                target_crs,
+                source_crs,
+                rename_columns=False,
+            )
         stations.insert(0, "well_name", str(success.name))
         if "DLS_deg_per_30m" in stations.columns:
             from pywp.ui_utils import dls_to_pi
@@ -9530,6 +9671,12 @@ def _build_batch_survey_csv(
                 stations["DLS_deg_per_30m"].to_numpy(dtype=float)
             )
             stations = stations.drop(columns=["DLS_deg_per_30m"])
+        if auto_convert and target_crs != source_crs:
+            stations = survey_export_dataframe(
+                stations,
+                xy_label_suffix=get_crs_display_suffix(target_crs),
+                xy_unit="deg" if target_crs.is_geographic() else "м",
+            )
         frames.append(stations)
     if not frames:
         return b""
@@ -9539,6 +9686,10 @@ def _build_batch_survey_csv(
 
 def _render_batch_summary(
     summary_rows: list[dict[str, object]],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> pd.DataFrame:
     summary_df = WelltrackBatchPlanner.summary_dataframe(summary_rows)
     if not summary_df.empty:
@@ -9675,7 +9826,12 @@ def _render_batch_summary(
         )
     with btn_cols[1]:
         successes = st.session_state.get("wt_successes") or []
-        survey_data = _build_batch_survey_csv(successes)
+        survey_data = _build_batch_survey_csv(
+            successes,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
+        )
         st.download_button(
             "Скачать инклинометрию (CSV)",
             data=survey_data or b"",
@@ -9773,6 +9929,7 @@ def _render_success_tabs(
                     backend=WT_3D_BACKEND_THREE_LOCAL,
                     height=560,
                     payload_overrides={
+                        "component_key": f"single-well-{selected.name}",
                         "edit_wells": _build_edit_wells_payload(
                             [selected], _single_well_name_to_color,
                         ),

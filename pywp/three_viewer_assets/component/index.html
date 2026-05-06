@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>pywp three viewer bridge</title>
+  </head>
+  <body>
+    <script>
+      (function () {
+        const READY = "streamlit:componentReady";
+        const SET_VALUE = "streamlit:setComponentValue";
+        const SET_HEIGHT = "streamlit:setFrameHeight";
+        const RENDER = "streamlit:render";
+        let channel = null;
+        let broadcast = null;
+
+        function post(type, payload) {
+          window.parent.postMessage(
+            Object.assign({ isStreamlitMessage: true, type: type }, payload || {}),
+            "*",
+          );
+        }
+
+        function emitValue(value) {
+          post(SET_VALUE, { value: value, dataType: "json" });
+        }
+
+        function bindChannel(nextChannel) {
+          if (broadcast) {
+            broadcast.close();
+            broadcast = null;
+          }
+          channel = String(nextChannel || "");
+          if (!channel || typeof BroadcastChannel === "undefined") {
+            return;
+          }
+          try {
+            broadcast = new BroadcastChannel(channel);
+            broadcast.onmessage = function (event) {
+              const data = event && event.data ? event.data : null;
+              if (!data || data.type !== "pywp:editTargets") {
+                return;
+              }
+              emitValue(data);
+            };
+          } catch (error) {
+            broadcast = null;
+          }
+        }
+
+        window.addEventListener("message", function (event) {
+          const message = event.data || {};
+          if (message.type !== RENDER) {
+            return;
+          }
+          const args = message.args || {};
+          bindChannel(args.channel || "");
+          post(SET_HEIGHT, { height: 0 });
+        });
+
+        post(READY, { apiVersion: 1 });
+      })();
+    </script>
+  </body>
+</html>

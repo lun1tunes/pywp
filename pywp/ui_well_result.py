@@ -489,6 +489,9 @@ def render_result_tables(
     summary_tab_label: str = "Сводка",
     survey_tab_label: str = "Инклинометрия",
     survey_file_name: str = "well_survey.csv",
+    survey_export_stations: pd.DataFrame | None = None,
+    survey_export_xy_label_suffix: str = "",
+    survey_export_xy_unit: str = "м",
     show_validation_section: bool = True,
     show_solver_diagnostics_section: bool = True,
 ) -> None:
@@ -571,8 +574,24 @@ def render_result_tables(
                 )
 
     with tab_survey:
+        display_crs = str(view.summary.get("display_crs", "")).strip()
+        fallback_xy_label_suffix = f" ({display_crs})" if display_crs else ""
+        fallback_xy_unit = str(view.summary.get("display_crs_xy_unit", "м")).strip() or "м"
+        display_xy_label_suffix = (
+            fallback_xy_label_suffix
+            if survey_export_stations is None
+            else ""
+        )
+        display_xy_unit = fallback_xy_unit if survey_export_stations is None else "м"
         render_survey_table_with_download(
             stations=view.stations,
             button_label="Скачать CSV инклинометрии",
             file_name=survey_file_name,
+            export_stations=survey_export_stations,
+            xy_label_suffix=display_xy_label_suffix,
+            xy_unit=display_xy_unit,
+            export_xy_label_suffix=(
+                survey_export_xy_label_suffix or fallback_xy_label_suffix
+            ),
+            export_xy_unit=survey_export_xy_unit or fallback_xy_unit,
         )

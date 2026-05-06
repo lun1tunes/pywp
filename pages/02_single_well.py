@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from time import perf_counter
 from typing import Callable
 
 import pandas as pd
+
+# Suppress noisy Streamlit warnings BEFORE importing streamlit
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
+
 import streamlit as st
+
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
 from pywp import Point3D, TrajectoryConfig, TrajectoryPlanner
 from pywp.classification import (

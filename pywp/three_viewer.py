@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
@@ -10,6 +11,11 @@ import streamlit.components.v1 as components
 _ASSETS_DIR = Path(__file__).resolve().parent / "three_viewer_assets"
 _VENDOR_DIR = _ASSETS_DIR / "vendor"
 _TEMPLATE_PATH = _ASSETS_DIR / "templates" / "viewer_template.html"
+_COMPONENT_DIR = _ASSETS_DIR / "component"
+_edit_bridge_component = components.declare_component(
+    "three_viewer_edit_bridge",
+    path=str(_COMPONENT_DIR),
+)
 
 
 @lru_cache(maxsize=1)
@@ -53,16 +59,34 @@ def render_local_three_scene(
     *,
     height: int,
     instance_token: int = 0,
-) -> None:
+    key: str | None = None,
+) -> object:
+    payload_dict = dict(payload)
+    stable_key = str(key or payload_dict.get("title") or "scene")
+    channel_digest = hashlib.blake2b(
+        f"{stable_key}:{int(instance_token)}".encode("utf-8"),
+        digest_size=10,
+    ).hexdigest()
+    edit_channel = f"pywp_three_edit_{channel_digest}"
+    payload_dict["edit_channel"] = edit_channel
     payload_json = json.dumps(
-        dict(payload),
+        payload_dict,
         ensure_ascii=False,
         separators=(",", ":"),
     ).replace("</", "<\\/")
-    html = _viewer_template_with_libraries().replace("__SCENE_PAYLOAD__", payload_json)
+    html = _viewer_template_with_libraries().replace(
+        "__SCENE_PAYLOAD__",
+        payload_json,
+    )
     html += f"\n<!-- viewer-instance:{int(instance_token)} -->"
+    bridge_value = _edit_bridge_component(
+        channel=edit_channel,
+        default=None,
+        key=f"three-viewer-edit-bridge-{channel_digest}",
+    )
     components.html(
         html,
         height=int(height),
         scrolling=False,
     )
+    return bridge_value

@@ -45,6 +45,38 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
     assert "function fitCameraToRawBounds(rawBounds)" in html
+    assert "data-edit-well-index" in html
+    assert "function selectEditWell(index, options)" in html
+    assert "function sendEditTargetsToStreamlit(changes)" in html
+    assert 'id="edit-toolbox"' in html
+    assert "editToolbox.classList.toggle" in html
+    assert "function initEditToolboxDrag()" in html
+    assert 'data-plane="xy"' in html
+    assert 'data-plane="x"' not in html
+    assert 'data-plane="y"' not in html
+    assert 'id="edit-undo-btn"' in html
+    assert 'id="edit-redo-btn"' in html
+    assert 'id="edit-reset-btn"' in html
+    assert "function undoSelectedEdit()" in html
+    assert "function redoSelectedEdit()" in html
+    assert "function resetSelectedEdit()" in html
+    assert "editDragHistoryStartState = cloneEditState" in html
+    assert "function pointerPlaneIntersection(event, displayZ)" in html
+    assert "LineDashedMaterial" in html
+    assert "edit-delta-label" in html
+    assert "formatDeltaMeters" in html
+    assert 'toFixed(1).replace(".", ",")' in html
+    assert "handleScale / 2.5" in html
+    assert "pickMesh" in html
+    assert "previewMesh" in html
+    assert "function handleDeltaLength(handle)" in html
+    assert "lineObject.visible = editModeActive && isDirty" in html
+    assert "BroadcastChannel" in html
+    assert "navigator.clipboard" not in html
+    assert "window.parent.location" not in html
+    assert "basePoints: Array.isArray(well.base_points)" in html
+    assert "warpedBaselineReplanPoints" in html
+    assert "return endpointExact(warped, surface, t1, t3);" in html
     assert "Свернуть / развернуть" in html
     assert "legend-node-btn legend-node-pad" in html
     assert "legend-node-btn legend-node-well" in html
@@ -72,23 +104,57 @@ def test_orbit_controls_use_expected_mouse_bindings() -> None:
 
 def test_render_local_three_scene_appends_instance_token(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    calls: list[str] = []
 
     def _fake_html(html: str, *, height: int, scrolling: bool) -> None:
+        calls.append("html")
         captured["html"] = html
         captured["height"] = height
         captured["scrolling"] = scrolling
 
-    monkeypatch.setattr(three_viewer.components, "html", _fake_html)
+    def _fake_bridge(**kwargs):
+        calls.append("bridge")
+        captured["bridge"] = dict(kwargs)
+        return {"type": "noop"}
 
-    three_viewer.render_local_three_scene(
+    monkeypatch.setattr(three_viewer.components, "html", _fake_html)
+    monkeypatch.setattr(three_viewer, "_edit_bridge_component", _fake_bridge)
+
+    result = three_viewer.render_local_three_scene(
         {"background": "#FFFFFF"},
         height=640,
         instance_token=7,
     )
 
     assert "<!-- viewer-instance:7 -->" in str(captured["html"])
+    assert '"edit_channel":"pywp_three_edit_' in str(captured["html"])
     assert captured["height"] == 640
     assert captured["scrolling"] is False
+    assert str(captured["bridge"]["channel"]).startswith("pywp_three_edit_")
+    assert captured["bridge"]["default"] is None
+    assert calls == ["bridge", "html"]
+    assert result == {"type": "noop"}
+
+
+def test_three_viewer_edit_bridge_relays_json_events() -> None:
+    bridge_html = (
+        three_viewer._ASSETS_DIR / "component" / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert "streamlit:setComponentValue" in bridge_html
+    assert 'dataType: "json"' in bridge_html
+    assert "new BroadcastChannel(channel)" in bridge_html
+    assert 'data.type !== "pywp:editTargets"' in bridge_html
+
+
+def test_three_viewer_assets_are_declared_as_package_data() -> None:
+    pyproject_text = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    assert "[tool.setuptools.package-data]" in pyproject_text
+    assert '"three_viewer_assets/*.js"' in pyproject_text
+    assert '"three_viewer_assets/component/*.html"' in pyproject_text
+    assert '"three_viewer_assets/templates/*.html"' in pyproject_text
+    assert '"three_viewer_assets/vendor/*.js"' in pyproject_text
 
 
 def test_three_viewer_asset_loader_reloads_file_after_mtime_change(

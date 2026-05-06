@@ -2,6 +2,7 @@
 import pandas as pd
 import pytest
 
+import pywp.coordinate_integration as ci
 from pywp.coordinate_integration import (
     CRS_OPTIONS,
     DEFAULT_CRS,
@@ -133,14 +134,14 @@ class TestCoordinateIntegration:
             CoordinateSystem.WGS84, CoordinateSystem.PULKOVO_1942
         ) is True
 
-    def test_can_transform_directly_placeholder_blocked(self) -> None:
-        """PNO/LOCAL placeholders cannot transform directly."""
+    def test_can_transform_directly_local_blocked_but_pno_has_base_crs(self) -> None:
+        """LOCAL has no base CRS, while PNO labels map to base projected CRSs."""
         assert _can_transform_directly(
             CoordinateSystem.LOCAL, CoordinateSystem.WGS84
         ) is False
         assert _can_transform_directly(
             CoordinateSystem.PNO_16_ZONE, CoordinateSystem.WGS84
-        ) is False
+        ) is True
 
     def test_transform_xy_same_crs(self) -> None:
         """_transform_xy with same CRS returns original values."""
@@ -220,3 +221,65 @@ class TestCoordinateIntegration:
         assert result.t1.z == 2500.0
         assert result.t3.z == 2500.0
 
+    def test_apply_crs_to_well_view_keeps_internal_station_columns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Transformed views keep X_m/Y_m so Plotly builders keep working."""
+        stations = pd.DataFrame({
+            "X_m": [1000.0],
+            "Y_m": [2000.0],
+            "Z_m": [100.0],
+        })
+        view = SingleWellResultView(
+            well_name="TEST-01",
+            surface=Point3D(x=10.0, y=20.0, z=500.0),
+            t1=Point3D(x=1000.0, y=2000.0, z=2500.0),
+            t3=Point3D(x=2000.0, y=4000.0, z=2500.0),
+            stations=stations,
+            summary={"md_m": 5000.0},
+            config={"lateral_tolerance_m": 30.0},
+            azimuth_deg=45.0,
+            md_t1_m=3000.0,
+        )
+
+        monkeypatch.setattr(ci, "HAS_PYPROJ", True)
+        monkeypatch.setattr(
+            ci,
+            "_transform_xy",
+            lambda x, y, _from_crs, _to_crs: (float(x) + 1.0, float(y) + 2.0),
+        )
+
+        result = apply_crs_to_well_view(view, CoordinateSystem.WGS84)
+
+        assert list(result.stations.columns) == ["X_m", "Y_m", "Z_m"]
+        assert result.stations["X_m"].tolist() == pytest.approx([1001.0])
+        assert result.stations["Y_m"].tolist() == pytest.approx([2002.0])
+        assert result.surface.x == pytest.approx(11.0)
+        assert result.summary["display_crs_xy_unit"] == "deg"
+
+    def test_transform_stations_can_keep_standard_columns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stations = pd.DataFrame({
+            "X_m": [1000.0],
+            "Y_m": [2000.0],
+            "Z_m": [100.0],
+        })
+        monkeypatch.setattr(ci, "HAS_PYPROJ", True)
+        monkeypatch.setattr(
+            ci,
+            "_transform_xy",
+            lambda x, y, _from_crs, _to_crs: (float(x) + 1.0, float(y) + 2.0),
+        )
+
+        result = transform_stations_to_crs(
+            stations,
+            CoordinateSystem.WGS84,
+            DEFAULT_CRS,
+            rename_columns=False,
+        )
+
+        assert list(result.columns) == ["X_m", "Y_m", "Z_m"]
+        assert result["X_m"].tolist() == pytest.approx([1001.0])

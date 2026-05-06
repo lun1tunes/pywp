@@ -6,7 +6,7 @@ import sys
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from typing import Any, Callable, Iterable, Mapping
 from time import perf_counter
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,8 @@ from pydantic import field_validator
 
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.anticollision_optimization import (
+    AntiCollisionReferencePath,
+    AntiCollisionSegment,
     AntiCollisionOptimizationContext,
     build_anti_collision_reference_path,
     evaluate_stations_anti_collision_clearance,
@@ -36,7 +38,7 @@ from pywp.anticollision_stage import (
     ANTI_COLLISION_STAGE_LATE_TRAJECTORY,
     anti_collision_stage_from_context,
 )
-from pywp.models import Point3D, SummaryDict, TrajectoryConfig
+from pywp.models import INTERPOLATION_RODRIGUES, Point3D, SummaryDict, TrajectoryConfig
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.reference_trajectories import ImportedTrajectoryWell
@@ -58,6 +60,185 @@ class DynamicClusterExecutionContext:
 
 
 _MAX_DYNAMIC_CLUSTER_PASSES = 3
+
+
+def _anti_collision_segment_to_worker_payload(
+    segment: AntiCollisionSegment,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+    start_xyz, end_xyz, start_cov, end_cov, sigma2_upper = segment
+    return (
+        np.asarray(start_xyz, dtype=float),
+        np.asarray(end_xyz, dtype=float),
+        np.asarray(start_cov, dtype=float),
+        np.asarray(end_cov, dtype=float),
+        float(sigma2_upper),
+    )
+
+
+def _anti_collision_segment_from_worker_payload(
+    payload: object,
+) -> AntiCollisionSegment:
+    if not isinstance(payload, (list, tuple)) or len(payload) != 5:
+        raise ValueError("Anti-collision segment payload must contain 5 items.")
+    start_xyz, end_xyz, start_cov, end_cov, sigma2_upper = payload
+    return (
+        np.asarray(start_xyz, dtype=float),
+        np.asarray(end_xyz, dtype=float),
+        np.asarray(start_cov, dtype=float),
+        np.asarray(end_cov, dtype=float),
+        float(sigma2_upper),
+    )
+
+
+def _reference_path_to_worker_payload(
+    reference: AntiCollisionReferencePath,
+) -> dict[str, Any]:
+    return {
+        "well_name": str(reference.well_name),
+        "md_start_m": float(reference.md_start_m),
+        "md_end_m": float(reference.md_end_m),
+        "sample_md_m": np.asarray(reference.sample_md_m, dtype=float),
+        "xyz_m": np.asarray(reference.xyz_m, dtype=float),
+        "covariance_xyz": np.asarray(reference.covariance_xyz, dtype=float),
+        "segments": tuple(
+            _anti_collision_segment_to_worker_payload(segment)
+            for segment in reference.segments
+        ),
+    }
+
+
+def _reference_path_from_worker_payload(
+    payload: object,
+) -> AntiCollisionReferencePath:
+    if isinstance(payload, AntiCollisionReferencePath):
+        raw: Mapping[str, object] = _reference_path_to_worker_payload(payload)
+    elif isinstance(payload, Mapping):
+        raw = payload
+    else:
+        raise ValueError("Anti-collision reference payload must be a mapping.")
+
+    return AntiCollisionReferencePath(
+        well_name=str(raw["well_name"]),
+        md_start_m=float(raw["md_start_m"]),
+        md_end_m=float(raw["md_end_m"]),
+        sample_md_m=np.asarray(raw["sample_md_m"], dtype=float),
+        xyz_m=np.asarray(raw["xyz_m"], dtype=float),
+        covariance_xyz=np.asarray(raw["covariance_xyz"], dtype=float),
+        segments=tuple(
+            _anti_collision_segment_from_worker_payload(segment)
+            for segment in raw.get("segments", ())
+        ),
+    )
+
+
+def _uncertainty_model_to_worker_payload(
+    model: PlanningUncertaintyModel,
+) -> dict[str, Any]:
+    return {
+        "sigma_inc_deg": float(model.sigma_inc_deg),
+        "sigma_azi_deg": float(model.sigma_azi_deg),
+        "sigma_lateral_drift_m_per_1000m": float(
+            model.sigma_lateral_drift_m_per_1000m
+        ),
+        "confidence_scale": float(model.confidence_scale),
+        "sample_step_m": float(model.sample_step_m),
+        "max_display_ellipses": int(model.max_display_ellipses),
+        "ellipse_points": int(model.ellipse_points),
+        "min_display_radius_m": float(model.min_display_radius_m),
+        "near_vertical_isotropic_threshold_deg": float(
+            model.near_vertical_isotropic_threshold_deg
+        ),
+        "directional_refine_threshold_deg": float(
+            model.directional_refine_threshold_deg
+        ),
+        "min_refined_step_m": float(model.min_refined_step_m),
+    }
+
+
+def _uncertainty_model_from_worker_payload(
+    payload: object,
+) -> PlanningUncertaintyModel:
+    if isinstance(payload, PlanningUncertaintyModel):
+        return payload
+    if not isinstance(payload, Mapping):
+        raise ValueError("Uncertainty model payload must be a mapping.")
+    return PlanningUncertaintyModel(**dict(payload))
+
+
+def _optimization_context_to_worker_payload(
+    context: AntiCollisionOptimizationContext | None,
+) -> dict[str, Any] | None:
+    if context is None:
+        return None
+    return {
+        "candidate_md_start_m": float(context.candidate_md_start_m),
+        "candidate_md_end_m": float(context.candidate_md_end_m),
+        "sf_target": float(context.sf_target),
+        "sample_step_m": float(context.sample_step_m),
+        "uncertainty_model": _uncertainty_model_to_worker_payload(
+            context.uncertainty_model
+        ),
+        "references": tuple(
+            _reference_path_to_worker_payload(reference)
+            for reference in context.references
+        ),
+        "prefer_lower_kop": bool(context.prefer_lower_kop),
+        "prefer_higher_build1": bool(context.prefer_higher_build1),
+        "prefer_keep_kop": bool(context.prefer_keep_kop),
+        "prefer_keep_build1": bool(context.prefer_keep_build1),
+        "prefer_adjust_build2": bool(context.prefer_adjust_build2),
+        "baseline_kop_vertical_m": (
+            float(context.baseline_kop_vertical_m)
+            if context.baseline_kop_vertical_m is not None
+            else None
+        ),
+        "baseline_build1_dls_deg_per_30m": (
+            float(context.baseline_build1_dls_deg_per_30m)
+            if context.baseline_build1_dls_deg_per_30m is not None
+            else None
+        ),
+        "interpolation_method": str(context.interpolation_method),
+    }
+
+
+def _optimization_context_from_worker_payload(
+    payload: object,
+) -> AntiCollisionOptimizationContext:
+    if isinstance(payload, AntiCollisionOptimizationContext):
+        return payload
+    if not isinstance(payload, Mapping):
+        raise ValueError("Anti-collision optimization context payload must be a mapping.")
+    return AntiCollisionOptimizationContext(
+        candidate_md_start_m=float(payload["candidate_md_start_m"]),
+        candidate_md_end_m=float(payload["candidate_md_end_m"]),
+        sf_target=float(payload["sf_target"]),
+        sample_step_m=float(payload["sample_step_m"]),
+        uncertainty_model=_uncertainty_model_from_worker_payload(
+            payload["uncertainty_model"]
+        ),
+        references=tuple(
+            _reference_path_from_worker_payload(reference)
+            for reference in payload.get("references", ())
+        ),
+        prefer_lower_kop=bool(payload.get("prefer_lower_kop", False)),
+        prefer_higher_build1=bool(payload.get("prefer_higher_build1", False)),
+        prefer_keep_kop=bool(payload.get("prefer_keep_kop", False)),
+        prefer_keep_build1=bool(payload.get("prefer_keep_build1", False)),
+        prefer_adjust_build2=bool(payload.get("prefer_adjust_build2", False)),
+        baseline_kop_vertical_m=(
+            float(payload["baseline_kop_vertical_m"])
+            if payload.get("baseline_kop_vertical_m") is not None
+            else None
+        ),
+        baseline_build1_dls_deg_per_30m=(
+            float(payload["baseline_build1_dls_deg_per_30m"])
+            if payload.get("baseline_build1_dls_deg_per_30m") is not None
+            else None
+        ),
+        interpolation_method=str(
+            payload.get("interpolation_method", INTERPOLATION_RODRIGUES)
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -215,8 +396,9 @@ def _evaluate_record_from_dicts(
     config = TrajectoryConfig.model_validate(config_dict)
     opt_ctx: AntiCollisionOptimizationContext | None = None
     if optimization_context_dict is not None:
-        # AntiCollisionOptimizationContext is a @dataclass, not Pydantic
-        opt_ctx = AntiCollisionOptimizationContext(**optimization_context_dict)
+        opt_ctx = _optimization_context_from_worker_payload(
+            optimization_context_dict
+        )
     row, success = _evaluate_record_standalone(record, config, opt_ctx)
     return row, success.model_dump() if success is not None else None
 
@@ -570,7 +752,7 @@ class WelltrackBatchPlanner:
                     _evaluate_record_from_dicts,
                     record.model_dump(),
                     well_config.model_dump(),
-                    asdict(opt_ctx) if opt_ctx is not None else None,
+                    _optimization_context_to_worker_payload(opt_ctx),
                 )
                 future_to_name[fut] = str(record.name)
 

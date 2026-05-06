@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import re
 from typing import Callable
 
 import pandas as pd
@@ -17,6 +18,44 @@ from pywp.visualization import (
     section_view_figure,
     trajectory_3d_figure,
 )
+
+
+def _csv_unit_label(unit: str) -> str:
+    normalized = str(unit or "").strip().lower()
+    if normalized in {"м", "m", "meter", "meters"}:
+        return "m"
+    if normalized in {"deg", "degree", "degrees", "°"}:
+        return "deg"
+    cleaned = re.sub(r"\W+", "_", normalized, flags=re.UNICODE).strip("_")
+    return cleaned or "m"
+
+
+def _csv_crs_label(label_suffix: str) -> str:
+    label = str(label_suffix or "").strip()
+    if label.startswith("(") and label.endswith(")"):
+        label = label[1:-1]
+    label = label.strip()
+    return re.sub(r"\W+", "_", label, flags=re.UNICODE).strip("_")
+
+
+def survey_export_dataframe(
+    display_df: pd.DataFrame,
+    *,
+    xy_label_suffix: str = "",
+    xy_unit: str = "м",
+) -> pd.DataFrame:
+    export_df = display_df.copy()
+    unit_label = _csv_unit_label(xy_unit)
+    crs_label = _csv_crs_label(xy_label_suffix)
+    if not crs_label and unit_label == "m":
+        return export_df
+    suffix = f"_{crs_label}_{unit_label}" if crs_label else f"_{unit_label}"
+    return export_df.rename(
+        columns={
+            "X_m": f"X{suffix}",
+            "Y_m": f"Y{suffix}",
+        }
+    )
 
 
 def render_run_log_panel(
@@ -155,18 +194,38 @@ def render_survey_table_with_download(
     stations: pd.DataFrame,
     button_label: str = "Скачать CSV инклинометрии",
     file_name: str = "well_survey.csv",
+    export_stations: pd.DataFrame | None = None,
+    xy_label_suffix: str = "",
+    xy_unit: str = "м",
+    export_xy_label_suffix: str | None = None,
+    export_xy_unit: str | None = None,
 ) -> None:
-    display_df = stations.copy()
-    if "DLS_deg_per_30m" in display_df.columns:
-        display_df["PI_deg_per_10m"] = dls_to_pi(
-            display_df["DLS_deg_per_30m"].to_numpy(dtype=float)
-        )
-        display_df = display_df.drop(columns=["DLS_deg_per_30m"])
+    def _prepare_survey_df(source: pd.DataFrame) -> pd.DataFrame:
+        prepared = source.copy()
+        if "DLS_deg_per_30m" in prepared.columns:
+            prepared["PI_deg_per_10m"] = dls_to_pi(
+                prepared["DLS_deg_per_30m"].to_numpy(dtype=float)
+            )
+            prepared = prepared.drop(columns=["DLS_deg_per_30m"])
+        return prepared
+
+    display_df = _prepare_survey_df(stations)
+    export_df = (
+        _prepare_survey_df(export_stations)
+        if export_stations is not None
+        else display_df
+    )
 
     column_config: dict[str, object] = {
         "MD_m": st.column_config.NumberColumn("MD, м", format="%.2f"),
-        "X_m": st.column_config.NumberColumn("X (East), м", format="%.2f"),
-        "Y_m": st.column_config.NumberColumn("Y (North), м", format="%.2f"),
+        "X_m": st.column_config.NumberColumn(
+            f"X (East){xy_label_suffix}, {xy_unit}",
+            format="%.6f" if xy_unit == "deg" else "%.2f",
+        ),
+        "Y_m": st.column_config.NumberColumn(
+            f"Y (North){xy_label_suffix}, {xy_unit}",
+            format="%.6f" if xy_unit == "deg" else "%.2f",
+        ),
         "Z_m": st.column_config.NumberColumn("Z (TVD), м", format="%.2f"),
         "INC_deg": st.column_config.NumberColumn("INC, deg", format="%.2f"),
         "AZI_deg": st.column_config.NumberColumn("AZI, deg", format="%.2f"),
@@ -181,7 +240,15 @@ def render_survey_table_with_download(
     )
     st.download_button(
         button_label,
-        data=display_df.to_csv(index=False).encode("utf-8"),
+        data=survey_export_dataframe(
+            export_df,
+            xy_label_suffix=(
+                xy_label_suffix
+                if export_xy_label_suffix is None
+                else export_xy_label_suffix
+            ),
+            xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
+        ).to_csv(index=False).encode("utf-8"),
         file_name=file_name,
         mime="text/csv",
         icon=":material/download:",

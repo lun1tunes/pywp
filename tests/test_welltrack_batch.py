@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict
 from typing import Any
 from pathlib import Path
 
@@ -11,6 +14,7 @@ from pywp.anticollision_optimization import (
     AntiCollisionClearanceEvaluation,
     AntiCollisionOptimizationContext,
     build_anti_collision_reference_path,
+    evaluate_stations_anti_collision_clearance,
 )
 from pywp.anticollision_rerun import (
     DYNAMIC_CLUSTER_PLAN_ACTIVE,
@@ -39,6 +43,9 @@ from pywp.welltrack_batch import (
     DynamicClusterExecutionContext,
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
+    _evaluate_record_from_dicts,
+    _optimization_context_from_worker_payload,
+    _optimization_context_to_worker_payload,
     merge_batch_results,
     recommended_batch_selection,
 )
@@ -2305,6 +2312,83 @@ def test_recommended_batch_selection_prefers_unresolved_wells_only() -> None:
 
     assert initial == ["WELL-A", "WELL-B", "WELL-C", "WELL-D"]
     assert follow_up == ["WELL-B", "WELL-C", "WELL-D"]
+
+
+def test_anti_collision_context_worker_payload_restores_nested_dataclasses() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "INC_deg": [0.0, 90.0, 90.0],
+            "AZI_deg": [0.0, 90.0, 90.0],
+            "X_m": [0.0, 1000.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0],
+        }
+    )
+    reference_path = build_anti_collision_reference_path(
+        well_name="REF",
+        stations=stations,
+        md_start_m=0.0,
+        md_end_m=2000.0,
+        sample_step_m=250.0,
+        model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+    )
+    context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=0.0,
+        candidate_md_end_m=2000.0,
+        sf_target=1.0,
+        sample_step_m=250.0,
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        references=(reference_path,),
+        prefer_keep_kop=True,
+        prefer_keep_build1=True,
+        prefer_adjust_build2=True,
+        baseline_kop_vertical_m=550.0,
+        baseline_build1_dls_deg_per_30m=2.5,
+    )
+
+    restored = _optimization_context_from_worker_payload(
+        _optimization_context_to_worker_payload(context)
+    )
+    legacy_restored = _optimization_context_from_worker_payload(asdict(context))
+
+    for item in (restored, legacy_restored):
+        assert item.uncertainty_model.confidence_scale == pytest.approx(
+            DEFAULT_PLANNING_UNCERTAINTY_MODEL.confidence_scale
+        )
+        assert item.references[0].well_name == "REF"
+        assert item.references[0].segments[0][0].shape == (3,)
+        evaluation = evaluate_stations_anti_collision_clearance(
+            stations=stations,
+            context=item,
+        )
+        assert evaluation.min_separation_factor >= 0.0
+
+
+@pytest.mark.integration
+def test_batch_worker_entrypoint_runs_under_spawn_context() -> None:
+    record = WelltrackRecord(
+        name="SPAWN-1",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+            WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+        ),
+    )
+    config = _fast_batch_config()
+
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        row, success_dict = pool.submit(
+            _evaluate_record_from_dicts,
+            record.model_dump(),
+            config.model_dump(),
+            None,
+        ).result(timeout=90)
+
+    assert row["Статус"] == "OK"
+    assert success_dict is not None
+    assert success_dict["name"] == "SPAWN-1"
 
 
 @pytest.mark.integration

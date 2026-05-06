@@ -5,20 +5,25 @@ import logging
 # Suppress noisy Streamlit warnings BEFORE importing streamlit
 logging.getLogger("streamlit").setLevel(logging.ERROR)
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
+
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
 from pywp import ptc_core as wt
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
 from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_well_panels import render_run_log_panel
 from pywp.coordinate_integration import (
-    apply_crs_to_well_view,
+    DEFAULT_CRS,
     get_crs_display_suffix,
     get_selected_crs,
     render_crs_sidebar,
     should_auto_convert,
+    transform_stations_to_crs,
 )
 from pywp.ui_well_result import (
     SingleWellResultView,
@@ -517,6 +522,7 @@ def _render_ptc_anticollision_panel(
             payload_overrides=wt._anticollision_three_payload_overrides(
                 records=records,
                 analysis=analysis,
+                successes=successes,
             ),
         )
         chart_col2.plotly_chart(
@@ -699,9 +705,18 @@ def _render_ptc_success_tabs(
                 "dash" if bool(selected.md_postcheck_exceeded) else "solid"
             ),
         )
-        # Apply coordinate system transformation if enabled
-        if auto_convert:
-            well_view = apply_crs_to_well_view(well_view, selected_crs)
+        survey_export_stations = None
+        survey_export_xy_label_suffix = ""
+        survey_export_xy_unit = "м"
+        if auto_convert and selected_crs != DEFAULT_CRS:
+            survey_export_stations = transform_stations_to_crs(
+                selected.stations,
+                selected_crs,
+                DEFAULT_CRS,
+                rename_columns=False,
+            )
+            survey_export_xy_label_suffix = get_crs_display_suffix(selected_crs)
+            survey_export_xy_unit = "deg" if selected_crs.is_geographic() else "м"
         t1_horizontal_offset_m = render_key_metrics(
             view=well_view,
             title="Ключевые показатели",
@@ -719,6 +734,9 @@ def _render_ptc_success_tabs(
             summary_tab_label="Сводка",
             survey_tab_label="Инклинометрия",
             survey_file_name=f"{selected_name}_survey.csv",
+            survey_export_stations=survey_export_stations,
+            survey_export_xy_label_suffix=survey_export_xy_label_suffix,
+            survey_export_xy_unit=survey_export_xy_unit,
             show_validation_section=False,
             show_solver_diagnostics_section=False,
         )
@@ -787,10 +805,14 @@ def run_page() -> None:
     _render_ptc_import_section()
     _edit_applied = st.session_state.pop("wt_edit_targets_applied", None)
     if _edit_applied:
+        st.success(
+            f"Точки обновлены из 3D-редактора: {', '.join(_edit_applied)}. "
+            "Проверьте подсветку t1/t3 ниже и запустите пересчёт."
+        )
         st.toast(
             f"Цели обновлены из 3D-редактора: {', '.join(_edit_applied)}. "
             "Запустите пересчёт для уточнения траекторий.",
-            icon="✎",
+            icon=":material/edit:",
         )
     records = st.session_state.get("wt_records")
     if records is None:
@@ -813,7 +835,7 @@ def run_page() -> None:
     if st.session_state.get("wt_last_error"):
         render_solver_diagnostics(st.session_state["wt_last_error"])
 
-    st.markdown(f"## 5. Результаты расчёта{get_crs_display_suffix(get_selected_crs())}")
+    st.markdown("## 5. Результаты расчёта")
     render_run_log_panel(
         st.session_state.get("wt_last_run_log_lines"),
         border=False,
@@ -826,7 +848,13 @@ def run_page() -> None:
             "Результаты расчёта появятся после запуска расчёта траекторий."
         )
         return
-    wt._render_batch_summary(summary_rows=summary_rows)
+    selected_crs = get_selected_crs()
+    auto_convert = should_auto_convert()
+    wt._render_batch_summary(
+        summary_rows=summary_rows,
+        target_crs=selected_crs,
+        auto_convert=auto_convert,
+    )
     if not successes:
         st.warning("Все выбранные скважины завершились ошибками расчёта.")
         return
@@ -838,4 +866,8 @@ def run_page() -> None:
 
 
 if __name__ == "__main__":
+    if get_script_run_ctx(suppress_warning=True) is None:
+        raise SystemExit(
+            "Запустите приложение командой `streamlit run pages/01_trajectory_constructor.py`."
+        )
     run_page()

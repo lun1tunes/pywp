@@ -26869,7 +26869,7 @@ class FastReplan {
   <body>
     <div id="root">
       <div id="toolbar-left">
-        <button id="fit-camera-btn" class="toolbar-btn" type="button" title="Подогнать сцену под кадр">Fit</button>
+        <button id="fit-camera-btn" class="toolbar-btn" type="button" title="Подогнать сцену под кадр">Reset view</button>
         <button id="edit-targets-btn" class="toolbar-btn" type="button" title="Изменить цели t1/t3" style="display:none">✎ Цели</button>
       </div>
       <div id="toolbar-right">

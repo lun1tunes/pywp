@@ -33,9 +33,11 @@
  *   const pts = replan.compute([t1x, t1y, t1z], [t3x, t3y, t3z]);
  *   updateLineGeometry(trajectoryLine, pts);
  *
- * STATUS: skeleton — functions contain analytical formulas but are not
- * yet wired into the viewer event loop.  Integration will happen when
- * the interactive control-point editor is implemented.
+ * The preview is intentionally lightweight: when Python sends the
+ * already solved survey stations, the client warps that baseline path
+ * to the edited t1/t3 anchors.  This preserves the visual character of
+ * the planned trajectory while guaranteeing exact edited endpoints.
+ * If baseline stations are unavailable, a smooth cubic fallback is used.
  */
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,109 @@ function v3Add(a, b) {
 function v3Normalise(v) {
   const len = v3Len(v);
   return len > SMALL ? v3Scale(v, 1.0 / len) : [0, 0, 1];
+}
+
+function v3Lerp(a, b, t) {
+  const k = Math.max(0, Math.min(1, Number(t) || 0));
+  return [
+    a[0] + (b[0] - a[0]) * k,
+    a[1] + (b[1] - a[1]) * k,
+    a[2] + (b[2] - a[2]) * k,
+  ];
+}
+
+function v3Distance(a, b) {
+  return v3Len(v3Sub(a, b));
+}
+
+function clonePoint(point) {
+  return [
+    Number(point && point[0]) || 0,
+    Number(point && point[1]) || 0,
+    Number(point && point[2]) || 0,
+  ];
+}
+
+function normalisePointList(points) {
+  if (!Array.isArray(points)) {
+    return [];
+  }
+  return points
+    .filter((point) => Array.isArray(point) && point.length >= 3)
+    .map(clonePoint)
+    .filter((point) => point.every((value) => Number.isFinite(value)));
+}
+
+function pushIfSeparated(points, point) {
+  const current = clonePoint(point);
+  const previous = points.length > 0 ? points[points.length - 1] : null;
+  if (!previous || v3Distance(previous, current) > 1e-6) {
+    points.push(current);
+  }
+}
+
+function nearestPointIndex(points, target) {
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  points.forEach((point, index) => {
+    const distance = v3Distance(point, target);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+
+function cumulativeLengths(points) {
+  const result = [0.0];
+  for (let i = 1; i < points.length; i++) {
+    result.push(result[i - 1] + v3Distance(points[i - 1], points[i]));
+  }
+  return result;
+}
+
+function cubicBezier(p0, p1, p2, p3, t) {
+  const u = 1.0 - t;
+  const uu = u * u;
+  const tt = t * t;
+  const uuu = uu * u;
+  const ttt = tt * t;
+  return [
+    p0[0] * uuu + 3 * p1[0] * uu * t + 3 * p2[0] * u * tt + p3[0] * ttt,
+    p0[1] * uuu + 3 * p1[1] * uu * t + 3 * p2[1] * u * tt + p3[1] * ttt,
+    p0[2] * uuu + 3 * p1[2] * uu * t + 3 * p2[2] * u * tt + p3[2] * ttt,
+  ];
+}
+
+function appendBezierSamples(points, p0, p1, p2, p3, sampleCount) {
+  const count = Math.max(2, Math.floor(sampleCount || 2));
+  for (let i = 1; i <= count; i++) {
+    pushIfSeparated(points, cubicBezier(p0, p1, p2, p3, i / count));
+  }
+}
+
+function endpointExact(points, surface, t1, t3) {
+  const cleaned = [];
+  pushIfSeparated(cleaned, surface);
+  let hasT1 = false;
+  points.forEach((point) => {
+    if (v3Distance(point, t1) <= 1e-6) {
+      hasT1 = true;
+    }
+    pushIfSeparated(cleaned, point);
+  });
+  if (!hasT1 && cleaned.length > 1) {
+    const insertAt = Math.max(1, nearestPointIndex(cleaned, t1));
+    cleaned.splice(insertAt, 0, clonePoint(t1));
+  }
+  if (cleaned.length < 2 || v3Distance(cleaned[cleaned.length - 1], t3) > 1e-6) {
+    pushIfSeparated(cleaned, t3);
+  } else {
+    cleaned[cleaned.length - 1] = clonePoint(t3);
+  }
+  cleaned[0] = clonePoint(surface);
+  return cleaned;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,12 +249,114 @@ function minCurvIncrement(dMD, inc1Deg, azi1Deg, inc2Deg, azi2Deg) {
 }
 
 // ---------------------------------------------------------------------------
-// Fast analytical trajectory: J-profile (VERTICAL → BUILD → HORIZONTAL)
+// Fast analytical trajectory preview.
 //
 // Input:  surface [x,y,z], t1 [x,y,z], t3 [x,y,z], config {}
 // Output: array of [x, y, z] points in data coordinates (E, N, TVD)
 // ---------------------------------------------------------------------------
-function fastReplanPoints(surface, t1, t3, config) {
+function warpedBaselineReplanPoints(surface, t1, t3, config) {
+  const basePoints = normalisePointList(config.basePoints);
+  const originalT1 = clonePoint(config.originalT1 || t1);
+  const originalT3 = clonePoint(config.originalT3 || t3);
+  if (basePoints.length < 3) {
+    return null;
+  }
+
+  const lengths = cumulativeLengths(basePoints);
+  const totalLength = lengths[lengths.length - 1] || 0.0;
+  if (totalLength <= SMALL) {
+    return null;
+  }
+
+  const t1Index = nearestPointIndex(basePoints, originalT1);
+  const t1Arc = Math.max(lengths[t1Index] || 0.0, totalLength * 0.05, SMALL);
+  const tailLength = Math.max(totalLength - t1Arc, SMALL);
+  const t1Delta = v3Sub(t1, originalT1);
+  const t3Delta = v3Sub(t3, originalT3);
+  const warped = [clonePoint(surface)];
+
+  for (let i = 1; i < basePoints.length; i++) {
+    let point;
+    if (i === t1Index) {
+      point = clonePoint(t1);
+    } else if (i === basePoints.length - 1) {
+      point = clonePoint(t3);
+    } else {
+      const arc = lengths[i] || 0.0;
+      let delta;
+      if (arc <= t1Arc) {
+        delta = v3Scale(t1Delta, arc / t1Arc);
+      } else {
+        const u = Math.max(0, Math.min(1, (arc - t1Arc) / tailLength));
+        delta = v3Lerp(t1Delta, t3Delta, u);
+      }
+      point = v3Add(basePoints[i], delta);
+    }
+    pushIfSeparated(warped, point);
+  }
+
+  return endpointExact(warped, surface, t1, t3);
+}
+
+function bezierFallbackReplanPoints(surface, t1, t3, config) {
+  const mdStep = Math.max(Number(config.mdStepM || 30.0), 5.0);
+  const points = [clonePoint(surface)];
+  const st1 = v3Sub(t1, surface);
+  const t1t3 = v3Sub(t3, t1);
+  const horizontalToT1 = Math.hypot(st1[0], st1[1]);
+  const tailHorizontal = Math.hypot(t1t3[0], t1t3[1]);
+  const entryDir = v3Normalise([
+    Math.abs(t1t3[0]) + Math.abs(t1t3[1]) > SMALL ? t1t3[0] : st1[0],
+    Math.abs(t1t3[0]) + Math.abs(t1t3[1]) > SMALL ? t1t3[1] : st1[1],
+    0,
+  ]);
+  const depthSign = (t1[2] - surface[2]) >= 0 ? 1 : -1;
+  const depthSpan = Math.max(Math.abs(t1[2] - surface[2]), 1.0);
+  const firstControl = [
+    surface[0],
+    surface[1],
+    surface[2] + depthSign * Math.min(depthSpan * 0.48, Math.max(depthSpan * 0.22, 420.0)),
+  ];
+  const entryControlLength = Math.max(horizontalToT1 * 0.34, depthSpan * 0.12, 80.0);
+  const secondControl = [
+    t1[0] - entryDir[0] * entryControlLength,
+    t1[1] - entryDir[1] * entryControlLength,
+    t1[2] - depthSign * Math.min(depthSpan * 0.08, 160.0),
+  ];
+  appendBezierSamples(
+    points,
+    surface,
+    firstControl,
+    secondControl,
+    t1,
+    Math.max(12, Math.ceil((horizontalToT1 + depthSpan) / mdStep)),
+  );
+
+  const tailLength = Math.max(v3Distance(t1, t3), tailHorizontal, mdStep);
+  const tailControlLength = Math.max(tailHorizontal * 0.33, tailLength * 0.18, 60.0);
+  const tailFirstControl = [
+    t1[0] + entryDir[0] * tailControlLength,
+    t1[1] + entryDir[1] * tailControlLength,
+    t1[2] + (t3[2] - t1[2]) * 0.18,
+  ];
+  const tailSecondControl = [
+    t3[0] - entryDir[0] * tailControlLength,
+    t3[1] - entryDir[1] * tailControlLength,
+    t3[2] - (t3[2] - t1[2]) * 0.18,
+  ];
+  appendBezierSamples(
+    points,
+    t1,
+    tailFirstControl,
+    tailSecondControl,
+    t3,
+    Math.max(8, Math.ceil(tailLength / mdStep)),
+  );
+
+  return endpointExact(points, surface, t1, t3);
+}
+
+function legacyJProfileReplanPoints(surface, t1, t3, config) {
   const entryIncDeg = config.entryIncTargetDeg || 86.0;
   const maxIncDeg = config.maxIncDeg || 95.0;
   const dlsBuild = config.dlsBuildMaxDegPer30m || 3.0;
@@ -161,7 +368,7 @@ function fastReplanPoints(surface, t1, t3, config) {
   const dEt1t3 = t3[0] - t1[0]; // East
   const horizDist = Math.sqrt(dNt1t3 * dNt1t3 + dEt1t3 * dEt1t3);
   if (horizDist < SMALL) {
-    return [surface, t1, t3]; // degenerate
+    return endpointExact([surface, t1, t3], surface, t1, t3); // degenerate
   }
   const aziEntryRad = Math.atan2(dEt1t3, dNt1t3);
   const aziEntryDeg = ((aziEntryRad * RAD2DEG) % 360 + 360) % 360;
@@ -175,7 +382,7 @@ function fastReplanPoints(surface, t1, t3, config) {
   const z1 = t1[2] - surface[2]; // TVD offset
 
   if (z1 <= 0 || s1 <= SMALL) {
-    return [surface, t1, t3]; // infeasible
+    return endpointExact([surface, t1, t3], surface, t1, t3); // infeasible
   }
 
   // --- J-profile geometry ---
@@ -277,7 +484,23 @@ function fastReplanPoints(surface, t1, t3, config) {
     points.push([curE, curN, curZ]); // [X=East, Y=North, Z=TVD]
   }
 
-  return points;
+  return endpointExact(points, surface, t1, t3);
+}
+
+function fastReplanPoints(surface, t1, t3, config) {
+  const safeSurface = clonePoint(surface);
+  const safeT1 = clonePoint(t1);
+  const safeT3 = clonePoint(t3);
+  const safeConfig = config || {};
+  const warped = warpedBaselineReplanPoints(safeSurface, safeT1, safeT3, safeConfig);
+  if (warped && warped.length >= 3) {
+    return warped;
+  }
+  const smooth = bezierFallbackReplanPoints(safeSurface, safeT1, safeT3, safeConfig);
+  if (smooth && smooth.length >= 3) {
+    return smooth;
+  }
+  return legacyJProfileReplanPoints(safeSurface, safeT1, safeT3, safeConfig);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +551,9 @@ class FastReplan {
         dlsBuildMaxDegPer30m: 3.0,
         kopMinVerticalM: 550,
         mdStepM: 30,
+        basePoints: [],
+        originalT1: null,
+        originalT3: null,
       },
       options.config || {}
     );

@@ -1483,6 +1483,7 @@ def test_actual_fund_profile_prefers_horizontal_azimuth_over_hold_azimuth() -> N
 def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None:
     page = wt_import_module
     captured: dict[str, object] = {}
+    page.st.session_state.pop("wt_edit_targets_highlight_names", None)
 
     class _DummyExpander:
         def __enter__(self):
@@ -1512,6 +1513,38 @@ def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None
         "Y, м",
         "Z/TVD, м",
     ]
+
+
+def test_apply_three_edit_targets_updates_records_and_resets_results() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_records"] = list(_records()[:1])
+    page.st.session_state["wt_successes"] = ["stale"]
+    page.st.session_state["wt_summary_rows"] = [{"name": "stale"}]
+
+    updated = page._apply_edit_targets_changes(
+        [
+            {
+                "name": "WELL-A",
+                "t1": [610.25, 805.5, 2401.0],
+                "t3": [1510.75, 2010.25, 2502.0],
+            }
+        ],
+        source="three_viewer",
+    )
+
+    assert updated == ["WELL-A"]
+    changed_record = page.st.session_state["wt_records"][0]
+    assert changed_record.points[1].x == pytest.approx(610.25)
+    assert changed_record.points[1].y == pytest.approx(805.5)
+    assert changed_record.points[1].z == pytest.approx(2401.0)
+    assert changed_record.points[2].x == pytest.approx(1510.75)
+    assert changed_record.points[2].y == pytest.approx(2010.25)
+    assert changed_record.points[2].z == pytest.approx(2502.0)
+    assert page.st.session_state["wt_successes"] is None
+    assert page.st.session_state["wt_summary_rows"] is None
+    assert page.st.session_state["wt_pending_selected_names"] == ["WELL-A"]
+    assert page.st.session_state["wt_edit_targets_highlight_names"] == ["WELL-A"]
 
 
 def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> None:
@@ -3744,6 +3777,29 @@ def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> N
 
     assert payload["meshes"]
     assert any(str(item["label"]) == "WELL-A" for item in payload["legend"])
+
+
+def test_anticollision_three_payload_overrides_include_edit_wells() -> None:
+    page = wt_import_module
+    successes = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0),
+    ]
+    analysis = page._build_anti_collision_analysis(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+
+    overrides = page._anticollision_three_payload_overrides(
+        records=_records(),
+        analysis=analysis,
+        successes=successes,
+    )
+
+    edit_wells = list(overrides["edit_wells"])
+    assert [str(item["name"]) for item in edit_wells] == ["WELL-A", "WELL-B"]
+    assert edit_wells[0]["t1"] == [1000.0, 0.0, 0.0]
+    assert edit_wells[0]["t3"] == [2000.0, 0.0, 0.0]
 
 
 def test_plotly_3d_figure_to_three_payload_preserves_hover_metadata_for_tooltip() -> (
