@@ -56,6 +56,7 @@ def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
         "md_step_m": 10.0,
         "md_step_control_m": 2.0,
         "pos_tolerance_m": 2.0,
+        "kop_min_vertical_m": 550.0,
         "turn_solver_max_restarts": 0,
     }
     base.update(overrides)

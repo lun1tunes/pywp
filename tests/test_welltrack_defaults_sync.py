@@ -81,3 +81,22 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
 
     for key in LEGACY_MIN_VALUES:
         assert key not in at.session_state, f"Legacy-ключ не удален: {key}"
+
+
+def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.run()
+    import_buttons = [button for button in at.button if button.label == "Импорт целей"]
+    assert import_buttons, "Кнопка импорта целей не найдена."
+    import_buttons[0].click()
+    at.run()
+
+    md_step_inputs = [
+        widget for widget in at.number_input if widget.label == "Шаг MD, м"
+    ]
+    assert md_step_inputs, "Поле 'Шаг MD, м' не найдено."
+    expected_md_step = float(calc_param_defaults()["md_step"]) + 1.0
+    md_step_inputs[0].set_value(expected_md_step)
+    at.run()
+
+    assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step

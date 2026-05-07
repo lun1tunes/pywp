@@ -1515,12 +1515,20 @@ def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None
     ]
 
 
-def test_apply_three_edit_targets_updates_records_and_resets_results() -> None:
+def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     page = wt_import_module
     page.st.session_state.clear()
-    page.st.session_state["wt_records"] = list(_records()[:1])
-    page.st.session_state["wt_successes"] = ["stale"]
-    page.st.session_state["wt_summary_rows"] = [{"name": "stale"}]
+    records = list(_records()[:2])
+    page.st.session_state["wt_records"] = list(records)
+    page.st.session_state["wt_records_original"] = list(records)
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0),
+    ]
+    page.st.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+    ]
 
     updated = page._apply_edit_targets_changes(
         [
@@ -1535,16 +1543,39 @@ def test_apply_three_edit_targets_updates_records_and_resets_results() -> None:
 
     assert updated == ["WELL-A"]
     changed_record = page.st.session_state["wt_records"][0]
+    changed_original_record = page.st.session_state["wt_records_original"][0]
     assert changed_record.points[1].x == pytest.approx(610.25)
     assert changed_record.points[1].y == pytest.approx(805.5)
     assert changed_record.points[1].z == pytest.approx(2401.0)
     assert changed_record.points[2].x == pytest.approx(1510.75)
     assert changed_record.points[2].y == pytest.approx(2010.25)
     assert changed_record.points[2].z == pytest.approx(2502.0)
-    assert page.st.session_state["wt_successes"] is None
-    assert page.st.session_state["wt_summary_rows"] is None
+    assert changed_original_record.points[1].x == pytest.approx(610.25)
+    assert changed_original_record.points[2].x == pytest.approx(1510.75)
+    assert [item.name for item in page.st.session_state["wt_successes"]] == [
+        "WELL-B"
+    ]
+    summary_rows = page.st.session_state["wt_summary_rows"]
+    assert [str(row["Скважина"]) for row in summary_rows] == [
+        "WELL-A",
+        "WELL-B",
+    ]
+    assert summary_rows[0]["Статус"] == "Не рассчитана"
+    assert summary_rows[1]["Статус"] == "OK"
     assert page.st.session_state["wt_pending_selected_names"] == ["WELL-A"]
     assert page.st.session_state["wt_edit_targets_highlight_names"] == ["WELL-A"]
+
+    page._store_merged_batch_results(
+        records=page.st.session_state["wt_records"],
+        new_rows=[{"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""}],
+        new_successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+    )
+
+    assert [item.name for item in page.st.session_state["wt_successes"]] == [
+        "WELL-A",
+        "WELL-B",
+    ]
+    assert page.st.session_state["wt_edit_targets_highlight_names"] == []
 
 
 def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> None:

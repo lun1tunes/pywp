@@ -442,18 +442,6 @@
         white-space: nowrap;
       }
 
-      .legend-edit-badge {
-        margin-left: auto;
-        flex: 0 0 auto;
-        border-radius: 999px;
-        padding: 1px 6px;
-        background: rgba(37, 99, 235, 0.10);
-        color: #1d4ed8;
-        font-size: 9px;
-        font-weight: 700;
-        letter-spacing: 0.02em;
-      }
-
       #tooltip {
         position: absolute;
         display: none;
@@ -613,12 +601,16 @@
       }
 
       #edit-plane-selector,
+      #edit-operation-selector,
+      #edit-scope-selector,
       .edit-toolbox-action-row {
         display: flex;
         gap: 4px;
       }
 
-      .plane-btn {
+      .plane-btn,
+      .operation-btn,
+      .scope-btn {
         flex: 1 1 0;
         border: 1px solid transparent;
         background: transparent;
@@ -631,14 +623,25 @@
         transition: all 0.15s ease;
       }
 
-      .plane-btn:hover {
+      .plane-btn:hover,
+      .operation-btn:hover,
+      .scope-btn:hover {
         background: rgba(37,99,235,0.06);
       }
 
-      .plane-btn.is-active {
+      .plane-btn.is-active,
+      .operation-btn.is-active,
+      .scope-btn.is-active {
         background: #2563eb;
         color: #ffffff;
         border-color: #1d4ed8;
+      }
+
+      .plane-btn:disabled,
+      .operation-btn:disabled,
+      .scope-btn:disabled {
+        cursor: default;
+        opacity: 0.45;
       }
 
       .edit-tool-btn {
@@ -675,13 +678,14 @@
       }
 
       .edit-delta-label {
-        min-width: 132px;
-        padding: 7px 9px;
-        border: 1px solid rgba(148,163,184,0.34);
-        border-radius: 8px;
-        background: rgba(255,255,255,0.92);
-        box-shadow: 0 6px 16px rgba(15,23,42,0.10);
-        color: #334155;
+        min-width: 118px;
+        padding: 3px 5px;
+        border: none;
+        border-radius: 4px;
+        background: rgba(255,255,255,0.18);
+        box-shadow: none;
+        color: rgba(15,23,42,0.86);
+        cursor: grab;
         font-family:
           "SFMono-Regular",
           ui-monospace,
@@ -690,16 +694,29 @@
           monospace;
         font-size: 10px;
         line-height: 1.35;
+        pointer-events: auto;
         text-align: left;
         transform: translate(10px, -100%);
         transform-origin: 0 100%;
-        backdrop-filter: blur(4px);
+        text-shadow:
+          0 1px 2px rgba(255,255,255,0.95),
+          0 0 7px rgba(255,255,255,0.72);
+        backdrop-filter: blur(2px);
+      }
+
+      .edit-delta-label:hover {
+        background: rgba(255,255,255,0.28);
+      }
+
+      .edit-delta-label.is-dragging {
+        cursor: grabbing;
+        background: rgba(255,255,255,0.34);
       }
 
       .edit-delta-label .edit-delta-head {
         display: block;
         margin-bottom: 3px;
-        color: #0f172a;
+        color: rgba(15,23,42,0.86);
         font-family:
           Inter,
           -apple-system,
@@ -720,9 +737,29 @@
       .edit-delta-label .edit-delta-total {
         margin-top: 3px;
         padding-top: 3px;
-        border-top: 1px solid rgba(148,163,184,0.28);
-        color: #0f172a;
+        border-top: 1px solid rgba(15,23,42,0.12);
+        color: rgba(15,23,42,0.92);
         font-weight: 700;
+      }
+
+      .edit-lateral-label {
+        padding: 4px 8px;
+        border: 1px solid rgba(37,99,235,0.18);
+        border-radius: 999px;
+        background: rgba(255,255,255,0.70);
+        box-shadow: 0 4px 12px rgba(15,23,42,0.06);
+        color: #1d4ed8;
+        font-family:
+          "SFMono-Regular",
+          ui-monospace,
+          Menlo,
+          Consolas,
+          monospace;
+        font-size: 10px;
+        font-weight: 700;
+        pointer-events: none;
+        transform: translate(-50%, -50%);
+        backdrop-filter: blur(7px);
       }
 
       #edit-save-btn {
@@ -812,6 +849,20 @@
             <div id="edit-plane-selector">
               <button class="plane-btn is-active" data-plane="xy" type="button">Плоскость XY</button>
               <button class="plane-btn" data-plane="z" type="button">Ось Z</button>
+            </div>
+          </div>
+          <div class="edit-toolbox-section">
+            <div class="edit-toolbox-label">Точки</div>
+            <div id="edit-scope-selector">
+              <button class="scope-btn is-active" data-scope="point" type="button">Одна</button>
+              <button class="scope-btn" data-scope="pair" type="button">t1 + t3</button>
+            </div>
+          </div>
+          <div class="edit-toolbox-section">
+            <div class="edit-toolbox-label">Действие</div>
+            <div id="edit-operation-selector">
+              <button class="operation-btn is-active" data-operation="move" type="button">Сдвиг</button>
+              <button class="operation-btn" data-operation="rotate" type="button">Поворот XY</button>
             </div>
           </div>
           <div class="edit-toolbox-section">
@@ -992,14 +1043,37 @@
           return colorValue;
         }
 
-        function registerEditableBaseMaterial(material, colorValue) {
+        function editableIndexForBaseName(nameValue) {
+          const rawName = String(nameValue || "").trim();
+          if (!rawName) {
+            return null;
+          }
+          if (editWellIndexByName.has(rawName)) {
+            return editWellIndexByName.get(rawName);
+          }
+          const baseName = rawName.split(":")[0].trim();
+          if (baseName && editWellIndexByName.has(baseName)) {
+            return editWellIndexByName.get(baseName);
+          }
+          return null;
+        }
+
+        function registerEditableBaseMaterial(material, colorValue, nameValue) {
           const colorKey = String(colorValue || "").trim().toLowerCase();
-          if (!material || !colorKey || !editableWellColors.has(colorKey)) {
+          const wellIndex = editableIndexForBaseName(nameValue);
+          if (
+            !material ||
+            (
+              !Number.isInteger(wellIndex) &&
+              (!colorKey || !editableWellColors.has(colorKey))
+            )
+          ) {
             return;
           }
           editableBaseMaterials.push({
             material: material,
             colorKey: colorKey,
+            wellIndex: wellIndex,
             opacity: Number.isFinite(Number(material.opacity))
               ? Number(material.opacity)
               : 1.0,
@@ -1018,9 +1092,16 @@
             const baseOpacity = Number.isFinite(Number(item.opacity))
               ? Number(item.opacity)
               : 1.0;
+            const itemWellIndex = Number(item.wellIndex);
             const applies =
               dimmed &&
-              (!selectedColorKey || String(item.colorKey) === selectedColorKey);
+              (
+                (Number.isInteger(itemWellIndex) && itemWellIndex === selectedWellIndex) ||
+                (
+                  !Number.isInteger(itemWellIndex) &&
+                  (!selectedColorKey || String(item.colorKey) === selectedColorKey)
+                )
+              );
             material.transparent = applies || item.transparent || baseOpacity < 0.999;
             material.opacity = applies ? Math.min(baseOpacity, 0.18) : baseOpacity;
             material.depthWrite = applies ? false : item.depthWrite;
@@ -1214,6 +1295,51 @@
           fitCameraToRawBounds(payload.bounds || {});
         }
 
+        function editWellTargetFocusBounds(index) {
+          const wellIndex = Number(index);
+          if (!Number.isInteger(wellIndex) || wellIndex < 0) {
+            return null;
+          }
+          const well = editWells[wellIndex] || {};
+          const t1 = editCurrentT1[wellIndex] || well.t1;
+          const t3 = editCurrentT3[wellIndex] || well.t3;
+          if (!Array.isArray(t1) || !Array.isArray(t3)) {
+            return null;
+          }
+          const midpoint = [
+            (Number(t1[0]) + Number(t3[0])) * 0.5,
+            (Number(t1[1]) + Number(t3[1])) * 0.5,
+            (Number(t1[2]) + Number(t3[2])) * 0.5,
+          ];
+          const targetLength = Math.hypot(
+            Number(t3[0]) - Number(t1[0]),
+            Number(t3[1]) - Number(t1[1]),
+            Number(t3[2]) - Number(t1[2]),
+          );
+          const radius = Math.max(targetLength * 0.55, maxSpan * 0.035, 40.0);
+          return {
+            min: [
+              midpoint[0] - radius,
+              midpoint[1] - radius,
+              midpoint[2] - radius,
+            ],
+            max: [
+              midpoint[0] + radius,
+              midpoint[1] + radius,
+              midpoint[2] + radius,
+            ],
+          };
+        }
+
+        function fitCameraToEditWellTargets(index) {
+          const focusBounds = editWellTargetFocusBounds(index);
+          if (!focusBounds) {
+            return false;
+          }
+          fitCameraToRawBounds(focusBounds);
+          return true;
+        }
+
         function createLegendSwatch(color, opacity) {
           const swatch = document.createElement("div");
           swatch.className = "legend-swatch";
@@ -1238,6 +1364,21 @@
           label.textContent = String(item.label || "");
           row.appendChild(label);
           return row;
+        }
+
+        function legendSortLabel(item) {
+          return String(
+            (item && (item.label || item.name || item.id)) || "",
+          ).trim();
+        }
+
+        function sortedLegendItems(items) {
+          return (Array.isArray(items) ? items.slice() : []).sort((left, right) =>
+            legendSortLabel(left).localeCompare(legendSortLabel(right), "ru", {
+              numeric: true,
+              sensitivity: "base",
+            }),
+          );
         }
 
         function editableIndexForLegendItem(item) {
@@ -1294,14 +1435,11 @@
             if (editableIndex === selectedEditWellIndex) {
               button.classList.add("is-selected-edit");
             }
-            const badge = document.createElement("span");
-            badge.className = "legend-edit-badge";
-            badge.textContent = "t1/t3";
-            button.appendChild(badge);
           }
           button.addEventListener("click", () => {
             if (editableIndex !== null) {
-              selectEditWell(editableIndex, { focus: false });
+              selectEditWell(editableIndex, { focus: true });
+              return;
             }
             const targetBounds = focusTargets[String(item.id || "")];
             if (targetBounds) {
@@ -1403,7 +1541,7 @@
               if (!legendTreeExpanded) {
                 childrenWrap.classList.add("is-collapsed");
               }
-              (Array.isArray(group.children) ? group.children : []).forEach((child) => {
+              sortedLegendItems(group.children).forEach((child) => {
                 childrenWrap.appendChild(createTreeNodeButton(child, "well"));
               });
               groupWrap.appendChild(childrenWrap);
@@ -1412,13 +1550,13 @@
             if (flatItems.length > 0) {
               const flatSection = document.createElement("div");
               flatSection.className = "legend-flat-section";
-              flatItems.forEach((item) => {
+              sortedLegendItems(flatItems).forEach((item) => {
                 flatSection.appendChild(createFlatLegendRow(item));
               });
               body.appendChild(flatSection);
             }
           } else {
-            flatItems.forEach((item) => {
+            sortedLegendItems(flatItems).forEach((item) => {
               body.appendChild(createFlatLegendRow(item));
             });
           }
@@ -1627,7 +1765,7 @@
                 dashSize: Math.max(maxSpan * 0.025, 14.0),
                 gapSize: Math.max(maxSpan * 0.015, 8.0),
               });
-              registerEditableBaseMaterial(material, materialOptions.color);
+              registerEditableBaseMaterial(material, materialOptions.color, item.name);
               const line = new THREE.Line(geometry, material);
               line.computeLineDistances();
               scene.add(line);
@@ -1661,7 +1799,7 @@
             new THREE.Float32BufferAttribute(positions, 3),
           );
           const material = new THREE.LineBasicMaterial(materialOptions);
-          registerEditableBaseMaterial(material, materialOptions.color);
+          registerEditableBaseMaterial(material, materialOptions.color, item.name);
           scene.add(new THREE.LineSegments(geometry, material));
         }
 
@@ -1736,7 +1874,11 @@
             transparent: Number(item.opacity || 1.0) < 0.999,
             opacity: Number(item.opacity || 1.0),
           });
-          registerEditableBaseMaterial(material, hexOrDefault(item.color, "#0f172a"));
+          registerEditableBaseMaterial(
+            material,
+            hexOrDefault(item.color, "#0f172a"),
+            item.name,
+          );
           scene.add(
             new THREE.LineSegments(
               geometry,
@@ -1810,7 +1952,11 @@
             alphaTest: 0.35,
             depthWrite: Number(item.opacity || 1.0) >= 0.999,
           });
-          registerEditableBaseMaterial(material, hexOrDefault(item.color, "#0f172a"));
+          registerEditableBaseMaterial(
+            material,
+            hexOrDefault(item.color, "#0f172a"),
+            item.name,
+          );
           scene.add(new THREE.Points(geometry, material));
           points.forEach((point, index) => {
             if (hoverItems[index]) {
@@ -2059,6 +2205,8 @@
         const editTargetsBtn = document.getElementById("edit-targets-btn");
         const editToolbox = document.getElementById("edit-toolbox");
         const editPlaneSelector = document.getElementById("edit-plane-selector");
+        const editScopeSelector = document.getElementById("edit-scope-selector");
+        const editOperationSelector = document.getElementById("edit-operation-selector");
         const editUndoBtn = document.getElementById("edit-undo-btn");
         const editRedoBtn = document.getElementById("edit-redo-btn");
         const editResetBtn = document.getElementById("edit-reset-btn");
@@ -2069,6 +2217,8 @@
           editTargetsBtn &&
           editToolbox &&
           editPlaneSelector &&
+          editScopeSelector &&
+          editOperationSelector &&
           editUndoBtn &&
           editRedoBtn &&
           editResetBtn &&
@@ -2080,9 +2230,14 @@
 
         let editModeActive = false;
         let editPlane = "xy"; // "xy" | "z"
+        let editMoveScope = "point"; // "point" | "pair"
+        let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, wellIndex, pointType, dataPos[3], guide}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
+        const editLateralLabels = []; // midpoint label per well for current t1-t3 length
+        const editRotationControls = []; // ring controls per well for t1-anchored XY rotation
+        const editRotationPickMeshes = [];
         const editOriginalT1 = []; // original t1 [x,y,z] per well
         const editOriginalT3 = []; // original t3 [x,y,z] per well
         const editCurrentT1 = []; // current (dragged) t1 per well
@@ -2096,9 +2251,16 @@
         let editDragStartPosition = null;
         let editDragStartAxisT = 0.0;
         let editDragPlane = null;
+        let editDragMoveScope = "point";
         let editDragPlaneZ = 0.0;
         let editDragPointerOffset = null;
         let editDragHistoryStartState = null;
+        let editRotateWellIndex = null;
+        let editRotateStartAngle = 0.0;
+        let editRotatePlaneZ = 0.0;
+        let editRotateCenterDisplay = null;
+        let editRotateHistoryStartState = null;
+        let editRotateStartVector = null;
         let editHasAnyChange = false;
         let selectedEditWellIndex = editWells.length > 0 ? 0 : null;
         let editBroadcastChannel = null;
@@ -2121,6 +2283,10 @@
                 ? "-"
                 : "";
           return `${sign}${absValue.toFixed(1).replace(".", ",")} м`;
+        }
+
+        function formatLengthMeters(value) {
+          return formatDeltaMeters(Math.max(0, Number(value) || 0), false);
         }
 
         function copyEditPoint(point) {
@@ -2169,6 +2335,169 @@
           return !editStatesEqual(cloneEditState(wellIndex), originalEditState(wellIndex));
         }
 
+        function createUnitCircleGeometry(segments) {
+          const positions = [];
+          const safeSegments = Math.max(Number(segments) || 96, 16);
+          for (let index = 0; index < safeSegments; index += 1) {
+            const angle = (index / safeSegments) * Math.PI * 2.0;
+            positions.push(Math.cos(angle), Math.sin(angle), 0);
+          }
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(new Float32Array(positions), 3),
+          );
+          return geometry;
+        }
+
+        function createRotationArrowGeometry(angleRad, direction) {
+          const radial = new THREE.Vector2(Math.cos(angleRad), Math.sin(angleRad));
+          const turnDirection = Number(direction) < 0 ? -1.0 : 1.0;
+          const tangent = new THREE.Vector2(
+            -radial.y * turnDirection,
+            radial.x * turnDirection,
+          );
+          const center = radial.clone().multiplyScalar(1.0);
+          const tip = center.clone().add(tangent.clone().multiplyScalar(0.042));
+          const baseCenter = center.clone().add(tangent.clone().multiplyScalar(-0.032));
+          const wing = radial.clone().multiplyScalar(0.026);
+          const positions = [
+            tip.x,
+            tip.y,
+            0,
+            baseCenter.x + wing.x,
+            baseCenter.y + wing.y,
+            0,
+            baseCenter.x - wing.x,
+            baseCenter.y - wing.y,
+            0,
+          ];
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(new Float32Array(positions), 3),
+          );
+          return geometry;
+        }
+
+        function editRotationControlLift() {
+          return Math.max(maxSpan * 0.012, 10.0);
+        }
+
+        function editRotationModeEnabled() {
+          return editModeActive && editMoveScope === "pair" && editTransformMode === "rotate";
+        }
+
+        function editRotationCenterDisplay(wellIndex) {
+          const t1 = editCurrentT1[wellIndex] || [0, 0, 0];
+          const t3 = editCurrentT3[wellIndex] || [0, 0, 0];
+          const center = displayPoint([t1[0], t1[1], t3[2]]);
+          center.z += editRotationControlLift();
+          return center;
+        }
+
+        function createEditRotationControl(wellIndex, color) {
+          const group = new THREE.Group();
+          group.visible = false;
+          group.renderOrder = 13;
+          const safeColor = hexOrDefault(color, "#2563eb");
+
+          const ringMaterial = new THREE.LineBasicMaterial({
+            color: safeColor,
+            transparent: true,
+            opacity: 0.52,
+            depthTest: false,
+            depthWrite: false,
+          });
+          const ring = new THREE.LineLoop(createUnitCircleGeometry(128), ringMaterial);
+          ring.renderOrder = 13;
+          group.add(ring);
+
+          const arrowMaterial = new THREE.MeshBasicMaterial({
+            color: safeColor,
+            transparent: true,
+            opacity: 0.68,
+            side: THREE.DoubleSide,
+            depthTest: false,
+            depthWrite: false,
+          });
+          [
+            [35, 1],
+            [125, -1],
+            [215, 1],
+            [305, -1],
+          ].forEach(([angleDeg, direction]) => {
+            const arrow = new THREE.Mesh(
+              createRotationArrowGeometry(
+                (angleDeg * Math.PI) / 180.0,
+                direction,
+              ),
+              arrowMaterial,
+            );
+            arrow.renderOrder = 14;
+            group.add(arrow);
+          });
+
+          const pickMaterial = new THREE.MeshBasicMaterial({
+            color: "#ffffff",
+            transparent: true,
+            opacity: 0.0,
+            side: THREE.DoubleSide,
+            depthTest: false,
+            depthWrite: false,
+          });
+          pickMaterial.colorWrite = false;
+          const pickMesh = new THREE.Mesh(
+            new THREE.RingGeometry(0.90, 1.12, 128),
+            pickMaterial,
+          );
+          pickMesh.userData.editRotationWellIndex = wellIndex;
+          pickMesh.renderOrder = 15;
+          group.add(pickMesh);
+          scene.add(group);
+          editRotationPickMeshes.push(pickMesh);
+          return {
+            group: group,
+            ring: ring,
+            arrows: group.children.filter((child) => child !== ring && child !== pickMesh),
+            pickMesh: pickMesh,
+          };
+        }
+
+        function updateEditRotationControl(wellIndex) {
+          const control = editRotationControls[wellIndex];
+          if (!control) {
+            return;
+          }
+          const visible =
+            editRotationModeEnabled() &&
+            Number.isInteger(selectedEditWellIndex) &&
+            wellIndex === selectedEditWellIndex &&
+            horizontalT1T3Length(wellIndex) > EDIT_DELTA_EPS_M;
+          control.group.visible = visible;
+          if (!visible) {
+            return;
+          }
+          const radius = Math.max(horizontalT1T3Length(wellIndex), EDIT_DELTA_EPS_M);
+          control.group.position.copy(editRotationCenterDisplay(wellIndex));
+          control.group.scale.set(radius, radius, 1.0);
+          const isDragging = editRotateWellIndex === wellIndex;
+          if (control.ring.material) {
+            control.ring.material.opacity = isDragging ? 0.78 : 0.52;
+            control.ring.material.needsUpdate = true;
+          }
+          control.arrows.forEach((arrow) => {
+            if (arrow.material) {
+              arrow.material.opacity = isDragging ? 0.86 : 0.68;
+              arrow.material.needsUpdate = true;
+            }
+          });
+        }
+
+        function syncEditRotationControls() {
+          editRotationControls.forEach((_, index) => updateEditRotationControl(index));
+        }
+
         function createEditDeltaLine(color, opacity) {
           const material = new THREE.LineDashedMaterial({
             color: color,
@@ -2186,6 +2515,62 @@
           return lineObject;
         }
 
+        function initEditDeltaLabelDrag(labelItem) {
+          if (!labelItem || !labelItem.element) {
+            return;
+          }
+          let dragging = false;
+          let startX = 0;
+          let startY = 0;
+          let startOffsetX = 0;
+          let startOffsetY = 0;
+          const element = labelItem.element;
+          element.title = "Перетащите, чтобы сместить плашку от точки";
+          element.addEventListener("pointerdown", function (event) {
+            dragging = true;
+            interactionActive = true;
+            hideTooltip();
+            startX = Number(event.clientX || 0);
+            startY = Number(event.clientY || 0);
+            startOffsetX = Number(labelItem.offsetX || 0);
+            startOffsetY = Number(labelItem.offsetY || 0);
+            element.classList.add("is-dragging");
+            try {
+              element.setPointerCapture(event.pointerId);
+            } catch (e) { /* ignore */ }
+            event.preventDefault();
+            event.stopPropagation();
+          });
+          element.addEventListener("pointermove", function (event) {
+            if (!dragging) {
+              return;
+            }
+            const dx = Number(event.clientX || 0) - startX;
+            const dy = Number(event.clientY || 0) - startY;
+            labelItem.offsetX = startOffsetX + dx;
+            labelItem.offsetY = startOffsetY - dy;
+            event.preventDefault();
+            event.stopPropagation();
+            requestRender();
+          });
+          const endDrag = function (event) {
+            if (!dragging) {
+              return;
+            }
+            dragging = false;
+            interactionActive = false;
+            element.classList.remove("is-dragging");
+            try {
+              element.releasePointerCapture(event.pointerId);
+            } catch (e) { /* ignore */ }
+            event.preventDefault();
+            event.stopPropagation();
+            requestRender();
+          };
+          element.addEventListener("pointerup", endDrag);
+          element.addEventListener("pointercancel", endDrag);
+        }
+
         function createEditDeltaGuide(pointType, color) {
           const label = addSceneLabel(
             "",
@@ -2195,6 +2580,7 @@
             { offsetX: 14, offsetY: 18 },
           );
           label.visible = false;
+          initEditDeltaLabelDrag(label);
           return {
             pointType: pointType,
             lines: {
@@ -2302,6 +2688,55 @@
           editHandles.forEach(updateEditDeltaGuide);
         }
 
+        function horizontalT1T3Length(wellIndex) {
+          const t1 = editCurrentT1[wellIndex];
+          const t3 = editCurrentT3[wellIndex];
+          if (!t1 || !t3) {
+            return 0.0;
+          }
+          return Math.hypot(t3[0] - t1[0], t3[1] - t1[1]);
+        }
+
+        function t1T3Midpoint(wellIndex) {
+          const t1 = editCurrentT1[wellIndex] || [0, 0, 0];
+          const t3 = editCurrentT3[wellIndex] || [0, 0, 0];
+          return [
+            (Number(t1[0]) + Number(t3[0])) * 0.5,
+            (Number(t1[1]) + Number(t3[1])) * 0.5,
+            (Number(t1[2]) + Number(t3[2])) * 0.5,
+          ];
+        }
+
+        function createEditLateralLabel(wellIndex) {
+          const label = addSceneLabel(
+            "",
+            displayPoint(t1T3Midpoint(wellIndex)),
+            "#1d4ed8",
+            "edit-lateral-label",
+            { offsetX: 0, offsetY: 0 },
+          );
+          label.visible = false;
+          return label;
+        }
+
+        function updateEditLateralLabel(wellIndex) {
+          const label = editLateralLabels[wellIndex];
+          if (!label) {
+            return;
+          }
+          label.position.copy(displayPoint(t1T3Midpoint(wellIndex)));
+          label.element.textContent =
+            `Длина ГС ${formatLengthMeters(horizontalT1T3Length(wellIndex))}`;
+          label.visible =
+            editModeActive &&
+            Number.isInteger(selectedEditWellIndex) &&
+            wellIndex === selectedEditWellIndex;
+        }
+
+        function syncEditLateralLabels() {
+          editLateralLabels.forEach((_, index) => updateEditLateralLabel(index));
+        }
+
         function handleDeltaLength(handle) {
           if (!handle) {
             return 0.0;
@@ -2332,12 +2767,9 @@
           }
         }
 
-        function applyEditState(wellIndex, state) {
-          if (!Number.isInteger(wellIndex) || !state) {
-            return;
-          }
-          editCurrentT1[wellIndex] = copyEditPoint(state.t1);
-          editCurrentT3[wellIndex] = copyEditPoint(state.t3);
+        function updateWellEditTargets(wellIndex, t1, t3) {
+          editCurrentT1[wellIndex] = copyEditPoint(t1);
+          editCurrentT3[wellIndex] = copyEditPoint(t3);
           editHandles.forEach((handle) => {
             if (handle.wellIndex !== wellIndex) {
               return;
@@ -2349,6 +2781,13 @@
                 : editCurrentT3[wellIndex],
             );
           });
+        }
+
+        function applyEditState(wellIndex, state) {
+          if (!Number.isInteger(wellIndex) || !state) {
+            return;
+          }
+          updateWellEditTargets(wellIndex, state.t1, state.t3);
           editDirtyFlags[wellIndex] = isEditWellDirty(wellIndex);
           rebuildPreviewTrajectory(wellIndex);
           resetEditSaveButtonState();
@@ -2399,6 +2838,18 @@
             !editModeActive ||
             !hasSelection ||
             !Boolean(editDirtyFlags[selectedIndex]);
+          editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
+            btn.disabled = !editModeActive || !hasSelection || editTransformMode === "rotate";
+          });
+          editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
+            btn.disabled = !editModeActive || !hasSelection;
+          });
+          editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {
+            btn.disabled =
+              !editModeActive ||
+              !hasSelection ||
+              (btn.dataset.operation === "rotate" && editMoveScope !== "pair");
+          });
         }
 
         function undoSelectedEdit() {
@@ -2469,6 +2920,8 @@
             editDirtyFlags.push(false);
             editUndoStacks.push([]);
             editRedoStacks.push([]);
+            editLateralLabels.push(createEditLateralLabel(idx));
+            editRotationControls.push(createEditRotationControl(idx, color));
 
             // Create FastReplan instance
             editReplanners.push(new FastReplan({
@@ -2685,6 +3138,8 @@
             lineObject.renderOrder = isSelected ? 9 : 8;
           });
           syncEditDeltaGuides();
+          syncEditLateralLabels();
+          syncEditRotationControls();
           syncEditToolboxState();
           syncLegendEditSelection();
         }
@@ -2698,6 +3153,10 @@
           syncEditVisibility();
           syncEditToolboxState();
           if (options && options.focus) {
+            if (fitCameraToEditWellTargets(nextIndex)) {
+              requestRender();
+              return;
+            }
             const well = editWells[nextIndex] || {};
             const name = String(well.name || "");
             const targetBounds = focusTargets[`well::${name}`];
@@ -2740,6 +3199,44 @@
             btn.classList.toggle("is-active", btn.dataset.plane === plane);
           });
           syncEditToolboxState();
+        }
+
+        function setEditMoveScope(scope) {
+          if (scope !== "point" && scope !== "pair") {
+            return;
+          }
+          editMoveScope = scope;
+          editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
+            btn.classList.toggle("is-active", btn.dataset.scope === scope);
+          });
+          if (editMoveScope !== "pair" && editTransformMode === "rotate") {
+            setEditTransformMode("move");
+            return;
+          }
+          syncEditRotationControls();
+          syncEditToolboxState();
+        }
+
+        function setEditTransformMode(operation) {
+          if (operation !== "move" && operation !== "rotate") {
+            return;
+          }
+          if (operation === "rotate" && editMoveScope !== "pair") {
+            return;
+          }
+          editTransformMode = operation;
+          if (operation === "rotate") {
+            editPlane = "xy";
+            editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
+              btn.classList.toggle("is-active", btn.dataset.plane === editPlane);
+            });
+          }
+          editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {
+            btn.classList.toggle("is-active", btn.dataset.operation === operation);
+          });
+          syncEditRotationControls();
+          syncEditToolboxState();
+          requestRender();
         }
 
         function rebuildPreviewTrajectory(wellIndex) {
@@ -2789,6 +3286,121 @@
           return ray.intersectPlane(plane, hitPoint) ? hitPoint : null;
         }
 
+        function pointerAngleAroundCenter(event, centerDisplay, planeZ, fallbackAngle) {
+          const hitPoint = pointerPlaneIntersection(event, planeZ);
+          if (!hitPoint || !centerDisplay) {
+            return fallbackAngle;
+          }
+          const dx = hitPoint.x - centerDisplay.x;
+          const dy = hitPoint.y - centerDisplay.y;
+          if (Math.hypot(dx, dy) <= EDIT_DELTA_EPS_M) {
+            return fallbackAngle;
+          }
+          return Math.atan2(dy, dx);
+        }
+
+        function startEditRotationDrag(wellIndex, event) {
+          if (!editRotationModeEnabled()) {
+            return false;
+          }
+          if (!Number.isInteger(wellIndex) || wellIndex !== selectedEditWellIndex) {
+            return false;
+          }
+          const startState = cloneEditState(wellIndex);
+          const startVector = {
+            x: startState.t3[0] - startState.t1[0],
+            y: startState.t3[1] - startState.t1[1],
+            z: startState.t3[2],
+          };
+          if (Math.hypot(startVector.x, startVector.y) <= EDIT_DELTA_EPS_M) {
+            return false;
+          }
+          editRotateWellIndex = wellIndex;
+          editRotateHistoryStartState = startState;
+          editRotateStartVector = startVector;
+          editRotateCenterDisplay = editRotationCenterDisplay(wellIndex);
+          editRotatePlaneZ = editRotateCenterDisplay.z;
+          editRotateStartAngle = pointerAngleAroundCenter(
+            event,
+            editRotateCenterDisplay,
+            editRotatePlaneZ,
+            Math.atan2(startVector.y, startVector.x),
+          );
+          controls.enabled = false;
+          interactionActive = true;
+          hideTooltip();
+          syncEditRotationControls();
+          try {
+            renderer.domElement.setPointerCapture(event.pointerId);
+          } catch (e) { /* ignore */ }
+          event.preventDefault();
+          event.stopPropagation();
+          requestRender();
+          return true;
+        }
+
+        function updateEditRotationDrag(event) {
+          if (
+            !Number.isInteger(editRotateWellIndex) ||
+            !editRotateHistoryStartState ||
+            !editRotateStartVector ||
+            !editRotateCenterDisplay
+          ) {
+            return;
+          }
+          const angle = pointerAngleAroundCenter(
+            event,
+            editRotateCenterDisplay,
+            editRotatePlaneZ,
+            editRotateStartAngle,
+          );
+          const deltaAngle = angle - editRotateStartAngle;
+          const cosA = Math.cos(deltaAngle);
+          const sinA = Math.sin(deltaAngle);
+          const rotatedX =
+            editRotateStartVector.x * cosA - editRotateStartVector.y * sinA;
+          const rotatedY =
+            editRotateStartVector.x * sinA + editRotateStartVector.y * cosA;
+          const nextT1 = copyEditPoint(editRotateHistoryStartState.t1);
+          const nextT3 = copyEditPoint(editRotateHistoryStartState.t3);
+          nextT3[0] = nextT1[0] + rotatedX;
+          nextT3[1] = nextT1[1] + rotatedY;
+          nextT3[2] = editRotateStartVector.z;
+          updateWellEditTargets(editRotateWellIndex, nextT1, nextT3);
+          editDirtyFlags[editRotateWellIndex] = isEditWellDirty(editRotateWellIndex);
+          rebuildPreviewTrajectory(editRotateWellIndex);
+          resetEditSaveButtonState();
+          syncEditVisibility();
+          showEditFeedback();
+          event.preventDefault();
+          event.stopPropagation();
+          requestRender();
+        }
+
+        function endEditRotationDrag(event) {
+          if (!Number.isInteger(editRotateWellIndex)) {
+            return false;
+          }
+          const wellIndex = editRotateWellIndex;
+          pushEditUndoState(wellIndex, editRotateHistoryStartState);
+          controls.enabled = true;
+          editRotateWellIndex = null;
+          editRotateStartAngle = 0.0;
+          editRotatePlaneZ = 0.0;
+          editRotateCenterDisplay = null;
+          editRotateHistoryStartState = null;
+          editRotateStartVector = null;
+          interactionActive = false;
+          syncEditRotationControls();
+          try {
+            renderer.domElement.releasePointerCapture(event.pointerId);
+          } catch (e) { /* ignore */ }
+          event.preventDefault();
+          event.stopPropagation();
+          requestRender();
+          return true;
+        }
+
         function closestAxisParameter(event, axisOrigin, axisDirection) {
           const ray = pointerRay(event);
           const direction = axisDirection.clone().normalize();
@@ -2812,6 +3424,26 @@
           );
           const ray = new THREE.Raycaster();
           ray.setFromCamera(mouse, camera);
+          if (editRotationModeEnabled()) {
+            const rotateMeshes = editRotationPickMeshes.filter((mesh) => {
+              const wellIndex = Number(mesh.userData.editRotationWellIndex);
+              const control = editRotationControls[wellIndex];
+              return (
+                wellIndex === selectedEditWellIndex &&
+                control &&
+                control.group.visible
+              );
+            });
+            const rotateHits = ray.intersectObjects(rotateMeshes, false);
+            if (rotateHits.length) {
+              const rotateWellIndex = Number(
+                rotateHits[0].object.userData.editRotationWellIndex,
+              );
+              if (startEditRotationDrag(rotateWellIndex, event)) {
+                return;
+              }
+            }
+          }
           const meshes = editHandles
             .filter((h) => h.wellIndex === selectedEditWellIndex)
             .map((h) => h.pickMesh || h.mesh);
@@ -2822,6 +3454,18 @@
             (h) => h.mesh === hitMesh || h.pickMesh === hitMesh,
           );
           if (!handle) return;
+          if (editRotationModeEnabled()) {
+            if (handle.pointType !== "t3") {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            if (!startEditRotationDrag(handle.wellIndex, event)) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           controls.enabled = false;
@@ -2831,6 +3475,7 @@
           editDragStartPosition = handle.mesh.position.clone();
           editDragHistoryStartState = cloneEditState(handle.wellIndex);
           editDragPlane = editPlane;
+          editDragMoveScope = editMoveScope;
           if (editDragPlane === "xy") {
             const planeHit = pointerPlaneIntersection(event, editDragStartPosition.z);
             editDragPlaneZ = editDragStartPosition.z;
@@ -2856,6 +3501,10 @@
         }
 
         function onEditPointerMove(event) {
+          if (Number.isInteger(editRotateWellIndex)) {
+            updateEditRotationDrag(event);
+            return;
+          }
           if (!editDragHandle || !editDragStartPosition) return;
           let newPos = null;
           if (editDragPlane === "xy") {
@@ -2879,14 +3528,36 @@
           const dataX = newPos.x;
           const dataY = newPos.y;
           const dataZ = newPos.z * Z_DISPLAY_SIGN;
-          updateHandlePosition(editDragHandle, [dataX, dataY, dataZ]);
           const wi = editDragHandle.wellIndex;
-          if (editDragHandle.pointType === "t1") {
-            editCurrentT1[wi] = [dataX, dataY, dataZ];
+          if (editDragMoveScope === "pair" && editDragHistoryStartState) {
+            const startPoint = editDragHistoryStartState[editDragHandle.pointType];
+            const dx = dataX - startPoint[0];
+            const dy = dataY - startPoint[1];
+            const dz = dataZ - startPoint[2];
+            const nextT1 = copyEditPoint(editDragHistoryStartState.t1);
+            const nextT3 = copyEditPoint(editDragHistoryStartState.t3);
+            nextT1[0] += dx;
+            nextT1[1] += dy;
+            nextT1[2] += dz;
+            nextT3[0] += dx;
+            nextT3[1] += dy;
+            nextT3[2] += dz;
+            updateWellEditTargets(wi, nextT1, nextT3);
           } else {
-            editCurrentT3[wi] = [dataX, dataY, dataZ];
+            const nextT1 = copyEditPoint(editCurrentT1[wi]);
+            const nextT3 = copyEditPoint(editCurrentT3[wi]);
+            if (editDragHandle.pointType === "t1") {
+              nextT1[0] = dataX;
+              nextT1[1] = dataY;
+              nextT1[2] = dataZ;
+            } else {
+              nextT3[0] = dataX;
+              nextT3[1] = dataY;
+              nextT3[2] = dataZ;
+            }
+            updateWellEditTargets(wi, nextT1, nextT3);
           }
-          editDirtyFlags[wi] = true;
+          editDirtyFlags[wi] = isEditWellDirty(wi);
           rebuildPreviewTrajectory(wi);
           resetEditSaveButtonState();
           syncEditVisibility();
@@ -2895,6 +3566,9 @@
         }
 
         function onEditPointerUp(event) {
+          if (endEditRotationDrag(event)) {
+            return;
+          }
           if (!editDragHandle) return;
           const wellIndex = editDragHandle.wellIndex;
           pushEditUndoState(wellIndex, editDragHistoryStartState);
@@ -2904,6 +3578,7 @@
           editDragAxisDirection = null;
           editDragStartPosition = null;
           editDragPlane = null;
+          editDragMoveScope = "point";
           editDragPointerOffset = null;
           editDragHistoryStartState = null;
           interactionActive = false;
@@ -2966,6 +3641,16 @@
           editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
             btn.addEventListener("click", () => {
               setEditPlane(btn.dataset.plane);
+            });
+          });
+          editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              setEditMoveScope(btn.dataset.scope);
+            });
+          });
+          editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              setEditTransformMode(btn.dataset.operation);
             });
           });
           editUndoBtn.addEventListener("click", undoSelectedEdit);

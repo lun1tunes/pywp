@@ -182,6 +182,63 @@ def test_collision_corridor_geometry_and_well_segments_are_built() -> None:
     assert {segment.well_name for segment in analysis.well_segments} == {"WELL-A", "WELL-B"}
 
 
+def test_collision_corridor_overlap_mesh_uses_independent_lenses() -> None:
+    corridor = AntiCollisionCorridor(
+        well_a="WELL-A",
+        well_b="WELL-B",
+        classification="trajectory",
+        priority_rank=2,
+        label_a="",
+        label_b="",
+        md_a_start_m=1000.0,
+        md_a_end_m=1030.0,
+        md_b_start_m=1000.0,
+        md_b_end_m=1030.0,
+        md_a_values_m=np.array([1000.0, 1030.0], dtype=float),
+        md_b_values_m=np.array([1000.0, 1030.0], dtype=float),
+        label_a_values=("", ""),
+        label_b_values=("", ""),
+        midpoint_xyz=np.array(
+            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float
+        ),
+        overlap_rings_xyz=(
+            np.array(
+                [
+                    [-1.0, -1.0, 0.0],
+                    [1.0, -1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [-1.0, 1.0, 0.0],
+                ],
+                dtype=float,
+            ),
+            np.array(
+                [
+                    [8.0, -1.0, 0.0],
+                    [12.0, -1.0, 0.0],
+                    [12.0, 1.0, 0.0],
+                    [8.0, 1.0, 0.0],
+                ],
+                dtype=float,
+            ),
+        ),
+        overlap_core_radius_m=np.array([2.0, 2.0], dtype=float),
+        separation_factor_values=np.array([0.6, 0.7], dtype=float),
+        overlap_depth_values_m=np.array([4.0, 3.0], dtype=float),
+    )
+
+    mesh = collision_corridor_tube_mesh(corridor)
+
+    assert mesh is not None
+    assert mesh.vertices_xyz.shape == (10, 3)
+    assert len(mesh.i) == 8
+    assert set(mesh.i[:4]) == {4}
+    assert set(mesh.i[4:]) == {9}
+    assert np.all(mesh.j[:4] < 4)
+    assert np.all(mesh.k[:4] < 4)
+    assert np.all((mesh.j[4:] >= 5) & (mesh.j[4:] < 9))
+    assert np.all((mesh.k[4:] >= 5) & (mesh.k[4:] < 9))
+
+
 def test_analyze_anti_collision_skips_distant_pair_before_corridor_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

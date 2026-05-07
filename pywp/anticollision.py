@@ -706,58 +706,42 @@ def collision_corridor_plan_polygon(
 def collision_corridor_tube_mesh(
     corridor: AntiCollisionCorridor,
 ) -> UncertaintyTubeMesh | None:
-    rings = [np.asarray(ring, dtype=float) for ring in corridor.overlap_rings_xyz]
+    rings = [
+        _open_ring(np.asarray(ring, dtype=float))
+        for ring in corridor.overlap_rings_xyz
+    ]
+    rings = [
+        ring
+        for ring in rings
+        if ring.ndim == 2
+        and ring.shape[0] >= 3
+        and ring.shape[1] == 3
+        and np.all(np.isfinite(ring))
+    ]
     if not rings:
         return None
 
-    points_per_ring = int(rings[0].shape[0])
-    if points_per_ring < 3:
-        return None
-    vertices = np.vstack(rings)
+    vertices_list: list[np.ndarray] = []
     triangles_i: list[int] = []
     triangles_j: list[int] = []
     triangles_k: list[int] = []
-    if len(rings) == 1:
-        center_index = int(len(vertices))
-        center = np.mean(np.asarray(rings[0], dtype=float), axis=0)
-        vertices = np.vstack([vertices, center[None, :]])
+    vertex_count = 0
+
+    for ring in rings:
+        ring_start_index = int(vertex_count)
+        vertices_list.append(ring)
+        vertex_count += int(len(ring))
+        center_index = ring_start_index + int(len(ring))
+        vertices_list.append(np.mean(np.asarray(ring, dtype=float), axis=0)[None, :])
+        vertex_count += 1
+        points_per_ring = int(len(ring))
         for point_index in range(points_per_ring):
             next_index = (point_index + 1) % points_per_ring
             triangles_i.append(center_index)
-            triangles_j.append(point_index)
-            triangles_k.append(next_index)
-    else:
-        for ring_index in range(len(rings) - 1):
-            start_a = ring_index * points_per_ring
-            start_b = (ring_index + 1) * points_per_ring
-            for point_index in range(points_per_ring):
-                next_index = (point_index + 1) % points_per_ring
-                a0 = start_a + point_index
-                a1 = start_a + next_index
-                b0 = start_b + point_index
-                b1 = start_b + next_index
-                triangles_i.extend([a0, a0])
-                triangles_j.extend([a1, b1])
-                triangles_k.extend([b1, b0])
+            triangles_j.append(ring_start_index + point_index)
+            triangles_k.append(ring_start_index + next_index)
 
-        start_cap_center_index = int(len(vertices))
-        end_cap_center_index = start_cap_center_index + 1
-        vertices = np.vstack(
-            [
-                vertices,
-                np.mean(np.asarray(rings[0], dtype=float), axis=0)[None, :],
-                np.mean(np.asarray(rings[-1], dtype=float), axis=0)[None, :],
-            ]
-        )
-        for point_index in range(points_per_ring):
-            next_index = (point_index + 1) % points_per_ring
-            triangles_i.append(start_cap_center_index)
-            triangles_j.append(next_index)
-            triangles_k.append(point_index)
-            last_ring_start = (len(rings) - 1) * points_per_ring
-            triangles_i.append(end_cap_center_index)
-            triangles_j.append(last_ring_start + point_index)
-            triangles_k.append(last_ring_start + next_index)
+    vertices = np.vstack(vertices_list)
     return UncertaintyTubeMesh(
         vertices_xyz=np.asarray(vertices, dtype=float),
         i=np.asarray(triangles_i, dtype=int),

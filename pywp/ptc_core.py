@@ -83,6 +83,7 @@ from pywp.anticollision_rerun import (
 from pywp.constants import SMALL
 from pywp.coordinate_integration import (
     DEFAULT_CRS,
+    csv_export_crs,
     get_crs_display_suffix,
     transform_stations_to_crs,
 )
@@ -3044,27 +3045,10 @@ def _edit_target_point(value: object) -> list[float] | None:
     return point
 
 
-def _apply_edit_targets_changes(
-    changes: object,
-    *,
-    source: str = "3d",
-) -> list[str]:
-    if not isinstance(changes, list) or not changes:
-        return []
-    records = st.session_state.get("wt_records")
-    if not records:
-        return []
-    change_map: dict[str, dict[str, list[float]]] = {}
-    for entry in changes:
-        if not isinstance(entry, Mapping):
-            continue
-        name = str(entry.get("name", "")).strip()
-        t1 = _edit_target_point(entry.get("t1"))
-        t3 = _edit_target_point(entry.get("t3"))
-        if name and t1 is not None and t3 is not None:
-            change_map[name] = {"t1": t1, "t3": t3}
-    if not change_map:
-        return []
+def _records_with_edit_targets(
+    records: Iterable[WelltrackRecord],
+    change_map: Mapping[str, Mapping[str, list[float]]],
+) -> tuple[list[WelltrackRecord], list[str]]:
     updated_records: list[WelltrackRecord] = []
     updated_names: list[str] = []
     for record in records:
@@ -3098,20 +3082,111 @@ def _apply_edit_targets_changes(
             WelltrackRecord(name=record.name, points=new_points)
         )
         updated_names.append(record_name)
+    return updated_records, updated_names
+
+
+def _invalidate_results_for_edited_targets(
+    *,
+    records: Iterable[WelltrackRecord],
+    edited_names: Iterable[str],
+) -> None:
+    edited_name_set = {
+        str(name) for name in edited_names if str(name).strip()
+    }
+    if not edited_name_set:
+        return
+
+    ordered_records = list(records)
+    existing_rows = st.session_state.get("wt_summary_rows")
+    if existing_rows is not None:
+        existing_rows_by_name = {
+            str(row.get("Скважина", "")).strip(): dict(row)
+            for row in existing_rows
+            if isinstance(row, Mapping)
+        }
+        st.session_state["wt_summary_rows"] = [
+            (
+                WelltrackBatchPlanner._base_row(record)
+                if str(record.name) in edited_name_set
+                else existing_rows_by_name.get(
+                    str(record.name),
+                    WelltrackBatchPlanner._base_row(record),
+                )
+            )
+            for record in ordered_records
+        ]
+
+    existing_successes = st.session_state.get("wt_successes")
+    if existing_successes is not None:
+        st.session_state["wt_successes"] = [
+            success
+            for success in existing_successes
+            if (
+                str(getattr(success, "name", "")).strip()
+                not in edited_name_set
+            )
+        ]
+
+    st.session_state["wt_last_anticollision_resolution"] = None
+    st.session_state["wt_last_anticollision_previous_successes"] = {}
+    st.session_state["wt_anticollision_analysis_cache"] = {}
+    st.session_state["wt_prepared_well_overrides"] = {}
+    st.session_state["wt_prepared_override_message"] = ""
+    st.session_state["wt_prepared_recommendation_id"] = ""
+    st.session_state["wt_anticollision_prepared_cluster_id"] = ""
+    st.session_state["wt_prepared_recommendation_snapshot"] = None
+
+
+def _apply_edit_targets_changes(
+    changes: object,
+    *,
+    source: str = "3d",
+) -> list[str]:
+    if not isinstance(changes, list) or not changes:
+        return []
+    records = st.session_state.get("wt_records")
+    if not records:
+        return []
+    change_map: dict[str, dict[str, list[float]]] = {}
+    for entry in changes:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("name", "")).strip()
+        t1 = _edit_target_point(entry.get("t1"))
+        t3 = _edit_target_point(entry.get("t3"))
+        if name and t1 is not None and t3 is not None:
+            change_map[name] = {"t1": t1, "t3": t3}
+    if not change_map:
+        return []
+    updated_records, updated_names = _records_with_edit_targets(
+        records=records,
+        change_map=change_map,
+    )
     if not updated_names:
         return []
 
+    effective_change_map = {
+        name: change_map[name] for name in updated_names if name in change_map
+    }
+    original_records = st.session_state.get("wt_records_original")
+    if original_records:
+        updated_original_records, _ = _records_with_edit_targets(
+            records=original_records,
+            change_map=effective_change_map,
+        )
+        st.session_state["wt_records_original"] = updated_original_records
+
     st.session_state["wt_records"] = updated_records
+    _invalidate_results_for_edited_targets(
+        records=updated_records,
+        edited_names=updated_names,
+    )
     st.session_state["wt_edit_targets_applied"] = updated_names
     st.session_state["wt_edit_targets_highlight_names"] = updated_names
     st.session_state["wt_edit_targets_last_source"] = str(source)
     st.session_state["wt_edit_targets_highlight_version"] = (
         int(st.session_state.get("wt_edit_targets_highlight_version", 0)) + 1
     )
-    # Clear stale calculation results so old trajectories don't conflict with
-    # edited control points.
-    st.session_state["wt_successes"] = None
-    st.session_state["wt_summary_rows"] = None
     st.session_state["wt_last_error"] = ""
     st.session_state["wt_pending_selected_names"] = list(updated_names)
     return updated_names
@@ -5181,8 +5256,9 @@ def _build_config_form(
     binding: CalcParamBinding = WT_CALC_PARAMS,
     *,
     title: str = "Параметры расчета",
+    on_change: Callable[[], None] | None = None,
 ) -> TrajectoryConfig:
-    binding.render_block(title=title)
+    binding.render_block(title=title, on_change=on_change)
     return binding.build_config()
 
 
@@ -6203,7 +6279,6 @@ def _prepare_rerun_from_cluster(
 
 
 def _render_source_input() -> _WelltrackSourcePayload:
-    st.markdown("### Источник WELLTRACK")
     source_mode = st.radio(
         "Режим загрузки",
         options=[
@@ -9222,6 +9297,15 @@ def _store_merged_batch_results(
     )
     st.session_state["wt_summary_rows"] = merged_rows
     st.session_state["wt_successes"] = merged_successes
+    successful_names = {str(success.name) for success in new_successes}
+    if successful_names:
+        st.session_state["wt_edit_targets_highlight_names"] = [
+            str(name)
+            for name in (
+                st.session_state.get("wt_edit_targets_highlight_names") or []
+            )
+            if str(name) not in successful_names
+        ]
     recommended_names = recommended_batch_selection(
         records=records,
         summary_rows=merged_rows,
@@ -9652,12 +9736,23 @@ def _build_batch_survey_csv(
     """Build combined CSV with inclinometry data for all successful wells."""
     if not successes:
         return b""
+    export_crs = csv_export_crs(
+        target_crs,
+        source_crs,
+        auto_convert=auto_convert,
+    )
+    should_transform = (
+        bool(auto_convert)
+        and target_crs != source_crs
+        and export_crs == target_crs
+    )
+    should_label_export_crs = bool(auto_convert) and target_crs != source_crs
     frames: list[pd.DataFrame] = []
     for success in successes:
         stations = success.stations.copy()
         if stations.empty:
             continue
-        if auto_convert and target_crs != source_crs:
+        if should_transform:
             stations = transform_stations_to_crs(
                 stations,
                 target_crs,
@@ -9671,11 +9766,11 @@ def _build_batch_survey_csv(
                 stations["DLS_deg_per_30m"].to_numpy(dtype=float)
             )
             stations = stations.drop(columns=["DLS_deg_per_30m"])
-        if auto_convert and target_crs != source_crs:
+        if should_label_export_crs:
             stations = survey_export_dataframe(
                 stations,
-                xy_label_suffix=get_crs_display_suffix(target_crs),
-                xy_unit="deg" if target_crs.is_geographic() else "м",
+                xy_label_suffix=get_crs_display_suffix(export_crs),
+                xy_unit="deg" if export_crs.is_geographic() else "м",
             )
         frames.append(stations)
     if not frames:

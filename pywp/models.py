@@ -133,7 +133,7 @@ class TrajectoryConfig(FrozenModel):
     dls_build_max_deg_per_30m: NonNegativeFiniteScalar = (
         DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     )
-    kop_min_vertical_m: NonNegativeFiniteScalar = 550.0
+    kop_min_vertical_m: NonNegativeFiniteScalar = 400.0
 
     # Post-processing MD threshold for user-facing validation only.
     # Does not participate in solver search/optimization constraints.

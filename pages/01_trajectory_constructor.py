@@ -19,18 +19,22 @@ from pywp.ui_theme import apply_page_style, render_hero, render_small_note
 from pywp.ui_well_panels import render_run_log_panel
 from pywp.coordinate_integration import (
     DEFAULT_CRS,
+    csv_export_crs,
     get_crs_display_suffix,
     get_selected_crs,
     render_crs_sidebar,
     should_auto_convert,
     transform_stations_to_crs,
 )
+from pywp.models import TrajectoryConfig
 from pywp.ui_well_result import (
     SingleWellResultView,
     render_key_metrics,
     render_result_plots,
     render_result_tables,
 )
+
+PTC_CALC_PARAMS_EXPAND_ONCE_KEY = "ptc_calc_params_expand_once"
 
 
 def _force_ptc_defaults() -> None:
@@ -46,12 +50,23 @@ def _force_ptc_defaults() -> None:
         st.session_state["wt_prepared_recommendation_snapshot"] = None
 
 
+def _keep_ptc_calc_params_expanded() -> None:
+    st.session_state[PTC_CALC_PARAMS_EXPAND_ONCE_KEY] = True
+
+
+def _render_ptc_calc_params_panel() -> TrajectoryConfig:
+    expanded = bool(st.session_state.pop(PTC_CALC_PARAMS_EXPAND_ONCE_KEY, False))
+    with st.expander("Параметры расчёта", expanded=expanded):
+        return wt._build_config_form(
+            binding=wt.WT_CALC_PARAMS,
+            title="",
+            on_change=_keep_ptc_calc_params_expanded,
+        )
+
+
 def _render_ptc_import_section() -> None:
     st.markdown("## 1. Импорт целей")
-    st.caption(
-        "Загрузите целевые точки скважин в формате WELLTRACK. После успешного "
-        "импорта цели будут доступны для расчёта и визуализации."
-    )
+
     source_payload = wt._render_source_input()
     parse_clicked = st.button(
         "Импорт целей",
@@ -269,6 +284,8 @@ def _render_ptc_run_section(*, records: list[object]) -> None:
     ):
         st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
 
+    config = _render_ptc_calc_params_panel()
+
     with st.form("ptc_run_form", clear_on_submit=False):
         select_col, pad_col, action_col, pad_add_col, pad_only_col = (
             st.columns(
@@ -323,9 +340,6 @@ def _render_ptc_run_section(*, records: list[object]) -> None:
                 if len(pad_ids) > 1
                 else False
             )
-
-        with st.expander("Параметры расчёта", expanded=False):
-            config = wt._build_config_form(binding=wt.WT_CALC_PARAMS, title="")
 
         _parallel_options = [
             ("Без Multiprocessing", 0),
@@ -708,15 +722,49 @@ def _render_ptc_success_tabs(
         survey_export_stations = None
         survey_export_xy_label_suffix = ""
         survey_export_xy_unit = "м"
-        if auto_convert and selected_crs != DEFAULT_CRS:
+        survey_export_crs = csv_export_crs(
+            selected_crs,
+            DEFAULT_CRS,
+            auto_convert=auto_convert,
+        )
+        if (
+            auto_convert
+            and selected_crs != DEFAULT_CRS
+            and survey_export_crs == selected_crs
+        ):
             survey_export_stations = transform_stations_to_crs(
                 selected.stations,
                 selected_crs,
                 DEFAULT_CRS,
                 rename_columns=False,
             )
-            survey_export_xy_label_suffix = get_crs_display_suffix(selected_crs)
-            survey_export_xy_unit = "deg" if selected_crs.is_geographic() else "м"
+        if auto_convert and selected_crs != DEFAULT_CRS:
+            survey_export_xy_label_suffix = get_crs_display_suffix(survey_export_crs)
+            survey_export_xy_unit = (
+                "deg" if survey_export_crs.is_geographic() else "м"
+            )
+        name_to_color = wt._well_color_map(list(records))
+        single_well_name_to_color = {
+            str(selected.name): str(
+                name_to_color.get(str(selected.name), "#2563eb")
+            )
+        }
+
+        def render_3d_override(container: object, figure: object) -> None:
+            wt._render_plotly_or_three_3d(
+                container=container,
+                figure=figure,
+                backend=wt.WT_3D_BACKEND_THREE_LOCAL,
+                height=560,
+                payload_overrides={
+                    "component_key": f"ptc-single-well-{selected.name}",
+                    "edit_wells": wt._build_edit_wells_payload(
+                        [selected],
+                        single_well_name_to_color,
+                    ),
+                },
+            )
+
         t1_horizontal_offset_m = render_key_metrics(
             view=well_view,
             title="Ключевые показатели",
@@ -727,6 +775,7 @@ def _render_ptc_success_tabs(
             title_trajectory=None,
             title_plan=None,
             border=True,
+            render_3d_override=render_3d_override,
         )
         render_result_tables(
             view=well_view,

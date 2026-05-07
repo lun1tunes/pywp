@@ -7,6 +7,7 @@ from pywp.coordinate_integration import (
     CRS_OPTIONS,
     DEFAULT_CRS,
     _can_transform_directly,
+    csv_export_crs,
     _transform_xy,
     apply_crs_to_well_view,
     format_coordinates_for_display,
@@ -84,8 +85,8 @@ class TestCoordinateIntegration:
         assert len(result) == 2
         assert "X_m" in result.columns  # Same CRS: no rename
 
-    def test_transform_stations_different_crs_renames_columns(self) -> None:
-        """Transform to different CRS renames columns even without pyproj."""
+    def test_transform_stations_different_crs_labels_source_when_unsupported(self) -> None:
+        """Unsupported transforms keep source CRS labels to avoid false units."""
         stations = pd.DataFrame({
             "X_m": [1000.0, 2000.0],
             "Y_m": [5000.0, 6000.0],
@@ -97,9 +98,8 @@ class TestCoordinateIntegration:
             CoordinateSystem.LOCAL,
         )
         assert len(result) == 2
-        # Columns should be renamed to reflect target CRS
-        assert "X_PNO16_m" in result.columns
-        assert "Y_PNO16_m" in result.columns
+        assert "X_LOCAL_m" in result.columns
+        assert "Y_LOCAL_m" in result.columns
         assert "Z_TVD_m" in result.columns
 
     def test_get_crs_display_suffix_pno16(self) -> None:
@@ -134,14 +134,33 @@ class TestCoordinateIntegration:
             CoordinateSystem.WGS84, CoordinateSystem.PULKOVO_1942
         ) is True
 
-    def test_can_transform_directly_local_blocked_but_pno_has_base_crs(self) -> None:
-        """LOCAL has no base CRS, while PNO labels map to base projected CRSs."""
+    def test_can_transform_directly_local_and_pno_placeholders_blocked(self) -> None:
+        """LOCAL and PNO placeholders require project-specific parameters."""
         assert _can_transform_directly(
             CoordinateSystem.LOCAL, CoordinateSystem.WGS84
         ) is False
         assert _can_transform_directly(
             CoordinateSystem.PNO_16_ZONE, CoordinateSystem.WGS84
-        ) is True
+        ) is False
+
+    def test_csv_export_crs_falls_back_to_source_for_pno_placeholder(self) -> None:
+        """CSV labels must match actual values when PNO conversion is unavailable."""
+        assert (
+            csv_export_crs(
+                CoordinateSystem.WGS84,
+                CoordinateSystem.PNO_16_ZONE,
+                auto_convert=True,
+            )
+            == CoordinateSystem.PNO_16_ZONE
+        )
+        assert (
+            csv_export_crs(
+                CoordinateSystem.WGS84,
+                CoordinateSystem.PNO_16_ZONE,
+                auto_convert=False,
+            )
+            == CoordinateSystem.PNO_16_ZONE
+        )
 
     def test_transform_xy_same_crs(self) -> None:
         """_transform_xy with same CRS returns original values."""
@@ -172,8 +191,8 @@ class TestCoordinateIntegration:
         assert result.t1.y == view.t1.y
         assert result.stations is view.stations  # Same CRS: returns original view
 
-    def test_apply_crs_to_well_view_adds_display_crs_to_summary(self) -> None:
-        """apply_crs_to_well_view adds display_crs to summary."""
+    def test_apply_crs_to_well_view_labels_actual_display_crs(self) -> None:
+        """Unsupported transforms keep source CRS in display metadata."""
         stations = pd.DataFrame({
             "X_m": [1000.0],
             "Y_m": [2000.0],
@@ -194,7 +213,7 @@ class TestCoordinateIntegration:
             view, CoordinateSystem.PNO_16_ZONE, CoordinateSystem.LOCAL
         )
         assert "display_crs" in result.summary
-        assert "PNO16" in result.summary["display_crs"]
+        assert "LOCAL" in result.summary["display_crs"]
 
     def test_apply_crs_to_well_view_preserves_z(self) -> None:
         """apply_crs_to_well_view always preserves z (TVD)."""
@@ -250,7 +269,11 @@ class TestCoordinateIntegration:
             lambda x, y, _from_crs, _to_crs: (float(x) + 1.0, float(y) + 2.0),
         )
 
-        result = apply_crs_to_well_view(view, CoordinateSystem.WGS84)
+        result = apply_crs_to_well_view(
+            view,
+            CoordinateSystem.WGS84,
+            CoordinateSystem.PULKOVO_1942_ZONE_16,
+        )
 
         assert list(result.stations.columns) == ["X_m", "Y_m", "Z_m"]
         assert result.stations["X_m"].tolist() == pytest.approx([1001.0])
@@ -277,7 +300,7 @@ class TestCoordinateIntegration:
         result = transform_stations_to_crs(
             stations,
             CoordinateSystem.WGS84,
-            DEFAULT_CRS,
+            CoordinateSystem.PULKOVO_1942_ZONE_16,
             rename_columns=False,
         )
 

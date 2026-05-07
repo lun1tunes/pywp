@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 import streamlit as st
 
@@ -89,11 +89,13 @@ class CalcParamBinding:
         *,
         title: str = "Параметры расчета",
         show_solver_help: bool = True,
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         render_calc_params_block(
             prefix=self.prefix,
             title=title,
             show_solver_help=show_solver_help,
+            on_change=on_change,
         )
 
 
@@ -310,9 +312,11 @@ def render_calc_params_block(
     *,
     title: str = "Параметры расчета",
     show_solver_help: bool = True,
+    on_change: Callable[[], None] | None = None,
 ) -> None:
     # Guard against any code path that renders widgets before page-level init.
     apply_calc_param_defaults(prefix=prefix, force=False)
+    widget_change_kwargs = {"on_change": on_change} if on_change is not None else {}
     if title:
         st.markdown(f"### {title}")
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7, gap="small")
@@ -322,6 +326,7 @@ def render_calc_params_block(
         min_value=1.0,
         step=1.0,
         help="Шаг выходной инклинометрии. Меньше шаг = подробнее профиль.",
+        **widget_change_kwargs,
     )
     c2.number_input(
         "Контрольный шаг MD, м",
@@ -329,6 +334,7 @@ def render_calc_params_block(
         min_value=0.5,
         step=0.5,
         help="Внутренний шаг проверки ограничений и качества решения.",
+        **widget_change_kwargs,
     )
     c3.number_input(
         "Допуск по латерали, м",
@@ -336,6 +342,7 @@ def render_calc_params_block(
         min_value=0.1,
         step=1.0,
         help="Максимально допустимый горизонтальный промах по t1 и t3: sqrt(dX² + dY²).",
+        **widget_change_kwargs,
     )
     c4.number_input(
         "Допуск по вертикали, м",
@@ -343,6 +350,7 @@ def render_calc_params_block(
         min_value=0.1,
         step=0.1,
         help="Максимально допустимый вертикальный промах по t1 и t3: |dZ|.",
+        **widget_change_kwargs,
     )
     c5.number_input(
         "Целевой INC на t1, deg",
@@ -351,6 +359,7 @@ def render_calc_params_block(
         max_value=89.0,
         step=0.5,
         help="Плановый угол входа в пласт в точке t1.",
+        **widget_change_kwargs,
     )
     c6.number_input(
         "Допуск INC на t1, deg",
@@ -359,6 +368,7 @@ def render_calc_params_block(
         max_value=5.0,
         step=0.1,
         help="Допустимое отклонение от целевого INC в точке t1.",
+        **widget_change_kwargs,
     )
     c7.number_input(
         "Макс INC по стволу, deg",
@@ -367,6 +377,7 @@ def render_calc_params_block(
         max_value=120.0,
         step=0.5,
         help="Глобальное ограничение по зенитному углу по всей траектории.",
+        **widget_change_kwargs,
     )
 
     d1, d2, d3 = st.columns(3, gap="small")
@@ -379,6 +390,7 @@ def render_calc_params_block(
             "Верхняя граница поиска ПИ на BUILD-сегментах. "
             "Внутри решателя автоматически переводится во внутренние единицы."
         ),
+        **widget_change_kwargs,
     )
     d2.number_input(
         "Мин VERTICAL до KOP, м",
@@ -386,6 +398,7 @@ def render_calc_params_block(
         min_value=0.0,
         step=10.0,
         help="Минимальный вертикальный участок от S до начала BUILD1.",
+        **widget_change_kwargs,
     ) if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_CONSTANT else d2.text_input(
         "Мин VERTICAL до KOP, м",
         value=kop_min_vertical_display_label(prefix),
@@ -406,6 +419,7 @@ def render_calc_params_block(
             "Порог итоговой длины ствола по MD для финальной проверки. "
             "На сам поиск решения не влияет."
         ),
+        **widget_change_kwargs,
     )
 
     with st.expander("Параметры солвера", expanded=False):
@@ -437,6 +451,7 @@ def render_calc_params_block(
                 "Мин. MD — сократить длину ствола. "
                 "Мин. KOP — поднять точку набора."
             ),
+            **widget_change_kwargs,
         )
         st.selectbox(
             "Метод решателя",
@@ -447,6 +462,7 @@ def render_calc_params_block(
                 "Least Squares — быстрый, подходит для большинства профилей. "
                 "DE Hybrid — медленнее, но надёжнее на сложной геометрии."
             ),
+            **widget_change_kwargs,
         )
         st.selectbox(
             "Интерполяция BUILD",
@@ -457,6 +473,7 @@ def render_calc_params_block(
                 "Rodrigues — численно стабильная формула вращения, рекомендуется. "
                 "SLERP — классическая сферическая линейная интерполяция."
             ),
+            **widget_change_kwargs,
         )
         st.number_input(
             "Макс рестартов решателя",
@@ -468,4 +485,5 @@ def render_calc_params_block(
                 "Число повторных попыток при неудаче. "
                 "Каждый рестарт увеличивает сетку поиска — дольше, но надёжнее."
             ),
+            **widget_change_kwargs,
         )

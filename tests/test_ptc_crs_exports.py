@@ -54,6 +54,7 @@ def test_batch_survey_csv_applies_selected_crs(
         [success],
         target_crs=CoordinateSystem.WGS84,
         auto_convert=True,
+        source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
     )
     result = pd.read_csv(BytesIO(payload))
 

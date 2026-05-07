@@ -45,6 +45,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
     assert "function fitCameraToRawBounds(rawBounds)" in html
+    assert "function editWellTargetFocusBounds(index)" in html
+    assert "function fitCameraToEditWellTargets(index)" in html
+    assert "selectEditWell(editableIndex, { focus: true })" in html
+    assert "fitCameraToEditWellTargets(nextIndex)" in html
     assert "data-edit-well-index" in html
     assert "function selectEditWell(index, options)" in html
     assert "function sendEditTargetsToStreamlit(changes)" in html
@@ -54,6 +58,27 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'data-plane="xy"' in html
     assert 'data-plane="x"' not in html
     assert 'data-plane="y"' not in html
+    assert 'id="edit-scope-selector"' in html
+    assert 'data-scope="point"' in html
+    assert 'data-scope="pair"' in html
+    assert "function setEditMoveScope(scope)" in html
+    assert 'let editMoveScope = "point";' in html
+    assert 'id="edit-operation-selector"' in html
+    assert 'data-operation="move"' in html
+    assert 'data-operation="rotate"' in html
+    assert "function setEditTransformMode(operation)" in html
+    assert 'let editTransformMode = "move";' in html
+    assert "function createEditRotationControl(wellIndex, color)" in html
+    assert "function createRotationArrowGeometry(angleRad, direction)" in html
+    assert "const turnDirection = Number(direction) < 0 ? -1.0 : 1.0;" in html
+    assert "[125, -1]" in html
+    assert "multiplyScalar(0.042)" in html
+    assert "function startEditRotationDrag(wellIndex, event)" in html
+    assert "function updateEditRotationDrag(event)" in html
+    assert "editRotationModeEnabled()" in html
+    assert "editRotationPickMeshes" in html
+    assert "editDragMoveScope === \"pair\"" in html
+    assert "updateWellEditTargets(wi, nextT1, nextT3)" in html
     assert 'id="edit-undo-btn"' in html
     assert 'id="edit-redo-btn"' in html
     assert 'id="edit-reset-btn"' in html
@@ -64,8 +89,16 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function pointerPlaneIntersection(event, displayZ)" in html
     assert "LineDashedMaterial" in html
     assert "edit-delta-label" in html
+    assert "background: rgba(255,255,255,0.18);" in html
+    assert "box-shadow: none;" in html
+    assert "text-shadow:" in html
+    assert "initEditDeltaLabelDrag" in html
     assert "formatDeltaMeters" in html
+    assert "formatLengthMeters" in html
     assert 'toFixed(1).replace(".", ",")' in html
+    assert "edit-lateral-label" in html
+    assert "horizontalT1T3Length" in html
+    assert "syncEditLateralLabels" in html
     assert "handleScale / 2.5" in html
     assert "pickMesh" in html
     assert "previewMesh" in html
@@ -74,12 +107,20 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "BroadcastChannel" in html
     assert "navigator.clipboard" not in html
     assert "window.parent.location" not in html
+    assert "function editableIndexForBaseName(nameValue)" in html
+    assert "registerEditableBaseMaterial(material, colorValue, nameValue)" in html
+    assert "itemWellIndex === selectedWellIndex" in html
     assert "basePoints: Array.isArray(well.base_points)" in html
     assert "warpedBaselineReplanPoints" in html
     assert "return endpointExact(warped, surface, t1, t3);" in html
     assert "Свернуть / развернуть" in html
     assert "legend-node-btn legend-node-pad" in html
     assert "legend-node-btn legend-node-well" in html
+    assert "function sortedLegendItems(items)" in html
+    assert ".localeCompare(legendSortLabel(right), \"ru\"" in html
+    assert "numeric: true" in html
+    assert "sortedLegendItems(group.children)" in html
+    assert "sortedLegendItems(flatItems)" in html
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html
@@ -155,6 +196,20 @@ def test_three_viewer_assets_are_declared_as_package_data() -> None:
     assert '"three_viewer_assets/component/*.html"' in pyproject_text
     assert '"three_viewer_assets/templates/*.html"' in pyproject_text
     assert '"three_viewer_assets/vendor/*.js"' in pyproject_text
+
+
+def test_ptc_single_well_view_uses_three_edit_override() -> None:
+    page_source = Path("pages/01_trajectory_constructor.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "def render_3d_override(container: object, figure: object) -> None:"
+        in page_source
+    )
+    assert '"component_key": f"ptc-single-well-{selected.name}"' in page_source
+    assert "wt._build_edit_wells_payload(" in page_source
+    assert "render_3d_override=render_3d_override" in page_source
 
 
 def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
