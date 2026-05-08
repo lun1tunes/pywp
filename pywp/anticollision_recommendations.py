@@ -38,6 +38,7 @@ MANEUVER_KOP_AND_TRAJECTORY = "Сначала уменьшить KOP, затем
 MANEUVER_CLUSTER_MIXED = "Комбинированный cluster-level маневр"
 
 _PRE_KOP_SEGMENTS = {"VERTICAL", "BUILD1"}
+_DSS_MANAGEABLE_SEGMENTS = {"VERTICAL", "BUILD1", "HOLD"}
 _EVENT_SEGMENT_TOLERANCE_M = 25.0
 _KOP_SATURATION_TOLERANCE_M = 1.0
 _BUILD_DLS_SATURATION_TOLERANCE_DEG_PER_30M = 1e-3
@@ -168,7 +169,7 @@ def anti_collision_recommendation_rows(
                 "Spacing t1, м": _nullable_float(item.required_spacing_t1_m),
                 "Spacing t3, м": _nullable_float(item.required_spacing_t3_m),
                 "Ожидаемый маневр": item.expected_maneuver,
-                "Рекомендация": item.summary,
+                "Рекомендация по устранению": item.summary,
                 "Подготовка пересчета": item.action_label,
             }
         )
@@ -382,8 +383,8 @@ def _build_single_recommendation(
         )
         target_scope = _target_scope_label(str(event.label_a), str(event.label_b))
         summary = (
-            f"Пересечение в области целей {target_scope}: для устранения текущего "
-            f"2σ overlap увеличьте spacing минимум на {float(event.max_overlap_depth_m):.1f} м."
+            f"Пересечение в области целей {target_scope}: "
+            f"{_spacing_recommendation_sentence(event)}"
         )
         detail = (
             "Этот конфликт затрагивает t1/t3, поэтому сначала нужно корректировать "
@@ -480,8 +481,9 @@ def _build_single_recommendation(
             )
         if suggestions:
             summary = (
-                "Конфликт на раннем участке: нужен cone-aware пересчет по KOP/BUILD1 "
-                "для затронутых скважин."
+                f"Конфликт на участке {_event_segments_label(analysis, event)}: "
+                "специалисты ДСС обычно могут устранить его оперативной "
+                f"корректировкой. {_spacing_recommendation_sentence(event)}"
             )
             detail = " ".join(detail_parts)
             action_label = "Подготовить anti-collision пересчет (KOP/BUILD1)"
@@ -489,8 +491,9 @@ def _build_single_recommendation(
             affected_wells = tuple(suggestion.well_name for suggestion in suggestions)
         else:
             summary = (
-                "Конфликт на раннем участке, но ранний маневр KOP/BUILD1 "
-                "для этой пары уже исчерпан."
+                f"Конфликт на участке {_event_segments_label(analysis, event)}: "
+                "ранний маневр KOP/BUILD1 для этой пары уже исчерпан. "
+                f"{_spacing_recommendation_sentence(event)}"
             )
             detail = (
                 "Нужно переходить к следующему маневру по траектории или "
@@ -556,11 +559,11 @@ def _build_single_recommendation(
             well_b=str(event.well_b),
             priority_rank=int(event.priority_rank),
             category=RECOMMENDATION_TRAJECTORY_REVIEW,
-            summary=(
-                "Остаточный конфликт на криволинейном участке: automatic "
-                "late BUILD2/HOLD anti-collision rerun для этой пары уже исчерпан. "
-                f"Нужен дополнительный local spacing не меньше "
-                f"{float(event.max_overlap_depth_m):.1f} м."
+            summary=_trajectory_recommendation_summary(
+                analysis=analysis,
+                event=event,
+                pair_label=f"{preferred_moving_well} ↔ {fixed_well}",
+                exhausted=True,
             ),
             detail=(
                 "Обе проектные скважины пары уже пересчитаны в anti-collision mode, "
@@ -620,10 +623,10 @@ def _build_single_recommendation(
             well_b=str(event.well_b),
             priority_rank=int(event.priority_rank),
             category=RECOMMENDATION_TRAJECTORY_REVIEW,
-            summary=(
-                "Конфликт на криволинейном участке: подготовить anti-collision "
-                f"пересчет пары {movable_well} ↔ {secondary_well} с учетом "
-                "остальных конусов куста."
+            summary=_trajectory_recommendation_summary(
+                analysis=analysis,
+                event=event,
+                pair_label=f"{movable_well} ↔ {secondary_well}",
             ),
             detail=(
                 "Для trajectory-collision пересчет готовится сразу для обеих "
@@ -658,8 +661,12 @@ def _build_single_recommendation(
         priority_rank=int(event.priority_rank),
         category=RECOMMENDATION_TRAJECTORY_REVIEW,
         summary=(
-            "Конфликт на build/hold/turn участке: нужен специальный anti-collision "
-            "пересчет траектории с учетом SF-ограничений."
+            _trajectory_recommendation_summary(
+                analysis=analysis,
+                event=event,
+                pair_label=f"{event.well_a} ↔ {event.well_b}",
+                can_prepare=False,
+            )
         ),
         detail=(
             "Автоматическая подготовка пересчета для этого случая пока не включена."
@@ -839,6 +846,99 @@ def _event_area_label(event: AntiCollisionReportEvent) -> str:
     if str(event.label_b):
         return f"траектория ↔ {event.label_b}"
     return "траектория ↔ траектория"
+
+
+def _spacing_recommendation_sentence(event: AntiCollisionReportEvent) -> str:
+    return (
+        "Для устранения пересечения увеличьте расстояние между "
+        "конфликтными участками минимум на "
+        f"{float(event.max_overlap_depth_m):.1f} м."
+    )
+
+
+def _event_segments(
+    analysis: AntiCollisionAnalysis,
+    event: AntiCollisionReportEvent,
+) -> tuple[str, ...]:
+    segments: list[str] = []
+    for well_name, md_start_m, md_end_m in (
+        (str(event.well_a), float(event.md_a_start_m), float(event.md_a_end_m)),
+        (str(event.well_b), float(event.md_b_start_m), float(event.md_b_end_m)),
+    ):
+        segment = _event_interval_segment_for_well(
+            analysis=analysis,
+            well_name=well_name,
+            md_start_m=md_start_m,
+            md_end_m=md_end_m,
+        )
+        normalized = str(segment).strip().upper()
+        if normalized and normalized not in segments:
+            segments.append(normalized)
+    return tuple(segments)
+
+
+def _event_segments_label(
+    analysis: AntiCollisionAnalysis,
+    event: AntiCollisionReportEvent,
+) -> str:
+    segments = _event_segments(analysis, event)
+    return "/".join(segments) if segments else "траектории"
+
+
+def _event_is_dss_manageable(
+    *,
+    event: AntiCollisionReportEvent,
+    analysis: AntiCollisionAnalysis,
+) -> bool:
+    segments = set(_event_segments(analysis, event))
+    return bool(segments) and segments.issubset(_DSS_MANAGEABLE_SEGMENTS)
+
+
+def _trajectory_area_phrase(
+    analysis: AntiCollisionAnalysis,
+    event: AntiCollisionReportEvent,
+) -> str:
+    segments = set(_event_segments(analysis, event))
+    if any(segment.startswith("BUILD") for segment in segments):
+        return "криволинейном участке"
+    if "HORIZONTAL" in segments:
+        return "горизонтальном участке"
+    if "HOLD" in segments:
+        return "наклонном участке HOLD"
+    return "траекторном участке"
+
+
+def _trajectory_recommendation_summary(
+    *,
+    analysis: AntiCollisionAnalysis,
+    event: AntiCollisionReportEvent,
+    pair_label: str,
+    can_prepare: bool = True,
+    exhausted: bool = False,
+) -> str:
+    if _event_is_dss_manageable(event=event, analysis=analysis):
+        return (
+            f"Конфликт на участке {_event_segments_label(analysis, event)}: "
+            "специалисты ДСС с высокой вероятностью смогут устранить его "
+            f"оперативной корректировкой. {_spacing_recommendation_sentence(event)}"
+        )
+    if exhausted:
+        return (
+            f"Остаточный конфликт на {_trajectory_area_phrase(analysis, event)}: "
+            "автоматический отвод уже исчерпан. "
+            f"{_spacing_recommendation_sentence(event)}"
+        )
+    if can_prepare:
+        return (
+            f"Конфликт на {_trajectory_area_phrase(analysis, event)}: "
+            f"подготовить anti-collision пересчет пары {pair_label} "
+            "с учетом остальных конусов куста."
+        )
+    return (
+        f"Конфликт на {_trajectory_area_phrase(analysis, event)}: "
+        f"нужна инженерная проверка пары {pair_label}. "
+        f"{_spacing_recommendation_sentence(event)}"
+    )
 
 
 def _select_movable_well_for_trajectory_event(

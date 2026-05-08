@@ -249,9 +249,9 @@ def analyze_anti_collision(
                 raise ValueError(
                     "build_overlap_geometry=True requires wells built with display geometry."
                 )
-    lateral_envelopes = {
-        well.name: _lateral_envelope_for_prefilter(well) for well in ordered_wells
-    }
+    lateral_envelopes = tuple(
+        _lateral_envelope_for_prefilter(well) for well in ordered_wells
+    )
     corridors: list[AntiCollisionCorridor] = []
     zones: list[AntiCollisionZone] = []
     pair_count = 0
@@ -267,8 +267,8 @@ def analyze_anti_collision(
                 continue
             pair_count += 1
             if _pair_prefilter_xy_far_apart(
-                lateral_envelope_a=lateral_envelopes[well_a.name],
-                lateral_envelope_b=lateral_envelopes[well_b.name],
+                lateral_envelope_a=lateral_envelopes[left_index],
+                lateral_envelope_b=lateral_envelopes[right_index],
             ):
                 continue
             pair_corridors = _pair_overlap_corridors(

@@ -47,7 +47,7 @@ FALLBACK_SEGMENT_COLORS = (
 HOVER_TEMPLATE_XYZ_MD_DLS = (
     "X: %{customdata[0]} m<br>"
     "Y: %{customdata[1]} m<br>"
-    "Z/TVD: %{customdata[2]} m<br>"
+    "Z: %{customdata[2]} m<br>"
     "MD: %{customdata[3]} m<br>"
     "ПИ: %{customdata[4]} deg/10m"
     "<extra>%{fullData.name}</extra>"

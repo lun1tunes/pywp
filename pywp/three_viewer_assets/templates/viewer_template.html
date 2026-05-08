@@ -489,6 +489,24 @@
         letter-spacing: 0.02em;
       }
 
+      .scene-label.pad-first-surface-label {
+        min-width: 11px;
+        height: 12px;
+        padding: 0 2px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.82);
+        border: none;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+        color: #0f172a;
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 9px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        line-height: 12px;
+        text-align: center;
+        text-shadow: none;
+      }
+
       .tooltip-head {
         display: flex;
         align-items: center;
@@ -1202,7 +1220,7 @@
           },
           {
             key: "z",
-            label: "Z / TVD",
+            label: "Z",
             color: "#1D4ED8",
             vector: new THREE.Vector3(0, 0, -1),
           },
@@ -1244,7 +1262,9 @@
               const dy = item.y - centerY;
               const labelX = item.x + (Math.abs(dx) < 4 ? 0 : Math.sign(dx) * 7);
               const labelY = item.y + (Math.abs(dy) < 4 ? 0 : Math.sign(dy) * 7);
-              return `<text class="axes-gizmo-label" x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" fill="${item.color}" text-anchor="${dx >= 0 ? "start" : "end"}">${item.label}</text>`;
+              const textAnchor =
+                Math.abs(dx) < 6 ? "middle" : dx > 0 ? "start" : "end";
+              return `<text class="axes-gizmo-label" x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" fill="${item.color}" text-anchor="${textAnchor}">${item.label}</text>`;
             })
             .join("");
           axesGizmoElement.innerHTML =
@@ -1438,11 +1458,11 @@
           }
           button.addEventListener("click", () => {
             if (editableIndex !== null) {
-              selectEditWell(editableIndex, { focus: true });
+              selectEditWell(editableIndex, { focus: !editModeActive });
               return;
             }
             const targetBounds = focusTargets[String(item.id || "")];
-            if (targetBounds) {
+            if (targetBounds && !editModeActive) {
               fitCameraToRawBounds(targetBounds);
             }
           });
@@ -1975,12 +1995,16 @@
               ? 12
               : role === "reference_label"
               ? 10
+              : role === "pad_first_surface_label"
+              ? 12
               : 0;
+          const extraClassName =
+            role === "pad_first_surface_label" ? "pad-first-surface-label" : "";
           addSceneLabel(
             String(item.text || ""),
             position,
             String(item.color || "#0f172a"),
-            "",
+            extraClassName,
             { offsetY: offsetY },
           );
         }
@@ -2261,6 +2285,7 @@
         let editRotateCenterDisplay = null;
         let editRotateHistoryStartState = null;
         let editRotateStartVector = null;
+        let editRotateStartPreviewPoints = null;
         let editHasAnyChange = false;
         let selectedEditWellIndex = editWells.length > 0 ? 0 : null;
         let editBroadcastChannel = null;
@@ -3022,6 +3047,8 @@
               color: color,
               transparent: true,
               opacity: 0.92,
+              depthTest: false,
+              depthWrite: false,
               linewidth: 1,
             });
             const lineObj = new THREE.LineSegments(lineGeometry, lineMaterial);
@@ -3251,6 +3278,95 @@
           syncEditVisibility();
         }
 
+        function dataPointDistance(left, right) {
+          return Math.hypot(
+            Number(left[0]) - Number(right[0]),
+            Number(left[1]) - Number(right[1]),
+            Number(left[2]) - Number(right[2]),
+          );
+        }
+
+        function nearestPreviewPointIndex(points, target) {
+          let bestIndex = 0;
+          let bestDistance = Number.POSITIVE_INFINITY;
+          points.forEach((point, index) => {
+            const distance = dataPointDistance(point, target);
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestIndex = index;
+            }
+          });
+          return bestIndex;
+        }
+
+        function rotatePointAroundPivotXY(point, pivot, angle) {
+          const dx = Number(point[0]) - Number(pivot[0]);
+          const dy = Number(point[1]) - Number(pivot[1]);
+          const cosA = Math.cos(angle);
+          const sinA = Math.sin(angle);
+          return [
+            Number(pivot[0]) + dx * cosA - dy * sinA,
+            Number(pivot[1]) + dx * sinA + dy * cosA,
+            Number(point[2]),
+          ];
+        }
+
+        function rotatedPreviewTrajectoryPoints(wellIndex, deltaAngle, nextT1, nextT3) {
+          if (
+            !Array.isArray(editRotateStartPreviewPoints) ||
+            editRotateStartPreviewPoints.length < 3 ||
+            !editRotateHistoryStartState
+          ) {
+            return null;
+          }
+          const startT1 = editRotateHistoryStartState.t1;
+          const rawT1Index = nearestPreviewPointIndex(
+            editRotateStartPreviewPoints,
+            startT1,
+          );
+          const t1Index = Math.min(
+            Math.max(rawT1Index, 1),
+            editRotateStartPreviewPoints.length - 2,
+          );
+          const rotated = editRotateStartPreviewPoints.map((point, index) => {
+            if (!Array.isArray(point) || point.length < 3) {
+              return null;
+            }
+            if (index < t1Index) {
+              return copyEditPoint(point);
+            }
+            if (index === t1Index) {
+              return copyEditPoint(nextT1);
+            }
+            return rotatePointAroundPivotXY(point, startT1, deltaAngle);
+          }).filter(Boolean);
+          if (rotated.length < 2) {
+            return null;
+          }
+          rotated[0] = copyEditPoint((editWells[wellIndex] || {}).surface || rotated[0]);
+          rotated[rotated.length - 1] = copyEditPoint(nextT3);
+          return rotated;
+        }
+
+        function rebuildRotatedPreviewTrajectory(wellIndex, deltaAngle, nextT1, nextT3) {
+          const rotatedPoints = rotatedPreviewTrajectoryPoints(
+            wellIndex,
+            deltaAngle,
+            nextT1,
+            nextT3,
+          );
+          if (rotatedPoints && rotatedPoints.length >= 2) {
+            updateLineGeometry(
+              editLineObjects[wellIndex],
+              rotatedPoints,
+              Z_DISPLAY_SIGN,
+            );
+            syncEditVisibility();
+            return;
+          }
+          rebuildPreviewTrajectory(wellIndex);
+        }
+
         function showEditFeedback() {
           editHasAnyChange = editDirtyFlags.some(Boolean);
           editSaveBtn.classList.toggle(
@@ -3318,6 +3434,14 @@
           editRotateWellIndex = wellIndex;
           editRotateHistoryStartState = startState;
           editRotateStartVector = startVector;
+          try {
+            editRotateStartPreviewPoints = editReplanners[wellIndex].compute(
+              startState.t1,
+              startState.t3,
+            );
+          } catch (e) {
+            editRotateStartPreviewPoints = null;
+          }
           editRotateCenterDisplay = editRotationCenterDisplay(wellIndex);
           editRotatePlaneZ = editRotateCenterDisplay.z;
           editRotateStartAngle = pointerAngleAroundCenter(
@@ -3368,7 +3492,12 @@
           nextT3[2] = editRotateStartVector.z;
           updateWellEditTargets(editRotateWellIndex, nextT1, nextT3);
           editDirtyFlags[editRotateWellIndex] = isEditWellDirty(editRotateWellIndex);
-          rebuildPreviewTrajectory(editRotateWellIndex);
+          rebuildRotatedPreviewTrajectory(
+            editRotateWellIndex,
+            deltaAngle,
+            nextT1,
+            nextT3,
+          );
           resetEditSaveButtonState();
           syncEditVisibility();
           showEditFeedback();
@@ -3390,6 +3519,7 @@
           editRotateCenterDisplay = null;
           editRotateHistoryStartState = null;
           editRotateStartVector = null;
+          editRotateStartPreviewPoints = null;
           interactionActive = false;
           syncEditRotationControls();
           try {

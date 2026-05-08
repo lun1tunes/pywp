@@ -25,7 +25,12 @@ from pywp.anticollision_recommendations import (
     recommendation_display_label,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
-from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_KIND_COLORS
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    REFERENCE_WELL_KIND_COLORS,
+    reference_well_collision_name,
+    reference_well_duplicate_name_keys,
+)
 from pywp.uncertainty import PlanningUncertaintyModel
 
 if TYPE_CHECKING:
@@ -50,6 +55,35 @@ class DynamicClusterExecutionPlan:
     blocking_reason: str | None = None
 
 
+def _reference_wells_by_collision_name(
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+    *,
+    planned_names: tuple[str, ...],
+) -> dict[str, ImportedTrajectoryWell]:
+    planned_name_keys = {
+        str(name).strip().casefold()
+        for name in planned_names
+        if str(name).strip()
+    }
+    duplicate_name_keys = reference_well_duplicate_name_keys(reference_wells)
+    result: dict[str, ImportedTrajectoryWell] = {}
+    for item in reference_wells:
+        collision_name = reference_well_collision_name(
+            item,
+            planned_names=planned_names,
+            duplicate_name_keys=duplicate_name_keys,
+        )
+        result[str(collision_name)] = item
+        item_key = str(item.name).strip().casefold()
+        if (
+            str(item.name) not in result
+            and item_key not in planned_name_keys
+            and item_key not in duplicate_name_keys
+        ):
+            result[str(item.name)] = item
+    return result
+
+
 def build_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -59,6 +93,10 @@ def build_anti_collision_analysis_for_successes(
     include_display_geometry: bool = True,
     build_overlap_geometry: bool = True,
 ) -> AntiCollisionAnalysis:
+    planned_names = tuple(str(item.name) for item in successes)
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(
+        reference_wells
+    )
     wells = [
         build_anti_collision_well(
             name=item.name,
@@ -76,27 +114,32 @@ def build_anti_collision_analysis_for_successes(
         )
         for item in successes
     ]
-    wells.extend(
-        build_anti_collision_well(
-            name=item.name,
-            color=(name_to_color or {}).get(
-                str(item.name),
-                REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
-            ),
-            stations=item.stations,
-            surface=item.surface,
-            t1=None,
-            t3=None,
-            azimuth_deg=float(item.azimuth_deg),
-            md_t1_m=None,
-            md_t3_m=None,
-            model=model,
-            include_display_geometry=include_display_geometry,
-            well_kind=str(item.kind),
-            is_reference_only=True,
+    for item in reference_wells:
+        collision_name = reference_well_collision_name(
+            item,
+            planned_names=planned_names,
+            duplicate_name_keys=duplicate_reference_name_keys,
         )
-        for item in reference_wells
-    )
+        wells.append(
+            build_anti_collision_well(
+                name=collision_name,
+                color=(name_to_color or {}).get(
+                    str(collision_name),
+                    REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
+                ),
+                stations=item.stations,
+                surface=item.surface,
+                t1=None,
+                t3=None,
+                azimuth_deg=float(item.azimuth_deg),
+                md_t1_m=None,
+                md_t3_m=None,
+                model=model,
+                include_display_geometry=include_display_geometry,
+                well_kind=str(item.kind),
+                is_reference_only=True,
+            )
+        )
     return analyze_anti_collision(
         wells,
         build_overlap_geometry=build_overlap_geometry,
@@ -490,7 +533,10 @@ def _build_reference_paths_for_candidate_window(
     uncertainty_model: PlanningUncertaintyModel,
 ) -> list[object]:
     success_by_name = {str(item.name): item for item in successes}
-    reference_by_name = {str(item.name): item for item in reference_wells}
+    reference_by_name = _reference_wells_by_collision_name(
+        reference_wells,
+        planned_names=tuple(success_by_name.keys()),
+    )
     reference_windows: dict[str, tuple[float, float]] = {
         str(primary_reference_name): (
             float(primary_reference_window[0]),
@@ -661,7 +707,10 @@ def build_cluster_prepared_overrides(
     prefer_trajectory_stage: bool = False,
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
     success_by_name = {str(item.name): item for item in successes}
-    reference_by_name = {str(item.name): item for item in reference_wells}
+    reference_by_name = _reference_wells_by_collision_name(
+        reference_wells,
+        planned_names=tuple(success_by_name.keys()),
+    )
     step_by_well = {
         str(step.well_name): step
         for step in cluster.action_steps

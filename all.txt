@@ -38,7 +38,7 @@ elif __name__ == "__main__":
     raise SystemExit("Запустите приложение командой `streamlit run app.py`.")
 
 ===END_FILE===
-===BEGIN_FILE===	pages/01_trajectory_constructor.py	32934
+===BEGIN_FILE===	pages/01_trajectory_constructor.py	36793
 from __future__ import annotations
 
 import logging
@@ -79,9 +79,20 @@ PTC_CALC_PARAMS_EXPAND_ONCE_KEY = "ptc_calc_params_expand_once"
 
 
 def _force_ptc_defaults() -> None:
-    st.session_state["wt_log_verbosity"] = str(wt.WT_LOG_COMPACT)
-    st.session_state["wt_3d_render_mode"] = str(wt.WT_3D_RENDER_DETAIL)
-    st.session_state["wt_3d_backend"] = str(wt.WT_3D_BACKEND_THREE_LOCAL)
+    if str(st.session_state.get("wt_log_verbosity", "")).strip() not in set(
+        wt.WT_LOG_LEVEL_OPTIONS
+    ):
+        st.session_state["wt_log_verbosity"] = str(wt.WT_LOG_COMPACT)
+    if str(st.session_state.get("wt_3d_render_mode", "")).strip() not in set(
+        wt.WT_3D_RENDER_OPTIONS
+    ):
+        st.session_state["wt_3d_render_mode"] = str(wt.WT_3D_RENDER_DETAIL)
+    if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(
+        wt.WT_3D_BACKEND_OPTIONS
+    ):
+        st.session_state["wt_3d_backend"] = str(wt.WT_3D_BACKEND_THREE_LOCAL)
+    if wt._pending_edit_target_names():
+        st.session_state["wt_results_view_mode"] = "Все скважины"
     st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     if st.session_state.get("wt_prepared_recommendation_snapshot"):
         st.session_state["wt_prepared_well_overrides"] = {}
@@ -126,18 +137,63 @@ def _render_ptc_import_section() -> None:
 def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
     title = wt._reference_kind_title(kind)
     state_mode_key = f"ptc_reference_source_mode::{kind}"
-    st.session_state.setdefault(state_mode_key, "Путь к WELLTRACK")
+    source_options = [
+        "Загрузить .dev",
+        "Путь к WELLTRACK",
+        "Загрузить WELLTRACK",
+    ]
+    if state_mode_key not in st.session_state:
+        legacy_mode = str(
+            st.session_state.get(wt._reference_source_mode_key(kind), "")
+        ).strip()
+        st.session_state[state_mode_key] = (
+            legacy_mode if legacy_mode in source_options else "Загрузить .dev"
+        )
+    if str(st.session_state.get(state_mode_key, "")).strip() not in set(
+        source_options
+    ):
+        st.session_state[state_mode_key] = "Загрузить .dev"
     mode = st.radio(
         f"Источник для {title.lower()}",
-        options=["Путь к WELLTRACK", "Загрузить WELLTRACK"],
+        options=source_options,
         key=state_mode_key,
         horizontal=True,
         label_visibility="collapsed",
     )
+    st.session_state[wt._reference_source_mode_key(kind)] = mode
     # st.caption(str(wt._reference_kind_help(kind)))
 
     uploaded_file = None
-    if mode == "Путь к WELLTRACK":
+    if mode == "Загрузить .dev":
+        folder_count_key = wt._reference_dev_folder_count_key(kind)
+        try:
+            folder_count = int(st.session_state.get(folder_count_key, 1))
+        except (TypeError, ValueError):
+            folder_count = 1
+        folder_count = max(1, folder_count)
+        st.session_state[folder_count_key] = folder_count
+        for index in range(folder_count):
+            st.text_input(
+                "Папка с .dev файлами"
+                if index == 0
+                else f"Папка с .dev файлами #{index + 1}",
+                key=wt._reference_dev_folder_path_key(kind, index),
+                placeholder="tests/test_data/dev_fact",
+            )
+        if st.button(
+            "Добавить ещё папку",
+            key=f"ptc_reference_{kind}_add_dev_folder",
+            icon=":material/create_new_folder:",
+            use_container_width=True,
+        ):
+            st.session_state[folder_count_key] = folder_count + 1
+            st.rerun()
+        st.caption(
+            "Импортируются все `.dev` файлы из папок. "
+            "Имя берется из файла без `.dev`, "
+            "координаты - из колонок `MD X Y Z`."
+        )
+    elif mode == "Путь к WELLTRACK":
         st.text_input(
             "Путь к WELLTRACK",
             key=wt._reference_welltrack_path_key(kind),
@@ -168,7 +224,12 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
     if import_clicked:
         with st.status(f"Импорт {title.lower()}...", expanded=True) as status:
             try:
-                if mode == "Путь к WELLTRACK":
+                if mode == "Загрузить .dev":
+                    parsed = wt.parse_reference_trajectory_dev_directories(
+                        wt._reference_dev_folder_paths(kind),
+                        kind=kind,
+                    )
+                elif mode == "Путь к WELLTRACK":
                     parsed = wt.parse_reference_trajectory_welltrack_text(
                         wt._read_welltrack_file(
                             str(
@@ -215,6 +276,7 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
     if clear_clicked:
         wt._set_reference_wells_for_kind(kind=kind, wells=())
         st.session_state[wt._reference_welltrack_path_key(kind)] = ""
+        wt._clear_reference_dev_folder_state(kind)
         wt._reset_anticollision_view_state(clear_prepared=True)
         st.rerun()
 
@@ -229,7 +291,8 @@ def _render_ptc_reference_section() -> None:
     st.markdown("## 3. Загрузка фактического фонда")
     st.caption(
         "Если на месторождении уже есть фактический фонд или утверждённый "
-        "проектный (проработанный в ЦСБ) - загрузите его в формате WELLTRACK."
+        "проектный (проработанный в ЦСБ) - загрузите его из папок `.dev` "
+        "или в формате WELLTRACK."
     )
     c1, c2 = st.columns(2, gap="medium")
     with c1:
@@ -464,6 +527,20 @@ def _render_ptc_anticollision_panel(
     focus_pad_id: str,
     focus_pad_well_names: list[str],
 ) -> None:
+    pending_edit_names = wt._pending_edit_target_names()
+    if pending_edit_names:
+        st.info(
+            "Anti-collision анализ приостановлен: есть изменённые в 3D точки "
+            "t1/t3, которые ещё не пересчитаны."
+        )
+        st.caption(
+            "Сначала пересчитайте скважины: "
+            + ", ".join(pending_edit_names)
+            + ". Предыдущий anti-collision расчёт сохранён и не будет "
+            "перезапускаться по неполному набору."
+        )
+        return
+
     reference_wells = wt._reference_wells_from_state()
     if len(successes) + len(reference_wells) < 2:
         st.info(
@@ -623,7 +700,7 @@ def _render_ptc_anticollision_panel(
 
     report_rows = (
         wt._report_rows_from_recommendations(visible_recommendations, analysis)
-        if focus_pad_well_names
+        if visible_recommendations
         else wt.anti_collision_report_rows(analysis)
     )
     st.markdown("### Отчет по anti-collision")
@@ -633,26 +710,35 @@ def _render_ptc_anticollision_panel(
         hide_index=True,
     )
 
-    st.markdown("### Рекомендации")
-    st.dataframe(
-        wt.arrow_safe_text_dataframe(
-            pd.DataFrame(
-                wt.anti_collision_recommendation_rows(visible_recommendations)
-            )
-        ),
-        width="stretch",
-        hide_index=True,
-    )
-
     if focus_pad_well_names and len(focus_pad_well_names) >= 2:
-        st.markdown("### Оптимизация расстановки")
         st.caption(
-            "Автоматический подбор порядка скважин на кусте для минимизации коллизий без изменения профиля (KOP, TVD)."
+            "Скважины, для которых зафиксирован порядок на кусте, не участвуют в оптимизации."
         )
+        fixed_pad_well_names = wt._focus_pad_fixed_well_names(
+            records=records,
+            focus_pad_id=focus_pad_id,
+        )
+        movable_pad_well_names = sorted(
+            set(str(name) for name in focus_pad_well_names)
+            - set(str(name) for name in fixed_pad_well_names)
+        )
+        if fixed_pad_well_names:
+            st.caption(
+                "Фиксированный порядок не изменяется: "
+                + ", ".join(str(name) for name in fixed_pad_well_names)
+                + ". Оптимизатор переставляет только остальные скважины."
+            )
+        optimization_disabled = len(movable_pad_well_names) < 2
+        if optimization_disabled:
+            st.info(
+                "Для оптимизации нужно минимум две незафиксированные скважины "
+                "на выбранном кусте."
+            )
         if st.button(
-            "✨ Оптимизировать порядок скважин на кусту",
+            "✨ Оптимизировать порядок скважин на кусте",
             type="primary",
             use_container_width=True,
+            disabled=optimization_disabled,
         ):
             from pywp.pad_optimization import optimize_pad_order
 
@@ -676,6 +762,7 @@ def _render_ptc_anticollision_panel(
                 reference_wells=list(reference_wells),
                 config_by_name=config_by_name,
                 progress_callback=opt_callback,
+                fixed_well_names=set(fixed_pad_well_names),
             )
 
             if improved:
@@ -725,6 +812,12 @@ def _render_ptc_success_tabs(
     # Get selected CRS for coordinate transformation
     selected_crs = get_selected_crs()
     auto_convert = should_auto_convert()
+    name_to_color = wt._well_color_map(list(records))
+    reference_wells = tuple(wt._reference_wells_from_state())
+    target_only_wells = wt._failed_target_only_wells(
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
     view_mode = st.radio(
         "Режим просмотра результатов",
         options=["Отдельная скважина", "Все скважины"],
@@ -784,7 +877,6 @@ def _render_ptc_success_tabs(
             survey_export_xy_unit = (
                 "deg" if survey_export_crs.is_geographic() else "м"
             )
-        name_to_color = wt._well_color_map(list(records))
         single_well_name_to_color = {
             str(selected.name): str(
                 name_to_color.get(str(selected.name), "#2563eb")
@@ -832,6 +924,7 @@ def _render_ptc_success_tabs(
         )
         return
 
+    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     pads, _, _ = wt._pad_membership(records)
     if len(pads) > 1:
         focus_options = [
@@ -3862,7 +3955,7 @@ def format_precheck_summary_ru(result: AnalyticalPreCheckResult) -> str:
     return "\n".join(lines)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	62448
+===BEGIN_FILE===	pywp/anticollision.py	62441
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -4114,9 +4207,9 @@ def analyze_anti_collision(
                 raise ValueError(
                     "build_overlap_geometry=True requires wells built with display geometry."
                 )
-    lateral_envelopes = {
-        well.name: _lateral_envelope_for_prefilter(well) for well in ordered_wells
-    }
+    lateral_envelopes = tuple(
+        _lateral_envelope_for_prefilter(well) for well in ordered_wells
+    )
     corridors: list[AntiCollisionCorridor] = []
     zones: list[AntiCollisionZone] = []
     pair_count = 0
@@ -4132,8 +4225,8 @@ def analyze_anti_collision(
                 continue
             pair_count += 1
             if _pair_prefilter_xy_far_apart(
-                lateral_envelope_a=lateral_envelopes[well_a.name],
-                lateral_envelope_b=lateral_envelopes[well_b.name],
+                lateral_envelope_a=lateral_envelopes[left_index],
+                lateral_envelope_b=lateral_envelopes[right_index],
             ):
                 continue
             pair_corridors = _pair_overlap_corridors(
@@ -6493,7 +6586,7 @@ def _sample_md_grid(
     return np.asarray(sorted(set(round(float(value), 6) for value in values)), dtype=float)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_recommendations.py	42924
+===BEGIN_FILE===	pywp/anticollision_recommendations.py	46202
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -6534,6 +6627,7 @@ MANEUVER_KOP_AND_TRAJECTORY = "Сначала уменьшить KOP, затем
 MANEUVER_CLUSTER_MIXED = "Комбинированный cluster-level маневр"
 
 _PRE_KOP_SEGMENTS = {"VERTICAL", "BUILD1"}
+_DSS_MANAGEABLE_SEGMENTS = {"VERTICAL", "BUILD1", "HOLD"}
 _EVENT_SEGMENT_TOLERANCE_M = 25.0
 _KOP_SATURATION_TOLERANCE_M = 1.0
 _BUILD_DLS_SATURATION_TOLERANCE_DEG_PER_30M = 1e-3
@@ -6664,7 +6758,7 @@ def anti_collision_recommendation_rows(
                 "Spacing t1, м": _nullable_float(item.required_spacing_t1_m),
                 "Spacing t3, м": _nullable_float(item.required_spacing_t3_m),
                 "Ожидаемый маневр": item.expected_maneuver,
-                "Рекомендация": item.summary,
+                "Рекомендация по устранению": item.summary,
                 "Подготовка пересчета": item.action_label,
             }
         )
@@ -6878,8 +6972,8 @@ def _build_single_recommendation(
         )
         target_scope = _target_scope_label(str(event.label_a), str(event.label_b))
         summary = (
-            f"Пересечение в области целей {target_scope}: для устранения текущего "
-            f"2σ overlap увеличьте spacing минимум на {float(event.max_overlap_depth_m):.1f} м."
+            f"Пересечение в области целей {target_scope}: "
+            f"{_spacing_recommendation_sentence(event)}"
         )
         detail = (
             "Этот конфликт затрагивает t1/t3, поэтому сначала нужно корректировать "
@@ -6976,8 +7070,9 @@ def _build_single_recommendation(
             )
         if suggestions:
             summary = (
-                "Конфликт на раннем участке: нужен cone-aware пересчет по KOP/BUILD1 "
-                "для затронутых скважин."
+                f"Конфликт на участке {_event_segments_label(analysis, event)}: "
+                "специалисты ДСС обычно могут устранить его оперативной "
+                f"корректировкой. {_spacing_recommendation_sentence(event)}"
             )
             detail = " ".join(detail_parts)
             action_label = "Подготовить anti-collision пересчет (KOP/BUILD1)"
@@ -6985,8 +7080,9 @@ def _build_single_recommendation(
             affected_wells = tuple(suggestion.well_name for suggestion in suggestions)
         else:
             summary = (
-                "Конфликт на раннем участке, но ранний маневр KOP/BUILD1 "
-                "для этой пары уже исчерпан."
+                f"Конфликт на участке {_event_segments_label(analysis, event)}: "
+                "ранний маневр KOP/BUILD1 для этой пары уже исчерпан. "
+                f"{_spacing_recommendation_sentence(event)}"
             )
             detail = (
                 "Нужно переходить к следующему маневру по траектории или "
@@ -7052,11 +7148,11 @@ def _build_single_recommendation(
             well_b=str(event.well_b),
             priority_rank=int(event.priority_rank),
             category=RECOMMENDATION_TRAJECTORY_REVIEW,
-            summary=(
-                "Остаточный конфликт на криволинейном участке: automatic "
-                "late BUILD2/HOLD anti-collision rerun для этой пары уже исчерпан. "
-                f"Нужен дополнительный local spacing не меньше "
-                f"{float(event.max_overlap_depth_m):.1f} м."
+            summary=_trajectory_recommendation_summary(
+                analysis=analysis,
+                event=event,
+                pair_label=f"{preferred_moving_well} ↔ {fixed_well}",
+                exhausted=True,
             ),
             detail=(
                 "Обе проектные скважины пары уже пересчитаны в anti-collision mode, "
@@ -7116,10 +7212,10 @@ def _build_single_recommendation(
             well_b=str(event.well_b),
             priority_rank=int(event.priority_rank),
             category=RECOMMENDATION_TRAJECTORY_REVIEW,
-            summary=(
-                "Конфликт на криволинейном участке: подготовить anti-collision "
-                f"пересчет пары {movable_well} ↔ {secondary_well} с учетом "
-                "остальных конусов куста."
+            summary=_trajectory_recommendation_summary(
+                analysis=analysis,
+                event=event,
+                pair_label=f"{movable_well} ↔ {secondary_well}",
             ),
             detail=(
                 "Для trajectory-collision пересчет готовится сразу для обеих "
@@ -7154,8 +7250,12 @@ def _build_single_recommendation(
         priority_rank=int(event.priority_rank),
         category=RECOMMENDATION_TRAJECTORY_REVIEW,
         summary=(
-            "Конфликт на build/hold/turn участке: нужен специальный anti-collision "
-            "пересчет траектории с учетом SF-ограничений."
+            _trajectory_recommendation_summary(
+                analysis=analysis,
+                event=event,
+                pair_label=f"{event.well_a} ↔ {event.well_b}",
+                can_prepare=False,
+            )
         ),
         detail=(
             "Автоматическая подготовка пересчета для этого случая пока не включена."
@@ -7335,6 +7435,99 @@ def _event_area_label(event: AntiCollisionReportEvent) -> str:
     if str(event.label_b):
         return f"траектория ↔ {event.label_b}"
     return "траектория ↔ траектория"
+
+
+def _spacing_recommendation_sentence(event: AntiCollisionReportEvent) -> str:
+    return (
+        "Для устранения пересечения увеличьте расстояние между "
+        "конфликтными участками минимум на "
+        f"{float(event.max_overlap_depth_m):.1f} м."
+    )
+
+
+def _event_segments(
+    analysis: AntiCollisionAnalysis,
+    event: AntiCollisionReportEvent,
+) -> tuple[str, ...]:
+    segments: list[str] = []
+    for well_name, md_start_m, md_end_m in (
+        (str(event.well_a), float(event.md_a_start_m), float(event.md_a_end_m)),
+        (str(event.well_b), float(event.md_b_start_m), float(event.md_b_end_m)),
+    ):
+        segment = _event_interval_segment_for_well(
+            analysis=analysis,
+            well_name=well_name,
+            md_start_m=md_start_m,
+            md_end_m=md_end_m,
+        )
+        normalized = str(segment).strip().upper()
+        if normalized and normalized not in segments:
+            segments.append(normalized)
+    return tuple(segments)
+
+
+def _event_segments_label(
+    analysis: AntiCollisionAnalysis,
+    event: AntiCollisionReportEvent,
+) -> str:
+    segments = _event_segments(analysis, event)
+    return "/".join(segments) if segments else "траектории"
+
+
+def _event_is_dss_manageable(
+    *,
+    event: AntiCollisionReportEvent,
+    analysis: AntiCollisionAnalysis,
+) -> bool:
+    segments = set(_event_segments(analysis, event))
+    return bool(segments) and segments.issubset(_DSS_MANAGEABLE_SEGMENTS)
+
+
+def _trajectory_area_phrase(
+    analysis: AntiCollisionAnalysis,
+    event: AntiCollisionReportEvent,
+) -> str:
+    segments = set(_event_segments(analysis, event))
+    if any(segment.startswith("BUILD") for segment in segments):
+        return "криволинейном участке"
+    if "HORIZONTAL" in segments:
+        return "горизонтальном участке"
+    if "HOLD" in segments:
+        return "наклонном участке HOLD"
+    return "траекторном участке"
+
+
+def _trajectory_recommendation_summary(
+    *,
+    analysis: AntiCollisionAnalysis,
+    event: AntiCollisionReportEvent,
+    pair_label: str,
+    can_prepare: bool = True,
+    exhausted: bool = False,
+) -> str:
+    if _event_is_dss_manageable(event=event, analysis=analysis):
+        return (
+            f"Конфликт на участке {_event_segments_label(analysis, event)}: "
+            "специалисты ДСС с высокой вероятностью смогут устранить его "
+            f"оперативной корректировкой. {_spacing_recommendation_sentence(event)}"
+        )
+    if exhausted:
+        return (
+            f"Остаточный конфликт на {_trajectory_area_phrase(analysis, event)}: "
+            "автоматический отвод уже исчерпан. "
+            f"{_spacing_recommendation_sentence(event)}"
+        )
+    if can_prepare:
+        return (
+            f"Конфликт на {_trajectory_area_phrase(analysis, event)}: "
+            f"подготовить anti-collision пересчет пары {pair_label} "
+            "с учетом остальных конусов куста."
+        )
+    return (
+        f"Конфликт на {_trajectory_area_phrase(analysis, event)}: "
+        f"нужна инженерная проверка пары {pair_label}. "
+        f"{_spacing_recommendation_sentence(event)}"
+    )
 
 
 def _select_movable_well_for_trajectory_event(
@@ -7624,7 +7817,7 @@ def _nullable_float(value: float | None) -> float | str:
     return float(value)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_rerun.py	39236
+===BEGIN_FILE===	pywp/anticollision_rerun.py	40880
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7652,7 +7845,12 @@ from pywp.anticollision_recommendations import (
     recommendation_display_label,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
-from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_KIND_COLORS
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    REFERENCE_WELL_KIND_COLORS,
+    reference_well_collision_name,
+    reference_well_duplicate_name_keys,
+)
 from pywp.uncertainty import PlanningUncertaintyModel
 
 if TYPE_CHECKING:
@@ -7677,6 +7875,35 @@ class DynamicClusterExecutionPlan:
     blocking_reason: str | None = None
 
 
+def _reference_wells_by_collision_name(
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+    *,
+    planned_names: tuple[str, ...],
+) -> dict[str, ImportedTrajectoryWell]:
+    planned_name_keys = {
+        str(name).strip().casefold()
+        for name in planned_names
+        if str(name).strip()
+    }
+    duplicate_name_keys = reference_well_duplicate_name_keys(reference_wells)
+    result: dict[str, ImportedTrajectoryWell] = {}
+    for item in reference_wells:
+        collision_name = reference_well_collision_name(
+            item,
+            planned_names=planned_names,
+            duplicate_name_keys=duplicate_name_keys,
+        )
+        result[str(collision_name)] = item
+        item_key = str(item.name).strip().casefold()
+        if (
+            str(item.name) not in result
+            and item_key not in planned_name_keys
+            and item_key not in duplicate_name_keys
+        ):
+            result[str(item.name)] = item
+    return result
+
+
 def build_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -7686,6 +7913,10 @@ def build_anti_collision_analysis_for_successes(
     include_display_geometry: bool = True,
     build_overlap_geometry: bool = True,
 ) -> AntiCollisionAnalysis:
+    planned_names = tuple(str(item.name) for item in successes)
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(
+        reference_wells
+    )
     wells = [
         build_anti_collision_well(
             name=item.name,
@@ -7703,27 +7934,32 @@ def build_anti_collision_analysis_for_successes(
         )
         for item in successes
     ]
-    wells.extend(
-        build_anti_collision_well(
-            name=item.name,
-            color=(name_to_color or {}).get(
-                str(item.name),
-                REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
-            ),
-            stations=item.stations,
-            surface=item.surface,
-            t1=None,
-            t3=None,
-            azimuth_deg=float(item.azimuth_deg),
-            md_t1_m=None,
-            md_t3_m=None,
-            model=model,
-            include_display_geometry=include_display_geometry,
-            well_kind=str(item.kind),
-            is_reference_only=True,
+    for item in reference_wells:
+        collision_name = reference_well_collision_name(
+            item,
+            planned_names=planned_names,
+            duplicate_name_keys=duplicate_reference_name_keys,
         )
-        for item in reference_wells
-    )
+        wells.append(
+            build_anti_collision_well(
+                name=collision_name,
+                color=(name_to_color or {}).get(
+                    str(collision_name),
+                    REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
+                ),
+                stations=item.stations,
+                surface=item.surface,
+                t1=None,
+                t3=None,
+                azimuth_deg=float(item.azimuth_deg),
+                md_t1_m=None,
+                md_t3_m=None,
+                model=model,
+                include_display_geometry=include_display_geometry,
+                well_kind=str(item.kind),
+                is_reference_only=True,
+            )
+        )
     return analyze_anti_collision(
         wells,
         build_overlap_geometry=build_overlap_geometry,
@@ -8117,7 +8353,10 @@ def _build_reference_paths_for_candidate_window(
     uncertainty_model: PlanningUncertaintyModel,
 ) -> list[object]:
     success_by_name = {str(item.name): item for item in successes}
-    reference_by_name = {str(item.name): item for item in reference_wells}
+    reference_by_name = _reference_wells_by_collision_name(
+        reference_wells,
+        planned_names=tuple(success_by_name.keys()),
+    )
     reference_windows: dict[str, tuple[float, float]] = {
         str(primary_reference_name): (
             float(primary_reference_window[0]),
@@ -8288,7 +8527,10 @@ def build_cluster_prepared_overrides(
     prefer_trajectory_stage: bool = False,
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
     success_by_name = {str(item.name): item for item in successes}
-    reference_by_name = {str(item.name): item for item in reference_wells}
+    reference_by_name = _reference_wells_by_collision_name(
+        reference_wells,
+        planned_names=tuple(success_by_name.keys()),
+    )
     step_by_well = {
         str(step.well_name): step
         for step in cluster.action_steps
@@ -10954,7 +11196,7 @@ class PlannerResult(FrozenArbitraryModel):
     md_t1_m: float
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/pad_optimization.py	14571
+===BEGIN_FILE===	pywp/pad_optimization.py	16804
 from __future__ import annotations
 
 import multiprocessing
@@ -10974,7 +11216,12 @@ from pywp.anticollision import (
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import TrajectoryConfig
 from pywp.planner import TrajectoryPlanner
-from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_KIND_COLORS
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    REFERENCE_WELL_KIND_COLORS,
+    reference_well_collision_name,
+    reference_well_duplicate_name_keys,
+)
 from pywp.uncertainty import PlanningUncertaintyModel
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -11046,27 +11293,36 @@ def recalculate_well(
 def _actionable_pad_zones(
     analysis: AntiCollisionAnalysis,
     pad_well_names: set[str],
+    fixed_well_names: set[str] | None = None,
 ) -> list:
-    """Return pad-internal zones excluding near-surface overlaps."""
-    return [
-        z
-        for z in analysis.zones
+    """Return zones affected by movable wells on this pad."""
+    fixed_names = {str(name) for name in (fixed_well_names or set())}
+    pad_names = {str(name) for name in pad_well_names}
+    movable_names = pad_names - fixed_names
+    zones: list = []
+    for zone in analysis.zones:
+        zone_names = {str(zone.well_a), str(zone.well_b)}
+        if not zone_names.intersection(pad_names):
+            continue
+        if not zone_names.intersection(movable_names):
+            continue
+        if zone_names.issubset(fixed_names):
+            continue
         if (
-            z.well_a in pad_well_names
-            and z.well_b in pad_well_names
-            and not (
-                float(z.md_a_m) <= _SURFACE_MD_THRESHOLD_M
-                and float(z.md_b_m) <= _SURFACE_MD_THRESHOLD_M
-            )
-        )
-    ]
+            float(zone.md_a_m) <= _SURFACE_MD_THRESHOLD_M
+            and float(zone.md_b_m) <= _SURFACE_MD_THRESHOLD_M
+        ):
+            continue
+        zones.append(zone)
+    return zones
 
 
 def score_analysis(
     analysis: AntiCollisionAnalysis | None,
     pad_well_names: set[str],
+    fixed_well_names: set[str] | None = None,
 ) -> float:
-    """Evaluate collision severity within the pad.  Higher is better.
+    """Evaluate collision severity affected by movable pad wells. Higher is better.
 
     Near-surface zones (both wells MD ≤ threshold) are excluded so that
     shared-surface pads don't produce a permanent SF=0 floor.
@@ -11076,7 +11332,11 @@ def score_analysis(
 
     pad_sfs = [
         float(z.separation_factor)
-        for z in _actionable_pad_zones(analysis, pad_well_names)
+        for z in _actionable_pad_zones(
+            analysis,
+            pad_well_names,
+            fixed_well_names=fixed_well_names,
+        )
     ]
     if not pad_sfs:
         return float("inf")
@@ -11112,9 +11372,11 @@ def _build_ac_well_light(
 def _build_ref_ac_well_light(
     ref: ImportedTrajectoryWell,
     model: PlanningUncertaintyModel,
+    *,
+    collision_name: str | None = None,
 ) -> AntiCollisionWell:
     return build_anti_collision_well(
-        name=ref.name,
+        name=str(collision_name) if collision_name is not None else str(ref.name),
         color=REFERENCE_WELL_KIND_COLORS.get(str(ref.kind), "#A0A0A0"),
         stations=ref.stations,
         surface=ref.surface,
@@ -11219,6 +11481,7 @@ def optimize_pad_order(
     reference_wells: list[ImportedTrajectoryWell],
     config_by_name: dict[str, TrajectoryConfig],
     progress_callback: Callable[[int, str], None],
+    fixed_well_names: set[str] | None = None,
 ) -> tuple[list[WelltrackRecord], dict[str, SuccessfulWellPlan], bool]:
 
     pad_names = {
@@ -11228,12 +11491,25 @@ def optimize_pad_order(
     }
     if len(pad_names) < 2:
         return records, success_dict, False
+    fixed_names = {
+        str(name)
+        for name in (fixed_well_names or set())
+        if str(name) in pad_names
+    }
+    movable_names = set(pad_names) - fixed_names
+    if len(movable_names) < 2:
+        progress_callback(
+            100,
+            "Оптимизация не запущена: для перестановки нужно минимум две "
+            "незафиксированные скважины.",
+        )
+        return records, success_dict, False
 
     # Check that at least 2 distinct surface locations exist; otherwise
     # swapping surfaces is a no-op and we can exit early.
     surface_set: set[tuple[float, float, float]] = set()
     for r in records:
-        if r.name in pad_names and r.points:
+        if r.name in movable_names and r.points:
             s = r.points[0]
             surface_set.add((round(float(s.x), 2), round(float(s.y), 2), round(float(s.z), 2)))
     if len(surface_set) < 2:
@@ -11251,8 +11527,18 @@ def optimize_pad_order(
 
     # --- Pre-build lightweight AC wells (no display geometry). ---
     # Reused across candidates; only swapped wells are rebuilt.
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(ref_wells)
     ref_ac_wells = tuple(
-        _build_ref_ac_well_light(rw, uncertainty_model) for rw in ref_wells
+        _build_ref_ac_well_light(
+            rw,
+            uncertainty_model,
+            collision_name=reference_well_collision_name(
+                rw,
+                planned_names=tuple(success_dict.keys()),
+                duplicate_name_keys=duplicate_reference_name_keys,
+            ),
+        )
+        for rw in ref_wells
     )
     ac_well_cache: dict[str, AntiCollisionWell] = {
         name: _build_ac_well_light(success_dict[name], uncertainty_model)
@@ -11260,7 +11546,11 @@ def optimize_pad_order(
     }
 
     analysis = _analyze_from_ac_wells(ac_well_cache, ref_ac_wells)
-    best_score = score_analysis(analysis, pad_names)
+    best_score = score_analysis(
+        analysis,
+        pad_names,
+        fixed_well_names=fixed_names,
+    )
 
     best_records = list(records)
     best_successes = dict(success_dict)
@@ -11272,7 +11562,11 @@ def optimize_pad_order(
     try:
         for iteration in range(1, _MAX_ITERATIONS + 1):
             analysis = _analyze_from_ac_wells(ac_well_cache, ref_ac_wells)
-            actionable = _actionable_pad_zones(analysis, pad_names)
+            actionable = _actionable_pad_zones(
+                analysis,
+                pad_names,
+                fixed_well_names=fixed_names,
+            )
             if not actionable:
                 break
 
@@ -11294,14 +11588,20 @@ def optimize_pad_order(
                     f"Итерация {iteration}: анализ {wa} ↔ {wb} (SF={float(zone.separation_factor):.3f})...",
                 )
 
-                # Generate all distinct swaps involving wa or wb with any other
-                # pad well whose surface differs.
-                other_names = sorted(pad_names - {wa, wb})
+                # Generate all distinct swaps involving non-fixed wells from the
+                # worst pair. Fixed wells keep their surface slot unchanged.
+                active_names = [
+                    name for name in (wa, wb) if name in movable_names
+                ]
                 swap_candidates: list[tuple[str, str]] = []
-                for other in other_names:
-                    swap_candidates.append((wa, other))
-                    swap_candidates.append((wb, other))
-                swap_candidates.append((wa, wb))
+                seen_candidate_keys: set[tuple[str, str]] = set()
+                for active_name in active_names:
+                    for other in sorted(movable_names - {active_name}):
+                        candidate_key = tuple(sorted((active_name, other)))
+                        if candidate_key in seen_candidate_keys:
+                            continue
+                        seen_candidate_keys.add(candidate_key)
+                        swap_candidates.append((active_name, other))
 
                 best_candidate = None
                 best_candidate_score = best_score
@@ -11330,7 +11630,11 @@ def optimize_pad_order(
                     cand_ac_wells[name_2] = ac_well_2
 
                     cand_analysis = _analyze_from_ac_wells(cand_ac_wells, ref_ac_wells)
-                    cand_score = score_analysis(cand_analysis, pad_names)
+                    cand_score = score_analysis(
+                        cand_analysis,
+                        pad_names,
+                        fixed_well_names=fixed_names,
+                    )
 
                     if cand_score > best_candidate_score + _IMPROVEMENT_EPS:
                         best_candidate_score = cand_score
@@ -16450,7 +16754,7 @@ def default_plotly_chart_config() -> dict[str, object]:
     }
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	369684
+===BEGIN_FILE===	pywp/ptc_core.py	384566
 from __future__ import annotations
 
 import colorsys
@@ -16509,7 +16813,6 @@ from pywp.anticollision_recommendations import (
     AntiCollisionRecommendationCluster,
     AntiCollisionWellContext,
     anti_collision_cluster_rows,
-    anti_collision_recommendation_rows,
     build_anti_collision_recommendation_clusters,
     build_anti_collision_recommendations,
     cluster_display_label,
@@ -16569,6 +16872,7 @@ from pywp.reference_trajectories import (
     REFERENCE_WELL_KIND_COLORS,
     REFERENCE_WELL_KIND_LABELS,
     ImportedTrajectoryWell,
+    parse_reference_trajectory_dev_directories,
     parse_reference_trajectory_text_with_kind,
     parse_reference_trajectory_welltrack_text,
     reference_well_display_label,
@@ -16629,6 +16933,21 @@ from pywp.welltrack_quality import (
 )
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS4.INC")
+WT_SOURCE_FORMAT_WELLTRACK = "WELLTRACK"
+WT_SOURCE_FORMAT_TARGET_TABLE = "Таблица с точками целей"
+WT_SOURCE_FORMAT_OPTIONS: tuple[str, ...] = (
+    WT_SOURCE_FORMAT_WELLTRACK,
+    WT_SOURCE_FORMAT_TARGET_TABLE,
+)
+WT_SOURCE_MODE_FILE_PATH = "Файл по пути"
+WT_SOURCE_MODE_UPLOAD = "Загрузить файл"
+WT_SOURCE_MODE_INLINE_TEXT = "Вставить текст"
+WT_SOURCE_MODE_TARGET_TABLE = "Вставить таблицу"
+WT_SOURCE_WELLTRACK_MODES: tuple[str, ...] = (
+    WT_SOURCE_MODE_FILE_PATH,
+    WT_SOURCE_MODE_UPLOAD,
+    WT_SOURCE_MODE_INLINE_TEXT,
+)
 WT_UI_DEFAULTS_VERSION = 16
 WT_LOG_COMPACT = "Краткий"
 WT_LOG_VERBOSE = "Подробный"
@@ -16821,13 +17140,17 @@ def _failed_target_only_wells(
         for row in summary_rows
         if str(row.get("Скважина", "")).strip()
     }
+    pending_edit_names = set(_pending_edit_target_names())
     target_only_wells: list[_TargetOnlyWell] = []
     for record in records:
         row = rows_by_name.get(str(record.name))
         if row is None:
             continue
         status = str(row.get("Статус", "")).strip()
-        if status in {"OK", "Не рассчитана"}:
+        if status == "OK" or (
+            status == "Не рассчитана"
+            and str(record.name) not in pending_edit_names
+        ):
             continue
         try:
             surface, t1, t3 = welltrack_points_to_targets(record.points)
@@ -18305,6 +18628,50 @@ def _three_legend_tree_payload(
     return tree, focus_targets, hidden_flat_legend_labels
 
 
+def _pad_first_surface_label_payloads(
+    *,
+    records: list[WelltrackRecord],
+    visible_well_names: Iterable[str],
+    surface_by_name: Mapping[str, Point3D],
+) -> list[dict[str, object]]:
+    visible_set = {
+        str(name) for name in visible_well_names if str(name).strip()
+    }
+    if not visible_set:
+        return []
+    pads, _, well_names_by_pad_id = _pad_membership(records)
+    labels: list[dict[str, object]] = []
+    seen_names: set[str] = set()
+    for pad in pads:
+        ordered_visible_names = [
+            str(name)
+            for name in well_names_by_pad_id.get(str(pad.pad_id), ())
+            if str(name) in visible_set and str(name) in surface_by_name
+        ]
+        if not ordered_visible_names:
+            continue
+        first_name = ordered_visible_names[0]
+        if first_name in seen_names:
+            continue
+        seen_names.add(first_name)
+        surface = surface_by_name[first_name]
+        labels.append(
+            {
+                "text": "1",
+                "position": [
+                    float(surface.x),
+                    float(surface.y),
+                    float(surface.z),
+                ],
+                "color": "#0f172a",
+                "role": "pad_first_surface_label",
+                "well_name": first_name,
+                "pad_id": str(pad.pad_id),
+            }
+        )
+    return labels
+
+
 def _augment_three_payload(
     *,
     payload: dict[str, object],
@@ -18313,6 +18680,7 @@ def _augment_three_payload(
     hidden_flat_legend_labels: set[str] | None = None,
     collisions: list[dict[str, object]] | None = None,
     edit_wells: list[dict[str, object]] | None = None,
+    extra_labels: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     updated = dict(payload)
     if legend_tree:
@@ -18334,6 +18702,11 @@ def _augment_three_payload(
         updated["collisions"] = list(collisions)
     if edit_wells is not None:
         updated["edit_wells"] = list(edit_wells)
+    if extra_labels:
+        updated["labels"] = [
+            *list(updated.get("labels") or []),
+            *list(extra_labels),
+        ]
     return updated
 
 
@@ -18431,6 +18804,7 @@ def _render_plotly_or_three_3d(
                 ),
                 collisions=payload_overrides.get("collisions"),
                 edit_wells=payload_overrides.get("edit_wells"),
+                extra_labels=payload_overrides.get("extra_labels"),
             )
         with container:
             edit_event = render_local_three_scene(
@@ -18529,14 +18903,17 @@ def _trajectory_three_payload_overrides(
     name_to_color: Mapping[str, str],
 ) -> dict[str, object]:
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
+    surface_by_name: dict[str, Point3D] = {}
     for success in successes:
         bounds = _successful_plan_raw_bounds(success)
         if bounds is not None:
             well_bounds_by_name[str(success.name)] = bounds
+            surface_by_name[str(success.name)] = success.surface
     for target_only in target_only_wells:
         well_bounds_by_name[str(target_only.name)] = _target_only_raw_bounds(
             target_only
         )
+        surface_by_name[str(target_only.name)] = target_only.surface
     legend_tree, focus_targets, hidden_labels = _three_legend_tree_payload(
         records=records,
         visible_well_names=tuple(well_bounds_by_name.keys()),
@@ -18548,6 +18925,11 @@ def _trajectory_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "edit_wells": _build_edit_wells_payload(successes, name_to_color),
+        "extra_labels": _pad_first_surface_label_payloads(
+            records=records,
+            visible_well_names=tuple(well_bounds_by_name.keys()),
+            surface_by_name=surface_by_name,
+        ),
         "component_key": "trajectory-overview",
     }
 
@@ -18561,11 +18943,13 @@ def _anticollision_three_payload_overrides(
     visible_names: list[str] = []
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
     name_to_color: dict[str, str] = {}
+    surface_by_name: dict[str, Point3D] = {}
     for well in analysis.wells:
         if bool(well.is_reference_only):
             continue
         visible_names.append(str(well.name))
         name_to_color[str(well.name)] = str(well.color)
+        surface_by_name[str(well.name)] = well.surface
         bounds = _raw_bounds_from_xyz_arrays(
             x_values=well.stations["X_m"].to_numpy(dtype=float),
             y_values=well.stations["Y_m"].to_numpy(dtype=float),
@@ -18663,6 +19047,11 @@ def _anticollision_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "collisions": collisions,
+        "extra_labels": _pad_first_surface_label_payloads(
+            records=records,
+            visible_well_names=tuple(visible_names),
+            surface_by_name=surface_by_name,
+        ),
         "component_key": "anticollision-overview",
     }
     if successes:
@@ -19260,6 +19649,43 @@ def _reference_welltrack_path_key(kind: str) -> str:
     return f"wt_reference_{str(kind)}_welltrack_path"
 
 
+def _reference_dev_folder_count_key(kind: str) -> str:
+    return f"wt_reference_{str(kind)}_dev_folder_count"
+
+
+def _reference_dev_folder_path_key(kind: str, index: int) -> str:
+    return f"wt_reference_{str(kind)}_dev_folder_path_{int(index)}"
+
+
+def _reference_dev_folder_paths(kind: str) -> tuple[str, ...]:
+    count_key = _reference_dev_folder_count_key(kind)
+    try:
+        folder_count = int(st.session_state.get(count_key, 1))
+    except (TypeError, ValueError):
+        folder_count = 1
+    folder_count = max(1, folder_count)
+    st.session_state[count_key] = folder_count
+    return tuple(
+        str(
+            st.session_state.get(
+                _reference_dev_folder_path_key(kind, index), ""
+            )
+        ).strip()
+        for index in range(folder_count)
+    )
+
+
+def _clear_reference_dev_folder_state(kind: str) -> None:
+    count_key = _reference_dev_folder_count_key(kind)
+    try:
+        folder_count = int(st.session_state.get(count_key, 1))
+    except (TypeError, ValueError):
+        folder_count = 1
+    for index in range(max(1, folder_count)):
+        st.session_state[_reference_dev_folder_path_key(kind, index)] = ""
+    st.session_state[count_key] = 1
+
+
 def _set_reference_wells_for_kind(
     *,
     kind: str,
@@ -19335,7 +19761,18 @@ def _reset_anticollision_view_state(*, clear_prepared: bool) -> None:
 
 
 def _init_state() -> None:
-    st.session_state.setdefault("wt_source_mode", "Файл по пути")
+    if "wt_source_format" not in st.session_state:
+        st.session_state["wt_source_format"] = (
+            WT_SOURCE_FORMAT_TARGET_TABLE
+            if str(st.session_state.get("wt_source_mode", "")).strip()
+            == WT_SOURCE_MODE_TARGET_TABLE
+            else WT_SOURCE_FORMAT_WELLTRACK
+        )
+    if str(st.session_state.get("wt_source_format", "")).strip() not in set(
+        WT_SOURCE_FORMAT_OPTIONS
+    ):
+        st.session_state["wt_source_format"] = WT_SOURCE_FORMAT_WELLTRACK
+    st.session_state.setdefault("wt_source_mode", WT_SOURCE_MODE_FILE_PATH)
     st.session_state.setdefault("wt_source_path", str(DEFAULT_WELLTRACK_PATH))
     st.session_state.setdefault("wt_source_inline", "")
     st.session_state.setdefault("wt_source_table_df", _empty_source_table_df())
@@ -19350,11 +19787,11 @@ def _init_state() -> None:
     )
     st.session_state.setdefault(
         _reference_source_mode_key(REFERENCE_WELL_ACTUAL),
-        "Вставить XYZ/MD текст",
+        "Загрузить .dev",
     )
     st.session_state.setdefault(
         _reference_source_mode_key(REFERENCE_WELL_APPROVED),
-        "Вставить XYZ/MD текст",
+        "Загрузить .dev",
     )
     st.session_state.setdefault(
         _reference_source_text_key(REFERENCE_WELL_ACTUAL), ""
@@ -19369,6 +19806,18 @@ def _init_state() -> None:
     st.session_state.setdefault(
         _reference_welltrack_path_key(REFERENCE_WELL_APPROVED),
         "",
+    )
+    st.session_state.setdefault(
+        _reference_dev_folder_count_key(REFERENCE_WELL_ACTUAL), 1
+    )
+    st.session_state.setdefault(
+        _reference_dev_folder_count_key(REFERENCE_WELL_APPROVED), 1
+    )
+    st.session_state.setdefault(
+        _reference_dev_folder_path_key(REFERENCE_WELL_ACTUAL, 0), ""
+    )
+    st.session_state.setdefault(
+        _reference_dev_folder_path_key(REFERENCE_WELL_APPROVED, 0), ""
     )
     _apply_profile_defaults(force=False)
     st.session_state.setdefault("wt_ui_defaults_version", 0)
@@ -19400,7 +19849,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_run_log_lines", [])
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault("wt_results_view_mode", "Все скважины")
-    st.session_state.setdefault("wt_results_all_view_mode", "Траектории")
+    st.session_state.setdefault("wt_results_all_view_mode", "Anti-collision")
     st.session_state.setdefault("wt_results_focus_pad_id", WT_PAD_FOCUS_ALL)
     st.session_state.setdefault("wt_batch_select_pad_id", "")
     st.session_state.setdefault("wt_3d_render_mode", WT_3D_RENDER_DETAIL)
@@ -19415,18 +19864,17 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_anticollision_last_run", None)
     st.session_state.setdefault("wt_t1_t3_last_resolution", None)
     st.session_state.setdefault("wt_t1_t3_acknowledged_well_names", ())
+    st.session_state.setdefault("wt_edit_targets_pending_names", [])
     if str(st.session_state.get("wt_results_view_mode", "")).strip() not in {
         "Отдельная скважина",
         "Все скважины",
     }:
         st.session_state["wt_results_view_mode"] = "Все скважины"
-    if str(
-        st.session_state.get("wt_results_all_view_mode", "")
-    ).strip() not in {
-        "Траектории",
-        "Anti-collision",
-    }:
-        st.session_state["wt_results_all_view_mode"] = "Траектории"
+    if (
+        str(st.session_state.get("wt_results_all_view_mode", "")).strip()
+        != "Anti-collision"
+    ):
+        st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     if str(st.session_state.get("wt_3d_render_mode", "")).strip() not in set(
         WT_3D_RENDER_OPTIONS
     ):
@@ -19538,6 +19986,29 @@ def _records_with_edit_targets(
     return updated_records, updated_names
 
 
+def _unique_well_names(names: Iterable[object]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in names:
+        name = str(value).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        result.append(name)
+    return result
+
+
+def _pending_edit_target_names() -> list[str]:
+    pending = _unique_well_names(
+        st.session_state.get("wt_edit_targets_pending_names") or []
+    )
+    if pending:
+        return pending
+    return _unique_well_names(
+        st.session_state.get("wt_edit_targets_highlight_names") or []
+    )
+
+
 def _invalidate_results_for_edited_targets(
     *,
     records: Iterable[WelltrackRecord],
@@ -19582,7 +20053,6 @@ def _invalidate_results_for_edited_targets(
 
     st.session_state["wt_last_anticollision_resolution"] = None
     st.session_state["wt_last_anticollision_previous_successes"] = {}
-    st.session_state["wt_anticollision_analysis_cache"] = {}
     st.session_state["wt_prepared_well_overrides"] = {}
     st.session_state["wt_prepared_override_message"] = ""
     st.session_state["wt_prepared_recommendation_id"] = ""
@@ -19634,14 +20104,22 @@ def _apply_edit_targets_changes(
         records=updated_records,
         edited_names=updated_names,
     )
+    pending_names = _unique_well_names(
+        [
+            *(_pending_edit_target_names()),
+            *updated_names,
+        ]
+    )
+    st.session_state["wt_edit_targets_pending_names"] = pending_names
     st.session_state["wt_edit_targets_applied"] = updated_names
-    st.session_state["wt_edit_targets_highlight_names"] = updated_names
+    st.session_state["wt_edit_targets_highlight_names"] = pending_names
     st.session_state["wt_edit_targets_last_source"] = str(source)
     st.session_state["wt_edit_targets_highlight_version"] = (
         int(st.session_state.get("wt_edit_targets_highlight_version", 0)) + 1
     )
     st.session_state["wt_last_error"] = ""
-    st.session_state["wt_pending_selected_names"] = list(updated_names)
+    st.session_state["wt_pending_selected_names"] = list(pending_names)
+    _focus_all_wells_trajectory_results()
     return updated_names
 
 
@@ -19676,7 +20154,7 @@ def _clear_results() -> None:
     st.session_state["wt_last_runtime_s"] = None
     st.session_state["wt_last_run_log_lines"] = []
     st.session_state["wt_results_view_mode"] = "Все скважины"
-    st.session_state["wt_results_all_view_mode"] = "Траектории"
+    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     st.session_state["wt_prepared_well_overrides"] = {}
     st.session_state["wt_prepared_override_message"] = ""
     st.session_state["wt_prepared_recommendation_id"] = ""
@@ -19685,6 +20163,8 @@ def _clear_results() -> None:
     st.session_state["wt_last_anticollision_resolution"] = None
     st.session_state["wt_last_anticollision_previous_successes"] = {}
     st.session_state["wt_anticollision_analysis_cache"] = {}
+    st.session_state["wt_edit_targets_pending_names"] = []
+    st.session_state["wt_edit_targets_highlight_names"] = []
 
 
 def _focus_all_wells_anticollision_results() -> None:
@@ -19696,7 +20176,7 @@ def _focus_all_wells_anticollision_results() -> None:
 
 def _focus_all_wells_trajectory_results() -> None:
     st.session_state["wt_results_view_mode"] = "Все скважины"
-    st.session_state["wt_results_all_view_mode"] = "Траектории"
+    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_DETAIL
     st.session_state["wt_3d_backend"] = WT_3D_BACKEND_THREE_LOCAL
 
@@ -19859,7 +20339,7 @@ def _all_wells_3d_figure(
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m<br>"
+                    "Z: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m<br>"
                     "DLS: %{customdata[1]:.2f} deg/30м<br>"
                     "INC: %{customdata[2]:.2f} deg<br>"
@@ -19897,7 +20377,7 @@ def _all_wells_3d_figure(
                     "line": {"width": 1, "color": "rgba(255,255,255,0.9)"},
                 },
                 showlegend=False,
-                hovertemplate="X: %{x:.2f} m<br>Y: %{y:.2f} m<br>Z/TVD: %{z:.2f} m<extra>%{fullData.name}</extra>",
+                hovertemplate="X: %{x:.2f} m<br>Y: %{y:.2f} m<br>Z: %{z:.2f} m<extra>%{fullData.name}</extra>",
             )
         )
         fig.add_trace(
@@ -19956,7 +20436,7 @@ def _all_wells_3d_figure(
                         + "<br>"
                         "X: %{x:.2f} m<br>"
                         "Y: %{y:.2f} m<br>"
-                        "Z/TVD: %{z:.2f} m<br>"
+                        "Z: %{z:.2f} m<br>"
                         "MD: %{customdata[0]:.2f} m"
                         "<extra>%{fullData.name}</extra>"
                     ),
@@ -20023,7 +20503,7 @@ def _all_wells_3d_figure(
                     "Проблема: %{customdata[2]}<br>"
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m"
+                    "Z: %{z:.2f} m"
                     "<extra>%{fullData.name}</extra>"
                 ),
             )
@@ -20175,7 +20655,7 @@ def _all_wells_plan_figure(
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{customdata[0]:.2f} m<br>"
+                    "Z: %{customdata[0]:.2f} m<br>"
                     "MD: %{customdata[1]:.2f} m<br>"
                     "ПИ: %{customdata[2]:.2f} deg/10m"
                     "<extra>%{fullData.name}</extra>"
@@ -20536,7 +21016,7 @@ def _all_wells_anticollision_3d_figure(
                 hovertemplate=(
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m<br>"
+                    "Z: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} m<br>"
                     "DLS: %{customdata[1]:.2f} deg/30м<br>"
                     "INC: %{customdata[2]:.2f} deg<br>"
@@ -20577,7 +21057,7 @@ def _all_wells_anticollision_3d_figure(
                     hovertemplate=(
                         "X: %{x:.2f} m<br>"
                         "Y: %{y:.2f} m<br>"
-                        "Z/TVD: %{z:.2f} m<br>"
+                        "Z: %{z:.2f} m<br>"
                         "MD: %{customdata[0]:.2f} m"
                         "<extra>%{fullData.name}</extra>"
                     ),
@@ -20600,7 +21080,7 @@ def _all_wells_anticollision_3d_figure(
                     hovertemplate=(
                         "X: %{x:.2f} m<br>"
                         "Y: %{y:.2f} m<br>"
-                        "Z/TVD: %{z:.2f} m<br>"
+                        "Z: %{z:.2f} m<br>"
                         "MD: %{customdata[0]:.2f} m<br>"
                         "DLS: %{customdata[1]:.2f} deg/30м<br>"
                         "INC: %{customdata[2]:.2f} deg<br>"
@@ -20633,7 +21113,7 @@ def _all_wells_anticollision_3d_figure(
                         "Точка: %{customdata[0]}<br>"
                         "X: %{x:.2f} m<br>"
                         "Y: %{y:.2f} m<br>"
-                        "Z/TVD: %{z:.2f} m<extra>%{fullData.name}</extra>"
+                        "Z: %{z:.2f} m<extra>%{fullData.name}</extra>"
                     ),
                 )
             )
@@ -20825,7 +21305,7 @@ def _all_wells_anticollision_3d_figure(
                     f"{segment.well_name}<br>"
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m<br>"
+                    "Z: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} м<br>"
                     "DLS: %{customdata[1]:.2f} deg/30м<br>"
                     "INC: %{customdata[2]:.2f} deg"
@@ -20843,7 +21323,7 @@ def _all_wells_anticollision_3d_figure(
                     f"{segment.well_name}<br>"
                     "X: %{x:.2f} m<br>"
                     "Y: %{y:.2f} m<br>"
-                    "Z/TVD: %{z:.2f} m<br>"
+                    "Z: %{z:.2f} m<br>"
                     "MD: %{customdata[0]:.2f} м<br>"
                     "DLS: %{customdata[1]:.2f} deg/30м<br>"
                     "INC: %{customdata[2]:.2f} deg"
@@ -21241,6 +21721,20 @@ def _render_anticollision_panel(
     focus_pad_id: str,
 ) -> None:
     panel_started_at = perf_counter()
+    pending_edit_names = _pending_edit_target_names()
+    if pending_edit_names:
+        st.info(
+            "Anti-collision анализ приостановлен: есть изменённые в 3D точки "
+            "t1/t3, которые ещё не пересчитаны."
+        )
+        st.caption(
+            "Сначала пересчитайте скважины: "
+            + ", ".join(pending_edit_names)
+            + ". Предыдущий anti-collision расчёт сохранён и не будет "
+            "перезапускаться по неполному набору."
+        )
+        return
+
     reference_wells = _reference_wells_from_state()
     if len(successes) + len(reference_wells) < 2:
         st.info(
@@ -21370,11 +21864,11 @@ def _render_anticollision_panel(
                 "reference-скважин, чьи XY-границы подходят к расчётным ближе чем на "
                 f"{int(WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M)} м."
             )
-    if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
-        st.caption(
-            "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "
-            "но детальные Plotly-hover подсказки доступны только в режиме Plotly."
-        )
+    # if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
+    #     st.caption(
+    #         "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "
+    #         "но детальные Plotly-hover подсказки доступны только в режиме Plotly."
+    #     )
 
     m1, m2, m3, m4 = st.columns(4, gap="small")
     m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
@@ -21459,8 +21953,8 @@ def _render_anticollision_panel(
             "учтены и при необходимости попадут в пересчет."
         )
     report_rows = (
-        _report_rows_from_recommendations(visible_recommendations)
-        if focus_pad_well_names
+        _report_rows_from_recommendations(visible_recommendations, analysis)
+        if visible_recommendations
         else anti_collision_report_rows(analysis)
     )
     report_event_count = len(report_rows)
@@ -21489,45 +21983,9 @@ def _render_anticollision_panel(
             "Мин. расстояние, м": st.column_config.NumberColumn(
                 "Мин. расстояние, м", format="%.2f"
             ),
-        },
-    )
-
-    recommendation_df = arrow_safe_text_dataframe(
-        pd.DataFrame(
-            anti_collision_recommendation_rows(visible_recommendations)
-        )
-    )
-    st.markdown("### Рекомендации")
-    st.caption(
-        "Рекомендации делят конфликты на три класса: цели, vertical-участки и "
-        "прочие траекторные пересечения. Автоподготовка пересчета сейчас включена "
-        "для vertical-кейсов и для trajectory-collision rerun обеих проектных "
-        "скважин пары с учетом остальных reference-cones куста."
-    )
-    st.dataframe(
-        recommendation_df,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Приоритет": st.column_config.TextColumn("Приоритет"),
-            "Скважина A": st.column_config.TextColumn("Скважина A"),
-            "Скважина B": st.column_config.TextColumn("Скважина B"),
-            "Тип действия": st.column_config.TextColumn("Тип действия"),
-            "Область": st.column_config.TextColumn("Область"),
-            "Интервал A, м": st.column_config.TextColumn("Интервал A, м"),
-            "Интервал B, м": st.column_config.TextColumn("Интервал B, м"),
-            "SF min": st.column_config.NumberColumn("SF min", format="%.2f"),
-            "Overlap max, м": st.column_config.NumberColumn(
-                "Overlap max, м", format="%.2f"
-            ),
-            "Spacing t1, м": st.column_config.TextColumn("Spacing t1, м"),
-            "Spacing t3, м": st.column_config.TextColumn("Spacing t3, м"),
-            "Ожидаемый маневр": st.column_config.TextColumn(
-                "Ожидаемый маневр"
-            ),
-            "Рекомендация": st.column_config.TextColumn("Рекомендация"),
-            "Подготовка пересчета": st.column_config.TextColumn(
-                "Подготовка пересчета"
+            "Рекомендация по устранению": st.column_config.TextColumn(
+                "Рекомендация по устранению",
+                width="large",
             ),
         },
     )
@@ -22732,19 +23190,34 @@ def _prepare_rerun_from_cluster(
 
 
 def _render_source_input() -> _WelltrackSourcePayload:
-    source_mode = st.radio(
-        "Режим загрузки",
-        options=[
-            "Файл по пути",
-            "Загрузить файл",
-            "Вставить текст",
-            "Вставить таблицу",
-        ],
+    if str(st.session_state.get("wt_source_format", "")).strip() not in set(
+        WT_SOURCE_FORMAT_OPTIONS
+    ):
+        st.session_state["wt_source_format"] = WT_SOURCE_FORMAT_WELLTRACK
+
+    source_format = st.radio(
+        "Формат импорта",
+        options=list(WT_SOURCE_FORMAT_OPTIONS),
         horizontal=True,
-        key="wt_source_mode",
+        key="wt_source_format",
     )
 
-    if source_mode == "Файл по пути":
+    if source_format == WT_SOURCE_FORMAT_WELLTRACK:
+        if str(st.session_state.get("wt_source_mode", "")).strip() not in set(
+            WT_SOURCE_WELLTRACK_MODES
+        ):
+            st.session_state["wt_source_mode"] = WT_SOURCE_MODE_FILE_PATH
+        source_mode = st.radio(
+            "Способ загрузки WELLTRACK",
+            options=list(WT_SOURCE_WELLTRACK_MODES),
+            horizontal=True,
+            key="wt_source_mode",
+        )
+    else:
+        source_mode = WT_SOURCE_MODE_TARGET_TABLE
+        st.session_state["wt_source_mode"] = WT_SOURCE_MODE_TARGET_TABLE
+
+    if source_mode == WT_SOURCE_MODE_FILE_PATH:
         source_path = st.text_input(
             "Путь к файлу WELLTRACK",
             key="wt_source_path",
@@ -22755,7 +23228,7 @@ def _render_source_input() -> _WelltrackSourcePayload:
             source_text=_read_welltrack_file(source_path),
         )
 
-    if source_mode == "Загрузить файл":
+    if source_mode == WT_SOURCE_MODE_UPLOAD:
         uploaded_file = st.file_uploader(
             "Файл ECLIPSE/INC", type=["inc", "txt", "data", "ecl"]
         )
@@ -22769,7 +23242,7 @@ def _render_source_input() -> _WelltrackSourcePayload:
             ),
         )
 
-    if source_mode == "Вставить текст":
+    if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
         return _WelltrackSourcePayload(
             mode=source_mode,
             source_text=st.text_area(
@@ -22780,7 +23253,7 @@ def _render_source_input() -> _WelltrackSourcePayload:
             ),
         )
 
-    with st.expander("Таблица точек WELLTRACK", expanded=True):
+    with st.expander("Таблица точек целей", expanded=True):
         note_col, clear_col = st.columns(
             [5.0, 1.2], gap="small", vertical_alignment="bottom"
         )
@@ -22834,7 +23307,7 @@ def _render_source_input() -> _WelltrackSourcePayload:
         )
 
     return _WelltrackSourcePayload(
-        mode=source_mode,
+        mode=WT_SOURCE_MODE_TARGET_TABLE,
         table_rows=pd.DataFrame(st.session_state["wt_source_table_df"]),
     )
 
@@ -22903,7 +23376,7 @@ def _render_import_controls() -> (
     with action_col:
         render_small_note("Действия импорта")
         parse_clicked = st.button(
-            "Прочитать WELLTRACK",
+            "Импорт целей",
             type="primary",
             icon=":material/upload_file:",
             width="stretch",
@@ -22917,7 +23390,7 @@ def _render_import_controls() -> (
             width="stretch",
             help=(
                 "Сбрасывает общие и отдельные параметры расчета/солвера к "
-                "рекомендованным значениям. Импортированный WELLTRACK и выбранные "
+                "рекомендованным значениям. Импортированные цели и выбранные "
                 "скважины не удаляются."
             ),
         )
@@ -22958,7 +23431,7 @@ def _handle_import_actions(
 
     if not parse_clicked:
         return
-    if source_payload.mode == "Вставить таблицу":
+    if source_payload.mode == WT_SOURCE_MODE_TARGET_TABLE:
         table_rows = source_payload.table_rows
         if table_rows is None:
             st.warning(
@@ -23042,8 +23515,6 @@ def _handle_import_actions(
 
 
 def _render_records_overview(records: list[WelltrackRecord]) -> None:
-    st.markdown("### Загруженные скважины")
-
     parsed_df = _records_overview_dataframe(records)
     ready_count = int(
         sum(str(item) == "✅" for item in parsed_df["Статус"].tolist())
@@ -23054,35 +23525,37 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     x2.metric("Готово", f"{ready_count}")
     x3.metric("Проблем", f"{problem_count}")
 
-    st.dataframe(
-        arrow_safe_text_dataframe(parsed_df),
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Скважина": st.column_config.TextColumn(
-                "Скважина", width="medium"
-            ),
-            "Точек": st.column_config.NumberColumn(
-                "Точек",
-                format="%d",
-                width="small",
-                help="Считаются только целевые точки `t1/t3`, без устья `S`.",
-            ),
-            "Статус": st.column_config.TextColumn(
-                "Статус",
-                width="small",
-                help="`✅` — импорт готов к расчёту; `❌` — проверьте колонку 'Проблема'.",
-            ),
-            "Проблема": st.column_config.TextColumn(
-                "Проблема",
-                width="large",
-                help=(
-                    "Показывает вероятные проблемы импорта: нет точки `S`, не хватает "
-                    "t1/t3, неверный порядок точек или лишние точки."
+    with st.expander(
+        "Статус загрузки точек целей",
+        expanded=bool(problem_count > 0),
+    ):
+        st.dataframe(
+            arrow_safe_text_dataframe(parsed_df),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Скважина": st.column_config.TextColumn("Скважина", width="medium"),
+                "Точек": st.column_config.NumberColumn(
+                    "Точек",
+                    format="%d",
+                    width="small",
+                    help="Считаются только целевые точки `t1/t3`, без устья `S`.",
                 ),
-            ),
-        },
-    )
+                "Статус": st.column_config.TextColumn(
+                    "Статус",
+                    width="small",
+                    help="`✅` — импорт готов к расчёту; `❌` — проверьте колонку 'Проблема'.",
+                ),
+                "Проблема": st.column_config.TextColumn(
+                    "Проблема",
+                    width="large",
+                    help=(
+                        "Показывает вероятные проблемы импорта: нет точки `S`, не хватает "
+                        "t1/t3, неверный порядок точек или лишние точки."
+                    ),
+                ),
+            },
+        )
 
 
 def _records_overview_dataframe(
@@ -23183,14 +23656,20 @@ def _reference_kind_wells(kind: str) -> tuple[ImportedTrajectoryWell, ...]:
 def _render_reference_kind_import_block(*, kind: str) -> None:
     title = _reference_kind_title(kind)
     current_wells = _reference_kind_wells(kind)
+    source_options = [
+        "Загрузить .dev",
+        "Вставить XYZ/MD текст",
+        "Загрузить XYZ/MD файл",
+        "Путь к WELLTRACK",
+        "Загрузить WELLTRACK",
+    ]
+    if str(
+        st.session_state.get(_reference_source_mode_key(kind), "")
+    ).strip() not in set(source_options):
+        st.session_state[_reference_source_mode_key(kind)] = "Загрузить .dev"
     mode = st.radio(
         f"Источник для {title.lower()}",
-        options=[
-            "Вставить XYZ/MD текст",
-            "Загрузить XYZ/MD файл",
-            "Путь к WELLTRACK",
-            "Загрузить WELLTRACK",
-        ],
+        options=source_options,
         key=_reference_source_mode_key(kind),
         horizontal=True,
         label_visibility="collapsed",
@@ -23200,7 +23679,39 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
     uploaded_xyz_file = None
     uploaded_welltrack_file = None
 
-    if mode == "Вставить XYZ/MD текст":
+    if mode == "Загрузить .dev":
+        folder_count_key = _reference_dev_folder_count_key(kind)
+        try:
+            folder_count = int(st.session_state.get(folder_count_key, 1))
+        except (TypeError, ValueError):
+            folder_count = 1
+        folder_count = max(1, folder_count)
+        st.session_state[folder_count_key] = folder_count
+        for index in range(folder_count):
+            folder_label = (
+                "Папка с .dev файлами"
+                if index == 0
+                else f"Папка с .dev файлами #{index + 1}"
+            )
+            st.text_input(
+                folder_label,
+                key=_reference_dev_folder_path_key(kind, index),
+                placeholder="tests/test_data/dev_fact",
+            )
+        if st.button(
+            "Добавить ещё папку",
+            key=f"wt_reference_{kind}_add_dev_folder",
+            icon=":material/create_new_folder:",
+            use_container_width=True,
+        ):
+            st.session_state[folder_count_key] = folder_count + 1
+            st.rerun()
+        st.caption(
+            "Импортируются все `.dev` файлы из папок. "
+            "Имя берется из файла, координаты - "
+            "из колонок `MD X Y Z`."
+        )
+    elif mode == "Вставить XYZ/MD текст":
         st.text_area(
             "Текст траекторий",
             key=_reference_source_text_key(kind),
@@ -23258,7 +23769,12 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
         with st.status(f"Импорт {title.lower()}...", expanded=True) as status:
             started = perf_counter()
             try:
-                if mode == "Вставить XYZ/MD текст":
+                if mode == "Загрузить .dev":
+                    parsed = parse_reference_trajectory_dev_directories(
+                        _reference_dev_folder_paths(kind),
+                        kind=kind,
+                    )
+                elif mode == "Вставить XYZ/MD текст":
                     parsed = parse_reference_trajectory_text_with_kind(
                         str(
                             st.session_state.get(
@@ -23325,6 +23841,7 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
         _set_reference_wells_for_kind(kind=kind, wells=())
         st.session_state[_reference_source_text_key(kind)] = ""
         st.session_state[_reference_welltrack_path_key(kind)] = ""
+        _clear_reference_dev_folder_state(kind)
         _reset_anticollision_view_state(clear_prepared=True)
         st.rerun()
 
@@ -24315,11 +24832,10 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                 raw_rows.append(
                     {
                         "Скважина": record.name,
-                        "Порядок": idx,
                         "Точка": point_label,
                         "X, м": float(point.x),
                         "Y, м": float(point.y),
-                        "Z/TVD, м": float(point.z),
+                        "Z, м": float(point.z),
                     }
                 )
         raw_df = arrow_safe_text_dataframe(pd.DataFrame(raw_rows))
@@ -24532,7 +25048,7 @@ def _t1_t3_order_resolution_message() -> tuple[str, str] | None:
     return None
 
 
-def _pad_config_defaults(pad: WellPad) -> dict[str, float | str]:
+def _pad_config_defaults(pad: WellPad) -> dict[str, object]:
     return {
         "spacing_m": float(DEFAULT_PAD_SPACING_M),
         "nds_azimuth_deg": float(
@@ -24547,7 +25063,122 @@ def _pad_config_defaults(pad: WellPad) -> dict[str, float | str]:
         "first_surface_y": float(pad.surface.y),
         "first_surface_z": float(pad.surface.z),
         "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+        "fixed_slots": (),
     }
+
+
+def _pad_fixed_slots_from_config(
+    *,
+    pad: WellPad,
+    config: Mapping[str, object],
+) -> tuple[tuple[int, str], ...]:
+    raw_value = config.get("fixed_slots", ())
+    if not isinstance(raw_value, (list, tuple)):
+        return ()
+    well_names = {str(well.name) for well in pad.wells}
+    max_slot = len(pad.wells)
+    used_slots: set[int] = set()
+    used_names: set[str] = set()
+    normalized: list[tuple[int, str]] = []
+    for item in raw_value:
+        if isinstance(item, Mapping):
+            raw_slot = item.get("slot", item.get("position"))
+            raw_name = item.get("name", item.get("well_name"))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            raw_slot = item[0]
+            raw_name = item[1]
+        else:
+            continue
+        try:
+            slot = int(raw_slot)
+        except (TypeError, ValueError):
+            continue
+        name = str(raw_name or "").strip()
+        if (
+            slot < 1
+            or slot > max_slot
+            or name not in well_names
+            or slot in used_slots
+            or name in used_names
+        ):
+            continue
+        used_slots.add(slot)
+        used_names.add(name)
+        normalized.append((slot, name))
+    return tuple(sorted(normalized, key=lambda value: value[0]))
+
+
+def _pad_fixed_slots_editor_rows(
+    *,
+    pad: WellPad,
+    config: Mapping[str, object],
+) -> pd.DataFrame:
+    slots = _pad_fixed_slots_from_config(pad=pad, config=config)
+    return pd.DataFrame(
+        [
+            {"Позиция": int(slot), "Скважина": str(name)}
+            for slot, name in slots
+        ],
+        columns=["Позиция", "Скважина"],
+    )
+
+
+def _pad_fixed_slots_from_editor(
+    *,
+    pad: WellPad,
+    editor_value: object,
+) -> tuple[tuple[tuple[int, str], ...], list[str]]:
+    if isinstance(editor_value, pd.DataFrame):
+        rows = editor_value.to_dict("records")
+    elif isinstance(editor_value, list):
+        rows = [item for item in editor_value if isinstance(item, Mapping)]
+    else:
+        return (), []
+
+    well_names = {str(well.name) for well in pad.wells}
+    max_slot = len(pad.wells)
+    used_slots: set[int] = set()
+    used_names: set[str] = set()
+    fixed_slots: list[tuple[int, str]] = []
+    warnings: list[str] = []
+    for row in rows:
+        raw_slot = row.get("Позиция")
+        raw_name = row.get("Скважина")
+        slot_blank = raw_slot is None or (
+            isinstance(raw_slot, float) and pd.isna(raw_slot)
+        ) or str(raw_slot).strip() == ""
+        name_blank = raw_name is None or (
+            isinstance(raw_name, float) and pd.isna(raw_name)
+        ) or str(raw_name).strip() == ""
+        if slot_blank and name_blank:
+            continue
+        try:
+            slot = int(raw_slot)
+        except (TypeError, ValueError):
+            warnings.append("Строки без корректной позиции пропущены.")
+            continue
+        name = str(raw_name or "").strip()
+        if not name or name.lower() == "nan":
+            warnings.append(f"Позиция {slot}: выберите скважину.")
+            continue
+        if slot < 1 or slot > max_slot:
+            warnings.append(
+                f"Позиция {slot}: допустимый диапазон 1–{max_slot}."
+            )
+            continue
+        if name not in well_names:
+            warnings.append(f"{name}: скважина не входит в выбранный куст.")
+            continue
+        if slot in used_slots:
+            warnings.append(f"Позиция {slot}: дубль, оставлена первая строка.")
+            continue
+        if name in used_names:
+            warnings.append(f"{name}: дубль, оставлена первая строка.")
+            continue
+        used_slots.add(slot)
+        used_names.add(name)
+        fixed_slots.append((slot, name))
+    return tuple(sorted(fixed_slots, key=lambda value: value[0])), warnings
 
 
 def _source_surface_xyz(
@@ -24763,7 +25394,7 @@ def _detect_ui_pads(
 def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
     pads, metadata = _detect_ui_pads(base_records)
     existing = st.session_state.get("wt_pad_configs", {})
-    merged: dict[str, dict[str, float]] = {}
+    merged: dict[str, dict[str, object]] = {}
     for pad in pads:
         defaults = _pad_config_defaults(pad)
         pad_meta = metadata.get(str(pad.pad_id))
@@ -24777,8 +25408,13 @@ def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
                 "first_surface_y": float(pad_meta.source_surface_y_m),
                 "first_surface_z": float(pad_meta.source_surface_z_m),
                 "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+                "fixed_slots": (),
             }
         current = existing.get(str(pad.pad_id), {})
+        current_fixed_slots = _pad_fixed_slots_from_config(
+            pad=pad,
+            config=current,
+        )
         merged[str(pad.pad_id)] = {
             "spacing_m": float(
                 current.get("spacing_m", defaults["spacing_m"])
@@ -24801,11 +25437,15 @@ def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
                     "surface_anchor_mode", defaults["surface_anchor_mode"]
                 )
             ),
+            "fixed_slots": current_fixed_slots,
         }
         if isinstance(pad_meta, _DetectedPadUiMeta) and bool(
             pad_meta.source_surfaces_defined
         ):
-            merged[str(pad.pad_id)] = dict(defaults)
+            merged[str(pad.pad_id)] = {
+                **dict(defaults),
+                "fixed_slots": current_fixed_slots,
+            }
     st.session_state["wt_pad_configs"] = merged
     st.session_state["wt_pad_detected_meta"] = metadata
 
@@ -24840,6 +25480,10 @@ def _build_pad_plan_map(pads: list[WellPad]) -> dict[str, PadLayoutPlan]:
             surface_anchor_mode=str(
                 cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
             ),
+            fixed_slots=_pad_fixed_slots_from_config(
+                pad=pad,
+                config=cfg,
+            ),
         )
     return plan_map
 
@@ -24860,7 +25504,7 @@ def _pad_display_label(pad: WellPad) -> str:
     return f"{str(pad.pad_id)} · {int(len(pad.wells))} скв."
 
 
-def _pad_config_for_ui(pad: WellPad) -> dict[str, float | str]:
+def _pad_config_for_ui(pad: WellPad) -> dict[str, object]:
     defaults = _pad_config_defaults(pad)
     pad_meta = dict(st.session_state.get("wt_pad_detected_meta", {})).get(
         str(pad.pad_id)
@@ -24875,11 +25519,13 @@ def _pad_config_for_ui(pad: WellPad) -> dict[str, float | str]:
             "first_surface_y": float(pad_meta.source_surface_y_m),
             "first_surface_z": float(pad_meta.source_surface_z_m),
             "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+            "fixed_slots": (),
         }
     current = dict(st.session_state.get("wt_pad_configs", {})).get(
         str(pad.pad_id),
         {},
     )
+    fixed_config = current
     if isinstance(pad_meta, _DetectedPadUiMeta) and bool(
         pad_meta.source_surfaces_defined
     ):
@@ -24902,6 +25548,10 @@ def _pad_config_for_ui(pad: WellPad) -> dict[str, float | str]:
         "surface_anchor_mode": str(
             current.get("surface_anchor_mode", defaults["surface_anchor_mode"])
         ),
+        "fixed_slots": _pad_fixed_slots_from_config(
+            pad=pad,
+            config=fixed_config,
+        ),
     }
 
 
@@ -24919,9 +25569,11 @@ def _pad_membership(
     well_names_by_pad_id: dict[str, tuple[str, ...]] = {}
     for pad in pads:
         pad_id = str(pad.pad_id)
+        cfg = _pad_config_for_ui(pad)
         ordered = ordered_pad_wells(
             pad=pad,
-            nds_azimuth_deg=float(_pad_config_for_ui(pad)["nds_azimuth_deg"]),
+            nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+            fixed_slots=_pad_fixed_slots_from_config(pad=pad, config=cfg),
         )
         ordered_names = tuple(str(item.name) for item in ordered)
         well_names_by_pad_id[pad_id] = ordered_names
@@ -24959,6 +25611,30 @@ def _focus_pad_well_names(
         return ()
     _, _, well_names_by_pad_id = _pad_membership(records)
     return tuple(well_names_by_pad_id.get(str(normalized), ()))
+
+
+def _focus_pad_fixed_well_names(
+    *,
+    records: list[WelltrackRecord],
+    focus_pad_id: str | None,
+) -> tuple[str, ...]:
+    normalized = _normalize_focus_pad_id(
+        records=records, requested_pad_id=focus_pad_id
+    )
+    if normalized == WT_PAD_FOCUS_ALL:
+        return ()
+    pads = _project_pads_for_ui(records)
+    pad = next(
+        (item for item in pads if str(item.pad_id) == str(normalized)),
+        None,
+    )
+    if pad is None:
+        return ()
+    cfg = _pad_config_for_ui(pad)
+    return tuple(
+        str(name)
+        for _, name in _pad_fixed_slots_from_config(pad=pad, config=cfg)
+    )
 
 
 def _clusters_touching_focus_pad(
@@ -25039,6 +25715,7 @@ def _report_rows_from_recommendations(
                 "SF min": float(item.min_separation_factor),
                 "Overlap max, м": float(item.max_overlap_depth_m),
                 "Мин. расстояние, м": float(item.min_center_distance_m),
+                "Рекомендация по устранению": str(item.summary),
             }
         )
     return rows
@@ -25117,7 +25794,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         return
 
     with st.container(border=True):
-        st.markdown("### Кусты и расчет устьев")
         if bool(st.session_state.get("wt_pad_auto_applied_on_import", False)):
             st.info(
                 "После импорта исходные устья скважин совпадали, "
@@ -25175,7 +25851,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             getattr(selected_pad_meta, "source_surfaces_defined", False)
         )
         config_map = st.session_state.get("wt_pad_configs", {})
-        selected_cfg = dict(
+        selected_cfg: dict[str, object] = dict(
             config_map.get(selected_id, _pad_config_defaults(selected_pad))
         )
         previous_anchor_mode = str(
@@ -25205,7 +25881,9 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         if source_surfaces_defined:
             st.info(
                 "Положения устьев были заданы в исходных данных. Для этого куста "
-                "параметры ниже показаны справочно и не редактируются."
+                "координаты устьев ниже показаны справочно и не редактируются. "
+                "Фиксированный порядок можно задавать отдельно для anti-collision "
+                "оптимизации."
             )
 
         anchor_center = st.toggle(
@@ -25300,22 +25978,97 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         selected_cfg["first_surface_y"] = float(first_surface_y)
         selected_cfg["first_surface_z"] = float(first_surface_z)
         selected_cfg["surface_anchor_mode"] = anchor_mode
+
+        fixed_slots = _pad_fixed_slots_from_config(
+            pad=selected_pad,
+            config=selected_cfg,
+        )
+        fixed_editor_key = f"wt_pad_fixed_slots_editor_{selected_id}"
+        fixed_expanded_once_key = f"wt_pad_fixed_slots_expand_once_{selected_id}"
+
+        def _keep_fixed_slots_expanded() -> None:
+            st.session_state[fixed_expanded_once_key] = True
+
+        fixed_slots_expanded = bool(fixed_slots) or bool(
+            st.session_state.pop(fixed_expanded_once_key, False)
+        )
+        with st.expander(
+            "Фиксированный порядок скважин",
+            expanded=fixed_slots_expanded,
+        ):
+            st.caption("Зафиксировать позицию скважины на кусте. ")
+            fixed_editor_df = st.data_editor(
+                _pad_fixed_slots_editor_rows(
+                    pad=selected_pad,
+                    config=selected_cfg,
+                ),
+                key=fixed_editor_key,
+                width="stretch",
+                hide_index=True,
+                num_rows="dynamic",
+                on_change=_keep_fixed_slots_expanded,
+                disabled=len(selected_pad.wells) < 2,
+                column_config={
+                    "Позиция": st.column_config.SelectboxColumn(
+                        "Позиция",
+                        options=list(range(1, int(len(selected_pad.wells)) + 1)),
+                        required=False,
+                        help="Номер слота на кусте, начиная с 1.",
+                    ),
+                    "Скважина": st.column_config.SelectboxColumn(
+                        "Скважина",
+                        options=sorted(str(well.name) for well in selected_pad.wells),
+                        required=False,
+                        help="Скважина, которую нужно закрепить в этой позиции.",
+                    ),
+                },
+            )
+            fixed_slots, fixed_warnings = _pad_fixed_slots_from_editor(
+                pad=selected_pad,
+                editor_value=fixed_editor_df,
+            )
+            if fixed_warnings:
+                st.warning(" ".join(dict.fromkeys(fixed_warnings)))
+            clear_fixed_clicked = st.button(
+                "Очистить фиксацию порядка",
+                icon=":material/lock_open:",
+                width="content",
+                disabled=not fixed_slots or len(selected_pad.wells) < 2,
+            )
+            if clear_fixed_clicked:
+                selected_cfg["fixed_slots"] = ()
+                config_map[selected_id] = selected_cfg
+                st.session_state["wt_pad_configs"] = config_map
+                if fixed_editor_key in st.session_state:
+                    del st.session_state[fixed_editor_key]
+                st.session_state.pop(fixed_expanded_once_key, None)
+                st.rerun()
+        selected_cfg["fixed_slots"] = fixed_slots
         config_map[selected_id] = selected_cfg
         st.session_state["wt_pad_configs"] = config_map
 
         ordered_wells = ordered_pad_wells(
             pad=selected_pad,
             nds_azimuth_deg=float(selected_cfg["nds_azimuth_deg"]),
+            fixed_slots=fixed_slots,
         )
         angle_rad = np.deg2rad(float(selected_cfg["nds_azimuth_deg"]))
         ux = float(np.sin(angle_rad))
         uy = float(np.cos(angle_rad))
         center_slot_index = 0.5 * float(max(len(ordered_wells) - 1, 0))
+        fixed_slot_by_name = {
+            str(name): int(slot) for slot, name in fixed_slots
+        }
         preview_rows: list[dict[str, object]] = []
         for slot_index, well in enumerate(ordered_wells, start=1):
             row = {
                 "Порядок": int(slot_index),
                 "Скважина": str(well.name),
+                "Фиксация": (
+                    "Да"
+                    if fixed_slot_by_name.get(str(well.name)) == int(slot_index)
+                    else "Авто"
+                ),
                 "Середина t1-t3 X, м": float(well.midpoint_x),
                 "Середина t1-t3 Y, м": float(well.midpoint_y),
                 "Опора S": _pad_anchor_mode_label(anchor_mode),
@@ -25414,10 +26167,10 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             _clear_results()
             st.rerun()
 
-        if str(st.session_state.get("wt_pad_last_applied_at", "")):
-            st.caption(
-                f"Последнее обновление устьев: {st.session_state['wt_pad_last_applied_at']}"
-            )
+        # if str(st.session_state.get("wt_pad_last_applied_at", "")):
+        #     st.caption(
+        #         f"Последнее обновление устьев: {st.session_state['wt_pad_last_applied_at']}"
+        #     )
 
 
 def _sync_selection_state(
@@ -25741,6 +26494,7 @@ def _store_merged_batch_results(
     new_rows: list[dict[str, object]],
     new_successes: list[SuccessfulWellPlan],
 ) -> None:
+    pending_before = set(_pending_edit_target_names())
     merged_rows, merged_successes = merge_batch_results(
         records=records,
         existing_rows=st.session_state.get("wt_summary_rows"),
@@ -25759,6 +26513,13 @@ def _store_merged_batch_results(
             )
             if str(name) not in successful_names
         ]
+        st.session_state["wt_edit_targets_pending_names"] = [
+            str(name)
+            for name in _pending_edit_target_names()
+            if str(name) not in successful_names
+        ]
+        if pending_before and not _pending_edit_target_names():
+            st.session_state["wt_anticollision_analysis_cache"] = {}
     recommended_names = recommended_batch_selection(
         records=records,
         summary_rows=merged_rows,
@@ -25778,6 +26539,7 @@ def _run_batch_if_clicked(
         st.warning("Выберите минимум одну скважину для расчета.")
         return
     selected_execution_order = _selected_execution_order(selected_names)
+    pending_edit_names_before_run = set(_pending_edit_target_names())
 
     records_for_run = list(records)
     pad_layout_active = bool(
@@ -26092,6 +26854,12 @@ def _run_batch_if_clicked(
                 new_rows=summary_rows,
                 new_successes=successes,
             )
+            pending_edit_names_after_run = set(_pending_edit_target_names())
+            edit_target_recalculation_completed = bool(
+                pending_edit_names_before_run
+                and not pending_edit_names_after_run
+                and pending_edit_names_before_run.issubset(selected_set)
+            )
             applied_affected_wells = {
                 str(name)
                 for name in prepared_snapshot.get("affected_wells", ())
@@ -26128,7 +26896,10 @@ def _run_batch_if_clicked(
                 st.session_state[
                     "wt_last_anticollision_previous_successes"
                 ] = {}
-                _focus_all_wells_trajectory_results()
+                if edit_target_recalculation_completed:
+                    _focus_all_wells_anticollision_results()
+                else:
+                    _focus_all_wells_trajectory_results()
             st.session_state["wt_last_error"] = ""
             st.session_state["wt_last_run_at"] = datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -26362,33 +27133,63 @@ def _render_batch_summary(
             ),
         },
     )
-    btn_cols = st.columns([1, 1])
-    with btn_cols[0]:
-        st.download_button(
-            "Скачать сводку (CSV)",
-            data=display_df.to_csv(index=False).encode("utf-8"),
-            file_name="welltrack_summary.csv",
-            mime="text/csv",
-            icon=":material/download:",
-            use_container_width=True,
-        )
-    with btn_cols[1]:
+    with st.expander("Инклинометрия скважин"):
         successes = st.session_state.get("wt_successes") or []
+        success_names = [str(success.name) for success in successes]
+        success_name_set = set(success_names)
+        selected_key = "wt_survey_download_selected_names"
+        selected_current = [
+            str(name)
+            for name in st.session_state.get(selected_key, [])
+            if str(name) in success_name_set
+        ]
+        if selected_current != st.session_state.get(selected_key, []):
+            st.session_state[selected_key] = selected_current
+        selected_names = st.multiselect(
+            "Скважины для выгрузки",
+            options=success_names,
+            key=selected_key,
+            placeholder="Выберите скважины",
+        )
+        selected_name_set = {str(name) for name in selected_names}
+        selected_successes = [
+            success
+            for success in successes
+            if str(success.name) in selected_name_set
+        ]
         survey_data = _build_batch_survey_csv(
             successes,
             target_crs=target_crs,
             auto_convert=auto_convert,
             source_crs=source_crs,
         )
-        st.download_button(
-            "Скачать инклинометрию (CSV)",
-            data=survey_data or b"",
-            file_name="welltrack_survey_all.csv",
-            mime="text/csv",
-            icon=":material/download:",
-            use_container_width=True,
-            disabled=not survey_data,
+        selected_survey_data = _build_batch_survey_csv(
+            selected_successes,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
         )
+        all_col, selected_col = st.columns(2, gap="small")
+        with all_col:
+            st.download_button(
+                "Скачать рассчитанные траектории всех скважин",
+                data=survey_data or b"",
+                file_name="welltrack_survey_all.csv",
+                mime="text/csv",
+                icon=":material/download:",
+                use_container_width=True,
+                disabled=not survey_data,
+            )
+        with selected_col:
+            st.download_button(
+                "Скачать рассчитанные траектории выбранных скважин",
+                data=selected_survey_data or b"",
+                file_name="welltrack_survey_selected.csv",
+                mime="text/csv",
+                icon=":material/download:",
+                use_container_width=True,
+                disabled=not selected_survey_data,
+            )
     return summary_df
 
 
@@ -26525,13 +27326,7 @@ def _render_success_tabs(
         )
         return
 
-    all_view_mode = st.radio(
-        "Режим отображения всех скважин",
-        options=["Траектории", "Anti-collision"],
-        key="wt_results_all_view_mode",
-        horizontal=True,
-        label_visibility="collapsed",
-    )
+    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     pads, _, _ = _pad_membership(records)
     if len(pads) > 1:
         focus_options = [WT_PAD_FOCUS_ALL, *(str(pad.pad_id) for pad in pads)]
@@ -26571,85 +27366,6 @@ def _render_success_tabs(
         records=records,
         focus_pad_id=focus_pad_id,
     )
-    if str(all_view_mode) == "Траектории":
-        selected_render_mode = st.selectbox(
-            "3D-режим отображения",
-            options=list(WT_3D_RENDER_OPTIONS),
-            key="wt_3d_render_mode",
-        )
-        selected_3d_backend = st.selectbox(
-            "3D backend",
-            options=list(WT_3D_BACKEND_OPTIONS),
-            key="wt_3d_backend",
-            help=(
-                "Plotly сохраняет привычные hover-подсказки. "
-                "Локальный Three.js backend быстрее на тяжёлых кустах и хранит все файлы локально."
-            ),
-        )
-        if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
-            if st.button(
-                "Пересоздать 3D viewer", key="wt_recreate_three_traj"
-            ):
-                _bump_three_viewer_nonce()
-                st.rerun()
-        resolved_render_mode = _resolve_3d_render_mode(
-            requested_mode=selected_render_mode,
-            calculated_well_count=len(successes),
-            reference_wells=reference_wells,
-        )
-        if target_only_wells:
-            st.caption(
-                "Для непростроенных скважин на обзорных графиках показаны только "
-                "точки S/t1/t3, без траектории."
-            )
-        if reference_wells:
-            st.caption(
-                "Дополнительные фактические и утвержденные скважины показаны как "
-                "reference-траектории: серые и красные линии без точек S/t1/t3."
-            )
-        if resolved_render_mode == WT_3D_RENDER_FAST:
-            st.caption(
-                "Включён быстрый 3D-режим: reference-скважины объединяются в "
-                "сводные фоновые 3D-линии, чтобы не перегружать браузер. 2D-план "
-                "и сами расчётные скважины остаются без смысловых изменений."
-            )
-        if str(selected_3d_backend) == WT_3D_BACKEND_THREE_LOCAL:
-            st.caption(
-                "Активен локальный Three.js viewer: 3D-смысл сцены сохраняется, "
-                "но детальные Plotly-hover подсказки доступны только в режиме Plotly."
-            )
-        c1, c2 = st.columns(2, gap="medium")
-        overview_3d_figure = _all_wells_3d_figure(
-            successes,
-            target_only_wells=target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            focus_well_names=focus_pad_well_names,
-            render_mode=selected_render_mode,
-        )
-        _render_plotly_or_three_3d(
-            container=c1,
-            figure=overview_3d_figure,
-            backend=selected_3d_backend,
-            height=620,
-            payload_overrides=_trajectory_three_payload_overrides(
-                records=records,
-                successes=successes,
-                target_only_wells=target_only_wells,
-                name_to_color=name_to_color,
-            ),
-        )
-        c2.plotly_chart(
-            _all_wells_plan_figure(
-                successes,
-                target_only_wells=target_only_wells,
-                reference_wells=reference_wells,
-                name_to_color=name_to_color,
-                focus_well_names=focus_pad_well_names,
-            ),
-            width="stretch",
-        )
-        return
 
     _render_anticollision_panel(
         successes,
@@ -26703,12 +27419,13 @@ def coerce_model_like(value: Any, model_cls: type[BaseModelT]) -> BaseModelT:
     return model_cls.model_validate(value, from_attributes=True)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/reference_trajectories.py	17056
+===BEGIN_FILE===	pywp/reference_trajectories.py	23001
 from __future__ import annotations
 
 import math
 import re
 from io import StringIO
+from pathlib import Path
 from typing import Iterable, Mapping
 
 import numpy as np
@@ -26718,6 +27435,7 @@ from pywp.constants import SMALL
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackRecord,
+    decode_welltrack_bytes,
     parse_welltrack_text,
 )
 from pywp.mcm import add_dls
@@ -26966,6 +27684,167 @@ def parse_reference_trajectory_welltrack_text(
     )
 
 
+def parse_reference_trajectory_dev_text(
+    text: str,
+    *,
+    well_name: str,
+    kind: str,
+) -> ImportedTrajectoryWell:
+    source = str(text or "")
+    normalized_kind = normalize_reference_well_kind(kind)
+    normalized_name = str(well_name or "").strip()
+    if not normalized_name:
+        raise WelltrackParseError(".dev: имя скважины не задано.")
+
+    xs: list[float] = []
+    ys: list[float] = []
+    zs: list[float] = []
+    mds: list[float] = []
+    for line_no, raw_line in enumerate(source.splitlines(), start=1):
+        line = str(raw_line).strip()
+        if not line or line.startswith("#"):
+            continue
+        tokens = _split_reference_text_line(line)
+        if not tokens:
+            continue
+        try:
+            md = float(tokens[0])
+        except ValueError:
+            continue
+        if len(tokens) < 4:
+            raise WelltrackParseError(
+                f".dev '{normalized_name}': строка {line_no} содержит MD, "
+                "но не содержит обязательные X Y Z."
+            )
+        try:
+            x = float(tokens[1])
+            y = float(tokens[2])
+            z = float(tokens[3])
+        except ValueError as exc:
+            raise WelltrackParseError(
+                f".dev '{normalized_name}': не удалось прочитать X Y Z "
+                f"в строке {line_no}."
+            ) from exc
+        mds.append(md)
+        xs.append(x)
+        ys.append(y)
+        zs.append(z)
+
+    if len(mds) < 2:
+        raise WelltrackParseError(
+            f".dev '{normalized_name}': требуется минимум 2 числовые "
+            "станции."
+        )
+    stations = build_reference_trajectory_stations(
+        xs=xs,
+        ys=ys,
+        zs=zs,
+        mds=mds,
+    )
+    return ImportedTrajectoryWell(
+        name=normalized_name,
+        kind=normalized_kind,
+        stations=stations,
+        surface=Point3D(
+            x=float(stations["X_m"].iloc[0]),
+            y=float(stations["Y_m"].iloc[0]),
+            z=float(stations["Z_m"].iloc[0]),
+        ),
+        azimuth_deg=float(_infer_reference_azimuth_deg(stations)),
+    )
+
+
+def parse_reference_trajectory_dev_file(
+    path: str | Path,
+    *,
+    kind: str,
+) -> ImportedTrajectoryWell:
+    source_path = Path(path).expanduser()
+    try:
+        raw = source_path.read_bytes()
+    except OSError as exc:
+        raise WelltrackParseError(
+            f"Не удалось прочитать .dev файл `{source_path}`: {exc}"
+        ) from exc
+    text, _encoding = decode_welltrack_bytes(raw)
+    return parse_reference_trajectory_dev_text(
+        text,
+        well_name=source_path.stem,
+        kind=kind,
+    )
+
+
+def parse_reference_trajectory_dev_directories(
+    directories: Iterable[str | Path],
+    *,
+    kind: str,
+) -> list[ImportedTrajectoryWell]:
+    normalized_kind = normalize_reference_well_kind(kind)
+    source_dirs = [
+        Path(str(directory).strip()).expanduser()
+        for directory in directories
+        if str(directory).strip()
+    ]
+    if not source_dirs:
+        raise WelltrackParseError(
+            "Укажите путь хотя бы к одной папке "
+            "с .dev файлами."
+        )
+
+    dev_files: list[Path] = []
+    unique_source_dirs: list[Path] = []
+    seen_dir_keys: set[str] = set()
+    for source_dir in source_dirs:
+        if not source_dir.exists():
+            raise WelltrackParseError(f"Папка .dev не найдена: `{source_dir}`.")
+        if not source_dir.is_dir():
+            raise WelltrackParseError(
+                f"Путь .dev не является папкой: `{source_dir}`."
+            )
+        dir_key = str(source_dir.resolve())
+        if dir_key in seen_dir_keys:
+            continue
+        seen_dir_keys.add(dir_key)
+        unique_source_dirs.append(source_dir)
+        dev_files.extend(
+            sorted(
+                (
+                    child
+                    for child in source_dir.iterdir()
+                    if child.is_file() and child.suffix.lower() == ".dev"
+                ),
+                key=lambda item: item.name.lower(),
+            )
+        )
+
+    if not dev_files:
+        joined_dirs = ", ".join(f"`{item}`" for item in unique_source_dirs)
+        raise WelltrackParseError(
+            f"В папках {joined_dirs} не найдено .dev файлов."
+        )
+
+    wells: list[ImportedTrajectoryWell] = []
+    seen_names: dict[str, Path] = {}
+    for dev_file in dev_files:
+        well_name = dev_file.stem
+        well_key = well_name.casefold()
+        previous_path = seen_names.get(well_key)
+        if previous_path is not None:
+            raise WelltrackParseError(
+                "Найдено несколько .dev файлов с одинаковым "
+                "именем скважины "
+                f"`{well_name}`: `{previous_path}` и `{dev_file}`."
+            )
+        seen_names[well_key] = dev_file
+        wells.append(
+            parse_reference_trajectory_dev_file(
+                dev_file,
+                kind=normalized_kind,
+            )
+        )
+    return wells
+
+
 def reference_welltrack_records_to_wells(
     records: Iterable[WelltrackRecord],
     *,
@@ -27081,6 +27960,37 @@ def normalize_reference_well_kind(value: object, *, row_no: int | None = None) -
 
 def reference_well_display_label(well: ImportedTrajectoryWell) -> str:
     return f"{str(well.name)} ({REFERENCE_WELL_KIND_LABELS.get(str(well.kind), str(well.kind))})"
+
+
+def reference_well_duplicate_name_keys(
+    wells: Iterable[ImportedTrajectoryWell],
+) -> set[str]:
+    name_counts: dict[str, int] = {}
+    for well in wells:
+        key = str(well.name).strip().casefold()
+        if not key:
+            continue
+        name_counts[key] = int(name_counts.get(key, 0)) + 1
+    return {key for key, count in name_counts.items() if int(count) > 1}
+
+
+def reference_well_collision_name(
+    well: ImportedTrajectoryWell,
+    *,
+    planned_names: Iterable[str] = (),
+    duplicate_name_keys: set[str] | None = None,
+) -> str:
+    name = str(well.name)
+    name_key = name.strip().casefold()
+    planned_name_keys = {
+        str(item).strip().casefold()
+        for item in planned_names
+        if str(item).strip()
+    }
+    duplicate_keys = set(duplicate_name_keys or set())
+    if name_key in planned_name_keys or name_key in duplicate_keys:
+        return reference_well_display_label(well)
+    return name
 
 
 def reference_wells_to_table_rows(
@@ -28615,7 +29525,7 @@ class FastReplan {
 // window.updateLineGeometry = updateLineGeometry;
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	127803
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	132234
 <!doctype html>
 <html lang="en">
   <head>
@@ -29105,6 +30015,24 @@ class FastReplan {
         font-size: 11px;
         font-weight: 700;
         letter-spacing: 0.02em;
+      }
+
+      .scene-label.pad-first-surface-label {
+        min-width: 11px;
+        height: 12px;
+        padding: 0 2px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.82);
+        border: none;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+        color: #0f172a;
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 9px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        line-height: 12px;
+        text-align: center;
+        text-shadow: none;
       }
 
       .tooltip-head {
@@ -29820,7 +30748,7 @@ class FastReplan {
           },
           {
             key: "z",
-            label: "Z / TVD",
+            label: "Z",
             color: "#1D4ED8",
             vector: new THREE.Vector3(0, 0, -1),
           },
@@ -29862,7 +30790,9 @@ class FastReplan {
               const dy = item.y - centerY;
               const labelX = item.x + (Math.abs(dx) < 4 ? 0 : Math.sign(dx) * 7);
               const labelY = item.y + (Math.abs(dy) < 4 ? 0 : Math.sign(dy) * 7);
-              return `<text class="axes-gizmo-label" x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" fill="${item.color}" text-anchor="${dx >= 0 ? "start" : "end"}">${item.label}</text>`;
+              const textAnchor =
+                Math.abs(dx) < 6 ? "middle" : dx > 0 ? "start" : "end";
+              return `<text class="axes-gizmo-label" x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" fill="${item.color}" text-anchor="${textAnchor}">${item.label}</text>`;
             })
             .join("");
           axesGizmoElement.innerHTML =
@@ -30056,11 +30986,11 @@ class FastReplan {
           }
           button.addEventListener("click", () => {
             if (editableIndex !== null) {
-              selectEditWell(editableIndex, { focus: true });
+              selectEditWell(editableIndex, { focus: !editModeActive });
               return;
             }
             const targetBounds = focusTargets[String(item.id || "")];
-            if (targetBounds) {
+            if (targetBounds && !editModeActive) {
               fitCameraToRawBounds(targetBounds);
             }
           });
@@ -30593,12 +31523,16 @@ class FastReplan {
               ? 12
               : role === "reference_label"
               ? 10
+              : role === "pad_first_surface_label"
+              ? 12
               : 0;
+          const extraClassName =
+            role === "pad_first_surface_label" ? "pad-first-surface-label" : "";
           addSceneLabel(
             String(item.text || ""),
             position,
             String(item.color || "#0f172a"),
-            "",
+            extraClassName,
             { offsetY: offsetY },
           );
         }
@@ -30879,6 +31813,7 @@ class FastReplan {
         let editRotateCenterDisplay = null;
         let editRotateHistoryStartState = null;
         let editRotateStartVector = null;
+        let editRotateStartPreviewPoints = null;
         let editHasAnyChange = false;
         let selectedEditWellIndex = editWells.length > 0 ? 0 : null;
         let editBroadcastChannel = null;
@@ -31640,6 +32575,8 @@ class FastReplan {
               color: color,
               transparent: true,
               opacity: 0.92,
+              depthTest: false,
+              depthWrite: false,
               linewidth: 1,
             });
             const lineObj = new THREE.LineSegments(lineGeometry, lineMaterial);
@@ -31869,6 +32806,95 @@ class FastReplan {
           syncEditVisibility();
         }
 
+        function dataPointDistance(left, right) {
+          return Math.hypot(
+            Number(left[0]) - Number(right[0]),
+            Number(left[1]) - Number(right[1]),
+            Number(left[2]) - Number(right[2]),
+          );
+        }
+
+        function nearestPreviewPointIndex(points, target) {
+          let bestIndex = 0;
+          let bestDistance = Number.POSITIVE_INFINITY;
+          points.forEach((point, index) => {
+            const distance = dataPointDistance(point, target);
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestIndex = index;
+            }
+          });
+          return bestIndex;
+        }
+
+        function rotatePointAroundPivotXY(point, pivot, angle) {
+          const dx = Number(point[0]) - Number(pivot[0]);
+          const dy = Number(point[1]) - Number(pivot[1]);
+          const cosA = Math.cos(angle);
+          const sinA = Math.sin(angle);
+          return [
+            Number(pivot[0]) + dx * cosA - dy * sinA,
+            Number(pivot[1]) + dx * sinA + dy * cosA,
+            Number(point[2]),
+          ];
+        }
+
+        function rotatedPreviewTrajectoryPoints(wellIndex, deltaAngle, nextT1, nextT3) {
+          if (
+            !Array.isArray(editRotateStartPreviewPoints) ||
+            editRotateStartPreviewPoints.length < 3 ||
+            !editRotateHistoryStartState
+          ) {
+            return null;
+          }
+          const startT1 = editRotateHistoryStartState.t1;
+          const rawT1Index = nearestPreviewPointIndex(
+            editRotateStartPreviewPoints,
+            startT1,
+          );
+          const t1Index = Math.min(
+            Math.max(rawT1Index, 1),
+            editRotateStartPreviewPoints.length - 2,
+          );
+          const rotated = editRotateStartPreviewPoints.map((point, index) => {
+            if (!Array.isArray(point) || point.length < 3) {
+              return null;
+            }
+            if (index < t1Index) {
+              return copyEditPoint(point);
+            }
+            if (index === t1Index) {
+              return copyEditPoint(nextT1);
+            }
+            return rotatePointAroundPivotXY(point, startT1, deltaAngle);
+          }).filter(Boolean);
+          if (rotated.length < 2) {
+            return null;
+          }
+          rotated[0] = copyEditPoint((editWells[wellIndex] || {}).surface || rotated[0]);
+          rotated[rotated.length - 1] = copyEditPoint(nextT3);
+          return rotated;
+        }
+
+        function rebuildRotatedPreviewTrajectory(wellIndex, deltaAngle, nextT1, nextT3) {
+          const rotatedPoints = rotatedPreviewTrajectoryPoints(
+            wellIndex,
+            deltaAngle,
+            nextT1,
+            nextT3,
+          );
+          if (rotatedPoints && rotatedPoints.length >= 2) {
+            updateLineGeometry(
+              editLineObjects[wellIndex],
+              rotatedPoints,
+              Z_DISPLAY_SIGN,
+            );
+            syncEditVisibility();
+            return;
+          }
+          rebuildPreviewTrajectory(wellIndex);
+        }
+
         function showEditFeedback() {
           editHasAnyChange = editDirtyFlags.some(Boolean);
           editSaveBtn.classList.toggle(
@@ -31936,6 +32962,14 @@ class FastReplan {
           editRotateWellIndex = wellIndex;
           editRotateHistoryStartState = startState;
           editRotateStartVector = startVector;
+          try {
+            editRotateStartPreviewPoints = editReplanners[wellIndex].compute(
+              startState.t1,
+              startState.t3,
+            );
+          } catch (e) {
+            editRotateStartPreviewPoints = null;
+          }
           editRotateCenterDisplay = editRotationCenterDisplay(wellIndex);
           editRotatePlaneZ = editRotateCenterDisplay.z;
           editRotateStartAngle = pointerAngleAroundCenter(
@@ -31986,7 +33020,12 @@ class FastReplan {
           nextT3[2] = editRotateStartVector.z;
           updateWellEditTargets(editRotateWellIndex, nextT1, nextT3);
           editDirtyFlags[editRotateWellIndex] = isEditWellDirty(editRotateWellIndex);
-          rebuildPreviewTrajectory(editRotateWellIndex);
+          rebuildRotatedPreviewTrajectory(
+            editRotateWellIndex,
+            deltaAngle,
+            nextT1,
+            nextT3,
+          );
           resetEditSaveButtonState();
           syncEditVisibility();
           showEditFeedback();
@@ -32008,6 +33047,7 @@ class FastReplan {
           editRotateCenterDisplay = null;
           editRotateHistoryStartState = null;
           editRotateStartVector = null;
+          editRotateStartPreviewPoints = null;
           interactionActive = false;
           syncEditRotationControls();
           try {
@@ -36733,7 +37773,7 @@ def _align_ring_for_continuity(
     return best_ring
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/visualization.py	39106
+===BEGIN_FILE===	pywp/visualization.py	39102
 from __future__ import annotations
 
 import numpy as np
@@ -36783,7 +37823,7 @@ FALLBACK_SEGMENT_COLORS = (
 HOVER_TEMPLATE_XYZ_MD_DLS = (
     "X: %{customdata[0]} m<br>"
     "Y: %{customdata[1]} m<br>"
-    "Z/TVD: %{customdata[2]} m<br>"
+    "Z: %{customdata[2]} m<br>"
     "MD: %{customdata[3]} m<br>"
     "ПИ: %{customdata[4]} deg/10m"
     "<extra>%{fullData.name}</extra>"
@@ -37873,7 +38913,7 @@ def dls_figure(
     return fig
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/well_pad.py	9600
+===BEGIN_FILE===	pywp/well_pad.py	11453
 from __future__ import annotations
 
 import math
@@ -37919,6 +38959,7 @@ class PadLayoutPlan(FrozenModel):
     spacing_m: float
     nds_azimuth_deg: float
     surface_anchor_mode: str = PAD_SURFACE_ANCHOR_FIRST
+    fixed_slots: tuple[tuple[int, str], ...] = ()
 
 
 def detect_well_pads(
@@ -38060,14 +39101,68 @@ def estimate_pad_nds_azimuth_deg(
     return _vector_to_azimuth_deg(dx=float(unit[0]), dy=float(unit[1]))
 
 
-def ordered_pad_wells(pad: WellPad, *, nds_azimuth_deg: float) -> list[PadWell]:
+def _normalized_fixed_slots(
+    *,
+    wells: tuple[PadWell, ...],
+    fixed_slots: Iterable[tuple[int, str]] | None,
+) -> tuple[tuple[int, str], ...]:
+    well_names = {str(well.name) for well in wells}
+    max_slot = len(wells)
+    used_slots: set[int] = set()
+    used_names: set[str] = set()
+    normalized: list[tuple[int, str]] = []
+    for raw_slot, raw_name in fixed_slots or ():
+        try:
+            slot = int(raw_slot)
+        except (TypeError, ValueError):
+            continue
+        name = str(raw_name).strip()
+        if (
+            slot < 1
+            or slot > max_slot
+            or name not in well_names
+            or slot in used_slots
+            or name in used_names
+        ):
+            continue
+        used_slots.add(slot)
+        used_names.add(name)
+        normalized.append((slot, name))
+    return tuple(sorted(normalized, key=lambda item: item[0]))
+
+
+def ordered_pad_wells(
+    pad: WellPad,
+    *,
+    nds_azimuth_deg: float,
+    fixed_slots: Iterable[tuple[int, str]] | None = None,
+) -> list[PadWell]:
     ux, uy = _azimuth_to_unit_xy(azimuth_deg=nds_azimuth_deg)
     sortable: list[tuple[float, str, PadWell]] = []
     for well in pad.wells:
         projection = float(well.midpoint_x * ux + well.midpoint_y * uy)
         sortable.append((projection, str(well.name), well))
     sortable.sort(key=lambda item: (item[0], item[1]))
-    return [item[2] for item in sortable]
+    base_order = [item[2] for item in sortable]
+    normalized_fixed_slots = _normalized_fixed_slots(
+        wells=pad.wells,
+        fixed_slots=fixed_slots,
+    )
+    if not normalized_fixed_slots:
+        return base_order
+
+    well_by_name = {str(well.name): well for well in pad.wells}
+    fixed_names = {name for _, name in normalized_fixed_slots}
+    ordered: list[PadWell | None] = [None] * len(base_order)
+    for slot, name in normalized_fixed_slots:
+        ordered[int(slot) - 1] = well_by_name[name]
+
+    remaining = [well for well in base_order if str(well.name) not in fixed_names]
+    remaining_iter = iter(remaining)
+    for index, item in enumerate(ordered):
+        if item is None:
+            ordered[index] = next(remaining_iter)
+    return [well for well in ordered if well is not None]
 
 
 def apply_pad_layout(
@@ -38089,7 +39184,9 @@ def apply_pad_layout(
         spacing_m = float(max(plan.spacing_m, 0.0))
         ux, uy = _azimuth_to_unit_xy(azimuth_deg=float(plan.nds_azimuth_deg))
         ordered = ordered_pad_wells(
-            pad=pad, nds_azimuth_deg=float(plan.nds_azimuth_deg)
+            pad=pad,
+            nds_azimuth_deg=float(plan.nds_azimuth_deg),
+            fixed_slots=tuple(plan.fixed_slots),
         )
         anchor_mode = str(
             getattr(plan, "surface_anchor_mode", PAD_SURFACE_ANCHOR_FIRST)
@@ -41198,7 +42295,7 @@ def test_min_kop_calculation() -> None:
     assert min_kop_tight > min_kop_gentle
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_anticollision.py	65941
+===BEGIN_FILE===	tests/test_anticollision.py	70028
 from __future__ import annotations
 
 import numpy as np
@@ -41867,6 +42964,111 @@ def test_runtime_analysis_supports_reference_trajectory_wells_without_target_ove
     assert analysis.target_overlap_pair_count == 0
 
 
+def test_runtime_analysis_disambiguates_reference_name_matching_planned_well() -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-A",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config={"optimization_mode": "none", "kop_min_vertical_m": 550.0},
+    )
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "WELL-A", "Type": "actual", "X": 0.0, "Y": 5.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "WELL-A", "Type": "actual", "X": 1000.0, "Y": 5.0, "Z": 0.0, "MD": 1000.0},
+                {"Wellname": "WELL-A", "Type": "actual", "X": 2000.0, "Y": 5.0, "Z": 0.0, "MD": 2000.0},
+            ]
+        )
+    )
+    reference_model = build_anti_collision_well(
+        name="TMP",
+        color="#000000",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+    ).overlay.model
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=reference_model,
+        name_to_color={"WELL-A": "#123456"},
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert [(well.name, well.well_kind) for well in analysis.wells] == [
+        ("WELL-A", "project"),
+        ("WELL-A (Фактическая)", "actual"),
+    ]
+    assert [well.color for well in analysis.wells] == ["#123456", "#6B7280"]
+    assert analysis.pair_count == 1
+    assert all(corridor.well_a != corridor.well_b for corridor in analysis.corridors)
+
+
+def test_runtime_analysis_disambiguates_actual_and_approved_same_stem() -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config={"optimization_mode": "none", "kop_min_vertical_m": 550.0},
+    )
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "DUP", "Type": "actual", "X": 0.0, "Y": 5.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "DUP", "Type": "actual", "X": 1000.0, "Y": 5.0, "Z": 0.0, "MD": 1000.0},
+                {"Wellname": "DUP", "Type": "approved", "X": 0.0, "Y": 6.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "DUP", "Type": "approved", "X": 1000.0, "Y": 6.0, "Z": 0.0, "MD": 1000.0},
+            ]
+        )
+    )
+    reference_model = build_anti_collision_well(
+        name="TMP",
+        color="#000000",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+    ).overlay.model
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=reference_model,
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert [well.name for well in analysis.wells] == [
+        "WELL-P",
+        "DUP (Фактическая)",
+        "DUP (Проектная утвержденная)",
+    ]
+    assert analysis.pair_count == 2
+    compared_pairs = {
+        tuple(sorted((corridor.well_a, corridor.well_b)))
+        for corridor in analysis.corridors
+    }
+    assert ("DUP (Фактическая)", "WELL-P") in compared_pairs
+    assert ("DUP (Проектная утвержденная)", "WELL-P") in compared_pairs
+
+
 def test_runtime_analysis_skips_reference_to_reference_pairs() -> None:
     calculated_well = build_anti_collision_well(
         name="WELL-A",
@@ -42018,7 +43220,10 @@ def test_recommendations_prioritize_target_spacing_for_target_overlap() -> None:
     assert recommendations[0].category == RECOMMENDATION_TARGET_SPACING
     assert recommendations[0].required_spacing_t1_m is not None
     assert recommendations[0].can_prepare_rerun is False
+    assert "2σ overlap" not in recommendations[0].summary
+    assert "увеличьте расстояние между конфликтными участками" in recommendations[0].summary
     assert rows[0]["Тип действия"] == "Цели / spacing"
+    assert "Рекомендация по устранению" in rows[0]
     assert rows[0]["Подготовка пересчета"] == "Только рекомендация по целям"
 
 
@@ -43980,9 +45185,10 @@ def test_minimum_curvature_increment_rejects_near_180_degree_dogleg() -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_pad_optimization.py	2312
+===BEGIN_FILE===	tests/test_pad_optimization.py	10284
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -44001,6 +45207,276 @@ def test_optimize_pad_order_no_records():
     def cb(pct, msg): pass
     res_rec, res_suc, improved = optimize_pad_order(records, successes, set(), model, [], {}, cb)
     assert not improved
+
+
+def test_optimize_pad_order_does_not_swap_fixed_wells(monkeypatch) -> None:
+    records = [
+        WelltrackRecord(
+            name="FIXED",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=500.0, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1000.0, y=0.0, z=2100.0, md=3000.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="MOVE-A",
+            points=(
+                WelltrackPoint(x=20.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=520.0, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1020.0, y=0.0, z=2100.0, md=3000.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="MOVE-B",
+            points=(
+                WelltrackPoint(x=40.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=540.0, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1040.0, y=0.0, z=2100.0, md=3000.0),
+            ),
+        ),
+    ]
+    success_dict = {str(record.name): object() for record in records}
+    analysis = SimpleNamespace(
+        zones=(
+            SimpleNamespace(
+                well_a="FIXED",
+                well_b="MOVE-A",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                separation_factor=0.25,
+            ),
+        )
+    )
+    calls: list[tuple[str, str]] = []
+
+    class DummyPool:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def shutdown(self, *, wait: bool = True) -> None:
+            pass
+
+    def fake_swap(
+        _records,
+        _successes,
+        name_a,
+        name_b,
+        _config_by_name,
+        pool=None,
+    ):
+        calls.append((str(name_a), str(name_b)))
+        return None
+
+    monkeypatch.setattr(pad_optimization, "ProcessPoolExecutor", DummyPool)
+    monkeypatch.setattr(
+        pad_optimization,
+        "_build_ac_well_light",
+        lambda _success, _model: object(),
+    )
+    monkeypatch.setattr(
+        pad_optimization,
+        "_analyze_from_ac_wells",
+        lambda _ac_wells, _ref_ac_wells: analysis,
+    )
+    monkeypatch.setattr(
+        pad_optimization,
+        "_swap_surfaces_and_recalculate",
+        fake_swap,
+    )
+
+    _, _, improved = optimize_pad_order(
+        records=records,
+        success_dict=success_dict,
+        pad_well_names={"FIXED", "MOVE-A", "MOVE-B"},
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        reference_wells=[],
+        config_by_name={},
+        progress_callback=lambda _pct, _msg: None,
+        fixed_well_names={"FIXED"},
+    )
+
+    assert improved is False
+    assert calls == [("MOVE-A", "MOVE-B")]
+
+
+def test_optimize_pad_order_ignores_fixed_fixed_score_floor(monkeypatch) -> None:
+    records = [
+        WelltrackRecord(
+            name="FIXED-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=500.0, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1000.0, y=0.0, z=2100.0, md=3000.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="FIXED-B",
+            points=(
+                WelltrackPoint(x=10.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=510.0, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1010.0, y=0.0, z=2100.0, md=3000.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="MOVE-A",
+            points=(
+                WelltrackPoint(x=20.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=520.0, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1020.0, y=0.0, z=2100.0, md=3000.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="MOVE-B",
+            points=(
+                WelltrackPoint(x=40.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=540.0, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1040.0, y=0.0, z=2100.0, md=3000.0),
+            ),
+        ),
+    ]
+    success_dict = {str(record.name): object() for record in records}
+    initial_analysis = SimpleNamespace(
+        zones=(
+            SimpleNamespace(
+                well_a="FIXED-A",
+                well_b="FIXED-B",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                separation_factor=0.10,
+            ),
+            SimpleNamespace(
+                well_a="MOVE-A",
+                well_b="MOVE-B",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                separation_factor=0.50,
+            ),
+        )
+    )
+    candidate_analysis = SimpleNamespace(
+        zones=(
+            SimpleNamespace(
+                well_a="FIXED-A",
+                well_b="FIXED-B",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                separation_factor=0.10,
+            ),
+            SimpleNamespace(
+                well_a="MOVE-A",
+                well_b="MOVE-B",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                separation_factor=0.80,
+            ),
+        )
+    )
+    analyze_calls = 0
+    swap_calls: list[tuple[str, str]] = []
+
+    class DummyPool:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def shutdown(self, *, wait: bool = True) -> None:
+            pass
+
+    def fake_analyze(_ac_wells, _ref_ac_wells):
+        nonlocal analyze_calls
+        analyze_calls += 1
+        if analyze_calls <= 2:
+            return initial_analysis
+        return candidate_analysis
+
+    def fake_swap(
+        _records,
+        successes,
+        name_a,
+        name_b,
+        _config_by_name,
+        pool=None,
+    ):
+        swap_calls.append((str(name_a), str(name_b)))
+        return list(_records), dict(successes)
+
+    monkeypatch.setattr(pad_optimization, "ProcessPoolExecutor", DummyPool)
+    monkeypatch.setattr(
+        pad_optimization,
+        "_build_ac_well_light",
+        lambda success, _model: success,
+    )
+    monkeypatch.setattr(pad_optimization, "_analyze_from_ac_wells", fake_analyze)
+    monkeypatch.setattr(
+        pad_optimization,
+        "_swap_surfaces_and_recalculate",
+        fake_swap,
+    )
+
+    _, _, improved = optimize_pad_order(
+        records=records,
+        success_dict=success_dict,
+        pad_well_names={"FIXED-A", "FIXED-B", "MOVE-A", "MOVE-B"},
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        reference_wells=[],
+        config_by_name={},
+        progress_callback=lambda _pct, _msg: None,
+        fixed_well_names={"FIXED-A", "FIXED-B"},
+    )
+
+    assert improved is True
+    assert swap_calls == [("MOVE-A", "MOVE-B")]
+
+
+def test_score_analysis_includes_reference_conflicts_touching_movable_pad_wells() -> None:
+    analysis = SimpleNamespace(
+        zones=(
+            SimpleNamespace(
+                well_a="MOVE-A",
+                well_b="FACT-1",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                separation_factor=0.40,
+            ),
+            SimpleNamespace(
+                well_a="OTHER-PAD",
+                well_b="FACT-2",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                separation_factor=0.10,
+            ),
+        )
+    )
+
+    score = pad_optimization.score_analysis(
+        analysis,
+        pad_well_names={"MOVE-A", "MOVE-B"},
+        fixed_well_names=set(),
+    )
+
+    assert score == pytest.approx(0.4004)
+
+
+def test_score_analysis_ignores_reference_conflicts_touching_only_fixed_pad_wells() -> None:
+    analysis = SimpleNamespace(
+        zones=(
+            SimpleNamespace(
+                well_a="FIXED-A",
+                well_b="FACT-1",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                separation_factor=0.10,
+            ),
+        )
+    )
+
+    score = pad_optimization.score_analysis(
+        analysis,
+        pad_well_names={"FIXED-A", "MOVE-A"},
+        fixed_well_names={"FIXED-A"},
+    )
+
+    assert score == float("inf")
 
 
 @pytest.mark.integration
@@ -46366,7 +47842,7 @@ def test_generated_stress_reference_welltracks_have_expected_sizes() -> None:
     assert project_records[0].name == "PROJECT_001"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_reference_trajectories.py	5073
+===BEGIN_FILE===	tests/test_reference_trajectories.py	8128
 from __future__ import annotations
 
 import pytest
@@ -46376,6 +47852,8 @@ from pywp.reference_trajectories import (
     REFERENCE_WELL_ACTUAL,
     REFERENCE_WELL_APPROVED,
     build_reference_trajectory_stations,
+    parse_reference_trajectory_dev_directories,
+    parse_reference_trajectory_dev_text,
     parse_reference_trajectory_table,
     parse_reference_trajectory_text,
     parse_reference_trajectory_text_with_kind,
@@ -46507,6 +47985,91 @@ def test_parse_reference_trajectory_welltrack_text_builds_reference_wells() -> N
     assert len(wells) == 1
     assert wells[0].kind == REFERENCE_WELL_APPROVED
     assert wells[0].name == "APP-1"
+
+
+def test_parse_reference_trajectory_dev_text_uses_md_xyz_columns() -> None:
+    well = parse_reference_trajectory_dev_text(
+        "\n".join(
+            [
+                "# SURVEY FROM PETRAL",
+                "MD X Y Z TVD DX DY AZIM_TN INCL DLS AZIM_GN",
+                "0.0 606207.5 7409801.6 40.9 0.0 0.0 0.0 0.0 0.0 0.0 357.8",
+                "100.0 606208.5 7409803.6 -59.1 100.0 1.0 2.0 10.0 1.0 0.1 7.8",
+                "250.0 606220.5 7409810.6 -209.1 250.0 13.0 9.0 20.0 3.0 0.2 17.8",
+            ]
+        ),
+        well_name="well_111",
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+
+    assert well.name == "well_111"
+    assert well.kind == REFERENCE_WELL_ACTUAL
+    assert list(well.stations["MD_m"]) == [0.0, 100.0, 250.0]
+    assert list(well.stations["X_m"]) == [606207.5, 606208.5, 606220.5]
+    assert list(well.stations["Y_m"]) == [7409801.6, 7409803.6, 7409810.6]
+    assert list(well.stations["Z_m"]) == [40.9, -59.1, -209.1]
+
+
+def test_parse_reference_trajectory_dev_directories_uses_filename_stems(
+    tmp_path,
+) -> None:
+    folder_a = tmp_path / "actual_a"
+    folder_b = tmp_path / "actual_b"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    dev_text = "\n".join(
+        [
+            "MD X Y Z",
+            "0 100 200 0",
+            "100 110 210 -100",
+            "200 130 230 -200",
+        ]
+    )
+    (folder_a / "well_111.dev").write_text(dev_text, encoding="utf-8")
+    (folder_a / "well_222.dev").write_text(dev_text, encoding="utf-8")
+    (folder_b / "well_333.dev").write_text(dev_text, encoding="utf-8")
+
+    wells = parse_reference_trajectory_dev_directories(
+        [folder_a, folder_b],
+        kind=REFERENCE_WELL_APPROVED,
+    )
+
+    assert [well.name for well in wells] == ["well_111", "well_222", "well_333"]
+    assert all(well.kind == REFERENCE_WELL_APPROVED for well in wells)
+
+
+def test_parse_reference_trajectory_dev_directories_rejects_duplicate_stems(
+    tmp_path,
+) -> None:
+    folder_a = tmp_path / "actual_a"
+    folder_b = tmp_path / "actual_b"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    dev_text = "\n".join(["MD X Y Z", "0 0 0 0", "100 1 1 -100"])
+    (folder_a / "well_111.dev").write_text(dev_text, encoding="utf-8")
+    (folder_b / "WELL_111.dev").write_text(dev_text, encoding="utf-8")
+
+    with pytest.raises(WelltrackParseError, match="одинаковым именем"):
+        parse_reference_trajectory_dev_directories(
+            [folder_a, folder_b],
+            kind=REFERENCE_WELL_ACTUAL,
+        )
+
+
+def test_parse_reference_trajectory_dev_directories_deduplicates_same_folder(
+    tmp_path,
+) -> None:
+    folder = tmp_path / "actual"
+    folder.mkdir()
+    dev_text = "\n".join(["MD X Y Z", "0 0 0 0", "100 1 1 -100"])
+    (folder / "well_111.dev").write_text(dev_text, encoding="utf-8")
+
+    wells = parse_reference_trajectory_dev_directories(
+        [folder, folder, str(folder) + "/"],
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+
+    assert [well.name for well in wells] == ["well_111"]
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_segments.py	7246
@@ -47018,7 +48581,7 @@ def test_parse_solver_error_formats_exact_target_delta_for_direct_miss() -> None
     assert "dZ=0.57 м" in rows[0]["Причина"]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	10219
+===BEGIN_FILE===	tests/test_three_viewer.py	10794
 from __future__ import annotations
 
 from pathlib import Path
@@ -47057,10 +48620,12 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "position.z += labelLift;" not in html
     assert "X / East" in html
     assert "Y / North" in html
-    assert "Z / TVD" in html
+    assert 'label: "Z"' in html
+    assert "Z / TVD" not in html
     assert "scene-axis-label" in html
     assert "function updateAxesGizmo()" in html
     assert "camera.quaternion.clone().invert()" in html
+    assert 'Math.abs(dx) < 6 ? "middle"' in html
     assert "#legend.is-collapsed" in html
     assert "function syncLegendVisibility()" in html
     assert "payload.legend_tree" in html
@@ -47068,7 +48633,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function fitCameraToRawBounds(rawBounds)" in html
     assert "function editWellTargetFocusBounds(index)" in html
     assert "function fitCameraToEditWellTargets(index)" in html
-    assert "selectEditWell(editableIndex, { focus: true })" in html
+    assert "selectEditWell(editableIndex, { focus: !editModeActive })" in html
+    assert "targetBounds && !editModeActive" in html
     assert "fitCameraToEditWellTargets(nextIndex)" in html
     assert "data-edit-well-index" in html
     assert "function selectEditWell(index, options)" in html
@@ -47096,6 +48662,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "multiplyScalar(0.042)" in html
     assert "function startEditRotationDrag(wellIndex, event)" in html
     assert "function updateEditRotationDrag(event)" in html
+    assert "let editRotateStartPreviewPoints = null;" in html
+    assert "function rotatedPreviewTrajectoryPoints" in html
+    assert "function rebuildRotatedPreviewTrajectory" in html
+    assert "editRotateStartPreviewPoints = editReplanners[wellIndex].compute" in html
+    assert "rebuildRotatedPreviewTrajectory(" in html
     assert "editRotationModeEnabled()" in html
     assert "editRotationPickMeshes" in html
     assert "editDragMoveScope === \"pair\"" in html
@@ -47142,6 +48713,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "numeric: true" in html
     assert "sortedLegendItems(group.children)" in html
     assert "sortedLegendItems(flatItems)" in html
+    assert "pad-first-surface-label" in html
+    assert 'role === "pad_first_surface_label"' in html
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html
@@ -47267,7 +48840,7 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     assert " B " in second
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	7735
+===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	9213
 from __future__ import annotations
 
 import pandas as pd
@@ -47427,7 +49000,7 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
         _successful_plan(name="WELL-B", y_offset_m=25.0),
     ]
     at.session_state["wt_results_view_mode"] = "Все скважины"
-    at.session_state["wt_results_all_view_mode"] = "Траектории"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
     at.run()
 
@@ -47448,6 +49021,36 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
     expander_labels = {str(widget.label) for widget in at.expander}
     assert "Контроль попадания и точность расчета" not in expander_labels
     assert "Технические параметры и диагностика решателя" not in expander_labels
+
+
+def test_ptc_page_defers_anticollision_when_three_edits_are_pending() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "Не рассчитана", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-C", "Статус": "OK", "Проблема": "", "Точек": 3},
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+        _successful_plan(name="WELL-C", y_offset_m=50.0),
+    ]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+    at.session_state["wt_edit_targets_pending_names"] = ["WELL-A"]
+    at.session_state["wt_pending_selected_names"] = ["WELL-A"]
+
+    at.run(timeout=120)
+
+    radio_labels = {str(widget.label) for widget in at.radio}
+    assert "Режим отображения всех скважин" not in radio_labels
+    assert str(at.session_state["wt_results_all_view_mode"]) == "Anti-collision"
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+    metric_labels = {str(widget.label) for widget in at.metric}
+    assert "Пресет неопределенности для anti-collision" not in selectbox_labels
+    assert "Проверено пар" not in metric_labels
 
 
 def test_ptc_page_wraps_reference_well_table_into_expander() -> None:
@@ -47490,9 +49093,6 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     assert "Просмотр фактической скважины" in selectbox_labels
     assert "Просмотр утвержденной проектной скважины" in selectbox_labels
-
-
-
 
 
 ===END_FILE===
@@ -48388,7 +49988,7 @@ def test_runtime_uncertainty_station_samples_keep_small_radius_sections() -> Non
     assert samples[0].md_m == pytest.approx(0.0, abs=1e-9)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_visualization.py	11397
+===BEGIN_FILE===	tests/test_visualization.py	11393
 from __future__ import annotations
 
 import math
@@ -48516,7 +50116,7 @@ def test_plotly_figures_are_constructed() -> None:
         hover = str(trace.hovertemplate)
         assert "X:" in hover
         assert "Y:" in hover
-        assert "Z/TVD:" in hover
+        assert "Z:" in hover
         assert "MD:" in hover
         assert "ПИ:" in hover
 
@@ -48744,7 +50344,7 @@ def test_uncertainty_ellipses_are_rendered_on_3d_plan_and_section_views() -> Non
     assert float(ribbons_section[0].line.width) == 0.0
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_well_pad.py	8938
+===BEGIN_FILE===	tests/test_well_pad.py	11765
 from __future__ import annotations
 
 import math
@@ -48875,6 +50475,56 @@ def test_ordered_pad_wells_uses_projection_along_nds() -> None:
     assert [well.name for well in ordered] == ["W1", "W3", "W2"]
 
 
+def test_ordered_pad_wells_honors_fixed_slots_and_fills_remaining_by_projection() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W3",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=200.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+
+    ordered = ordered_pad_wells(
+        pad=pads[0],
+        nds_azimuth_deg=90.0,
+        fixed_slots=((1, "W2"), (3, "W1")),
+    )
+
+    assert [well.name for well in ordered] == ["W2", "W3", "W1"]
+
+
 def test_apply_pad_layout_rewrites_surface_points() -> None:
     records = [
         _record(
@@ -48925,6 +50575,83 @@ def test_apply_pad_layout_rewrites_surface_points() -> None:
     assert math.isclose(float(s2.y), 500.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(s1.z), 5.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(s2.z), 5.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_apply_pad_layout_uses_fixed_slots_for_surface_positions() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W3",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=200.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+    plan = PadLayoutPlan(
+        pad_id=str(pads[0].pad_id),
+        first_surface_x=1000.0,
+        first_surface_y=500.0,
+        first_surface_z=5.0,
+        spacing_m=20.0,
+        nds_azimuth_deg=90.0,
+        fixed_slots=((1, "W2"), (2, "W1")),
+    )
+
+    updated = apply_pad_layout(
+        records=records,
+        pads=pads,
+        plan_by_pad_id={str(pads[0].pad_id): plan},
+    )
+    updated_by_name = {str(record.name): record for record in updated}
+
+    assert math.isclose(
+        float(updated_by_name["W2"].points[0].x),
+        1000.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert math.isclose(
+        float(updated_by_name["W1"].points[0].x),
+        1020.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert math.isclose(
+        float(updated_by_name["W3"].points[0].x),
+        1040.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
 
 
 def test_apply_pad_layout_can_center_surfaces_about_anchor() -> None:
@@ -51735,7 +53462,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	149973
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	166549
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -52055,6 +53782,91 @@ def test_records_overview_dataframe_detects_missing_surface_s_by_surface_z_heuri
     assert list(overview_df["Статус"]) == ["❌"]
     assert list(overview_df["Точек"]) == [2]
     assert "Не найдена точка `S`" in str(overview_df.iloc[0]["Проблема"])
+
+
+def test_records_overview_table_uses_collapsed_status_expander_without_problems(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+
+    class _DummyColumn:
+        def metric(self, *args, **kwargs):
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(label, *args, **kwargs):
+        captured["label"] = label
+        captured["expanded"] = kwargs.get("expanded")
+        return _DummyExpander()
+
+    def _fake_dataframe(frame, **kwargs):
+        captured["frame"] = frame.copy()
+
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn(), _DummyColumn()),
+    )
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+
+    page._render_records_overview([_records()[0]])
+
+    assert captured["label"] == "Статус загрузки точек целей"
+    assert captured["expanded"] is False
+    assert list(captured["frame"]["Статус"]) == ["✅"]
+
+
+def test_records_overview_status_expander_opens_when_import_has_problems(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    incomplete = WelltrackRecord(
+        name="WELL-X",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+        ),
+    )
+
+    class _DummyColumn:
+        def metric(self, *args, **kwargs):
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(label, *args, **kwargs):
+        captured["label"] = label
+        captured["expanded"] = kwargs.get("expanded")
+        return _DummyExpander()
+
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn(), _DummyColumn()),
+    )
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+
+    page._render_records_overview([_records()[0], incomplete])
+
+    assert captured["label"] == "Статус загрузки точек целей"
+    assert captured["expanded"] is True
 
 
 def test_t1_t3_resolution_message_reports_fixed_and_kept_wells() -> None:
@@ -52561,6 +54373,7 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
     legend_tree = list(overrides["legend_tree"])
     focus_targets = dict(overrides["focus_targets"])
     hidden_labels = set(str(item) for item in overrides["hidden_flat_legend_labels"])
+    first_surface_labels = list(overrides["extra_labels"])
 
     assert [str(item["label"]) for item in legend_tree] == [
         "Куст PAD-01",
@@ -52583,6 +54396,49 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
         "well::PAD2-B",
     }
     assert hidden_labels == {"PAD1-A", "PAD1-B", "PAD2-A", "PAD2-B"}
+    assert [str(item["well_name"]) for item in first_surface_labels] == [
+        "PAD1-A",
+        "PAD2-A",
+    ]
+    assert {str(item["role"]) for item in first_surface_labels} == {
+        "pad_first_surface_label"
+    }
+    assert {str(item["text"]) for item in first_surface_labels} == {"1"}
+    assert first_surface_labels[0]["position"] == [0.0, 0.0, 0.0]
+    assert first_surface_labels[1]["position"] == [5000.0, 0.0, 0.0]
+
+
+def test_trajectory_three_payload_first_surface_label_uses_fixed_pad_order() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "WELL-C"),
+    )
+    successes = [
+        _successful_plan_xy(name="WELL-A", x_offset_m=0.0, y_offset_m=0.0),
+        _successful_plan_xy(name="WELL-B", x_offset_m=0.0, y_offset_m=50.0),
+        _successful_plan_xy(name="WELL-C", x_offset_m=0.0, y_offset_m=100.0),
+    ]
+
+    overrides = page._trajectory_three_payload_overrides(
+        records=records,
+        successes=successes,
+        target_only_wells=[],
+        name_to_color={
+            "WELL-A": "#22c55e",
+            "WELL-B": "#2563eb",
+            "WELL-C": "#f59e0b",
+        },
+    )
+
+    first_surface_labels = list(overrides["extra_labels"])
+    assert [str(item["well_name"]) for item in first_surface_labels] == [
+        "WELL-C"
+    ]
+    assert first_surface_labels[0]["position"] == [0.0, 100.0, 0.0]
 
 
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
@@ -52733,6 +54589,79 @@ def test_reference_trajectory_welltrack_path_import_populates_reference_wells_st
     approved_wells = tuple(at.session_state["wt_reference_approved_wells"])
     assert len(approved_wells) == 1
     assert str(approved_wells[0].name) == "APP-1"
+
+
+def test_reference_trajectory_dev_folder_import_is_default_and_uses_file_names(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    folder_a = tmp_path / "dev_fact_a"
+    folder_b = tmp_path / "dev_fact_b"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    dev_text = "\n".join(
+        [
+            "# SURVEY FROM PETRAL",
+            "MD X Y Z TVD",
+            "0 606207.5 7409801.6 40.9 0",
+            "100 606208.5 7409803.6 -59.1 100",
+            "250 606220.5 7409810.6 -209.1 250",
+        ]
+    )
+    (folder_a / "well_111.dev").write_text(dev_text, encoding="utf-8")
+    (folder_b / "well_222.dev").write_text(dev_text, encoding="utf-8")
+    at.session_state["wt_reference_actual_dev_folder_count"] = 2
+    at.session_state["wt_reference_actual_dev_folder_path_0"] = str(folder_a)
+    at.session_state["wt_reference_actual_dev_folder_path_1"] = str(folder_b)
+
+    at.run(timeout=120)
+    _click_button(at, "Загрузить фактические скважины")
+    at.run(timeout=120)
+
+    actual_wells = tuple(at.session_state["wt_reference_actual_wells"])
+    assert [str(well.name) for well in actual_wells] == ["well_111", "well_222"]
+    assert [float(actual_wells[0].stations["X_m"].iloc[0])] == [606207.5]
+    assert str(at.session_state["ptc_reference_source_mode::actual"]) == "Загрузить .dev"
+
+
+def test_reference_trajectory_dev_import_keeps_actual_and_approved_kinds(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    actual_folder = tmp_path / "dev_fact"
+    approved_folder = tmp_path / "dev_approved"
+    actual_folder.mkdir()
+    approved_folder.mkdir()
+    dev_text = "\n".join(
+        [
+            "MD X Y Z",
+            "0 606207.5 7409801.6 40.9",
+            "100 606208.5 7409803.6 -59.1",
+            "250 606220.5 7409810.6 -209.1",
+        ]
+    )
+    (actual_folder / "well_same.dev").write_text(dev_text, encoding="utf-8")
+    (approved_folder / "well_same.dev").write_text(dev_text, encoding="utf-8")
+    at.session_state["wt_reference_actual_dev_folder_path_0"] = str(actual_folder)
+    at.session_state["wt_reference_approved_dev_folder_path_0"] = str(approved_folder)
+
+    at.run(timeout=120)
+    _click_button(at, "Загрузить фактические скважины")
+    at.run(timeout=120)
+    _click_button(at, "Загрузить проектные утвержденные скважины")
+    at.run(timeout=120)
+
+    reference_wells = tuple(at.session_state["wt_reference_wells"])
+    assert [(str(well.name), str(well.kind)) for well in reference_wells] == [
+        ("well_same", "actual"),
+        ("well_same", "approved"),
+    ]
 
 
 def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> None:
@@ -52940,6 +54869,128 @@ def test_build_pad_plan_map_skips_prepositioned_source_surface_pads() -> None:
     assert plan_map == {}
 
 
+def test_pad_config_preserves_fixed_slots_for_prepositioned_source_pads() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "P1-C"),
+        (2, "P1-A"),
+    )
+
+    refreshed_pads = page._ensure_pad_configs(records)
+    cfg = page._pad_config_for_ui(refreshed_pads[0])
+    fixed_names = page._focus_pad_fixed_well_names(
+        records=records,
+        focus_pad_id=pad_id,
+    )
+
+    assert cfg["fixed_slots"] == ((1, "P1-C"), (2, "P1-A"))
+    assert fixed_names == ("P1-C", "P1-A")
+
+
+def test_build_pad_plan_map_preserves_fixed_pad_slots() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "WELL-B"),
+        (2, "WELL-A"),
+    )
+
+    plan_map = page._build_pad_plan_map(pads)
+
+    assert plan_map[pad_id].fixed_slots == (
+        (1, "WELL-B"),
+        (2, "WELL-A"),
+    )
+
+
+def test_pad_layout_fixed_position_column_uses_slot_selectbox(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    captured: dict[str, object] = {
+        "number_columns": [],
+        "selectbox_columns": [],
+    }
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_data_editor(frame, **kwargs):
+        captured["column_config"] = dict(kwargs.get("column_config", {}))
+        return frame
+
+    def _fake_number_column(label, *args, **kwargs):
+        captured["number_columns"].append(str(label))
+        return {"type": "number", "label": str(label), **kwargs}
+
+    def _fake_selectbox_column(label, *args, **kwargs):
+        captured["selectbox_columns"].append(
+            {"label": str(label), "kwargs": dict(kwargs)}
+        )
+        return {"type": "selectbox", "label": str(label), **kwargs}
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", _fake_data_editor)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st.column_config, "NumberColumn", _fake_number_column)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        _fake_selectbox_column,
+    )
+
+    page._render_pad_layout_panel(list(_records()))
+
+    position_column = captured["column_config"]["Позиция"]
+    position_selectbox = next(
+        item
+        for item in captured["selectbox_columns"]
+        if item["label"] == "Позиция"
+    )
+
+    assert position_column["type"] == "selectbox"
+    assert position_selectbox["kwargs"]["options"] == [1, 2, 3]
+    assert "Позиция" not in captured["number_columns"]
+
+
 def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference() -> (
     None
 ):
@@ -52954,6 +55005,39 @@ def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference()
         "Положения устьев были заданы в исходных данных" in str(widget.value)
         for widget in at.info
     )
+
+
+def test_welltrack_import_source_selector_splits_format_and_welltrack_method() -> (
+    None
+):
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+
+    at.run(timeout=120)
+
+    radios_by_label = {str(widget.label): widget for widget in at.radio}
+    assert list(radios_by_label["Формат импорта"].options) == [
+        "WELLTRACK",
+        "Таблица с точками целей",
+    ]
+    assert radios_by_label["Формат импорта"].value == "WELLTRACK"
+    assert list(radios_by_label["Способ загрузки WELLTRACK"].options) == [
+        "Файл по пути",
+        "Загрузить файл",
+        "Вставить текст",
+    ]
+
+
+def test_welltrack_import_target_table_format_hides_welltrack_method() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_source_format"] = "Таблица с точками целей"
+
+    at.run(timeout=120)
+
+    radio_labels = {str(widget.label) for widget in at.radio}
+    assert radio_labels == {"Формат импорта"}
+    assert [str(widget.label) for widget in at.expander] == [
+        "Таблица точек целей"
+    ]
 
 
 def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
@@ -53245,11 +55329,10 @@ def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None
     assert "MD (из файла), м" not in list(frame.columns)
     assert list(frame.columns) == [
         "Скважина",
-        "Порядок",
         "Точка",
         "X, м",
         "Y, м",
-        "Z/TVD, м",
+        "Z, м",
     ]
 
 
@@ -53267,6 +55350,10 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
         {"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""},
         {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
     ]
+    cached_analysis = {"key": "previous-full-scan"}
+    page.st.session_state["wt_anticollision_analysis_cache"] = cached_analysis
+    page.st.session_state["wt_results_view_mode"] = "Все скважины"
+    page.st.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
     updated = page._apply_edit_targets_changes(
         [
@@ -53301,7 +55388,16 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     assert summary_rows[0]["Статус"] == "Не рассчитана"
     assert summary_rows[1]["Статус"] == "OK"
     assert page.st.session_state["wt_pending_selected_names"] == ["WELL-A"]
+    assert page.st.session_state["wt_edit_targets_pending_names"] == ["WELL-A"]
     assert page.st.session_state["wt_edit_targets_highlight_names"] == ["WELL-A"]
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+    assert page.st.session_state["wt_anticollision_analysis_cache"] is cached_analysis
+    target_only = page._failed_target_only_wells(
+        records=page.st.session_state["wt_records"],
+        summary_rows=summary_rows,
+    )
+    assert [item.name for item in target_only] == ["WELL-A"]
 
     page._store_merged_batch_results(
         records=page.st.session_state["wt_records"],
@@ -53313,7 +55409,9 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
         "WELL-A",
         "WELL-B",
     ]
+    assert page.st.session_state["wt_edit_targets_pending_names"] == []
     assert page.st.session_state["wt_edit_targets_highlight_names"] == []
+    assert page.st.session_state["wt_anticollision_analysis_cache"] == {}
 
 
 def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> None:
@@ -53386,14 +55484,11 @@ def test_focus_all_wells_trajectory_results_sets_detail_three_defaults() -> None
     page._focus_all_wells_trajectory_results()
 
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
-    assert page.st.session_state["wt_results_all_view_mode"] == "Траектории"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
     assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
     assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
 
 
-@pytest.mark.skip(
-    reason="PTC page does not render view mode radio buttons present on the removed welltrack_import page"
-)
 def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
@@ -53427,13 +55522,101 @@ def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
     result_mode = next(
         widget for widget in at.radio if widget.label == "Режим просмотра результатов"
     )
-    all_wells_mode = next(
-        widget
-        for widget in at.radio
-        if widget.label == "Режим отображения всех скважин"
-    )
+    radio_labels = {str(widget.label) for widget in at.radio}
     assert str(result_mode.value) == "Все скважины"
-    assert str(all_wells_mode.value) == "Anti-collision"
+    assert "Режим отображения всех скважин" not in radio_labels
+    assert str(at.session_state["wt_results_all_view_mode"]) == "Anti-collision"
+
+
+def test_batch_summary_moves_survey_downloads_into_inclinometry_expander(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+    ]
+    page.st.session_state["wt_survey_download_selected_names"] = ["WELL-B"]
+    captured: dict[str, object] = {
+        "download_buttons": [],
+        "expanders": [],
+        "multiselect": None,
+    }
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fake_expander(label, *args, **kwargs):
+        captured["expanders"].append(str(label))
+        return _DummyContext()
+
+    def _fake_multiselect(label, options, *args, **kwargs):
+        captured["multiselect"] = {
+            "label": str(label),
+            "options": [str(option) for option in options],
+        }
+        return list(page.st.session_state.get(kwargs.get("key"), []))
+
+    def _fake_download_button(label, *args, **kwargs):
+        captured["download_buttons"].append(
+            {
+                "label": str(label),
+                "data": kwargs.get("data", b""),
+                "disabled": bool(kwargs.get("disabled", False)),
+            }
+        )
+        return False
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "download_button", _fake_download_button)
+
+    page._render_batch_summary(
+        [
+            {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+            {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+        ]
+    )
+
+    downloads = list(captured["download_buttons"])
+    download_labels = {str(item["label"]) for item in downloads}
+    assert "Скачать сводку (CSV)" not in download_labels
+    assert "Инклинометрия скважин" in captured["expanders"]
+    assert captured["multiselect"] == {
+        "label": "Скважины для выгрузки",
+        "options": ["WELL-A", "WELL-B"],
+    }
+    assert download_labels == {
+        "Скачать рассчитанные траектории всех скважин",
+        "Скачать рассчитанные траектории выбранных скважин",
+    }
+    selected_download = next(
+        item
+        for item in downloads
+        if item["label"]
+        == "Скачать рассчитанные траектории выбранных скважин"
+    )
+    selected_csv = bytes(selected_download["data"]).decode("utf-8")
+    assert "WELL-B" in selected_csv
+    assert "WELL-A" not in selected_csv
+    assert selected_download["disabled"] is False
 
 
 @pytest.mark.skip(
@@ -55415,6 +57598,12 @@ def test_clusters_touching_focus_pad_expand_focus_to_neighbor_cluster_wells() ->
 
     assert visible_clusters
     assert set(focus_names) == {"PAD1-A", "PAD2-A"}
+    report_rows = page._report_rows_from_recommendations(
+        recommendations,
+        analysis,
+    )
+    assert report_rows
+    assert "Рекомендация по устранению" in report_rows[0]
 
 
 def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
@@ -55758,7 +57947,7 @@ def test_plotly_3d_payload_decimates_reference_hover_points() -> None:
         hovertemplate=(
             "X: %{x:.2f} m<br>"
             "Y: %{y:.2f} m<br>"
-            "Z/TVD: %{z:.2f} m<br>"
+            "Z: %{z:.2f} m<br>"
             "MD: %{customdata[0]:.2f} m<br>"
             "DLS: %{customdata[1]:.2f} deg/30м<br>"
             "INC: %{customdata[2]:.2f} deg<br>"

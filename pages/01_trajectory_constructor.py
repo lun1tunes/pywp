@@ -38,9 +38,20 @@ PTC_CALC_PARAMS_EXPAND_ONCE_KEY = "ptc_calc_params_expand_once"
 
 
 def _force_ptc_defaults() -> None:
-    st.session_state["wt_log_verbosity"] = str(wt.WT_LOG_COMPACT)
-    st.session_state["wt_3d_render_mode"] = str(wt.WT_3D_RENDER_DETAIL)
-    st.session_state["wt_3d_backend"] = str(wt.WT_3D_BACKEND_THREE_LOCAL)
+    if str(st.session_state.get("wt_log_verbosity", "")).strip() not in set(
+        wt.WT_LOG_LEVEL_OPTIONS
+    ):
+        st.session_state["wt_log_verbosity"] = str(wt.WT_LOG_COMPACT)
+    if str(st.session_state.get("wt_3d_render_mode", "")).strip() not in set(
+        wt.WT_3D_RENDER_OPTIONS
+    ):
+        st.session_state["wt_3d_render_mode"] = str(wt.WT_3D_RENDER_DETAIL)
+    if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(
+        wt.WT_3D_BACKEND_OPTIONS
+    ):
+        st.session_state["wt_3d_backend"] = str(wt.WT_3D_BACKEND_THREE_LOCAL)
+    if wt._pending_edit_target_names():
+        st.session_state["wt_results_view_mode"] = "Все скважины"
     st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     if st.session_state.get("wt_prepared_recommendation_snapshot"):
         st.session_state["wt_prepared_well_overrides"] = {}
@@ -85,18 +96,63 @@ def _render_ptc_import_section() -> None:
 def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
     title = wt._reference_kind_title(kind)
     state_mode_key = f"ptc_reference_source_mode::{kind}"
-    st.session_state.setdefault(state_mode_key, "Путь к WELLTRACK")
+    source_options = [
+        "Загрузить .dev",
+        "Путь к WELLTRACK",
+        "Загрузить WELLTRACK",
+    ]
+    if state_mode_key not in st.session_state:
+        legacy_mode = str(
+            st.session_state.get(wt._reference_source_mode_key(kind), "")
+        ).strip()
+        st.session_state[state_mode_key] = (
+            legacy_mode if legacy_mode in source_options else "Загрузить .dev"
+        )
+    if str(st.session_state.get(state_mode_key, "")).strip() not in set(
+        source_options
+    ):
+        st.session_state[state_mode_key] = "Загрузить .dev"
     mode = st.radio(
         f"Источник для {title.lower()}",
-        options=["Путь к WELLTRACK", "Загрузить WELLTRACK"],
+        options=source_options,
         key=state_mode_key,
         horizontal=True,
         label_visibility="collapsed",
     )
+    st.session_state[wt._reference_source_mode_key(kind)] = mode
     # st.caption(str(wt._reference_kind_help(kind)))
 
     uploaded_file = None
-    if mode == "Путь к WELLTRACK":
+    if mode == "Загрузить .dev":
+        folder_count_key = wt._reference_dev_folder_count_key(kind)
+        try:
+            folder_count = int(st.session_state.get(folder_count_key, 1))
+        except (TypeError, ValueError):
+            folder_count = 1
+        folder_count = max(1, folder_count)
+        st.session_state[folder_count_key] = folder_count
+        for index in range(folder_count):
+            st.text_input(
+                "Папка с .dev файлами"
+                if index == 0
+                else f"Папка с .dev файлами #{index + 1}",
+                key=wt._reference_dev_folder_path_key(kind, index),
+                placeholder="tests/test_data/dev_fact",
+            )
+        if st.button(
+            "Добавить ещё папку",
+            key=f"ptc_reference_{kind}_add_dev_folder",
+            icon=":material/create_new_folder:",
+            use_container_width=True,
+        ):
+            st.session_state[folder_count_key] = folder_count + 1
+            st.rerun()
+        st.caption(
+            "Импортируются все `.dev` файлы из папок. "
+            "Имя берется из файла без `.dev`, "
+            "координаты - из колонок `MD X Y Z`."
+        )
+    elif mode == "Путь к WELLTRACK":
         st.text_input(
             "Путь к WELLTRACK",
             key=wt._reference_welltrack_path_key(kind),
@@ -127,7 +183,12 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
     if import_clicked:
         with st.status(f"Импорт {title.lower()}...", expanded=True) as status:
             try:
-                if mode == "Путь к WELLTRACK":
+                if mode == "Загрузить .dev":
+                    parsed = wt.parse_reference_trajectory_dev_directories(
+                        wt._reference_dev_folder_paths(kind),
+                        kind=kind,
+                    )
+                elif mode == "Путь к WELLTRACK":
                     parsed = wt.parse_reference_trajectory_welltrack_text(
                         wt._read_welltrack_file(
                             str(
@@ -174,6 +235,7 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
     if clear_clicked:
         wt._set_reference_wells_for_kind(kind=kind, wells=())
         st.session_state[wt._reference_welltrack_path_key(kind)] = ""
+        wt._clear_reference_dev_folder_state(kind)
         wt._reset_anticollision_view_state(clear_prepared=True)
         st.rerun()
 
@@ -188,7 +250,8 @@ def _render_ptc_reference_section() -> None:
     st.markdown("## 3. Загрузка фактического фонда")
     st.caption(
         "Если на месторождении уже есть фактический фонд или утверждённый "
-        "проектный (проработанный в ЦСБ) - загрузите его в формате WELLTRACK."
+        "проектный (проработанный в ЦСБ) - загрузите его из папок `.dev` "
+        "или в формате WELLTRACK."
     )
     c1, c2 = st.columns(2, gap="medium")
     with c1:
@@ -423,6 +486,20 @@ def _render_ptc_anticollision_panel(
     focus_pad_id: str,
     focus_pad_well_names: list[str],
 ) -> None:
+    pending_edit_names = wt._pending_edit_target_names()
+    if pending_edit_names:
+        st.info(
+            "Anti-collision анализ приостановлен: есть изменённые в 3D точки "
+            "t1/t3, которые ещё не пересчитаны."
+        )
+        st.caption(
+            "Сначала пересчитайте скважины: "
+            + ", ".join(pending_edit_names)
+            + ". Предыдущий anti-collision расчёт сохранён и не будет "
+            "перезапускаться по неполному набору."
+        )
+        return
+
     reference_wells = wt._reference_wells_from_state()
     if len(successes) + len(reference_wells) < 2:
         st.info(
@@ -582,7 +659,7 @@ def _render_ptc_anticollision_panel(
 
     report_rows = (
         wt._report_rows_from_recommendations(visible_recommendations, analysis)
-        if focus_pad_well_names
+        if visible_recommendations
         else wt.anti_collision_report_rows(analysis)
     )
     st.markdown("### Отчет по anti-collision")
@@ -592,26 +669,35 @@ def _render_ptc_anticollision_panel(
         hide_index=True,
     )
 
-    st.markdown("### Рекомендации")
-    st.dataframe(
-        wt.arrow_safe_text_dataframe(
-            pd.DataFrame(
-                wt.anti_collision_recommendation_rows(visible_recommendations)
-            )
-        ),
-        width="stretch",
-        hide_index=True,
-    )
-
     if focus_pad_well_names and len(focus_pad_well_names) >= 2:
-        st.markdown("### Оптимизация расстановки")
         st.caption(
-            "Автоматический подбор порядка скважин на кусте для минимизации коллизий без изменения профиля (KOP, TVD)."
+            "Скважины, для которых зафиксирован порядок на кусте, не участвуют в оптимизации."
         )
+        fixed_pad_well_names = wt._focus_pad_fixed_well_names(
+            records=records,
+            focus_pad_id=focus_pad_id,
+        )
+        movable_pad_well_names = sorted(
+            set(str(name) for name in focus_pad_well_names)
+            - set(str(name) for name in fixed_pad_well_names)
+        )
+        if fixed_pad_well_names:
+            st.caption(
+                "Фиксированный порядок не изменяется: "
+                + ", ".join(str(name) for name in fixed_pad_well_names)
+                + ". Оптимизатор переставляет только остальные скважины."
+            )
+        optimization_disabled = len(movable_pad_well_names) < 2
+        if optimization_disabled:
+            st.info(
+                "Для оптимизации нужно минимум две незафиксированные скважины "
+                "на выбранном кусте."
+            )
         if st.button(
-            "✨ Оптимизировать порядок скважин на кусту",
+            "✨ Оптимизировать порядок скважин на кусте",
             type="primary",
             use_container_width=True,
+            disabled=optimization_disabled,
         ):
             from pywp.pad_optimization import optimize_pad_order
 
@@ -635,6 +721,7 @@ def _render_ptc_anticollision_panel(
                 reference_wells=list(reference_wells),
                 config_by_name=config_by_name,
                 progress_callback=opt_callback,
+                fixed_well_names=set(fixed_pad_well_names),
             )
 
             if improved:
@@ -684,6 +771,12 @@ def _render_ptc_success_tabs(
     # Get selected CRS for coordinate transformation
     selected_crs = get_selected_crs()
     auto_convert = should_auto_convert()
+    name_to_color = wt._well_color_map(list(records))
+    reference_wells = tuple(wt._reference_wells_from_state())
+    target_only_wells = wt._failed_target_only_wells(
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
     view_mode = st.radio(
         "Режим просмотра результатов",
         options=["Отдельная скважина", "Все скважины"],
@@ -743,7 +836,6 @@ def _render_ptc_success_tabs(
             survey_export_xy_unit = (
                 "deg" if survey_export_crs.is_geographic() else "м"
             )
-        name_to_color = wt._well_color_map(list(records))
         single_well_name_to_color = {
             str(selected.name): str(
                 name_to_color.get(str(selected.name), "#2563eb")
@@ -791,6 +883,7 @@ def _render_ptc_success_tabs(
         )
         return
 
+    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     pads, _, _ = wt._pad_membership(records)
     if len(pads) > 1:
         focus_options = [

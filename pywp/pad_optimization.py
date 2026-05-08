@@ -17,7 +17,12 @@ from pywp.anticollision import (
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import TrajectoryConfig
 from pywp.planner import TrajectoryPlanner
-from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_KIND_COLORS
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    REFERENCE_WELL_KIND_COLORS,
+    reference_well_collision_name,
+    reference_well_duplicate_name_keys,
+)
 from pywp.uncertainty import PlanningUncertaintyModel
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -89,27 +94,36 @@ def recalculate_well(
 def _actionable_pad_zones(
     analysis: AntiCollisionAnalysis,
     pad_well_names: set[str],
+    fixed_well_names: set[str] | None = None,
 ) -> list:
-    """Return pad-internal zones excluding near-surface overlaps."""
-    return [
-        z
-        for z in analysis.zones
+    """Return zones affected by movable wells on this pad."""
+    fixed_names = {str(name) for name in (fixed_well_names or set())}
+    pad_names = {str(name) for name in pad_well_names}
+    movable_names = pad_names - fixed_names
+    zones: list = []
+    for zone in analysis.zones:
+        zone_names = {str(zone.well_a), str(zone.well_b)}
+        if not zone_names.intersection(pad_names):
+            continue
+        if not zone_names.intersection(movable_names):
+            continue
+        if zone_names.issubset(fixed_names):
+            continue
         if (
-            z.well_a in pad_well_names
-            and z.well_b in pad_well_names
-            and not (
-                float(z.md_a_m) <= _SURFACE_MD_THRESHOLD_M
-                and float(z.md_b_m) <= _SURFACE_MD_THRESHOLD_M
-            )
-        )
-    ]
+            float(zone.md_a_m) <= _SURFACE_MD_THRESHOLD_M
+            and float(zone.md_b_m) <= _SURFACE_MD_THRESHOLD_M
+        ):
+            continue
+        zones.append(zone)
+    return zones
 
 
 def score_analysis(
     analysis: AntiCollisionAnalysis | None,
     pad_well_names: set[str],
+    fixed_well_names: set[str] | None = None,
 ) -> float:
-    """Evaluate collision severity within the pad.  Higher is better.
+    """Evaluate collision severity affected by movable pad wells. Higher is better.
 
     Near-surface zones (both wells MD ≤ threshold) are excluded so that
     shared-surface pads don't produce a permanent SF=0 floor.
@@ -119,7 +133,11 @@ def score_analysis(
 
     pad_sfs = [
         float(z.separation_factor)
-        for z in _actionable_pad_zones(analysis, pad_well_names)
+        for z in _actionable_pad_zones(
+            analysis,
+            pad_well_names,
+            fixed_well_names=fixed_well_names,
+        )
     ]
     if not pad_sfs:
         return float("inf")
@@ -155,9 +173,11 @@ def _build_ac_well_light(
 def _build_ref_ac_well_light(
     ref: ImportedTrajectoryWell,
     model: PlanningUncertaintyModel,
+    *,
+    collision_name: str | None = None,
 ) -> AntiCollisionWell:
     return build_anti_collision_well(
-        name=ref.name,
+        name=str(collision_name) if collision_name is not None else str(ref.name),
         color=REFERENCE_WELL_KIND_COLORS.get(str(ref.kind), "#A0A0A0"),
         stations=ref.stations,
         surface=ref.surface,
@@ -262,6 +282,7 @@ def optimize_pad_order(
     reference_wells: list[ImportedTrajectoryWell],
     config_by_name: dict[str, TrajectoryConfig],
     progress_callback: Callable[[int, str], None],
+    fixed_well_names: set[str] | None = None,
 ) -> tuple[list[WelltrackRecord], dict[str, SuccessfulWellPlan], bool]:
 
     pad_names = {
@@ -271,12 +292,25 @@ def optimize_pad_order(
     }
     if len(pad_names) < 2:
         return records, success_dict, False
+    fixed_names = {
+        str(name)
+        for name in (fixed_well_names or set())
+        if str(name) in pad_names
+    }
+    movable_names = set(pad_names) - fixed_names
+    if len(movable_names) < 2:
+        progress_callback(
+            100,
+            "Оптимизация не запущена: для перестановки нужно минимум две "
+            "незафиксированные скважины.",
+        )
+        return records, success_dict, False
 
     # Check that at least 2 distinct surface locations exist; otherwise
     # swapping surfaces is a no-op and we can exit early.
     surface_set: set[tuple[float, float, float]] = set()
     for r in records:
-        if r.name in pad_names and r.points:
+        if r.name in movable_names and r.points:
             s = r.points[0]
             surface_set.add((round(float(s.x), 2), round(float(s.y), 2), round(float(s.z), 2)))
     if len(surface_set) < 2:
@@ -294,8 +328,18 @@ def optimize_pad_order(
 
     # --- Pre-build lightweight AC wells (no display geometry). ---
     # Reused across candidates; only swapped wells are rebuilt.
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(ref_wells)
     ref_ac_wells = tuple(
-        _build_ref_ac_well_light(rw, uncertainty_model) for rw in ref_wells
+        _build_ref_ac_well_light(
+            rw,
+            uncertainty_model,
+            collision_name=reference_well_collision_name(
+                rw,
+                planned_names=tuple(success_dict.keys()),
+                duplicate_name_keys=duplicate_reference_name_keys,
+            ),
+        )
+        for rw in ref_wells
     )
     ac_well_cache: dict[str, AntiCollisionWell] = {
         name: _build_ac_well_light(success_dict[name], uncertainty_model)
@@ -303,7 +347,11 @@ def optimize_pad_order(
     }
 
     analysis = _analyze_from_ac_wells(ac_well_cache, ref_ac_wells)
-    best_score = score_analysis(analysis, pad_names)
+    best_score = score_analysis(
+        analysis,
+        pad_names,
+        fixed_well_names=fixed_names,
+    )
 
     best_records = list(records)
     best_successes = dict(success_dict)
@@ -315,7 +363,11 @@ def optimize_pad_order(
     try:
         for iteration in range(1, _MAX_ITERATIONS + 1):
             analysis = _analyze_from_ac_wells(ac_well_cache, ref_ac_wells)
-            actionable = _actionable_pad_zones(analysis, pad_names)
+            actionable = _actionable_pad_zones(
+                analysis,
+                pad_names,
+                fixed_well_names=fixed_names,
+            )
             if not actionable:
                 break
 
@@ -337,14 +389,20 @@ def optimize_pad_order(
                     f"Итерация {iteration}: анализ {wa} ↔ {wb} (SF={float(zone.separation_factor):.3f})...",
                 )
 
-                # Generate all distinct swaps involving wa or wb with any other
-                # pad well whose surface differs.
-                other_names = sorted(pad_names - {wa, wb})
+                # Generate all distinct swaps involving non-fixed wells from the
+                # worst pair. Fixed wells keep their surface slot unchanged.
+                active_names = [
+                    name for name in (wa, wb) if name in movable_names
+                ]
                 swap_candidates: list[tuple[str, str]] = []
-                for other in other_names:
-                    swap_candidates.append((wa, other))
-                    swap_candidates.append((wb, other))
-                swap_candidates.append((wa, wb))
+                seen_candidate_keys: set[tuple[str, str]] = set()
+                for active_name in active_names:
+                    for other in sorted(movable_names - {active_name}):
+                        candidate_key = tuple(sorted((active_name, other)))
+                        if candidate_key in seen_candidate_keys:
+                            continue
+                        seen_candidate_keys.add(candidate_key)
+                        swap_candidates.append((active_name, other))
 
                 best_candidate = None
                 best_candidate_score = best_score
@@ -373,7 +431,11 @@ def optimize_pad_order(
                     cand_ac_wells[name_2] = ac_well_2
 
                     cand_analysis = _analyze_from_ac_wells(cand_ac_wells, ref_ac_wells)
-                    cand_score = score_analysis(cand_analysis, pad_names)
+                    cand_score = score_analysis(
+                        cand_analysis,
+                        pad_names,
+                        fixed_well_names=fixed_names,
+                    )
 
                     if cand_score > best_candidate_score + _IMPROVEMENT_EPS:
                         best_candidate_score = cand_score

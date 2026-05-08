@@ -7,6 +7,8 @@ from pywp.reference_trajectories import (
     REFERENCE_WELL_ACTUAL,
     REFERENCE_WELL_APPROVED,
     build_reference_trajectory_stations,
+    parse_reference_trajectory_dev_directories,
+    parse_reference_trajectory_dev_text,
     parse_reference_trajectory_table,
     parse_reference_trajectory_text,
     parse_reference_trajectory_text_with_kind,
@@ -138,3 +140,88 @@ def test_parse_reference_trajectory_welltrack_text_builds_reference_wells() -> N
     assert len(wells) == 1
     assert wells[0].kind == REFERENCE_WELL_APPROVED
     assert wells[0].name == "APP-1"
+
+
+def test_parse_reference_trajectory_dev_text_uses_md_xyz_columns() -> None:
+    well = parse_reference_trajectory_dev_text(
+        "\n".join(
+            [
+                "# SURVEY FROM PETRAL",
+                "MD X Y Z TVD DX DY AZIM_TN INCL DLS AZIM_GN",
+                "0.0 606207.5 7409801.6 40.9 0.0 0.0 0.0 0.0 0.0 0.0 357.8",
+                "100.0 606208.5 7409803.6 -59.1 100.0 1.0 2.0 10.0 1.0 0.1 7.8",
+                "250.0 606220.5 7409810.6 -209.1 250.0 13.0 9.0 20.0 3.0 0.2 17.8",
+            ]
+        ),
+        well_name="well_111",
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+
+    assert well.name == "well_111"
+    assert well.kind == REFERENCE_WELL_ACTUAL
+    assert list(well.stations["MD_m"]) == [0.0, 100.0, 250.0]
+    assert list(well.stations["X_m"]) == [606207.5, 606208.5, 606220.5]
+    assert list(well.stations["Y_m"]) == [7409801.6, 7409803.6, 7409810.6]
+    assert list(well.stations["Z_m"]) == [40.9, -59.1, -209.1]
+
+
+def test_parse_reference_trajectory_dev_directories_uses_filename_stems(
+    tmp_path,
+) -> None:
+    folder_a = tmp_path / "actual_a"
+    folder_b = tmp_path / "actual_b"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    dev_text = "\n".join(
+        [
+            "MD X Y Z",
+            "0 100 200 0",
+            "100 110 210 -100",
+            "200 130 230 -200",
+        ]
+    )
+    (folder_a / "well_111.dev").write_text(dev_text, encoding="utf-8")
+    (folder_a / "well_222.dev").write_text(dev_text, encoding="utf-8")
+    (folder_b / "well_333.dev").write_text(dev_text, encoding="utf-8")
+
+    wells = parse_reference_trajectory_dev_directories(
+        [folder_a, folder_b],
+        kind=REFERENCE_WELL_APPROVED,
+    )
+
+    assert [well.name for well in wells] == ["well_111", "well_222", "well_333"]
+    assert all(well.kind == REFERENCE_WELL_APPROVED for well in wells)
+
+
+def test_parse_reference_trajectory_dev_directories_rejects_duplicate_stems(
+    tmp_path,
+) -> None:
+    folder_a = tmp_path / "actual_a"
+    folder_b = tmp_path / "actual_b"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    dev_text = "\n".join(["MD X Y Z", "0 0 0 0", "100 1 1 -100"])
+    (folder_a / "well_111.dev").write_text(dev_text, encoding="utf-8")
+    (folder_b / "WELL_111.dev").write_text(dev_text, encoding="utf-8")
+
+    with pytest.raises(WelltrackParseError, match="одинаковым именем"):
+        parse_reference_trajectory_dev_directories(
+            [folder_a, folder_b],
+            kind=REFERENCE_WELL_ACTUAL,
+        )
+
+
+def test_parse_reference_trajectory_dev_directories_deduplicates_same_folder(
+    tmp_path,
+) -> None:
+    folder = tmp_path / "actual"
+    folder.mkdir()
+    dev_text = "\n".join(["MD X Y Z", "0 0 0 0", "100 1 1 -100"])
+    (folder / "well_111.dev").write_text(dev_text, encoding="utf-8")
+
+    wells = parse_reference_trajectory_dev_directories(
+        [folder, folder, str(folder) + "/"],
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+
+    assert [well.name for well in wells] == ["well_111"]

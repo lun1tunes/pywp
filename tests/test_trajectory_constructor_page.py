@@ -157,7 +157,7 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
         _successful_plan(name="WELL-B", y_offset_m=25.0),
     ]
     at.session_state["wt_results_view_mode"] = "Все скважины"
-    at.session_state["wt_results_all_view_mode"] = "Траектории"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
     at.run()
 
@@ -178,6 +178,36 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
     expander_labels = {str(widget.label) for widget in at.expander}
     assert "Контроль попадания и точность расчета" not in expander_labels
     assert "Технические параметры и диагностика решателя" not in expander_labels
+
+
+def test_ptc_page_defers_anticollision_when_three_edits_are_pending() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "Не рассчитана", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-C", "Статус": "OK", "Проблема": "", "Точек": 3},
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+        _successful_plan(name="WELL-C", y_offset_m=50.0),
+    ]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+    at.session_state["wt_edit_targets_pending_names"] = ["WELL-A"]
+    at.session_state["wt_pending_selected_names"] = ["WELL-A"]
+
+    at.run(timeout=120)
+
+    radio_labels = {str(widget.label) for widget in at.radio}
+    assert "Режим отображения всех скважин" not in radio_labels
+    assert str(at.session_state["wt_results_all_view_mode"]) == "Anti-collision"
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+    metric_labels = {str(widget.label) for widget in at.metric}
+    assert "Пресет неопределенности для anti-collision" not in selectbox_labels
+    assert "Проверено пар" not in metric_labels
 
 
 def test_ptc_page_wraps_reference_well_table_into_expander() -> None:
@@ -220,7 +250,4 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     assert "Просмотр фактической скважины" in selectbox_labels
     assert "Просмотр утвержденной проектной скважины" in selectbox_labels
-
-
-
 

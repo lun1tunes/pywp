@@ -43,6 +43,7 @@ class PadLayoutPlan(FrozenModel):
     spacing_m: float
     nds_azimuth_deg: float
     surface_anchor_mode: str = PAD_SURFACE_ANCHOR_FIRST
+    fixed_slots: tuple[tuple[int, str], ...] = ()
 
 
 def detect_well_pads(
@@ -184,14 +185,68 @@ def estimate_pad_nds_azimuth_deg(
     return _vector_to_azimuth_deg(dx=float(unit[0]), dy=float(unit[1]))
 
 
-def ordered_pad_wells(pad: WellPad, *, nds_azimuth_deg: float) -> list[PadWell]:
+def _normalized_fixed_slots(
+    *,
+    wells: tuple[PadWell, ...],
+    fixed_slots: Iterable[tuple[int, str]] | None,
+) -> tuple[tuple[int, str], ...]:
+    well_names = {str(well.name) for well in wells}
+    max_slot = len(wells)
+    used_slots: set[int] = set()
+    used_names: set[str] = set()
+    normalized: list[tuple[int, str]] = []
+    for raw_slot, raw_name in fixed_slots or ():
+        try:
+            slot = int(raw_slot)
+        except (TypeError, ValueError):
+            continue
+        name = str(raw_name).strip()
+        if (
+            slot < 1
+            or slot > max_slot
+            or name not in well_names
+            or slot in used_slots
+            or name in used_names
+        ):
+            continue
+        used_slots.add(slot)
+        used_names.add(name)
+        normalized.append((slot, name))
+    return tuple(sorted(normalized, key=lambda item: item[0]))
+
+
+def ordered_pad_wells(
+    pad: WellPad,
+    *,
+    nds_azimuth_deg: float,
+    fixed_slots: Iterable[tuple[int, str]] | None = None,
+) -> list[PadWell]:
     ux, uy = _azimuth_to_unit_xy(azimuth_deg=nds_azimuth_deg)
     sortable: list[tuple[float, str, PadWell]] = []
     for well in pad.wells:
         projection = float(well.midpoint_x * ux + well.midpoint_y * uy)
         sortable.append((projection, str(well.name), well))
     sortable.sort(key=lambda item: (item[0], item[1]))
-    return [item[2] for item in sortable]
+    base_order = [item[2] for item in sortable]
+    normalized_fixed_slots = _normalized_fixed_slots(
+        wells=pad.wells,
+        fixed_slots=fixed_slots,
+    )
+    if not normalized_fixed_slots:
+        return base_order
+
+    well_by_name = {str(well.name): well for well in pad.wells}
+    fixed_names = {name for _, name in normalized_fixed_slots}
+    ordered: list[PadWell | None] = [None] * len(base_order)
+    for slot, name in normalized_fixed_slots:
+        ordered[int(slot) - 1] = well_by_name[name]
+
+    remaining = [well for well in base_order if str(well.name) not in fixed_names]
+    remaining_iter = iter(remaining)
+    for index, item in enumerate(ordered):
+        if item is None:
+            ordered[index] = next(remaining_iter)
+    return [well for well in ordered if well is not None]
 
 
 def apply_pad_layout(
@@ -213,7 +268,9 @@ def apply_pad_layout(
         spacing_m = float(max(plan.spacing_m, 0.0))
         ux, uy = _azimuth_to_unit_xy(azimuth_deg=float(plan.nds_azimuth_deg))
         ordered = ordered_pad_wells(
-            pad=pad, nds_azimuth_deg=float(plan.nds_azimuth_deg)
+            pad=pad,
+            nds_azimuth_deg=float(plan.nds_azimuth_deg),
+            fixed_slots=tuple(plan.fixed_slots),
         )
         anchor_mode = str(
             getattr(plan, "surface_anchor_mode", PAD_SURFACE_ANCHOR_FIRST)

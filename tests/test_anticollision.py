@@ -666,6 +666,111 @@ def test_runtime_analysis_supports_reference_trajectory_wells_without_target_ove
     assert analysis.target_overlap_pair_count == 0
 
 
+def test_runtime_analysis_disambiguates_reference_name_matching_planned_well() -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-A",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config={"optimization_mode": "none", "kop_min_vertical_m": 550.0},
+    )
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "WELL-A", "Type": "actual", "X": 0.0, "Y": 5.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "WELL-A", "Type": "actual", "X": 1000.0, "Y": 5.0, "Z": 0.0, "MD": 1000.0},
+                {"Wellname": "WELL-A", "Type": "actual", "X": 2000.0, "Y": 5.0, "Z": 0.0, "MD": 2000.0},
+            ]
+        )
+    )
+    reference_model = build_anti_collision_well(
+        name="TMP",
+        color="#000000",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+    ).overlay.model
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=reference_model,
+        name_to_color={"WELL-A": "#123456"},
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert [(well.name, well.well_kind) for well in analysis.wells] == [
+        ("WELL-A", "project"),
+        ("WELL-A (Фактическая)", "actual"),
+    ]
+    assert [well.color for well in analysis.wells] == ["#123456", "#6B7280"]
+    assert analysis.pair_count == 1
+    assert all(corridor.well_a != corridor.well_b for corridor in analysis.corridors)
+
+
+def test_runtime_analysis_disambiguates_actual_and_approved_same_stem() -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config={"optimization_mode": "none", "kop_min_vertical_m": 550.0},
+    )
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {"Wellname": "DUP", "Type": "actual", "X": 0.0, "Y": 5.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "DUP", "Type": "actual", "X": 1000.0, "Y": 5.0, "Z": 0.0, "MD": 1000.0},
+                {"Wellname": "DUP", "Type": "approved", "X": 0.0, "Y": 6.0, "Z": 0.0, "MD": 0.0},
+                {"Wellname": "DUP", "Type": "approved", "X": 1000.0, "Y": 6.0, "Z": 0.0, "MD": 1000.0},
+            ]
+        )
+    )
+    reference_model = build_anti_collision_well(
+        name="TMP",
+        color="#000000",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+    ).overlay.model
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=reference_model,
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert [well.name for well in analysis.wells] == [
+        "WELL-P",
+        "DUP (Фактическая)",
+        "DUP (Проектная утвержденная)",
+    ]
+    assert analysis.pair_count == 2
+    compared_pairs = {
+        tuple(sorted((corridor.well_a, corridor.well_b)))
+        for corridor in analysis.corridors
+    }
+    assert ("DUP (Фактическая)", "WELL-P") in compared_pairs
+    assert ("DUP (Проектная утвержденная)", "WELL-P") in compared_pairs
+
+
 def test_runtime_analysis_skips_reference_to_reference_pairs() -> None:
     calculated_well = build_anti_collision_well(
         name="WELL-A",
@@ -817,7 +922,10 @@ def test_recommendations_prioritize_target_spacing_for_target_overlap() -> None:
     assert recommendations[0].category == RECOMMENDATION_TARGET_SPACING
     assert recommendations[0].required_spacing_t1_m is not None
     assert recommendations[0].can_prepare_rerun is False
+    assert "2σ overlap" not in recommendations[0].summary
+    assert "увеличьте расстояние между конфликтными участками" in recommendations[0].summary
     assert rows[0]["Тип действия"] == "Цели / spacing"
+    assert "Рекомендация по устранению" in rows[0]
     assert rows[0]["Подготовка пересчета"] == "Только рекомендация по целям"
 
 

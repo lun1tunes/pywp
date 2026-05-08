@@ -128,6 +128,56 @@ def test_ordered_pad_wells_uses_projection_along_nds() -> None:
     assert [well.name for well in ordered] == ["W1", "W3", "W2"]
 
 
+def test_ordered_pad_wells_honors_fixed_slots_and_fills_remaining_by_projection() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W3",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=200.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+
+    ordered = ordered_pad_wells(
+        pad=pads[0],
+        nds_azimuth_deg=90.0,
+        fixed_slots=((1, "W2"), (3, "W1")),
+    )
+
+    assert [well.name for well in ordered] == ["W2", "W3", "W1"]
+
+
 def test_apply_pad_layout_rewrites_surface_points() -> None:
     records = [
         _record(
@@ -178,6 +228,83 @@ def test_apply_pad_layout_rewrites_surface_points() -> None:
     assert math.isclose(float(s2.y), 500.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(s1.z), 5.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(s2.z), 5.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_apply_pad_layout_uses_fixed_slots_for_surface_positions() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W3",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=200.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+    plan = PadLayoutPlan(
+        pad_id=str(pads[0].pad_id),
+        first_surface_x=1000.0,
+        first_surface_y=500.0,
+        first_surface_z=5.0,
+        spacing_m=20.0,
+        nds_azimuth_deg=90.0,
+        fixed_slots=((1, "W2"), (2, "W1")),
+    )
+
+    updated = apply_pad_layout(
+        records=records,
+        pads=pads,
+        plan_by_pad_id={str(pads[0].pad_id): plan},
+    )
+    updated_by_name = {str(record.name): record for record in updated}
+
+    assert math.isclose(
+        float(updated_by_name["W2"].points[0].x),
+        1000.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert math.isclose(
+        float(updated_by_name["W1"].points[0].x),
+        1020.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert math.isclose(
+        float(updated_by_name["W3"].points[0].x),
+        1040.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
 
 
 def test_apply_pad_layout_can_center_surfaces_about_anchor() -> None:

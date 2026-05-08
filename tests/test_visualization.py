@@ -125,7 +125,7 @@ def test_plotly_figures_are_constructed() -> None:
         hover = str(trace.hovertemplate)
         assert "X:" in hover
         assert "Y:" in hover
-        assert "Z/TVD:" in hover
+        assert "Z:" in hover
         assert "MD:" in hover
         assert "ПИ:" in hover
 

@@ -36,10 +36,12 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "position.z += labelLift;" not in html
     assert "X / East" in html
     assert "Y / North" in html
-    assert "Z / TVD" in html
+    assert 'label: "Z"' in html
+    assert "Z / TVD" not in html
     assert "scene-axis-label" in html
     assert "function updateAxesGizmo()" in html
     assert "camera.quaternion.clone().invert()" in html
+    assert 'Math.abs(dx) < 6 ? "middle"' in html
     assert "#legend.is-collapsed" in html
     assert "function syncLegendVisibility()" in html
     assert "payload.legend_tree" in html
@@ -47,7 +49,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function fitCameraToRawBounds(rawBounds)" in html
     assert "function editWellTargetFocusBounds(index)" in html
     assert "function fitCameraToEditWellTargets(index)" in html
-    assert "selectEditWell(editableIndex, { focus: true })" in html
+    assert "selectEditWell(editableIndex, { focus: !editModeActive })" in html
+    assert "targetBounds && !editModeActive" in html
     assert "fitCameraToEditWellTargets(nextIndex)" in html
     assert "data-edit-well-index" in html
     assert "function selectEditWell(index, options)" in html
@@ -75,6 +78,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "multiplyScalar(0.042)" in html
     assert "function startEditRotationDrag(wellIndex, event)" in html
     assert "function updateEditRotationDrag(event)" in html
+    assert "let editRotateStartPreviewPoints = null;" in html
+    assert "function rotatedPreviewTrajectoryPoints" in html
+    assert "function rebuildRotatedPreviewTrajectory" in html
+    assert "editRotateStartPreviewPoints = editReplanners[wellIndex].compute" in html
+    assert "rebuildRotatedPreviewTrajectory(" in html
     assert "editRotationModeEnabled()" in html
     assert "editRotationPickMeshes" in html
     assert "editDragMoveScope === \"pair\"" in html
@@ -121,6 +129,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "numeric: true" in html
     assert "sortedLegendItems(group.children)" in html
     assert "sortedLegendItems(flatItems)" in html
+    assert "pad-first-surface-label" in html
+    assert 'role === "pad_first_surface_label"' in html
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html

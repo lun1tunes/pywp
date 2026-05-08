@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from io import StringIO
+from pathlib import Path
 from typing import Iterable, Mapping
 
 import numpy as np
@@ -12,6 +13,7 @@ from pywp.constants import SMALL
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackRecord,
+    decode_welltrack_bytes,
     parse_welltrack_text,
 )
 from pywp.mcm import add_dls
@@ -260,6 +262,167 @@ def parse_reference_trajectory_welltrack_text(
     )
 
 
+def parse_reference_trajectory_dev_text(
+    text: str,
+    *,
+    well_name: str,
+    kind: str,
+) -> ImportedTrajectoryWell:
+    source = str(text or "")
+    normalized_kind = normalize_reference_well_kind(kind)
+    normalized_name = str(well_name or "").strip()
+    if not normalized_name:
+        raise WelltrackParseError(".dev: имя скважины не задано.")
+
+    xs: list[float] = []
+    ys: list[float] = []
+    zs: list[float] = []
+    mds: list[float] = []
+    for line_no, raw_line in enumerate(source.splitlines(), start=1):
+        line = str(raw_line).strip()
+        if not line or line.startswith("#"):
+            continue
+        tokens = _split_reference_text_line(line)
+        if not tokens:
+            continue
+        try:
+            md = float(tokens[0])
+        except ValueError:
+            continue
+        if len(tokens) < 4:
+            raise WelltrackParseError(
+                f".dev '{normalized_name}': строка {line_no} содержит MD, "
+                "но не содержит обязательные X Y Z."
+            )
+        try:
+            x = float(tokens[1])
+            y = float(tokens[2])
+            z = float(tokens[3])
+        except ValueError as exc:
+            raise WelltrackParseError(
+                f".dev '{normalized_name}': не удалось прочитать X Y Z "
+                f"в строке {line_no}."
+            ) from exc
+        mds.append(md)
+        xs.append(x)
+        ys.append(y)
+        zs.append(z)
+
+    if len(mds) < 2:
+        raise WelltrackParseError(
+            f".dev '{normalized_name}': требуется минимум 2 числовые "
+            "станции."
+        )
+    stations = build_reference_trajectory_stations(
+        xs=xs,
+        ys=ys,
+        zs=zs,
+        mds=mds,
+    )
+    return ImportedTrajectoryWell(
+        name=normalized_name,
+        kind=normalized_kind,
+        stations=stations,
+        surface=Point3D(
+            x=float(stations["X_m"].iloc[0]),
+            y=float(stations["Y_m"].iloc[0]),
+            z=float(stations["Z_m"].iloc[0]),
+        ),
+        azimuth_deg=float(_infer_reference_azimuth_deg(stations)),
+    )
+
+
+def parse_reference_trajectory_dev_file(
+    path: str | Path,
+    *,
+    kind: str,
+) -> ImportedTrajectoryWell:
+    source_path = Path(path).expanduser()
+    try:
+        raw = source_path.read_bytes()
+    except OSError as exc:
+        raise WelltrackParseError(
+            f"Не удалось прочитать .dev файл `{source_path}`: {exc}"
+        ) from exc
+    text, _encoding = decode_welltrack_bytes(raw)
+    return parse_reference_trajectory_dev_text(
+        text,
+        well_name=source_path.stem,
+        kind=kind,
+    )
+
+
+def parse_reference_trajectory_dev_directories(
+    directories: Iterable[str | Path],
+    *,
+    kind: str,
+) -> list[ImportedTrajectoryWell]:
+    normalized_kind = normalize_reference_well_kind(kind)
+    source_dirs = [
+        Path(str(directory).strip()).expanduser()
+        for directory in directories
+        if str(directory).strip()
+    ]
+    if not source_dirs:
+        raise WelltrackParseError(
+            "Укажите путь хотя бы к одной папке "
+            "с .dev файлами."
+        )
+
+    dev_files: list[Path] = []
+    unique_source_dirs: list[Path] = []
+    seen_dir_keys: set[str] = set()
+    for source_dir in source_dirs:
+        if not source_dir.exists():
+            raise WelltrackParseError(f"Папка .dev не найдена: `{source_dir}`.")
+        if not source_dir.is_dir():
+            raise WelltrackParseError(
+                f"Путь .dev не является папкой: `{source_dir}`."
+            )
+        dir_key = str(source_dir.resolve())
+        if dir_key in seen_dir_keys:
+            continue
+        seen_dir_keys.add(dir_key)
+        unique_source_dirs.append(source_dir)
+        dev_files.extend(
+            sorted(
+                (
+                    child
+                    for child in source_dir.iterdir()
+                    if child.is_file() and child.suffix.lower() == ".dev"
+                ),
+                key=lambda item: item.name.lower(),
+            )
+        )
+
+    if not dev_files:
+        joined_dirs = ", ".join(f"`{item}`" for item in unique_source_dirs)
+        raise WelltrackParseError(
+            f"В папках {joined_dirs} не найдено .dev файлов."
+        )
+
+    wells: list[ImportedTrajectoryWell] = []
+    seen_names: dict[str, Path] = {}
+    for dev_file in dev_files:
+        well_name = dev_file.stem
+        well_key = well_name.casefold()
+        previous_path = seen_names.get(well_key)
+        if previous_path is not None:
+            raise WelltrackParseError(
+                "Найдено несколько .dev файлов с одинаковым "
+                "именем скважины "
+                f"`{well_name}`: `{previous_path}` и `{dev_file}`."
+            )
+        seen_names[well_key] = dev_file
+        wells.append(
+            parse_reference_trajectory_dev_file(
+                dev_file,
+                kind=normalized_kind,
+            )
+        )
+    return wells
+
+
 def reference_welltrack_records_to_wells(
     records: Iterable[WelltrackRecord],
     *,
@@ -375,6 +538,37 @@ def normalize_reference_well_kind(value: object, *, row_no: int | None = None) -
 
 def reference_well_display_label(well: ImportedTrajectoryWell) -> str:
     return f"{str(well.name)} ({REFERENCE_WELL_KIND_LABELS.get(str(well.kind), str(well.kind))})"
+
+
+def reference_well_duplicate_name_keys(
+    wells: Iterable[ImportedTrajectoryWell],
+) -> set[str]:
+    name_counts: dict[str, int] = {}
+    for well in wells:
+        key = str(well.name).strip().casefold()
+        if not key:
+            continue
+        name_counts[key] = int(name_counts.get(key, 0)) + 1
+    return {key for key, count in name_counts.items() if int(count) > 1}
+
+
+def reference_well_collision_name(
+    well: ImportedTrajectoryWell,
+    *,
+    planned_names: Iterable[str] = (),
+    duplicate_name_keys: set[str] | None = None,
+) -> str:
+    name = str(well.name)
+    name_key = name.strip().casefold()
+    planned_name_keys = {
+        str(item).strip().casefold()
+        for item in planned_names
+        if str(item).strip()
+    }
+    duplicate_keys = set(duplicate_name_keys or set())
+    if name_key in planned_name_keys or name_key in duplicate_keys:
+        return reference_well_display_label(well)
+    return name
 
 
 def reference_wells_to_table_rows(
