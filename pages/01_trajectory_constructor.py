@@ -173,11 +173,13 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
         icon=":material/upload_file:",
         use_container_width=True,
     )
-    clear_clicked = clear_col.button(
+    clear_col.button(
         f"Очистить {title.lower()}",
         key=f"ptc_reference_clear_{kind}",
         icon=":material/delete:",
         use_container_width=True,
+        on_click=wt._clear_reference_import_state,
+        kwargs={"kind": kind},
     )
 
     if import_clicked:
@@ -231,13 +233,6 @@ def _render_ptc_reference_kind_import_block(*, kind: str) -> None:
                     state="error",
                     expanded=True,
                 )
-
-    if clear_clicked:
-        wt._set_reference_wells_for_kind(kind=kind, wells=())
-        st.session_state[wt._reference_welltrack_path_key(kind)] = ""
-        wt._clear_reference_dev_folder_state(kind)
-        wt._reset_anticollision_view_state(clear_prepared=True)
-        st.rerun()
 
     current_wells = tuple(wt._reference_kind_wells(kind))
     if current_wells:

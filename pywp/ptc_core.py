@@ -2929,6 +2929,14 @@ def _clear_reference_dev_folder_state(kind: str) -> None:
     st.session_state[count_key] = 1
 
 
+def _clear_reference_import_state(kind: str) -> None:
+    _set_reference_wells_for_kind(kind=kind, wells=())
+    st.session_state[_reference_source_text_key(kind)] = ""
+    st.session_state[_reference_welltrack_path_key(kind)] = ""
+    _clear_reference_dev_folder_state(kind)
+    _reset_anticollision_view_state(clear_prepared=True)
+
+
 def _set_reference_wells_for_kind(
     *,
     kind: str,
@@ -3108,6 +3116,13 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_t1_t3_last_resolution", None)
     st.session_state.setdefault("wt_t1_t3_acknowledged_well_names", ())
     st.session_state.setdefault("wt_edit_targets_pending_names", [])
+    st.session_state.setdefault("wt_pending_all_wells_results_focus", False)
+    pending_all_wells_results_focus = bool(
+        st.session_state.get("wt_pending_all_wells_results_focus", False)
+    )
+    st.session_state["wt_pending_all_wells_results_focus"] = False
+    if pending_all_wells_results_focus or _pending_edit_target_names():
+        _set_all_wells_results_focus_state()
     if str(st.session_state.get("wt_results_view_mode", "")).strip() not in {
         "Отдельная скважина",
         "Все скважины",
@@ -3362,7 +3377,7 @@ def _apply_edit_targets_changes(
     )
     st.session_state["wt_last_error"] = ""
     st.session_state["wt_pending_selected_names"] = list(pending_names)
-    _focus_all_wells_trajectory_results()
+    _queue_all_wells_results_focus()
     return updated_names
 
 
@@ -3410,18 +3425,23 @@ def _clear_results() -> None:
     st.session_state["wt_edit_targets_highlight_names"] = []
 
 
-def _focus_all_wells_anticollision_results() -> None:
+def _set_all_wells_results_focus_state() -> None:
     st.session_state["wt_results_view_mode"] = "Все скважины"
     st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_DETAIL
     st.session_state["wt_3d_backend"] = WT_3D_BACKEND_THREE_LOCAL
+
+
+def _queue_all_wells_results_focus() -> None:
+    st.session_state["wt_pending_all_wells_results_focus"] = True
+
+
+def _focus_all_wells_anticollision_results() -> None:
+    _set_all_wells_results_focus_state()
 
 
 def _focus_all_wells_trajectory_results() -> None:
-    st.session_state["wt_results_view_mode"] = "Все скважины"
-    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
-    st.session_state["wt_3d_render_mode"] = WT_3D_RENDER_DETAIL
-    st.session_state["wt_3d_backend"] = WT_3D_BACKEND_THREE_LOCAL
+    _set_all_wells_results_focus_state()
 
 
 def _bump_three_viewer_nonce() -> None:
@@ -7001,11 +7021,13 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
         icon=":material/upload_file:",
         use_container_width=True,
     )
-    clear_clicked = clear_col.button(
+    clear_col.button(
         f"Очистить {title.lower()}",
         key=f"wt_reference_clear_{kind}",
         icon=":material/delete:",
         use_container_width=True,
+        on_click=_clear_reference_import_state,
+        kwargs={"kind": kind},
     )
 
     if import_clicked:
@@ -7079,14 +7101,6 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
                     state="error",
                     expanded=True,
                 )
-
-    if clear_clicked:
-        _set_reference_wells_for_kind(kind=kind, wells=())
-        st.session_state[_reference_source_text_key(kind)] = ""
-        st.session_state[_reference_welltrack_path_key(kind)] = ""
-        _clear_reference_dev_folder_state(kind)
-        _reset_anticollision_view_state(clear_prepared=True)
-        st.rerun()
 
     if current_wells:
         st.caption(f"Загружено {len(current_wells)} скважин.")

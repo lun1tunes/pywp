@@ -1199,6 +1199,63 @@ def test_reference_trajectory_dev_import_keeps_actual_and_approved_kinds(
     ]
 
 
+def test_reference_dev_clear_button_resets_paths_without_widget_state_error(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    folder_a = tmp_path / "dev_fact_a"
+    folder_b = tmp_path / "dev_fact_b"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["ptc_reference_source_mode::actual"] = "Загрузить .dev"
+    at.session_state["wt_reference_actual_dev_folder_count"] = 2
+    at.session_state["wt_reference_actual_dev_folder_path_0"] = str(folder_a)
+    at.session_state["wt_reference_actual_dev_folder_path_1"] = str(folder_b)
+
+    at.run(timeout=120)
+    _click_button(at, "Очистить фактические скважины")
+    at.run(timeout=120)
+
+    assert not at.exception
+    assert int(at.session_state["wt_reference_actual_dev_folder_count"]) == 1
+    assert str(at.session_state["wt_reference_actual_dev_folder_path_0"]) == ""
+    assert str(at.session_state["wt_reference_actual_dev_folder_path_1"]) == ""
+
+
+def test_reference_welltrack_clear_button_resets_path_without_widget_state_error(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    welltrack_path = tmp_path / "actual.inc"
+    welltrack_path.write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'FACT-1'",
+                "0 25 0 0",
+                "900 25 300 950",
+                "1800 25 400 1900",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["ptc_reference_source_mode::actual"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_actual_welltrack_path"] = str(welltrack_path)
+
+    at.run(timeout=120)
+    _click_button(at, "Очистить фактические скважины")
+    at.run(timeout=120)
+
+    assert not at.exception
+    assert str(at.session_state["wt_reference_actual_welltrack_path"]) == ""
+
+
 def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
@@ -1927,6 +1984,7 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     assert page.st.session_state["wt_edit_targets_highlight_names"] == ["WELL-A"]
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+    assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
     assert page.st.session_state["wt_anticollision_analysis_cache"] is cached_analysis
     target_only = page._failed_target_only_wells(
         records=page.st.session_state["wt_records"],
@@ -1947,6 +2005,38 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     assert page.st.session_state["wt_edit_targets_pending_names"] == []
     assert page.st.session_state["wt_edit_targets_highlight_names"] == []
     assert page.st.session_state["wt_anticollision_analysis_cache"] == {}
+
+
+def test_apply_three_edit_targets_defers_result_widget_state_update() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_records()[:1])
+    page.st.session_state["wt_records"] = list(records)
+    page.st.session_state["wt_records_original"] = list(records)
+    page.st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+    page.st.session_state["wt_results_all_view_mode"] = "Anti-collision"
+
+    updated = page._apply_edit_targets_changes(
+        [
+            {
+                "name": "WELL-A",
+                "t1": [610.25, 805.5, 2401.0],
+                "t3": [1510.75, 2010.25, 2502.0],
+            }
+        ],
+        source="three_viewer",
+    )
+
+    assert updated == ["WELL-A"]
+    assert page.st.session_state["wt_results_view_mode"] == "Отдельная скважина"
+    assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
+
+    page._init_state()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+    assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
+    assert page.st.session_state["wt_pending_all_wells_results_focus"] is False
 
 
 def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> None:
