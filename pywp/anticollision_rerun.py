@@ -203,7 +203,7 @@ def build_dynamic_cluster_execution_plan(
 ) -> DynamicClusterExecutionPlan | None:
     if not selected_names:
         return None
-    if len(successes) < 2:
+    if len(successes) + len(reference_wells) < 2:
         return DynamicClusterExecutionPlan(
             cluster=None,
             ordered_well_names=(),

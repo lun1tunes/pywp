@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import multiprocessing
-import sys
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from typing import Any, Callable, Iterable, Mapping
 from time import perf_counter
@@ -39,6 +37,7 @@ from pywp.anticollision_stage import (
     anti_collision_stage_from_context,
 )
 from pywp.models import INTERPOLATION_RODRIGUES, Point3D, SummaryDict, TrajectoryConfig
+from pywp.parallel import process_pool_context
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.reference_trajectories import ImportedTrajectoryWell
@@ -729,8 +728,7 @@ class WelltrackBatchPlanner:
         parallel_workers: int,
     ) -> tuple[list[dict[str, Any]], list[SuccessfulWellPlan]]:
         """Execute selected wells in parallel using a process pool."""
-        _mp_method = "spawn" if sys.platform == "win32" else "forkserver"
-        _mp_ctx = multiprocessing.get_context(_mp_method)
+        _mp_ctx = process_pool_context()
         total = len(selected_records)
         workers = min(int(parallel_workers), total)
 
@@ -818,7 +816,7 @@ class WelltrackBatchPlanner:
         dynamic_cluster_context: DynamicClusterExecutionContext,
     ) -> tuple[float, float, int]:
         successes = list(success_by_name.values())
-        if len(successes) < 2:
+        if len(successes) + len(dynamic_cluster_context.reference_wells) < 2:
             return 1e6, 0.0, 0
         analysis = build_anti_collision_analysis_for_successes(
             successes,
@@ -908,7 +906,10 @@ class WelltrackBatchPlanner:
         target_well_name: str,
     ) -> tuple[float, float, int]:
         successes = list(success_by_name.values())
-        if len(successes) < 2 or str(target_well_name) not in success_by_name:
+        if (
+            len(successes) + len(dynamic_cluster_context.reference_wells) < 2
+            or str(target_well_name) not in success_by_name
+        ):
             return 1e6, 0.0, 0
         analysis = build_anti_collision_analysis_for_successes(
             successes,

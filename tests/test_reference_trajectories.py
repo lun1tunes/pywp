@@ -163,6 +163,47 @@ def test_parse_reference_trajectory_dev_text_uses_md_xyz_columns() -> None:
     assert list(well.stations["X_m"]) == [606207.5, 606208.5, 606220.5]
     assert list(well.stations["Y_m"]) == [7409801.6, 7409803.6, 7409810.6]
     assert list(well.stations["Z_m"]) == [40.9, -59.1, -209.1]
+    assert float(well.stations["INC_deg"].iloc[0]) < 2.0
+    assert float(well.stations["INC_deg"].max()) < 6.0
+
+
+def test_parse_reference_trajectory_dev_text_accepts_decimal_commas() -> None:
+    well = parse_reference_trajectory_dev_text(
+        "\n".join(
+            [
+                "MD X Y Z",
+                "0,0 606207,5 7409801,6 40,9",
+                "100,0 606208,5 7409803,6 -59,1",
+                "250,0 606220,5 7409810,6 -209,1",
+            ]
+        ),
+        well_name="well_111",
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+
+    assert list(well.stations["MD_m"]) == [0.0, 100.0, 250.0]
+    assert list(well.stations["X_m"]) == [606207.5, 606208.5, 606220.5]
+    assert list(well.stations["Y_m"]) == [7409801.6, 7409803.6, 7409810.6]
+    assert list(well.stations["Z_m"]) == [40.9, -59.1, -209.1]
+
+
+def test_parse_reference_trajectory_dev_text_accepts_semicolon_rows_with_decimal_commas() -> None:
+    well = parse_reference_trajectory_dev_text(
+        "\n".join(
+            [
+                "MD;X;Y;Z",
+                "0,0;606207,5;7409801,6;40,9",
+                "100,0;606208,5;7409803,6;-59,1",
+            ]
+        ),
+        well_name="well_111",
+        kind=REFERENCE_WELL_APPROVED,
+    )
+
+    assert list(well.stations["MD_m"]) == [0.0, 100.0]
+    assert list(well.stations["X_m"]) == [606207.5, 606208.5]
+    assert list(well.stations["Y_m"]) == [7409801.6, 7409803.6]
+    assert list(well.stations["Z_m"]) == [40.9, -59.1]
 
 
 def test_parse_reference_trajectory_dev_directories_uses_filename_stems(
@@ -191,6 +232,24 @@ def test_parse_reference_trajectory_dev_directories_uses_filename_stems(
 
     assert [well.name for well in wells] == ["well_111", "well_222", "well_333"]
     assert all(well.kind == REFERENCE_WELL_APPROVED for well in wells)
+
+
+def test_parse_reference_trajectory_dev_directories_uses_natural_file_order(
+    tmp_path,
+) -> None:
+    folder = tmp_path / "actual"
+    folder.mkdir()
+    dev_text = "\n".join(["MD X Y Z", "0 0 0 0", "100 1 1 -100"])
+    (folder / "well_10.dev").write_text(dev_text, encoding="utf-8")
+    (folder / "well_2.DEV").write_text(dev_text, encoding="utf-8")
+    (folder / "well_1.dev").write_text(dev_text, encoding="utf-8")
+
+    wells = parse_reference_trajectory_dev_directories(
+        [folder],
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+
+    assert [well.name for well in wells] == ["well_1", "well_2", "well_10"]
 
 
 def test_parse_reference_trajectory_dev_directories_rejects_duplicate_stems(

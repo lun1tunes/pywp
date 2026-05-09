@@ -34,6 +34,10 @@ from pywp.eclipse_welltrack import (
     parse_welltrack_text,
 )
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    parse_reference_trajectory_table,
+)
 from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     DEFAULT_UNCERTAINTY_PRESET,
@@ -104,6 +108,79 @@ class _StubPlanner:
             "solver_turn_max_restarts": float(config.turn_solver_max_restarts),
         }
         return PlannerResult(stations=stations, summary=summary, azimuth_deg=0.0, md_t1_m=1000.0)
+
+
+def _straight_success(
+    name: str,
+    *,
+    y_offset_m: float,
+) -> SuccessfulWellPlan:
+    return SuccessfulWellPlan(
+        name=name,
+        surface=Point3D(0.0, y_offset_m, 0.0),
+        t1=Point3D(1000.0, y_offset_m, 0.0),
+        t3=Point3D(2000.0, y_offset_m, 0.0),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0, 2000.0],
+                "INC_deg": [0.0, 90.0, 90.0],
+                "AZI_deg": [90.0, 90.0, 90.0],
+                "X_m": [0.0, 1000.0, 2000.0],
+                "Y_m": [y_offset_m, y_offset_m, y_offset_m],
+                "Z_m": [0.0, 0.0, 0.0],
+                "DLS_deg_per_30m": [0.0, 0.0, 0.0],
+                "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+            }
+        ),
+        summary={
+            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
+            "trajectory_target_direction": "Цели в одном направлении",
+            "well_complexity": "Обычная",
+            "optimization_mode": "none",
+            "kop_md_m": 700.0,
+            "build1_dls_selected_deg_per_30m": 0.0,
+            "md_total_m": 2000.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+
+
+def _straight_reference_wells(
+    *,
+    y_offset_m: float,
+) -> tuple[ImportedTrajectoryWell, ...]:
+    return tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": y_offset_m,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 1000.0,
+                    "Y": y_offset_m,
+                    "Z": 0.0,
+                    "MD": 1000.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 2000.0,
+                    "Y": y_offset_m,
+                    "Z": 0.0,
+                    "MD": 2000.0,
+                },
+            ]
+        )
+    )
 
 
 @pytest.mark.integration
@@ -745,6 +822,49 @@ def test_build_dynamic_cluster_execution_plan_uses_real_cluster_filtering() -> N
     assert plan.cluster is not None
     assert set(plan.cluster.well_names) == {"WELL-A", "WELL-B"}
     assert set(plan.ordered_well_names).issubset({"WELL-A", "WELL-B"})
+
+
+def test_dynamic_cluster_execution_plan_includes_single_well_reference_conflict() -> None:
+    success = _straight_success("WELL-P", y_offset_m=0.0)
+    reference_wells = _straight_reference_wells(y_offset_m=5.0)
+
+    plan = build_dynamic_cluster_execution_plan(
+        successes=[success],
+        selected_names={"WELL-P"},
+        target_well_names=("WELL-P",),
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        reference_wells=reference_wells,
+    )
+
+    assert plan is not None
+    assert plan.cluster is not None
+    assert "WELL-P" in plan.cluster.well_names
+    assert "WELL-P" in plan.prepared_by_well or plan.resolution_state == "blocked"
+
+
+def test_cluster_scores_include_single_well_reference_conflict() -> None:
+    success = _straight_success("WELL-P", y_offset_m=0.0)
+    context = DynamicClusterExecutionContext(
+        target_well_names=("WELL-P",),
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        initial_successes=(success,),
+        reference_wells=_straight_reference_wells(y_offset_m=5.0),
+    )
+
+    cluster_score = WelltrackBatchPlanner._cluster_anticollision_score(
+        success_by_name={"WELL-P": success},
+        dynamic_cluster_context=context,
+    )
+    local_score = WelltrackBatchPlanner._well_local_anticollision_score(
+        success_by_name={"WELL-P": success},
+        dynamic_cluster_context=context,
+        target_well_name="WELL-P",
+    )
+
+    assert cluster_score[0] < 1.0
+    assert local_score[0] < 1.0
+    assert cluster_score[2] >= 1
+    assert local_score[2] >= 1
 
 
 def test_build_dynamic_cluster_execution_plan_stages_mixed_and_trajectory_frontier(

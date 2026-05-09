@@ -558,6 +558,58 @@
         background: #1d4ed8;
       }
 
+      #anti-collision-control-wrap {
+        display: none;
+        position: relative;
+      }
+
+      #anti-collision-control-wrap.is-visible {
+        display: block;
+      }
+
+      #anti-collision-controls {
+        display: none;
+        position: absolute;
+        top: calc(100% + 8px);
+        left: 0;
+        width: 236px;
+        z-index: 7;
+        padding: 9px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
+        backdrop-filter: blur(8px);
+      }
+
+      #anti-collision-controls.is-visible {
+        display: block;
+      }
+
+      .anti-collision-option {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 24px;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.25;
+        color: #334155;
+        user-select: none;
+        cursor: pointer;
+      }
+
+      .anti-collision-option + .anti-collision-option {
+        margin-top: 6px;
+      }
+
+      .anti-collision-option input {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        accent-color: #dc2626;
+        flex: 0 0 auto;
+      }
+
       #edit-toolbox {
         display: none;
         position: absolute;
@@ -853,6 +905,23 @@
       <div id="toolbar-left">
         <button id="fit-camera-btn" class="toolbar-btn" type="button" title="Подогнать сцену под кадр">Сброс вида</button>
         <button id="edit-targets-btn" class="toolbar-btn" type="button" title="Изменить точки t1/t3" style="display:none">Редактировать точки</button>
+        <div id="anti-collision-control-wrap">
+          <button id="anti-collision-btn" class="toolbar-btn" type="button" title="Настроить слои anti-collision">Anti-collision</button>
+          <div id="anti-collision-controls">
+            <label class="anti-collision-option">
+              <input type="checkbox" data-ac-layer="cones" checked />
+              <span>Конусы неопределенности</span>
+            </label>
+            <label class="anti-collision-option">
+              <input type="checkbox" data-ac-layer="overlaps" checked />
+              <span>Зоны пересечений</span>
+            </label>
+            <label class="anti-collision-option">
+              <input type="checkbox" data-ac-layer="segments" checked />
+              <span>Красные участки траекторий</span>
+            </label>
+          </div>
+        </div>
       </div>
       <div id="toolbar-right">
         <button id="fullscreen-btn" class="toolbar-btn" type="button" title="Развернуть на весь экран">⛶</button>
@@ -933,6 +1002,9 @@
         const fullscreenButton = document.getElementById("fullscreen-btn");
         const axesGizmoElement = document.getElementById("axes-gizmo");
         const collisionsPanelElement = document.getElementById("collisions-panel");
+        const antiCollisionControlWrap = document.getElementById("anti-collision-control-wrap");
+        const antiCollisionButton = document.getElementById("anti-collision-btn");
+        const antiCollisionControls = document.getElementById("anti-collision-controls");
         const Z_DISPLAY_SIGN = -1.0;
         const scene = new THREE.Scene();
         const backgroundColor = String(payload.background || "#ffffff");
@@ -1022,6 +1094,21 @@
             .filter(Boolean),
         );
         const editableBaseMaterials = [];
+        const antiCollisionVisualObjects = {
+          cones: [],
+          overlaps: [],
+          segments: [],
+        };
+        const antiCollisionLayerLabels = {
+          cones: "Конусы неопределенности",
+          overlaps: "Зоны пересечений",
+          segments: "Красные участки траекторий",
+        };
+        const antiCollisionLayerState = {
+          cones: true,
+          overlaps: true,
+          segments: true,
+        };
 
         const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
         const hoverSphereMaterial = new THREE.MeshBasicMaterial({
@@ -1125,6 +1212,87 @@
             material.depthWrite = applies ? false : item.depthWrite;
             material.needsUpdate = true;
           });
+        }
+
+        function antiCollisionLayerForRole(roleValue) {
+          const role = String(roleValue || "");
+          if (role === "cone" || role === "cone_tip") {
+            return "cones";
+          }
+          if (role === "overlap") {
+            return "overlaps";
+          }
+          if (role === "conflict_segment" || role === "conflict_hover") {
+            return "segments";
+          }
+          return "";
+        }
+
+        function hasAntiCollisionVisualPayload() {
+          const lineItems = Array.isArray(payload.lines) ? payload.lines : [];
+          const meshItems = Array.isArray(payload.meshes) ? payload.meshes : [];
+          const pointItems = Array.isArray(payload.points) ? payload.points : [];
+          return [...lineItems, ...meshItems, ...pointItems].some((item) =>
+            antiCollisionLayerForRole(item && item.role),
+          );
+        }
+
+        function registerAntiCollisionVisualObject(object, roleValue) {
+          const layer = antiCollisionLayerForRole(roleValue);
+          if (!object || !layer) {
+            return;
+          }
+          antiCollisionVisualObjects[layer].push(object);
+          object.visible = Boolean(antiCollisionLayerState[layer]);
+        }
+
+        function applyAntiCollisionLayerVisibility() {
+          Object.keys(antiCollisionVisualObjects).forEach((layer) => {
+            const visible = Boolean(antiCollisionLayerState[layer]);
+            antiCollisionVisualObjects[layer].forEach((object) => {
+              if (object) {
+                object.visible = visible;
+              }
+            });
+          });
+          if (tooltipElement) {
+            hideTooltip();
+          }
+          requestRender();
+        }
+
+        function initAntiCollisionControls() {
+          if (!antiCollisionControlWrap || !antiCollisionButton || !antiCollisionControls) {
+            return;
+          }
+          if (!hasAntiCollisionVisualPayload()) {
+            return;
+          }
+          antiCollisionControlWrap.classList.add("is-visible");
+          antiCollisionControls
+            .querySelectorAll("input[data-ac-layer]")
+            .forEach((input) => {
+              const layer = String(input.getAttribute("data-ac-layer") || "");
+              if (!Object.prototype.hasOwnProperty.call(antiCollisionLayerState, layer)) {
+                return;
+              }
+              input.checked = Boolean(antiCollisionLayerState[layer]);
+              input.setAttribute(
+                "aria-label",
+                antiCollisionLayerLabels[layer] || layer,
+              );
+              input.addEventListener("change", () => {
+                antiCollisionLayerState[layer] = Boolean(input.checked);
+                applyAntiCollisionLayerVisibility();
+              });
+            });
+          antiCollisionButton.addEventListener("click", () => {
+            const expanded = !antiCollisionControls.classList.contains("is-visible");
+            antiCollisionControls.classList.toggle("is-visible", expanded);
+            antiCollisionButton.classList.toggle("is-active", expanded);
+            antiCollisionButton.setAttribute("aria-expanded", expanded ? "true" : "false");
+          });
+          antiCollisionButton.setAttribute("aria-expanded", "false");
         }
 
         let circleMarkerTexture = null;
@@ -1788,6 +1956,7 @@
               registerEditableBaseMaterial(material, materialOptions.color, item.name);
               const line = new THREE.Line(geometry, material);
               line.computeLineDistances();
+              registerAntiCollisionVisualObject(line, role);
               scene.add(line);
             });
             return;
@@ -1820,7 +1989,9 @@
           );
           const material = new THREE.LineBasicMaterial(materialOptions);
           registerEditableBaseMaterial(material, materialOptions.color, item.name);
-          scene.add(new THREE.LineSegments(geometry, material));
+          const lineSegments = new THREE.LineSegments(geometry, material);
+          registerAntiCollisionVisualObject(lineSegments, role);
+          scene.add(lineSegments);
         }
 
         function addMesh(item) {
@@ -1867,6 +2038,7 @@
           if (role === "overlap") {
             material.opacity = Math.min(opacity, 0.42);
           }
+          registerAntiCollisionVisualObject(mesh, role);
           scene.add(mesh);
         }
 
@@ -1922,6 +2094,7 @@
             hoverData || {},
           );
           hoverTargets.push(mesh);
+          registerAntiCollisionVisualObject(mesh, item.role);
           scene.add(mesh);
         }
 
@@ -2072,7 +2245,10 @@
           pointer.x = ((pointerScreen.x - rect.left) / rect.width) * 2 - 1;
           pointer.y = -((pointerScreen.y - rect.top) / rect.height) * 2 + 1;
           raycaster.setFromCamera(pointer, camera);
-          const intersections = raycaster.intersectObjects(hoverTargets, false);
+          const visibleHoverTargets = hoverTargets.filter(
+            (target) => target && target.visible !== false,
+          );
+          const intersections = raycaster.intersectObjects(visibleHoverTargets, false);
           if (!intersections.length) {
             hideTooltip();
             return;
@@ -2180,6 +2356,7 @@
           animationFrameHandle = window.requestAnimationFrame(animate);
         }
 
+        initAntiCollisionControls();
         (payload.lines || []).forEach(addLine);
         (payload.meshes || []).forEach(addMesh);
         (payload.points || []).forEach(addMarkers);

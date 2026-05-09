@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.models import TrajectoryConfig
+from pywp import ptc_pad_state
+from pywp import ptc_three_overrides
+from pywp.welltrack_batch import SuccessfulWellPlan
+
+
+def _records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-C",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=700.0, y=760.0, z=2200.0, md=2300.0),
+                WelltrackPoint(x=1600.0, y=1960.0, z=2350.0, md=3350.0),
+            ),
+        ),
+    ]
+
+
+def _multi_pad_records() -> list[WelltrackRecord]:
+    return [
+        *_records()[:2],
+        WelltrackRecord(
+            name="PAD2-A",
+            points=(
+                WelltrackPoint(x=5000.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=5600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=6500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="PAD2-B",
+            points=(
+                WelltrackPoint(x=5000.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=5650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=6550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
+def _successful_plan_xy(
+    *,
+    name: str,
+    x_offset_m: float,
+    y_offset_m: float,
+    station_count: int = 3,
+) -> SuccessfulWellPlan:
+    x_values = np.linspace(x_offset_m, x_offset_m + 2000.0, station_count)
+    y_values = np.full(station_count, y_offset_m, dtype=float)
+    z_values = np.zeros(station_count, dtype=float)
+    stations = pd.DataFrame(
+        {
+            "MD_m": np.linspace(0.0, 2000.0, station_count),
+            "INC_deg": np.linspace(0.0, 90.0, station_count),
+            "AZI_deg": np.full(station_count, 90.0, dtype=float),
+            "X_m": x_values,
+            "Y_m": y_values,
+            "Z_m": z_values,
+            "DLS_deg_per_30m": np.zeros(station_count, dtype=float),
+            "segment": np.array(["HOLD"] * station_count, dtype=object),
+        }
+    )
+    return SuccessfulWellPlan(
+        name=name,
+        surface={"x": x_offset_m, "y": y_offset_m, "z": 0.0},
+        t1={"x": x_offset_m + 1000.0, "y": y_offset_m, "z": 0.0},
+        t3={"x": x_offset_m + 2000.0, "y": y_offset_m, "z": 0.0},
+        stations=stations,
+        summary={
+            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
+            "trajectory_target_direction": "Цели в одном направлении",
+            "well_complexity": "Обычная",
+            "optimization_mode": "none",
+            "azimuth_turn_deg": 0.0,
+            "horizontal_length_m": 1000.0,
+            "entry_inc_deg": 90.0,
+            "hold_inc_deg": 90.0,
+            "build_dls_selected_deg_per_30m": 0.0,
+            "build1_dls_selected_deg_per_30m": 0.0,
+            "max_dls_total_deg_per_30m": 0.0,
+            "kop_md_m": 0.0,
+            "max_inc_actual_deg": 90.0,
+            "max_inc_deg": 95.0,
+            "md_total_m": 2000.0,
+            "max_total_md_postcheck_m": 6500.0,
+            "md_postcheck_excess_m": 0.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(optimization_mode="none"),
+    )
+
+
+def test_trajectory_overrides_build_tree_focus_targets_for_multi_pad() -> None:
+    session_state: dict[str, object] = {}
+    records = _multi_pad_records()
+    successes = [
+        _successful_plan_xy(name="WELL-A", x_offset_m=0.0, y_offset_m=0.0),
+        _successful_plan_xy(name="WELL-B", x_offset_m=0.0, y_offset_m=50.0),
+        _successful_plan_xy(name="PAD2-A", x_offset_m=5000.0, y_offset_m=0.0),
+        _successful_plan_xy(name="PAD2-B", x_offset_m=5000.0, y_offset_m=50.0),
+    ]
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        session_state,
+        records=records,
+        successes=successes,
+        target_only_wells=[],
+        name_to_color={
+            "WELL-A": "#22c55e",
+            "WELL-B": "#2563eb",
+            "PAD2-A": "#f59e0b",
+            "PAD2-B": "#c026d3",
+        },
+    )
+
+    legend_tree = list(overrides["legend_tree"])
+    focus_targets = dict(overrides["focus_targets"])
+    assert [str(item["label"]) for item in legend_tree] == [
+        "Куст PAD-01",
+        "Куст PAD-02",
+    ]
+    assert set(focus_targets) == {
+        "pad::PAD-01",
+        "pad::PAD-02",
+        "well::WELL-A",
+        "well::WELL-B",
+        "well::PAD2-A",
+        "well::PAD2-B",
+    }
+    assert set(overrides["hidden_flat_legend_labels"]) == {
+        "WELL-A",
+        "WELL-B",
+        "PAD2-A",
+        "PAD2-B",
+    }
+
+
+def test_first_surface_label_honors_fixed_pad_order() -> None:
+    session_state: dict[str, object] = {}
+    records = _records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id]["fixed_slots"] = ((1, "WELL-C"),)
+    successes = [
+        _successful_plan_xy(name="WELL-A", x_offset_m=0.0, y_offset_m=0.0),
+        _successful_plan_xy(name="WELL-B", x_offset_m=0.0, y_offset_m=50.0),
+        _successful_plan_xy(name="WELL-C", x_offset_m=0.0, y_offset_m=100.0),
+    ]
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        session_state,
+        records=records,
+        successes=successes,
+        target_only_wells=[],
+        name_to_color={},
+    )
+
+    first_surface_labels = list(overrides["extra_labels"])
+    assert [str(item["well_name"]) for item in first_surface_labels] == [
+        "WELL-C"
+    ]
+    assert first_surface_labels[0]["position"] == [0.0, 100.0, 0.0]
+
+
+def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
+    success = _successful_plan_xy(
+        name="WELL-A",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=900,
+    )
+
+    edit_wells = ptc_three_overrides.build_edit_wells_payload(
+        [success],
+        {"WELL-A": "#123456"},
+    )
+
+    assert edit_wells[0]["name"] == "WELL-A"
+    assert edit_wells[0]["color"] == "#123456"
+    assert len(edit_wells[0]["base_points"]) == (
+        ptc_three_overrides.MAX_EDIT_BASE_POINTS
+    )
+
+
+def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
+    payload = {
+        "legend": [
+            {"label": "WELL-A", "color": "#22c55e", "opacity": 1.0},
+            {"label": "WELL-B", "color": "#2563eb", "opacity": 1.0},
+            {"label": "Общая зона overlap", "color": "#fca5a5", "opacity": 0.4},
+        ]
+    }
+
+    updated = ptc_three_overrides.augment_three_payload(
+        payload=payload,
+        legend_tree=[{"id": "pad::PAD-01", "label": "Куст PAD-01"}],
+        hidden_flat_legend_labels={"WELL-A", "WELL-B"},
+    )
+
+    assert [str(item["label"]) for item in updated["legend"]] == [
+        "Общая зона overlap"
+    ]
+    assert updated["legend_tree"] == [
+        {"id": "pad::PAD-01", "label": "Куст PAD-01"}
+    ]

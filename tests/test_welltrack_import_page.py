@@ -1583,6 +1583,94 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
     assert "Позиция" not in captured["number_columns"]
 
 
+def test_pad_layout_clear_fixed_slots_resets_editor_key(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "WELL-B"),
+    )
+    captured: dict[str, object] = {
+        "editor_keys": [],
+        "editor_lengths": [],
+    }
+
+    class _Rerun(Exception):
+        pass
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_data_editor(frame, **kwargs):
+        captured["editor_keys"].append(str(kwargs.get("key")))
+        captured["editor_lengths"].append(len(frame))
+        return frame
+
+    def _fake_clear_button(label, *args, **kwargs):
+        return str(label) == "Очистить фиксацию порядка"
+
+    def _fake_selectbox_column(label, *args, **kwargs):
+        return {"type": "selectbox", "label": str(label), **kwargs}
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", _fake_data_editor)
+    monkeypatch.setattr(page.st, "button", _fake_clear_button)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda: (_ for _ in ()).throw(_Rerun()))
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        _fake_selectbox_column,
+    )
+
+    with pytest.raises(_Rerun):
+        page._render_pad_layout_panel(records)
+
+    assert page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] == ()
+    assert page.st.session_state[
+        f"wt_pad_fixed_slots_editor_revision_{pad_id}"
+    ] == 1
+    assert captured["editor_keys"] == [f"wt_pad_fixed_slots_editor_{pad_id}_0"]
+    assert captured["editor_lengths"] == [1]
+
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    page._render_pad_layout_panel(records)
+
+    assert captured["editor_keys"][-1] == f"wt_pad_fixed_slots_editor_{pad_id}_1"
+    assert captured["editor_lengths"][-1] == 0
+
+
 def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference() -> (
     None
 ):
@@ -4511,6 +4599,31 @@ def test_optimize_three_payload_keeps_mesh_roles_separate() -> None:
 
     assert len(optimized["meshes"]) == 2
     assert {str(item["role"]) for item in optimized["meshes"]} == {"cone", "overlap"}
+
+
+def test_three_payload_marks_conflict_segments_as_anticollision_layer() -> None:
+    page = wt_import_module
+    trace = go.Scatter3d(
+        x=[0.0, 10.0],
+        y=[0.0, 0.0],
+        z=[0.0, -10.0],
+        mode="lines+markers",
+        name="Конфликтный участок ствола",
+        line={"color": "rgb(198, 40, 40)", "width": 8},
+        marker={"color": "rgba(0, 0, 0, 0.001)", "size": 7.5},
+        customdata=np.array(
+            [
+                [0.0, 0.0, 0.0, "Конфликтный участок"],
+                [10.0, 1.0, 3.0, "Конфликтный участок"],
+            ],
+            dtype=object,
+        ),
+    )
+
+    payload = page._scatter3d_trace_to_three_payload(trace)
+
+    assert payload["lines"][0]["role"] == "conflict_segment"
+    assert payload["points"][0]["role"] == "conflict_hover"
 
 
 def test_resolve_3d_render_mode_forces_fast_for_large_reference_scene() -> None:

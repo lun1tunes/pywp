@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from io import StringIO
 from pathlib import Path
@@ -282,11 +283,11 @@ def parse_reference_trajectory_dev_text(
         line = str(raw_line).strip()
         if not line or line.startswith("#"):
             continue
-        tokens = _split_reference_text_line(line)
+        tokens = _split_dev_text_line(line)
         if not tokens:
             continue
         try:
-            md = float(tokens[0])
+            md = _parse_dev_float(tokens[0])
         except ValueError:
             continue
         if len(tokens) < 4:
@@ -295,9 +296,9 @@ def parse_reference_trajectory_dev_text(
                 "но не содержит обязательные X Y Z."
             )
         try:
-            x = float(tokens[1])
-            y = float(tokens[2])
-            z = float(tokens[3])
+            x = _parse_dev_float(tokens[1])
+            y = _parse_dev_float(tokens[2])
+            z = _parse_dev_float(tokens[3])
         except ValueError as exc:
             raise WelltrackParseError(
                 f".dev '{normalized_name}': не удалось прочитать X Y Z "
@@ -379,7 +380,7 @@ def parse_reference_trajectory_dev_directories(
             raise WelltrackParseError(
                 f"Путь .dev не является папкой: `{source_dir}`."
             )
-        dir_key = str(source_dir.resolve())
+        dir_key = os.path.normcase(str(source_dir.resolve()))
         if dir_key in seen_dir_keys:
             continue
         seen_dir_keys.add(dir_key)
@@ -391,7 +392,7 @@ def parse_reference_trajectory_dev_directories(
                     for child in source_dir.iterdir()
                     if child.is_file() and child.suffix.lower() == ".dev"
                 ),
-                key=lambda item: item.name.lower(),
+                key=_natural_path_sort_key,
             )
         )
 
@@ -502,7 +503,7 @@ def build_reference_trajectory_stations(
     tangent_y = _local_derivative(md_values, y_values)
     tangent_z = _local_derivative(md_values, z_values)
     horizontal = np.hypot(tangent_x, tangent_y)
-    inc_deg = np.degrees(np.arctan2(horizontal, tangent_z))
+    inc_deg = np.degrees(np.arctan2(horizontal, np.abs(tangent_z)))
     azi_deg = (np.degrees(np.arctan2(tangent_x, tangent_y)) + 360.0) % 360.0
 
     stations = pd.DataFrame(
@@ -638,6 +639,25 @@ def _local_derivative(md_values: np.ndarray, values: np.ndarray) -> np.ndarray:
 
 def _split_reference_text_line(line: str) -> list[str]:
     return [token for token in re.split(r"[\t,; ]+", str(line).strip()) if token]
+
+
+def _split_dev_text_line(line: str) -> list[str]:
+    text = str(line).strip()
+    tokens = [token for token in re.split(r"[\t; ]+", text) if token]
+    if len(tokens) > 1:
+        return tokens
+    return [token for token in text.split(",") if token]
+
+
+def _parse_dev_float(value: str) -> float:
+    return float(str(value).strip().replace(",", "."))
+
+
+def _natural_path_sort_key(path: Path) -> tuple[tuple[int, object], ...]:
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in re.split(r"(\d+)", path.name.casefold())
+    )
 
 
 def _looks_like_reference_header(tokens: list[str]) -> bool:

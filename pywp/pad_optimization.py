@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import multiprocessing
-import sys
 from concurrent.futures import ProcessPoolExecutor
 from time import perf_counter
 from typing import Callable
@@ -16,6 +14,7 @@ from pywp.anticollision import (
 )
 from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
 from pywp.models import TrajectoryConfig
+from pywp.parallel import process_pool_context
 from pywp.planner import TrajectoryPlanner
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -318,12 +317,8 @@ def optimize_pad_order(
         return records, success_dict, False
 
     ref_wells = tuple(reference_wells)
-    # Use "forkserver" on Linux to avoid deadlocks when forking inside
-    # Streamlit's threaded environment (the default "fork" can copy locked
-    # mutexes from numpy / BLAS threads).  On Windows / macOS only "spawn"
-    # is reliably available.
-    _mp_method = "spawn" if sys.platform == "win32" else "forkserver"
-    _mp_ctx = multiprocessing.get_context(_mp_method)
+    # Use a Streamlit-safe context: spawn on Windows/macOS, forkserver on Linux.
+    _mp_ctx = process_pool_context()
     pool = ProcessPoolExecutor(max_workers=2, mp_context=_mp_ctx)
 
     # --- Pre-build lightweight AC wells (no display geometry). ---

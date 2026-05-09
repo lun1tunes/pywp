@@ -32,7 +32,10 @@ from pywp.anticollision_recommendations import (
     AntiCollisionWellContext,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, Point3D
-from pywp.reference_trajectories import parse_reference_trajectory_table
+from pywp.reference_trajectories import (
+    parse_reference_trajectory_dev_directories,
+    parse_reference_trajectory_table,
+)
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 
@@ -821,6 +824,83 @@ def test_runtime_analysis_skips_reference_to_reference_pairs() -> None:
         for corridor in analysis.corridors
     }
     assert ("APP-1", "FACT-1") not in compared_pairs
+
+
+def test_runtime_analysis_includes_dev_references_from_multiple_folders(
+    tmp_path,
+) -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config={"optimization_mode": "none", "kop_min_vertical_m": 550.0},
+    )
+    actual_a = tmp_path / "actual_a"
+    actual_b = tmp_path / "actual_b"
+    approved = tmp_path / "approved"
+    actual_a.mkdir()
+    actual_b.mkdir()
+    approved.mkdir()
+
+    def _write_dev(path, *, y_offset_m: float) -> None:
+        path.write_text(
+            "\n".join(
+                [
+                    "MD X Y Z",
+                    f"0 0 {y_offset_m} 0",
+                    f"1000 1000 {y_offset_m} -10",
+                    f"2000 2000 {y_offset_m} -20",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    _write_dev(actual_a / "well_2.dev", y_offset_m=5.0)
+    _write_dev(actual_b / "well_10.dev", y_offset_m=6.0)
+    _write_dev(approved / "approved_1.dev", y_offset_m=7.0)
+    reference_wells = tuple(
+        [
+            *parse_reference_trajectory_dev_directories(
+                [actual_a, actual_b],
+                kind="actual",
+            ),
+            *parse_reference_trajectory_dev_directories(
+                [approved],
+                kind="approved",
+            ),
+        ]
+    )
+    reference_model = build_anti_collision_well(
+        name="TMP",
+        color="#000000",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+    ).overlay.model
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=reference_model,
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert [(well.name, well.well_kind) for well in analysis.wells] == [
+        ("WELL-P", "project"),
+        ("well_2", "actual"),
+        ("well_10", "actual"),
+        ("approved_1", "approved"),
+    ]
+    assert analysis.pair_count == 3
 
 
 def test_report_merges_adjacent_corridors_into_single_event() -> None:

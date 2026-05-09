@@ -11,6 +11,16 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
 
     assert 'id="fit-camera-btn"' in html
     assert 'id="fullscreen-btn"' in html
+    assert 'id="anti-collision-btn"' in html
+    assert 'id="anti-collision-controls"' in html
+    assert 'data-ac-layer="cones"' in html
+    assert 'data-ac-layer="overlaps"' in html
+    assert 'data-ac-layer="segments"' in html
+    assert "function initAntiCollisionControls()" in html
+    assert "function registerAntiCollisionVisualObject(object, roleValue)" in html
+    assert 'role === "cone" || role === "cone_tip"' in html
+    assert 'role === "conflict_segment" || role === "conflict_hover"' in html
+    assert "antiCollisionVisualObjects[layer].forEach" in html
     assert 'id="legend-toggle-btn"' in html
     assert 'id="tooltip"' in html
     assert 'id="axes-gizmo"' in html
@@ -209,7 +219,7 @@ def test_three_viewer_assets_are_declared_as_package_data() -> None:
 
 
 def test_ptc_single_well_view_uses_three_edit_override() -> None:
-    page_source = Path("pages/01_trajectory_constructor.py").read_text(
+    page_source = Path("pywp/ptc_page_results.py").read_text(
         encoding="utf-8"
     )
 
