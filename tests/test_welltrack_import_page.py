@@ -939,11 +939,17 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
     assert {str(item["role"]) for item in first_surface_arrows} == {
         "pad_first_surface_arrow"
     }
-    assert {str(item["color"]) for item in first_surface_arrows} == {"#64748B"}
-    assert {len(item["vertices"]) for item in first_surface_arrows} == {7}
-    assert {len(item["faces"]) for item in first_surface_arrows} == {3}
-    assert first_surface_arrows[0]["vertices"][5][0] > 0.0
-    assert first_surface_arrows[1]["vertices"][5][0] > 5000.0
+    assert {str(item["color"]) for item in first_surface_arrows} == {"#475569"}
+    assert {len(item["vertices"]) for item in first_surface_arrows} == {14}
+    assert {len(item["faces"]) for item in first_surface_arrows} == {20}
+    assert [str(item["end_well_name"]) for item in first_surface_arrows] == [
+        "PAD1-B",
+        "PAD2-B",
+    ]
+    assert first_surface_arrows[0]["start_position"] == [0.0, 0.0, 0.0]
+    assert first_surface_arrows[0]["end_position"] == [0.0, 50.0, 0.0]
+    assert first_surface_arrows[1]["start_position"] == [5000.0, 0.0, 0.0]
+    assert first_surface_arrows[1]["end_position"] == [5000.0, 50.0, 0.0]
 
 
 def test_trajectory_three_payload_first_surface_arrow_uses_fixed_pad_order() -> None:
@@ -974,15 +980,14 @@ def test_trajectory_three_payload_first_surface_arrow_uses_fixed_pad_order() -> 
     assert [str(item["well_name"]) for item in first_surface_arrows] == ["WELL-C"]
     arrow = first_surface_arrows[0]
     assert str(arrow["role"]) == "pad_first_surface_arrow"
-    angle_rad = np.deg2rad(float(arrow["nds_azimuth_deg"]))
-    direction = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=float)
-    tip_xy = np.asarray(arrow["vertices"][5][:2], dtype=float)
-    center_xy = np.array([0.0, 100.0], dtype=float)
-    delta_xy = tip_xy - center_xy
-    assert float(np.dot(delta_xy, direction)) > 0.0
-    cross_z = float(direction[0] * delta_xy[1] - direction[1] * delta_xy[0])
-    assert abs(cross_z) < 1e-9
-    assert float(arrow["vertices"][5][2]) < 0.0
+    start_xy = np.asarray(arrow["start_position"][:2], dtype=float)
+    end_xy = np.asarray(arrow["end_position"][:2], dtype=float)
+    tip_xy = np.asarray(arrow["vertices"][4][:2], dtype=float)
+    assert np.allclose(start_xy, [0.0, 100.0])
+    assert np.allclose(tip_xy, end_xy)
+    assert float(np.linalg.norm(end_xy - start_xy)) >= 50.0
+    assert float(arrow["vertices"][4][2]) <= -24.0
+    assert float(arrow["vertices"][11][2] - arrow["vertices"][4][2]) >= 5.0
 
 
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
@@ -1025,6 +1030,10 @@ def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
     palette = tuple(str(color) for color in page.WELL_COLOR_PALETTE)
     assert len(palette) >= 50
     assert len(set(palette)) == len(palette)
+    assert "#8B5E34" in palette[:12]
+    assert "#38BDF8" in palette[:12]
+    assert "#6B7280" not in palette
+    assert "#C62828" not in palette
 
     def _rgb_triplet(value: str) -> tuple[int, int, int]:
         normalized = value.lstrip("#")
@@ -1052,6 +1061,22 @@ def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
                 abs(red_a - red_b) + abs(green_a - green_b) + abs(blue_a - blue_b)
             )
             assert distance >= 115
+
+
+def test_well_color_map_restarts_palette_for_each_pad() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_multi_pad_records())
+
+    color_map = page._well_color_map(records)
+    _, _, well_names_by_pad_id = page._pad_membership(records)
+
+    assert len(well_names_by_pad_id) == 2
+    for ordered_names in well_names_by_pad_id.values():
+        for index, name in enumerate(ordered_names):
+            assert color_map[str(name)] == page._well_color(index)
+    first_well_names = [str(names[0]) for names in well_names_by_pad_id.values()]
+    assert color_map[first_well_names[0]] == color_map[first_well_names[1]]
 
 
 def test_reference_trajectory_text_import_populates_reference_wells_state(
@@ -1519,6 +1544,7 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
     page = wt_import_module
     page.st.session_state.clear()
     captured: dict[str, object] = {
+        "expander_labels": [],
         "number_columns": [],
         "selectbox_columns": [],
     }
@@ -1553,6 +1579,10 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
         captured["column_config"] = dict(kwargs.get("column_config", {}))
         return frame
 
+    def _fake_expander(label, *args, **kwargs):
+        captured["expander_labels"].append(str(label))
+        return _DummyContext()
+
     def _fake_number_column(label, *args, **kwargs):
         captured["number_columns"].append(str(label))
         return {"type": "number", "label": str(label), **kwargs}
@@ -1564,7 +1594,7 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
         return {"type": "selectbox", "label": str(label), **kwargs}
 
     monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
-    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
     monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
@@ -1590,6 +1620,9 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
     assert position_column["type"] == "selectbox"
     assert position_selectbox["kwargs"]["options"] == [1, 2, 3]
     assert "Позиция" not in captured["number_columns"]
+    assert captured["expander_labels"] == [
+        "Порядок бурения и координаты устьев на кусте"
+    ]
 
 
 def test_pad_layout_clear_fixed_slots_resets_editor_key(monkeypatch) -> None:
@@ -4356,7 +4389,7 @@ def test_clusters_touching_focus_pad_expand_focus_to_neighbor_cluster_wells() ->
     assert "Рекомендация по устранению" in report_rows[0]
 
 
-def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
+def test_all_wells_and_anticollision_figures_show_well_names_at_t3() -> None:
     page = wt_import_module
     successes = [
         _successful_plan(name="WELL-A", y_offset_m=0.0),
@@ -4412,9 +4445,9 @@ def test_all_wells_three_payload_preserves_overview_labels_and_legend() -> (
     )
     assert str(well_label["role"]) == "well_label"
     assert well_label["position"] == [
-        float(success.t1.x),
-        float(success.t1.y),
-        float(success.t1.z),
+        float(success.t3.x),
+        float(success.t3.y),
+        float(success.t3.z),
     ]
 
 

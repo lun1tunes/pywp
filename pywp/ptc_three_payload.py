@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 
@@ -90,14 +90,15 @@ def optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
 def merge_three_line_payloads(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    grouped: dict[tuple[str, float, str, str], list[list[list[float]]]] = {}
-    ordered_keys: list[tuple[str, float, str, str]] = []
+    grouped: dict[tuple[str, str, float, str, str], list[list[list[float]]]] = {}
+    ordered_keys: list[tuple[str, str, float, str, str]] = []
     for item in items:
+        name = str(item.get("name") or "")
         color = str(item.get("color") or "#0F172A")
         opacity = _float_or_default(item.get("opacity"), 1.0)
         dash = str(item.get("dash") or "solid")
         role = str(item.get("role") or "line")
-        key = (color, opacity, dash, role)
+        key = (name, color, opacity, dash, role)
         if key not in grouped:
             grouped[key] = []
             ordered_keys.append(key)
@@ -110,12 +111,13 @@ def merge_three_line_payloads(
         )
 
     merged: list[dict[str, object]] = []
-    for color, opacity, dash, role in ordered_keys:
-        segments = grouped[(color, opacity, dash, role)]
+    for name, color, opacity, dash, role in ordered_keys:
+        segments = grouped[(name, color, opacity, dash, role)]
         if not segments:
             continue
         merged.append(
             {
+                "name": name,
                 "segments": segments,
                 "color": color,
                 "opacity": float(opacity),
@@ -130,19 +132,21 @@ def merge_three_point_payloads(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     grouped: dict[
-        tuple[str, float, float, str, bool, str], dict[str, object]
+        tuple[str, str, float, float, str, bool, str], dict[str, object]
     ] = {}
-    ordered_keys: list[tuple[str, float, float, str, bool, str]] = []
+    ordered_keys: list[tuple[str, str, float, float, str, bool, str]] = []
     for item in items:
+        name = str(item.get("name") or "")
         color = str(item.get("color") or "#0F172A")
         opacity = _float_or_default(item.get("opacity"), 1.0)
         size = float(item.get("size") or 6.0)
         symbol = str(item.get("symbol") or "circle")
         hover_only = bool(item.get("hover_only"))
         role = str(item.get("role") or "point")
-        key = (color, opacity, size, symbol, hover_only, role)
+        key = (name, color, opacity, size, symbol, hover_only, role)
         if key not in grouped:
             grouped[key] = {
+                "name": name,
                 "points": [],
                 "hover": [],
                 "color": color,
@@ -154,15 +158,15 @@ def merge_three_point_payloads(
             }
             ordered_keys.append(key)
 
-        valid_points = [
-            point
-            for point in (item.get("points") or [])
-            if isinstance(point, list) and len(point) == 3
-        ]
-        grouped[key]["points"].extend(valid_points)
-        grouped[key]["hover"].extend(
-            list(item.get("hover") or [])[: len(valid_points)]
-        )
+        raw_hover = list(item.get("hover") or [])
+        for point_index, point in enumerate(item.get("points") or []):
+            if not isinstance(point, list) or len(point) != 3:
+                continue
+            grouped[key]["points"].append(point)
+            hover_item = raw_hover[point_index] if point_index < len(raw_hover) else {}
+            grouped[key]["hover"].append(
+                dict(hover_item) if isinstance(hover_item, Mapping) else {}
+            )
 
     merged: list[dict[str, object]] = []
     for key in ordered_keys:
@@ -172,6 +176,7 @@ def merge_three_point_payloads(
             continue
         merged.append(
             {
+                "name": str(entry["name"]),
                 "points": points,
                 "hover": list(entry["hover"]),
                 "color": str(entry["color"]),
@@ -188,10 +193,11 @@ def merge_three_point_payloads(
 def merge_three_mesh_payloads(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    grouped: dict[tuple[str, float, str], dict[str, object]] = {}
-    ordered_keys: list[tuple[str, float, str]] = []
+    grouped: dict[tuple[str, str, float, str], dict[str, object]] = {}
+    ordered_keys: list[tuple[str, str, float, str]] = []
     passthrough_items: list[dict[str, object]] = []
     for item in items:
+        name = str(item.get("name") or "")
         color = str(item.get("color") or "#94A3B8")
         opacity = _float_or_default(item.get("opacity"), 1.0)
         role = str(item.get("role") or "mesh")
@@ -199,9 +205,10 @@ def merge_three_mesh_payloads(
             passthrough_items.append(dict(item))
             continue
 
-        key = (color, opacity, role)
+        key = (name, color, opacity, role)
         if key not in grouped:
             grouped[key] = {
+                "name": name,
                 "vertices": [],
                 "faces": [],
                 "color": color,

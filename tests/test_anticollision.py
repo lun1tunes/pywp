@@ -972,6 +972,93 @@ def test_report_merges_adjacent_corridors_into_single_event() -> None:
     assert rows[0]["Мин. расстояние, м"] >= 0.0
 
 
+def test_report_keeps_distinct_target_labels_in_adjacent_events() -> None:
+    def _corridor(
+        *,
+        start_m: float,
+        end_m: float,
+        classification: str,
+        priority_rank: int,
+        label_a: str,
+        label_b: str,
+        sf: float,
+    ) -> AntiCollisionCorridor:
+        return AntiCollisionCorridor(
+            well_a="well_01",
+            well_b="well_11",
+            classification=classification,
+            priority_rank=priority_rank,
+            label_a=label_a,
+            label_b=label_b,
+            md_a_start_m=start_m,
+            md_a_end_m=end_m,
+            md_b_start_m=start_m,
+            md_b_end_m=end_m,
+            md_a_values_m=np.array([start_m, end_m], dtype=float),
+            md_b_values_m=np.array([start_m, end_m], dtype=float),
+            label_a_values=(label_a, label_a),
+            label_b_values=(label_b, label_b),
+            midpoint_xyz=np.array([[start_m, 0.0, 0.0], [end_m, 0.0, 0.0]], dtype=float),
+            overlap_rings_xyz=(
+                np.zeros((16, 3), dtype=float),
+                np.ones((16, 3), dtype=float),
+            ),
+            overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
+            separation_factor_values=np.array([sf, sf], dtype=float),
+            overlap_depth_values_m=np.array([8.0, 8.0], dtype=float),
+        )
+
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(
+            _corridor(
+                start_m=1000.0,
+                end_m=1050.0,
+                classification="target-trajectory",
+                priority_rank=1,
+                label_a=TARGET_T1,
+                label_b="",
+                sf=0.6,
+            ),
+            _corridor(
+                start_m=1050.0,
+                end_m=1100.0,
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                sf=0.5,
+            ),
+            _corridor(
+                start_m=1100.0,
+                end_m=1150.0,
+                classification="target-trajectory",
+                priority_rank=1,
+                label_a=TARGET_T3,
+                label_b="",
+                sf=0.4,
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=1,
+        target_overlap_pair_count=1,
+        worst_separation_factor=0.4,
+    )
+
+    events = anti_collision_report_events(analysis)
+
+    assert [(event.label_a, event.label_b) for event in events] == [
+        (TARGET_T1, ""),
+        (TARGET_T3, ""),
+    ]
+    assert events[0].merged_corridor_count == 2
+    assert events[0].md_a_start_m == 1000.0
+    assert events[0].md_a_end_m == 1100.0
+    assert events[1].merged_corridor_count == 1
+
+
 def test_recommendations_prioritize_target_spacing_for_target_overlap() -> None:
     well_a = build_anti_collision_well(
         name="WELL-A",

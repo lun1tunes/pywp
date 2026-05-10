@@ -392,21 +392,25 @@ def render_calc_params_block(
         ),
         **widget_change_kwargs,
     )
-    d2.number_input(
-        "Мин VERTICAL до KOP, м",
-        key=_state_key(prefix, "kop_min_vertical"),
-        min_value=0.0,
-        step=10.0,
-        help="Минимальный вертикальный участок от S до начала BUILD1.",
-        **widget_change_kwargs,
-    ) if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_CONSTANT else d2.text_input(
-        "Мин VERTICAL до KOP, м",
-        value=kop_min_vertical_display_label(prefix),
-        disabled=True,
-        help=(
-            "Для расчета активна функция KOP / TVD по фактическому фонду. "
-            "Пересчет по скважинам будет подставлять свой KOP по глубине t1."
-        ),
+    (
+        d2.number_input(
+            "Мин VERTICAL до KOP, м",
+            key=_state_key(prefix, "kop_min_vertical"),
+            min_value=0.0,
+            step=50.0,
+            help="Минимальный вертикальный участок от S до начала BUILD1.",
+            **widget_change_kwargs,
+        )
+        if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_CONSTANT
+        else d2.text_input(
+            "Мин VERTICAL до KOP, м",
+            value=kop_min_vertical_display_label(prefix),
+            disabled=True,
+            help=(
+                "Для расчета активна функция KOP / TVD по фактическому фонду. "
+                "Пересчет по скважинам будет подставлять свой KOP по глубине t1."
+            ),
+        )
     )
     if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION:
         d2.caption(kop_min_vertical_detail_label(prefix))
@@ -414,7 +418,7 @@ def render_calc_params_block(
         "Макс итоговая MD (постпроверка), м",
         key=_state_key(prefix, "max_total_md_postcheck"),
         min_value=100.0,
-        step=50.0,
+        step=100.0,
         help=(
             "Порог итоговой длины ствола по MD для финальной проверки. "
             "На сам поиск решения не влияет."

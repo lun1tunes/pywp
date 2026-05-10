@@ -120,7 +120,7 @@
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.95);
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
-        z-index: 5;
+        z-index: 8;
         will-change: transform;
       }
 
@@ -199,7 +199,7 @@
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.95);
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
-        z-index: 5;
+        z-index: 8;
         will-change: transform;
       }
 
@@ -362,6 +362,14 @@
         color: #0f172a;
       }
 
+      .legend-item.is-focusable {
+        cursor: pointer;
+      }
+
+      .legend-item.is-focusable:hover .legend-label {
+        color: #334155;
+      }
+
       .legend-group {
         margin: 0 0 10px 0;
       }
@@ -481,6 +489,23 @@
         text-shadow:
           0 1px 0 rgba(255, 255, 255, 0.95),
           0 0 8px rgba(255, 255, 255, 0.8);
+      }
+
+      .scene-label.well-name-label,
+      .minimap-well-label {
+        font-family:
+          Inter,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      .scene-label.well-name-label {
+        font-size: 12px;
       }
 
       .scene-axis-label {
@@ -864,16 +889,279 @@
         border-left: 5px solid #f59e0b;
         border-radius: 12px;
         box-shadow: 0 9px 24px rgba(15,23,42,0.12);
-        padding: 15px 21px;
+        padding: 15px 21px 36px;
         font-size: 16.5px;
         line-height: 1.45;
         color: #475569;
-        pointer-events: none;
+        pointer-events: auto;
+      }
+
+      #edit-warning-hide-btn {
+        position: absolute;
+        right: 12px;
+        bottom: 8px;
+        border: none;
+        background: transparent;
+        color: #64748b;
+        border-radius: 6px;
+        padding: 3px 7px;
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.2;
+        cursor: pointer;
+      }
+
+      #edit-warning-hide-btn:hover {
+        background: rgba(148,163,184,0.16);
+        color: #334155;
       }
 
       #edit-warning-toast.is-visible {
         display: block;
         animation: fadeInUp 0.3s ease;
+      }
+
+      #minimap-frame {
+        display: none;
+        position: absolute;
+        z-index: 3;
+        border: 1px solid rgba(15,23,42,0.16);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.035);
+        box-shadow: 0 8px 20px rgba(15,23,42,0.10);
+        pointer-events: none;
+      }
+
+      #minimap-frame.is-visible {
+        display: block;
+      }
+
+      #minimap-label-layer {
+        display: none;
+        position: absolute;
+        z-index: 4;
+        overflow: hidden;
+        pointer-events: none;
+      }
+
+      #minimap-label-layer.is-visible {
+        display: block;
+      }
+
+      .minimap-well-label {
+        position: absolute;
+        display: none;
+        max-width: 120px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: #0f172a;
+        font-size: 10px;
+        line-height: 1;
+        text-shadow:
+          0 1px 0 rgba(255,255,255,0.98),
+          0 0 7px rgba(255,255,255,0.95),
+          0 1px 4px rgba(15,23,42,0.18);
+        transform: translate(6px, -50%);
+        white-space: nowrap;
+      }
+
+      #minimap-axes {
+        display: none;
+        position: absolute;
+        z-index: 4;
+        width: 62px;
+        height: 62px;
+        color: #334155;
+        opacity: 0.86;
+        pointer-events: none;
+      }
+
+      #minimap-axes.is-visible {
+        display: block;
+      }
+
+      .minimap-axis {
+        position: absolute;
+        background: currentColor;
+        box-shadow: 0 1px 2px rgba(255,255,255,0.9);
+      }
+
+      .minimap-axis::after {
+        content: "";
+        position: absolute;
+        width: 0;
+        height: 0;
+      }
+
+      .minimap-axis-x {
+        left: 13px;
+        bottom: 14px;
+        width: 34px;
+        height: 2px;
+        color: #16A34A;
+      }
+
+      .minimap-axis-x::after {
+        right: -1px;
+        top: -4px;
+        border-left: 7px solid currentColor;
+        border-top: 5px solid transparent;
+        border-bottom: 5px solid transparent;
+      }
+
+      .minimap-axis-y {
+        left: 13px;
+        bottom: 14px;
+        width: 2px;
+        height: 34px;
+        color: #2563EB;
+      }
+
+      .minimap-axis-y::after {
+        left: -4px;
+        top: -1px;
+        border-bottom: 7px solid currentColor;
+        border-left: 5px solid transparent;
+        border-right: 5px solid transparent;
+      }
+
+      .minimap-axis-label {
+        position: absolute;
+        color: currentColor;
+        font-size: 10px;
+        font-weight: 800;
+        line-height: 1;
+        text-shadow: 0 1px 2px rgba(255,255,255,0.95);
+        white-space: nowrap;
+      }
+
+      .minimap-axis-label-x {
+        right: 2px;
+        bottom: 1px;
+        color: #16A34A;
+      }
+
+      .minimap-axis-label-y {
+        left: 0;
+        top: 0;
+        color: #2563EB;
+      }
+
+      #minimap-control {
+        position: absolute;
+        right: 14px;
+        bottom: 14px;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        pointer-events: none;
+      }
+
+      #minimap-control.is-expanded {
+        height: 28px;
+        justify-content: center;
+      }
+
+      #minimap-label {
+        padding: 0;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        color: #334155;
+        box-shadow: none;
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.15;
+        pointer-events: none;
+        text-shadow: 0 1px 2px rgba(255,255,255,0.95);
+        white-space: nowrap;
+      }
+
+      #minimap-label.is-expanded {
+        position: absolute;
+        left: 50%;
+        top: 6px;
+        transform: translateX(-50%);
+        background: transparent;
+        box-shadow: none;
+      }
+
+      #minimap-toggle-btn {
+        width: 28px;
+        height: 28px;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        color: #475569;
+        box-shadow: none;
+        cursor: pointer;
+        font-size: 22px;
+        font-weight: 800;
+        line-height: 1;
+        pointer-events: auto;
+      }
+
+      #minimap-control:not(.is-expanded) #minimap-label {
+        display: none;
+      }
+
+      #minimap-control:not(.is-expanded) #minimap-toggle-btn {
+        width: auto;
+        min-width: 94px;
+        height: 30px;
+        padding: 0 10px;
+        border: 1px solid rgba(15,23,42,0.16);
+        border-radius: 8px;
+        background: rgba(255,255,255,0.88);
+        box-shadow: 0 6px 16px rgba(15,23,42,0.10);
+        color: #334155;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      #minimap-control.is-expanded #minimap-toggle-btn {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        box-shadow: none;
+        color: transparent;
+        cursor: nwse-resize;
+      }
+
+      #minimap-control.is-expanded #minimap-toggle-btn::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 0;
+        height: 0;
+        border-top: 18px solid rgba(71,85,105,0.62);
+        border-right: 18px solid transparent;
+      }
+
+      #minimap-control.is-expanded #minimap-toggle-btn::after {
+        content: "";
+        position: absolute;
+        left: 5px;
+        top: 5px;
+        width: 7px;
+        height: 7px;
+        border-left: 2px solid rgba(255,255,255,0.88);
+        border-top: 2px solid rgba(255,255,255,0.88);
+      }
+
+      #minimap-toggle-btn:hover {
+        color: #0f172a;
+      }
+
+      #minimap-control.is-expanded #minimap-toggle-btn:hover::before {
+        border-top-color: rgba(51,65,85,0.74);
       }
 
       @keyframes fadeInUp {
@@ -946,7 +1234,8 @@
       </div>
       <button id="edit-save-btn" type="button">Сохранить изменения</button>
       <div id="edit-warning-toast">
-        ⚠ Для скорректированных скважин показана предварительная траектория — для уточнения требуется пересчёт.
+        <span>⚠ Для скорректированных скважин показана предварительная траектория — для уточнения требуется пересчёт.</span>
+        <button id="edit-warning-hide-btn" type="button">скрыть</button>
       </div>
       <div id="legend-toggle-wrap">
         <button id="legend-toggle-btn" class="toolbar-btn" type="button" title="Свернуть или развернуть легенду">Legend</button>
@@ -956,6 +1245,18 @@
       <div id="collisions-panel"></div>
       <div id="legend"></div>
       <div id="tooltip"></div>
+      <div id="minimap-frame"></div>
+      <div id="minimap-label-layer"></div>
+      <div id="minimap-axes" aria-hidden="true">
+        <div class="minimap-axis minimap-axis-x"></div>
+        <div class="minimap-axis minimap-axis-y"></div>
+        <div class="minimap-axis-label minimap-axis-label-x">X / E</div>
+        <div class="minimap-axis-label minimap-axis-label-y">Y / N</div>
+      </div>
+      <div id="minimap-control">
+        <div id="minimap-label">План E-N (вид сверху)</div>
+        <button id="minimap-toggle-btn" type="button" title="Показать вид сверху">План E-N ‹</button>
+      </div>
     </div>
     <script>
       __THREE_LIBRARY__
@@ -980,6 +1281,12 @@
         const labelLayerElement = document.getElementById("label-layer");
         const legendElement = document.getElementById("legend");
         const tooltipElement = document.getElementById("tooltip");
+        const miniMapFrame = document.getElementById("minimap-frame");
+        const miniMapLabelLayer = document.getElementById("minimap-label-layer");
+        const miniMapAxes = document.getElementById("minimap-axes");
+        const miniMapControl = document.getElementById("minimap-control");
+        const miniMapLabel = document.getElementById("minimap-label");
+        const miniMapToggleBtn = document.getElementById("minimap-toggle-btn");
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
         const axesGizmoElement = document.getElementById("axes-gizmo");
@@ -1047,6 +1354,9 @@
         const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
         camera.up.set(0, 0, 1);
 
+        const miniMapCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1000000);
+        miniMapCamera.up.set(0, 1, 0);
+
         const controls = new THREE.OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.dampingFactor = 0.12;
@@ -1060,12 +1370,29 @@
 
         const hoverTargets = [];
         const sceneLabels = [];
+        const miniMapLabels = [];
         let animationFrameHandle = 0;
         let idleFrameCount = 0;
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
         let legendTreeExpanded = true;
         let interactionActive = false;
+        const miniMapState = {
+          expanded: false,
+          dragging: false,
+          zoom: 1.0,
+          baseSpan: 1.0,
+          maxSpan: 1.0,
+          target: new THREE.Vector3(0, 0, 0),
+          pointerStart: { x: 0, y: 0 },
+          targetStart: new THREE.Vector3(0, 0, 0),
+          customSize: null,
+          resizing: false,
+          resizeMoved: false,
+          resizeStartRect: null,
+          resizeStartWorldPerPixel: 1.0,
+          rect: { x: 0, y: 0, width: 0, height: 0 },
+        };
         const hasTreeLegend =
           Array.isArray(payload.legend_tree) && payload.legend_tree.length > 0;
         const focusTargets =
@@ -1094,6 +1421,7 @@
           overlaps: [],
           segments: [],
         };
+        const miniMapHiddenContourObjects = [];
         const antiCollisionLayerLabels = {
           cones: "Конусы неопределенности",
           overlaps: "Зоны пересечений",
@@ -1268,6 +1596,26 @@
           object.visible = Boolean(antiCollisionLayerState[layer]);
         }
 
+        function registerMiniMapHiddenContourObject(object) {
+          if (object) {
+            miniMapHiddenContourObjects.push(object);
+          }
+        }
+
+        function renderMiniMapScene() {
+          const previousVisibility = miniMapHiddenContourObjects.map((object) => ({
+            object,
+            visible: Boolean(object.visible),
+          }));
+          previousVisibility.forEach((item) => {
+            item.object.visible = false;
+          });
+          renderer.render(scene, miniMapCamera);
+          previousVisibility.forEach((item) => {
+            item.object.visible = item.visible;
+          });
+        }
+
         function applyAntiCollisionLayerVisibility() {
           Object.keys(antiCollisionVisualObjects).forEach((layer) => {
             const visible = Boolean(antiCollisionLayerState[layer]);
@@ -1367,6 +1715,310 @@
           };
         }
 
+        function clampValue(value, minValue, maxValue) {
+          return Math.max(minValue, Math.min(maxValue, value));
+        }
+
+        function miniMapSizeConfig(canvasWidth, canvasHeight) {
+          const margin = 14;
+          const aspect = canvasWidth / canvasHeight;
+          const targetArea = (canvasWidth * canvasHeight) / 6.0;
+          const preferredWidth = Math.sqrt(targetArea * aspect) * 1.2;
+          const preferredHeight = preferredWidth / aspect;
+          return {
+            margin: margin,
+            preferredWidth: preferredWidth,
+            preferredHeight: preferredHeight,
+            minWidth: Math.min(264, Math.max(canvasWidth - margin * 2, 1)),
+            minHeight: Math.min(180, Math.max(canvasHeight - margin * 2, 1)),
+            maxWidth: Math.max(Math.min(canvasWidth - margin * 2, 900), 1),
+            maxHeight: Math.max(Math.min(canvasHeight - margin * 2, 620), 1),
+          };
+        }
+
+        function miniMapCanvasRect() {
+          const canvasWidth = Math.max(renderer.domElement.clientWidth || 1, 1);
+          const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
+          const sizeConfig = miniMapSizeConfig(canvasWidth, canvasHeight);
+          const requestedWidth =
+            miniMapState.customSize && Number.isFinite(miniMapState.customSize.width)
+              ? miniMapState.customSize.width
+              : sizeConfig.preferredWidth;
+          const requestedHeight =
+            miniMapState.customSize && Number.isFinite(miniMapState.customSize.height)
+              ? miniMapState.customSize.height
+              : sizeConfig.preferredHeight;
+          const rectWidth = clampValue(
+            requestedWidth,
+            sizeConfig.minWidth,
+            sizeConfig.maxWidth,
+          );
+          const rectHeight = clampValue(
+            requestedHeight,
+            sizeConfig.minHeight,
+            sizeConfig.maxHeight,
+          );
+          return {
+            x: canvasWidth - rectWidth - sizeConfig.margin,
+            y: sizeConfig.margin,
+            width: rectWidth,
+            height: rectHeight,
+            canvasWidth: canvasWidth,
+            canvasHeight: canvasHeight,
+          };
+        }
+
+        function resizedMiniMapSize(startRect, event) {
+          const canvasWidth = Math.max(renderer.domElement.clientWidth || 1, 1);
+          const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
+          const sizeConfig = miniMapSizeConfig(canvasWidth, canvasHeight);
+          const startWidth = Math.max(Number(startRect && startRect.width) || 1, 1);
+          const startHeight = Math.max(Number(startRect && startRect.height) || 1, 1);
+          const growX = miniMapState.pointerStart.x - Number(event.clientX || 0);
+          const growY = miniMapState.pointerStart.y - Number(event.clientY || 0);
+          const scale = clampValue(
+            1.0 + (growX / startWidth + growY / startHeight) * 0.5,
+            Math.max(sizeConfig.minWidth / startWidth, sizeConfig.minHeight / startHeight),
+            Math.min(sizeConfig.maxWidth / startWidth, sizeConfig.maxHeight / startHeight),
+          );
+          return {
+            width: clampValue(
+              startWidth * scale,
+              sizeConfig.minWidth,
+              sizeConfig.maxWidth,
+            ),
+            height: clampValue(
+              startHeight * scale,
+              sizeConfig.minHeight,
+              sizeConfig.maxHeight,
+            ),
+          };
+        }
+
+        function syncMiniMapResizeZoom(rect) {
+          const safeRect = rect || miniMapCanvasRect();
+          const worldPerPixel = Math.max(
+            Number(miniMapState.resizeStartWorldPerPixel) || miniMapWorldPerPixel(),
+            0.000001,
+          );
+          miniMapState.zoom = clampValue(
+            miniMapState.baseSpan / (worldPerPixel * Math.max(safeRect.height, 1.0)),
+            0.25,
+            12.0,
+          );
+        }
+
+        function updateMiniMapOverlay() {
+          if (!miniMapFrame || !miniMapAxes || !miniMapControl || !miniMapToggleBtn || !miniMapLabel) {
+            return;
+          }
+          if (!miniMapState.expanded) {
+            miniMapFrame.classList.remove("is-visible");
+            miniMapAxes.classList.remove("is-visible");
+            if (miniMapLabelLayer) {
+              miniMapLabelLayer.classList.remove("is-visible");
+              miniMapLabelLayer.style.left = "";
+              miniMapLabelLayer.style.top = "";
+              miniMapLabelLayer.style.width = "";
+              miniMapLabelLayer.style.height = "";
+            }
+            miniMapLabels.forEach((item) => {
+              item.element.style.display = "none";
+            });
+            miniMapAxes.style.left = "";
+            miniMapAxes.style.top = "";
+            miniMapControl.classList.remove("is-expanded");
+            miniMapLabel.classList.remove("is-expanded");
+            miniMapControl.style.right = "14px";
+            miniMapControl.style.bottom = "14px";
+            miniMapControl.style.left = "";
+            miniMapControl.style.top = "";
+            miniMapControl.style.width = "";
+            miniMapToggleBtn.textContent = "План E-N ‹";
+            miniMapToggleBtn.title = "Показать вид сверху";
+            return;
+          }
+          const rect = miniMapCanvasRect();
+          miniMapState.rect = rect;
+          miniMapFrame.classList.add("is-visible");
+          miniMapFrame.style.left = `${Math.round(rect.x)}px`;
+          miniMapFrame.style.top = `${Math.round(rect.canvasHeight - rect.y - rect.height)}px`;
+          miniMapFrame.style.width = `${Math.round(rect.width)}px`;
+          miniMapFrame.style.height = `${Math.round(rect.height)}px`;
+          if (miniMapLabelLayer) {
+            miniMapLabelLayer.classList.add("is-visible");
+            miniMapLabelLayer.style.left = `${Math.round(rect.x)}px`;
+            miniMapLabelLayer.style.top = `${Math.round(rect.canvasHeight - rect.y - rect.height)}px`;
+            miniMapLabelLayer.style.width = `${Math.round(rect.width)}px`;
+            miniMapLabelLayer.style.height = `${Math.round(rect.height)}px`;
+          }
+          const axesSize = 62;
+          miniMapAxes.classList.add("is-visible");
+          miniMapAxes.style.left = `${Math.round(
+            clampValue(rect.x + rect.width - axesSize - 12, rect.x + 8, rect.x + rect.width - axesSize),
+          )}px`;
+          miniMapAxes.style.top = `${Math.round(
+            clampValue(rect.canvasHeight - rect.y - axesSize - 12, rect.canvasHeight - rect.y - rect.height + 8, rect.canvasHeight - rect.y - axesSize),
+          )}px`;
+          miniMapControl.classList.add("is-expanded");
+          miniMapLabel.classList.add("is-expanded");
+          miniMapControl.style.left = `${Math.round(rect.x + 12)}px`;
+          miniMapControl.style.top = `${Math.round(rect.canvasHeight - rect.y - rect.height + 10)}px`;
+          miniMapControl.style.width = `${Math.round(Math.max(rect.width - 24, 1))}px`;
+          miniMapControl.style.right = "";
+          miniMapControl.style.bottom = "";
+          miniMapToggleBtn.textContent = "";
+          miniMapToggleBtn.title = "Потяните, чтобы изменить размер. Клик — скрыть вид сверху";
+        }
+
+        function updateMiniMapLabels() {
+          if (!miniMapLabelLayer || !miniMapState.expanded) {
+            miniMapLabels.forEach((item) => {
+              item.element.style.display = "none";
+            });
+            return;
+          }
+          const rect = miniMapState.rect.width > 0
+            ? miniMapState.rect
+            : miniMapCanvasRect();
+          const aspect = Math.max(rect.width / Math.max(rect.height, 1), 0.01);
+          const viewHeight = Math.max(miniMapState.baseSpan / miniMapState.zoom, 1.0);
+          const viewWidth = viewHeight * aspect;
+          const leftWorld = miniMapState.target.x - viewWidth * 0.5;
+          const topWorld = miniMapState.target.y + viewHeight * 0.5;
+          const padding = 8;
+          miniMapLabels.forEach((item) => {
+            const localX = ((item.position.x - leftWorld) / viewWidth) * rect.width;
+            const localY = ((topWorld - item.position.y) / viewHeight) * rect.height;
+            if (
+              !Number.isFinite(localX) ||
+              !Number.isFinite(localY) ||
+              localX < padding ||
+              localX > rect.width - padding ||
+              localY < padding ||
+              localY > rect.height - padding
+            ) {
+              item.element.style.display = "none";
+              return;
+            }
+            item.element.style.display = "block";
+            item.element.style.left = `${Math.round(localX)}px`;
+            item.element.style.top = `${Math.round(localY)}px`;
+          });
+        }
+
+        function fitMiniMapToRawBounds(rawBounds) {
+          const localBounds = transformedBounds(rawBounds || payload.bounds || {});
+          const localMin = localBounds.min;
+          const localMax = localBounds.max;
+          const localCenter = new THREE.Vector3()
+            .addVectors(localMin, localMax)
+            .multiplyScalar(0.5);
+          const localSpan = new THREE.Vector3().subVectors(localMax, localMin);
+          miniMapState.target.copy(localCenter);
+          miniMapState.maxSpan = Math.max(localSpan.x, localSpan.y, localSpan.z, 1.0);
+          miniMapState.baseSpan = Math.max(localSpan.x, localSpan.y, 1.0) * 1.18;
+          miniMapState.zoom = 1.0;
+        }
+
+        function focusMiniMapToDisplayPoint(displayCenter, focusSpan) {
+          if (!displayCenter) {
+            return;
+          }
+          const safeSpan = Math.max(Number(focusSpan) || 1.0, 1.0);
+          miniMapState.target.copy(displayCenter);
+          miniMapState.maxSpan = Math.max(safeSpan, 1.0);
+          miniMapState.baseSpan = safeSpan * 1.18;
+          miniMapState.zoom = 1.0;
+        }
+
+        function updateMiniMapCamera(rect) {
+          const safeRect = rect || miniMapCanvasRect();
+          const aspect = Math.max(safeRect.width / Math.max(safeRect.height, 1), 0.01);
+          const viewHeight = Math.max(miniMapState.baseSpan / miniMapState.zoom, 1.0);
+          const viewWidth = viewHeight * aspect;
+          miniMapCamera.left = -viewWidth * 0.5;
+          miniMapCamera.right = viewWidth * 0.5;
+          miniMapCamera.top = viewHeight * 0.5;
+          miniMapCamera.bottom = -viewHeight * 0.5;
+          miniMapCamera.near = 0.1;
+          miniMapCamera.far = Math.max(miniMapState.maxSpan * 24.0, 5000.0);
+          miniMapCamera.position.set(
+            miniMapState.target.x,
+            miniMapState.target.y,
+            miniMapState.target.z + Math.max(miniMapState.maxSpan * 8.0, 1000.0),
+          );
+          miniMapCamera.lookAt(miniMapState.target);
+          miniMapCamera.updateProjectionMatrix();
+        }
+
+        function isPointerInMiniMap(event) {
+          if (!miniMapState.expanded) {
+            return false;
+          }
+          const rect = miniMapCanvasRect();
+          const canvasRect = renderer.domElement.getBoundingClientRect();
+          const localX = Number(event.clientX || 0) - canvasRect.left;
+          const localY = Number(event.clientY || 0) - canvasRect.top;
+          const top = rect.canvasHeight - rect.y - rect.height;
+          return (
+            localX >= rect.x &&
+            localX <= rect.x + rect.width &&
+            localY >= top &&
+            localY <= top + rect.height
+          );
+        }
+
+        function miniMapWorldPerPixel() {
+          const rect = miniMapState.rect.width > 0
+            ? miniMapState.rect
+            : miniMapCanvasRect();
+          const viewHeight = Math.max(miniMapState.baseSpan / miniMapState.zoom, 1.0);
+          return viewHeight / Math.max(rect.height, 1.0);
+        }
+
+        function miniMapWorldAtEvent(event) {
+          const rect = miniMapCanvasRect();
+          const canvasRect = renderer.domElement.getBoundingClientRect();
+          const localX = Number(event.clientX || 0) - canvasRect.left;
+          const localY = Number(event.clientY || 0) - canvasRect.top;
+          const top = rect.canvasHeight - rect.y - rect.height;
+          const normalizedX = (localX - rect.x) / Math.max(rect.width, 1.0) - 0.5;
+          const normalizedY = 0.5 - (localY - top) / Math.max(rect.height, 1.0);
+          const viewHeight = Math.max(miniMapState.baseSpan / miniMapState.zoom, 1.0);
+          const viewWidth = viewHeight * (rect.width / Math.max(rect.height, 1.0));
+          return new THREE.Vector3(
+            miniMapState.target.x + normalizedX * viewWidth,
+            miniMapState.target.y + normalizedY * viewHeight,
+            miniMapState.target.z,
+          );
+        }
+
+        function miniMapLocalAtEvent(event, rect) {
+          const safeRect = rect || miniMapCanvasRect();
+          const canvasRect = renderer.domElement.getBoundingClientRect();
+          return {
+            x: Number(event.clientX || 0) - canvasRect.left - safeRect.x,
+            y:
+              Number(event.clientY || 0) -
+              canvasRect.top -
+              (safeRect.canvasHeight - safeRect.y - safeRect.height),
+          };
+        }
+
+        function miniMapLocalFromDisplayPoint(displayPosition, rect) {
+          const safeRect = rect || miniMapCanvasRect();
+          const aspect = Math.max(safeRect.width / Math.max(safeRect.height, 1), 0.01);
+          const viewHeight = Math.max(miniMapState.baseSpan / miniMapState.zoom, 1.0);
+          const viewWidth = viewHeight * aspect;
+          const leftWorld = miniMapState.target.x - viewWidth * 0.5;
+          const topWorld = miniMapState.target.y + viewHeight * 0.5;
+          return {
+            x: ((displayPosition.x - leftWorld) / viewWidth) * safeRect.width,
+            y: ((topWorld - displayPosition.y) / viewHeight) * safeRect.height,
+          };
+        }
+
         const bounds = transformedBounds(payload.bounds || {});
         const minBound = bounds.min;
         const maxBound = bounds.max;
@@ -1377,10 +2029,14 @@
         const maxSpan = Math.max(span.x, span.y, span.z, 1);
         const worldMarkerSize = Math.max(maxSpan * 0.008, 9.0);
         const axisLength = Math.max(maxSpan * 0.18, 40.0);
+        fitMiniMapToRawBounds(payload.bounds || {});
 
         function addSceneLabel(text, position, color, extraClassName, options) {
+          const labelRole = String((options && options.role) || "label");
+          const roleClassName = labelRole === "well_label" ? "well-name-label" : "";
           const element = document.createElement("div");
-          element.className = `scene-label ${String(extraClassName || "").trim()}`.trim();
+          element.className =
+            `scene-label ${roleClassName} ${String(extraClassName || "").trim()}`.trim();
           element.textContent = String(text || "");
           element.style.color = String(color || "#0f172a");
           labelLayerElement.appendChild(element);
@@ -1389,9 +2045,23 @@
             position: position.clone(),
             offsetX: Number((options && options.offsetX) || 0),
             offsetY: Number((options && options.offsetY) || 0),
+            role: labelRole,
+            text: String(text || ""),
             visible: true,
           };
           sceneLabels.push(labelItem);
+          if (miniMapLabelLayer && options && options.role === "well_label") {
+            const miniMapElement = document.createElement("div");
+            miniMapElement.className = "minimap-well-label";
+            miniMapElement.textContent = String(text || "");
+            miniMapElement.style.color = String(color || "#0f172a");
+            miniMapLabelLayer.appendChild(miniMapElement);
+            miniMapLabels.push({
+              element: miniMapElement,
+              position: position.clone(),
+              text: String(text || ""),
+            });
+          }
           return labelItem;
         }
 
@@ -1399,19 +2069,19 @@
           {
             key: "x",
             label: "X / East",
-            color: "#B91C1C",
+            color: "#16A34A",
             vector: new THREE.Vector3(1, 0, 0),
           },
           {
             key: "y",
             label: "Y / North",
-            color: "#15803D",
+            color: "#2563EB",
             vector: new THREE.Vector3(0, 1, 0),
           },
           {
             key: "z",
             label: "Z",
-            color: "#1D4ED8",
+            color: "#DC2626",
             vector: new THREE.Vector3(0, 0, -1),
           },
         ];
@@ -1470,6 +2140,7 @@
           camera.aspect = width / height;
           camera.updateProjectionMatrix();
           renderer.setSize(width, height, false);
+          updateMiniMapOverlay();
           requestRender();
         }
 
@@ -1498,6 +2169,7 @@
           controls.target.copy(localCenter);
           camera.updateProjectionMatrix();
           controls.update();
+          fitMiniMapToRawBounds(rawBounds || payload.bounds || {});
           requestRender();
         }
 
@@ -1573,6 +2245,15 @@
           label.className = "legend-label";
           label.textContent = String(item.label || "");
           row.appendChild(label);
+          const targetBounds = focusTargets[String(item.id || "")];
+          if (targetBounds) {
+            row.classList.add("is-focusable");
+            row.addEventListener("click", () => {
+              if (!editModeActive) {
+                fitCameraToRawBounds(targetBounds);
+              }
+            });
+          }
           return row;
         }
 
@@ -1944,6 +2625,7 @@
                 controls.target.copy(targetCenter);
                 camera.updateProjectionMatrix();
                 controls.update();
+                focusMiniMapToDisplayPoint(targetCenter, offsetDistance * 2.0);
                 requestRender();
               }
             });
@@ -1962,7 +2644,131 @@
               role === "cone_tip"
                 ? Math.min(Number(item.opacity || 1.0), 0.62)
                 : Number(item.opacity || 1.0),
+            depthTest: true,
+            depthWrite: role !== "cone_tip",
           };
+          function addPolylineTube() {
+            if (role !== "line" || String(item.dash || "solid") !== "solid") {
+              return;
+            }
+            const pointCount = segments.reduce(
+              (acc, segment) => acc + (Array.isArray(segment) ? segment.length : 0),
+              0,
+            );
+            if (sceneComplexity > 90000 || pointCount > 2200) {
+              return;
+            }
+            const radius = Math.min(Math.max(maxSpan * 0.00032, 0.9), 3.2);
+            const radialSegments = 6;
+            const material = new THREE.MeshLambertMaterial({
+              color: materialOptions.color,
+              transparent: true,
+              opacity: Math.min(Number(materialOptions.opacity || 1.0), 0.72),
+              side: THREE.DoubleSide,
+              depthWrite: false,
+              depthTest: true,
+            });
+            material.forceSinglePass = true;
+            const depthMaterial = new THREE.MeshBasicMaterial({
+              color: materialOptions.color,
+              side: THREE.DoubleSide,
+              depthWrite: true,
+              depthTest: true,
+              colorWrite: false,
+            });
+            depthMaterial.forceSinglePass = true;
+            registerEditableBaseMaterial(material, materialOptions.color, item.name);
+            segments.forEach((segment) => {
+              if (!Array.isArray(segment) || segment.length < 2) {
+                return;
+              }
+              const points = [];
+              segment.forEach((rawPoint) => {
+                const point = displayPoint(rawPoint);
+                if (
+                  !Number.isFinite(point.x) ||
+                  !Number.isFinite(point.y) ||
+                  !Number.isFinite(point.z)
+                ) {
+                  return;
+                }
+                const previous = points[points.length - 1];
+                if (!previous || previous.distanceTo(point) > 1e-6) {
+                  points.push(point);
+                }
+              });
+              if (points.length < 2) {
+                return;
+              }
+              const positions = [];
+              const indices = [];
+              let carriedNormal = null;
+              for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
+                const previous = points[Math.max(pointIndex - 1, 0)];
+                const next = points[Math.min(pointIndex + 1, points.length - 1)];
+                const tangent = new THREE.Vector3().subVectors(next, previous);
+                if (tangent.lengthSq() <= 1e-12) {
+                  tangent.set(0, 1, 0);
+                } else {
+                  tangent.normalize();
+                }
+                if (!carriedNormal) {
+                  const seed =
+                    Math.abs(tangent.z) < 0.92
+                      ? new THREE.Vector3(0, 0, 1)
+                      : new THREE.Vector3(0, 1, 0);
+                  carriedNormal = new THREE.Vector3()
+                    .crossVectors(tangent, seed)
+                    .normalize();
+                }
+                let binormal = new THREE.Vector3()
+                  .crossVectors(tangent, carriedNormal)
+                  .normalize();
+                if (binormal.lengthSq() <= 1e-12) {
+                  binormal = new THREE.Vector3(1, 0, 0);
+                }
+                carriedNormal = new THREE.Vector3()
+                  .crossVectors(binormal, tangent)
+                  .normalize();
+                for (let sideIndex = 0; sideIndex < radialSegments; sideIndex += 1) {
+                  const angle = (sideIndex / radialSegments) * Math.PI * 2.0;
+                  const ringPoint = points[pointIndex]
+                    .clone()
+                    .addScaledVector(carriedNormal, Math.cos(angle) * radius)
+                    .addScaledVector(binormal, Math.sin(angle) * radius);
+                  positions.push(ringPoint.x, ringPoint.y, ringPoint.z);
+                }
+              }
+              for (let pointIndex = 0; pointIndex < points.length - 1; pointIndex += 1) {
+                const ringStart = pointIndex * radialSegments;
+                const nextRingStart = (pointIndex + 1) * radialSegments;
+                for (let sideIndex = 0; sideIndex < radialSegments; sideIndex += 1) {
+                  const nextSideIndex = (sideIndex + 1) % radialSegments;
+                  indices.push(
+                    ringStart + sideIndex,
+                    nextRingStart + sideIndex,
+                    nextRingStart + nextSideIndex,
+                    ringStart + sideIndex,
+                    nextRingStart + nextSideIndex,
+                    ringStart + nextSideIndex,
+                  );
+                }
+              }
+              const geometry = new THREE.BufferGeometry();
+              geometry.setAttribute(
+                "position",
+                new THREE.Float32BufferAttribute(new Float32Array(positions), 3),
+              );
+              geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+              geometry.computeVertexNormals();
+              const depthMesh = new THREE.Mesh(geometry, depthMaterial);
+              depthMesh.renderOrder = -1;
+              scene.add(depthMesh);
+              const mesh = new THREE.Mesh(geometry, material);
+              mesh.renderOrder = 0;
+              scene.add(mesh);
+            });
+          }
           if (String(item.dash || "solid") !== "solid") {
             segments.forEach((segment) => {
               if (!Array.isArray(segment) || segment.length < 2) {
@@ -1979,6 +2785,9 @@
               const line = new THREE.Line(geometry, material);
               line.computeLineDistances();
               registerAntiCollisionVisualObject(line, item);
+              if (role === "cone_tip") {
+                registerMiniMapHiddenContourObject(line);
+              }
               scene.add(line);
             });
             return;
@@ -2013,6 +2822,10 @@
           registerEditableBaseMaterial(material, materialOptions.color, item.name);
           const lineSegments = new THREE.LineSegments(geometry, material);
           registerAntiCollisionVisualObject(lineSegments, item);
+          if (role === "cone_tip") {
+            registerMiniMapHiddenContourObject(lineSegments);
+          }
+          addPolylineTube();
           scene.add(lineSegments);
         }
 
@@ -2157,7 +2970,8 @@
           geometry.computeVertexNormals();
           const baseColor = hexOrDefault(item.color, "#94a3b8");
           const opacity = numberOrDefault(item.opacity, 0.25);
-          const isShadedSurface = role === "cone" || role === "overlap";
+          const isShadedSurface =
+            role === "cone" || role === "overlap" || role === "pad_first_surface_arrow";
           const MaterialClass = isShadedSurface
             ? THREE.MeshLambertMaterial
             : THREE.MeshBasicMaterial;
@@ -2166,17 +2980,34 @@
             transparent: true,
             opacity:
               role === "cone"
-                ? Math.min(opacity, 0.14)
+                ? Math.min(opacity, 0.12)
                 : opacity,
             side: role === "cone" ? THREE.FrontSide : THREE.DoubleSide,
-            depthWrite: false,
+            depthWrite: role === "cone",
             depthTest: true,
+            polygonOffset: role === "cone",
+            polygonOffsetFactor: role === "cone" ? 1.0 : 0.0,
+            polygonOffsetUnits: role === "cone" ? 1.0 : 0.0,
           });
           material.forceSinglePass = true;
           const mesh = new THREE.Mesh(geometry, material);
           mesh.renderOrder = role === "overlap" ? 3 : role === "cone" ? 1 : 2;
           if (role === "overlap") {
             material.opacity = Math.min(opacity, 0.42);
+          }
+          if (role === "cone") {
+            const wireGeometry = new THREE.WireframeGeometry(geometry);
+            const wireMaterial = new THREE.LineBasicMaterial({
+              color: baseColor,
+              transparent: true,
+              opacity: 0.10,
+              depthWrite: false,
+              depthTest: true,
+            });
+            const wireframe = new THREE.LineSegments(wireGeometry, wireMaterial);
+            wireframe.renderOrder = mesh.renderOrder + 0.05;
+            registerMiniMapHiddenContourObject(wireframe);
+            mesh.add(wireframe);
           }
           registerAntiCollisionVisualObject(mesh, item);
           scene.add(mesh);
@@ -2314,7 +3145,7 @@
             position,
             String(item.color || "#0f172a"),
             "",
-            { offsetY: offsetY },
+            { offsetY: offsetY, role: role },
           );
         }
 
@@ -2416,10 +3247,37 @@
         }
 
         function render() {
+          const canvasWidth = Math.max(renderer.domElement.clientWidth || 1, 1);
+          const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
+          renderer.setViewport(0, 0, canvasWidth, canvasHeight);
+          renderer.setScissorTest(false);
           renderer.clear(true, true, true);
           renderer.render(scene, camera);
+          if (miniMapState.expanded) {
+            const miniMapRect = miniMapCanvasRect();
+            miniMapState.rect = miniMapRect;
+            updateMiniMapCamera(miniMapRect);
+            renderer.setViewport(
+              miniMapRect.x,
+              miniMapRect.y,
+              miniMapRect.width,
+              miniMapRect.height,
+            );
+            renderer.setScissor(
+              miniMapRect.x,
+              miniMapRect.y,
+              miniMapRect.width,
+              miniMapRect.height,
+            );
+            renderer.setScissorTest(true);
+            renderer.clear(true, true, true);
+            renderMiniMapScene();
+            renderer.setScissorTest(false);
+            renderer.setViewport(0, 0, canvasWidth, canvasHeight);
+          }
           updateAxesGizmo();
           updateLabels();
+          updateMiniMapLabels();
           updateTooltip();
         }
 
@@ -2451,10 +3309,176 @@
               offsetLeft + (((projected.x + 1.0) * 0.5) * width) + item.offsetX;
             const screenY =
               offsetTop + (((-projected.y + 1.0) * 0.5) * height) - item.offsetY;
+            if (miniMapState.expanded) {
+              const miniMapRect = miniMapCanvasRect();
+              const miniMapTop = offsetTop + miniMapRect.canvasHeight - miniMapRect.y - miniMapRect.height;
+              const miniMapLeft = offsetLeft + miniMapRect.x;
+              if (
+                screenX >= miniMapLeft &&
+                screenX <= miniMapLeft + miniMapRect.width &&
+                screenY >= miniMapTop &&
+                screenY <= miniMapTop + miniMapRect.height
+              ) {
+                item.element.style.display = "none";
+                return;
+              }
+            }
             item.element.style.display = "block";
             item.element.style.left = `${Math.round(screenX)}px`;
             item.element.style.top = `${Math.round(screenY)}px`;
           });
+        }
+
+        function consumeMiniMapEvent(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === "function") {
+            event.stopImmediatePropagation();
+          }
+        }
+
+        function handleMiniMapResizePointerDown(event) {
+          if (!miniMapState.expanded) {
+            return;
+          }
+          miniMapState.resizing = true;
+          miniMapState.resizeMoved = false;
+          miniMapState.pointerStart = {
+            x: Number(event.clientX || 0),
+            y: Number(event.clientY || 0),
+          };
+          miniMapState.resizeStartRect = miniMapCanvasRect();
+          miniMapState.resizeStartWorldPerPixel = miniMapWorldPerPixel();
+          controls.enabled = false;
+          interactionActive = true;
+          hideTooltip();
+          try {
+            miniMapToggleBtn.setPointerCapture(event.pointerId);
+          } catch (e) { /* ignore */ }
+          consumeMiniMapEvent(event);
+        }
+
+        function handleMiniMapResizePointerMove(event) {
+          if (!miniMapState.resizing || !miniMapState.resizeStartRect) {
+            return;
+          }
+          const dx = Number(event.clientX || 0) - miniMapState.pointerStart.x;
+          const dy = Number(event.clientY || 0) - miniMapState.pointerStart.y;
+          if (Math.hypot(dx, dy) > 3.0) {
+            miniMapState.resizeMoved = true;
+          }
+          miniMapState.customSize = resizedMiniMapSize(
+            miniMapState.resizeStartRect,
+            event,
+          );
+          const nextRect = miniMapCanvasRect();
+          miniMapState.rect = nextRect;
+          syncMiniMapResizeZoom(nextRect);
+          updateMiniMapOverlay();
+          requestRender();
+          consumeMiniMapEvent(event);
+        }
+
+        function handleMiniMapResizePointerUp(event) {
+          if (!miniMapState.resizing) {
+            return;
+          }
+          miniMapState.resizing = false;
+          miniMapState.resizeStartRect = null;
+          controls.enabled = true;
+          interactionActive = false;
+          try {
+            miniMapToggleBtn.releasePointerCapture(event.pointerId);
+          } catch (e) { /* ignore */ }
+          requestRender();
+          consumeMiniMapEvent(event);
+        }
+
+        function handleMiniMapPointerDown(event) {
+          if (miniMapState.resizing) {
+            return;
+          }
+          if (!isPointerInMiniMap(event)) {
+            return;
+          }
+          if (startMiniMapEditDrag(event)) {
+            consumeMiniMapEvent(event);
+            return;
+          }
+          miniMapState.dragging = true;
+          miniMapState.pointerStart = {
+            x: Number(event.clientX || 0),
+            y: Number(event.clientY || 0),
+          };
+          miniMapState.targetStart.copy(miniMapState.target);
+          controls.enabled = false;
+          interactionActive = true;
+          hideTooltip();
+          try {
+            renderer.domElement.setPointerCapture(event.pointerId);
+          } catch (e) { /* ignore */ }
+          consumeMiniMapEvent(event);
+        }
+
+        function handleMiniMapPointerMove(event) {
+          if (editDragInputMode === "minimap") {
+            return;
+          }
+          if (miniMapState.resizing) {
+            return;
+          }
+          if (!miniMapState.dragging) {
+            if (isPointerInMiniMap(event)) {
+              hideTooltip();
+              consumeMiniMapEvent(event);
+            }
+            return;
+          }
+          const worldPerPixel = miniMapWorldPerPixel();
+          const dx = Number(event.clientX || 0) - miniMapState.pointerStart.x;
+          const dy = Number(event.clientY || 0) - miniMapState.pointerStart.y;
+          miniMapState.target.set(
+            miniMapState.targetStart.x - dx * worldPerPixel,
+            miniMapState.targetStart.y + dy * worldPerPixel,
+            miniMapState.targetStart.z,
+          );
+          requestRender();
+          consumeMiniMapEvent(event);
+        }
+
+        function handleMiniMapPointerUp(event) {
+          if (editDragInputMode === "minimap") {
+            return;
+          }
+          if (!miniMapState.dragging) {
+            return;
+          }
+          miniMapState.dragging = false;
+          controls.enabled = true;
+          interactionActive = false;
+          try {
+            renderer.domElement.releasePointerCapture(event.pointerId);
+          } catch (e) { /* ignore */ }
+          requestRender();
+          consumeMiniMapEvent(event);
+        }
+
+        function handleMiniMapWheel(event) {
+          if (!isPointerInMiniMap(event)) {
+            return;
+          }
+          const before = miniMapWorldAtEvent(event);
+          const zoomFactor = Number(event.deltaY || 0) > 0 ? 0.88 : 1.14;
+          miniMapState.zoom = clampValue(
+            miniMapState.zoom * zoomFactor,
+            0.25,
+            12.0,
+          );
+          const after = miniMapWorldAtEvent(event);
+          miniMapState.target.add(before.sub(after));
+          updateMiniMapOverlay();
+          requestRender();
+          consumeMiniMapEvent(event);
         }
 
         function animate() {
@@ -2498,6 +3522,39 @@
         (payload.labels || []).forEach(addLabel);
         initAntiCollisionControls();
         applyAntiCollisionLayerVisibility();
+        if (miniMapToggleBtn) {
+          miniMapToggleBtn.addEventListener("pointerdown", handleMiniMapResizePointerDown);
+          miniMapToggleBtn.addEventListener("pointermove", handleMiniMapResizePointerMove);
+          miniMapToggleBtn.addEventListener("pointerup", handleMiniMapResizePointerUp);
+          miniMapToggleBtn.addEventListener("pointercancel", handleMiniMapResizePointerUp);
+          miniMapToggleBtn.addEventListener("click", (event) => {
+            if (miniMapState.resizeMoved) {
+              miniMapState.resizeMoved = false;
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            miniMapState.expanded = !miniMapState.expanded;
+            if (!miniMapState.expanded) {
+              miniMapState.dragging = false;
+              miniMapState.resizing = false;
+              controls.enabled = true;
+              interactionActive = false;
+            }
+            updateMiniMapOverlay();
+            requestRender();
+            event.preventDefault();
+            event.stopPropagation();
+          });
+        }
+        renderer.domElement.addEventListener("pointerdown", handleMiniMapPointerDown, true);
+        renderer.domElement.addEventListener("pointermove", handleMiniMapPointerMove, true);
+        renderer.domElement.addEventListener("pointerup", handleMiniMapPointerUp, true);
+        renderer.domElement.addEventListener("pointercancel", handleMiniMapPointerUp, true);
+        renderer.domElement.addEventListener("wheel", handleMiniMapWheel, {
+          capture: true,
+          passive: false,
+        });
         renderer.domElement.addEventListener("pointermove", (event) => {
           pointerScreen = {
             x: Number(event.clientX || 0),
@@ -2550,6 +3607,7 @@
         const editResetBtn = document.getElementById("edit-reset-btn");
         const editSaveBtn = document.getElementById("edit-save-btn");
         const editWarningToast = document.getElementById("edit-warning-toast");
+        const editWarningHideBtn = document.getElementById("edit-warning-hide-btn");
         const canEditTargets =
           editWells.length > 0 &&
           editTargetsBtn &&
@@ -2593,6 +3651,7 @@
         let editDragPlaneZ = 0.0;
         let editDragPointerOffset = null;
         let editDragHistoryStartState = null;
+        let editDragInputMode = "scene";
         let editRotateWellIndex = null;
         let editRotateStartAngle = 0.0;
         let editRotatePlaneZ = 0.0;
@@ -2601,6 +3660,7 @@
         let editRotateStartVector = null;
         let editRotateStartPreviewPoints = null;
         let editHasAnyChange = false;
+        let editWarningDismissed = false;
         let selectedEditWellIndex = editWells.length > 0 ? 0 : null;
         let editBroadcastChannel = null;
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
@@ -2611,6 +3671,16 @@
           z: "#1D4ED8",
           total: "#475569",
         };
+
+        if (editWarningHideBtn) {
+          editWarningHideBtn.addEventListener("click", function (event) {
+            editWarningDismissed = true;
+            editWarningToast.classList.remove("is-visible");
+            event.preventDefault();
+            event.stopPropagation();
+            requestRender();
+          });
+        }
 
         function formatDeltaMeters(value, signed = true) {
           const numericValue = Number(value) || 0;
@@ -3036,6 +4106,15 @@
           return Math.hypot(t3[0] - t1[0], t3[1] - t1[1]);
         }
 
+        function t1T3Length(wellIndex) {
+          const t1 = editCurrentT1[wellIndex];
+          const t3 = editCurrentT3[wellIndex];
+          if (!t1 || !t3) {
+            return 0.0;
+          }
+          return Math.hypot(t3[0] - t1[0], t3[1] - t1[1], t3[2] - t1[2]);
+        }
+
         function t1T3Midpoint(wellIndex) {
           const t1 = editCurrentT1[wellIndex] || [0, 0, 0];
           const t3 = editCurrentT3[wellIndex] || [0, 0, 0];
@@ -3065,7 +4144,7 @@
           }
           label.position.copy(displayPoint(t1T3Midpoint(wellIndex)));
           label.element.textContent =
-            `Длина ГС ${formatLengthMeters(horizontalT1T3Length(wellIndex))}`;
+            `Длина ГС ${formatLengthMeters(t1T3Length(wellIndex))}`;
           label.visible =
             editModeActive &&
             Number.isInteger(selectedEditWellIndex) &&
@@ -3106,6 +4185,26 @@
           }
         }
 
+        function syncEditWellNameLabelPosition(wellIndex) {
+          const well = editWells[wellIndex] || {};
+          const wellName = String(well.name || "");
+          const t3 = editCurrentT3[wellIndex];
+          if (!wellName || !t3) {
+            return;
+          }
+          const displayPosition = displayPoint(t3);
+          sceneLabels.forEach((item) => {
+            if (item.role === "well_label" && item.text === wellName) {
+              item.position.copy(displayPosition);
+            }
+          });
+          miniMapLabels.forEach((item) => {
+            if (item.text === wellName) {
+              item.position.copy(displayPosition);
+            }
+          });
+        }
+
         function updateWellEditTargets(wellIndex, t1, t3) {
           editCurrentT1[wellIndex] = copyEditPoint(t1);
           editCurrentT3[wellIndex] = copyEditPoint(t3);
@@ -3120,6 +4219,7 @@
                 : editCurrentT3[wellIndex],
             );
           });
+          syncEditWellNameLabelPosition(wellIndex);
         }
 
         function applyEditState(wellIndex, state) {
@@ -3520,6 +4620,7 @@
           }
           syncEditVisibility();
           if (!active) {
+            editWarningDismissed = false;
             editSaveBtn.classList.remove("is-visible");
             editWarningToast.classList.remove("is-visible");
           } else {
@@ -3683,13 +4784,16 @@
 
         function showEditFeedback() {
           editHasAnyChange = editDirtyFlags.some(Boolean);
+          if (!editHasAnyChange) {
+            editWarningDismissed = false;
+          }
           editSaveBtn.classList.toggle(
             "is-visible",
             editModeActive && editHasAnyChange,
           );
           editWarningToast.classList.toggle(
             "is-visible",
-            editModeActive && editHasAnyChange,
+            editModeActive && editHasAnyChange && !editWarningDismissed,
           );
           syncEditToolboxState();
         }
@@ -3859,8 +4963,69 @@
           return (b * e - d) / denominator;
         }
 
+        function miniMapEditableHandleAtEvent(event) {
+          if (
+            !editModeActive ||
+            !Number.isInteger(selectedEditWellIndex) ||
+            editTransformMode === "rotate"
+          ) {
+            return null;
+          }
+          const rect = miniMapCanvasRect();
+          const pointerLocal = miniMapLocalAtEvent(event, rect);
+          let bestHandle = null;
+          let bestDistance = Number.POSITIVE_INFINITY;
+          editHandles.forEach((handle) => {
+            if (handle.wellIndex !== selectedEditWellIndex || !handle.mesh.visible) {
+              return;
+            }
+            const local = miniMapLocalFromDisplayPoint(handle.mesh.position, rect);
+            const distance = Math.hypot(
+              local.x - pointerLocal.x,
+              local.y - pointerLocal.y,
+            );
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestHandle = handle;
+            }
+          });
+          const pickRadiusPx = Math.max(
+            18.0,
+            Math.min(rect.width, rect.height) * 0.045,
+          );
+          return bestDistance <= pickRadiusPx ? bestHandle : null;
+        }
+
+        function startMiniMapEditDrag(event) {
+          const handle = miniMapEditableHandleAtEvent(event);
+          if (!handle) {
+            return false;
+          }
+          controls.enabled = false;
+          interactionActive = true;
+          hideTooltip();
+          editDragHandle = handle;
+          editDragStartPosition = handle.mesh.position.clone();
+          editDragHistoryStartState = cloneEditState(handle.wellIndex);
+          editDragPlane = "xy";
+          editDragMoveScope = editMoveScope;
+          editDragInputMode = "minimap";
+          editDragPlaneZ = editDragStartPosition.z;
+          const planeHit = miniMapWorldAtEvent(event);
+          planeHit.z = editDragPlaneZ;
+          editDragPointerOffset = editDragStartPosition.clone().sub(planeHit);
+          editDragAxisOrigin = null;
+          editDragAxisDirection = null;
+          editDragStartAxisT = 0.0;
+          try {
+            renderer.domElement.setPointerCapture(event.pointerId);
+          } catch (e) { /* ignore */ }
+          return true;
+        }
+
         function onEditPointerDown(event) {
           if (!editModeActive) return;
+          if (isPointerInMiniMap(event)) return;
           const rect = renderer.domElement.getBoundingClientRect();
           const mouse = new THREE.Vector2(
             ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -3920,6 +5085,7 @@
           editDragHistoryStartState = cloneEditState(handle.wellIndex);
           editDragPlane = editPlane;
           editDragMoveScope = editMoveScope;
+          editDragInputMode = "scene";
           if (editDragPlane === "xy") {
             const planeHit = pointerPlaneIntersection(event, editDragStartPosition.z);
             editDragPlaneZ = editDragStartPosition.z;
@@ -3952,8 +5118,12 @@
           if (!editDragHandle || !editDragStartPosition) return;
           let newPos = null;
           if (editDragPlane === "xy") {
-            const planeHit = pointerPlaneIntersection(event, editDragPlaneZ);
+            const planeHit =
+              editDragInputMode === "minimap"
+                ? miniMapWorldAtEvent(event)
+                : pointerPlaneIntersection(event, editDragPlaneZ);
             if (!planeHit) return;
+            planeHit.z = editDragPlaneZ;
             newPos = planeHit.add(editDragPointerOffset || new THREE.Vector3());
             newPos.z = editDragPlaneZ;
           } else {
@@ -4025,6 +5195,7 @@
           editDragMoveScope = "point";
           editDragPointerOffset = null;
           editDragHistoryStartState = null;
+          editDragInputMode = "scene";
           interactionActive = false;
           try {
             renderer.domElement.releasePointerCapture(event.pointerId);

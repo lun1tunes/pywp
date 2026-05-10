@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 
-from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.models import TrajectoryConfig
+from pywp.anticollision import anti_collision_report_events
+from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord, parse_welltrack_text
+from pywp.models import Point3D, TrajectoryConfig
 from pywp import ptc_pad_state
 from pywp import ptc_three_overrides
-from pywp.welltrack_batch import SuccessfulWellPlan
+from pywp.uncertainty import DEFAULT_UNCERTAINTY_PRESET, planning_uncertainty_model_for_preset
+from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 
 def _records() -> list[WelltrackRecord]:
@@ -185,15 +189,83 @@ def test_first_surface_arrow_honors_fixed_pad_order() -> None:
     assert [str(item["well_name"]) for item in first_surface_arrows] == ["WELL-C"]
     arrow = first_surface_arrows[0]
     assert str(arrow["role"]) == "pad_first_surface_arrow"
-    angle_rad = np.deg2rad(float(arrow["nds_azimuth_deg"]))
-    direction = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=float)
-    tip_xy = np.asarray(arrow["vertices"][5][:2], dtype=float)
-    center_xy = np.array([0.0, 100.0], dtype=float)
-    delta_xy = tip_xy - center_xy
-    assert float(np.dot(delta_xy, direction)) > 0.0
-    cross_z = float(direction[0] * delta_xy[1] - direction[1] * delta_xy[0])
-    assert abs(cross_z) < 1e-9
-    assert float(arrow["vertices"][5][2]) < 0.0
+    start_xy = np.asarray(arrow["start_position"][:2], dtype=float)
+    end_xy = np.asarray(arrow["end_position"][:2], dtype=float)
+    tip_xy = np.asarray(arrow["vertices"][4][:2], dtype=float)
+    assert np.allclose(start_xy, [0.0, 100.0])
+    assert np.allclose(tip_xy, end_xy)
+    assert float(np.linalg.norm(end_xy - start_xy)) >= 50.0
+    assert float(arrow["vertices"][4][2]) <= -24.0
+    assert float(arrow["vertices"][11][2] - arrow["vertices"][4][2]) >= 5.0
+
+
+def test_first_surface_arrow_mesh_spans_first_to_seventh_surface() -> None:
+    arrow = ptc_three_overrides._pad_first_surface_arrow_payload(
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        end_surface=Point3D(x=0.0, y=300.0, z=0.0),
+        nds_azimuth_deg=0.0,
+        spacing_m=50.0,
+        well_name="WELL-01",
+        end_well_name="WELL-07",
+        pad_id="PAD-01",
+    )
+
+    assert arrow["start_position"] == [0.0, 0.0, 0.0]
+    assert arrow["end_position"] == [0.0, 300.0, 0.0]
+    assert str(arrow["end_well_name"]) == "WELL-07"
+    assert len(arrow["vertices"]) == 14
+    assert len(arrow["faces"]) == 20
+    assert arrow["vertices"][4][:2] == [0.0, 300.0]
+    assert float(arrow["vertices"][4][2]) < float(arrow["vertices"][11][2])
+
+
+def test_first_surface_arrow_payloads_end_at_seventh_visible_surface() -> None:
+    records = [
+        WelltrackRecord(
+            name=f"WELL-{index:02d}",
+            points=(
+                WelltrackPoint(x=0.0, y=float((index - 1) * 50), z=0.0, md=0.0),
+                WelltrackPoint(x=1000.0, y=float((index - 1) * 50), z=0.0, md=1000.0),
+            ),
+        )
+        for index in range(1, 9)
+    ]
+    surface_by_name = {
+        str(record.name): Point3D(
+            x=float(record.points[0].x),
+            y=float(record.points[0].y),
+            z=float(record.points[0].z),
+        )
+        for record in records
+    }
+
+    session_state: dict[str, object] = {}
+    arrows = ptc_three_overrides.pad_first_surface_arrow_payloads(
+        session_state,
+        records=records,
+        visible_well_names=[record.name for record in records],
+        surface_by_name=surface_by_name,
+    )
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(session_state, records)
+    ordered_names = next(iter(well_names_by_pad_id.values()))
+
+    assert len(arrows) == 1
+    arrow = arrows[0]
+    expected_start = surface_by_name[str(ordered_names[0])]
+    expected_end = surface_by_name[str(ordered_names[6])]
+    assert str(arrow["well_name"]) == str(ordered_names[0])
+    assert str(arrow["end_well_name"]) == str(ordered_names[6])
+    assert arrow["start_position"] == [
+        float(expected_start.x),
+        float(expected_start.y),
+        float(expected_start.z),
+    ]
+    assert arrow["end_position"] == [
+        float(expected_end.x),
+        float(expected_end.y),
+        float(expected_end.z),
+    ]
+    assert arrow["vertices"][4][:2] == [float(expected_end.x), float(expected_end.y)]
 
 
 def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
@@ -272,6 +344,114 @@ def test_anticollision_overlap_volume_payload_uses_aligned_rings() -> None:
     assert len(volumes[0]["rings"]) == 2
     assert volumes[0]["rings"][0][0] == [0.0, 0.0, 100.0]
     assert volumes[0]["rings"][1][0] == [1.0, 1.0, 120.0]
+
+
+def test_anticollision_overlap_volume_payload_keeps_single_ring_corridor() -> None:
+    single_ring = np.array(
+        [
+            [0.0, 0.0, 100.0],
+            [10.0, 0.0, 100.0],
+            [10.0, 10.0, 100.0],
+            [0.0, 10.0, 100.0],
+        ],
+        dtype=float,
+    )
+    analysis = SimpleNamespace(
+        corridors=[
+            SimpleNamespace(
+                well_a="well_09",
+                well_b="well_03",
+                midpoint_xyz=np.array([[5.0, 5.0, 100.0]], dtype=float),
+                overlap_core_radius_m=np.array([5.0], dtype=float),
+                overlap_depth_values_m=np.array([8.0], dtype=float),
+                overlap_rings_xyz=(single_ring,),
+            )
+        ]
+    )
+
+    volumes = ptc_three_overrides.overlap_volume_payloads(analysis)
+
+    assert len(volumes) == 1
+    assert volumes[0]["well_a"] == "well_09"
+    assert volumes[0]["well_b"] == "well_03"
+    assert len(volumes[0]["rings"]) == 2
+    assert len(volumes[0]["rings"][0]) == 4
+    assert volumes[0]["rings"][0] != volumes[0]["rings"][1]
+
+
+def test_anticollision_overlap_volume_payload_falls_back_to_corridor_core() -> None:
+    analysis = SimpleNamespace(
+        corridors=[
+            SimpleNamespace(
+                well_a="WELL-A",
+                well_b="WELL-B",
+                midpoint_xyz=np.array([[0.0, 0.0, 100.0]], dtype=float),
+                overlap_core_radius_m=np.array([6.0], dtype=float),
+                overlap_depth_values_m=np.array([12.0], dtype=float),
+                overlap_rings_xyz=(),
+            )
+        ]
+    )
+
+    volumes = ptc_three_overrides.overlap_volume_payloads(analysis)
+
+    assert len(volumes) == 1
+    assert len(volumes[0]["rings"]) == 2
+    assert all(len(ring) >= 8 for ring in volumes[0]["rings"])
+
+
+def test_welltracks4_overlap_volumes_match_report_zones() -> None:
+    records = [
+        record
+        for record in parse_welltrack_text(
+            Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+        )
+        if str(record.name) in {"well_01", "well_03", "well_09", "well_11"}
+    ]
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={str(record.name) for record in records},
+        config=TrajectoryConfig(turn_solver_max_restarts=0),
+    )
+    assert {row["Скважина"]: row["Статус"] for row in rows} == {
+        "well_01": "OK",
+        "well_03": "OK",
+        "well_09": "OK",
+        "well_11": "OK",
+    }
+
+    analysis = build_anti_collision_analysis_for_successes(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    events = anti_collision_report_events(analysis)
+    volumes = ptc_three_overrides.overlap_volume_payloads(analysis)
+
+    assert len(volumes) == len(events)
+    pair_events = [
+        event
+        for event in events
+        if {str(event.well_a), str(event.well_b)} == {"well_01", "well_11"}
+    ]
+    pair_volumes = [
+        volume
+        for volume in volumes
+        if {str(volume["well_a"]), str(volume["well_b"])} == {"well_01", "well_11"}
+    ]
+    assert len(pair_events) == len(pair_volumes) == 2
+    assert any(
+        str(event.classification) == "target-trajectory"
+        and int(event.merged_corridor_count) >= 3
+        for event in pair_events
+    )
+    assert max(len(volume["rings"]) for volume in pair_volumes) >= 8
+
+    well_09_03_volume = next(
+        volume
+        for volume in volumes
+        if {str(volume["well_a"]), str(volume["well_b"])} == {"well_09", "well_03"}
+    )
+    assert len(well_09_03_volume["rings"]) >= 3
 
 
 def test_augment_three_payload_appends_overlap_volume_and_legend_once() -> None:

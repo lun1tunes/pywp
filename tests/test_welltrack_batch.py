@@ -221,6 +221,33 @@ def test_batch_planner_evaluates_success_and_format_error() -> None:
     assert successes[0].name == "OK-1"
 
 
+@pytest.mark.integration
+def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike() -> None:
+    records = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+    )
+    well_08 = next(record for record in records if record.name == "well_08")
+    config = TrajectoryConfig()
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=[well_08],
+        selected_names={"well_08"},
+        config=config,
+    )
+
+    assert rows[0]["Статус"] == "OK"
+    assert rows[0]["Проблема"] == ""
+    assert len(successes) == 1
+    assert successes[0].config.dls_limits_deg_per_30m["HORIZONTAL"] == pytest.approx(
+        config.dls_build_max_deg_per_30m
+    )
+    horizontal_dls = successes[0].stations.loc[
+        successes[0].stations["segment"] == "HORIZONTAL",
+        "DLS_deg_per_30m",
+    ].dropna()
+    assert float(horizontal_dls.max()) <= float(config.dls_build_max_deg_per_30m) + 1e-5
+
+
 def test_batch_planner_reports_progress_callback_for_selected_wells() -> None:
     records = [
         WelltrackRecord(

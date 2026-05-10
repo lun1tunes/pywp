@@ -106,3 +106,93 @@ def test_optimize_three_payload_preserves_zero_opacity() -> None:
     assert optimized["lines"][0]["opacity"] == 0.0
     assert optimized["points"][0]["opacity"] == 0.0
     assert optimized["meshes"][0]["opacity"] == 0.0
+
+
+def test_optimize_three_payload_keeps_named_wells_separate() -> None:
+    payload = {
+        "lines": [
+            {
+                "name": "WELL-1",
+                "segments": [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
+                "color": "#22C55E",
+                "opacity": 1.0,
+                "dash": "solid",
+                "role": "line",
+            },
+            {
+                "name": "WELL-2",
+                "segments": [[[0.0, 1.0, 0.0], [1.0, 1.0, 0.0]]],
+                "color": "#22C55E",
+                "opacity": 1.0,
+                "dash": "solid",
+                "role": "line",
+            },
+        ],
+        "points": [
+            {
+                "name": "WELL-1: цели",
+                "points": [[0.0, 0.0, 0.0]],
+                "hover": [{"name": "WELL-1"}],
+                "color": "#22C55E",
+                "opacity": 1.0,
+                "size": 5.0,
+                "symbol": "circle",
+                "role": "marker",
+            },
+            {
+                "name": "WELL-2: цели",
+                "points": [[0.0, 1.0, 0.0]],
+                "hover": [{"name": "WELL-2"}],
+                "color": "#22C55E",
+                "opacity": 1.0,
+                "size": 5.0,
+                "symbol": "circle",
+                "role": "marker",
+            },
+        ],
+        "meshes": [],
+        "labels": [],
+        "legend": [],
+    }
+
+    optimized = ptc_three_payload.optimize_three_payload(payload)
+
+    assert [item["name"] for item in optimized["lines"]] == ["WELL-1", "WELL-2"]
+    assert [item["name"] for item in optimized["points"]] == [
+        "WELL-1: цели",
+        "WELL-2: цели",
+    ]
+
+
+def test_optimize_three_payload_preserves_hover_alignment_with_sparse_hover() -> None:
+    payload = {
+        "lines": [],
+        "points": [
+            {
+                "points": [[0.0, 0.0, 0.0]],
+                "hover": [],
+                "color": "#111111",
+                "opacity": 1.0,
+                "size": 6.0,
+                "symbol": "circle",
+                "role": "marker",
+            },
+            {
+                "points": [[1.0, 0.0, 0.0]],
+                "hover": [{"name": "second"}],
+                "color": "#111111",
+                "opacity": 1.0,
+                "size": 6.0,
+                "symbol": "circle",
+                "role": "marker",
+            },
+        ],
+        "meshes": [],
+        "labels": [],
+        "legend": [],
+    }
+
+    optimized = ptc_three_payload.optimize_three_payload(payload)
+
+    assert len(optimized["points"]) == 1
+    assert optimized["points"][0]["hover"] == [{}, {"name": "second"}]

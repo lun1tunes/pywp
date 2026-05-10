@@ -247,29 +247,32 @@ def _build_well_color_palette() -> tuple[str, ...]:
     """
 
     leading_colors: tuple[str, ...] = (
-        "#15D562",
-        "#1562D5",
+        "#22C55E",
+        "#8B5CF6",
         "#F59E0B",
-        "#AF15D5",
-        "#00A0A0",
-        "#D54A9A",
-        "#62D515",
-        "#8A5CF6",
+        "#4338CA",
+        "#A3E635",
+        "#0891B2",
+        "#8B5E34",
+        "#38BDF8",
+        "#B45309",
+        "#2563EB",
+        "#65A30D",
+        "#0F766E",
     )
     hue_degrees: tuple[float, ...] = (
-        18.0,
-        42.0,
-        72.0,
-        102.0,
-        132.0,
-        162.0,
-        192.0,
-        222.0,
-        252.0,
-        282.0,
-        312.0,
+        116.0,
+        236.0,
+        58.0,
+        146.0,
+        36.0,
+        266.0,
+        206.0,
+        86.0,
+        176.0,
+        292.0,
     )
-    hue_jump_order: tuple[int, ...] = (0, 5, 10, 4, 9, 3, 8, 2, 7, 1, 6)
+    hue_jump_order: tuple[int, ...] = tuple(range(len(hue_degrees)))
     lightness_saturation_bands: tuple[tuple[float, float], ...] = (
         (0.47, 0.82),
         (0.61, 0.74),
@@ -303,9 +306,25 @@ def _well_color(index: int) -> str:
 
 
 def _well_color_map(records: list[WelltrackRecord]) -> dict[str, str]:
-    return {
-        str(record.name): _well_color(index) for index, record in enumerate(records)
-    }
+    try:
+        _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+            st.session_state,
+            records,
+        )
+    except Exception:
+        well_names_by_pad_id = {}
+    color_map: dict[str, str] = {}
+    for ordered_names in well_names_by_pad_id.values():
+        for index, name in enumerate(ordered_names):
+            color_map.setdefault(str(name), _well_color(index))
+    fallback_index = 0
+    for record in records:
+        name = str(record.name)
+        if name in color_map:
+            continue
+        color_map[name] = _well_color(fallback_index)
+        fallback_index += 1
+    return color_map
 
 
 def _failed_target_only_wells(
@@ -1398,7 +1417,6 @@ def _trajectory_hover_customdata(stations: pd.DataFrame) -> np.ndarray:
     customdata[:, 2] = inc_values
     customdata[:, 3] = segment_values
     return customdata
-
 
 
 @st.cache_data(show_spinner=False)
@@ -4904,7 +4922,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         spacing_m = p1.number_input(
             "Расстояние между устьями, м",
             min_value=0.0,
-            step=1.0,
+            step=5.0,
             key=widget_keys["spacing_m"],
             help="Шаг по кусту между соседними устьями скважин.",
             disabled=source_surfaces_defined,
@@ -4913,7 +4931,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             "НДС (азимут), deg",
             min_value=0.0,
             max_value=360.0,
-            step=0.5,
+            step=10.0,
             key=widget_keys["nds_azimuth_deg"],
             help="Направление движения станка по кусту.",
             disabled=source_surfaces_defined,
@@ -4970,65 +4988,55 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         fixed_editor_key = (
             f"wt_pad_fixed_slots_editor_{selected_id}_{fixed_editor_revision}"
         )
-        fixed_expanded_once_key = f"wt_pad_fixed_slots_expand_once_{selected_id}"
-
-        def _keep_fixed_slots_expanded() -> None:
-            st.session_state[fixed_expanded_once_key] = True
-
-        fixed_slots_expanded = bool(fixed_slots) or bool(
-            st.session_state.pop(fixed_expanded_once_key, False)
+        st.markdown("**Фиксированный порядок скважин**")
+        st.caption(
+            "Зафиксируйте конкретные скважины в нужных позициях. "
+            "Остальные скважины будут упорядочены автоматически."
         )
-        with st.expander(
-            "Фиксированный порядок скважин",
-            expanded=fixed_slots_expanded,
-        ):
-            st.caption("Зафиксировать позицию скважины на кусте. ")
-            fixed_editor_df = st.data_editor(
-                _pad_fixed_slots_editor_rows(
-                    pad=selected_pad,
-                    config=selected_cfg,
-                ),
-                key=fixed_editor_key,
-                width="stretch",
-                hide_index=True,
-                num_rows="dynamic",
-                on_change=_keep_fixed_slots_expanded,
-                disabled=len(selected_pad.wells) < 2,
-                column_config={
-                    "Позиция": st.column_config.SelectboxColumn(
-                        "Позиция",
-                        options=list(range(1, int(len(selected_pad.wells)) + 1)),
-                        required=False,
-                        help="Номер слота на кусте, начиная с 1.",
-                    ),
-                    "Скважина": st.column_config.SelectboxColumn(
-                        "Скважина",
-                        options=sorted(str(well.name) for well in selected_pad.wells),
-                        required=False,
-                        help="Скважина, которую нужно закрепить в этой позиции.",
-                    ),
-                },
-            )
-            fixed_slots, fixed_warnings = _pad_fixed_slots_from_editor(
+        fixed_editor_df = st.data_editor(
+            _pad_fixed_slots_editor_rows(
                 pad=selected_pad,
-                editor_value=fixed_editor_df,
-            )
-            if fixed_warnings:
-                st.warning(" ".join(dict.fromkeys(fixed_warnings)))
-            clear_fixed_clicked = st.button(
-                "Очистить фиксацию порядка",
-                icon=":material/lock_open:",
-                width="content",
-                disabled=not fixed_slots or len(selected_pad.wells) < 2,
-            )
-            if clear_fixed_clicked:
-                fixed_slots = ()
-                selected_cfg["fixed_slots"] = ()
-                config_map[selected_id] = selected_cfg
-                st.session_state["wt_pad_configs"] = config_map
-                st.session_state[fixed_editor_revision_key] = fixed_editor_revision + 1
-                st.session_state.pop(fixed_expanded_once_key, None)
-                st.rerun()
+                config=selected_cfg,
+            ),
+            key=fixed_editor_key,
+            width="stretch",
+            hide_index=True,
+            num_rows="dynamic",
+            disabled=len(selected_pad.wells) < 2,
+            column_config={
+                "Позиция": st.column_config.SelectboxColumn(
+                    "Позиция",
+                    options=list(range(1, int(len(selected_pad.wells)) + 1)),
+                    required=False,
+                    help="Номер слота на кусте, начиная с 1.",
+                ),
+                "Скважина": st.column_config.SelectboxColumn(
+                    "Скважина",
+                    options=sorted(str(well.name) for well in selected_pad.wells),
+                    required=False,
+                    help="Скважина, которую нужно закрепить в этой позиции.",
+                ),
+            },
+        )
+        fixed_slots, fixed_warnings = _pad_fixed_slots_from_editor(
+            pad=selected_pad,
+            editor_value=fixed_editor_df,
+        )
+        if fixed_warnings:
+            st.warning(" ".join(dict.fromkeys(fixed_warnings)))
+        clear_fixed_clicked = st.button(
+            "Очистить фиксацию порядка",
+            icon=":material/lock_open:",
+            width="content",
+            disabled=not fixed_slots or len(selected_pad.wells) < 2,
+        )
+        if clear_fixed_clicked:
+            fixed_slots = ()
+            selected_cfg["fixed_slots"] = ()
+            config_map[selected_id] = selected_cfg
+            st.session_state["wt_pad_configs"] = config_map
+            st.session_state[fixed_editor_revision_key] = fixed_editor_revision + 1
+            st.rerun()
         selected_cfg["fixed_slots"] = fixed_slots
         config_map[selected_id] = selected_cfg
         st.session_state["wt_pad_configs"] = config_map
@@ -5091,11 +5099,15 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 )
                 row["Новое S Z, м"] = float(selected_cfg["first_surface_z"])
             preview_rows.append(row)
-        st.dataframe(
-            arrow_safe_text_dataframe(pd.DataFrame(preview_rows)),
-            width="stretch",
-            hide_index=True,
-        )
+        with st.expander(
+            "Порядок бурения и координаты устьев на кусте",
+            expanded=True,
+        ):
+            st.dataframe(
+                arrow_safe_text_dataframe(pd.DataFrame(preview_rows)),
+                width="stretch",
+                hide_index=True,
+            )
 
         a1, a2 = st.columns(2, gap="small")
         apply_clicked = a1.button(

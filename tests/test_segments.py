@@ -12,6 +12,7 @@ from pywp.segments import (
     INTERPOLATION_RODRIGUES,
     INTERPOLATION_SLERP,
     _direction_vector,
+    _make_md_grid,
     _rodrigues_directions,
     _slerp_directions,
 )
@@ -54,6 +55,20 @@ def test_build_segment_generates_azimuth_turn_and_target_dls() -> None:
     build_dls = stations["DLS_deg_per_30m"].dropna()
     assert len(build_dls) > 10
     assert float(build_dls.mean()) == pytest.approx(4.0, rel=0.03)
+
+
+def test_make_md_grid_preserves_large_md_segment_endpoints() -> None:
+    md_start = 3998.684149268526
+    md_end = 4008.718149268526
+    md = _make_md_grid(
+        md_start=md_start,
+        length_m=md_end - md_start,
+        md_step_m=10.0,
+    )
+
+    assert np.isclose(md[-2], md_end)
+    assert md[-2] != pytest.approx(md_end, abs=1e-9)
+    assert md[-1] == pytest.approx(md_end, abs=1e-12)
 
 
 # ---------------------------------------------------------------------------

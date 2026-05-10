@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Annotated, Literal
 
 import pandas as pd
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 
 from pywp.constants import SMALL
 from pywp.planner_types import PlanningError
@@ -71,11 +71,11 @@ _SEGMENT_DLS_ORDER: tuple[str, ...] = (
 _SEGMENT_DLS_FIXED_LIMITS: dict[str, float] = {
     "VERTICAL": 1.0,
     "HOLD": 2.0,
-    "HORIZONTAL": 2.0,
 }
 _SEGMENT_DLS_BUILD_CONTROLLED: set[str] = {
     "BUILD1",
     "BUILD2",
+    "HORIZONTAL",
 }
 SummaryValue = float | int | str | bool
 SummaryDict = dict[str, SummaryValue]
@@ -85,7 +85,6 @@ NonNegativeFiniteScalar = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 EntryIncTargetScalar = Annotated[float, Field(gt=0.0, lt=90.0, allow_inf_nan=False)]
 MaxIncScalar = Annotated[float, Field(gt=0.0, le=120.0, allow_inf_nan=False)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
-SegmentDlsLimitScalar = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 
 
 def build_segment_dls_limits_deg_per_30m(
@@ -145,18 +144,28 @@ class TrajectoryConfig(FrozenModel):
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: PositiveFiniteScalar = 30.0
 
-    dls_limits_deg_per_30m: dict[str, SegmentDlsLimitScalar] = Field(
-        default_factory=lambda: build_segment_dls_limits_deg_per_30m(
-            DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
-        )
-    )
-
     @model_validator(mode="before")
     @classmethod
     def _strip_removed_legacy_fields(cls, value: object) -> object:
         if not isinstance(value, Mapping):
             return value
         payload = dict(value)
+        legacy_dls_limits = payload.pop("dls_limits_deg_per_30m", None)
+        if legacy_dls_limits is not None:
+            try:
+                raw_limits = dict(legacy_dls_limits)  # type: ignore[arg-type]
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "dls_limits_deg_per_30m must be a mapping of segment names to limits."
+                ) from exc
+            unknown_segments = sorted(
+                {str(key) for key in raw_limits.keys()}.difference(_SEGMENT_DLS_ORDER)
+            )
+            if unknown_segments:
+                raise ValueError(
+                    "Unsupported DLS segment names: "
+                    + ", ".join(unknown_segments)
+                )
         legacy_pos_tolerance = payload.pop("pos_tolerance_m", None)
         if legacy_pos_tolerance is not None:
             if "lateral_tolerance_m" not in payload:
@@ -166,39 +175,6 @@ class TrajectoryConfig(FrozenModel):
         payload.pop("objective_mode", None)
         payload.pop("max_total_md_m", None)
         return payload
-
-    @field_validator("dls_limits_deg_per_30m", mode="before")
-    @classmethod
-    def _normalize_dls_limits(
-        cls, value: object
-    ) -> dict[str, SegmentDlsLimitScalar]:
-        defaults = build_segment_dls_limits_deg_per_30m(
-            DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
-        )
-        if value is None:
-            return defaults
-        try:
-            raw_limits = dict(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "dls_limits_deg_per_30m must be a mapping of segment names to limits."
-            ) from exc
-
-        unknown_segments = sorted(
-            {str(key) for key in raw_limits.keys()}.difference(_SEGMENT_DLS_ORDER)
-        )
-        if unknown_segments:
-            raise ValueError(
-                "Unsupported DLS segment names: "
-                + ", ".join(unknown_segments)
-            )
-
-        limits = dict(defaults)
-        for key, raw_value in raw_limits.items():
-            limits[str(key)] = float(raw_value)
-        return {
-            segment_name: float(limits[segment_name]) for segment_name in _SEGMENT_DLS_ORDER
-        }
 
     def validate_for_planning(self) -> None:
         """Validate configuration limits that cannot be checked via isolated Pydantic fields."""
@@ -257,19 +233,13 @@ class TrajectoryConfig(FrozenModel):
         if float(self.min_structural_segment_m) < float(self.md_step_control_m):
             raise ValueError("min_structural_segment_m must be >= md_step_control_m.")
 
-        current_limits = dict(self.dls_limits_deg_per_30m)
-        build_limit = float(self.dls_build_max_deg_per_30m)
-        for segment_name in _SEGMENT_DLS_BUILD_CONTROLLED:
-            current_limits[segment_name] = build_limit
-        object.__setattr__(
-            self,
-            "dls_limits_deg_per_30m",
-            {
-                segment_name: float(current_limits[segment_name])
-                for segment_name in _SEGMENT_DLS_ORDER
-            },
-        )
         return self
+
+    @property
+    def dls_limits_deg_per_30m(self) -> dict[str, float]:
+        return build_segment_dls_limits_deg_per_30m(
+            float(self.dls_build_max_deg_per_30m)
+        )
 
     @property
     def pos_tolerance_m(self) -> float:

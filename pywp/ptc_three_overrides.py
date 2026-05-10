@@ -6,8 +6,10 @@ import numpy as np
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
+    AntiCollisionCorridor,
     AntiCollisionZone,
     _segment_types_for_interval,
+    anti_collision_report_event_groups,
     anti_collision_report_events,
 )
 from pywp.eclipse_welltrack import WelltrackRecord
@@ -144,13 +146,20 @@ def pad_first_surface_arrow_payloads(
         if first_name in seen_names:
             continue
         seen_names.add(first_name)
+        end_name = (
+            ordered_visible_names[6]
+            if len(ordered_visible_names) >= 7
+            else ordered_visible_names[-1]
+        )
         surface = surface_by_name[first_name]
         arrows.append(
             _pad_first_surface_arrow_payload(
                 surface=surface,
+                end_surface=surface_by_name.get(end_name),
                 nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
                 spacing_m=float(cfg["spacing_m"]),
                 well_name=first_name,
+                end_well_name=end_name,
                 pad_id=str(pad.pad_id),
             )
         )
@@ -160,28 +169,43 @@ def pad_first_surface_arrow_payloads(
 def _pad_first_surface_arrow_payload(
     *,
     surface: Point3D,
+    end_surface: Point3D | None,
     nds_azimuth_deg: float,
     spacing_m: float,
     well_name: str,
+    end_well_name: str,
     pad_id: str,
 ) -> dict[str, object]:
-    length_m = float(np.clip(float(spacing_m) * 0.55, 14.0, 34.0))
-    shaft_width_m = max(length_m * 0.12, 2.0)
-    head_length_m = length_m * 0.32
-    head_width_m = length_m * 0.34
-    vertical_lift_m = float(np.clip(length_m * 0.28, 4.0, 10.0))
+    spacing = max(float(spacing_m), 1.0)
+    vertical_lift_m = float(np.clip(spacing * 1.2, 24.0, 110.0))
+    thickness_m = float(np.clip(spacing * 0.22, 5.0, 20.0))
 
     angle_rad = np.deg2rad(float(nds_azimuth_deg) % 360.0)
     direction = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=float)
     if float(np.linalg.norm(direction)) <= 1e-9:
         direction = np.array([0.0, 1.0], dtype=float)
+    start_xy = np.array([float(surface.x), float(surface.y)], dtype=float)
+    if end_surface is not None:
+        end_xy = np.array([float(end_surface.x), float(end_surface.y)], dtype=float)
+        measured_direction = end_xy - start_xy
+        measured_length = float(np.linalg.norm(measured_direction))
+        if measured_length > max(spacing * 0.35, 1.0):
+            direction = measured_direction / measured_length
+        else:
+            end_xy = start_xy + direction * float(np.clip(spacing * 6.0, 72.0, 320.0))
+    else:
+        end_xy = start_xy + direction * float(np.clip(spacing * 6.0, 72.0, 320.0))
+    length_m = max(float(np.linalg.norm(end_xy - start_xy)), 1.0)
     normal = np.array([-direction[1], direction[0]], dtype=float)
-    center = np.array([float(surface.x), float(surface.y)], dtype=float)
 
-    tail = center - direction * (length_m * 0.5)
-    tip = center + direction * (length_m * 0.5)
+    tail = start_xy
+    tip = end_xy
+    shaft_width_m = max(min(length_m * 0.10, spacing * 0.55), 6.0)
+    head_length_m = float(np.clip(length_m * 0.22, 18.0, max(length_m * 0.38, 18.0)))
+    head_width_m = max(shaft_width_m * 2.6, min(length_m * 0.22, spacing * 1.35))
     head_base = tip - direction * head_length_m
-    z_value = float(surface.z) - vertical_lift_m
+    top_z = float(surface.z) - vertical_lift_m - thickness_m * 0.5
+    bottom_z = float(surface.z) - vertical_lift_m + thickness_m * 0.5
 
     shaft_half = normal * (shaft_width_m * 0.5)
     head_half = normal * (head_width_m * 0.5)
@@ -189,23 +213,46 @@ def _pad_first_surface_arrow_payload(
         tail - shaft_half,
         tail + shaft_half,
         head_base + shaft_half,
-        head_base - shaft_half,
         head_base + head_half,
         tip,
         head_base - head_half,
+        head_base - shaft_half,
     ]
+    vertices_top = [
+        [float(point[0]), float(point[1]), top_z] for point in vertices_xy
+    ]
+    vertices_bottom = [
+        [float(point[0]), float(point[1]), bottom_z] for point in vertices_xy
+    ]
+    faces = [
+        [0, 1, 2],
+        [0, 2, 6],
+        [3, 4, 5],
+        [9, 8, 7],
+        [13, 9, 7],
+        [12, 11, 10],
+    ]
+    outline = (0, 1, 2, 3, 4, 5, 6)
+    for left, right in zip(outline, (*outline[1:], outline[0]), strict=False):
+        faces.append([left, right, right + 7])
+        faces.append([left, right + 7, left + 7])
     return {
         "name": "Начало порядка скважин",
-        "vertices": [
-            [float(point[0]), float(point[1]), z_value] for point in vertices_xy
-        ],
-        "faces": [[0, 1, 2], [0, 2, 3], [4, 5, 6]],
-        "color": "#64748B",
-        "opacity": 0.86,
+        "vertices": [*vertices_top, *vertices_bottom],
+        "faces": faces,
+        "color": "#475569",
+        "opacity": 0.94,
         "role": "pad_first_surface_arrow",
         "well_name": str(well_name),
+        "end_well_name": str(end_well_name),
         "pad_id": str(pad_id),
         "nds_azimuth_deg": float(nds_azimuth_deg) % 360.0,
+        "start_position": [float(surface.x), float(surface.y), float(surface.z)],
+        "end_position": [
+            float(end_xy[0]),
+            float(end_xy[1]),
+            float(surface.z if end_surface is None else end_surface.z),
+        ],
     }
 
 
@@ -491,18 +538,28 @@ def _collision_payloads(
 def overlap_volume_payloads(
     analysis: AntiCollisionAnalysis,
 ) -> list[dict[str, object]]:
+    if not hasattr(analysis, "wells"):
+        return _legacy_overlap_volume_payloads(getattr(analysis, "corridors", ()))
+
     volumes: list[dict[str, object]] = []
-    for index, corridor in enumerate(analysis.corridors):
-        rings = _aligned_overlap_rings(corridor.overlap_rings_xyz)
+    for index, group in enumerate(anti_collision_report_event_groups(analysis)):
+        event = group.event
+        rings = _overlap_volume_rings_for_corridors(group.corridors)
         if len(rings) < 2:
             continue
         volumes.append(
             {
                 "name": "Зоны пересечений",
                 "role": "overlap_volume",
-                "well_a": str(corridor.well_a),
-                "well_b": str(corridor.well_b),
-                "id": f"overlap-volume::{corridor.well_a}::{corridor.well_b}::{index}",
+                "well_a": str(event.well_a),
+                "well_b": str(event.well_b),
+                "id": f"overlap-volume::{event.well_a}::{event.well_b}::{index}",
+                "classification": str(event.classification),
+                "priority_rank": int(event.priority_rank),
+                "md_a_start_m": float(event.md_a_start_m),
+                "md_a_end_m": float(event.md_a_end_m),
+                "md_b_start_m": float(event.md_b_start_m),
+                "md_b_end_m": float(event.md_b_end_m),
                 "color": "#C62828",
                 "opacity": 0.34,
                 "rings": [
@@ -515,6 +572,79 @@ def overlap_volume_payloads(
             }
         )
     return volumes
+
+
+def _legacy_overlap_volume_payloads(corridors: Iterable[object]) -> list[dict[str, object]]:
+    volumes: list[dict[str, object]] = []
+    for index, corridor in enumerate(corridors):
+        rings = _overlap_volume_rings(corridor)
+        if len(rings) < 2:
+            continue
+        well_a = str(getattr(corridor, "well_a", ""))
+        well_b = str(getattr(corridor, "well_b", ""))
+        volumes.append(
+            {
+                "name": "Зоны пересечений",
+                "role": "overlap_volume",
+                "well_a": well_a,
+                "well_b": well_b,
+                "id": f"overlap-volume::{well_a}::{well_b}::{index}",
+                "color": "#C62828",
+                "opacity": 0.34,
+                "rings": [
+                    [
+                        [float(x_value), float(y_value), float(z_value)]
+                        for x_value, y_value, z_value in ring.tolist()
+                    ]
+                    for ring in rings
+                ],
+            }
+        )
+    return volumes
+
+
+def _overlap_volume_rings_for_corridors(
+    corridors: Iterable[AntiCollisionCorridor],
+) -> list[np.ndarray]:
+    corridor_list = sorted(
+        tuple(corridors),
+        key=lambda corridor: (
+            float(corridor.md_a_start_m),
+            float(corridor.md_b_start_m),
+            int(corridor.priority_rank),
+        ),
+    )
+    raw_rings = [
+        ring
+        for corridor in corridor_list
+        for ring in getattr(corridor, "overlap_rings_xyz", ())
+    ]
+    rings = _aligned_overlap_rings(raw_rings)
+    if len(rings) >= 2:
+        return rings
+    if len(rings) == 1:
+        return _thin_volume_from_single_ring(rings[0])
+
+    fallback_rings = [
+        ring
+        for corridor in corridor_list
+        for ring in _fallback_overlap_rings_from_corridor(corridor)
+    ]
+    rings = _aligned_overlap_rings(fallback_rings)
+    if len(rings) >= 2:
+        return rings
+    if len(rings) == 1:
+        return _thin_volume_from_single_ring(rings[0])
+    return []
+
+
+def _overlap_volume_rings(corridor: object) -> list[np.ndarray]:
+    rings = _aligned_overlap_rings(getattr(corridor, "overlap_rings_xyz", ()))
+    if len(rings) >= 2:
+        return rings
+    if len(rings) == 1:
+        return _thin_volume_from_single_ring(rings[0])
+    return _fallback_overlap_rings_from_corridor(corridor)
 
 
 def _aligned_overlap_rings(
@@ -531,6 +661,148 @@ def _aligned_overlap_rings(
         rings.append(ring)
         previous = ring
     return rings
+
+
+def _thin_volume_from_single_ring(ring: np.ndarray) -> list[np.ndarray]:
+    ring = np.asarray(ring, dtype=float)
+    center = np.mean(ring, axis=0)
+    distances = np.linalg.norm(ring - center[None, :], axis=1)
+    radius = float(np.nanmax(distances)) if distances.size else 1.0
+    normal = _ring_normal_vector(ring)
+    thickness = _overlap_fallback_thickness(radius)
+    return [
+        np.asarray(ring - normal[None, :] * thickness * 0.5, dtype=float),
+        np.asarray(ring + normal[None, :] * thickness * 0.5, dtype=float),
+    ]
+
+
+def _fallback_overlap_rings_from_corridor(corridor: object) -> list[np.ndarray]:
+    centers = _finite_xyz_rows(getattr(corridor, "midpoint_xyz", ()))
+    if centers.size == 0:
+        return []
+    radii = _positive_values(getattr(corridor, "overlap_core_radius_m", ()))
+    if radii.size == 0:
+        radii = _positive_values(getattr(corridor, "overlap_depth_values_m", ()))
+    if radii.size == 0:
+        radii = np.full(len(centers), 2.0, dtype=float)
+    if len(radii) < len(centers):
+        radii = np.pad(radii, (0, len(centers) - len(radii)), mode="edge")
+    radii = radii[: len(centers)]
+    rings: list[np.ndarray] = []
+    if len(centers) == 1:
+        radius = float(max(radii[0], 1.0))
+        normal = np.array([0.0, 0.0, 1.0], dtype=float)
+        thickness = _overlap_fallback_thickness(radius)
+        for offset in (-0.5, 0.5):
+            rings.append(
+                _circle_ring(
+                    center=centers[0] + normal * thickness * offset,
+                    normal=normal,
+                    radius=radius,
+                )
+            )
+        return rings
+    for index, center in enumerate(centers):
+        tangent = _centerline_tangent(centers, index)
+        rings.append(
+            _circle_ring(
+                center=center,
+                normal=tangent,
+                radius=float(max(radii[index], 1.0)),
+            )
+        )
+    return _aligned_overlap_rings(rings)
+
+
+def _finite_xyz_rows(values: object) -> np.ndarray:
+    try:
+        rows = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return np.empty((0, 3), dtype=float)
+    if rows.ndim == 1 and rows.shape[0] == 3:
+        rows = rows.reshape(1, 3)
+    if rows.ndim != 2 or rows.shape[1] != 3:
+        return np.empty((0, 3), dtype=float)
+    return np.asarray(rows[np.all(np.isfinite(rows), axis=1)], dtype=float)
+
+
+def _positive_values(values: object) -> np.ndarray:
+    try:
+        array = np.asarray(values, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return np.empty(0, dtype=float)
+    array = array[np.isfinite(array) & (array > 0.0)]
+    return np.asarray(array, dtype=float)
+
+
+def _overlap_fallback_thickness(radius: float) -> float:
+    return float(np.clip(max(float(radius), 1.0) * 0.12, 0.6, 8.0))
+
+
+def _ring_normal_vector(ring: np.ndarray) -> np.ndarray:
+    center = np.mean(np.asarray(ring, dtype=float), axis=0)
+    centered = np.asarray(ring, dtype=float) - center[None, :]
+    if len(centered) >= 3:
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        normal = np.asarray(vh[-1], dtype=float)
+    else:
+        normal = np.array([0.0, 0.0, 1.0], dtype=float)
+    norm = float(np.linalg.norm(normal))
+    if not np.isfinite(norm) or norm <= 1e-9:
+        return np.array([0.0, 0.0, 1.0], dtype=float)
+    return normal / norm
+
+
+def _centerline_tangent(centers: np.ndarray, index: int) -> np.ndarray:
+    if len(centers) <= 1:
+        return np.array([0.0, 0.0, 1.0], dtype=float)
+    if index <= 0:
+        tangent = centers[1] - centers[0]
+    elif index >= len(centers) - 1:
+        tangent = centers[-1] - centers[-2]
+    else:
+        tangent = centers[index + 1] - centers[index - 1]
+    norm = float(np.linalg.norm(tangent))
+    if not np.isfinite(norm) or norm <= 1e-9:
+        return np.array([0.0, 0.0, 1.0], dtype=float)
+    return np.asarray(tangent / norm, dtype=float)
+
+
+def _circle_ring(
+    *,
+    center: np.ndarray,
+    normal: np.ndarray,
+    radius: float,
+    point_count: int = 24,
+) -> np.ndarray:
+    normal = np.asarray(normal, dtype=float)
+    normal_norm = float(np.linalg.norm(normal))
+    if not np.isfinite(normal_norm) or normal_norm <= 1e-9:
+        normal = np.array([0.0, 0.0, 1.0], dtype=float)
+    else:
+        normal = normal / normal_norm
+    seed = (
+        np.array([0.0, 0.0, 1.0], dtype=float)
+        if abs(float(normal[2])) < 0.92
+        else np.array([0.0, 1.0, 0.0], dtype=float)
+    )
+    basis_u = np.cross(normal, seed)
+    basis_u_norm = float(np.linalg.norm(basis_u))
+    if not np.isfinite(basis_u_norm) or basis_u_norm <= 1e-9:
+        basis_u = np.array([1.0, 0.0, 0.0], dtype=float)
+    else:
+        basis_u = basis_u / basis_u_norm
+    basis_v = np.cross(normal, basis_u)
+    basis_v = basis_v / max(float(np.linalg.norm(basis_v)), 1e-9)
+    angles = np.linspace(0.0, 2.0 * np.pi, int(max(point_count, 8)), endpoint=False)
+    safe_radius = float(max(radius, 1.0))
+    return np.asarray(
+        [
+            center + safe_radius * (np.cos(angle) * basis_u + np.sin(angle) * basis_v)
+            for angle in angles
+        ],
+        dtype=float,
+    )
 
 
 def _open_finite_ring(raw_ring: object) -> np.ndarray | None:

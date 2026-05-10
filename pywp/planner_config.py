@@ -95,7 +95,4 @@ def build_trajectory_config(
         turn_solver_max_restarts=int(turn_solver_max_restarts),
         max_total_md_postcheck_m=float(max_total_md_postcheck_m),
         interpolation_method=str(interpolation_method),
-        dls_limits_deg_per_30m=build_segment_dls_limits(
-            build_dls_max_deg_per_30m=max_build
-        ),
     )

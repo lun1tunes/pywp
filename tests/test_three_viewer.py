@@ -32,6 +32,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="axes-gizmo"' in html
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
+    assert ".scene-label.well-name-label" in html
+    assert 'roleClassName = labelRole === "well_label" ? "well-name-label" : ""' in html
+    assert "font-size: 10px;" in html
     assert ".axes-gizmo-line" in html
     assert ".axes-gizmo-label" in html
     assert "OrbitControls" in html
@@ -54,15 +57,24 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "Y / North" in html
     assert 'label: "Z"' in html
     assert "Z / TVD" not in html
+    assert 'color: "#16A34A"' in html
+    assert 'color: "#2563EB"' in html
+    assert 'color: "#DC2626"' in html
     assert "scene-axis-label" in html
     assert "function updateAxesGizmo()" in html
     assert "camera.quaternion.clone().invert()" in html
     assert 'Math.abs(dx) < 6 ? "middle"' in html
     assert "#legend.is-collapsed" in html
+    assert "#legend {" in html
+    assert "#collisions-panel {" in html
+    assert "z-index: 8;" in html
     assert "function syncLegendVisibility()" in html
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
     assert "function fitCameraToRawBounds(rawBounds)" in html
+    assert "fitMiniMapToRawBounds(rawBounds || payload.bounds || {})" in html
+    assert "function focusMiniMapToDisplayPoint(displayCenter, focusSpan)" in html
+    assert "focusMiniMapToDisplayPoint(targetCenter, offsetDistance * 2.0)" in html
     assert "function editWellTargetFocusBounds(index)" in html
     assert "function fitCameraToEditWellTargets(index)" in html
     assert "selectEditWell(editableIndex, { focus: !editModeActive })" in html
@@ -106,6 +118,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="edit-undo-btn"' in html
     assert 'id="edit-redo-btn"' in html
     assert 'id="edit-reset-btn"' in html
+    assert 'id="edit-warning-hide-btn"' in html
+    assert "editWarningDismissed = true" in html
+    assert "editHasAnyChange && !editWarningDismissed" in html
     assert "function undoSelectedEdit()" in html
     assert "function redoSelectedEdit()" in html
     assert "function resetSelectedEdit()" in html
@@ -122,6 +137,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'toFixed(1).replace(".", ",")' in html
     assert "edit-lateral-label" in html
     assert "horizontalT1T3Length" in html
+    assert "function t1T3Length(wellIndex)" in html
+    assert "Math.hypot(t3[0] - t1[0], t3[1] - t1[1], t3[2] - t1[2])" in html
+    assert "`Длина ГС ${formatLengthMeters(t1T3Length(wellIndex))}`" in html
     assert "syncEditLateralLabels" in html
     assert "handleScale / 2.5" in html
     assert "pickMesh" in html
@@ -140,6 +158,70 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "Свернуть / развернуть" in html
     assert "legend-node-btn legend-node-pad" in html
     assert "legend-node-btn legend-node-well" in html
+    assert "legend-item.is-focusable" in html
+    assert 'id="minimap-frame"' in html
+    assert 'id="minimap-label-layer"' in html
+    assert ".minimap-well-label" in html
+    assert 'id="minimap-axes"' in html
+    assert "minimap-axis-x" in html
+    assert "minimap-axis-y" in html
+    assert "X / E" in html
+    assert "Y / N" in html
+    assert "const miniMapAxes = document.getElementById(\"minimap-axes\")" in html
+    assert "const miniMapLabels = [];" in html
+    assert "miniMapAxes.classList.add(\"is-visible\")" in html
+    assert "function updateMiniMapLabels()" in html
+    assert 'options && options.role === "well_label"' in html
+    assert "{ offsetY: offsetY, role: role }" in html
+    assert "function syncEditWellNameLabelPosition(wellIndex)" in html
+    assert 'id="minimap-control"' in html
+    assert 'id="minimap-label"' in html
+    assert "План E-N (вид сверху)" in html
+    assert "const miniMapControl = document.getElementById(\"minimap-control\")" in html
+    assert "miniMapControl.classList.add(\"is-expanded\")" in html
+    assert "miniMapControl.style.width" in html
+    assert "miniMapLabel.classList.add(\"is-expanded\")" in html
+    assert "miniMapControl.style.left" in html
+    assert "pointer-events: none;" in html
+    assert "pointer-events: auto;" in html
+    assert "screenX >= miniMapLeft" in html
+    assert "#minimap-frame" in html
+    assert "border: 1px solid rgba(15,23,42,0.16);" in html
+    assert "background: rgba(255,255,255,0.035);" in html
+    assert "background: transparent;" in html
+    assert "box-shadow: none;" in html
+    assert "text-shadow: 0 1px 2px rgba(255,255,255,0.95);" in html
+    assert 'id="minimap-toggle-btn"' in html
+    assert "План E-N ‹" in html
+    assert "#minimap-control:not(.is-expanded) #minimap-label" in html
+    assert 'miniMapToggleBtn.textContent = "План E-N ‹";' in html
+    assert "new THREE.OrthographicCamera" in html
+    assert "function miniMapCanvasRect()" in html
+    assert "function miniMapSizeConfig(canvasWidth, canvasHeight)" in html
+    assert "function resizedMiniMapSize(startRect, event)" in html
+    assert "function syncMiniMapResizeZoom(rect)" in html
+    assert "function handleMiniMapResizePointerDown(event)" in html
+    assert "function handleMiniMapResizePointerMove(event)" in html
+    assert "function handleMiniMapResizePointerUp(event)" in html
+    assert "miniMapState.customSize = resizedMiniMapSize" in html
+    assert "miniMapState.resizeStartWorldPerPixel = miniMapWorldPerPixel()" in html
+    assert "cursor: nwse-resize;" in html
+    assert "border-top: 18px solid rgba(71,85,105,0.62);" in html
+    assert "Math.sqrt(targetArea * aspect) * 1.2" in html
+    assert "renderer.setScissorTest(true)" in html
+    assert "const miniMapHiddenContourObjects = [];" in html
+    assert "function renderMiniMapScene()" in html
+    assert "registerMiniMapHiddenContourObject(wireframe)" in html
+    assert "role === \"cone_tip\"" in html
+    assert "renderMiniMapScene();" in html
+    assert "handleMiniMapWheel" in html
+    assert "handleMiniMapPointerDown" in html
+    assert "isPointerInMiniMap(event)" in html
+    assert "function miniMapEditableHandleAtEvent(event)" in html
+    assert "function startMiniMapEditDrag(event)" in html
+    assert 'editDragInputMode = "minimap"' in html
+    assert "editTransformMode === \"rotate\"" in html
+    assert "miniMapWorldAtEvent(event)" in html
     assert "function sortedLegendItems(items)" in html
     assert '.localeCompare(legendSortLabel(right), "ru"' in html
     assert "numeric: true" in html
@@ -150,10 +232,24 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html
+    assert "function addPolylineTube()" in html
+    assert "new THREE.MeshLambertMaterial({" in html
+    assert "const depthMaterial = new THREE.MeshBasicMaterial({" in html
+    assert "colorWrite: false" in html
+    assert "depthMesh.renderOrder = -1" in html
+    assert "Math.max(maxSpan * 0.00032, 0.9)" in html
+    assert "sceneComplexity > 90000 || pointCount > 2200" in html
     assert "new THREE.AmbientLight(0xffffff, 0.72)" in html
     assert "new THREE.DirectionalLight(0xffffff, 0.58)" in html
     assert "THREE.MeshLambertMaterial" in html
-    assert 'const isShadedSurface = role === "cone" || role === "overlap";' in html
+    assert "THREE.WireframeGeometry" in html
+    assert "new THREE.LineSegments(wireGeometry, wireMaterial)" in html
+    assert 'depthWrite: role === "cone"' in html
+    assert 'depthWrite: role !== "cone_tip"' in html
+    assert "wireframe.renderOrder = mesh.renderOrder + 0.05" in html
+    assert 'role === "cone" || role === "overlap" || role === "pad_first_surface_arrow"' in html
+    assert "Math.min(opacity, 0.12)" in html
+    assert "opacity: 0.10" in html
     assert "function numberOrDefault(value, fallback)" in html
     assert "numberOrDefault(item.opacity, 0.34)" in html
     assert "numberOrDefault(item.opacity, 0.25)" in html

@@ -512,7 +512,7 @@ def _assert_solution_is_valid(
             f"dX={float(summary['t3_miss_dx_m']):.2f} m, "
             f"dY={float(summary['t3_miss_dy_m']):.2f} m, "
             f"dZ={float(summary['t3_miss_dz_m']):.2f} m. "
-            "Increase HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
+            "Increase BUILD/HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
         )
     if abs(float(summary["entry_inc_deg"]) - config.entry_inc_target_deg) > config.entry_inc_tolerance_deg + 1e-6:
         raise PlanningError("Entry inclination at t1 is outside required target range.")

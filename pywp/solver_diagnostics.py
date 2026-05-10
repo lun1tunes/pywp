@@ -283,7 +283,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
         )
 
     match = re.search(
-        rf"Post-entry t1->t3 connection is not feasible with HORIZONTAL DLS limit ({_RE_FLOAT}) deg/30m; requires about ({_RE_FLOAT}) deg/30m",
+        rf"Post-entry t1->t3 connection is not feasible with (?:BUILD/HORIZONTAL|HORIZONTAL) DLS limit ({_RE_FLOAT}) deg/30m; requires about ({_RE_FLOAT}) deg/30m",
         text,
     )
     if match:
@@ -292,10 +292,10 @@ def _item_from_text(line: str) -> DiagnosticItem:
         pi_req = _pi_text_from_dls_text(dls_req)
         return DiagnosticItem(
             reason_ru=(
-                f"Участок после входа в пласт не бурим при HORIZONTAL ПИ limit {pi_lim} deg/10m: "
+                f"Участок после входа в пласт не бурим при лимите BUILD/HORIZONTAL ПИ {pi_lim} deg/10m: "
                 f"нужно примерно {pi_req} deg/10m."
             ),
-            action_ru="Увеличьте лимит HORIZONTAL ПИ или переместите t3 ближе к t1 по разрезу.",
+            action_ru="Увеличьте лимит BUILD/HORIZONTAL ПИ или переместите t3 ближе к t1 по разрезу.",
         )
 
     if "Post-entry t1->t3 connection is infeasible even with high DLS scan up to 30 deg/30m" in text:

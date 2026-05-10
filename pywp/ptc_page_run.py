@@ -27,12 +27,14 @@ def render_run_section(*, records: list[object]) -> None:
     config = render_calc_params_panel()
 
     with st.form("ptc_run_form", clear_on_submit=False):
-        select_col, pad_col, action_col, pad_add_col, pad_only_col = (
-            st.columns(
-                [5.0, 2.4, 1.2, 1.45, 1.45],
-                gap="small",
-                vertical_alignment="bottom",
-            )
+        select_all_clicked = False
+        add_pad_clicked = False
+        replace_with_pad_clicked = False
+
+        select_col, select_all_col = st.columns(
+            [7.0, 1.25],
+            gap="small",
+            vertical_alignment="bottom",
         )
         with select_col:
             st.multiselect(
@@ -40,14 +42,20 @@ def render_run_section(*, records: list[object]) -> None:
                 options=all_names,
                 key="wt_selected_names",
             )
-        with action_col:
+        with select_all_col:
             select_all_clicked = st.form_submit_button(
                 "Выбрать все",
                 icon=":material/done_all:",
                 width="stretch",
             )
-        with pad_col:
-            if len(pad_ids) > 1:
+
+        if len(pad_ids) > 1:
+            pad_col, pad_add_col, pad_only_col, _ = st.columns(
+                [2.5, 1.45, 1.45, 2.85],
+                gap="small",
+                vertical_alignment="bottom",
+            )
+            with pad_col:
                 st.selectbox(
                     "Куст",
                     options=pad_ids,
@@ -60,26 +68,18 @@ def render_run_section(*, records: list[object]) -> None:
                     ),
                     key="wt_batch_select_pad_id",
                 )
-        with pad_add_col:
-            add_pad_clicked = (
-                st.form_submit_button(
+            with pad_add_col:
+                add_pad_clicked = st.form_submit_button(
                     "Добавить куст",
                     icon=":material/filter_alt:",
                     width="stretch",
                 )
-                if len(pad_ids) > 1
-                else False
-            )
-        with pad_only_col:
-            replace_with_pad_clicked = (
-                st.form_submit_button(
+            with pad_only_col:
+                replace_with_pad_clicked = st.form_submit_button(
                     "Только куст",
                     icon=":material/rule:",
                     width="stretch",
                 )
-                if len(pad_ids) > 1
-                else False
-            )
 
         _parallel_options = [
             ("Без Multiprocessing", 0),

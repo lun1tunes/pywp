@@ -19,8 +19,10 @@ def _make_md_grid(md_start: float, length_m: float, md_step_m: float) -> np.ndar
 
     md_end = md_start + float(length_m)
     md = np.arange(md_start, md_end, md_step_m, dtype=float)
-    if len(md) == 0 or not np.isclose(md[-1], md_end):
+    if len(md) == 0 or abs(float(md[-1]) - float(md_end)) > 1e-9:
         md = np.append(md, md_end)
+    else:
+        md[-1] = md_end
     return md
 
 

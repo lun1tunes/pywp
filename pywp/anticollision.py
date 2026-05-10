@@ -119,6 +119,12 @@ class AntiCollisionReportEvent:
 
 
 @dataclass(frozen=True)
+class AntiCollisionReportEventGroup:
+    event: AntiCollisionReportEvent
+    corridors: tuple[AntiCollisionCorridor, ...]
+
+
+@dataclass(frozen=True)
 class AntiCollisionAnalysis:
     wells: tuple[AntiCollisionWell, ...]
     corridors: tuple[AntiCollisionCorridor, ...]
@@ -622,35 +628,67 @@ def anti_collision_report_rows(
 def anti_collision_report_events(
     analysis: AntiCollisionAnalysis,
 ) -> tuple[AntiCollisionReportEvent, ...]:
+    return tuple(group.event for group in anti_collision_report_event_groups(analysis))
+
+
+def anti_collision_report_event_groups(
+    analysis: AntiCollisionAnalysis,
+) -> tuple[AntiCollisionReportEventGroup, ...]:
     if not analysis.corridors:
         return ()
     merge_tolerance_m = _corridor_merge_tolerance_m(analysis.wells)
     sorted_corridors = sorted(
         analysis.corridors,
         key=lambda corridor: (
-            int(corridor.priority_rank),
             str(corridor.well_a),
             str(corridor.well_b),
-            str(corridor.label_a),
-            str(corridor.label_b),
             float(corridor.md_a_start_m),
             float(corridor.md_b_start_m),
+            int(corridor.priority_rank),
         ),
     )
-    events: list[AntiCollisionReportEvent] = []
+    groups: list[AntiCollisionReportEventGroup] = []
     current = _corridor_to_report_event(sorted_corridors[0])
+    current_corridors = [sorted_corridors[0]]
     for corridor in sorted_corridors[1:]:
-        if _report_events_can_merge(
+        if _report_event_group_can_merge(
             current,
             corridor,
             tolerance_m=merge_tolerance_m,
         ):
             current = _merge_report_event_with_corridor(current, corridor)
+            current_corridors.append(corridor)
             continue
-        events.append(current)
+        groups.append(
+            AntiCollisionReportEventGroup(
+                event=current,
+                corridors=tuple(current_corridors),
+            )
+        )
         current = _corridor_to_report_event(corridor)
-    events.append(current)
-    return tuple(events)
+        current_corridors = [corridor]
+    groups.append(
+        AntiCollisionReportEventGroup(
+            event=current,
+            corridors=tuple(current_corridors),
+        )
+    )
+    return tuple(
+        sorted(
+            groups,
+            key=lambda group: (
+                int(group.event.priority_rank),
+                str(group.event.well_a),
+                str(group.event.well_b),
+                str(group.event.label_a),
+                str(group.event.label_b),
+                float(group.event.md_a_start_m),
+                float(group.event.md_b_start_m),
+                float(group.event.min_separation_factor),
+                -float(group.event.max_overlap_depth_m),
+            ),
+        )
+    )
 
 
 def collision_zone_plan_polygon(
@@ -1468,16 +1506,6 @@ def _corridor_summary_zone(corridor: AntiCollisionCorridor) -> AntiCollisionZone
 def _corridor_to_report_event(
     corridor: AntiCollisionCorridor,
 ) -> AntiCollisionReportEvent:
-    sf_values = np.asarray(corridor.separation_factor_values, dtype=float)
-    overlap_depth_values = np.asarray(corridor.overlap_depth_values_m, dtype=float)
-    # For overlapping points (SF < 1): center_distance = SF * overlap_depth / (1 - SF)
-    # Avoid division by zero by masking SF >= 1 (shouldn't happen for corridor points)
-    safe_mask = sf_values < 0.999999
-    center_distances = np.full_like(sf_values, np.inf)
-    center_distances[safe_mask] = (
-        sf_values[safe_mask] * overlap_depth_values[safe_mask] / (1.0 - sf_values[safe_mask])
-    )
-    min_center_distance_m = float(np.min(center_distances))
     return AntiCollisionReportEvent(
         well_a=str(corridor.well_a),
         well_b=str(corridor.well_b),
@@ -1491,12 +1519,12 @@ def _corridor_to_report_event(
         md_b_end_m=float(corridor.md_b_end_m),
         min_separation_factor=float(np.min(corridor.separation_factor_values)),
         max_overlap_depth_m=float(np.max(corridor.overlap_depth_values_m)),
-        min_center_distance_m=min_center_distance_m,
+        min_center_distance_m=_corridor_min_center_distance_m(corridor),
         merged_corridor_count=1,
     )
 
 
-def _report_events_can_merge(
+def _report_event_group_can_merge(
     event: AntiCollisionReportEvent,
     corridor: AntiCollisionCorridor,
     *,
@@ -1505,10 +1533,18 @@ def _report_events_can_merge(
     if (
         str(event.well_a) != str(corridor.well_a)
         or str(event.well_b) != str(corridor.well_b)
-        or str(event.classification) != str(corridor.classification)
-        or str(event.label_a) != str(corridor.label_a)
-        or str(event.label_b) != str(corridor.label_b)
     ):
+        return False
+    if str(event.classification) == "target-target" or str(
+        corridor.classification
+    ) == "target-target":
+        if (
+            str(event.classification) != str(corridor.classification)
+            or str(event.label_a) != str(corridor.label_a)
+            or str(event.label_b) != str(corridor.label_b)
+        ):
+            return False
+    if not _target_labels_are_merge_compatible(event, corridor):
         return False
     overlap_or_touch_a = (
         float(corridor.md_a_start_m) <= float(event.md_a_end_m) + tolerance_m
@@ -1523,22 +1559,17 @@ def _merge_report_event_with_corridor(
     event: AntiCollisionReportEvent,
     corridor: AntiCollisionCorridor,
 ) -> AntiCollisionReportEvent:
-    # Compute min center distance for this corridor
-    sf_values = np.asarray(corridor.separation_factor_values, dtype=float)
-    overlap_depth_values = np.asarray(corridor.overlap_depth_values_m, dtype=float)
-    safe_mask = sf_values < 0.999999
-    center_distances = np.full_like(sf_values, np.inf)
-    center_distances[safe_mask] = (
-        sf_values[safe_mask] * overlap_depth_values[safe_mask] / (1.0 - sf_values[safe_mask])
+    classification, priority_rank, label_a, label_b = _merged_report_event_meta(
+        event,
+        corridor,
     )
-    corridor_min_center_distance = float(np.min(center_distances))
     return AntiCollisionReportEvent(
         well_a=event.well_a,
         well_b=event.well_b,
-        classification=event.classification,
-        priority_rank=int(event.priority_rank),
-        label_a=event.label_a,
-        label_b=event.label_b,
+        classification=classification,
+        priority_rank=int(priority_rank),
+        label_a=label_a,
+        label_b=label_b,
         md_a_start_m=min(float(event.md_a_start_m), float(corridor.md_a_start_m)),
         md_a_end_m=max(float(event.md_a_end_m), float(corridor.md_a_end_m)),
         md_b_start_m=min(float(event.md_b_start_m), float(corridor.md_b_start_m)),
@@ -1553,10 +1584,71 @@ def _merge_report_event_with_corridor(
         ),
         min_center_distance_m=min(
             float(event.min_center_distance_m),
-            corridor_min_center_distance,
+            _corridor_min_center_distance_m(corridor),
         ),
         merged_corridor_count=int(event.merged_corridor_count) + 1,
     )
+
+
+def _corridor_min_center_distance_m(corridor: AntiCollisionCorridor) -> float:
+    sf_values = np.asarray(corridor.separation_factor_values, dtype=float)
+    overlap_depth_values = np.asarray(corridor.overlap_depth_values_m, dtype=float)
+    safe_mask = sf_values < 0.999999
+    center_distances = np.full_like(sf_values, np.inf)
+    center_distances[safe_mask] = (
+        sf_values[safe_mask]
+        * overlap_depth_values[safe_mask]
+        / (1.0 - sf_values[safe_mask])
+    )
+    return float(np.min(center_distances))
+
+
+def _merged_report_event_meta(
+    event: AntiCollisionReportEvent,
+    corridor: AntiCollisionCorridor,
+) -> tuple[str, int, str, str]:
+    event_key = (
+        int(event.priority_rank),
+        float(event.min_separation_factor),
+        -float(event.max_overlap_depth_m),
+    )
+    corridor_key = (
+        int(corridor.priority_rank),
+        float(np.min(corridor.separation_factor_values)),
+        -float(np.max(corridor.overlap_depth_values_m)),
+    )
+    if corridor_key < event_key:
+        return (
+            str(corridor.classification),
+            int(corridor.priority_rank),
+            str(corridor.label_a),
+            str(corridor.label_b),
+        )
+    return (
+        str(event.classification),
+        int(event.priority_rank),
+        str(event.label_a),
+        str(event.label_b),
+    )
+
+
+def _target_labels_are_merge_compatible(
+    event: AntiCollisionReportEvent,
+    corridor: AntiCollisionCorridor,
+) -> bool:
+    event_labels = _target_label_signature(event.label_a, event.label_b)
+    corridor_labels = _target_label_signature(corridor.label_a, corridor.label_b)
+    return bool(
+        not event_labels
+        or not corridor_labels
+        or event_labels == corridor_labels
+    )
+
+
+def _target_label_signature(label_a: str, label_b: str) -> tuple[str, ...]:
+    left = str(label_a)
+    right = str(label_b)
+    return (left, right) if left or right else ()
 
 
 def _corridor_merge_tolerance_m(

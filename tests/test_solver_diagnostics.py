@@ -141,11 +141,29 @@ def test_parse_solver_error_build_dls_moderate_pi_shows_value() -> None:
     assert "Мин VERTICAL до KOP" in rows[0]["Что изменить"]
 
 
+def test_parse_solver_error_build_horizontal_post_entry_limit() -> None:
+    text = (
+        "No valid trajectory solution found within configured limits.\n"
+        "Reasons and actions:\n"
+        "- Post-entry t1->t3 connection is not feasible with BUILD/HORIZONTAL DLS limit "
+        "3.00 deg/30m; requires about 4.50 deg/30m. "
+        "Increase BUILD/HORIZONTAL DLS limit or move t3 closer to t1 in section.\n"
+    )
+
+    rows = diagnostics_rows_ru(text)
+
+    assert rows
+    assert "BUILD/HORIZONTAL ПИ" in rows[0]["Причина"]
+    assert "1.00 deg/10m" in rows[0]["Причина"]
+    assert "1.50 deg/10m" in rows[0]["Причина"]
+    assert "BUILD/HORIZONTAL ПИ" in rows[0]["Что изменить"]
+
+
 def test_parse_solver_error_formats_exact_target_delta_for_direct_miss() -> None:
     text = (
         "Failed to hit t3 within tolerance. Miss=7.87 m, tolerance=2.00 m. "
         "Analytical delta: dX=3.51 m, dY=7.02 m, dZ=0.57 m. "
-        "Increase HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
+        "Increase BUILD/HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
     )
     rows = diagnostics_rows_ru(text)
     assert rows

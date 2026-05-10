@@ -150,7 +150,7 @@ def single_well_three_payload(
         }
     )
     if well_name:
-        payload["labels"].append(_well_name_label(str(well_name), t1, TARGET_COLOR_PRIMARY))
+        payload["labels"].append(_well_name_label(str(well_name), t3, TARGET_COLOR_PRIMARY))
 
     if md_t1_m is not None and not stations.empty and "MD_m" in stations.columns:
         calc_points = _calculated_t1_t3_points(stations, md_t1_m=float(md_t1_m))
@@ -242,7 +242,7 @@ def all_wells_three_payload(
             if _include_name_in_focus(well_name, focus_set)
             else None,
         )
-        payload["labels"].append(_well_name_label(well_name, success.t1, color))
+        payload["labels"].append(_well_name_label(well_name, success.t3, color))
         _append_unique_legend_item(payload, label=well_name, color=color, opacity=1.0)
 
     _append_reference_wells(
@@ -277,7 +277,7 @@ def all_wells_three_payload(
                 "problem": str(getattr(target_only, "problem", "") or ""),
             },
         )
-        payload["labels"].append(_well_name_label(well_name, getattr(target_only, "t1"), color))
+        payload["labels"].append(_well_name_label(well_name, getattr(target_only, "t3"), color))
         _append_unique_legend_item(
             payload,
             label=f"{well_name}: цели (без траектории)",
@@ -440,7 +440,7 @@ def anticollision_three_payload(
                 z_arrays=z_arrays,
                 focus_arrays=focus_arrays,
             )
-            payload["labels"].append(_well_name_label(well_name, well.t1, str(well.color)))
+            payload["labels"].append(_well_name_label(well_name, well.t3, str(well.color)))
 
     if aggregated_reference_wells:
         _append_combined_reference_wells(
@@ -1248,10 +1248,10 @@ def _point3d_payload(point: Point3D) -> list[float]:
     return [float(point.x), float(point.y), float(point.z)]
 
 
-def _well_name_label(well_name: str, t1: Point3D, color: str) -> dict[str, object]:
+def _well_name_label(well_name: str, point: Point3D, color: str) -> dict[str, object]:
     return {
         "text": str(well_name),
-        "position": [float(t1.x), float(t1.y), float(t1.z)],
+        "position": [float(point.x), float(point.y), float(point.z)],
         "color": str(color),
         "role": "well_label",
     }

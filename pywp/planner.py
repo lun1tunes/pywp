@@ -3809,9 +3809,9 @@ def _diagnose_post_entry_constraints(
     )
     if required_dls is not None:
         messages.append(
-            "Post-entry t1->t3 connection is not feasible with HORIZONTAL DLS limit "
+            "Post-entry t1->t3 connection is not feasible with BUILD/HORIZONTAL DLS limit "
             f"{horizontal_dls_deg_per_30m:.2f} deg/30m; requires about {required_dls:.2f} deg/30m. "
-            "Increase HORIZONTAL DLS limit or move t3 closer to t1 in section."
+            "Increase BUILD/HORIZONTAL DLS limit or move t3 closer to t1 in section."
         )
     else:
         messages.append(
