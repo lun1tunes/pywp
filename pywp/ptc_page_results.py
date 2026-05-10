@@ -133,16 +133,15 @@ def _render_anticollision_panel(
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     try:
-        anticollision_3d_figure = wt._all_wells_anticollision_3d_figure(
+        anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
             analysis,
             previous_successes_by_name={},
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
             render_mode=wt.WT_3D_RENDER_DETAIL,
         )
-        wt._render_plotly_or_three_3d(
+        wt._render_three_payload(
             container=chart_col1,
-            figure=anticollision_3d_figure,
-            backend=wt.WT_3D_BACKEND_THREE_LOCAL,
+            payload=anticollision_3d_payload,
             height=660,
             payload_overrides=wt._anticollision_three_payload_overrides(
                 records=records,
@@ -358,11 +357,10 @@ def render_success_tabs(
             str(selected.name): str(name_to_color.get(str(selected.name), "#2563eb"))
         }
 
-        def render_3d_override(container: object, figure: object) -> None:
-            wt._render_plotly_or_three_3d(
+        def render_3d_override(container: object, payload: dict[str, object]) -> None:
+            wt._render_three_payload(
                 container=container,
-                figure=figure,
-                backend=wt.WT_3D_BACKEND_THREE_LOCAL,
+                payload=payload,
                 height=560,
                 payload_overrides={
                     "component_key": f"ptc-single-well-{selected.name}",

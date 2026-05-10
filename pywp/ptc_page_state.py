@@ -19,10 +19,7 @@ def force_ptc_defaults() -> None:
         wt.WT_3D_RENDER_OPTIONS
     ):
         st.session_state["wt_3d_render_mode"] = str(wt.WT_3D_RENDER_DETAIL)
-    if str(st.session_state.get("wt_3d_backend", "")).strip() not in set(
-        wt.WT_3D_BACKEND_OPTIONS
-    ):
-        st.session_state["wt_3d_backend"] = str(wt.WT_3D_BACKEND_THREE_LOCAL)
+    st.session_state.pop("wt_3d_backend", None)
     if wt._pending_edit_target_names():
         st.session_state["wt_results_view_mode"] = "Все скважины"
     st.session_state["wt_results_all_view_mode"] = "Anti-collision"

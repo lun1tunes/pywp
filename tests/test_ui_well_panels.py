@@ -3,8 +3,11 @@ from __future__ import annotations
 from io import BytesIO
 
 import pandas as pd
+import plotly.graph_objects as go
 
+from pywp.models import Point3D
 from pywp.ui_well_panels import (
+    render_trajectory_dls_panel,
     render_survey_table_with_download,
     survey_export_dataframe,
 )
@@ -97,3 +100,54 @@ def test_survey_download_uses_export_stations_without_changing_display(
     assert "X_m" not in exported.columns
     assert exported["X_WGS_deg"].iloc[0] == 110.0
     assert exported["Y_WGS_deg"].iloc[0] == 220.0
+
+
+def test_trajectory_panel_uses_local_three_for_default_3d(monkeypatch) -> None:
+    import pywp.ui_well_panels as panels
+
+    captured: dict[str, object] = {"plotly_calls": []}
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def plotly_chart(self, figure, **kwargs):
+            captured["plotly_calls"].append((figure, dict(kwargs)))
+
+    col_3d = _DummyColumn()
+    col_dls = _DummyColumn()
+
+    def fake_three_scene(payload, **kwargs):
+        captured["three_payload"] = payload
+        captured["three_kwargs"] = dict(kwargs)
+        return None
+
+    monkeypatch.setattr(panels.st, "columns", lambda *args, **kwargs: (col_3d, col_dls))
+    monkeypatch.setattr(panels, "dls_figure", lambda *args, **kwargs: go.Figure())
+    monkeypatch.setattr(panels, "render_local_three_scene", fake_three_scene)
+
+    render_trajectory_dls_panel(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 10.0],
+                "X_m": [0.0, 10.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 5.0],
+            }
+        ),
+        well_name="WELL-A",
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        t1=Point3D(x=5.0, y=0.0, z=2.0),
+        t3=Point3D(x=10.0, y=0.0, z=5.0),
+        md_t1_m=5.0,
+        dls_limits={},
+        border=False,
+    )
+
+    assert captured["three_kwargs"]["height"] == 560
+    assert captured["three_payload"]["lines"]
+    assert len(captured["plotly_calls"]) == 1
+    assert captured["plotly_calls"][0][1] == {"width": "stretch"}

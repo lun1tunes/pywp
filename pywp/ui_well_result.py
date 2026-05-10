@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Callable, Mapping, Sequence
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 from pydantic import field_validator
 
@@ -396,7 +395,7 @@ def render_result_plots(
     title_trajectory: str | None,
     title_plan: str | None,
     border: bool = True,
-    render_3d_override: Callable[[object, go.Figure], None] | None = None,
+    render_3d_override: Callable[[object, dict[str, object]], None] | None = None,
 ) -> None:
     show_uncertainty = st.checkbox(
         "Показать конус неопределенности",

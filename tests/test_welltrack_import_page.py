@@ -26,8 +26,8 @@ from pywp.anticollision_recommendations import (
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.mcm import compute_positions_min_curv
 from pywp.models import Point3D, TrajectoryConfig
-from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.reference_trajectories import parse_reference_trajectory_table
+from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp.ui_calc_params import (
     clear_kop_min_vertical_function,
     set_kop_min_vertical_function,
@@ -43,7 +43,7 @@ pytestmark = pytest.mark.integration
 
 
 def _records() -> list[WelltrackRecord]:
-    return [
+    records = [
         WelltrackRecord(
             name="WELL-A",
             points=(
@@ -69,6 +69,7 @@ def _records() -> list[WelltrackRecord]:
             ),
         ),
     ]
+    return records
 
 
 def _bad_order_records() -> list[WelltrackRecord]:
@@ -908,7 +909,7 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
     legend_tree = list(overrides["legend_tree"])
     focus_targets = dict(overrides["focus_targets"])
     hidden_labels = set(str(item) for item in overrides["hidden_flat_legend_labels"])
-    first_surface_labels = list(overrides["extra_labels"])
+    first_surface_arrows = list(overrides["extra_meshes"])
 
     assert [str(item["label"]) for item in legend_tree] == [
         "Куст PAD-01",
@@ -931,27 +932,27 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
         "well::PAD2-B",
     }
     assert hidden_labels == {"PAD1-A", "PAD1-B", "PAD2-A", "PAD2-B"}
-    assert [str(item["well_name"]) for item in first_surface_labels] == [
+    assert [str(item["well_name"]) for item in first_surface_arrows] == [
         "PAD1-A",
         "PAD2-A",
     ]
-    assert {str(item["role"]) for item in first_surface_labels} == {
-        "pad_first_surface_label"
+    assert {str(item["role"]) for item in first_surface_arrows} == {
+        "pad_first_surface_arrow"
     }
-    assert {str(item["text"]) for item in first_surface_labels} == {"1"}
-    assert first_surface_labels[0]["position"] == [0.0, 0.0, 0.0]
-    assert first_surface_labels[1]["position"] == [5000.0, 0.0, 0.0]
+    assert {str(item["color"]) for item in first_surface_arrows} == {"#64748B"}
+    assert {len(item["vertices"]) for item in first_surface_arrows} == {7}
+    assert {len(item["faces"]) for item in first_surface_arrows} == {3}
+    assert first_surface_arrows[0]["vertices"][5][0] > 0.0
+    assert first_surface_arrows[1]["vertices"][5][0] > 5000.0
 
 
-def test_trajectory_three_payload_first_surface_label_uses_fixed_pad_order() -> None:
+def test_trajectory_three_payload_first_surface_arrow_uses_fixed_pad_order() -> None:
     page = wt_import_module
     page.st.session_state.clear()
     records = list(_records())
     pads = page._ensure_pad_configs(records)
     pad_id = str(pads[0].pad_id)
-    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
-        (1, "WELL-C"),
-    )
+    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = ((1, "WELL-C"),)
     successes = [
         _successful_plan_xy(name="WELL-A", x_offset_m=0.0, y_offset_m=0.0),
         _successful_plan_xy(name="WELL-B", x_offset_m=0.0, y_offset_m=50.0),
@@ -969,11 +970,19 @@ def test_trajectory_three_payload_first_surface_label_uses_fixed_pad_order() -> 
         },
     )
 
-    first_surface_labels = list(overrides["extra_labels"])
-    assert [str(item["well_name"]) for item in first_surface_labels] == [
-        "WELL-C"
-    ]
-    assert first_surface_labels[0]["position"] == [0.0, 100.0, 0.0]
+    first_surface_arrows = list(overrides["extra_meshes"])
+    assert [str(item["well_name"]) for item in first_surface_arrows] == ["WELL-C"]
+    arrow = first_surface_arrows[0]
+    assert str(arrow["role"]) == "pad_first_surface_arrow"
+    angle_rad = np.deg2rad(float(arrow["nds_azimuth_deg"]))
+    direction = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=float)
+    tip_xy = np.asarray(arrow["vertices"][5][:2], dtype=float)
+    center_xy = np.array([0.0, 100.0], dtype=float)
+    delta_xy = tip_xy - center_xy
+    assert float(np.dot(delta_xy, direction)) > 0.0
+    cross_z = float(direction[0] * delta_xy[1] - direction[1] * delta_xy[0])
+    assert abs(cross_z) < 1e-9
+    assert float(arrow["vertices"][5][2]) < 0.0
 
 
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
@@ -982,7 +991,7 @@ def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> Non
         "legend": [
             {"label": "PAD1-A", "color": "#22c55e", "opacity": 1.0},
             {"label": "PAD2-A", "color": "#f59e0b", "opacity": 1.0},
-            {"label": "Общая зона overlap", "color": "#fca5a5", "opacity": 0.4},
+            {"label": "Зоны пересечений", "color": "#fca5a5", "opacity": 0.4},
         ]
     }
 
@@ -1006,7 +1015,7 @@ def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> Non
         "pad::PAD-01": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}
     }
     assert list(updated["legend"]) == [
-        {"label": "Общая зона overlap", "color": "#fca5a5", "opacity": 0.4}
+        {"label": "Зоны пересечений", "color": "#fca5a5", "opacity": 0.4}
     ]
 
 
@@ -1037,7 +1046,7 @@ def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
     first_colors = palette[:8]
     for index, color_a in enumerate(first_colors):
         red_a, green_a, blue_a = _rgb_triplet(color_a)
-        for color_b in first_colors[index + 1:]:
+        for color_b in first_colors[index + 1 :]:
             red_b, green_b, blue_b = _rgb_triplet(color_b)
             distance = (
                 abs(red_a - red_b) + abs(green_a - green_b) + abs(blue_a - blue_b)
@@ -1159,7 +1168,9 @@ def test_reference_trajectory_dev_folder_import_is_default_and_uses_file_names(
     actual_wells = tuple(at.session_state["wt_reference_actual_wells"])
     assert [str(well.name) for well in actual_wells] == ["well_111", "well_222"]
     assert [float(actual_wells[0].stations["X_m"].iloc[0])] == [606207.5]
-    assert str(at.session_state["ptc_reference_source_mode::actual"]) == "Загрузить .dev"
+    assert (
+        str(at.session_state["ptc_reference_source_mode::actual"]) == "Загрузить .dev"
+    )
 
 
 def test_reference_trajectory_dev_import_keeps_actual_and_approved_kinds(
@@ -1573,9 +1584,7 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
 
     position_column = captured["column_config"]["Позиция"]
     position_selectbox = next(
-        item
-        for item in captured["selectbox_columns"]
-        if item["label"] == "Позиция"
+        item for item in captured["selectbox_columns"] if item["label"] == "Позиция"
     )
 
     assert position_column["type"] == "selectbox"
@@ -1589,9 +1598,7 @@ def test_pad_layout_clear_fixed_slots_resets_editor_key(monkeypatch) -> None:
     records = list(_records())
     pads = page._ensure_pad_configs(records)
     pad_id = str(pads[0].pad_id)
-    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
-        (1, "WELL-B"),
-    )
+    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = ((1, "WELL-B"),)
     captured: dict[str, object] = {
         "editor_keys": [],
         "editor_lengths": [],
@@ -1658,9 +1665,7 @@ def test_pad_layout_clear_fixed_slots_resets_editor_key(monkeypatch) -> None:
         page._render_pad_layout_panel(records)
 
     assert page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] == ()
-    assert page.st.session_state[
-        f"wt_pad_fixed_slots_editor_revision_{pad_id}"
-    ] == 1
+    assert page.st.session_state[f"wt_pad_fixed_slots_editor_revision_{pad_id}"] == 1
     assert captured["editor_keys"] == [f"wt_pad_fixed_slots_editor_{pad_id}_0"]
     assert captured["editor_lengths"] == [1]
 
@@ -1687,9 +1692,7 @@ def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference()
     )
 
 
-def test_welltrack_import_source_selector_splits_format_and_welltrack_method() -> (
-    None
-):
+def test_welltrack_import_source_selector_splits_format_and_welltrack_method() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
 
     at.run(timeout=120)
@@ -1715,9 +1718,7 @@ def test_welltrack_import_target_table_format_hides_welltrack_method() -> None:
 
     radio_labels = {str(widget.label) for widget in at.radio}
     assert radio_labels == {"Формат импорта"}
-    assert [str(widget.label) for widget in at.expander] == [
-        "Таблица точек целей"
-    ]
+    assert [str(widget.label) for widget in at.expander] == ["Таблица точек целей"]
 
 
 def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
@@ -2057,9 +2058,7 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     assert changed_record.points[2].z == pytest.approx(2502.0)
     assert changed_original_record.points[1].x == pytest.approx(610.25)
     assert changed_original_record.points[2].x == pytest.approx(1510.75)
-    assert [item.name for item in page.st.session_state["wt_successes"]] == [
-        "WELL-B"
-    ]
+    assert [item.name for item in page.st.session_state["wt_successes"]] == ["WELL-B"]
     summary_rows = page.st.session_state["wt_summary_rows"]
     assert [str(row["Скважина"]) for row in summary_rows] == [
         "WELL-A",
@@ -2123,7 +2122,7 @@ def test_apply_three_edit_targets_defers_result_widget_state_update() -> None:
 
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
-    assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
+    assert "wt_3d_backend" not in page.st.session_state
     assert page.st.session_state["wt_pending_all_wells_results_focus"] is False
 
 
@@ -2171,10 +2170,10 @@ def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
     assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
-    assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
+    assert "wt_3d_backend" not in page.st.session_state
 
 
-def test_init_state_defaults_to_all_wells_detail_three_backend() -> None:
+def test_init_state_defaults_to_all_wells_detail_three_render_mode() -> None:
     page = wt_import_module
 
     page.st.session_state.clear()
@@ -2182,24 +2181,74 @@ def test_init_state_defaults_to_all_wells_detail_three_backend() -> None:
 
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
-    assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
+    assert "wt_3d_backend" not in page.st.session_state
     assert page.WT_3D_RENDER_AUTO not in page.WT_3D_RENDER_OPTIONS
 
 
-def test_focus_all_wells_trajectory_results_sets_detail_three_defaults() -> None:
+def test_focus_all_wells_trajectory_results_sets_detail_render_mode() -> None:
     page = wt_import_module
 
     page.st.session_state.clear()
     page._init_state()
     page.st.session_state["wt_3d_render_mode"] = page.WT_3D_RENDER_FAST
-    page.st.session_state["wt_3d_backend"] = page.WT_3D_BACKEND_PLOTLY
+    page.st.session_state["wt_3d_backend"] = "removed-backend"
 
     page._focus_all_wells_trajectory_results()
 
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
     assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
-    assert page.st.session_state["wt_3d_backend"] == page.WT_3D_BACKEND_THREE_LOCAL
+    assert "wt_3d_backend" not in page.st.session_state
+
+
+def test_render_three_payload_uses_local_three_renderer(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    captured: dict[str, object] = {}
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def plotly_chart(self, *args, **kwargs):
+            raise AssertionError("3D chart fallback should not be used in PTC")
+
+    def _fake_three_scene(payload, **kwargs):
+        captured["payload"] = payload
+        captured["kwargs"] = dict(kwargs)
+        return None
+
+    monkeypatch.setattr(page, "render_local_three_scene", _fake_three_scene)
+    payload = {
+        "background": "#FFFFFF",
+        "bounds": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+        "camera": DEFAULT_THREE_CAMERA,
+        "lines": [
+            {
+                "segments": [[[0.0, 0.0, 0.0], [10.0, 0.0, 5.0]]],
+                "color": "#15D562",
+                "opacity": 1.0,
+                "dash": "solid",
+                "role": "line",
+            }
+        ],
+        "points": [],
+        "meshes": [],
+        "labels": [],
+        "legend": [],
+    }
+
+    page._render_three_payload(
+        container=_DummyContainer(),
+        payload=payload,
+        height=420,
+    )
+
+    assert captured["kwargs"]["height"] == 420
+    assert captured["payload"]["lines"]
 
 
 def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
@@ -2323,8 +2372,7 @@ def test_batch_summary_moves_survey_downloads_into_inclinometry_expander(
     selected_download = next(
         item
         for item in downloads
-        if item["label"]
-        == "Скачать рассчитанные траектории выбранных скважин"
+        if item["label"] == "Скачать рассчитанные траектории выбранных скважин"
     )
     selected_csv = bytes(selected_download["data"]).decode("utf-8")
     assert "WELL-B" in selected_csv
@@ -3788,9 +3836,9 @@ def test_prepare_rerun_from_recommendation_builds_two_well_pair_plan() -> None:
     assert page.st.session_state["wt_pending_selected_names"] == ["WELL-B", "WELL-A"]
 
 
-def test_anticollision_3d_figure_draws_terminal_cone_boundaries_per_well() -> None:
+def test_anticollision_three_payload_draws_terminal_cone_boundaries_per_well() -> None:
     page = wt_import_module
-    figure = page._all_wells_anticollision_3d_figure(
+    payload = page._all_wells_anticollision_three_payload(
         page._build_anti_collision_analysis(
             [
                 _successful_plan(name="WELL-A", y_offset_m=0.0),
@@ -3800,20 +3848,16 @@ def test_anticollision_3d_figure_draws_terminal_cone_boundaries_per_well() -> No
         )
     )
 
-    boundary_traces = [
-        trace
-        for trace in figure.data
-        if str(trace.type) == "scatter3d"
-        and str(trace.name).endswith(": граница конуса")
+    boundary_lines = [
+        item for item in payload["lines"] if str(item.get("role")) == "cone_tip"
     ]
 
-    assert len(boundary_traces) == 2
-    assert {str(trace.line.color) for trace in boundary_traces} == {
+    assert len(boundary_lines) == 2
+    assert {str(item["color"]) for item in boundary_lines} == {
         page._lighten_hex(page._well_color(0), 0.55),
         page._lighten_hex(page._well_color(1), 0.55),
     }
-    assert all(float(trace.line.width) == 0.8 for trace in boundary_traces)
-    assert figure.layout.scene.camera.to_plotly_json() == DEFAULT_3D_CAMERA
+    assert payload["camera"] == DEFAULT_THREE_CAMERA
 
 
 def test_anticollision_figures_draw_previous_trajectories_as_dashed_overlay() -> None:
@@ -3830,7 +3874,7 @@ def test_anticollision_figures_draw_previous_trajectories_as_dashed_overlay() ->
         model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
     )
 
-    figure_3d = page._all_wells_anticollision_3d_figure(
+    payload_3d = page._all_wells_anticollision_three_payload(
         analysis,
         previous_successes_by_name=previous_successes,
     )
@@ -3840,9 +3884,7 @@ def test_anticollision_figures_draw_previous_trajectories_as_dashed_overlay() ->
     )
 
     previous_3d = [
-        trace
-        for trace in figure_3d.data
-        if str(trace.name).endswith(": до anti-collision")
+        item for item in payload_3d["lines"] if str(item.get("dash")) == "dot"
     ]
     previous_plan = [
         trace
@@ -3851,20 +3893,20 @@ def test_anticollision_figures_draw_previous_trajectories_as_dashed_overlay() ->
     ]
     assert len(previous_3d) == 1
     assert len(previous_plan) == 1
-    assert str(previous_3d[0].line.dash) == "dot"
+    assert str(previous_3d[0]["dash"]) == "dot"
     assert str(previous_plan[0].line.dash) == "dot"
 
 
-def test_all_wells_3d_figure_uses_default_camera() -> None:
+def test_all_wells_three_payload_uses_default_camera() -> None:
     page = wt_import_module
-    figure = page._all_wells_3d_figure(
+    payload = page._all_wells_three_payload(
         [
             _successful_plan(name="WELL-A", y_offset_m=0.0),
             _successful_plan(name="WELL-B", y_offset_m=5.0),
         ]
     )
 
-    assert figure.layout.scene.camera.to_plotly_json() == DEFAULT_3D_CAMERA
+    assert payload["camera"] == DEFAULT_THREE_CAMERA
 
 
 def test_all_wells_overview_figures_show_targets_for_failed_wells_without_fake_trajectory() -> (
@@ -3887,7 +3929,7 @@ def test_all_wells_overview_figures_show_targets_for_failed_wells_without_fake_t
     )
     color_map = page._well_color_map(records)
 
-    figure_3d = page._all_wells_3d_figure(
+    payload_3d = page._all_wells_three_payload(
         [
             _successful_plan(name="WELL-A", y_offset_m=0.0),
             _successful_plan(name="WELL-B", y_offset_m=5.0),
@@ -3904,31 +3946,25 @@ def test_all_wells_overview_figures_show_targets_for_failed_wells_without_fake_t
         name_to_color=color_map,
     )
 
-    failed_3d_traces = [
-        trace
-        for trace in figure_3d.data
-        if str(trace.name) == "WELL-C: цели (без траектории)"
+    failed_3d_markers = [
+        item for item in payload_3d["points"] if str(item.get("symbol")) == "cross"
     ]
     failed_plan_traces = [
         trace
         for trace in figure_plan.data
         if str(trace.name) == "WELL-C: цели (без траектории)"
     ]
-    failed_trajectory_3d = [
-        trace for trace in figure_3d.data if str(trace.name) == "WELL-C"
-    ]
     failed_trajectory_plan = [
         trace for trace in figure_plan.data if str(trace.name) == "WELL-C"
     ]
 
     assert len(target_only_wells) == 1
-    assert failed_3d_traces
+    assert failed_3d_markers
     assert failed_plan_traces
-    assert not failed_trajectory_3d
     assert not failed_trajectory_plan
-    assert "Статус: %{customdata[1]}" in str(failed_3d_traces[0].hovertemplate)
+    assert failed_3d_markers[0]["hover"][0]["segment"] == "Ошибка расчета"
     assert "Точка: %{customdata[0]}" in str(failed_plan_traces[0].hovertemplate)
-    assert str(failed_3d_traces[0].marker.symbol) == "cross"
+    assert str(failed_3d_markers[0]["symbol"]) == "cross"
     assert str(failed_plan_traces[0].marker.symbol) == "x"
 
 
@@ -3936,7 +3972,7 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     page = wt_import_module
     reference_wells = _reference_wells()
 
-    figure_3d = page._all_wells_3d_figure(
+    payload_3d = page._all_wells_three_payload(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
         reference_wells=reference_wells,
         render_mode=page.WT_3D_RENDER_DETAIL,
@@ -3946,36 +3982,31 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
         reference_wells=reference_wells,
     )
 
-    trace_names_3d = {str(trace.name) for trace in figure_3d.data}
     trace_names_plan = {str(trace.name) for trace in figure_plan.data}
+    hover_names_3d = {
+        str(hover.get("name"))
+        for item in payload_3d["points"]
+        for hover in list(item.get("hover") or [])
+    }
 
-    assert "FACT-1 (Фактическая)" in trace_names_3d
-    assert "APP-1 (Проектная утвержденная)" in trace_names_3d
+    assert "FACT-1 (Фактическая)" in hover_names_3d
+    assert "APP-1 (Проектная утвержденная)" in hover_names_3d
     assert "FACT-1 (Фактическая)" in trace_names_plan
     assert "APP-1 (Проектная утвержденная)" in trace_names_plan
 
     fact_3d = next(
-        trace for trace in figure_3d.data if str(trace.name) == "FACT-1 (Фактическая)"
+        item for item in payload_3d["lines"] if str(item["color"]) == "#6B7280"
     )
     approved_3d = next(
-        trace
-        for trace in figure_3d.data
-        if str(trace.name) == "APP-1 (Проектная утвержденная)"
+        item for item in payload_3d["lines"] if str(item["color"]) == "#C62828"
     )
-    assert str(fact_3d.line.color) == "#6B7280"
-    assert str(approved_3d.line.color) == "#C62828"
-    fact_label_3d = next(
-        trace for trace in figure_3d.data if str(trace.name) == "Фактическая: подписи"
-    )
-    approved_label_3d = next(
-        trace
-        for trace in figure_3d.data
-        if str(trace.name) == "Проектная утвержденная: подписи"
-    )
-    assert "FACT-1" in list(fact_label_3d.text)
-    assert "APP-1" in list(approved_label_3d.text)
-    assert str(fact_label_3d.textfont.color) == "#111111"
-    assert str(approved_label_3d.textfont.color) == "#C62828"
+    assert str(fact_3d["color"]) == "#6B7280"
+    assert str(approved_3d["color"]) == "#C62828"
+    label_by_text = {str(item["text"]): item for item in payload_3d["labels"]}
+    assert "FACT-1" in label_by_text
+    assert "APP-1" in label_by_text
+    assert str(label_by_text["FACT-1"]["color"]) == "#111111"
+    assert str(label_by_text["APP-1"]["color"]) == "#C62828"
 
 
 def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> (
@@ -4071,18 +4102,25 @@ def test_reference_pad_labels_group_surface_points_by_chain_and_numeric_prefix()
     assert float(pad_labels[0].x) == pytest.approx(0.0)
     assert float(pad_labels[1].x) == pytest.approx(1200.0)
 
-    label_trace = page._reference_pad_label_trace_3d(reference_wells)
-    assert label_trace is not None
-    assert list(label_trace.text) == ["Куст 80", "Куст 90"]
+    payload = page._all_wells_three_payload(
+        [],
+        reference_wells=reference_wells,
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
+    assert [
+        str(item["text"])
+        for item in payload["labels"]
+        if str(item.get("role")) == "reference_pad_label"
+    ] == ["Куст 80", "Куст 90"]
 
 
 def test_all_wells_overview_figures_ignore_far_reference_wells_for_axis_zoom() -> None:
     page = wt_import_module
     successes = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
 
-    base_3d = page._all_wells_3d_figure(successes)
+    base_3d = page._all_wells_three_payload(successes)
     base_plan = page._all_wells_plan_figure(successes)
-    far_ref_3d = page._all_wells_3d_figure(
+    far_ref_3d = page._all_wells_three_payload(
         successes,
         reference_wells=_far_reference_wells(),
     )
@@ -4091,15 +4129,7 @@ def test_all_wells_overview_figures_ignore_far_reference_wells_for_axis_zoom() -
         reference_wells=_far_reference_wells(),
     )
 
-    assert tuple(base_3d.layout.scene.xaxis.range) == tuple(
-        far_ref_3d.layout.scene.xaxis.range
-    )
-    assert tuple(base_3d.layout.scene.yaxis.range) == tuple(
-        far_ref_3d.layout.scene.yaxis.range
-    )
-    assert tuple(base_3d.layout.scene.zaxis.range) == tuple(
-        far_ref_3d.layout.scene.zaxis.range
-    )
+    assert base_3d["bounds"] == far_ref_3d["bounds"]
     assert tuple(base_plan.layout.xaxis.range) == tuple(far_ref_plan.layout.xaxis.range)
     assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
@@ -4124,7 +4154,7 @@ def test_all_wells_figures_focus_camera_on_selected_pad_without_hiding_other_pad
         _successful_plan_xy(name="PAD2-B", x_offset_m=6000.0, y_offset_m=30.0),
     ]
 
-    figure_3d = page._all_wells_3d_figure(
+    payload_3d = page._all_wells_three_payload(
         successes,
         focus_well_names=("PAD1-A", "PAD1-B"),
     )
@@ -4133,9 +4163,9 @@ def test_all_wells_figures_focus_camera_on_selected_pad_without_hiding_other_pad
         focus_well_names=("PAD1-A", "PAD1-B"),
     )
 
-    assert float(figure_3d.layout.scene.xaxis.range[1]) < 4000.0
+    assert float(payload_3d["bounds"]["max"][0]) < 4000.0
     assert float(figure_plan.layout.xaxis.range[1]) < 4000.0
-    assert any(str(trace.name) == "PAD2-A" for trace in figure_3d.data)
+    assert "PAD2-A" in {str(item["label"]) for item in payload_3d["legend"]}
     assert any(str(trace.name) == "PAD2-B" for trace in figure_plan.data)
 
 
@@ -4150,24 +4180,29 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
         reference_wells=reference_wells,
     )
 
-    figure_3d = page._all_wells_anticollision_3d_figure(
+    payload_3d = page._all_wells_anticollision_three_payload(
         analysis,
         render_mode=page.WT_3D_RENDER_DETAIL,
     )
     figure_plan = page._all_wells_anticollision_plan_figure(analysis)
 
-    assert any(str(trace.name) == "FACT-1 (Фактическая)" for trace in figure_3d.data)
-    assert any(
-        str(trace.name) == "APP-1 (Проектная утвержденная)" for trace in figure_3d.data
-    )
+    hover_names = {
+        str(hover.get("name"))
+        for item in payload_3d["points"]
+        for hover in list(item.get("hover") or [])
+    }
+    assert "FACT-1 (Фактическая)" in hover_names
+    assert "APP-1 (Проектная утвержденная)" in hover_names
     assert not any(
-        "FACT-1 (Фактическая): цели" == str(trace.name) for trace in figure_3d.data
+        "FACT-1 (Фактическая): цели" == str(hover.get("name"))
+        for item in payload_3d["points"]
+        for hover in list(item.get("hover") or [])
     )
     assert not any(
         "APP-1 (Проектная утвержденная): цели" == str(trace.name)
         for trace in figure_plan.data
     )
-    assert any(str(trace.name) == "Фактическая: подписи" for trace in figure_3d.data)
+    assert any(str(item["text"]) == "FACT-1" for item in payload_3d["labels"])
     assert any(
         str(trace.name) == "Проектная утвержденная: подписи"
         for trace in figure_plan.data
@@ -4187,40 +4222,37 @@ def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> Non
         reference_wells=_far_reference_wells(),
     )
 
-    base_3d = page._all_wells_anticollision_3d_figure(base_analysis)
+    base_3d = page._all_wells_anticollision_three_payload(base_analysis)
     base_plan = page._all_wells_anticollision_plan_figure(base_analysis)
-    far_ref_3d = page._all_wells_anticollision_3d_figure(far_ref_analysis)
+    far_ref_3d = page._all_wells_anticollision_three_payload(far_ref_analysis)
     far_ref_plan = page._all_wells_anticollision_plan_figure(far_ref_analysis)
 
-    assert tuple(base_3d.layout.scene.xaxis.range) == tuple(
-        far_ref_3d.layout.scene.xaxis.range
-    )
-    assert tuple(base_3d.layout.scene.yaxis.range) == tuple(
-        far_ref_3d.layout.scene.yaxis.range
-    )
-    assert tuple(base_3d.layout.scene.zaxis.range) == tuple(
-        far_ref_3d.layout.scene.zaxis.range
-    )
+    assert base_3d["bounds"] == far_ref_3d["bounds"]
     assert tuple(base_plan.layout.xaxis.range) == tuple(far_ref_plan.layout.xaxis.range)
     assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
 
-def test_all_wells_3d_figure_aggregates_reference_wells_in_fast_mode() -> None:
+def test_all_wells_three_payload_aggregates_reference_wells_in_fast_mode() -> None:
     page = wt_import_module
-    figure = page._all_wells_3d_figure(
+    payload = page._all_wells_three_payload(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)],
         reference_wells=_reference_wells(),
         render_mode=page.WT_3D_RENDER_FAST,
     )
 
-    trace_names = {str(trace.name) for trace in figure.data}
-    assert "Фактическая (сводно)" in trace_names
-    assert "Проектная утвержденная (сводно)" in trace_names
-    assert "FACT-1 (Фактическая)" not in trace_names
-    assert "APP-1 (Проектная утвержденная)" not in trace_names
+    line_colors = {str(item["color"]) for item in payload["lines"]}
+    hover_names = {
+        str(hover.get("name"))
+        for item in payload["points"]
+        for hover in list(item.get("hover") or [])
+    }
+    assert "#6B7280" in line_colors
+    assert "#C62828" in line_colors
+    assert "FACT-1 (Фактическая)" not in hover_names
+    assert "APP-1 (Проектная утвержденная)" not in hover_names
 
 
-def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_fast_mode() -> (
+def test_anticollision_three_payload_aggregates_non_conflicting_reference_wells_in_fast_mode() -> (
     None
 ):
     page = wt_import_module
@@ -4268,16 +4300,21 @@ def test_anticollision_3d_figure_aggregates_non_conflicting_reference_wells_in_f
         reference_wells=far_reference_wells,
     )
 
-    figure = page._all_wells_anticollision_3d_figure(
+    payload = page._all_wells_anticollision_three_payload(
         analysis,
         render_mode=page.WT_3D_RENDER_FAST,
     )
 
-    trace_names = {str(trace.name) for trace in figure.data}
-    assert "Фактическая (сводно)" in trace_names
-    assert "Проектная утвержденная (сводно)" in trace_names
-    assert "FACT-FAR (Фактическая)" not in trace_names
-    assert "APP-FAR (Проектная утвержденная)" not in trace_names
+    line_colors = {str(item["color"]) for item in payload["lines"]}
+    hover_names = {
+        str(hover.get("name"))
+        for item in payload["points"]
+        for hover in list(item.get("hover") or [])
+    }
+    assert "#6B7280" in line_colors
+    assert "#C62828" in line_colors
+    assert "FACT-FAR (Фактическая)" not in hover_names
+    assert "APP-FAR (Проектная утвержденная)" not in hover_names
 
 
 def test_clusters_touching_focus_pad_expand_focus_to_neighbor_cluster_wells() -> None:
@@ -4328,38 +4365,40 @@ def test_all_wells_and_anticollision_figures_show_well_names_at_t1() -> None:
     records = _records()[:2]
     color_map = page._well_color_map(records)
 
-    overview_3d = page._all_wells_3d_figure(successes, name_to_color=color_map)
+    overview_3d = page._all_wells_three_payload(successes, name_to_color=color_map)
     overview_plan = page._all_wells_plan_figure(successes, name_to_color=color_map)
     analysis = page._build_anti_collision_analysis(
         successes,
         model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
         name_to_color=color_map,
     )
-    anticollision_3d = page._all_wells_anticollision_3d_figure(analysis)
+    anticollision_3d = page._all_wells_anticollision_three_payload(analysis)
     anticollision_plan = page._all_wells_anticollision_plan_figure(analysis)
 
-    for figure in (overview_3d, overview_plan, anticollision_3d, anticollision_plan):
+    for payload in (overview_3d, anticollision_3d):
+        label_texts = {str(item["text"]) for item in payload["labels"]}
+        assert "WELL-A" in label_texts
+        assert "WELL-B" in label_texts
+    for figure in (overview_plan, anticollision_plan):
         trace_names = {str(trace.name) for trace in figure.data}
         assert "WELL-A: t1 label" in trace_names
         assert "WELL-B: t1 label" in trace_names
 
 
-def test_plotly_3d_figure_to_three_payload_preserves_overview_labels_and_legend() -> (
+def test_all_wells_three_payload_preserves_overview_labels_and_legend() -> (
     None
 ):
     page = wt_import_module
     success = _successful_plan(name="WELL-A", y_offset_m=0.0)
-    figure = page._all_wells_3d_figure(
+    payload = page._all_wells_three_payload(
         [success],
         reference_wells=_reference_wells(),
         render_mode=page.WT_3D_RENDER_DETAIL,
     )
 
-    payload = page._plotly_3d_figure_to_three_payload(figure)
-
     labels = {str(item["text"]) for item in payload["labels"]}
     legend_labels = {str(item["label"]) for item in payload["legend"]}
-    assert payload["camera"] == DEFAULT_3D_CAMERA
+    assert payload["camera"] == DEFAULT_THREE_CAMERA
     assert "WELL-A" in labels
     assert "FACT-1" in labels
     assert "APP-1" in labels
@@ -4415,25 +4454,24 @@ def test_three_legend_tree_stays_calculated_only_when_reference_pad_labels_exist
     assert "Куст 90" not in flat_child_labels
 
 
-def test_scatter3d_legendonly_trace_preserves_legend_without_geometry() -> None:
+def test_three_payload_preserves_reference_legend_without_flat_geometry_label() -> None:
     page = wt_import_module
-    trace = page._reference_legend_trace_3d(page.REFERENCE_WELL_ACTUAL)
+    payload = page._all_wells_three_payload(
+        [],
+        reference_wells=_reference_wells(),
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
 
-    payload = page._scatter3d_trace_to_three_payload(trace)
-
-    assert payload["lines"] == []
-    assert payload["points"] == []
-    assert payload["labels"] == []
-    assert payload["legend_items"] == [
-        {
-            "label": "Фактические скважины",
-            "color": "#6B7280",
-            "opacity": 1.0,
-        }
-    ]
+    assert {
+        (str(item["label"]), str(item["color"]), float(item["opacity"]))
+        for item in payload["legend"]
+    } >= {
+        ("Фактические скважины", "#6B7280", 1.0),
+        ("Проектные утвержденные скважины", "#C62828", 1.0),
+    }
 
 
-def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> None:
+def test_anticollision_three_payload_preserves_meshes() -> None:
     page = wt_import_module
     analysis = page._build_anti_collision_analysis(
         [
@@ -4442,9 +4480,7 @@ def test_plotly_3d_figure_to_three_payload_preserves_anticollision_meshes() -> N
         ],
         model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
     )
-    figure = page._all_wells_anticollision_3d_figure(analysis)
-
-    payload = page._plotly_3d_figure_to_three_payload(figure)
+    payload = page._all_wells_anticollision_three_payload(analysis)
 
     assert payload["meshes"]
     assert any(str(item["label"]) == "WELL-A" for item in payload["legend"])
@@ -4473,15 +4509,13 @@ def test_anticollision_three_payload_overrides_include_edit_wells() -> None:
     assert edit_wells[0]["t3"] == [2000.0, 0.0, 0.0]
 
 
-def test_plotly_3d_figure_to_three_payload_preserves_hover_metadata_for_tooltip() -> (
+def test_all_wells_three_payload_preserves_hover_metadata_for_tooltip() -> (
     None
 ):
     page = wt_import_module
-    figure = page._all_wells_3d_figure(
+    payload = page._all_wells_three_payload(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)]
     )
-
-    payload = page._plotly_3d_figure_to_three_payload(figure)
 
     hover_only_points = [
         item for item in payload["points"] if bool(item.get("hover_only"))
@@ -4500,7 +4534,7 @@ def test_optimize_three_payload_merges_same_style_objects() -> None:
     payload = {
         "background": "#FFFFFF",
         "bounds": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
-        "camera": DEFAULT_3D_CAMERA,
+        "camera": DEFAULT_THREE_CAMERA,
         "lines": [
             {
                 "segments": [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
@@ -4562,7 +4596,7 @@ def test_optimize_three_payload_merges_same_style_objects() -> None:
     assert len(optimized["meshes"][0]["vertices"]) == 6
     assert len(optimized["meshes"][0]["faces"]) == 2
     assert optimized["meshes"][0]["role"] == "overlap"
-    assert optimized["camera"] == DEFAULT_3D_CAMERA
+    assert optimized["camera"] == DEFAULT_THREE_CAMERA
     assert optimized["labels"] == payload["labels"]
     assert optimized["legend"] == payload["legend"]
 
@@ -4572,7 +4606,7 @@ def test_optimize_three_payload_keeps_mesh_roles_separate() -> None:
     payload = {
         "background": "#FFFFFF",
         "bounds": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
-        "camera": DEFAULT_3D_CAMERA,
+        "camera": DEFAULT_THREE_CAMERA,
         "lines": [],
         "points": [],
         "meshes": [
@@ -4603,27 +4637,18 @@ def test_optimize_three_payload_keeps_mesh_roles_separate() -> None:
 
 def test_three_payload_marks_conflict_segments_as_anticollision_layer() -> None:
     page = wt_import_module
-    trace = go.Scatter3d(
-        x=[0.0, 10.0],
-        y=[0.0, 0.0],
-        z=[0.0, -10.0],
-        mode="lines+markers",
-        name="Конфликтный участок ствола",
-        line={"color": "rgb(198, 40, 40)", "width": 8},
-        marker={"color": "rgba(0, 0, 0, 0.001)", "size": 7.5},
-        customdata=np.array(
-            [
-                [0.0, 0.0, 0.0, "Конфликтный участок"],
-                [10.0, 1.0, 3.0, "Конфликтный участок"],
-            ],
-            dtype=object,
-        ),
+    analysis = page._build_anti_collision_analysis(
+        [
+            _successful_plan(name="WELL-A", y_offset_m=0.0),
+            _successful_plan(name="WELL-B", y_offset_m=5.0),
+        ],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
     )
 
-    payload = page._scatter3d_trace_to_three_payload(trace)
+    payload = page._all_wells_anticollision_three_payload(analysis)
 
-    assert payload["lines"][0]["role"] == "conflict_segment"
-    assert payload["points"][0]["role"] == "conflict_hover"
+    assert any(str(item.get("role")) == "conflict_segment" for item in payload["lines"])
+    assert any(str(item.get("role")) == "conflict_hover" for item in payload["points"])
 
 
 def test_resolve_3d_render_mode_forces_fast_for_large_reference_scene() -> None:
@@ -4661,7 +4686,7 @@ def test_resolve_3d_render_mode_forces_fast_for_large_reference_scene() -> None:
     assert resolved == page.WT_3D_RENDER_FAST
 
 
-def test_plotly_3d_payload_decimates_reference_hover_points() -> None:
+def test_three_payload_decimates_reference_hover_points() -> None:
     page = wt_import_module
     stations = pd.DataFrame(
         {
@@ -4675,25 +4700,18 @@ def test_plotly_3d_payload_decimates_reference_hover_points() -> None:
             "segment": np.array(["HOLD"] * 300, dtype=object),
         }
     )
-    trace = go.Scatter3d(
-        x=stations["X_m"],
-        y=stations["Y_m"],
-        z=stations["Z_m"],
-        mode="lines",
-        name="FACT-001 (Фактическая)",
-        customdata=page._trajectory_hover_customdata(stations),
-        hovertemplate=(
-            "X: %{x:.2f} m<br>"
-            "Y: %{y:.2f} m<br>"
-            "Z: %{z:.2f} m<br>"
-            "MD: %{customdata[0]:.2f} m<br>"
-            "DLS: %{customdata[1]:.2f} deg/30м<br>"
-            "INC: %{customdata[2]:.2f} deg<br>"
-            "Сегмент: %{customdata[3]}<extra>%{fullData.name}</extra>"
-        ),
+    reference_well = SimpleNamespace(
+        name="FACT-001",
+        kind=page.REFERENCE_WELL_ACTUAL,
+        stations=stations,
+        surface=Point3D(0.0, 0.0, 0.0),
     )
 
-    payload = page._scatter3d_trace_to_three_payload(trace)
+    payload = page._all_wells_three_payload(
+        [],
+        reference_wells=(reference_well,),
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
     hover_only_points = [
         item for item in payload["points"] if bool(item.get("hover_only"))
     ]
@@ -4756,33 +4774,40 @@ def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
         reference_wells=reference_wells,
     )
 
-    figure = page._all_wells_anticollision_3d_figure(
+    payload = page._all_wells_anticollision_three_payload(
         analysis,
         render_mode=page.WT_3D_RENDER_FAST,
     )
-    mesh_names = {
-        str(trace.name) for trace in figure.data if isinstance(trace, go.Mesh3d)
-    }
+    near_only_analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        reference_wells=tuple(
+            well for well in reference_wells if str(well.name) == "FACT-NEAR"
+        ),
+    )
+    near_only_payload = page._all_wells_anticollision_three_payload(
+        near_only_analysis,
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
+    reference_cone = next(
+        item for item in payload["meshes"] if str(item.get("color")) == "#6B7280"
+    )
+    near_only_reference_cone = next(
+        item
+        for item in near_only_payload["meshes"]
+        if str(item.get("color")) == "#6B7280"
+    )
 
-    assert "FACT-NEAR (Фактическая) cone" in mesh_names
-    assert "FACT-FAR (Фактическая) cone" not in mesh_names
+    assert len(reference_cone["vertices"]) == len(near_only_reference_cone["vertices"])
 
 
-def test_plotly_3d_figure_to_three_payload_preserves_custom_camera() -> None:
+def test_all_wells_three_payload_sets_default_camera() -> None:
     page = wt_import_module
-    figure = page._all_wells_3d_figure(
+    payload = page._all_wells_three_payload(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)]
     )
-    custom_camera = {
-        "up": {"x": 0.0, "y": 0.0, "z": 1.0},
-        "center": {"x": 0.15, "y": -0.05, "z": 0.0},
-        "eye": {"x": 1.6, "y": 0.9, "z": 1.1},
-    }
-    figure.update_layout(scene={"camera": custom_camera})
 
-    payload = page._plotly_3d_figure_to_three_payload(figure)
-
-    assert payload["camera"] == custom_camera
+    assert payload["camera"] == DEFAULT_THREE_CAMERA
 
 
 def test_batch_summary_display_df_reorders_and_shortens_summary_columns() -> None:
@@ -4831,38 +4856,41 @@ def test_anticollision_figures_render_overlap_corridor_and_red_conflict_segments
     None
 ):
     page = wt_import_module
+    successes = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0),
+    ]
     analysis = page._build_anti_collision_analysis(
-        [
-            _successful_plan(name="WELL-A", y_offset_m=0.0),
-            _successful_plan(name="WELL-B", y_offset_m=5.0),
-        ],
+        successes,
         model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
     )
-    figure_3d = page._all_wells_anticollision_3d_figure(analysis)
+    payload_3d = page._all_wells_anticollision_three_payload(analysis)
     figure_plan = page._all_wells_anticollision_plan_figure(analysis)
 
-    overlap_3d_traces = [
-        trace for trace in figure_3d.data if str(trace.name) == "Общая зона overlap"
+    overlap_volumes = [
+        item
+        for item in payload_3d["meshes"]
+        if str(item.get("role")) == "overlap_volume"
     ]
-    conflict_3d_traces = [
-        trace
-        for trace in figure_3d.data
-        if str(trace.name) == "Конфликтный участок ствола"
+    conflict_3d_lines = [
+        item
+        for item in payload_3d["lines"]
+        if str(item.get("role")) == "conflict_segment"
     ]
     overlap_plan_traces = [
-        trace for trace in figure_plan.data if str(trace.name) == "Общая зона overlap"
+        trace for trace in figure_plan.data if str(trace.name) == "Зоны пересечений"
     ]
     conflict_plan_traces = [
         trace
         for trace in figure_plan.data
-        if str(trace.name) == "Конфликтный участок ствола"
+        if str(trace.name) == "Конфликтные участки ствола"
     ]
-
-    assert overlap_3d_traces
-    assert conflict_3d_traces
+    assert overlap_volumes
+    assert all(len(item["rings"]) >= 2 for item in overlap_volumes)
+    assert conflict_3d_lines
     assert overlap_plan_traces
     assert conflict_plan_traces
-    assert all("198, 40, 40" in str(trace.line.color) for trace in conflict_3d_traces)
+    assert all(str(item["color"]) == "#C62828" for item in conflict_3d_lines)
     assert all("198, 40, 40" in str(trace.line.color) for trace in conflict_plan_traces)
     assert all(
         str(getattr(trace, "hoverinfo", "")) == "skip" for trace in overlap_plan_traces
@@ -4880,46 +4908,47 @@ def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_con
         ],
         model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
     )
-    figure_3d = page._all_wells_anticollision_3d_figure(analysis)
+    payload_3d = page._all_wells_anticollision_three_payload(analysis)
 
     cone_meshes = [
-        trace
-        for trace in figure_3d.data
-        if str(trace.type) == "mesh3d" and "cone" in str(trace.name)
+        item for item in payload_3d["meshes"] if str(item.get("role")) == "cone"
     ]
     overlap_meshes = [
-        trace for trace in figure_3d.data if str(trace.name) == "Общая зона overlap"
+        item
+        for item in payload_3d["meshes"]
+        if str(item.get("role")) == "overlap_volume"
     ]
     well_lines = [
-        trace
-        for trace in figure_3d.data
-        if str(trace.type) == "scatter3d" and str(trace.name) == "WELL-A"
+        item for item in payload_3d["lines"] if str(item.get("role")) == "line"
     ]
     target_markers = [
-        trace
-        for trace in figure_3d.data
-        if str(trace.type) == "scatter3d" and str(trace.name) == "WELL-A: цели"
+        item for item in payload_3d["points"] if str(item.get("role")) == "marker"
     ]
     conflict_segments = [
-        trace
-        for trace in figure_3d.data
-        if str(trace.type) == "scatter3d"
-        and str(trace.name) == "Конфликтный участок ствола"
+        item
+        for item in payload_3d["lines"]
+        if str(item.get("role")) == "conflict_segment"
     ]
 
     assert cone_meshes
     assert overlap_meshes
-    assert all(str(getattr(trace, "hoverinfo", "")) == "skip" for trace in cone_meshes)
-    assert all(
-        str(getattr(trace, "hoverinfo", "")) == "skip" for trace in overlap_meshes
-    )
     assert well_lines
-    assert "DLS: %{customdata[1]:.2f} deg/30м" in str(well_lines[0].hovertemplate)
-    assert "INC: %{customdata[2]:.2f} deg" in str(well_lines[0].hovertemplate)
-    assert "Сегмент: %{customdata[3]}" in str(well_lines[0].hovertemplate)
+    trajectory_hovers = [
+        hover
+        for item in payload_3d["points"]
+        if str(item.get("role")) == "trajectory_hover"
+        for hover in list(item.get("hover") or [])
+    ]
+    assert trajectory_hovers
+    assert {"md", "dls", "inc", "segment"}.issubset(trajectory_hovers[0].keys())
     assert target_markers
-    assert "Точка: %{customdata[0]}" in str(target_markers[0].hovertemplate)
+    assert target_markers[0]["hover"][0]["point"] == "S"
     assert conflict_segments
-    assert "DLS: %{customdata[1]:.2f} deg/30м" in str(
-        conflict_segments[0].hovertemplate
-    )
+    conflict_hovers = [
+        hover
+        for item in payload_3d["points"]
+        if str(item.get("role")) == "conflict_hover"
+        for hover in list(item.get("hover") or [])
+    ]
+    assert conflict_hovers
+    assert {"md", "dls", "inc"}.issubset(conflict_hovers[0].keys())

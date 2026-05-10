@@ -5,9 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from pywp.models import Point3D
-from pywp.plotly_config import DEFAULT_3D_CAMERA
 from pywp.plot_axes import (
-    equalized_axis_ranges,
     equalized_xy_ranges,
     linear_tick_values,
     nice_tick_step,
@@ -15,7 +13,6 @@ from pywp.plot_axes import (
 )
 from pywp.uncertainty import (
     WellUncertaintyOverlay,
-    build_uncertainty_tube_mesh,
     uncertainty_ribbon_polygon,
 )
 from pywp.constants import DEG2RAD
@@ -25,7 +22,6 @@ PLAN_CSB_COLOR = "#0B6E4F"
 ACTUAL_PROFILE_COLOR = "#111111"
 TARGET_COLOR_PRIMARY = "#C1121F"
 UNCERTAINTY_FILL_COLOR = "rgba(33, 33, 33, 0.16)"
-UNCERTAINTY_SURFACE_COLOR = "#5A5A5A"
 INC_LABEL_TEXT_COLOR = TARGET_COLOR_PRIMARY
 INC_LABEL_TICK_COLOR = "#000000"
 SEGMENT_COLORS = {
@@ -54,28 +50,6 @@ HOVER_TEMPLATE_XYZ_MD_DLS = (
 )
 
 
-def _t1_label_trace_3d(
-    *,
-    well_name: str | None,
-    t1: Point3D,
-    color: str,
-) -> go.Scatter3d | None:
-    if not well_name:
-        return None
-    return go.Scatter3d(
-        x=[float(t1.x)],
-        y=[float(t1.y)],
-        z=[float(t1.z)],
-        mode="text",
-        text=[str(well_name)],
-        textposition="top center",
-        name=f"{well_name}: t1 label",
-        showlegend=False,
-        textfont={"color": str(color), "size": 12},
-        hoverinfo="skip",
-    )
-
-
 def _t1_label_trace_2d(
     *,
     well_name: str | None,
@@ -96,30 +70,6 @@ def _t1_label_trace_2d(
         textfont={"color": str(color), "size": 12},
         hoverinfo="skip",
     )
-
-
-def _hex_to_rgba(hex_color: str, alpha: float) -> str:
-    color = str(hex_color).strip().lstrip("#")
-    if len(color) != 6:
-        return f"rgba(90, 90, 90, {float(alpha):.3f})"
-    red = int(color[0:2], 16)
-    green = int(color[2:4], 16)
-    blue = int(color[4:6], 16)
-    return f"rgba({red}, {green}, {blue}, {float(alpha):.3f})"
-
-
-def _lighten_hex(hex_color: str, blend_with_white: float = 0.38) -> str:
-    color = str(hex_color).strip().lstrip("#")
-    if len(color) != 6:
-        return "#A0A0A0"
-    blend = float(np.clip(blend_with_white, 0.0, 1.0))
-    red = int(color[0:2], 16)
-    green = int(color[2:4], 16)
-    blue = int(color[4:6], 16)
-    red = int(round(red + (255 - red) * blend))
-    green = int(round(green + (255 - green) * blend))
-    blue = int(round(blue + (255 - blue) * blend))
-    return f"#{red:02X}{green:02X}{blue:02X}"
 
 
 def _segment_blocks(segment_names: np.ndarray) -> list[tuple[int, int, str]]:
@@ -455,289 +405,6 @@ def _add_uncertainty_plan_or_section_traces(
                 hoverinfo="skip",
             )
         )
-
-
-def _add_uncertainty_3d_traces(
-    fig: go.Figure,
-    *,
-    overlay: WellUncertaintyOverlay,
-    terminal_boundary_color: str | None = None,
-) -> None:
-    tube_mesh = build_uncertainty_tube_mesh(overlay)
-    if tube_mesh is not None:
-        fig.add_trace(
-            go.Mesh3d(
-                x=tube_mesh.vertices_xyz[:, 0],
-                y=tube_mesh.vertices_xyz[:, 1],
-                z=tube_mesh.vertices_xyz[:, 2],
-                i=tube_mesh.i,
-                j=tube_mesh.j,
-                k=tube_mesh.k,
-                name="Конус неопределенности (2σ)",
-                legendgroup="uncertainty_overlay",
-                showlegend=True,
-                color=UNCERTAINTY_SURFACE_COLOR,
-                opacity=0.16,
-                flatshading=True,
-                hoverinfo="skip",
-            )
-        )
-    if overlay.samples and terminal_boundary_color:
-        terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
-        fig.add_trace(
-            go.Scatter3d(
-                x=terminal_ring[:, 0],
-                y=terminal_ring[:, 1],
-                z=terminal_ring[:, 2],
-                mode="lines",
-                name="Граница конуса неопределенности",
-                showlegend=False,
-                line={
-                    "width": 1.5,
-                    "color": _lighten_hex(str(terminal_boundary_color)),
-                },
-                hoverinfo="skip",
-            )
-        )
-
-
-def trajectory_3d_figure(
-    df: pd.DataFrame,
-    surface: Point3D,
-    t1: Point3D,
-    t3: Point3D,
-    well_name: str | None = None,
-    height: int = 560,
-    md_t1_m: float | None = None,
-    trajectory_line_dash: str = "solid",
-    plan_csb_df: pd.DataFrame | None = None,
-    actual_df: pd.DataFrame | None = None,
-    uncertainty_overlay: WellUncertaintyOverlay | None = None,
-) -> go.Figure:
-    fig = go.Figure()
-    x_arrays = [
-        df["X_m"].to_numpy(dtype=float),
-        np.array([surface.x, t1.x, t3.x], dtype=float),
-    ]
-    y_arrays = [
-        df["Y_m"].to_numpy(dtype=float),
-        np.array([surface.y, t1.y, t3.y], dtype=float),
-    ]
-    z_arrays = [
-        df["Z_m"].to_numpy(dtype=float),
-        np.array([surface.z, t1.z, t3.z], dtype=float),
-    ]
-    if plan_csb_df is not None and len(plan_csb_df) > 0:
-        x_arrays.append(plan_csb_df["X_m"].to_numpy(dtype=float))
-        y_arrays.append(plan_csb_df["Y_m"].to_numpy(dtype=float))
-        z_arrays.append(plan_csb_df["Z_m"].to_numpy(dtype=float))
-    if actual_df is not None and len(actual_df) > 0:
-        x_arrays.append(actual_df["X_m"].to_numpy(dtype=float))
-        y_arrays.append(actual_df["Y_m"].to_numpy(dtype=float))
-        z_arrays.append(actual_df["Z_m"].to_numpy(dtype=float))
-    if uncertainty_overlay is not None:
-        for sample in uncertainty_overlay.samples:
-            x_arrays.append(sample.ring_xyz[:, 0])
-            y_arrays.append(sample.ring_xyz[:, 1])
-            z_arrays.append(sample.ring_xyz[:, 2])
-    x_values = np.concatenate(x_arrays)
-    y_values = np.concatenate(y_arrays)
-    z_values = np.concatenate(z_arrays)
-    x_range, y_range, z_range = equalized_axis_ranges(
-        x_values=x_values, y_values=y_values, z_values=z_values
-    )
-    xy_span = max(x_range[1] - x_range[0], y_range[1] - y_range[0])
-    xy_dtick = nice_tick_step(xy_span, target_ticks=6)
-    x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
-    y_tickvals = linear_tick_values(axis_range=y_range, step=xy_dtick)
-    xy_axis_style = {
-        "tickmode": "array",
-        "tickformat": ".0f",
-        "showexponent": "none",
-        "exponentformat": "none",
-        "showgrid": True,
-        "gridcolor": "rgba(0, 0, 0, 0.15)",
-        "gridwidth": 1,
-        "zeroline": True,
-        "zerolinecolor": "rgba(0, 0, 0, 0.65)",
-        "zerolinewidth": 2,
-        "showline": True,
-        "linecolor": "rgba(0, 0, 0, 0.65)",
-        "linewidth": 1.5,
-    }
-
-    fig.add_trace(
-        go.Scatter3d(
-            x=df["X_m"],
-            y=df["Y_m"],
-            z=df["Z_m"],
-            mode="lines",
-            name="Траектория",
-            line={
-                "width": 6,
-                "color": TRAJECTORY_COLOR_PRIMARY,
-                "dash": str(trajectory_line_dash),
-            },
-            customdata=_station_hover_customdata(df),
-            hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
-        )
-    )
-    if uncertainty_overlay is not None and uncertainty_overlay.samples:
-        _add_uncertainty_3d_traces(
-            fig,
-            overlay=uncertainty_overlay,
-            terminal_boundary_color=TRAJECTORY_COLOR_PRIMARY,
-        )
-    if plan_csb_df is not None and len(plan_csb_df) > 0:
-        fig.add_trace(
-            go.Scatter3d(
-                x=plan_csb_df["X_m"],
-                y=plan_csb_df["Y_m"],
-                z=plan_csb_df["Z_m"],
-                mode="lines",
-                name="План ЦСБ",
-                line={"width": 5, "color": PLAN_CSB_COLOR},
-                customdata=_build_hover_customdata(
-                    x_values=plan_csb_df["X_m"].to_numpy(dtype=float),
-                    y_values=plan_csb_df["Y_m"].to_numpy(dtype=float),
-                    z_values=plan_csb_df["Z_m"].to_numpy(dtype=float),
-                ),
-                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
-            )
-        )
-    if actual_df is not None and len(actual_df) > 0:
-        fig.add_trace(
-            go.Scatter3d(
-                x=actual_df["X_m"],
-                y=actual_df["Y_m"],
-                z=actual_df["Z_m"],
-                mode="lines",
-                name="Фактический профиль",
-                line={"width": 5, "color": ACTUAL_PROFILE_COLOR},
-                customdata=_build_hover_customdata(
-                    x_values=actual_df["X_m"].to_numpy(dtype=float),
-                    y_values=actual_df["Y_m"].to_numpy(dtype=float),
-                    z_values=actual_df["Z_m"].to_numpy(dtype=float),
-                ),
-                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
-            )
-        )
-
-    targets_df = pd.DataFrame(
-        {
-            "X_m": [surface.x, t1.x, t3.x],
-            "Y_m": [surface.y, t1.y, t3.y],
-            "Z_m": [surface.z, t1.z, t3.z],
-        }
-    )
-    fig.add_trace(
-        go.Scatter3d(
-            x=[surface.x, t1.x, t3.x],
-            y=[surface.y, t1.y, t3.y],
-            z=[surface.z, t1.z, t3.z],
-            mode="markers+text",
-            text=["S", "t1", "t3"],
-            textposition="top center",
-            name="Цели",
-            marker={"size": 6, "color": ["#EF476F", "#FFD166", "#118AB2"]},
-            customdata=_build_hover_customdata(
-                x_values=targets_df["X_m"].to_numpy(dtype=float),
-                y_values=targets_df["Y_m"].to_numpy(dtype=float),
-                z_values=targets_df["Z_m"].to_numpy(dtype=float),
-            ),
-            hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
-        )
-    )
-    t1_label_trace = _t1_label_trace_3d(
-        well_name=well_name,
-        t1=t1,
-        color=TARGET_COLOR_PRIMARY,
-    )
-    if t1_label_trace is not None:
-        fig.add_trace(t1_label_trace)
-
-    if md_t1_m is not None:
-        t1_idx = int((df["MD_m"] - float(md_t1_m)).abs().idxmin())
-        t1_calc = df.loc[t1_idx]
-        t3_calc = df.iloc[-1]
-        calc_df = pd.DataFrame([t1_calc, t3_calc]).reset_index(drop=True)
-        fig.add_trace(
-            go.Scatter3d(
-                x=[float(t1_calc["X_m"]), float(t3_calc["X_m"])],
-                y=[float(t1_calc["Y_m"]), float(t3_calc["Y_m"])],
-                z=[float(t1_calc["Z_m"]), float(t3_calc["Z_m"])],
-                mode="markers",
-                name="Расчетные в t1/t3",
-                marker={"size": 5, "color": "#073B4C", "symbol": "diamond"},
-                customdata=_station_hover_customdata(calc_df),
-                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
-            )
-        )
-
-    zero_axis_color = "rgba(0, 0, 0, 0.70)"
-    z_zero_ref = float(surface.z)
-    if y_range[0] <= 0.0 <= y_range[1]:
-        fig.add_trace(
-            go.Scatter3d(
-                x=[0.0, 0.0],
-                y=[float(y_range[0]), float(y_range[1])],
-                z=[z_zero_ref, z_zero_ref],
-                mode="lines",
-                name="Y=0 axis",
-                showlegend=False,
-                hoverinfo="skip",
-                line={"width": 4, "color": zero_axis_color},
-            )
-        )
-    if x_range[0] <= 0.0 <= x_range[1]:
-        fig.add_trace(
-            go.Scatter3d(
-                x=[float(x_range[0]), float(x_range[1])],
-                y=[0.0, 0.0],
-                z=[z_zero_ref, z_zero_ref],
-                mode="lines",
-                name="X=0 axis",
-                showlegend=False,
-                hoverinfo="skip",
-                line={"width": 4, "color": zero_axis_color},
-            )
-        )
-
-    fig.update_layout(
-        title="3D траектория",
-        scene={
-            "xaxis_title": "X / Восток (м)",
-            "yaxis_title": "Y / Север (м)",
-            "zaxis_title": "Z / TVD (m)",
-            "camera": DEFAULT_3D_CAMERA,
-            "xaxis": {
-                "range": x_range,
-                "tickvals": x_tickvals,
-                **xy_axis_style,
-            },
-            "yaxis": {
-                "range": y_range,
-                "tickvals": y_tickvals,
-                **xy_axis_style,
-            },
-            "zaxis": {
-                "range": z_range,
-                "tickformat": ".0f",
-                "showexponent": "none",
-                "exponentformat": "none",
-                "showgrid": True,
-                "gridcolor": "rgba(0, 0, 0, 0.12)",
-                "gridwidth": 1,
-                "zeroline": True,
-                "zerolinecolor": "rgba(0, 0, 0, 0.45)",
-                "zerolinewidth": 1,
-            },
-            "aspectmode": "cube",
-        },
-        margin={"l": 0, "r": 0, "t": 40, "b": 0},
-        height=height,
-    )
-    return fig
 
 
 def plan_view_figure(

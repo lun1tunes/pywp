@@ -5,18 +5,17 @@ import re
 from typing import Callable
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from pywp.models import Point3D
-from pywp.plotly_config import trajectory_plotly_chart_config
+from pywp.ptc_three_builders import single_well_three_payload
+from pywp.three_viewer import render_local_three_scene
 from pywp.uncertainty import WellUncertaintyOverlay
 from pywp.ui_utils import dls_to_pi
 from pywp.visualization import (
     dls_figure,
     plan_view_figure,
     section_view_figure,
-    trajectory_3d_figure,
 )
 
 
@@ -95,13 +94,13 @@ def render_trajectory_dls_panel(
     plan_csb_stations: pd.DataFrame | None = None,
     actual_stations: pd.DataFrame | None = None,
     uncertainty_overlay: WellUncertaintyOverlay | None = None,
-    render_3d_override: Callable[[object, go.Figure], None] | None = None,
+    render_3d_override: Callable[[object, dict[str, object]], None] | None = None,
 ) -> None:
     def _render_body() -> None:
         if title:
             st.markdown(f"### {title}")
         row1_col1, row1_col2 = st.columns(2, gap="medium")
-        fig_3d = trajectory_3d_figure(
+        payload = single_well_three_payload(
             stations,
             well_name=well_name,
             surface=surface,
@@ -114,13 +113,14 @@ def render_trajectory_dls_panel(
             uncertainty_overlay=uncertainty_overlay,
         )
         if render_3d_override is not None:
-            render_3d_override(row1_col1, fig_3d)
+            render_3d_override(row1_col1, payload)
         else:
-            row1_col1.plotly_chart(
-                fig_3d,
-                config=trajectory_plotly_chart_config(),
-                width="stretch",
-            )
+            with row1_col1:
+                render_local_three_scene(
+                    payload,
+                    height=560,
+                    key=f"single-well-3d-{str(well_name or 'trajectory')}",
+                )
         row1_col2.plotly_chart(
             dls_figure(stations, dls_limits=dls_limits),
             width="stretch",
@@ -248,7 +248,9 @@ def render_survey_table_with_download(
                 else export_xy_label_suffix
             ),
             xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
-        ).to_csv(index=False).encode("utf-8"),
+        )
+        .to_csv(index=False)
+        .encode("utf-8"),
         file_name=file_name,
         mime="text/csv",
         icon=":material/download:",

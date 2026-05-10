@@ -17,9 +17,15 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'data-ac-layer="overlaps"' in html
     assert 'data-ac-layer="segments"' in html
     assert "function initAntiCollisionControls()" in html
-    assert "function registerAntiCollisionVisualObject(object, roleValue)" in html
+    assert "function registerAntiCollisionVisualObject(object, itemOrRole)" in html
     assert 'role === "cone" || role === "cone_tip"' in html
+    assert 'role === "overlap" || role === "overlap_volume"' in html
     assert 'role === "conflict_segment" || role === "conflict_hover"' in html
+    assert "function antiCollisionLayerForItem(itemOrRole)" in html
+    assert 'name.includes("конфликт") || name.includes("conflict")' in html
+    assert "function addOverlapVolumeMesh(item)" in html
+    assert "function resampledRingPoint(ring, sampleIndex, sampleCount)" in html
+    assert "registerAntiCollisionVisualObject(mesh, item)" in html
     assert "antiCollisionVisualObjects[layer].forEach" in html
     assert 'id="legend-toggle-btn"' in html
     assert 'id="tooltip"' in html
@@ -95,7 +101,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "rebuildRotatedPreviewTrajectory(" in html
     assert "editRotationModeEnabled()" in html
     assert "editRotationPickMeshes" in html
-    assert "editDragMoveScope === \"pair\"" in html
+    assert 'editDragMoveScope === "pair"' in html
     assert "updateWellEditTargets(wi, nextT1, nextT3)" in html
     assert 'id="edit-undo-btn"' in html
     assert 'id="edit-redo-btn"' in html
@@ -135,19 +141,25 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "legend-node-btn legend-node-pad" in html
     assert "legend-node-btn legend-node-well" in html
     assert "function sortedLegendItems(items)" in html
-    assert ".localeCompare(legendSortLabel(right), \"ru\"" in html
+    assert '.localeCompare(legendSortLabel(right), "ru"' in html
     assert "numeric: true" in html
     assert "sortedLegendItems(group.children)" in html
     assert "sortedLegendItems(flatItems)" in html
-    assert "pad-first-surface-label" in html
-    assert 'role === "pad_first_surface_label"' in html
+    assert "pad-first-surface-label" not in html
+    assert 'role === "pad_first_surface_label"' not in html
     assert "function ensureCircleMarkerTexture()" in html
     assert "new THREE.CanvasTexture(canvas)" in html
     assert "new THREE.PointsMaterial" in html
-    assert "new THREE.MeshLambertMaterial" not in html
+    assert "new THREE.AmbientLight(0xffffff, 0.72)" in html
+    assert "new THREE.DirectionalLight(0xffffff, 0.58)" in html
+    assert "THREE.MeshLambertMaterial" in html
+    assert 'const isShadedSurface = role === "cone" || role === "overlap";' in html
+    assert "function numberOrDefault(value, fallback)" in html
+    assert "numberOrDefault(item.opacity, 0.34)" in html
+    assert "numberOrDefault(item.opacity, 0.25)" in html
     assert "markerScale * 0.52" in html
-    assert '<strong>DLS:</strong>' in html
-    assert '<strong>INC:</strong>' in html
+    assert "<strong>DLS:</strong>" in html
+    assert "<strong>INC:</strong>" in html
     assert 'id="reset-camera-btn"' not in html
     assert "Легенда" not in html
 
@@ -198,9 +210,9 @@ def test_render_local_three_scene_appends_instance_token(monkeypatch) -> None:
 
 
 def test_three_viewer_edit_bridge_relays_json_events() -> None:
-    bridge_html = (
-        three_viewer._ASSETS_DIR / "component" / "index.html"
-    ).read_text(encoding="utf-8")
+    bridge_html = (three_viewer._ASSETS_DIR / "component" / "index.html").read_text(
+        encoding="utf-8"
+    )
 
     assert "streamlit:setComponentValue" in bridge_html
     assert 'dataType: "json"' in bridge_html
@@ -219,12 +231,10 @@ def test_three_viewer_assets_are_declared_as_package_data() -> None:
 
 
 def test_ptc_single_well_view_uses_three_edit_override() -> None:
-    page_source = Path("pywp/ptc_page_results.py").read_text(
-        encoding="utf-8"
-    )
+    page_source = Path("pywp/ptc_page_results.py").read_text(encoding="utf-8")
 
     assert (
-        "def render_3d_override(container: object, figure: object) -> None:"
+        "def render_3d_override(container: object, payload: dict[str, object]) -> None:"
         in page_source
     )
     assert '"component_key": f"ptc-single-well-{selected.name}"' in page_source

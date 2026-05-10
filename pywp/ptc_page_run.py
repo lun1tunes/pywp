@@ -83,7 +83,7 @@ def render_run_section(*, records: list[object]) -> None:
 
         _parallel_options = [
             ("Без Multiprocessing", 0),
-            *((f"{n} процессов", n) for n in (2, 4, 6, 8, 12, 16, 24, 32)),
+            *((f"{n} процессов", n) for n in (2, 4, 6, 8, 12)),
         ]
         _parallel_labels = [label for label, _ in _parallel_options]
         _parallel_values = {label: value for label, value in _parallel_options}

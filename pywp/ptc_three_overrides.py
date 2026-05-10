@@ -22,7 +22,8 @@ __all__ = [
     "augment_three_payload",
     "build_edit_wells_payload",
     "legend_pad_label",
-    "pad_first_surface_label_payloads",
+    "overlap_volume_payloads",
+    "pad_first_surface_arrow_payloads",
     "successful_plan_raw_bounds",
     "target_only_raw_bounds",
     "three_legend_tree_payload",
@@ -66,12 +67,8 @@ def three_legend_tree_payload(
     visible_well_names: Iterable[str],
     well_bounds_by_name: Mapping[str, dict[str, list[float]]],
     name_to_color: Mapping[str, str],
-) -> tuple[
-    list[dict[str, object]], dict[str, dict[str, list[float]]], set[str]
-]:
-    visible_set = {
-        str(name) for name in visible_well_names if str(name).strip()
-    }
+) -> tuple[list[dict[str, object]], dict[str, dict[str, list[float]]], set[str]]:
+    visible_set = {str(name) for name in visible_well_names if str(name).strip()}
     if not visible_set:
         return [], {}, set()
     pads, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
@@ -118,25 +115,24 @@ def three_legend_tree_payload(
     return tree, focus_targets, hidden_flat_legend_labels
 
 
-def pad_first_surface_label_payloads(
+def pad_first_surface_arrow_payloads(
     session_state: MutableMapping[str, object],
     *,
     records: list[WelltrackRecord],
     visible_well_names: Iterable[str],
     surface_by_name: Mapping[str, Point3D],
 ) -> list[dict[str, object]]:
-    visible_set = {
-        str(name) for name in visible_well_names if str(name).strip()
-    }
+    visible_set = {str(name) for name in visible_well_names if str(name).strip()}
     if not visible_set:
         return []
     pads, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
         session_state,
         records,
     )
-    labels: list[dict[str, object]] = []
+    arrows: list[dict[str, object]] = []
     seen_names: set[str] = set()
     for pad in pads:
+        cfg = ptc_pad_state.pad_config_for_ui(session_state, pad)
         ordered_visible_names = [
             str(name)
             for name in well_names_by_pad_id.get(str(pad.pad_id), ())
@@ -149,21 +145,68 @@ def pad_first_surface_label_payloads(
             continue
         seen_names.add(first_name)
         surface = surface_by_name[first_name]
-        labels.append(
-            {
-                "text": "1",
-                "position": [
-                    float(surface.x),
-                    float(surface.y),
-                    float(surface.z),
-                ],
-                "color": "#0f172a",
-                "role": "pad_first_surface_label",
-                "well_name": first_name,
-                "pad_id": str(pad.pad_id),
-            }
+        arrows.append(
+            _pad_first_surface_arrow_payload(
+                surface=surface,
+                nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+                spacing_m=float(cfg["spacing_m"]),
+                well_name=first_name,
+                pad_id=str(pad.pad_id),
+            )
         )
-    return labels
+    return arrows
+
+
+def _pad_first_surface_arrow_payload(
+    *,
+    surface: Point3D,
+    nds_azimuth_deg: float,
+    spacing_m: float,
+    well_name: str,
+    pad_id: str,
+) -> dict[str, object]:
+    length_m = float(np.clip(float(spacing_m) * 0.55, 14.0, 34.0))
+    shaft_width_m = max(length_m * 0.12, 2.0)
+    head_length_m = length_m * 0.32
+    head_width_m = length_m * 0.34
+    vertical_lift_m = float(np.clip(length_m * 0.28, 4.0, 10.0))
+
+    angle_rad = np.deg2rad(float(nds_azimuth_deg) % 360.0)
+    direction = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=float)
+    if float(np.linalg.norm(direction)) <= 1e-9:
+        direction = np.array([0.0, 1.0], dtype=float)
+    normal = np.array([-direction[1], direction[0]], dtype=float)
+    center = np.array([float(surface.x), float(surface.y)], dtype=float)
+
+    tail = center - direction * (length_m * 0.5)
+    tip = center + direction * (length_m * 0.5)
+    head_base = tip - direction * head_length_m
+    z_value = float(surface.z) - vertical_lift_m
+
+    shaft_half = normal * (shaft_width_m * 0.5)
+    head_half = normal * (head_width_m * 0.5)
+    vertices_xy = [
+        tail - shaft_half,
+        tail + shaft_half,
+        head_base + shaft_half,
+        head_base - shaft_half,
+        head_base + head_half,
+        tip,
+        head_base - head_half,
+    ]
+    return {
+        "name": "Начало порядка скважин",
+        "vertices": [
+            [float(point[0]), float(point[1]), z_value] for point in vertices_xy
+        ],
+        "faces": [[0, 1, 2], [0, 2, 3], [4, 5, 6]],
+        "color": "#64748B",
+        "opacity": 0.86,
+        "role": "pad_first_surface_arrow",
+        "well_name": str(well_name),
+        "pad_id": str(pad_id),
+        "nds_azimuth_deg": float(nds_azimuth_deg) % 360.0,
+    }
 
 
 def augment_three_payload(
@@ -175,6 +218,8 @@ def augment_three_payload(
     collisions: list[dict[str, object]] | None = None,
     edit_wells: list[dict[str, object]] | None = None,
     extra_labels: list[dict[str, object]] | None = None,
+    extra_meshes: list[dict[str, object]] | None = None,
+    extra_legend_items: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     updated = dict(payload)
     if legend_tree:
@@ -183,9 +228,7 @@ def augment_three_payload(
         updated["focus_targets"] = {
             str(key): dict(value) for key, value in focus_targets.items()
         }
-    hidden_labels = {
-        str(label) for label in (hidden_flat_legend_labels or set())
-    }
+    hidden_labels = {str(label) for label in (hidden_flat_legend_labels or set())}
     if hidden_labels:
         updated["legend"] = [
             item
@@ -201,6 +244,24 @@ def augment_three_payload(
             *list(updated.get("labels") or []),
             *list(extra_labels),
         ]
+    if extra_meshes:
+        updated["meshes"] = [
+            *list(updated.get("meshes") or []),
+            *list(extra_meshes),
+        ]
+    if extra_legend_items:
+        seen_labels = {
+            str(dict(item).get("label", "")).strip()
+            for item in list(updated.get("legend") or [])
+        }
+        legend_items = list(updated.get("legend") or [])
+        for item in extra_legend_items:
+            label = str(dict(item).get("label", "")).strip()
+            if not label or label in seen_labels:
+                continue
+            legend_items.append(dict(item))
+            seen_labels.add(label)
+        updated["legend"] = legend_items
     return updated
 
 
@@ -218,9 +279,7 @@ def build_edit_wells_payload(
                 "surface": _point3d_payload(success.surface),
                 "t1": _point3d_payload(success.t1),
                 "t3": _point3d_payload(success.t3),
-                "color": str(
-                    name_to_color.get(str(success.name), "#2563eb")
-                ),
+                "color": str(name_to_color.get(str(success.name), "#2563eb")),
                 "base_points": base_points,
                 "config": {
                     "entry_inc_target_deg": float(config.entry_inc_target_deg),
@@ -266,7 +325,7 @@ def trajectory_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "edit_wells": build_edit_wells_payload(successes, name_to_color),
-        "extra_labels": pad_first_surface_label_payloads(
+        "extra_meshes": pad_first_surface_arrow_payloads(
             session_state,
             records=records,
             visible_well_names=tuple(well_bounds_by_name.keys()),
@@ -316,7 +375,7 @@ def anticollision_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "collisions": _collision_payloads(analysis),
-        "extra_labels": pad_first_surface_label_payloads(
+        "extra_meshes": pad_first_surface_arrow_payloads(
             session_state,
             records=records,
             visible_well_names=tuple(visible_names),
@@ -357,9 +416,7 @@ def _decimated_base_points(success: SuccessfulWellPlan) -> list[list[float]]:
     if not all(column in success.stations.columns for column in station_columns):
         return []
     station_values = (
-        success.stations.loc[:, list(station_columns)]
-        .dropna()
-        .to_numpy(dtype=float)
+        success.stations.loc[:, list(station_columns)].dropna().to_numpy(dtype=float)
     )
     if not station_values.size:
         return []
@@ -429,6 +486,83 @@ def _collision_payloads(
             }
         )
     return collisions
+
+
+def overlap_volume_payloads(
+    analysis: AntiCollisionAnalysis,
+) -> list[dict[str, object]]:
+    volumes: list[dict[str, object]] = []
+    for index, corridor in enumerate(analysis.corridors):
+        rings = _aligned_overlap_rings(corridor.overlap_rings_xyz)
+        if len(rings) < 2:
+            continue
+        volumes.append(
+            {
+                "name": "Зоны пересечений",
+                "role": "overlap_volume",
+                "well_a": str(corridor.well_a),
+                "well_b": str(corridor.well_b),
+                "id": f"overlap-volume::{corridor.well_a}::{corridor.well_b}::{index}",
+                "color": "#C62828",
+                "opacity": 0.34,
+                "rings": [
+                    [
+                        [float(x_value), float(y_value), float(z_value)]
+                        for x_value, y_value, z_value in ring.tolist()
+                    ]
+                    for ring in rings
+                ],
+            }
+        )
+    return volumes
+
+
+def _aligned_overlap_rings(
+    raw_rings: Iterable[np.ndarray],
+) -> list[np.ndarray]:
+    rings: list[np.ndarray] = []
+    previous: np.ndarray | None = None
+    for raw_ring in raw_rings:
+        ring = _open_finite_ring(raw_ring)
+        if ring is None:
+            continue
+        if previous is not None and len(previous) == len(ring):
+            ring = _align_ring_to_previous(previous, ring)
+        rings.append(ring)
+        previous = ring
+    return rings
+
+
+def _open_finite_ring(raw_ring: object) -> np.ndarray | None:
+    try:
+        ring = np.asarray(raw_ring, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if ring.ndim != 2 or ring.shape[1] != 3 or len(ring) < 3:
+        return None
+    finite_mask = np.all(np.isfinite(ring), axis=1)
+    ring = ring[finite_mask]
+    if len(ring) < 3:
+        return None
+    if np.linalg.norm(ring[0] - ring[-1]) <= 1e-6:
+        ring = ring[:-1]
+    if len(ring) < 3:
+        return None
+    return np.asarray(ring, dtype=float)
+
+
+def _align_ring_to_previous(previous: np.ndarray, ring: np.ndarray) -> np.ndarray:
+    candidates = [ring, ring[::-1]]
+    best_ring = ring
+    best_score = float("inf")
+    for candidate in candidates:
+        for shift in range(len(candidate)):
+            shifted = np.roll(candidate, -shift, axis=0)
+            score = float(np.linalg.norm(previous - shifted, axis=1).sum())
+            if score < best_score:
+                best_score = score
+                best_ring = shifted
+    return np.asarray(best_ring, dtype=float)
 
 
 def _best_event_zone(

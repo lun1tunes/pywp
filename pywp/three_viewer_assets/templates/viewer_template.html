@@ -489,24 +489,6 @@
         letter-spacing: 0.02em;
       }
 
-      .scene-label.pad-first-surface-label {
-        min-width: 11px;
-        height: 12px;
-        padding: 0 2px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.82);
-        border: none;
-        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
-        color: #0f172a;
-        font-family: "Segoe UI", Arial, sans-serif;
-        font-size: 9px;
-        font-weight: 700;
-        font-variant-numeric: tabular-nums;
-        line-height: 12px;
-        text-align: center;
-        text-shadow: none;
-      }
-
       .tooltip-head {
         display: flex;
         align-items: center;
@@ -874,16 +856,16 @@
       #edit-warning-toast {
         display: none;
         position: absolute;
-        bottom: 54px;
-        right: 14px;
+        bottom: 64px;
+        right: 18px;
         z-index: 6;
-        max-width: 280px;
+        max-width: 420px;
         background: rgba(255,255,255,0.97);
-        border-left: 3px solid #f59e0b;
-        border-radius: 8px;
-        box-shadow: 0 6px 18px rgba(15,23,42,0.10);
-        padding: 10px 14px;
-        font-size: 11px;
+        border-left: 5px solid #f59e0b;
+        border-radius: 12px;
+        box-shadow: 0 9px 24px rgba(15,23,42,0.12);
+        padding: 15px 21px;
+        font-size: 16.5px;
         line-height: 1.45;
         color: #475569;
         pointer-events: none;
@@ -918,7 +900,7 @@
             </label>
             <label class="anti-collision-option">
               <input type="checkbox" data-ac-layer="segments" checked />
-              <span>Красные участки траекторий</span>
+              <span>Конфликтные участки ствола</span>
             </label>
           </div>
         </div>
@@ -1009,6 +991,10 @@
         const scene = new THREE.Scene();
         const backgroundColor = String(payload.background || "#ffffff");
         scene.background = new THREE.Color(backgroundColor);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.72));
+        const surfaceShadeLight = new THREE.DirectionalLight(0xffffff, 0.58);
+        surfaceShadeLight.position.set(0.35, -0.45, 0.82).normalize();
+        scene.add(surfaceShadeLight);
 
         const sceneComplexity =
           (payload.lines || []).reduce(
@@ -1030,7 +1016,16 @@
           ) +
           (payload.labels || []).length * 12 +
           (payload.meshes || []).reduce(
-            (acc, item) => acc + (Array.isArray(item.vertices) ? item.vertices.length : 0),
+            (acc, item) => {
+              const vertexCount = Array.isArray(item.vertices) ? item.vertices.length : 0;
+              const ringCount = Array.isArray(item.rings)
+                ? item.rings.reduce(
+                    (ringAcc, ring) => ringAcc + (Array.isArray(ring) ? ring.length : 0),
+                    0,
+                  )
+                : 0;
+              return acc + vertexCount + ringCount;
+            },
             0,
           );
         const maxPixelRatio =
@@ -1102,7 +1097,7 @@
         const antiCollisionLayerLabels = {
           cones: "Конусы неопределенности",
           overlaps: "Зоны пересечений",
-          segments: "Красные участки траекторий",
+          segments: "Конфликтные участки ствола",
         };
         const antiCollisionLayerState = {
           cones: true,
@@ -1146,6 +1141,11 @@
             return fallback;
           }
           return colorValue;
+        }
+
+        function numberOrDefault(value, fallback) {
+          const result = Number(value);
+          return Number.isFinite(result) ? result : fallback;
         }
 
         function editableIndexForBaseName(nameValue) {
@@ -1219,11 +1219,33 @@
           if (role === "cone" || role === "cone_tip") {
             return "cones";
           }
-          if (role === "overlap") {
+          if (role === "overlap" || role === "overlap_volume") {
             return "overlaps";
           }
           if (role === "conflict_segment" || role === "conflict_hover") {
             return "segments";
+          }
+          return "";
+        }
+
+        function antiCollisionLayerForItem(itemOrRole) {
+          if (typeof itemOrRole === "string") {
+            return antiCollisionLayerForRole(itemOrRole);
+          }
+          const item = itemOrRole || {};
+          const roleLayer = antiCollisionLayerForRole(item.role);
+          if (roleLayer) {
+            return roleLayer;
+          }
+          const name = String(item.name || "").toLowerCase();
+          if (name.includes("конфликт") || name.includes("conflict")) {
+            return "segments";
+          }
+          if (name.includes("зоны пересеч") || name.includes("overlap")) {
+            return "overlaps";
+          }
+          if (name.includes("конус") || name.includes("cone")) {
+            return "cones";
           }
           return "";
         }
@@ -1233,12 +1255,12 @@
           const meshItems = Array.isArray(payload.meshes) ? payload.meshes : [];
           const pointItems = Array.isArray(payload.points) ? payload.points : [];
           return [...lineItems, ...meshItems, ...pointItems].some((item) =>
-            antiCollisionLayerForRole(item && item.role),
+            antiCollisionLayerForItem(item),
           );
         }
 
-        function registerAntiCollisionVisualObject(object, roleValue) {
-          const layer = antiCollisionLayerForRole(roleValue);
+        function registerAntiCollisionVisualObject(object, itemOrRole) {
+          const layer = antiCollisionLayerForItem(itemOrRole);
           if (!object || !layer) {
             return;
           }
@@ -1956,7 +1978,7 @@
               registerEditableBaseMaterial(material, materialOptions.color, item.name);
               const line = new THREE.Line(geometry, material);
               line.computeLineDistances();
-              registerAntiCollisionVisualObject(line, role);
+              registerAntiCollisionVisualObject(line, item);
               scene.add(line);
             });
             return;
@@ -1990,12 +2012,127 @@
           const material = new THREE.LineBasicMaterial(materialOptions);
           registerEditableBaseMaterial(material, materialOptions.color, item.name);
           const lineSegments = new THREE.LineSegments(geometry, material);
-          registerAntiCollisionVisualObject(lineSegments, role);
+          registerAntiCollisionVisualObject(lineSegments, item);
           scene.add(lineSegments);
+        }
+
+        function resampledRingPoint(ring, sampleIndex, sampleCount) {
+          const count = Array.isArray(ring) ? ring.length : 0;
+          if (count <= 0) {
+            return new THREE.Vector3();
+          }
+          if (count === sampleCount) {
+            return ring[sampleIndex].clone();
+          }
+          const position = (sampleIndex / sampleCount) * count;
+          const leftIndex = Math.floor(position) % count;
+          const rightIndex = (leftIndex + 1) % count;
+          const fraction = position - Math.floor(position);
+          return ring[leftIndex].clone().lerp(ring[rightIndex], fraction);
+        }
+
+        function addOverlapVolumeMesh(item) {
+          const rawRings = Array.isArray(item.rings) ? item.rings : [];
+          const rings = rawRings
+            .map((ring) =>
+              (Array.isArray(ring) ? ring : [])
+                .map(displayPoint)
+                .filter(
+                  (point) =>
+                    Number.isFinite(point.x) &&
+                    Number.isFinite(point.y) &&
+                    Number.isFinite(point.z),
+                ),
+            )
+            .filter((ring) => ring.length >= 3);
+          if (rings.length < 2) {
+            return;
+          }
+          const ringSize = Math.max(
+            8,
+            ...rings.map((ring) => ring.length),
+          );
+          const positions = [];
+          rings.forEach((ring) => {
+            for (let pointIndex = 0; pointIndex < ringSize; pointIndex += 1) {
+              const point = resampledRingPoint(ring, pointIndex, ringSize);
+              positions.push(point.x, point.y, point.z);
+            }
+          });
+
+          const indices = [];
+          for (let ringIndex = 0; ringIndex < rings.length - 1; ringIndex += 1) {
+            const currentStart = ringIndex * ringSize;
+            const nextStart = (ringIndex + 1) * ringSize;
+            for (let pointIndex = 0; pointIndex < ringSize; pointIndex += 1) {
+              const nextPointIndex = (pointIndex + 1) % ringSize;
+              const a = currentStart + pointIndex;
+              const b = currentStart + nextPointIndex;
+              const c = nextStart + pointIndex;
+              const d = nextStart + nextPointIndex;
+              indices.push(a, c, b, b, c, d);
+            }
+          }
+
+          const firstCenterIndex = positions.length / 3;
+          const firstCenter = new THREE.Vector3();
+          for (let pointIndex = 0; pointIndex < ringSize; pointIndex += 1) {
+            firstCenter.add(resampledRingPoint(rings[0], pointIndex, ringSize));
+          }
+          firstCenter.multiplyScalar(1 / ringSize);
+          positions.push(firstCenter.x, firstCenter.y, firstCenter.z);
+
+          const lastCenterIndex = positions.length / 3;
+          const lastRing = rings[rings.length - 1];
+          const lastCenter = new THREE.Vector3();
+          for (let pointIndex = 0; pointIndex < ringSize; pointIndex += 1) {
+            lastCenter.add(resampledRingPoint(lastRing, pointIndex, ringSize));
+          }
+          lastCenter.multiplyScalar(1 / ringSize);
+          positions.push(lastCenter.x, lastCenter.y, lastCenter.z);
+
+          const lastStart = (rings.length - 1) * ringSize;
+          for (let pointIndex = 0; pointIndex < ringSize; pointIndex += 1) {
+            const nextPointIndex = (pointIndex + 1) % ringSize;
+            indices.push(
+              firstCenterIndex,
+              nextPointIndex,
+              pointIndex,
+              lastCenterIndex,
+              lastStart + pointIndex,
+              lastStart + nextPointIndex,
+            );
+          }
+
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3),
+          );
+          geometry.setIndex(indices);
+          geometry.computeVertexNormals();
+          const opacity = Math.min(numberOrDefault(item.opacity, 0.34), 0.44);
+          const material = new THREE.MeshLambertMaterial({
+            color: hexOrDefault(item.color, "#c62828"),
+            transparent: true,
+            opacity,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            depthTest: true,
+          });
+          material.forceSinglePass = true;
+          const mesh = new THREE.Mesh(geometry, material);
+          mesh.renderOrder = 3;
+          registerAntiCollisionVisualObject(mesh, item);
+          scene.add(mesh);
         }
 
         function addMesh(item) {
           const role = String(item.role || "mesh");
+          if (role === "overlap_volume") {
+            addOverlapVolumeMesh(item);
+            return;
+          }
           const vertices = Array.isArray(item.vertices) ? item.vertices : [];
           const faces = Array.isArray(item.faces) ? item.faces : [];
           if (vertices.length === 0 || faces.length === 0) {
@@ -2019,26 +2156,29 @@
           geometry.setIndex(new THREE.BufferAttribute(indices, 1));
           geometry.computeVertexNormals();
           const baseColor = hexOrDefault(item.color, "#94a3b8");
-          const opacity = Number(item.opacity || 0.25);
-          const material = new THREE.MeshBasicMaterial({
+          const opacity = numberOrDefault(item.opacity, 0.25);
+          const isShadedSurface = role === "cone" || role === "overlap";
+          const MaterialClass = isShadedSurface
+            ? THREE.MeshLambertMaterial
+            : THREE.MeshBasicMaterial;
+          const material = new MaterialClass({
             color: baseColor,
             transparent: true,
             opacity:
               role === "cone"
-                ? Math.min(opacity, 0.12)
+                ? Math.min(opacity, 0.14)
                 : opacity,
             side: role === "cone" ? THREE.FrontSide : THREE.DoubleSide,
             depthWrite: false,
             depthTest: true,
           });
-          material.toneMapped = false;
           material.forceSinglePass = true;
           const mesh = new THREE.Mesh(geometry, material);
           mesh.renderOrder = role === "overlap" ? 3 : role === "cone" ? 1 : 2;
           if (role === "overlap") {
             material.opacity = Math.min(opacity, 0.42);
           }
-          registerAntiCollisionVisualObject(mesh, role);
+          registerAntiCollisionVisualObject(mesh, item);
           scene.add(mesh);
         }
 
@@ -2094,7 +2234,7 @@
             hoverData || {},
           );
           hoverTargets.push(mesh);
-          registerAntiCollisionVisualObject(mesh, item.role);
+          registerAntiCollisionVisualObject(mesh, item);
           scene.add(mesh);
         }
 
@@ -2168,16 +2308,12 @@
               ? 12
               : role === "reference_label"
               ? 10
-              : role === "pad_first_surface_label"
-              ? 12
               : 0;
-          const extraClassName =
-            role === "pad_first_surface_label" ? "pad-first-surface-label" : "";
           addSceneLabel(
             String(item.text || ""),
             position,
             String(item.color || "#0f172a"),
-            extraClassName,
+            "",
             { offsetY: offsetY },
           );
         }
@@ -2356,11 +2492,12 @@
           animationFrameHandle = window.requestAnimationFrame(animate);
         }
 
-        initAntiCollisionControls();
         (payload.lines || []).forEach(addLine);
         (payload.meshes || []).forEach(addMesh);
         (payload.points || []).forEach(addMarkers);
         (payload.labels || []).forEach(addLabel);
+        initAntiCollisionControls();
+        applyAntiCollisionLayerVisibility();
         renderer.domElement.addEventListener("pointermove", (event) => {
           pointerScreen = {
             x: Number(event.clientX || 0),

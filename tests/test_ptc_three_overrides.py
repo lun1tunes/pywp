@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 
@@ -159,7 +161,7 @@ def test_trajectory_overrides_build_tree_focus_targets_for_multi_pad() -> None:
     }
 
 
-def test_first_surface_label_honors_fixed_pad_order() -> None:
+def test_first_surface_arrow_honors_fixed_pad_order() -> None:
     session_state: dict[str, object] = {}
     records = _records()
     pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
@@ -179,11 +181,19 @@ def test_first_surface_label_honors_fixed_pad_order() -> None:
         name_to_color={},
     )
 
-    first_surface_labels = list(overrides["extra_labels"])
-    assert [str(item["well_name"]) for item in first_surface_labels] == [
-        "WELL-C"
-    ]
-    assert first_surface_labels[0]["position"] == [0.0, 100.0, 0.0]
+    first_surface_arrows = list(overrides["extra_meshes"])
+    assert [str(item["well_name"]) for item in first_surface_arrows] == ["WELL-C"]
+    arrow = first_surface_arrows[0]
+    assert str(arrow["role"]) == "pad_first_surface_arrow"
+    angle_rad = np.deg2rad(float(arrow["nds_azimuth_deg"]))
+    direction = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=float)
+    tip_xy = np.asarray(arrow["vertices"][5][:2], dtype=float)
+    center_xy = np.array([0.0, 100.0], dtype=float)
+    delta_xy = tip_xy - center_xy
+    assert float(np.dot(delta_xy, direction)) > 0.0
+    cross_z = float(direction[0] * delta_xy[1] - direction[1] * delta_xy[0])
+    assert abs(cross_z) < 1e-9
+    assert float(arrow["vertices"][5][2]) < 0.0
 
 
 def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
@@ -211,7 +221,7 @@ def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> Non
         "legend": [
             {"label": "WELL-A", "color": "#22c55e", "opacity": 1.0},
             {"label": "WELL-B", "color": "#2563eb", "opacity": 1.0},
-            {"label": "Общая зона overlap", "color": "#fca5a5", "opacity": 0.4},
+            {"label": "Зоны пересечений", "color": "#fca5a5", "opacity": 0.4},
         ]
     }
 
@@ -221,9 +231,70 @@ def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> Non
         hidden_flat_legend_labels={"WELL-A", "WELL-B"},
     )
 
-    assert [str(item["label"]) for item in updated["legend"]] == [
-        "Общая зона overlap"
-    ]
-    assert updated["legend_tree"] == [
-        {"id": "pad::PAD-01", "label": "Куст PAD-01"}
-    ]
+    assert [str(item["label"]) for item in updated["legend"]] == ["Зоны пересечений"]
+    assert updated["legend_tree"] == [{"id": "pad::PAD-01", "label": "Куст PAD-01"}]
+
+
+def test_anticollision_overlap_volume_payload_uses_aligned_rings() -> None:
+    first_ring = np.array(
+        [
+            [0.0, 0.0, 100.0],
+            [10.0, 0.0, 100.0],
+            [10.0, 10.0, 100.0],
+            [0.0, 10.0, 100.0],
+        ],
+        dtype=float,
+    )
+    shifted_reversed_ring = np.array(
+        [
+            [1.0, 11.0, 120.0],
+            [11.0, 11.0, 120.0],
+            [11.0, 1.0, 120.0],
+            [1.0, 1.0, 120.0],
+        ],
+        dtype=float,
+    )
+    analysis = SimpleNamespace(
+        corridors=[
+            SimpleNamespace(
+                well_a="WELL-A",
+                well_b="WELL-B",
+                overlap_rings_xyz=(first_ring, shifted_reversed_ring),
+            )
+        ]
+    )
+
+    volumes = ptc_three_overrides.overlap_volume_payloads(analysis)
+
+    assert len(volumes) == 1
+    assert volumes[0]["role"] == "overlap_volume"
+    assert volumes[0]["name"] == "Зоны пересечений"
+    assert len(volumes[0]["rings"]) == 2
+    assert volumes[0]["rings"][0][0] == [0.0, 0.0, 100.0]
+    assert volumes[0]["rings"][1][0] == [1.0, 1.0, 120.0]
+
+
+def test_augment_three_payload_appends_overlap_volume_and_legend_once() -> None:
+    payload = {
+        "meshes": [],
+        "legend": [{"label": "Зоны пересечений", "color": "#C62828"}],
+    }
+    volume = {
+        "name": "Зоны пересечений",
+        "role": "overlap_volume",
+        "rings": [
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]],
+        ],
+    }
+
+    updated = ptc_three_overrides.augment_three_payload(
+        payload=payload,
+        extra_meshes=[volume],
+        extra_legend_items=[
+            {"label": "Зоны пересечений", "color": "#C62828", "opacity": 0.34}
+        ],
+    )
+
+    assert updated["meshes"] == [volume]
+    assert [str(item["label"]) for item in updated["legend"]] == ["Зоны пересечений"]
