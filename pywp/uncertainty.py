@@ -1,14 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
 from pywp.constants import DEG2RAD
+from pywp.iscwsa_mwd import (
+    DEFAULT_ISCWSA_MWD_ENVIRONMENT,
+    ISCWSA_MWD_POOR_MAGNETIC,
+    ISCWSA_MWD_UNKNOWN_MAGNETIC,
+    ISCWSA_MWD_TOOL_CODES,
+    IscwsaMwdEnvironment,
+    iscwsa_mwd_covariance_xyz,
+)
 from pywp.models import Point3D
 
-_REQUIRED_STATION_COLUMNS = frozenset({"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"})
+_REQUIRED_STATION_COLUMNS = frozenset(
+    {"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"}
+)
 UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC = "mwd_poor_magnetic"
 UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC = "mwd_unknown_magnetic"
 DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
@@ -20,12 +30,11 @@ UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class PlanningUncertaintyModel:
-    """Planning-level first-order uncertainty model.
+    """Planning uncertainty settings.
 
-    This is intentionally not a full ISCWSA tool-error model. It uses a
-    first-order local-angle approximation: position uncertainty in the plane
-    normal to the borehole grows with measured depth and assumed 1-sigma
-    inclination/azimuth errors.
+    When ``iscwsa_tool_code`` is set, covariance is calculated from the
+    digitized ISCWSA MWD tool-error model. Otherwise the model uses a fast
+    first-order local-angle proxy for optimization hot loops and tests.
     """
 
     sigma_inc_deg: float = 0.30
@@ -39,6 +48,10 @@ class PlanningUncertaintyModel:
     near_vertical_isotropic_threshold_deg: float = 5.0
     directional_refine_threshold_deg: float = 5.0
     min_refined_step_m: float = 50.0
+    iscwsa_tool_code: str | None = None
+    iscwsa_environment: IscwsaMwdEnvironment = field(
+        default_factory=lambda: DEFAULT_ISCWSA_MWD_ENVIRONMENT
+    )
 
     def __post_init__(self) -> None:
         if float(self.sigma_inc_deg) <= 0.0:
@@ -58,13 +71,20 @@ class PlanningUncertaintyModel:
         if float(self.min_display_radius_m) < 0.0:
             raise ValueError("min_display_radius_m cannot be negative.")
         if float(self.near_vertical_isotropic_threshold_deg) < 0.0:
-            raise ValueError("near_vertical_isotropic_threshold_deg cannot be negative.")
+            raise ValueError(
+                "near_vertical_isotropic_threshold_deg cannot be negative."
+            )
         if float(self.directional_refine_threshold_deg) <= 0.0:
             raise ValueError("directional_refine_threshold_deg must be positive.")
         if float(self.min_refined_step_m) <= 0.0:
             raise ValueError("min_refined_step_m must be positive.")
         if float(self.min_refined_step_m) > float(self.sample_step_m):
             raise ValueError("min_refined_step_m must be <= sample_step_m.")
+        if (
+            self.iscwsa_tool_code is not None
+            and self.iscwsa_tool_code not in ISCWSA_MWD_TOOL_CODES
+        ):
+            raise ValueError(f"Unknown ISCWSA tool code: {self.iscwsa_tool_code!r}.")
 
 
 PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
@@ -74,7 +94,8 @@ PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
         sigma_inc_deg=0.35,
         sigma_azi_deg=1.20,
         sigma_lateral_drift_m_per_1000m=15.0,
-        confidence_scale=1.0,
+        confidence_scale=2.0,
+        iscwsa_tool_code=ISCWSA_MWD_POOR_MAGNETIC,
     ),
     # ISCWSA MWD Unknown magnetic: worst-case assumption for magnetic reference quality
     # (~1.5-2.5° dec error, very conservative for anti-collision planning)
@@ -82,7 +103,8 @@ PLANNING_UNCERTAINTY_PRESET_MODELS: dict[str, PlanningUncertaintyModel] = {
         sigma_inc_deg=0.40,
         sigma_azi_deg=1.80,
         sigma_lateral_drift_m_per_1000m=20.0,
-        confidence_scale=1.0,
+        confidence_scale=2.0,
+        iscwsa_tool_code=ISCWSA_MWD_UNKNOWN_MAGNETIC,
     ),
 }
 DEFAULT_PLANNING_UNCERTAINTY_MODEL = PLANNING_UNCERTAINTY_PRESET_MODELS[
@@ -97,6 +119,11 @@ class UncertaintyEllipseSample:
     center_xyz: tuple[float, float, float]
     center_plan_xy: tuple[float, float]
     center_section_xz: tuple[float, float]
+    covariance_xyz: np.ndarray
+    covariance_xyz_random: np.ndarray
+    covariance_xyz_systematic: np.ndarray
+    covariance_xyz_global: np.ndarray
+    global_source_vectors_xyz: tuple[tuple[str, np.ndarray], ...]
     ring_xyz: np.ndarray
     ring_plan_xy: np.ndarray
     ring_section_xz: np.ndarray
@@ -118,6 +145,19 @@ class UncertaintyStationSample:
     azi_deg: float
     center_xyz: tuple[float, float, float]
     covariance_xyz: np.ndarray
+    covariance_xyz_random: np.ndarray
+    covariance_xyz_systematic: np.ndarray
+    covariance_xyz_global: np.ndarray
+    global_source_vectors_xyz: tuple[tuple[str, np.ndarray], ...]
+
+
+@dataclass(frozen=True)
+class UncertaintyCovarianceSamples:
+    covariance_xyz: np.ndarray
+    covariance_xyz_random: np.ndarray
+    covariance_xyz_systematic: np.ndarray
+    covariance_xyz_global: np.ndarray
+    global_source_vectors_xyz: tuple[tuple[str, np.ndarray], ...]
 
 
 @dataclass(frozen=True)
@@ -144,6 +184,28 @@ def planning_uncertainty_model_for_preset(
     return PLANNING_UNCERTAINTY_PRESET_MODELS[normalized]
 
 
+def fast_proxy_uncertainty_model(
+    model: PlanningUncertaintyModel,
+) -> PlanningUncertaintyModel:
+    if not model.iscwsa_tool_code:
+        return model
+    return PlanningUncertaintyModel(
+        sigma_inc_deg=float(model.sigma_inc_deg),
+        sigma_azi_deg=float(model.sigma_azi_deg),
+        sigma_lateral_drift_m_per_1000m=float(model.sigma_lateral_drift_m_per_1000m),
+        confidence_scale=float(model.confidence_scale),
+        sample_step_m=float(model.sample_step_m),
+        max_display_ellipses=int(model.max_display_ellipses),
+        ellipse_points=int(model.ellipse_points),
+        min_display_radius_m=float(model.min_display_radius_m),
+        near_vertical_isotropic_threshold_deg=float(
+            model.near_vertical_isotropic_threshold_deg
+        ),
+        directional_refine_threshold_deg=float(model.directional_refine_threshold_deg),
+        min_refined_step_m=float(model.min_refined_step_m),
+    )
+
+
 def uncertainty_preset_label(preset: object) -> str:
     preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
     return UNCERTAINTY_PRESET_OPTIONS.get(
@@ -155,6 +217,20 @@ def uncertainty_preset_label(preset: object) -> str:
 def uncertainty_model_caption(
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> str:
+    if _model_uses_iscwsa(model):
+        environment = model.iscwsa_environment
+        model_label = ISCWSA_MWD_TOOL_CODES[str(model.iscwsa_tool_code)].label
+        return (
+            f"Показан 2σ {model_label} конус неопределенности, "
+            "построенный из 1σ tool-error covariance: depth reference/scale, "
+            "misalignment/sag, declination, magnetic field, accelerometer и "
+            "magnetometer bias/scale terms. Эллипсы считаются из полной 3x3 "
+            "covariance matrix в NEV/XYZ и затем проецируются в плоскость, "
+            "нормальную к стволу. "
+            f"Параметры магнитного поля: MTOT={float(environment.mtot_nt):.0f} nT, "
+            f"DIP={float(environment.dip_deg):.1f}°, "
+            f"DECL={float(environment.declination_deg):.1f}°."
+        )
     return (
         "Показан 2σ planning-level конус неопределенности, построенный по "
         "эллиптическим сечениям в плоскости, нормальной к стволу. "
@@ -214,6 +290,26 @@ def station_uncertainty_axes_m(
     inc_deg: float,
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> tuple[float, float]:
+    if _model_uses_iscwsa(model):
+        covariance = station_uncertainty_covariance_xyz(
+            md_m=md_m,
+            inc_deg=inc_deg,
+            azi_deg=0.0,
+            model=model,
+        )
+        tangent, inc_axis, azi_axis = local_uncertainty_axes_xyz(
+            inc_deg=inc_deg,
+            azi_deg=0.0,
+        )
+        semi_major, semi_minor, _, _ = _normal_plane_ellipse_axes_from_covariance(
+            covariance_xyz=covariance,
+            tangent=tangent,
+            primary_axis=inc_axis,
+            secondary_axis=azi_axis,
+            confidence_scale=float(model.confidence_scale),
+        )
+        return float(semi_major), float(semi_minor)
+
     md_value = max(float(md_m), 0.0)
     inc_value = _validated_inclination_deg(inc_deg)
     inc_rad = inc_value * DEG2RAD
@@ -245,6 +341,17 @@ def station_uncertainty_covariance_xyz(
     azi_deg: float,
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> np.ndarray:
+    if _model_uses_iscwsa(model):
+        md_value = max(float(md_m), 0.0)
+        if md_value <= 0.0:
+            return np.zeros((3, 3), dtype=float)
+        return iscwsa_mwd_covariance_xyz(
+            md_m=np.asarray([0.0, md_value], dtype=float),
+            inc_deg=np.asarray([0.0, float(inc_deg)], dtype=float),
+            azi_deg=np.asarray([float(azi_deg), float(azi_deg)], dtype=float),
+            tool_code=str(model.iscwsa_tool_code),
+            environment=model.iscwsa_environment,
+        ).covariance_xyz[-1]
     return np.asarray(
         station_uncertainty_covariance_xyz_many(
             md_m=np.asarray([float(md_m)], dtype=float),
@@ -263,6 +370,14 @@ def station_uncertainty_covariance_xyz_many(
     azi_deg: np.ndarray,
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> np.ndarray:
+    if _model_uses_iscwsa(model):
+        return _station_uncertainty_covariance_xyz_many_iscwsa(
+            md_m=md_m,
+            inc_deg=inc_deg,
+            azi_deg=azi_deg,
+            model=model,
+        )
+
     md_values, inc_values, azi_values = np.broadcast_arrays(
         np.asarray(md_m, dtype=float),
         np.asarray(inc_deg, dtype=float),
@@ -323,21 +438,299 @@ def station_uncertainty_covariance_xyz_many(
     )
     if np.any(near_vertical_mask):
         projector = (
-            np.eye(3, dtype=float)
-            - tangent[..., :, None] * tangent[..., None, :]
+            np.eye(3, dtype=float) - tangent[..., :, None] * tangent[..., None, :]
         )
         covariance[near_vertical_mask] = (
-            sigma_inc2[near_vertical_mask, None, None]
-            * projector[near_vertical_mask]
+            sigma_inc2[near_vertical_mask, None, None] * projector[near_vertical_mask]
         )
     if np.any(~near_vertical_mask):
-        covariance[~near_vertical_mask] = (
-            sigma_inc2[~near_vertical_mask, None, None]
-            * (inc_axis[~near_vertical_mask, :, None] * inc_axis[~near_vertical_mask, None, :])
-            + sigma_azi2[~near_vertical_mask, None, None]
-            * (azi_axis[~near_vertical_mask, :, None] * azi_axis[~near_vertical_mask, None, :])
+        covariance[~near_vertical_mask] = sigma_inc2[
+            ~near_vertical_mask, None, None
+        ] * (
+            inc_axis[~near_vertical_mask, :, None]
+            * inc_axis[~near_vertical_mask, None, :]
+        ) + sigma_azi2[
+            ~near_vertical_mask, None, None
+        ] * (
+            azi_axis[~near_vertical_mask, :, None]
+            * azi_axis[~near_vertical_mask, None, :]
         )
     return covariance
+
+
+def station_uncertainty_covariance_xyz_for_stations(
+    *,
+    stations: pd.DataFrame,
+    sample_md_m: np.ndarray,
+    model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+) -> np.ndarray:
+    return station_uncertainty_covariance_samples_for_stations(
+        stations=stations,
+        sample_md_m=sample_md_m,
+        model=model,
+    ).covariance_xyz
+
+
+def station_uncertainty_covariance_samples_for_stations(
+    *,
+    stations: pd.DataFrame,
+    sample_md_m: np.ndarray,
+    model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+) -> UncertaintyCovarianceSamples:
+    md_values, inc_values, azi_values_deg, _, _, z_values = _validated_station_arrays(
+        stations=stations,
+        context="uncertainty covariance",
+    )
+    sample_md = np.asarray(sample_md_m, dtype=float).reshape(-1)
+    if len(sample_md) == 0:
+        empty_covariance = np.zeros((0, 3, 3), dtype=float)
+        return UncertaintyCovarianceSamples(
+            covariance_xyz=empty_covariance,
+            covariance_xyz_random=empty_covariance,
+            covariance_xyz_systematic=empty_covariance,
+            covariance_xyz_global=empty_covariance,
+            global_source_vectors_xyz=(),
+        )
+    _validate_md_values_for_interpolation(
+        sample_md, context="uncertainty covariance samples"
+    )
+    if sample_md[0] < md_values[0] - 1e-6 or sample_md[-1] > md_values[-1] + 1e-6:
+        raise ValueError(
+            "uncertainty covariance samples must be within station MD range."
+        )
+    sample_azi_rad = np.interp(
+        sample_md, md_values, np.unwrap(np.deg2rad(azi_values_deg))
+    )
+    sample_azi_deg = np.rad2deg(sample_azi_rad) % 360.0
+    sample_inc_deg = np.interp(sample_md, md_values, inc_values)
+    if not _model_uses_iscwsa(model):
+        covariance = station_uncertainty_covariance_xyz_many(
+            md_m=sample_md,
+            inc_deg=sample_inc_deg,
+            azi_deg=sample_azi_deg,
+            model=model,
+        )
+        zero_covariance = np.zeros_like(covariance)
+        return UncertaintyCovarianceSamples(
+            covariance_xyz=covariance,
+            covariance_xyz_random=covariance,
+            covariance_xyz_systematic=zero_covariance,
+            covariance_xyz_global=zero_covariance,
+            global_source_vectors_xyz=(),
+        )
+
+    path_md = [round(float(value), 6) for value in md_values]
+    if path_md and path_md[0] > 0.0:
+        path_md.insert(0, 0.0)
+    path_md_array = np.asarray(path_md, dtype=float)
+    path_inc = np.interp(path_md_array, md_values, inc_values)
+    path_azi_rad = np.interp(
+        path_md_array, md_values, np.unwrap(np.deg2rad(azi_values_deg))
+    )
+    path_azi = np.rad2deg(path_azi_rad) % 360.0
+    path_z = np.interp(path_md_array, md_values, z_values)
+    path_tvd = path_z - float(z_values[0])
+    covariance_path = iscwsa_mwd_covariance_xyz(
+        md_m=path_md_array,
+        inc_deg=path_inc,
+        azi_deg=path_azi,
+        tvd_m=path_tvd,
+        tool_code=str(model.iscwsa_tool_code),
+        environment=model.iscwsa_environment,
+    )
+    covariance_random = _interpolate_covariance_path(
+        path_md_array,
+        np.asarray(covariance_path.covariance_xyz_random, dtype=float),
+        sample_md,
+    )
+    covariance_systematic = _interpolate_covariance_path(
+        path_md_array,
+        np.asarray(covariance_path.covariance_xyz_systematic, dtype=float),
+        sample_md,
+    )
+    global_source_vectors_xyz = tuple(
+        (
+            source_name,
+            _interpolate_vector_path(
+                path_md_array,
+                np.asarray(source_vectors, dtype=float),
+                sample_md,
+            ),
+        )
+        for source_name, source_vectors in covariance_path.global_source_vectors_xyz
+    )
+    covariance_global = np.zeros_like(covariance_random)
+    for _, source_vectors in global_source_vectors_xyz:
+        covariance_global += np.einsum("ni,nj->nij", source_vectors, source_vectors)
+    covariance_total = _symmetrized_covariance_array(
+        covariance_random + covariance_systematic + covariance_global
+    )
+    return UncertaintyCovarianceSamples(
+        covariance_xyz=covariance_total,
+        covariance_xyz_random=covariance_random,
+        covariance_xyz_systematic=covariance_systematic,
+        covariance_xyz_global=_symmetrized_covariance_array(covariance_global),
+        global_source_vectors_xyz=global_source_vectors_xyz,
+    )
+
+
+def _model_uses_iscwsa(model: PlanningUncertaintyModel) -> bool:
+    return bool(model.iscwsa_tool_code)
+
+
+def _interpolate_covariance_path(
+    path_md: np.ndarray,
+    covariance_path: np.ndarray,
+    sample_md: np.ndarray,
+) -> np.ndarray:
+    covariance = np.asarray(covariance_path, dtype=float)
+    if covariance.shape != (len(path_md), 3, 3):
+        raise ValueError("covariance path must have shape (MD, 3, 3).")
+    flat = covariance.reshape(len(path_md), 9)
+    interpolated = np.empty((len(sample_md), 9), dtype=float)
+    for column_index in range(9):
+        interpolated[:, column_index] = np.interp(
+            sample_md,
+            path_md,
+            flat[:, column_index],
+        )
+    return _symmetrized_covariance_array(interpolated.reshape(len(sample_md), 3, 3))
+
+
+def _interpolate_vector_path(
+    path_md: np.ndarray,
+    vector_path: np.ndarray,
+    sample_md: np.ndarray,
+) -> np.ndarray:
+    vectors = np.asarray(vector_path, dtype=float)
+    if vectors.shape != (len(path_md), 3):
+        raise ValueError("vector path must have shape (MD, 3).")
+    interpolated = np.empty((len(sample_md), 3), dtype=float)
+    for column_index in range(3):
+        interpolated[:, column_index] = np.interp(
+            sample_md,
+            path_md,
+            vectors[:, column_index],
+        )
+    return interpolated
+
+
+def _symmetrized_covariance_array(covariance: np.ndarray) -> np.ndarray:
+    covariance_array = np.asarray(covariance, dtype=float)
+    return 0.5 * (covariance_array + np.swapaxes(covariance_array, -1, -2))
+
+
+def _station_uncertainty_covariance_xyz_many_iscwsa(
+    *,
+    md_m: np.ndarray,
+    inc_deg: np.ndarray,
+    azi_deg: np.ndarray,
+    model: PlanningUncertaintyModel,
+) -> np.ndarray:
+    md_values, inc_values, azi_values = np.broadcast_arrays(
+        np.asarray(md_m, dtype=float),
+        np.asarray(inc_deg, dtype=float),
+        np.asarray(azi_deg, dtype=float),
+    )
+    original_shape = md_values.shape
+    md_flat = np.asarray(md_values, dtype=float).reshape(-1)
+    inc_flat = np.asarray(inc_values, dtype=float).reshape(-1)
+    azi_flat = np.asarray(azi_values, dtype=float).reshape(-1)
+    if len(md_flat) == 0:
+        return np.zeros(original_shape + (3, 3), dtype=float)
+    if len(md_flat) == 1:
+        md_value = max(float(md_flat[0]), 0.0)
+        if md_value <= 0.0:
+            return np.zeros(original_shape + (3, 3), dtype=float)
+        covariance = iscwsa_mwd_covariance_xyz(
+            md_m=np.asarray([0.0, md_value], dtype=float),
+            inc_deg=np.asarray([0.0, float(inc_flat[0])], dtype=float),
+            azi_deg=np.asarray([float(azi_flat[0]), float(azi_flat[0])], dtype=float),
+            tool_code=str(model.iscwsa_tool_code),
+            environment=model.iscwsa_environment,
+        ).covariance_xyz[-1]
+        return covariance.reshape(original_shape + (3, 3))
+    if np.any(np.diff(md_flat) <= 0.0):
+        raise ValueError("ISCWSA covariance arrays must be sorted by increasing MD.")
+    path_md = md_flat
+    path_inc = inc_flat
+    path_azi = azi_flat
+    trim_origin = False
+    if float(path_md[0]) > 0.0:
+        path_md = np.concatenate([np.asarray([0.0], dtype=float), path_md])
+        path_inc = np.concatenate([np.asarray([0.0], dtype=float), path_inc])
+        path_azi = np.concatenate(
+            [np.asarray([float(azi_flat[0])], dtype=float), path_azi]
+        )
+        trim_origin = True
+    covariance_path = iscwsa_mwd_covariance_xyz(
+        md_m=path_md,
+        inc_deg=path_inc,
+        azi_deg=path_azi,
+        tool_code=str(model.iscwsa_tool_code),
+        environment=model.iscwsa_environment,
+    ).covariance_xyz
+    if trim_origin:
+        covariance_path = covariance_path[1:]
+    return covariance_path.reshape(original_shape + (3, 3))
+
+
+def _normal_plane_ellipse_axes_from_covariance(
+    *,
+    covariance_xyz: np.ndarray,
+    tangent: np.ndarray,
+    primary_axis: np.ndarray,
+    secondary_axis: np.ndarray,
+    confidence_scale: float,
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    tangent_unit = np.asarray(tangent, dtype=float)
+    tangent_norm = float(np.linalg.norm(tangent_unit))
+    if tangent_norm <= 1e-12:
+        tangent_unit = np.asarray([0.0, 0.0, 1.0], dtype=float)
+    else:
+        tangent_unit = tangent_unit / tangent_norm
+
+    axis_1 = _normal_plane_axis(primary_axis, tangent_unit)
+    if axis_1 is None:
+        axis_1, axis_2 = _stable_normal_plane_basis(tangent_unit)
+    else:
+        axis_2 = _normal_plane_axis(secondary_axis, tangent_unit, orthogonal_to=axis_1)
+        if axis_2 is None:
+            axis_2 = np.cross(tangent_unit, axis_1)
+            axis_2 = axis_2 / max(float(np.linalg.norm(axis_2)), 1e-12)
+    basis = np.column_stack([axis_1, axis_2])
+    covariance = np.asarray(covariance_xyz, dtype=float)
+    if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
+        return 0.0, 0.0, axis_1, axis_2
+    projected = basis.T @ (0.5 * (covariance + covariance.T)) @ basis
+    projected = 0.5 * (projected + projected.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(projected)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = np.clip(eigenvalues[order], 0.0, None)
+    eigenvectors = eigenvectors[:, order]
+    scale = float(max(confidence_scale, 0.0))
+    semi_major = scale * float(np.sqrt(eigenvalues[0]))
+    semi_minor = scale * float(np.sqrt(eigenvalues[1]))
+    axis_major = basis @ eigenvectors[:, 0]
+    axis_minor = basis @ eigenvectors[:, 1]
+    axis_major = axis_major / max(float(np.linalg.norm(axis_major)), 1e-12)
+    axis_minor = axis_minor / max(float(np.linalg.norm(axis_minor)), 1e-12)
+    return semi_major, semi_minor, axis_major, axis_minor
+
+
+def _normal_plane_axis(
+    axis: np.ndarray,
+    tangent_unit: np.ndarray,
+    orthogonal_to: np.ndarray | None = None,
+) -> np.ndarray | None:
+    candidate = np.asarray(axis, dtype=float)
+    candidate = candidate - float(np.dot(candidate, tangent_unit)) * tangent_unit
+    if orthogonal_to is not None:
+        candidate = candidate - float(np.dot(candidate, orthogonal_to)) * orthogonal_to
+    norm = float(np.linalg.norm(candidate))
+    if norm <= 1e-12:
+        return None
+    return candidate / norm
 
 
 def build_uncertainty_overlay(
@@ -367,13 +760,21 @@ def build_uncertainty_overlay(
     angles = np.linspace(0.0, 2.0 * np.pi, int(model.ellipse_points), endpoint=False)
     samples: list[UncertaintyEllipseSample] = []
     previous_ring_open_xyz: np.ndarray | None = None
-    for md_m in _display_sample_md_values(
+    sample_md_values = _display_sample_md_values(
         md_values=md_values,
         inc_values=inc_values,
         azi_values_rad=azi_values_rad,
         model=model,
         required_md_m=required_md_m,
-    ):
+    )
+    if not sample_md_values:
+        return WellUncertaintyOverlay(samples=(), model=model)
+    covariance_samples = station_uncertainty_covariance_samples_for_stations(
+        stations=stations,
+        sample_md_m=np.asarray(sample_md_values, dtype=float),
+        model=model,
+    )
+    for sample_index, md_m in enumerate(sample_md_values):
         state = _interpolate_station_state(
             md_values=md_values,
             inc_values=inc_values,
@@ -387,20 +788,27 @@ def build_uncertainty_overlay(
         md_m = float(state["md_m"])
         inc_deg = float(state["inc_deg"])
         azi_deg = float(state["azi_deg"])
-        semi_inc_m, semi_azi_m = station_uncertainty_axes_m(
-            md_m=md_m,
-            inc_deg=inc_deg,
-            model=model,
-        )
-        if max(semi_inc_m, semi_azi_m) < float(model.min_display_radius_m):
-            continue
-
         tangent, inc_axis, azi_axis = local_uncertainty_axes_xyz(
             inc_deg=inc_deg,
             azi_deg=azi_deg,
         )
         if abs(float(inc_deg)) < float(model.near_vertical_isotropic_threshold_deg):
             inc_axis, azi_axis = _stable_normal_plane_basis(tangent)
+        covariance_xyz = np.asarray(
+            covariance_samples.covariance_xyz[int(sample_index)], dtype=float
+        )
+        semi_inc_m, semi_azi_m, inc_axis, azi_axis = (
+            _normal_plane_ellipse_axes_from_covariance(
+                covariance_xyz=covariance_xyz,
+                tangent=tangent,
+                primary_axis=inc_axis,
+                secondary_axis=azi_axis,
+                confidence_scale=float(model.confidence_scale),
+            )
+        )
+        if max(semi_inc_m, semi_azi_m) < float(model.min_display_radius_m):
+            continue
+
         center = np.array(
             [float(state["x_m"]), float(state["y_m"]), float(state["z_m"])], dtype=float
         )
@@ -444,6 +852,26 @@ def build_uncertainty_overlay(
                         )[0]
                     ),
                     float(center[2]),
+                ),
+                covariance_xyz=covariance_xyz,
+                covariance_xyz_random=np.asarray(
+                    covariance_samples.covariance_xyz_random[int(sample_index)],
+                    dtype=float,
+                ),
+                covariance_xyz_systematic=np.asarray(
+                    covariance_samples.covariance_xyz_systematic[int(sample_index)],
+                    dtype=float,
+                ),
+                covariance_xyz_global=np.asarray(
+                    covariance_samples.covariance_xyz_global[int(sample_index)],
+                    dtype=float,
+                ),
+                global_source_vectors_xyz=tuple(
+                    (
+                        source_name,
+                        np.asarray(source_vectors[int(sample_index)], dtype=float),
+                    )
+                    for source_name, source_vectors in covariance_samples.global_source_vectors_xyz
                 ),
                 ring_xyz=ring_xyz,
                 ring_plan_xy=ring_plan_xy,
@@ -495,20 +923,14 @@ def build_uncertainty_station_samples(
     sample_x = np.interp(sample_md, md_values, x_values)
     sample_y = np.interp(sample_md, md_values, y_values)
     sample_z = np.interp(sample_md, md_values, z_values)
-    covariance_xyz = station_uncertainty_covariance_xyz_many(
-        md_m=sample_md,
-        inc_deg=sample_inc_deg,
-        azi_deg=sample_azi_deg,
+    covariance_samples = station_uncertainty_covariance_samples_for_stations(
+        stations=stations,
+        sample_md_m=sample_md,
         model=model,
     )
 
     samples: list[UncertaintyStationSample] = []
     for index, md_m in enumerate(sample_md.tolist()):
-        semi_inc_m, semi_azi_m = station_uncertainty_axes_m(
-            md_m=float(md_m),
-            inc_deg=float(sample_inc_deg[index]),
-            model=model,
-        )
         station_index = int(np.argmin(np.abs(md_values - float(md_m))))
         samples.append(
             UncertaintyStationSample(
@@ -521,7 +943,22 @@ def build_uncertainty_station_samples(
                     float(sample_y[index]),
                     float(sample_z[index]),
                 ),
-                covariance_xyz=np.asarray(covariance_xyz[index], dtype=float),
+                covariance_xyz=np.asarray(
+                    covariance_samples.covariance_xyz[index], dtype=float
+                ),
+                covariance_xyz_random=np.asarray(
+                    covariance_samples.covariance_xyz_random[index], dtype=float
+                ),
+                covariance_xyz_systematic=np.asarray(
+                    covariance_samples.covariance_xyz_systematic[index], dtype=float
+                ),
+                covariance_xyz_global=np.asarray(
+                    covariance_samples.covariance_xyz_global[index], dtype=float
+                ),
+                global_source_vectors_xyz=tuple(
+                    (source_name, np.asarray(source_vectors[index], dtype=float))
+                    for source_name, source_vectors in covariance_samples.global_source_vectors_xyz
+                ),
             )
         )
     return tuple(samples)
@@ -610,7 +1047,9 @@ def _refine_sample_md_values(
         if md_key in tangent_cache:
             return tangent_cache[md_key]
         inc_deg = float(np.interp(md_key, md_values, inc_values))
-        azi_deg = float(np.rad2deg(np.interp(md_key, md_values, azi_values_rad)) % 360.0)
+        azi_deg = float(
+            np.rad2deg(np.interp(md_key, md_values, azi_values_rad)) % 360.0
+        )
         tangent = tangent_vector_xyz(inc_deg=inc_deg, azi_deg=azi_deg)
         tangent_cache[md_key] = tangent
         return tangent
@@ -630,7 +1069,9 @@ def _refine_sample_md_values(
         if interval_m <= float(model.min_refined_step_m) + 1e-9:
             refined.append(float(md_right))
             return
-        if angular_change_deg(md_left, md_right) <= float(model.directional_refine_threshold_deg):
+        if angular_change_deg(md_left, md_right) <= float(
+            model.directional_refine_threshold_deg
+        ):
             refined.append(float(md_right))
             return
         midpoint = round(float(0.5 * (md_left + md_right)), 6)
@@ -697,12 +1138,16 @@ def _interpolate_station_state(
     z_values: np.ndarray,
     md_m: float,
 ) -> dict[str, float]:
-    _validate_md_values_for_interpolation(md_values, context="uncertainty interpolation")
+    _validate_md_values_for_interpolation(
+        md_values, context="uncertainty interpolation"
+    )
     md_value = float(np.clip(md_m, float(md_values[0]), float(md_values[-1])))
     return {
         "md_m": md_value,
         "inc_deg": float(np.interp(md_value, md_values, inc_values)),
-        "azi_deg": float(np.rad2deg(np.interp(md_value, md_values, azi_values_rad)) % 360.0),
+        "azi_deg": float(
+            np.rad2deg(np.interp(md_value, md_values, azi_values_rad)) % 360.0
+        ),
         "x_m": float(np.interp(md_value, md_values, x_values)),
         "y_m": float(np.interp(md_value, md_values, y_values)),
         "z_m": float(np.interp(md_value, md_values, z_values)),
@@ -714,7 +1159,9 @@ def _validated_inclination_deg(inc_deg: float) -> float:
     if not np.isfinite(inc_value):
         raise ValueError("inc_deg must be finite for uncertainty calculations.")
     if inc_value < 0.0 or inc_value > 180.0:
-        raise ValueError("inc_deg must be within [0, 180] for uncertainty calculations.")
+        raise ValueError(
+            "inc_deg must be within [0, 180] for uncertainty calculations."
+        )
     return inc_value
 
 
@@ -838,7 +1285,9 @@ def build_uncertainty_tube_mesh(
     if len(overlay.samples) < 2:
         return None
 
-    rings = [np.asarray(sample.ring_xyz[:-1], dtype=float) for sample in overlay.samples]
+    rings = [
+        np.asarray(sample.ring_xyz[:-1], dtype=float) for sample in overlay.samples
+    ]
     points_per_ring = int(rings[0].shape[0])
     if points_per_ring < 3:
         return None
@@ -1017,7 +1466,9 @@ def _align_ring_for_continuity(
     for candidate_base in (current, current[::-1]):
         for shift in range(current.shape[0]):
             candidate = np.roll(candidate_base, shift=shift, axis=0)
-            candidate_cost = float(np.mean(np.linalg.norm(candidate - previous, axis=1)))
+            candidate_cost = float(
+                np.mean(np.linalg.norm(candidate - previous, axis=1))
+            )
             if candidate_cost + 1e-9 < best_cost:
                 best_ring = candidate
                 best_cost = candidate_cost

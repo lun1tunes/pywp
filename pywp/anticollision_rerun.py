@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Mapping
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
+    DEFINITIVE_SCAN_STEP_M,
     analyze_anti_collision,
     build_anti_collision_well,
 )
@@ -32,7 +33,7 @@ from pywp.reference_trajectories import (
     reference_well_collision_name,
     reference_well_duplicate_name_keys,
 )
-from pywp.uncertainty import PlanningUncertaintyModel
+from pywp.uncertainty import PlanningUncertaintyModel, fast_proxy_uncertainty_model
 
 if TYPE_CHECKING:
     from pywp.welltrack_batch import SuccessfulWellPlan
@@ -93,7 +94,17 @@ def build_anti_collision_analysis_for_successes(
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     include_display_geometry: bool = True,
     build_overlap_geometry: bool = True,
+    analysis_sample_step_m: float | None = None,
 ) -> AntiCollisionAnalysis:
+    effective_sample_step_m = (
+        float(analysis_sample_step_m)
+        if analysis_sample_step_m is not None
+        else (
+            float(DEFINITIVE_SCAN_STEP_M)
+            if include_display_geometry and build_overlap_geometry
+            else None
+        )
+    )
     planned_names = tuple(str(item.name) for item in successes)
     duplicate_reference_name_keys = reference_well_duplicate_name_keys(
         reference_wells
@@ -112,6 +123,7 @@ def build_anti_collision_analysis_for_successes(
             include_display_geometry=include_display_geometry,
             well_kind="project",
             is_reference_only=False,
+            analysis_sample_step_m=effective_sample_step_m,
         )
         for item in successes
     ]
@@ -139,6 +151,7 @@ def build_anti_collision_analysis_for_successes(
                 include_display_geometry=include_display_geometry,
                 well_kind=str(item.kind),
                 is_reference_only=True,
+                analysis_sample_step_m=effective_sample_step_m,
             )
         )
     return analyze_anti_collision(
@@ -218,7 +231,7 @@ def build_dynamic_cluster_execution_plan(
         )
     analysis = build_anti_collision_analysis_for_successes(
         successes,
-        model=uncertainty_model,
+        model=fast_proxy_uncertainty_model(uncertainty_model),
         reference_wells=reference_wells,
         include_display_geometry=False,
         build_overlap_geometry=False,

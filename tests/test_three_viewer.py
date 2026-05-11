@@ -218,6 +218,16 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "registerMiniMapHiddenContourObject(wireframe)" in html
     assert "const miniMapOverlayScene = new THREE.Scene();" in html
     assert "function addMiniMapTrajectoryOverlay(item)" in html
+    assert 'const isConflictSegment = role === "conflict_segment";' in html
+    assert 'role === "line" || role === "conflict_segment"' in html
+    assert "mesh.renderOrder = isConflictSegment ? 8 : 0;" in html
+    assert "lineSegments.renderOrder = isConflictSegment ? 9 : 0;" in html
+    assert "miniMapTrajectoryOverlayWidth() * 1.45" in html
+    assert "mesh.renderOrder = 12;" in html
+    assert "function addMiniMapConeOverlay(item, sourceGeometry)" in html
+    assert 'String((item && item.role) || "") !== "cone"' in html
+    assert "addMiniMapConeOverlay(item, geometry)" in html
+    assert "mesh.renderOrder = -10;" in html
     assert "function addMiniMapMarkerOverlay(item)" in html
     assert "renderer.clearDepth();" in html
     assert "renderer.render(miniMapOverlayScene, miniMapCamera);" in html
@@ -244,7 +254,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "new THREE.PointsMaterial" in html
     assert "function addPolylineTube()" in html
     assert "new THREE.MeshLambertMaterial({" in html
-    assert "const depthMaterial = new THREE.MeshBasicMaterial({" in html
+    assert "const depthMaterial = isConflictSegment" in html
     assert "colorWrite: false" in html
     assert "depthMesh.renderOrder = -1" in html
     assert "Math.max(maxSpan * 0.00032, 0.9)" in html

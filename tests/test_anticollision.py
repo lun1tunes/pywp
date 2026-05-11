@@ -10,6 +10,8 @@ import pywp.anticollision as anticollision_module
 from pywp.anticollision import (
     AntiCollisionAnalysis,
     AntiCollisionCorridor,
+    AntiCollisionSample,
+    AntiCollisionWell,
     TARGET_T1,
     TARGET_T3,
     anti_collision_report_events,
@@ -40,12 +42,16 @@ from pywp.models import (
     TrajectoryConfig,
 )
 from pywp.reference_trajectories import (
+    REFERENCE_WELL_ACTUAL,
+    REFERENCE_WELL_APPROVED,
     parse_reference_trajectory_dev_directories,
     parse_reference_trajectory_table,
 )
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
+    PlanningUncertaintyModel,
     planning_uncertainty_model_for_preset,
+    station_uncertainty_covariance_samples_for_stations,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
@@ -63,6 +69,399 @@ def _straight_stations(*, y_offset_m: float) -> pd.DataFrame:
     )
 
 
+def test_anti_collision_scan_samples_are_decoupled_from_display_ellipses() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=5)
+
+    well = build_anti_collision_well(
+        name="WELL-A",
+        color="#123456",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=True,
+        analysis_sample_step_m=10.0,
+    )
+
+    sample_md = np.asarray([sample.md_m for sample in well.samples], dtype=float)
+
+    assert len(well.overlay.samples) <= 5
+    assert len(well.samples) > len(well.overlay.samples)
+    assert float(np.max(np.diff(sample_md))) <= 10.0 + 1e-6
+
+
+def test_overlap_geometry_uses_dense_scan_samples_not_display_indices() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=4)
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#123456",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=True,
+        analysis_sample_step_m=10.0,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#654321",
+        stations=_straight_stations(y_offset_m=6.0),
+        surface=Point3D(0.0, 6.0, 0.0),
+        t1=Point3D(1000.0, 6.0, 0.0),
+        t3=Point3D(2000.0, 6.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=True,
+        analysis_sample_step_m=10.0,
+    )
+
+    analysis = analyze_anti_collision([well_a, well_b], build_overlap_geometry=True)
+
+    assert analysis.corridors
+    assert any(len(corridor.overlap_rings_xyz) > 0 for corridor in analysis.corridors)
+
+
+def test_local_refine_finds_overlap_between_coarse_scan_stations() -> None:
+    covariance = np.diag([36.0, 36.0, 36.0])
+    zero = np.zeros((3, 3), dtype=float)
+    model = PlanningUncertaintyModel(confidence_scale=1.0)
+
+    def sample(md_m: float, center: tuple[float, float, float]) -> AntiCollisionSample:
+        return AntiCollisionSample(
+            md_m=md_m,
+            center_xyz=center,
+            covariance_xyz=covariance,
+            covariance_xyz_random=covariance,
+            covariance_xyz_systematic=zero,
+            covariance_xyz_global=zero,
+            global_source_vectors_xyz=(),
+            inc_deg=90.0,
+            azi_deg=90.0,
+        )
+
+    well_a = AntiCollisionWell(
+        name="WELL-A",
+        color="#123456",
+        overlay=anticollision_module.WellUncertaintyOverlay(samples=(), model=model),
+        samples=(sample(0.0, (0.0, 0.0, 0.0)), sample(10.0, (10.0, 0.0, 0.0))),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 10.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [0.0, 10.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 0.0],
+            }
+        ),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=None,
+        t3=None,
+        md_t1_m=None,
+        md_t3_m=None,
+    )
+    well_b = AntiCollisionWell(
+        name="WELL-B",
+        color="#654321",
+        overlay=anticollision_module.WellUncertaintyOverlay(samples=(), model=model),
+        samples=(sample(0.0, (0.0, 20.0, 0.0)), sample(10.0, (10.0, 20.0, 0.0))),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 5.0, 10.0],
+                "INC_deg": [90.0, 90.0, 90.0],
+                "AZI_deg": [90.0, 90.0, 90.0],
+                "X_m": [0.0, 5.0, 10.0],
+                "Y_m": [20.0, 0.0, 20.0],
+                "Z_m": [0.0, 0.0, 0.0],
+            }
+        ),
+        surface=Point3D(0.0, 20.0, 0.0),
+        t1=None,
+        t3=None,
+        md_t1_m=None,
+        md_t3_m=None,
+    )
+
+    for build_overlap_geometry in (True, False):
+        analysis = analyze_anti_collision(
+            [well_a, well_b],
+            build_overlap_geometry=build_overlap_geometry,
+        )
+
+        assert analysis.corridors
+        assert min(
+            float(np.min(corridor.separation_factor_values))
+            for corridor in analysis.corridors
+        ) == pytest.approx(0.0)
+
+
+def test_local_refine_still_runs_when_a_coarse_overlap_already_exists() -> None:
+    covariance = np.diag([36.0, 36.0, 36.0])
+    zero = np.zeros((3, 3), dtype=float)
+    model = PlanningUncertaintyModel(confidence_scale=1.0)
+
+    def sample(md_m: float, center: tuple[float, float, float]) -> AntiCollisionSample:
+        return AntiCollisionSample(
+            md_m=md_m,
+            center_xyz=center,
+            covariance_xyz=covariance,
+            covariance_xyz_random=covariance,
+            covariance_xyz_systematic=zero,
+            covariance_xyz_global=zero,
+            global_source_vectors_xyz=(),
+            inc_deg=90.0,
+            azi_deg=90.0,
+        )
+
+    well_a = AntiCollisionWell(
+        name="WELL-A",
+        color="#123456",
+        overlay=anticollision_module.WellUncertaintyOverlay(samples=(), model=model),
+        samples=tuple(
+            sample(float(md_m), (float(md_m), 0.0, 0.0))
+            for md_m in (0.0, 10.0, 20.0, 30.0, 40.0, 50.0)
+        ),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+                "INC_deg": [90.0, 90.0, 90.0, 90.0, 90.0, 90.0],
+                "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0, 90.0],
+                "X_m": [0.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+                "Y_m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "Z_m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            }
+        ),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=None,
+        t3=None,
+        md_t1_m=None,
+        md_t3_m=None,
+    )
+    well_b = AntiCollisionWell(
+        name="WELL-B",
+        color="#654321",
+        overlay=anticollision_module.WellUncertaintyOverlay(samples=(), model=model),
+        samples=tuple(
+            sample(
+                float(md_m),
+                (
+                    float(md_m),
+                    0.0 if md_m == 0.0 else 20.0 if md_m >= 40.0 else 60.0,
+                    0.0,
+                ),
+            )
+            for md_m in (0.0, 10.0, 20.0, 30.0, 40.0, 50.0)
+        ),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 10.0, 20.0, 30.0, 40.0, 45.0, 50.0],
+                "INC_deg": [90.0, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0],
+                "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0],
+                "X_m": [0.0, 10.0, 20.0, 30.0, 40.0, 45.0, 50.0],
+                "Y_m": [0.0, 60.0, 60.0, 60.0, 20.0, 0.0, 20.0],
+                "Z_m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            }
+        ),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=None,
+        t3=None,
+        md_t1_m=None,
+        md_t3_m=None,
+    )
+
+    analysis = analyze_anti_collision(
+        [well_a, well_b],
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.corridors
+    assert any(float(corridor.md_a_end_m) >= 45.0 for corridor in analysis.corridors)
+    assert min(
+        float(np.min(corridor.separation_factor_values))
+        for corridor in analysis.corridors
+    ) == pytest.approx(0.0)
+
+
+def test_success_analysis_uses_definitive_scan_step_for_report_geometry() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=5)
+    successes = [
+        SuccessfulWellPlan(
+            name="WELL-A",
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(1000.0, 0.0, 0.0),
+            t3=Point3D(2000.0, 0.0, 0.0),
+            stations=_straight_stations(y_offset_m=0.0),
+            summary={},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config=TrajectoryConfig(),
+        ),
+        SuccessfulWellPlan(
+            name="WELL-B",
+            surface=Point3D(0.0, 6.0, 0.0),
+            t1=Point3D(1000.0, 6.0, 0.0),
+            t3=Point3D(2000.0, 6.0, 0.0),
+            stations=_straight_stations(y_offset_m=6.0),
+            summary={},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config=TrajectoryConfig(),
+        ),
+    ]
+
+    analysis = build_anti_collision_analysis_for_successes(
+        successes,
+        model=model,
+        include_display_geometry=True,
+        build_overlap_geometry=True,
+    )
+
+    sample_md = np.asarray(
+        [sample.md_m for sample in analysis.wells[0].samples], dtype=float
+    )
+
+    assert float(np.max(np.diff(sample_md))) <= 10.0 + 1e-6
+    assert len(analysis.wells[0].overlay.samples) <= 5
+
+
+def test_reference_actual_and_approved_wells_use_station_history_iscwsa_ellipses() -> (
+    None
+):
+    model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, -600.0, 0.0),
+        t1=Point3D(200.0, -600.0, 700.0),
+        t3=Point3D(1300.0, -600.0, 900.0),
+        stations=_straight_stations(y_offset_m=-600.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+    reference_rows = []
+    for well_name, well_kind, y_m in (
+        ("REF-ACT", "actual", 0.0),
+        ("REF-APP", "approved", 100.0),
+    ):
+        for x_m, z_m, md_m in (
+            (0.0, 0.0, 0.0),
+            (200.0, 700.0, 760.0),
+            (1300.0, 900.0, 1900.0),
+        ):
+            reference_rows.append(
+                {
+                    "Wellname": well_name,
+                    "Type": well_kind,
+                    "X": x_m,
+                    "Y": y_m,
+                    "Z": z_m,
+                    "MD": md_m,
+                }
+            )
+    reference_wells = tuple(parse_reference_trajectory_table(reference_rows))
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=model,
+        reference_wells=reference_wells,
+        include_display_geometry=True,
+        build_overlap_geometry=False,
+    )
+    reference_by_kind = {
+        str(well.well_kind): well
+        for well in analysis.wells
+        if bool(well.is_reference_only)
+    }
+
+    assert set(reference_by_kind) == {REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED}
+    for imported_reference in reference_wells:
+        reference_well = reference_by_kind[str(imported_reference.kind)]
+        terminal_md_m = float(imported_reference.stations["MD_m"].iloc[-1])
+        terminal_sample = next(
+            sample
+            for sample in reference_well.samples
+            if float(sample.md_m) == pytest.approx(terminal_md_m)
+        )
+        expected = station_uncertainty_covariance_samples_for_stations(
+            stations=imported_reference.stations,
+            sample_md_m=np.asarray([terminal_md_m], dtype=float),
+            model=model,
+        )
+        expected_covariance = np.asarray(expected.covariance_xyz[0], dtype=float)
+
+        assert reference_well.overlay.samples
+        assert reference_well.overlay.samples[-1].md_m == pytest.approx(terminal_md_m)
+        np.testing.assert_allclose(terminal_sample.covariance_xyz, expected_covariance)
+        np.testing.assert_allclose(
+            reference_well.overlay.samples[-1].covariance_xyz,
+            expected_covariance,
+        )
+        assert float(np.trace(terminal_sample.covariance_xyz)) > 0.0
+        assert {
+            source_name
+            for source_name, _ in terminal_sample.global_source_vectors_xyz
+        } == {"dbhg", "decg", "dstg"}
+
+    np.testing.assert_allclose(
+        reference_by_kind[REFERENCE_WELL_ACTUAL].samples[-1].covariance_xyz,
+        reference_by_kind[REFERENCE_WELL_APPROVED].samples[-1].covariance_xyz,
+    )
+
+
+def test_global_source_vectors_are_correlated_in_relative_clearance() -> None:
+    covariance_zero = np.zeros((3, 3), dtype=float)
+    sample_a = AntiCollisionSample(
+        md_m=100.0,
+        center_xyz=(0.0, 0.0, 0.0),
+        covariance_xyz=np.diag([25.0, 0.0, 0.0]),
+        covariance_xyz_random=covariance_zero,
+        covariance_xyz_systematic=covariance_zero,
+        covariance_xyz_global=np.diag([25.0, 0.0, 0.0]),
+        global_source_vectors_xyz=(("decg", np.asarray([5.0, 0.0, 0.0])),),
+    )
+    sample_b_same_global = AntiCollisionSample(
+        md_m=100.0,
+        center_xyz=(10.0, 0.0, 0.0),
+        covariance_xyz=np.diag([25.0, 0.0, 0.0]),
+        covariance_xyz_random=covariance_zero,
+        covariance_xyz_systematic=covariance_zero,
+        covariance_xyz_global=np.diag([25.0, 0.0, 0.0]),
+        global_source_vectors_xyz=(("decg", np.asarray([5.0, 0.0, 0.0])),),
+    )
+    sample_b_different_global = AntiCollisionSample(
+        md_m=100.0,
+        center_xyz=(10.0, 0.0, 0.0),
+        covariance_xyz=np.diag([25.0, 0.0, 0.0]),
+        covariance_xyz_random=covariance_zero,
+        covariance_xyz_systematic=covariance_zero,
+        covariance_xyz_global=np.diag([25.0, 0.0, 0.0]),
+        global_source_vectors_xyz=(("decg", np.asarray([-5.0, 0.0, 0.0])),),
+    )
+    direction = np.asarray([[1.0, 0.0, 0.0]], dtype=float)
+
+    same_sigma2 = anticollision_module._directional_global_relative_sigma2_for_pairs(
+        samples_a=(sample_a,),
+        samples_b=(sample_b_same_global,),
+        direction=direction,
+    )
+    different_sigma2 = anticollision_module._directional_global_relative_sigma2_for_pairs(
+        samples_a=(sample_a,),
+        samples_b=(sample_b_different_global,),
+        direction=direction,
+    )
+
+    assert same_sigma2[0] == pytest.approx(0.0)
+    assert different_sigma2[0] == pytest.approx(100.0)
+
+
 def _vertical_build_stations(
     *,
     y_offset_m: float,
@@ -75,7 +474,13 @@ def _vertical_build_stations(
             "INC_deg": [0.0, 0.0, 0.0, 20.0, 50.0],
             "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0],
             "X_m": [0.0, 0.0, 0.0, 50.0, 320.0],
-            "Y_m": [y_offset_m, y_offset_m, y_offset_m, lateral_y_t1_m, lateral_y_end_m],
+            "Y_m": [
+                y_offset_m,
+                y_offset_m,
+                y_offset_m,
+                lateral_y_t1_m,
+                lateral_y_end_m,
+            ],
             "Z_m": [0.0, 500.0, 1000.0, 1450.0, 1775.0],
             "segment": ["VERTICAL", "VERTICAL", "VERTICAL", "BUILD1", "BUILD1"],
         }
@@ -131,7 +536,9 @@ def test_anti_collision_analysis_prioritizes_target_overlaps() -> None:
     assert (2000.0, 2000.0) in target_mds
 
 
-def test_collision_zone_geometry_helpers_return_closed_plan_polygon_and_sphere_grid() -> None:
+def test_collision_zone_geometry_helpers_return_closed_plan_polygon_and_sphere_grid() -> (
+    None
+):
     well_a = build_anti_collision_well(
         name="WELL-A",
         color="#0B6E4F",
@@ -193,7 +600,10 @@ def test_collision_corridor_geometry_and_well_segments_are_built() -> None:
     assert tuple(polygon[0]) == tuple(polygon[-1])
     assert tube_mesh is not None
     assert tube_mesh.vertices_xyz.shape[1] == 3
-    assert {segment.well_name for segment in analysis.well_segments} == {"WELL-A", "WELL-B"}
+    assert {segment.well_name for segment in analysis.well_segments} == {
+        "WELL-A",
+        "WELL-B",
+    }
 
 
 def test_collision_corridor_overlap_mesh_uses_independent_lenses() -> None:
@@ -212,9 +622,7 @@ def test_collision_corridor_overlap_mesh_uses_independent_lenses() -> None:
         md_b_values_m=np.array([1000.0, 1030.0], dtype=float),
         label_a_values=("", ""),
         label_b_values=("", ""),
-        midpoint_xyz=np.array(
-            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float
-        ),
+        midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
         overlap_rings_xyz=(
             np.array(
                 [
@@ -244,13 +652,14 @@ def test_collision_corridor_overlap_mesh_uses_independent_lenses() -> None:
 
     assert mesh is not None
     assert mesh.vertices_xyz.shape == (10, 3)
-    assert len(mesh.i) == 8
-    assert set(mesh.i[:4]) == {4}
-    assert set(mesh.i[4:]) == {9}
-    assert np.all(mesh.j[:4] < 4)
-    assert np.all(mesh.k[:4] < 4)
-    assert np.all((mesh.j[4:] >= 5) & (mesh.j[4:] < 9))
-    assert np.all((mesh.k[4:] >= 5) & (mesh.k[4:] < 9))
+    assert len(mesh.i) == 16
+    assert set(mesh.i[-8:-4]) == {8}
+    assert set(mesh.i[-4:]) == {9}
+    side_vertices = np.concatenate([mesh.i[:8], mesh.j[:8], mesh.k[:8]])
+    assert np.any(side_vertices < 4)
+    assert np.any((side_vertices >= 4) & (side_vertices < 8))
+    assert np.all(mesh.j[-8:-4] < 4)
+    assert np.all((mesh.j[-4:] >= 4) & (mesh.j[-4:] < 8))
 
 
 def test_analyze_anti_collision_skips_distant_pair_before_corridor_scan(
@@ -446,7 +855,9 @@ def test_analyze_anti_collision_does_not_skip_pair_by_terminal_geometry_only(
     assert seen_pairs == [("WELL-A", "WELL-B")]
 
 
-def test_analyze_anti_collision_rejects_overlap_geometry_without_display_overlay() -> None:
+def test_analyze_anti_collision_builds_overlap_geometry_without_display_overlay() -> (
+    None
+):
     well_a = build_anti_collision_well(
         name="WELL-A",
         color="#0B6E4F",
@@ -470,11 +881,15 @@ def test_analyze_anti_collision_rejects_overlap_geometry_without_display_overlay
         include_display_geometry=False,
     )
 
-    with pytest.raises(ValueError, match="display geometry"):
-        analyze_anti_collision([well_a, well_b], build_overlap_geometry=True)
+    analysis = analyze_anti_collision([well_a, well_b], build_overlap_geometry=True)
+
+    assert analysis.corridors
+    assert any(len(corridor.overlap_rings_xyz) > 0 for corridor in analysis.corridors)
 
 
-def test_lightweight_runtime_analysis_matches_full_report_events_and_recommendations() -> None:
+def test_lightweight_runtime_analysis_matches_full_report_events_and_recommendations() -> (
+    None
+):
     stations_a = _vertical_build_stations(
         y_offset_m=0.0,
         lateral_y_t1_m=60.0,
@@ -529,7 +944,8 @@ def test_lightweight_runtime_analysis_matches_full_report_events_and_recommendat
                 azimuth_deg=90.0,
                 md_t1_m=1500.0,
             ),
-        ]
+        ],
+        build_overlap_geometry=False,
     )
     runtime_analysis = build_anti_collision_analysis_for_successes(
         [success_a, success_b],
@@ -557,7 +973,9 @@ def test_lightweight_runtime_analysis_matches_full_report_events_and_recommendat
     }
 
     assert runtime_analysis.zones
-    assert all(len(corridor.overlap_rings_xyz) == 0 for corridor in runtime_analysis.corridors)
+    assert all(
+        len(corridor.overlap_rings_xyz) == 0 for corridor in runtime_analysis.corridors
+    )
     runtime_events = anti_collision_report_events(runtime_analysis)
     full_events = anti_collision_report_events(full_analysis)
     assert len(runtime_events) == len(full_events)
@@ -604,7 +1022,7 @@ def test_lightweight_runtime_analysis_matches_full_report_events_and_recommendat
         )
 
 
-def test_welltracks4_well_03_well_09_target_overlap_is_reported() -> None:
+def test_welltracks4_well_03_well_09_shared_surface_overlap_is_reported() -> None:
     records = [
         record
         for record in parse_welltrack_text(
@@ -634,12 +1052,54 @@ def test_welltracks4_well_03_well_09_target_overlap_is_reported() -> None:
         for event in anti_collision_report_events(analysis)
         if {str(event.well_a), str(event.well_b)} == {"well_03", "well_09"}
     ]
-    assert any(str(event.classification) == "target-target" for event in pair_events)
     assert any(
-        str(event.classification) == "target-trajectory"
-        and float(event.max_overlap_depth_m) > 40.0
+        str(event.classification) == "trajectory"
+        and float(event.min_center_distance_m) == pytest.approx(0.0)
+        and float(event.max_overlap_depth_m) > 0.0
         for event in pair_events
     )
+
+
+def test_welltracks4_well_06_well_07_visual_cones_use_dense_iscwsa_samples() -> None:
+    records = [
+        record
+        for record in parse_welltrack_text(
+            Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+        )
+        if str(record.name) in {"well_06", "well_07"}
+    ]
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={str(record.name) for record in records},
+        config=TrajectoryConfig(turn_solver_max_restarts=0),
+    )
+    assert {str(row["Скважина"]): str(row["Статус"]) for row in rows} == {
+        "well_06": "OK",
+        "well_07": "OK",
+    }
+
+    analysis = build_anti_collision_analysis_for_successes(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        include_display_geometry=True,
+        build_overlap_geometry=True,
+    )
+    wells_by_name = {str(well.name): well for well in analysis.wells}
+    pair_events = [
+        event
+        for event in anti_collision_report_events(analysis)
+        if {str(event.well_a), str(event.well_b)} == {"well_06", "well_07"}
+    ]
+    late_pair_events = [
+        event
+        for event in pair_events
+        if min(float(event.md_a_start_m), float(event.md_b_start_m)) > 1000.0
+    ]
+
+    assert pair_events
+    assert late_pair_events == []
+    assert len(wells_by_name["well_06"].overlay.samples) >= 150
+    assert len(wells_by_name["well_07"].overlay.samples) >= 150
 
 
 def test_overlap_ring_is_not_reduced_to_uniform_circle_for_offset_wells() -> None:
@@ -665,14 +1125,20 @@ def test_overlap_ring_is_not_reduced_to_uniform_circle_for_offset_wells() -> Non
     )
     analysis = analyze_anti_collision([well_a, well_b])
 
-    overlap_ring = np.asarray(analysis.corridors[0].overlap_rings_xyz[0], dtype=float)
-    center = np.mean(overlap_ring, axis=0)
-    radial_distances = np.linalg.norm(overlap_ring - center[None, :], axis=1)
+    radial_spreads = []
+    for corridor in analysis.corridors:
+        for ring in corridor.overlap_rings_xyz:
+            ring_xyz = np.asarray(ring, dtype=float)
+            center = np.mean(ring_xyz, axis=0)
+            radial_distances = np.linalg.norm(ring_xyz - center[None, :], axis=1)
+            radial_spreads.append(float(np.max(radial_distances) - np.min(radial_distances)))
 
-    assert float(np.std(radial_distances)) > 0.2
+    assert max(radial_spreads) > 0.25
 
 
-def test_runtime_analysis_supports_reference_trajectory_wells_without_target_overlap_pollution() -> None:
+def test_runtime_analysis_supports_reference_trajectory_wells_without_target_overlap_pollution() -> (
+    None
+):
     success = SuccessfulWellPlan(
         name="WELL-A",
         surface=Point3D(0.0, 0.0, 0.0),
@@ -687,9 +1153,30 @@ def test_runtime_analysis_supports_reference_trajectory_wells_without_target_ove
     reference_wells = tuple(
         parse_reference_trajectory_table(
             [
-                {"Wellname": "FACT-1", "Type": "actual", "X": 0.0, "Y": 5.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "FACT-1", "Type": "actual", "X": 1000.0, "Y": 5.0, "Z": 0.0, "MD": 1000.0},
-                {"Wellname": "FACT-1", "Type": "actual", "X": 2000.0, "Y": 5.0, "Z": 0.0, "MD": 2000.0},
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 5.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 1000.0,
+                    "Y": 5.0,
+                    "Z": 0.0,
+                    "MD": 1000.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 2000.0,
+                    "Y": 5.0,
+                    "Z": 0.0,
+                    "MD": 2000.0,
+                },
             ]
         )
     )
@@ -733,9 +1220,30 @@ def test_runtime_analysis_disambiguates_reference_name_matching_planned_well() -
     reference_wells = tuple(
         parse_reference_trajectory_table(
             [
-                {"Wellname": "WELL-A", "Type": "actual", "X": 0.0, "Y": 5.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "WELL-A", "Type": "actual", "X": 1000.0, "Y": 5.0, "Z": 0.0, "MD": 1000.0},
-                {"Wellname": "WELL-A", "Type": "actual", "X": 2000.0, "Y": 5.0, "Z": 0.0, "MD": 2000.0},
+                {
+                    "Wellname": "WELL-A",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 5.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "WELL-A",
+                    "Type": "actual",
+                    "X": 1000.0,
+                    "Y": 5.0,
+                    "Z": 0.0,
+                    "MD": 1000.0,
+                },
+                {
+                    "Wellname": "WELL-A",
+                    "Type": "actual",
+                    "X": 2000.0,
+                    "Y": 5.0,
+                    "Z": 0.0,
+                    "MD": 2000.0,
+                },
             ]
         )
     )
@@ -783,10 +1291,38 @@ def test_runtime_analysis_disambiguates_actual_and_approved_same_stem() -> None:
     reference_wells = tuple(
         parse_reference_trajectory_table(
             [
-                {"Wellname": "DUP", "Type": "actual", "X": 0.0, "Y": 5.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "DUP", "Type": "actual", "X": 1000.0, "Y": 5.0, "Z": 0.0, "MD": 1000.0},
-                {"Wellname": "DUP", "Type": "approved", "X": 0.0, "Y": 6.0, "Z": 0.0, "MD": 0.0},
-                {"Wellname": "DUP", "Type": "approved", "X": 1000.0, "Y": 6.0, "Z": 0.0, "MD": 1000.0},
+                {
+                    "Wellname": "DUP",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 5.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "DUP",
+                    "Type": "actual",
+                    "X": 1000.0,
+                    "Y": 5.0,
+                    "Z": 0.0,
+                    "MD": 1000.0,
+                },
+                {
+                    "Wellname": "DUP",
+                    "Type": "approved",
+                    "X": 0.0,
+                    "Y": 6.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "DUP",
+                    "Type": "approved",
+                    "X": 1000.0,
+                    "Y": 6.0,
+                    "Z": 0.0,
+                    "MD": 1000.0,
+                },
             ]
         )
     )
@@ -969,7 +1505,10 @@ def test_report_merges_adjacent_corridors_into_single_event() -> None:
         label_a_values=("", ""),
         label_b_values=("", ""),
         midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_rings_xyz=(
+            np.zeros((16, 3), dtype=float),
+            np.ones((16, 3), dtype=float),
+        ),
         overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
         separation_factor_values=np.array([0.72, 0.69], dtype=float),
         overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
@@ -990,7 +1529,10 @@ def test_report_merges_adjacent_corridors_into_single_event() -> None:
         label_a_values=("", ""),
         label_b_values=("", ""),
         midpoint_xyz=np.array([[20.0, 0.0, 0.0], [30.0, 0.0, 0.0]], dtype=float),
-        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_rings_xyz=(
+            np.zeros((16, 3), dtype=float),
+            np.ones((16, 3), dtype=float),
+        ),
         overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
         separation_factor_values=np.array([0.68, 0.66], dtype=float),
         overlap_depth_values_m=np.array([10.0, 11.0], dtype=float),
@@ -1047,7 +1589,9 @@ def test_report_keeps_distinct_target_labels_in_adjacent_events() -> None:
             md_b_values_m=np.array([start_m, end_m], dtype=float),
             label_a_values=(label_a, label_a),
             label_b_values=(label_b, label_b),
-            midpoint_xyz=np.array([[start_m, 0.0, 0.0], [end_m, 0.0, 0.0]], dtype=float),
+            midpoint_xyz=np.array(
+                [[start_m, 0.0, 0.0], [end_m, 0.0, 0.0]], dtype=float
+            ),
             overlap_rings_xyz=(
                 np.zeros((16, 3), dtype=float),
                 np.ones((16, 3), dtype=float),
@@ -1139,13 +1683,18 @@ def test_recommendations_prioritize_target_spacing_for_target_overlap() -> None:
     assert recommendations[0].required_spacing_t1_m is not None
     assert recommendations[0].can_prepare_rerun is False
     assert "2σ overlap" not in recommendations[0].summary
-    assert "увеличьте расстояние между конфликтными участками" in recommendations[0].summary
+    assert (
+        "увеличьте расстояние между конфликтными участками"
+        in recommendations[0].summary
+    )
     assert rows[0]["Тип действия"] == "Цели / spacing"
     assert "Рекомендация по устранению" in rows[0]
     assert rows[0]["Подготовка пересчета"] == "Только рекомендация по целям"
 
 
-def test_recommendations_prepare_anticollision_kop_build1_for_vertical_collision() -> None:
+def test_recommendations_prepare_anticollision_kop_build1_for_vertical_collision() -> (
+    None
+):
     well_a = build_anti_collision_well(
         name="WELL-A",
         color="#0B6E4F",
@@ -1207,10 +1756,15 @@ def test_recommendations_prepare_anticollision_kop_build1_for_vertical_collision
         for suggestion in recommendation.override_suggestions
     )
     assert recommendation.expected_maneuver == "Сместить ранний уход: KOP / BUILD1"
-    assert recommendation.action_label == "Подготовить anti-collision пересчет (KOP/BUILD1)"
+    assert (
+        recommendation.action_label
+        == "Подготовить anti-collision пересчет (KOP/BUILD1)"
+    )
 
 
-def test_pre_kop_trajectory_conflict_is_reclassified_to_kop_build1_anticollision() -> None:
+def test_pre_kop_trajectory_conflict_is_reclassified_to_kop_build1_anticollision() -> (
+    None
+):
     well_a = build_anti_collision_well(
         name="WELL-A",
         color="#0B6E4F",
@@ -1298,7 +1852,10 @@ def test_pre_kop_trajectory_conflict_is_reclassified_to_kop_build1_anticollision
 
     assert recommendations
     assert recommendations[0].category == RECOMMENDATION_REDUCE_KOP
-    assert recommendations[0].action_label == "Подготовить anti-collision пересчет (KOP/BUILD1)"
+    assert (
+        recommendations[0].action_label
+        == "Подготовить anti-collision пересчет (KOP/BUILD1)"
+    )
     assert all(
         suggestion.config_updates.get("optimization_mode") == "anti_collision_avoidance"
         for suggestion in recommendations[0].override_suggestions
@@ -1399,7 +1956,9 @@ def test_build2_trajectory_conflict_reports_build2_maneuver() -> None:
     assert recommendations[0].expected_maneuver == MANEUVER_BUILD2_ENTRY
 
 
-def test_recommendations_prepare_pairwise_anti_collision_rerun_for_trajectory_collision() -> None:
+def test_recommendations_prepare_pairwise_anti_collision_rerun_for_trajectory_collision() -> (
+    None
+):
     corridor = AntiCollisionCorridor(
         well_a="well_02",
         well_b="well_05",
@@ -1416,7 +1975,10 @@ def test_recommendations_prepare_pairwise_anti_collision_rerun_for_trajectory_co
         label_a_values=("", ""),
         label_b_values=("", ""),
         midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_rings_xyz=(
+            np.zeros((16, 3), dtype=float),
+            np.ones((16, 3), dtype=float),
+        ),
         overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
         separation_factor_values=np.array([0.72, 0.69], dtype=float),
         overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
@@ -1461,19 +2023,25 @@ def test_recommendations_prepare_pairwise_anti_collision_rerun_for_trajectory_co
     assert recommendation.can_prepare_rerun is True
     assert set(recommendation.affected_wells) == {"well_02", "well_05"}
     assert len(recommendation.override_suggestions) == 2
-    assert {
-        str(item.well_name) for item in recommendation.override_suggestions
-    } == {"well_02", "well_05"}
+    assert {str(item.well_name) for item in recommendation.override_suggestions} == {
+        "well_02",
+        "well_05",
+    }
     assert all(
-        item.config_updates["optimization_mode"] == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+        item.config_updates["optimization_mode"]
+        == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
         for item in recommendation.override_suggestions
     )
-    assert recommendation.expected_maneuver == "Pre-entry azimuth turn / сдвиг HOLD до t1"
+    assert (
+        recommendation.expected_maneuver == "Pre-entry azimuth turn / сдвиг HOLD до t1"
+    )
     rows = anti_collision_recommendation_rows(recommendations)
     assert rows[0]["Ожидаемый маневр"] == recommendation.expected_maneuver
 
 
-def test_recommendations_switch_movable_well_after_one_side_already_used_anticollision() -> None:
+def test_recommendations_switch_movable_well_after_one_side_already_used_anticollision() -> (
+    None
+):
     corridor = AntiCollisionCorridor(
         well_a="well_02",
         well_b="well_05",
@@ -1490,7 +2058,10 @@ def test_recommendations_switch_movable_well_after_one_side_already_used_anticol
         label_a_values=("", ""),
         label_b_values=("", ""),
         midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_rings_xyz=(
+            np.zeros((16, 3), dtype=float),
+            np.ones((16, 3), dtype=float),
+        ),
         overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
         separation_factor_values=np.array([0.72, 0.69], dtype=float),
         overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
@@ -1536,7 +2107,9 @@ def test_recommendations_switch_movable_well_after_one_side_already_used_anticol
     assert recommendation.override_suggestions[0].well_name == "well_05"
 
 
-def test_recommendations_disable_repeated_late_trajectory_rerun_after_both_wells_already_used_anticollision() -> None:
+def test_recommendations_disable_repeated_late_trajectory_rerun_after_both_wells_already_used_anticollision() -> (
+    None
+):
     corridor = AntiCollisionCorridor(
         well_a="well_02",
         well_b="well_05",
@@ -1553,7 +2126,10 @@ def test_recommendations_disable_repeated_late_trajectory_rerun_after_both_wells
         label_a_values=("", ""),
         label_b_values=("", ""),
         midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_rings_xyz=(
+            np.zeros((16, 3), dtype=float),
+            np.ones((16, 3), dtype=float),
+        ),
         overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
         separation_factor_values=np.array([0.72, 0.69], dtype=float),
         overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
@@ -1618,7 +2194,10 @@ def test_recommendation_clusters_merge_connected_pairs_into_single_cluster() -> 
         label_a_values=("", ""),
         label_b_values=("", ""),
         midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_rings_xyz=(
+            np.zeros((16, 3), dtype=float),
+            np.ones((16, 3), dtype=float),
+        ),
         overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
         separation_factor_values=np.array([0.82, 0.78], dtype=float),
         overlap_depth_values_m=np.array([4.0, 5.0], dtype=float),
@@ -1639,7 +2218,10 @@ def test_recommendation_clusters_merge_connected_pairs_into_single_cluster() -> 
         label_a_values=("", ""),
         label_b_values=("", ""),
         midpoint_xyz=np.array([[20.0, 0.0, 0.0], [30.0, 0.0, 0.0]], dtype=float),
-        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+        overlap_rings_xyz=(
+            np.zeros((16, 3), dtype=float),
+            np.ones((16, 3), dtype=float),
+        ),
         overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
         separation_factor_values=np.array([0.76, 0.71], dtype=float),
         overlap_depth_values_m=np.array([6.0, 7.0], dtype=float),
@@ -1697,7 +2279,10 @@ def test_recommendation_clusters_merge_connected_pairs_into_single_cluster() -> 
     assert cluster.first_rerun_well == "well_03"
     assert cluster.rerun_order_label == "well_03 → well_02 → well_01"
     assert cluster.action_steps[0].well_name == "well_03"
-    assert cluster.action_steps[0].optimization_mode == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+    assert (
+        cluster.action_steps[0].optimization_mode
+        == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+    )
     rows = cluster.recommendations
     assert rows[0].expected_maneuver
 
@@ -1722,7 +2307,10 @@ def test_cluster_with_target_spacing_conflict_is_not_actionable_for_rerun() -> N
                 label_a_values=(TARGET_T1,),
                 label_b_values=(TARGET_T1,),
                 midpoint_xyz=np.array([[1000.0, 0.0, 2400.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([12.0], dtype=float),
                 separation_factor_values=np.array([0.62], dtype=float),
                 overlap_depth_values_m=np.array([18.0], dtype=float),
@@ -1742,8 +2330,13 @@ def test_cluster_with_target_spacing_conflict_is_not_actionable_for_rerun() -> N
                 md_b_values_m=np.array([4050.0, 4500.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([6.0, 6.0], dtype=float),
                 separation_factor_values=np.array([0.81, 0.76], dtype=float),
                 overlap_depth_values_m=np.array([7.0, 9.0], dtype=float),
@@ -1798,7 +2391,9 @@ def test_cluster_with_target_spacing_conflict_is_not_actionable_for_rerun() -> N
     assert cluster.blocking_advisory == "Сначала решить spacing целей."
 
 
-def test_cluster_action_steps_normalize_mixed_vertical_and_trajectory_for_same_well() -> None:
+def test_cluster_action_steps_normalize_mixed_vertical_and_trajectory_for_same_well() -> (
+    None
+):
     analysis = AntiCollisionAnalysis(
         wells=(
             build_anti_collision_well(
@@ -1856,8 +2451,13 @@ def test_cluster_action_steps_normalize_mixed_vertical_and_trajectory_for_same_w
                 md_b_values_m=np.array([410.0, 710.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
                 separation_factor_values=np.array([0.82, 0.78], dtype=float),
                 overlap_depth_values_m=np.array([5.0, 7.0], dtype=float),
@@ -1877,8 +2477,13 @@ def test_cluster_action_steps_normalize_mixed_vertical_and_trajectory_for_same_w
                 md_b_values_m=np.array([1700.0, 2000.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([5.0, 5.0], dtype=float),
                 separation_factor_values=np.array([0.76, 0.73], dtype=float),
                 overlap_depth_values_m=np.array([7.0, 9.0], dtype=float),
@@ -1931,7 +2536,9 @@ def test_cluster_action_steps_normalize_mixed_vertical_and_trajectory_for_same_w
     assert step.expected_maneuver == MANEUVER_POSTENTRY_TURN
 
 
-def test_saturated_early_kop_build1_conflict_becomes_advisory_and_shifts_cluster_to_trajectory() -> None:
+def test_saturated_early_kop_build1_conflict_becomes_advisory_and_shifts_cluster_to_trajectory() -> (
+    None
+):
     analysis = AntiCollisionAnalysis(
         wells=(
             build_anti_collision_well(
@@ -1989,8 +2596,13 @@ def test_saturated_early_kop_build1_conflict_becomes_advisory_and_shifts_cluster
                 md_b_values_m=np.array([410.0, 710.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[0.0, 0.0, 400.0], [0.0, 0.0, 700.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([6.0, 7.0], dtype=float),
                 separation_factor_values=np.array([0.55, 0.52], dtype=float),
                 overlap_depth_values_m=np.array([8.0, 9.0], dtype=float),
@@ -2010,8 +2622,13 @@ def test_saturated_early_kop_build1_conflict_becomes_advisory_and_shifts_cluster
                 md_b_values_m=np.array([1700.0, 2000.0], dtype=float),
                 label_a_values=("", ""),
                 label_b_values=("", ""),
-                midpoint_xyz=np.array([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float),
-                overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
+                midpoint_xyz=np.array(
+                    [[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
                 overlap_core_radius_m=np.array([3.0, 3.0], dtype=float),
                 separation_factor_values=np.array([0.82, 0.80], dtype=float),
                 overlap_depth_values_m=np.array([4.0, 4.0], dtype=float),
@@ -2077,88 +2694,96 @@ def test_saturated_early_kop_build1_conflict_becomes_advisory_and_shifts_cluster
 
 
 def test_cluster_action_steps_keep_worst_sf_first_and_preserve_order_label() -> None:
-    recommendations = (
-        build_anti_collision_recommendations(
-            AntiCollisionAnalysis(
-                wells=(),
-                corridors=(
-                    AntiCollisionCorridor(
-                        well_a="well_a",
-                        well_b="well_c",
-                        classification="trajectory",
-                        priority_rank=2,
-                        label_a="",
-                        label_b="",
-                        md_a_start_m=2500.0,
-                        md_a_end_m=2700.0,
-                        md_b_start_m=2600.0,
-                        md_b_end_m=2800.0,
-                        md_a_values_m=np.array([2500.0, 2700.0], dtype=float),
-                        md_b_values_m=np.array([2600.0, 2800.0], dtype=float),
-                        label_a_values=("", ""),
-                        label_b_values=("", ""),
-                        midpoint_xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float),
-                        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
-                        overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
-                        separation_factor_values=np.array([0.82, 0.75], dtype=float),
-                        overlap_depth_values_m=np.array([5.0, 7.0], dtype=float),
+    recommendations = build_anti_collision_recommendations(
+        AntiCollisionAnalysis(
+            wells=(),
+            corridors=(
+                AntiCollisionCorridor(
+                    well_a="well_a",
+                    well_b="well_c",
+                    classification="trajectory",
+                    priority_rank=2,
+                    label_a="",
+                    label_b="",
+                    md_a_start_m=2500.0,
+                    md_a_end_m=2700.0,
+                    md_b_start_m=2600.0,
+                    md_b_end_m=2800.0,
+                    md_a_values_m=np.array([2500.0, 2700.0], dtype=float),
+                    md_b_values_m=np.array([2600.0, 2800.0], dtype=float),
+                    label_a_values=("", ""),
+                    label_b_values=("", ""),
+                    midpoint_xyz=np.array(
+                        [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float
                     ),
-                    AntiCollisionCorridor(
-                        well_a="well_a",
-                        well_b="well_b",
-                        classification="trajectory",
-                        priority_rank=2,
-                        label_a="",
-                        label_b="",
-                        md_a_start_m=600.0,
-                        md_a_end_m=900.0,
-                        md_b_start_m=620.0,
-                        md_b_end_m=910.0,
-                        md_a_values_m=np.array([600.0, 900.0], dtype=float),
-                        md_b_values_m=np.array([620.0, 910.0], dtype=float),
-                        label_a_values=("", ""),
-                        label_b_values=("", ""),
-                        midpoint_xyz=np.array([[20.0, 0.0, 0.0], [30.0, 0.0, 0.0]], dtype=float),
-                        overlap_rings_xyz=(np.zeros((16, 3), dtype=float), np.ones((16, 3), dtype=float)),
-                        overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
-                        separation_factor_values=np.array([0.79, 0.77], dtype=float),
-                        overlap_depth_values_m=np.array([4.0, 5.0], dtype=float),
+                    overlap_rings_xyz=(
+                        np.zeros((16, 3), dtype=float),
+                        np.ones((16, 3), dtype=float),
                     ),
+                    overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
+                    separation_factor_values=np.array([0.82, 0.75], dtype=float),
+                    overlap_depth_values_m=np.array([5.0, 7.0], dtype=float),
                 ),
-                well_segments=(),
-                zones=(),
-                pair_count=2,
-                overlapping_pair_count=2,
-                target_overlap_pair_count=0,
-                worst_separation_factor=0.75,
+                AntiCollisionCorridor(
+                    well_a="well_a",
+                    well_b="well_b",
+                    classification="trajectory",
+                    priority_rank=2,
+                    label_a="",
+                    label_b="",
+                    md_a_start_m=600.0,
+                    md_a_end_m=900.0,
+                    md_b_start_m=620.0,
+                    md_b_end_m=910.0,
+                    md_a_values_m=np.array([600.0, 900.0], dtype=float),
+                    md_b_values_m=np.array([620.0, 910.0], dtype=float),
+                    label_a_values=("", ""),
+                    label_b_values=("", ""),
+                    midpoint_xyz=np.array(
+                        [[20.0, 0.0, 0.0], [30.0, 0.0, 0.0]], dtype=float
+                    ),
+                    overlap_rings_xyz=(
+                        np.zeros((16, 3), dtype=float),
+                        np.ones((16, 3), dtype=float),
+                    ),
+                    overlap_core_radius_m=np.array([4.0, 4.0], dtype=float),
+                    separation_factor_values=np.array([0.79, 0.77], dtype=float),
+                    overlap_depth_values_m=np.array([4.0, 5.0], dtype=float),
+                ),
             ),
-            well_context_by_name={
-                "well_a": AntiCollisionWellContext(
-                    well_name="well_a",
-                    kop_md_m=900.0,
-                    kop_min_vertical_m=550.0,
-                    md_t1_m=3400.0,
-                    md_total_m=6000.0,
-                    optimization_mode="none",
-                ),
-                "well_b": AntiCollisionWellContext(
-                    well_name="well_b",
-                    kop_md_m=840.0,
-                    kop_min_vertical_m=550.0,
-                    md_t1_m=1800.0,
-                    md_total_m=5300.0,
-                    optimization_mode="none",
-                ),
-                "well_c": AntiCollisionWellContext(
-                    well_name="well_c",
-                    kop_md_m=950.0,
-                    kop_min_vertical_m=550.0,
-                    md_t1_m=4200.0,
-                    md_total_m=6200.0,
-                    optimization_mode="none",
-                ),
-            },
-        )
+            well_segments=(),
+            zones=(),
+            pair_count=2,
+            overlapping_pair_count=2,
+            target_overlap_pair_count=0,
+            worst_separation_factor=0.75,
+        ),
+        well_context_by_name={
+            "well_a": AntiCollisionWellContext(
+                well_name="well_a",
+                kop_md_m=900.0,
+                kop_min_vertical_m=550.0,
+                md_t1_m=3400.0,
+                md_total_m=6000.0,
+                optimization_mode="none",
+            ),
+            "well_b": AntiCollisionWellContext(
+                well_name="well_b",
+                kop_md_m=840.0,
+                kop_min_vertical_m=550.0,
+                md_t1_m=1800.0,
+                md_total_m=5300.0,
+                optimization_mode="none",
+            ),
+            "well_c": AntiCollisionWellContext(
+                well_name="well_c",
+                kop_md_m=950.0,
+                kop_min_vertical_m=550.0,
+                md_t1_m=4200.0,
+                md_total_m=6200.0,
+                optimization_mode="none",
+            ),
+        },
     )
     clusters = build_anti_collision_recommendation_clusters(recommendations)
 

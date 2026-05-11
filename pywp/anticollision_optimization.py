@@ -13,7 +13,8 @@ from pywp.constants import SMALL
 from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     PlanningUncertaintyModel,
-    station_uncertainty_covariance_xyz_many,
+    fast_proxy_uncertainty_model,
+    station_uncertainty_covariance_xyz_for_stations,
 )
 AntiCollisionSegment = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]
 
@@ -83,11 +84,10 @@ def build_anti_collision_reference_path(
         sample_step_m=sample_step_m,
     )
     xyz_m = sampled[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float)
-    covariance_xyz = station_uncertainty_covariance_xyz_many(
-        md_m=sampled["MD_m"].to_numpy(dtype=float),
-        inc_deg=sampled["INC_deg"].to_numpy(dtype=float),
-        azi_deg=sampled["AZI_deg"].to_numpy(dtype=float),
-        model=model,
+    covariance_xyz = station_uncertainty_covariance_xyz_for_stations(
+        stations=stations,
+        sample_md_m=sampled["MD_m"].to_numpy(dtype=float),
+        model=fast_proxy_uncertainty_model(model),
     )
     return AntiCollisionReferencePath(
         well_name=str(well_name),
@@ -137,11 +137,10 @@ def evaluate_stations_anti_collision_clearance(
         sample_step_m=float(context.sample_step_m),
     )
     candidate_xyz = sampled_candidate[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float)
-    candidate_covariance = station_uncertainty_covariance_xyz_many(
-        md_m=sampled_candidate["MD_m"].to_numpy(dtype=float),
-        inc_deg=sampled_candidate["INC_deg"].to_numpy(dtype=float),
-        azi_deg=sampled_candidate["AZI_deg"].to_numpy(dtype=float),
-        model=context.uncertainty_model,
+    candidate_covariance = station_uncertainty_covariance_xyz_for_stations(
+        stations=stations,
+        sample_md_m=sampled_candidate["MD_m"].to_numpy(dtype=float),
+        model=fast_proxy_uncertainty_model(context.uncertainty_model),
     )
     confidence_scale = float(max(context.uncertainty_model.confidence_scale, SMALL))
     return _clearance_from_continuous_segment_pairs(

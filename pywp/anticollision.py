@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import numpy as np
@@ -17,6 +17,7 @@ from pywp.uncertainty import (
     WellUncertaintyOverlay,
     build_uncertainty_overlay,
     build_uncertainty_station_samples,
+    local_uncertainty_axes_xyz,
 )
 
 TARGET_NONE = ""
@@ -24,6 +25,13 @@ TARGET_T1 = "t1"
 TARGET_T3 = "t3"
 _PAIR_XY_PREFILTER_DIAMETER_FACTOR = 1.5
 _PAIR_TERMINAL_PREFILTER_DIAMETER_FACTOR = 1.35
+DEFINITIVE_SCAN_STEP_M = 10.0
+DEFINITIVE_LOCAL_REFINE_STEP_M = 5.0
+DEFINITIVE_LOCAL_REFINE_TRIGGER_SF = 4.0
+_MAX_OVERLAP_GEOMETRY_RINGS_PER_CORRIDOR = 8
+_MAX_LOCAL_REFINE_SEED_PAIRS_PER_WELL_PAIR = 4
+_SCAN_MAX_SAMPLES = 1_000_000
+_ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION = 240
 
 
 @dataclass(frozen=True)
@@ -31,6 +39,12 @@ class AntiCollisionSample:
     md_m: float
     center_xyz: tuple[float, float, float]
     covariance_xyz: np.ndarray
+    covariance_xyz_random: np.ndarray
+    covariance_xyz_systematic: np.ndarray
+    covariance_xyz_global: np.ndarray
+    global_source_vectors_xyz: tuple[tuple[str, np.ndarray], ...]
+    inc_deg: float = 0.0
+    azi_deg: float = 0.0
     target_label: str = TARGET_NONE
 
 
@@ -155,9 +169,32 @@ class _AntiCollisionLateralEnvelope:
 def anti_collision_method_caption(
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> str:
+    if model.iscwsa_tool_code:
+        model_name = (
+            str(model.iscwsa_tool_code).replace("iscwsa_", "").replace("_", " ").upper()
+        )
+        return (
+            f"Anti-collision scan выполнен по 2σ {model_name} "
+            "tool-error covariance. Для каждой пары скважин считается "
+            f"отчетная сетка с шагом до {DEFINITIVE_SCAN_STEP_M:.0f} м, "
+            f"а зоны с SF≤{DEFINITIVE_LOCAL_REFINE_TRIGGER_SF:.0f} локально уточняются до "
+            f"{DEFINITIVE_LOCAL_REFINE_STEP_M:.0f} м. "
+            "расстояние между центрами сечений и geometric directional 2σ "
+            "overlap radius: random/systematic terms суммируются по двум "
+            "стволам, а global terms считаются через относительный вклад "
+            "общих error sources между скважинами. "
+            "Красный volume/polygon показывает приближенное общее пересечение "
+            "двух конусов: в каждом конфликтном сечении строится "
+            "polygon-intersection uncertainty-контуров в общей локальной "
+            "плоскости. Красные участки стволов показывают MD-интервалы "
+            "с overlap. Приоритет в отчете отдается пересечениям в t1/t3."
+        )
     return (
         "Anti-collision scan выполнен по planning-level 2σ конусам неопределенности. "
-        "Для каждой пары скважин считается расстояние между центрами сечений и "
+        f"Для каждой пары скважин считается отчетная сетка с шагом до {DEFINITIVE_SCAN_STEP_M:.0f} м, "
+        f"а зоны с SF≤{DEFINITIVE_LOCAL_REFINE_TRIGGER_SF:.0f} локально уточняются до "
+        f"{DEFINITIVE_LOCAL_REFINE_STEP_M:.0f} м. "
+        "расстояние между центрами сечений и "
         "geometric directional 2σ overlap radius как сумма опорных радиусов "
         "двух uncertainty-конусов. Красный volume/polygon показывает "
         "приближенное общее пересечение двух конусов: в каждом конфликтном "
@@ -186,6 +223,7 @@ def build_anti_collision_well(
     include_display_geometry: bool = True,
     well_kind: str = "project",
     is_reference_only: bool = False,
+    analysis_sample_step_m: float | None = None,
 ) -> AntiCollisionWell:
     md_t3_m = (
         float(md_t3_m)
@@ -196,36 +234,35 @@ def build_anti_collision_well(
         float(value) for value in (md_t1_m, md_t3_m) if value is not None
     )
     if include_display_geometry:
+        overlay_model = _display_geometry_sampling_model(
+            model=model,
+            sample_step_m=analysis_sample_step_m,
+        )
         overlay = build_uncertainty_overlay(
             stations=stations,
             surface=surface,
             azimuth_deg=azimuth_deg,
-            model=model,
+            model=overlay_model,
             required_md_m=required_md_values,
-        )
-        samples = tuple(
-            _build_collision_sample(
-                sample=sample,
-                confidence_scale=float(model.confidence_scale),
-                md_t1_m=None if md_t1_m is None else float(md_t1_m),
-                md_t3_m=None if md_t3_m is None else float(md_t3_m),
-            )
-            for sample in overlay.samples
         )
     else:
         overlay = WellUncertaintyOverlay(samples=(), model=model)
-        samples = tuple(
-            _build_collision_sample_from_station_sample(
-                sample=sample,
-                md_t1_m=_optional_float(md_t1_m),
-                md_t3_m=_optional_float(md_t3_m),
-            )
-            for sample in build_uncertainty_station_samples(
-                stations=stations,
-                model=model,
-                required_md_m=required_md_values,
-            )
+    analysis_model = _analysis_sampling_model(
+        model=model,
+        sample_step_m=analysis_sample_step_m,
+    )
+    samples = tuple(
+        _build_collision_sample_from_station_sample(
+            sample=sample,
+            md_t1_m=_optional_float(md_t1_m),
+            md_t3_m=_optional_float(md_t3_m),
         )
+        for sample in build_uncertainty_station_samples(
+            stations=stations,
+            model=analysis_model,
+            required_md_m=required_md_values,
+        )
+    )
     return AntiCollisionWell(
         name=str(name),
         color=str(color),
@@ -242,6 +279,45 @@ def build_anti_collision_well(
     )
 
 
+def _analysis_sampling_model(
+    *,
+    model: PlanningUncertaintyModel,
+    sample_step_m: float | None,
+) -> PlanningUncertaintyModel:
+    if sample_step_m is None:
+        return model
+    step_m = float(sample_step_m)
+    if step_m <= 0.0:
+        raise ValueError("analysis_sample_step_m must be positive.")
+    return replace(
+        model,
+        sample_step_m=step_m,
+        max_display_ellipses=max(int(model.max_display_ellipses), _SCAN_MAX_SAMPLES),
+        min_refined_step_m=min(float(model.min_refined_step_m), step_m),
+    )
+
+
+def _display_geometry_sampling_model(
+    *,
+    model: PlanningUncertaintyModel,
+    sample_step_m: float | None,
+) -> PlanningUncertaintyModel:
+    if sample_step_m is None or not bool(model.iscwsa_tool_code):
+        return model
+    step_m = float(sample_step_m)
+    if step_m <= 0.0:
+        raise ValueError("analysis_sample_step_m must be positive.")
+    return replace(
+        model,
+        sample_step_m=step_m,
+        max_display_ellipses=max(
+            int(model.max_display_ellipses),
+            _ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION,
+        ),
+        min_refined_step_m=min(float(model.min_refined_step_m), step_m),
+    )
+
+
 def analyze_anti_collision(
     wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
     *,
@@ -249,12 +325,6 @@ def analyze_anti_collision(
     pair_filter: Callable[[AntiCollisionWell, AntiCollisionWell], bool] | None = None,
 ) -> AntiCollisionAnalysis:
     ordered_wells = tuple(wells)
-    if build_overlap_geometry:
-        for well in ordered_wells:
-            if well.samples and not well.overlay.samples:
-                raise ValueError(
-                    "build_overlap_geometry=True requires wells built with display geometry."
-                )
     lateral_envelopes = tuple(
         _lateral_envelope_for_prefilter(well) for well in ordered_wells
     )
@@ -719,7 +789,10 @@ def collision_corridor_plan_polygon(
 
     positive_side: list[np.ndarray] = []
     negative_side: list[np.ndarray] = []
-    centers_xy = np.asarray(corridor.midpoint_xyz[:, :2], dtype=float)
+    centers_xy = np.asarray(
+        [np.mean(np.asarray(ring, dtype=float), axis=0)[:2] for ring in rings_xyz],
+        dtype=float,
+    )
     for index, ring_xy in enumerate(rings_xy):
         center_xy = np.asarray(centers_xy[index], dtype=float)
         tangent_xy = _centerline_tangent_xy(centers_xy, index)
@@ -745,8 +818,7 @@ def collision_corridor_tube_mesh(
     corridor: AntiCollisionCorridor,
 ) -> UncertaintyTubeMesh | None:
     rings = [
-        _open_ring(np.asarray(ring, dtype=float))
-        for ring in corridor.overlap_rings_xyz
+        _open_ring(np.asarray(ring, dtype=float)) for ring in corridor.overlap_rings_xyz
     ]
     rings = [
         ring
@@ -758,18 +830,51 @@ def collision_corridor_tube_mesh(
     ]
     if not rings:
         return None
+    if len(rings) == 1:
+        ring = np.asarray(rings[0], dtype=float)
+        center = np.mean(ring, axis=0)
+        radius = float(np.nanmax(np.linalg.norm(ring - center[None, :], axis=1)))
+        normal = _ring_plane_normal(ring, center)
+        thickness = float(np.clip(max(radius, 1.0) * 0.25, 2.0, 30.0))
+        rings = [
+            np.asarray(ring - normal[None, :] * thickness * 0.5, dtype=float),
+            np.asarray(ring + normal[None, :] * thickness * 0.5, dtype=float),
+        ]
 
     vertices_list: list[np.ndarray] = []
     triangles_i: list[int] = []
     triangles_j: list[int] = []
     triangles_k: list[int] = []
     vertex_count = 0
+    ring_starts: list[int] = []
+    ring_sizes: list[int] = []
 
     for ring in rings:
         ring_start_index = int(vertex_count)
+        ring_starts.append(ring_start_index)
+        ring_sizes.append(int(len(ring)))
         vertices_list.append(ring)
         vertex_count += int(len(ring))
-        center_index = ring_start_index + int(len(ring))
+
+    for ring_index in range(len(rings) - 1):
+        current_start = ring_starts[ring_index]
+        next_start = ring_starts[ring_index + 1]
+        points_per_ring = min(ring_sizes[ring_index], ring_sizes[ring_index + 1])
+        for point_index in range(points_per_ring):
+            next_point_index = (point_index + 1) % points_per_ring
+            a = current_start + point_index
+            b = current_start + next_point_index
+            c = next_start + point_index
+            d = next_start + next_point_index
+            triangles_i.extend([a, b])
+            triangles_j.extend([c, c])
+            triangles_k.extend([b, d])
+
+    for ring_start_index, ring in (
+        (ring_starts[0], rings[0]),
+        (ring_starts[-1], rings[-1]),
+    ):
+        center_index = int(vertex_count)
         vertices_list.append(np.mean(np.asarray(ring, dtype=float), axis=0)[None, :])
         vertex_count += 1
         points_per_ring = int(len(ring))
@@ -833,18 +938,24 @@ def collision_zone_sphere_mesh(
 def _build_collision_sample(
     *,
     sample: UncertaintyEllipseSample,
-    confidence_scale: float,
     md_t1_m: float | None,
     md_t3_m: float | None,
 ) -> AntiCollisionSample:
     return AntiCollisionSample(
         md_m=float(sample.md_m),
         center_xyz=tuple(float(value) for value in sample.center_xyz),
-        covariance_xyz=_covariance_from_ring(
-            ring_xyz=np.asarray(sample.ring_xyz, dtype=float),
-            center_xyz=np.asarray(sample.center_xyz, dtype=float),
-            confidence_scale=float(confidence_scale),
+        covariance_xyz=np.asarray(sample.covariance_xyz, dtype=float),
+        covariance_xyz_random=np.asarray(sample.covariance_xyz_random, dtype=float),
+        covariance_xyz_systematic=np.asarray(
+            sample.covariance_xyz_systematic, dtype=float
         ),
+        covariance_xyz_global=np.asarray(sample.covariance_xyz_global, dtype=float),
+        global_source_vectors_xyz=tuple(
+            (source_name, np.asarray(source_vector, dtype=float))
+            for source_name, source_vector in sample.global_source_vectors_xyz
+        ),
+        inc_deg=float(getattr(sample, "inc_deg", 0.0)),
+        azi_deg=float(getattr(sample, "azi_deg", 0.0)),
         target_label=_target_label(
             md_m=float(sample.md_m),
             md_t1_m=_optional_float(md_t1_m),
@@ -863,29 +974,23 @@ def _build_collision_sample_from_station_sample(
         md_m=float(sample.md_m),
         center_xyz=tuple(float(value) for value in sample.center_xyz),
         covariance_xyz=np.asarray(sample.covariance_xyz, dtype=float),
+        covariance_xyz_random=np.asarray(sample.covariance_xyz_random, dtype=float),
+        covariance_xyz_systematic=np.asarray(
+            sample.covariance_xyz_systematic, dtype=float
+        ),
+        covariance_xyz_global=np.asarray(sample.covariance_xyz_global, dtype=float),
+        global_source_vectors_xyz=tuple(
+            (source_name, np.asarray(source_vector, dtype=float))
+            for source_name, source_vector in sample.global_source_vectors_xyz
+        ),
+        inc_deg=float(sample.inc_deg),
+        azi_deg=float(sample.azi_deg),
         target_label=_target_label(
             md_m=float(sample.md_m),
             md_t1_m=_optional_float(md_t1_m),
             md_t3_m=_optional_float(md_t3_m),
         ),
     )
-
-
-def _covariance_from_ring(
-    *,
-    ring_xyz: np.ndarray,
-    center_xyz: np.ndarray,
-    confidence_scale: float,
-) -> np.ndarray:
-    ring_open = np.asarray(ring_xyz, dtype=float)
-    if len(ring_open) >= 2 and np.allclose(ring_open[0], ring_open[-1], atol=SMALL):
-        ring_open = ring_open[:-1]
-    if ring_open.ndim != 2 or ring_open.shape[1] != 3 or len(ring_open) < 3:
-        return np.zeros((3, 3), dtype=float)
-    offsets = ring_open - np.asarray(center_xyz, dtype=float)[None, :]
-    boundary_covariance = np.cov(offsets.T, bias=True)
-    scale = float(max(confidence_scale, SMALL))
-    return 2.0 * np.asarray(boundary_covariance, dtype=float) / (scale * scale)
 
 
 def _target_label(*, md_m: float, md_t1_m: float | None, md_t3_m: float | None) -> str:
@@ -900,6 +1005,361 @@ def _optional_float(value: float | None) -> float | None:
     return None if value is None else float(value)
 
 
+def _independent_sample_covariance(sample: AntiCollisionSample) -> np.ndarray:
+    return np.asarray(sample.covariance_xyz_random, dtype=float) + np.asarray(
+        sample.covariance_xyz_systematic, dtype=float
+    )
+
+
+def _pair_relative_covariance_matrix(
+    sample_a: AntiCollisionSample,
+    sample_b: AntiCollisionSample,
+) -> np.ndarray:
+    covariance = _independent_sample_covariance(
+        sample_a
+    ) + _independent_sample_covariance(sample_b)
+    vectors_a = {
+        str(source_name): np.asarray(source_vector, dtype=float)
+        for source_name, source_vector in sample_a.global_source_vectors_xyz
+    }
+    vectors_b = {
+        str(source_name): np.asarray(source_vector, dtype=float)
+        for source_name, source_vector in sample_b.global_source_vectors_xyz
+    }
+    for source_name in sorted(set(vectors_a).union(vectors_b)):
+        vector_a = vectors_a.get(source_name, np.zeros(3, dtype=float))
+        vector_b = vectors_b.get(source_name, np.zeros(3, dtype=float))
+        relative = vector_a - vector_b
+        covariance = covariance + np.outer(relative, relative)
+    return 0.5 * (covariance + covariance.T)
+
+
+def _normal_projection_matrix(sample: AntiCollisionSample) -> np.ndarray:
+    tangent = local_uncertainty_axes_xyz(
+        inc_deg=float(sample.inc_deg),
+        azi_deg=float(sample.azi_deg),
+    )[0]
+    tangent = np.asarray(tangent, dtype=float)
+    tangent_norm = float(np.linalg.norm(tangent))
+    if tangent_norm <= SMALL:
+        return np.eye(3, dtype=float)
+    tangent = tangent / tangent_norm
+    return np.eye(3, dtype=float) - np.outer(tangent, tangent)
+
+
+def _pair_normal_projected_relative_covariance_matrix(
+    sample_a: AntiCollisionSample,
+    sample_b: AntiCollisionSample,
+) -> np.ndarray:
+    projection_a = _normal_projection_matrix(sample_a)
+    projection_b = _normal_projection_matrix(sample_b)
+    covariance_a = _independent_sample_covariance(sample_a)
+    covariance_b = _independent_sample_covariance(sample_b)
+    covariance = (
+        projection_a @ covariance_a @ projection_a.T
+        + projection_b @ covariance_b @ projection_b.T
+    )
+    vectors_a = {
+        str(source_name): np.asarray(source_vector, dtype=float)
+        for source_name, source_vector in sample_a.global_source_vectors_xyz
+    }
+    vectors_b = {
+        str(source_name): np.asarray(source_vector, dtype=float)
+        for source_name, source_vector in sample_b.global_source_vectors_xyz
+    }
+    for source_name in sorted(set(vectors_a).union(vectors_b)):
+        relative = projection_a @ vectors_a.get(source_name, np.zeros(3, dtype=float))
+        relative -= projection_b @ vectors_b.get(source_name, np.zeros(3, dtype=float))
+        covariance = covariance + np.outer(relative, relative)
+    return 0.5 * (covariance + covariance.T)
+
+
+def _pair_distance_combined_radius_matrices(
+    *,
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
+    confidence_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    centers_a = np.asarray([sample.center_xyz for sample in samples_a], dtype=float)
+    centers_b = np.asarray([sample.center_xyz for sample in samples_b], dtype=float)
+    delta = centers_a[:, None, :] - centers_b[None, :, :]
+    distance = np.linalg.norm(delta, axis=2)
+    max_radius_a = _max_normal_support_radii_for_samples(
+        samples=samples_a,
+        confidence_scale=confidence_scale,
+    )
+    max_radius_b = _max_normal_support_radii_for_samples(
+        samples=samples_b,
+        confidence_scale=confidence_scale,
+    )
+    conservative_radius = max_radius_a[:, None] + max_radius_b[None, :]
+    candidate_mask = distance <= (
+        float(DEFINITIVE_LOCAL_REFINE_TRIGGER_SF)
+        * np.maximum(conservative_radius, SMALL)
+    )
+    combined_radius = np.zeros_like(distance, dtype=float)
+    candidate_indices = np.argwhere(candidate_mask)
+    if candidate_indices.size == 0:
+        return distance, combined_radius
+
+    index_a_values = candidate_indices[:, 0].astype(int, copy=False)
+    index_b_values = candidate_indices[:, 1].astype(int, copy=False)
+    _, candidate_radii = _evaluated_pair_distances_and_radii_by_indices(
+        samples_a=samples_a,
+        samples_b=samples_b,
+        index_a_values=index_a_values,
+        index_b_values=index_b_values,
+        centers_a=centers_a,
+        centers_b=centers_b,
+        confidence_scale=confidence_scale,
+    )
+    combined_radius[index_a_values, index_b_values] = candidate_radii
+    return distance, combined_radius
+
+
+def _max_normal_support_radii_for_samples(
+    *,
+    samples: tuple[AntiCollisionSample, ...],
+    confidence_scale: float,
+) -> np.ndarray:
+    radii: list[float] = []
+    scale = float(max(confidence_scale, SMALL))
+    for sample in samples:
+        projection = _normal_projection_matrix(sample)
+        covariance = projection @ np.asarray(sample.covariance_xyz, dtype=float) @ projection.T
+        eigenvalues = np.linalg.eigvalsh(0.5 * (covariance + covariance.T))
+        radii.append(scale * float(np.sqrt(max(float(np.max(eigenvalues)), 0.0))))
+    return np.asarray(radii, dtype=float)
+
+
+def _evaluated_pair_distances_and_radii_by_indices(
+    *,
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
+    index_a_values: np.ndarray,
+    index_b_values: np.ndarray,
+    centers_a: np.ndarray,
+    centers_b: np.ndarray,
+    confidence_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    index_a = np.asarray(index_a_values, dtype=int)
+    index_b = np.asarray(index_b_values, dtype=int)
+    pair_centers_a = np.asarray(centers_a, dtype=float)[index_a]
+    pair_centers_b = np.asarray(centers_b, dtype=float)[index_b]
+    delta = pair_centers_a - pair_centers_b
+    distance = np.linalg.norm(delta, axis=1)
+    direction = np.zeros_like(delta, dtype=float)
+    np.divide(delta, distance[:, None], out=direction, where=distance[:, None] > SMALL)
+    zero_mask = distance <= SMALL
+    if np.any(zero_mask):
+        zero_offsets = np.where(zero_mask)[0]
+        for offset in zero_offsets.tolist():
+            covariance = _pair_normal_projected_relative_covariance_matrix(
+                samples_a[int(index_a[int(offset)])],
+                samples_b[int(index_b[int(offset)])],
+            )
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+            direction[int(offset)] = eigenvectors[:, int(np.argmax(eigenvalues))]
+
+    covariances_a = np.asarray(
+        [_independent_sample_covariance(sample) for sample in samples_a],
+        dtype=float,
+    )[index_a]
+    covariances_b = np.asarray(
+        [_independent_sample_covariance(sample) for sample in samples_b],
+        dtype=float,
+    )[index_b]
+    tangents_a = _sample_tangent_array(samples_a)[index_a]
+    tangents_b = _sample_tangent_array(samples_b)[index_b]
+    direction_a = _normal_plane_projected_direction_from_tangents(
+        direction=direction,
+        tangents=tangents_a,
+    )
+    direction_b = _normal_plane_projected_direction_from_tangents(
+        direction=direction,
+        tangents=tangents_b,
+    )
+    directional_sigma2_a = np.einsum(
+        "pi,pij,pj->p", direction_a, covariances_a, direction_a
+    )
+    directional_sigma2_b = np.einsum(
+        "pi,pij,pj->p", direction_b, covariances_b, direction_b
+    )
+    scale = float(max(confidence_scale, SMALL))
+    radius_global = scale * np.sqrt(
+        np.clip(
+            _directional_global_relative_sigma2_for_index_arrays(
+                samples_a=samples_a,
+                samples_b=samples_b,
+                index_a=index_a,
+                index_b=index_b,
+                direction_a=direction_a,
+                direction_b=direction_b,
+            ),
+            0.0,
+            None,
+        )
+    )
+    combined_radius = (
+        scale * np.sqrt(np.clip(directional_sigma2_a, 0.0, None))
+        + scale * np.sqrt(np.clip(directional_sigma2_b, 0.0, None))
+        + radius_global
+    )
+    return distance, combined_radius
+
+
+def _sample_tangent_array(samples: tuple[AntiCollisionSample, ...]) -> np.ndarray:
+    return np.asarray(
+        [
+            local_uncertainty_axes_xyz(
+                inc_deg=float(sample.inc_deg),
+                azi_deg=float(sample.azi_deg),
+            )[0]
+            for sample in samples
+        ],
+        dtype=float,
+    )
+
+
+def _normal_plane_projected_direction_from_tangents(
+    *,
+    direction: np.ndarray,
+    tangents: np.ndarray,
+) -> np.ndarray:
+    tangent_component = np.sum(
+        np.asarray(direction, dtype=float) * np.asarray(tangents, dtype=float),
+        axis=1,
+        keepdims=True,
+    )
+    return np.asarray(direction, dtype=float) - tangent_component * np.asarray(
+        tangents, dtype=float
+    )
+
+
+def _directional_global_relative_sigma2_for_index_arrays(
+    *,
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
+    index_a: np.ndarray,
+    index_b: np.ndarray,
+    direction_a: np.ndarray,
+    direction_b: np.ndarray,
+) -> np.ndarray:
+    source_names = sorted(
+        {
+            str(source_name)
+            for sample in (*samples_a, *samples_b)
+            for source_name, _ in sample.global_source_vectors_xyz
+        }
+    )
+    sigma2 = np.zeros(len(index_a), dtype=float)
+    for source_name in source_names:
+        vectors_a = _source_vector_array(samples_a, source_name)[index_a]
+        vectors_b = _source_vector_array(samples_b, source_name)[index_b]
+        projected = (
+            np.einsum("pi,pi->p", direction_a, vectors_a)
+            - np.einsum("pi,pi->p", direction_b, vectors_b)
+        )
+        sigma2 += projected * projected
+    return sigma2
+
+
+def _source_vector_array(
+    samples: tuple[AntiCollisionSample, ...],
+    source_name: str,
+) -> np.ndarray:
+    vectors: list[np.ndarray] = []
+    for sample in samples:
+        sample_vectors = {
+            str(name): np.asarray(vector, dtype=float)
+            for name, vector in sample.global_source_vectors_xyz
+        }
+        vectors.append(sample_vectors.get(source_name, np.zeros(3, dtype=float)))
+    return np.asarray(vectors, dtype=float)
+
+
+def _score_matrix(distance: np.ndarray, combined_radius: np.ndarray) -> np.ndarray:
+    return np.divide(
+        distance,
+        np.maximum(combined_radius, SMALL),
+        out=np.full_like(distance, np.inf, dtype=float),
+        where=combined_radius > SMALL,
+    )
+
+
+def _local_refine_candidate_pairs(score: np.ndarray) -> set[tuple[int, int]]:
+    if score.size == 0 or not np.any(np.isfinite(score)):
+        return set()
+    trigger = float(DEFINITIVE_LOCAL_REFINE_TRIGGER_SF)
+    row_best_j = np.argmin(score, axis=1)
+    col_best_i = np.argmin(score, axis=0)
+    pairs: set[tuple[int, int]] = set()
+    for index_a, index_b in enumerate(row_best_j.tolist()):
+        if float(score[int(index_a), int(index_b)]) <= trigger:
+            pairs.add((int(index_a), int(index_b)))
+    for index_b, index_a in enumerate(col_best_i.tolist()):
+        if float(score[int(index_a), int(index_b)]) <= trigger:
+            pairs.add((int(index_a), int(index_b)))
+    return _representative_refine_pairs_by_cluster(
+        pairs=pairs,
+        score=score,
+        max_pairs=int(_MAX_LOCAL_REFINE_SEED_PAIRS_PER_WELL_PAIR),
+    )
+
+
+def _representative_refine_pairs_by_cluster(
+    *,
+    pairs: set[tuple[int, int]],
+    score: np.ndarray,
+    max_pairs: int,
+) -> set[tuple[int, int]]:
+    if not pairs:
+        return set()
+    sorted_pairs = sorted(pairs)
+    clusters: list[list[tuple[int, int]]] = []
+    current_cluster: list[tuple[int, int]] = []
+    previous_pair: tuple[int, int] | None = None
+    for pair in sorted_pairs:
+        if (
+            previous_pair is None
+            or (
+                abs(int(pair[0]) - int(previous_pair[0])) <= 2
+                and abs(int(pair[1]) - int(previous_pair[1])) <= 2
+            )
+        ):
+            current_cluster.append(pair)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [pair]
+        previous_pair = pair
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    representatives = [
+        min(cluster, key=lambda pair: _refine_pair_sort_key(pair, score=score))
+        for cluster in clusters
+    ]
+    if len(representatives) <= max_pairs:
+        return set(representatives)
+    ranked_pairs = sorted(
+        representatives,
+        key=lambda pair: _refine_pair_sort_key(pair, score=score),
+    )
+    return set(ranked_pairs[:max_pairs])
+
+
+def _refine_pair_sort_key(
+    pair: tuple[int, int],
+    *,
+    score: np.ndarray,
+) -> tuple[float, int, int]:
+    return (
+        float(score[int(pair[0]), int(pair[1])]),
+        int(pair[0]),
+        int(pair[1]),
+    )
+
+
 def _pair_overlap_corridors(
     *,
     well_a: AntiCollisionWell,
@@ -909,80 +1369,18 @@ def _pair_overlap_corridors(
     if not well_a.samples or not well_b.samples:
         return []
 
-    centers_a = np.asarray(
-        [sample.center_xyz for sample in well_a.samples], dtype=float
-    )
-    centers_b = np.asarray(
-        [sample.center_xyz for sample in well_b.samples], dtype=float
-    )
-    covariances_a = np.asarray(
-        [np.asarray(sample.covariance_xyz, dtype=float) for sample in well_a.samples],
-        dtype=float,
-    )
-    covariances_b = np.asarray(
-        [np.asarray(sample.covariance_xyz, dtype=float) for sample in well_b.samples],
-        dtype=float,
-    )
-    delta = centers_a[:, None, :] - centers_b[None, :, :]
-    distance = np.linalg.norm(delta, axis=2)
-
-    direction = np.zeros_like(delta, dtype=float)
-    np.divide(
-        delta,
-        distance[:, :, None],
-        out=direction,
-        where=distance[:, :, None] > SMALL,
-    )
-
-    zero_mask = distance <= SMALL
-    if np.any(zero_mask):
-        combined_covariance = (
-            covariances_a[:, None, :, :] + covariances_b[None, :, :, :]
-        )
-        zero_covariance = combined_covariance[zero_mask]
-        eigenvalues, eigenvectors = np.linalg.eigh(zero_covariance)
-        principal_indices = np.argmax(eigenvalues, axis=1)
-        principal_vectors = np.take_along_axis(
-            eigenvectors,
-            principal_indices[:, None, None],
-            axis=2,
-        )[:, :, 0]
-        principal_norm = np.linalg.norm(principal_vectors, axis=1)
-        degenerate_mask = (np.max(eigenvalues, axis=1) <= 1e-12) | (
-            principal_norm <= 1e-12
-        )
-        if np.any(degenerate_mask):
-            principal_vectors[degenerate_mask] = np.array([1.0, 0.0, 0.0], dtype=float)
-            principal_norm[degenerate_mask] = 1.0
-        principal_vectors = principal_vectors / principal_norm[:, None]
-        direction[zero_mask] = principal_vectors
-
-    directional_sigma2_a = np.einsum(
-        "abi,aij,abj->ab",
-        direction,
-        covariances_a,
-        direction,
-    )
-    directional_sigma2_b = np.einsum(
-        "abi,bij,abj->ab",
-        direction,
-        covariances_b,
-        direction,
-    )
     confidence_scale = float(max(well_a.overlay.model.confidence_scale, SMALL))
-    radius_a = confidence_scale * np.sqrt(np.clip(directional_sigma2_a, 0.0, None))
-    radius_b = confidence_scale * np.sqrt(np.clip(directional_sigma2_b, 0.0, None))
-    combined_radius = radius_a + radius_b
+    distance, combined_radius = _pair_distance_combined_radius_matrices(
+        samples_a=well_a.samples,
+        samples_b=well_b.samples,
+        confidence_scale=confidence_scale,
+    )
+    score = _score_matrix(distance, combined_radius)
+    refine_pairs = _local_refine_candidate_pairs(score)
     overlap_mask = (combined_radius > SMALL) & (distance <= combined_radius)
-    if not np.any(overlap_mask):
+    if not refine_pairs and not np.any(overlap_mask):
         return []
 
-    score = np.divide(
-        distance,
-        np.maximum(combined_radius, SMALL),
-        out=np.full_like(distance, np.inf, dtype=float),
-        where=combined_radius > SMALL,
-    )
     row_best_j = np.argmin(score, axis=1)
     col_best_i = np.argmin(score, axis=0)
 
@@ -1001,26 +1399,546 @@ def _pair_overlap_corridors(
         if sample_a.target_label or sample_b.target_label:
             matched_pairs.add((int(index_a), int(index_b)))
 
+    matched_pairs = _geometry_confirmed_pairs(
+        pairs=matched_pairs,
+        samples_a=well_a.samples,
+        samples_b=well_b.samples,
+        model_a=well_a.overlay.model,
+        model_b=well_b.overlay.model,
+    )
+
+    refined_corridors: list[AntiCollisionCorridor] = []
+    if refine_pairs:
+        refined_corridors = _build_local_refined_pair_corridors(
+            well_a=well_a,
+            well_b=well_b,
+            coarse_pairs=sorted(refine_pairs),
+            confidence_scale=confidence_scale,
+            build_overlap_geometry=build_overlap_geometry,
+        )
+        if refined_corridors and not matched_pairs:
+            return refined_corridors
+    if not matched_pairs:
+        return []
+    if refined_corridors:
+        matched_pairs = _pairs_outside_refined_corridors(
+            pairs=matched_pairs,
+            samples_a=well_a.samples,
+            samples_b=well_b.samples,
+            refined_corridors=refined_corridors,
+        )
+        if not matched_pairs:
+            return refined_corridors
+    return _build_pair_corridors(
+        well_a=well_a,
+        well_b=well_b,
+        samples_a=well_a.samples,
+        samples_b=well_b.samples,
+        pairs=sorted(matched_pairs),
+        distance=distance,
+        combined_radius=combined_radius,
+        build_overlap_geometry=build_overlap_geometry,
+    ) + refined_corridors
+
+
+def _pairs_outside_refined_corridors(
+    *,
+    pairs: set[tuple[int, int]],
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
+    refined_corridors: list[AntiCollisionCorridor],
+) -> set[tuple[int, int]]:
+    if not pairs or not refined_corridors:
+        return set(pairs)
+    remaining: set[tuple[int, int]] = set()
+    tolerance_m = float(DEFINITIVE_LOCAL_REFINE_STEP_M) * 0.5 + 1e-6
+    for index_a, index_b in pairs:
+        md_a = float(samples_a[int(index_a)].md_m)
+        md_b = float(samples_b[int(index_b)].md_m)
+        if any(
+            float(corridor.md_a_start_m) - tolerance_m
+            <= md_a
+            <= float(corridor.md_a_end_m) + tolerance_m
+            and float(corridor.md_b_start_m) - tolerance_m
+            <= md_b
+            <= float(corridor.md_b_end_m) + tolerance_m
+            for corridor in refined_corridors
+        ):
+            continue
+        remaining.add((int(index_a), int(index_b)))
+    return remaining
+
+
+def _build_local_refined_pair_corridors(
+    *,
+    well_a: AntiCollisionWell,
+    well_b: AntiCollisionWell,
+    coarse_pairs: list[tuple[int, int]],
+    confidence_scale: float,
+    build_overlap_geometry: bool,
+) -> list[AntiCollisionCorridor]:
+    if not coarse_pairs:
+        return []
+    samples_by_md_a: dict[float, AntiCollisionSample] = {}
+    samples_by_md_b: dict[float, AntiCollisionSample] = {}
+    evaluated_md_pairs: set[tuple[float, float]] = set()
+
+    for index_a, index_b in coarse_pairs:
+        local_a = _local_refined_samples_for_index(well_a, int(index_a))
+        local_b = _local_refined_samples_for_index(well_b, int(index_b))
+        for sample in local_a:
+            samples_by_md_a[round(float(sample.md_m), 6)] = sample
+        for sample in local_b:
+            samples_by_md_b[round(float(sample.md_m), 6)] = sample
+        for sample_a in local_a:
+            for sample_b in local_b:
+                evaluated_md_pairs.add(
+                    (round(float(sample_a.md_m), 6), round(float(sample_b.md_m), 6))
+                )
+
+    samples_a = tuple(
+        sample
+        for _, sample in sorted(samples_by_md_a.items(), key=lambda item: item[0])
+    )
+    samples_b = tuple(
+        sample
+        for _, sample in sorted(samples_by_md_b.items(), key=lambda item: item[0])
+    )
+    if not samples_a or not samples_b or not evaluated_md_pairs:
+        return []
+
+    index_by_md_a = {
+        round(float(sample.md_m), 6): index
+        for index, sample in enumerate(samples_a)
+    }
+    index_by_md_b = {
+        round(float(sample.md_m), 6): index
+        for index, sample in enumerate(samples_b)
+    }
+    distance = np.full((len(samples_a), len(samples_b)), np.inf, dtype=float)
+    combined_radius = np.zeros((len(samples_a), len(samples_b)), dtype=float)
+    evaluated_pairs: list[tuple[int, int]] = []
+    for md_a, md_b in sorted(evaluated_md_pairs):
+        index_a = index_by_md_a.get(md_a)
+        index_b = index_by_md_b.get(md_b)
+        if index_a is None or index_b is None:
+            continue
+        evaluated_pairs.append((int(index_a), int(index_b)))
+    if not evaluated_pairs:
+        return []
+
+    pair_distances, pair_radii = _evaluated_pair_distances_and_radii(
+        samples_a=samples_a,
+        samples_b=samples_b,
+        pairs=evaluated_pairs,
+        confidence_scale=confidence_scale,
+    )
+    for pair_index, (index_a, index_b) in enumerate(evaluated_pairs):
+        distance[int(index_a), int(index_b)] = float(pair_distances[pair_index])
+        combined_radius[int(index_a), int(index_b)] = float(pair_radii[pair_index])
+
+    overlap_mask = (combined_radius > SMALL) & (distance <= combined_radius)
+    if not np.any(overlap_mask):
+        return []
+    score = _score_matrix(distance, combined_radius)
+    row_best_j = np.argmin(score, axis=1)
+    col_best_i = np.argmin(score, axis=0)
+    matched_pairs: set[tuple[int, int]] = set()
+    for index_a, index_b in enumerate(row_best_j.tolist()):
+        if overlap_mask[int(index_a), int(index_b)]:
+            matched_pairs.add((int(index_a), int(index_b)))
+    for index_b, index_a in enumerate(col_best_i.tolist()):
+        if overlap_mask[int(index_a), int(index_b)]:
+            matched_pairs.add((int(index_a), int(index_b)))
+    matched_pairs = _geometry_confirmed_pairs(
+        pairs=matched_pairs,
+        samples_a=samples_a,
+        samples_b=samples_b,
+        model_a=well_a.overlay.model,
+        model_b=well_b.overlay.model,
+    )
     if not matched_pairs:
         return []
     return _build_pair_corridors(
         well_a=well_a,
         well_b=well_b,
+        samples_a=samples_a,
+        samples_b=samples_b,
         pairs=sorted(matched_pairs),
         distance=distance,
         combined_radius=combined_radius,
         build_overlap_geometry=build_overlap_geometry,
+        interval_half_width_cap_m=0.5 * float(DEFINITIVE_LOCAL_REFINE_STEP_M),
     )
+
+
+def _geometry_confirmed_pairs(
+    *,
+    pairs: set[tuple[int, int]],
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
+    model_a: PlanningUncertaintyModel,
+    model_b: PlanningUncertaintyModel,
+) -> set[tuple[int, int]]:
+    if not pairs:
+        return set()
+
+    ring_cache_a: dict[int, np.ndarray] = {}
+    ring_cache_b: dict[int, np.ndarray] = {}
+    confirmed: set[tuple[int, int]] = set()
+    for index_a, index_b in sorted(pairs):
+        index_a = int(index_a)
+        index_b = int(index_b)
+        ring_a = ring_cache_a.get(index_a)
+        if ring_a is None:
+            ring_a = _sample_uncertainty_ring_xyz(samples_a[index_a], model=model_a)
+            ring_cache_a[index_a] = ring_a
+        ring_b = ring_cache_b.get(index_b)
+        if ring_b is None:
+            ring_b = _sample_uncertainty_ring_xyz(samples_b[index_b], model=model_b)
+            ring_cache_b[index_b] = ring_b
+        overlap_ring = _overlap_ring_between_samples(
+            ring_a_xyz=ring_a,
+            ring_b_xyz=ring_b,
+            center_xyz=0.5
+            * (
+                np.asarray(samples_a[index_a].center_xyz, dtype=float)
+                + np.asarray(samples_b[index_b].center_xyz, dtype=float)
+            ),
+        )
+        if len(overlap_ring) >= 3:
+            confirmed.add((index_a, index_b))
+    return confirmed
+
+
+def _local_refined_samples_for_index(
+    well: AntiCollisionWell,
+    index: int,
+) -> tuple[AntiCollisionSample, ...]:
+    samples = well.samples
+    if not samples:
+        return ()
+    safe_index = int(np.clip(index, 0, len(samples) - 1))
+    md_start = _sample_interval_start(samples, safe_index)
+    md_end = _sample_interval_end(samples, safe_index)
+    step_m = float(DEFINITIVE_LOCAL_REFINE_STEP_M)
+    md_values = [float(md_start)]
+    next_md = float(md_start + step_m)
+    while next_md < float(md_end) - 1e-6:
+        md_values.append(float(next_md))
+        next_md += step_m
+    if abs(float(md_values[-1]) - float(md_end)) > 1e-6:
+        md_values.append(float(md_end))
+    center_md = float(samples[safe_index].md_m)
+    if all(abs(center_md - value) > 1e-6 for value in md_values):
+        md_values.append(center_md)
+    return tuple(
+        _collision_sample_at_md(well, md_m=float(md_m))
+        for md_m in sorted(set(round(float(value), 6) for value in md_values))
+    )
+
+
+def _collision_sample_at_md(
+    well: AntiCollisionWell,
+    *,
+    md_m: float,
+) -> AntiCollisionSample:
+    interpolated = _interpolate_collision_sample(well.samples, md_m=float(md_m))
+    state = _interpolated_station_state_for_collision(well.stations, md_m=float(md_m))
+    if state is None:
+        return interpolated
+    return AntiCollisionSample(
+        md_m=float(interpolated.md_m),
+        center_xyz=(
+            float(state["x_m"]),
+            float(state["y_m"]),
+            float(state["z_m"]),
+        ),
+        covariance_xyz=interpolated.covariance_xyz,
+        covariance_xyz_random=interpolated.covariance_xyz_random,
+        covariance_xyz_systematic=interpolated.covariance_xyz_systematic,
+        covariance_xyz_global=interpolated.covariance_xyz_global,
+        global_source_vectors_xyz=interpolated.global_source_vectors_xyz,
+        inc_deg=float(state["inc_deg"]),
+        azi_deg=float(state["azi_deg"]),
+        target_label=_target_label(
+            md_m=float(interpolated.md_m),
+            md_t1_m=_optional_float(well.md_t1_m),
+            md_t3_m=_optional_float(well.md_t3_m),
+        ),
+    )
+
+
+def _interpolated_station_state_for_collision(
+    stations: pd.DataFrame,
+    *,
+    md_m: float,
+) -> dict[str, float] | None:
+    required = {"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"}
+    if not required.issubset(stations.columns) or stations.empty:
+        return None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    finite = np.isfinite(md_values)
+    if not np.any(finite):
+        return None
+    md_values = md_values[finite]
+    order = np.argsort(md_values)
+    md_values = md_values[order]
+    md = float(np.clip(float(md_m), float(md_values[0]), float(md_values[-1])))
+
+    def column_values(name: str) -> np.ndarray:
+        return stations[name].to_numpy(dtype=float)[finite][order]
+
+    azi_rad = np.unwrap(np.deg2rad(column_values("AZI_deg")))
+    return {
+        "md_m": md,
+        "inc_deg": float(np.interp(md, md_values, column_values("INC_deg"))),
+        "azi_deg": float(np.rad2deg(np.interp(md, md_values, azi_rad)) % 360.0),
+        "x_m": float(np.interp(md, md_values, column_values("X_m"))),
+        "y_m": float(np.interp(md, md_values, column_values("Y_m"))),
+        "z_m": float(np.interp(md, md_values, column_values("Z_m"))),
+    }
+
+
+def _interpolate_collision_sample(
+    samples: tuple[AntiCollisionSample, ...],
+    *,
+    md_m: float,
+) -> AntiCollisionSample:
+    md = round(float(md_m), 6)
+    md_values = np.asarray([sample.md_m for sample in samples], dtype=float)
+    exact_matches = np.where(np.isclose(md_values, md, atol=1e-6))[0]
+    if exact_matches.size:
+        return samples[int(exact_matches[0])]
+    right = int(np.searchsorted(md_values, md, side="right"))
+    if right <= 0:
+        return samples[0]
+    if right >= len(samples):
+        return samples[-1]
+    left_sample = samples[right - 1]
+    right_sample = samples[right]
+    left_md = float(left_sample.md_m)
+    right_md = float(right_sample.md_m)
+    fraction = float((md - left_md) / max(right_md - left_md, SMALL))
+
+    def lerp_array(left: np.ndarray, right_value: np.ndarray) -> np.ndarray:
+        return np.asarray(left, dtype=float) + fraction * (
+            np.asarray(right_value, dtype=float) - np.asarray(left, dtype=float)
+        )
+
+    target_label = TARGET_NONE
+    for sample in (left_sample, right_sample):
+        if sample.target_label and abs(float(sample.md_m) - md) <= 1e-6:
+            target_label = str(sample.target_label)
+            break
+
+    source_names = sorted(
+        {
+            str(source_name)
+            for sample in (left_sample, right_sample)
+            for source_name, _ in sample.global_source_vectors_xyz
+        }
+    )
+    left_vectors = {
+        str(source_name): np.asarray(vector, dtype=float)
+        for source_name, vector in left_sample.global_source_vectors_xyz
+    }
+    right_vectors = {
+        str(source_name): np.asarray(vector, dtype=float)
+        for source_name, vector in right_sample.global_source_vectors_xyz
+    }
+    return AntiCollisionSample(
+        md_m=float(md),
+        center_xyz=tuple(
+            float(value)
+            for value in lerp_array(
+                np.asarray(left_sample.center_xyz, dtype=float),
+                np.asarray(right_sample.center_xyz, dtype=float),
+            )
+        ),
+        covariance_xyz=lerp_array(left_sample.covariance_xyz, right_sample.covariance_xyz),
+        covariance_xyz_random=lerp_array(
+            left_sample.covariance_xyz_random,
+            right_sample.covariance_xyz_random,
+        ),
+        covariance_xyz_systematic=lerp_array(
+            left_sample.covariance_xyz_systematic,
+            right_sample.covariance_xyz_systematic,
+        ),
+        covariance_xyz_global=lerp_array(
+            left_sample.covariance_xyz_global,
+            right_sample.covariance_xyz_global,
+        ),
+        global_source_vectors_xyz=tuple(
+            (
+                source_name,
+                lerp_array(
+                    left_vectors.get(source_name, np.zeros(3, dtype=float)),
+                    right_vectors.get(source_name, np.zeros(3, dtype=float)),
+                ),
+            )
+            for source_name in source_names
+        ),
+        inc_deg=float(left_sample.inc_deg + fraction * (right_sample.inc_deg - left_sample.inc_deg)),
+        azi_deg=_interpolated_azimuth_deg(
+            left_sample.azi_deg,
+            right_sample.azi_deg,
+            fraction,
+        ),
+        target_label=target_label,
+    )
+
+
+def _interpolated_azimuth_deg(left_deg: float, right_deg: float, fraction: float) -> float:
+    left = float(left_deg)
+    delta = ((float(right_deg) - left + 180.0) % 360.0) - 180.0
+    return float((left + float(fraction) * delta) % 360.0)
+
+
+def _evaluated_pair_distances_and_radii(
+    *,
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
+    pairs: list[tuple[int, int]],
+    confidence_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    pair_samples_a = tuple(samples_a[int(index_a)] for index_a, _ in pairs)
+    pair_samples_b = tuple(samples_b[int(index_b)] for _, index_b in pairs)
+    centers_a = np.asarray([sample.center_xyz for sample in pair_samples_a], dtype=float)
+    centers_b = np.asarray([sample.center_xyz for sample in pair_samples_b], dtype=float)
+    delta = centers_a - centers_b
+    distance = np.linalg.norm(delta, axis=1)
+    direction = np.zeros_like(delta, dtype=float)
+    np.divide(delta, distance[:, None], out=direction, where=distance[:, None] > SMALL)
+    zero_mask = distance <= SMALL
+    if np.any(zero_mask):
+        for index in np.where(zero_mask)[0].tolist():
+            covariance = _pair_normal_projected_relative_covariance_matrix(
+                pair_samples_a[int(index)],
+                pair_samples_b[int(index)],
+            )
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+            direction[int(index)] = eigenvectors[:, int(np.argmax(eigenvalues))]
+    covariances_a = np.asarray(
+        [_independent_sample_covariance(sample) for sample in pair_samples_a],
+        dtype=float,
+    )
+    covariances_b = np.asarray(
+        [_independent_sample_covariance(sample) for sample in pair_samples_b],
+        dtype=float,
+    )
+    direction_a = _normal_plane_projected_direction_for_pairs(
+        samples=pair_samples_a,
+        direction=direction,
+    )
+    direction_b = _normal_plane_projected_direction_for_pairs(
+        samples=pair_samples_b,
+        direction=direction,
+    )
+    directional_sigma2_a = np.einsum("pi,pij,pj->p", direction_a, covariances_a, direction_a)
+    directional_sigma2_b = np.einsum("pi,pij,pj->p", direction_b, covariances_b, direction_b)
+    scale = float(max(confidence_scale, SMALL))
+    radius_global = scale * np.sqrt(
+        np.clip(
+            _directional_global_relative_sigma2_for_pairs(
+                samples_a=pair_samples_a,
+                samples_b=pair_samples_b,
+                direction=direction,
+            ),
+            0.0,
+            None,
+        )
+    )
+    combined_radius = (
+        scale * np.sqrt(np.clip(directional_sigma2_a, 0.0, None))
+        + scale * np.sqrt(np.clip(directional_sigma2_b, 0.0, None))
+        + radius_global
+    )
+    return distance, combined_radius
+
+
+def _directional_global_relative_sigma2_for_pairs(
+    *,
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
+    direction: np.ndarray,
+) -> np.ndarray:
+    direction_a = _normal_plane_projected_direction_for_pairs(
+        samples=samples_a,
+        direction=direction,
+    )
+    direction_b = _normal_plane_projected_direction_for_pairs(
+        samples=samples_b,
+        direction=direction,
+    )
+    source_names = sorted(
+        {
+            str(source_name)
+            for sample in (*samples_a, *samples_b)
+            for source_name, _ in sample.global_source_vectors_xyz
+        }
+    )
+    sigma2 = np.zeros(len(samples_a), dtype=float)
+    for source_name in source_names:
+        vectors_a = np.asarray(
+            [
+                dict(sample.global_source_vectors_xyz).get(
+                    source_name,
+                    np.zeros(3, dtype=float),
+                )
+                for sample in samples_a
+            ],
+            dtype=float,
+        )
+        vectors_b = np.asarray(
+            [
+                dict(sample.global_source_vectors_xyz).get(
+                    source_name,
+                    np.zeros(3, dtype=float),
+                )
+                for sample in samples_b
+            ],
+            dtype=float,
+        )
+        projected = (
+            np.einsum("pi,pi->p", direction_a, vectors_a)
+            - np.einsum("pi,pi->p", direction_b, vectors_b)
+        )
+        sigma2 += projected * projected
+    return sigma2
+
+
+def _normal_plane_projected_direction_for_pairs(
+    *,
+    samples: tuple[AntiCollisionSample, ...],
+    direction: np.ndarray,
+) -> np.ndarray:
+    direction_array = np.asarray(direction, dtype=float)
+    tangents = np.asarray(
+        [
+            local_uncertainty_axes_xyz(
+                inc_deg=float(sample.inc_deg),
+                azi_deg=float(sample.azi_deg),
+            )[0]
+            for sample in samples
+        ],
+        dtype=float,
+    )
+    tangent_component = np.sum(direction_array * tangents, axis=1, keepdims=True)
+    return direction_array - tangent_component * tangents
 
 
 def _build_pair_corridors(
     *,
     well_a: AntiCollisionWell,
     well_b: AntiCollisionWell,
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
     pairs: list[tuple[int, int]],
     distance: np.ndarray,
     combined_radius: np.ndarray,
     build_overlap_geometry: bool,
+    interval_half_width_cap_m: float | None = None,
 ) -> list[AntiCollisionCorridor]:
     corridors: list[AntiCollisionCorridor] = []
     current_pairs: list[tuple[int, int]] = []
@@ -1028,27 +1946,29 @@ def _build_pair_corridors(
     for index_a, index_b in sorted(
         pairs,
         key=lambda pair: (
-            0.5 * (well_a.samples[pair[0]].md_m + well_b.samples[pair[1]].md_m),
+            0.5 * (samples_a[pair[0]].md_m + samples_b[pair[1]].md_m),
             pair[0],
             pair[1],
         ),
     ):
         next_key = _pair_class_key(
-            label_a=well_a.samples[int(index_a)].target_label,
-            label_b=well_b.samples[int(index_b)].target_label,
+            label_a=samples_a[int(index_a)].target_label,
+            label_b=samples_b[int(index_b)].target_label,
         )
         if not current_pairs:
             current_pairs.append((int(index_a), int(index_b)))
             continue
         prev_a, prev_b = current_pairs[-1]
         previous_key = _pair_class_key(
-            label_a=well_a.samples[int(prev_a)].target_label,
-            label_b=well_b.samples[int(prev_b)].target_label,
+            label_a=samples_a[int(prev_a)].target_label,
+            label_b=samples_b[int(prev_b)].target_label,
         )
         if (
             _pairs_are_contiguous(
                 previous_pair=(prev_a, prev_b),
                 next_pair=(int(index_a), int(index_b)),
+                samples_a=samples_a,
+                samples_b=samples_b,
             )
             and previous_key == next_key
         ):
@@ -1058,10 +1978,13 @@ def _build_pair_corridors(
             _build_single_corridor(
                 well_a=well_a,
                 well_b=well_b,
+                samples_a=samples_a,
+                samples_b=samples_b,
                 pairs=current_pairs,
                 distance=distance,
                 combined_radius=combined_radius,
                 build_overlap_geometry=build_overlap_geometry,
+                interval_half_width_cap_m=interval_half_width_cap_m,
             )
         )
         current_pairs = [(int(index_a), int(index_b))]
@@ -1071,10 +1994,13 @@ def _build_pair_corridors(
             _build_single_corridor(
                 well_a=well_a,
                 well_b=well_b,
+                samples_a=samples_a,
+                samples_b=samples_b,
                 pairs=current_pairs,
                 distance=distance,
                 combined_radius=combined_radius,
                 build_overlap_geometry=build_overlap_geometry,
+                interval_half_width_cap_m=interval_half_width_cap_m,
             )
         )
     return corridors
@@ -1084,14 +2010,37 @@ def _pairs_are_contiguous(
     *,
     previous_pair: tuple[int, int],
     next_pair: tuple[int, int],
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
 ) -> bool:
-    delta_a = int(next_pair[0]) - int(previous_pair[0])
-    delta_b = int(next_pair[1]) - int(previous_pair[1])
-    if delta_a < 0 or delta_b < 0:
+    previous_md_a = float(samples_a[int(previous_pair[0])].md_m)
+    next_md_a = float(samples_a[int(next_pair[0])].md_m)
+    previous_md_b = float(samples_b[int(previous_pair[1])].md_m)
+    next_md_b = float(samples_b[int(next_pair[1])].md_m)
+    step_a = _local_sample_step_near_pair(samples_a, previous_pair[0], next_pair[0])
+    step_b = _local_sample_step_near_pair(samples_b, previous_pair[1], next_pair[1])
+    if abs(next_md_a - previous_md_a) > 2.1 * max(step_a, SMALL):
         return False
-    if delta_a > 2 or delta_b > 2:
+    if abs(next_md_b - previous_md_b) > 2.1 * max(step_b, SMALL):
         return False
-    return abs(delta_a - delta_b) <= 2
+    return abs(next_md_a - previous_md_a) > SMALL or abs(next_md_b - previous_md_b) > SMALL
+
+
+def _local_sample_step_near_pair(
+    samples: tuple[AntiCollisionSample, ...],
+    index_a: int,
+    index_b: int,
+) -> float:
+    if len(samples) < 2:
+        return 1.0
+    left = max(min(int(index_a), int(index_b)) - 1, 0)
+    right = min(max(int(index_a), int(index_b)) + 2, len(samples) - 1)
+    md_values = np.asarray([sample.md_m for sample in samples[left : right + 1]], dtype=float)
+    diffs = np.diff(np.sort(md_values))
+    diffs = diffs[np.isfinite(diffs) & (diffs > 1e-6)]
+    if diffs.size == 0:
+        return float(DEFINITIVE_LOCAL_REFINE_STEP_M)
+    return float(np.median(diffs))
 
 
 def _pair_class_key(*, label_a: str, label_b: str) -> tuple[int, str, str]:
@@ -1106,10 +2055,13 @@ def _build_single_corridor(
     *,
     well_a: AntiCollisionWell,
     well_b: AntiCollisionWell,
+    samples_a: tuple[AntiCollisionSample, ...],
+    samples_b: tuple[AntiCollisionSample, ...],
     pairs: list[tuple[int, int]],
     distance: np.ndarray,
     combined_radius: np.ndarray,
     build_overlap_geometry: bool,
+    interval_half_width_cap_m: float | None = None,
 ) -> AntiCollisionCorridor:
     ordered_pairs = sorted(pairs, key=lambda pair: (pair[0], pair[1]))
     midpoint_points: list[np.ndarray] = []
@@ -1122,10 +2074,13 @@ def _build_single_corridor(
     label_a_values: list[str] = []
     label_b_values: list[str] = []
     overlap_rings_xyz: list[np.ndarray] = []
+    overlap_ring_inputs: list[
+        tuple[AntiCollisionSample, AntiCollisionSample, np.ndarray]
+    ] = []
 
     for index_a, index_b in ordered_pairs:
-        sample_a = well_a.samples[int(index_a)]
-        sample_b = well_b.samples[int(index_b)]
+        sample_a = samples_a[int(index_a)]
+        sample_b = samples_b[int(index_b)]
         if bool(well_a.is_reference_only) or bool(well_b.is_reference_only):
             label_a = TARGET_NONE
             label_b = TARGET_NONE
@@ -1149,18 +2104,11 @@ def _build_single_corridor(
         )
         core_radii.append(_overlap_core_radius_m(overlap_depth_m=overlap_depth_m))
         if build_overlap_geometry:
-            overlap_rings_xyz.append(
-                _overlap_ring_between_samples(
-                    ring_a_xyz=np.asarray(
-                        well_a.overlay.samples[int(index_a)].ring_xyz,
-                        dtype=float,
-                    ),
-                    ring_b_xyz=np.asarray(
-                        well_b.overlay.samples[int(index_b)].ring_xyz,
-                        dtype=float,
-                    ),
-                    center_xyz=midpoint_points[-1],
-                    fallback_radius_m=core_radii[-1],
+            overlap_ring_inputs.append(
+                (
+                    sample_a,
+                    sample_b,
+                    np.asarray(midpoint_points[-1], dtype=float),
                 )
             )
         sf_values.append(sf)
@@ -1181,6 +2129,27 @@ def _build_single_corridor(
         0: "target-target",
         1: "target-trajectory",
     }.get(best_priority, "trajectory")
+    if build_overlap_geometry:
+        for offset in _selected_overlap_geometry_offsets(
+            point_count=len(overlap_ring_inputs),
+            separation_factor_values=sf_values,
+        ):
+            sample_a, sample_b, midpoint_xyz = overlap_ring_inputs[
+                int(offset)
+            ]
+            overlap_ring = _overlap_ring_between_samples(
+                ring_a_xyz=_sample_uncertainty_ring_xyz(
+                    sample_a,
+                    model=well_a.overlay.model,
+                ),
+                ring_b_xyz=_sample_uncertainty_ring_xyz(
+                    sample_b,
+                    model=well_b.overlay.model,
+                ),
+                center_xyz=midpoint_xyz,
+            )
+            if len(overlap_ring) >= 3:
+                overlap_rings_xyz.append(overlap_ring)
     first_index_a = min(index_a for index_a, _ in ordered_pairs)
     last_index_a = max(index_a for index_a, _ in ordered_pairs)
     first_index_b = min(index_b for _, index_b in ordered_pairs)
@@ -1192,10 +2161,26 @@ def _build_single_corridor(
         priority_rank=best_priority,
         label_a=str(best_meta[1]),
         label_b=str(best_meta[2]),
-        md_a_start_m=_sample_interval_start(well_a.samples, first_index_a),
-        md_a_end_m=_sample_interval_end(well_a.samples, last_index_a),
-        md_b_start_m=_sample_interval_start(well_b.samples, first_index_b),
-        md_b_end_m=_sample_interval_end(well_b.samples, last_index_b),
+        md_a_start_m=_sample_interval_start(
+            samples_a,
+            first_index_a,
+            half_width_cap_m=interval_half_width_cap_m,
+        ),
+        md_a_end_m=_sample_interval_end(
+            samples_a,
+            last_index_a,
+            half_width_cap_m=interval_half_width_cap_m,
+        ),
+        md_b_start_m=_sample_interval_start(
+            samples_b,
+            first_index_b,
+            half_width_cap_m=interval_half_width_cap_m,
+        ),
+        md_b_end_m=_sample_interval_end(
+            samples_b,
+            last_index_b,
+            half_width_cap_m=interval_half_width_cap_m,
+        ),
         md_a_values_m=np.asarray(md_a_values, dtype=float),
         md_b_values_m=np.asarray(md_b_values, dtype=float),
         label_a_values=tuple(label_a_values),
@@ -1210,30 +2195,163 @@ def _build_single_corridor(
     )
 
 
+def _selected_overlap_geometry_offsets(
+    *,
+    point_count: int,
+    separation_factor_values: list[float],
+) -> tuple[int, ...]:
+    count = int(point_count)
+    if count <= 0:
+        return ()
+    max_count = int(min(count, _MAX_OVERLAP_GEOMETRY_RINGS_PER_CORRIDOR))
+    if count <= max_count:
+        return tuple(range(count))
+
+    priority_offsets = [0, count - 1]
+    if separation_factor_values:
+        priority_offsets.append(
+            int(np.argmin(np.asarray(separation_factor_values, dtype=float)))
+        )
+    priority_offsets.extend(
+        int(round(value)) for value in np.linspace(0, count - 1, max_count)
+    )
+
+    selected: list[int] = []
+    for offset in priority_offsets:
+        safe_offset = int(np.clip(int(offset), 0, count - 1))
+        if safe_offset not in selected:
+            selected.append(safe_offset)
+        if len(selected) >= max_count:
+            break
+    return tuple(sorted(selected))
+
+
 def _sample_interval_start(
     samples: tuple[AntiCollisionSample, ...],
     index: int,
+    *,
+    half_width_cap_m: float | None = None,
 ) -> float:
     current_md = float(samples[int(index)].md_m)
     if int(index) == 0:
         return current_md
     previous_md = float(samples[int(index) - 1].md_m)
-    return 0.5 * (previous_md + current_md)
+    start_m = 0.5 * (previous_md + current_md)
+    if half_width_cap_m is not None:
+        start_m = max(start_m, current_md - float(half_width_cap_m))
+    return float(start_m)
 
 
 def _sample_interval_end(
     samples: tuple[AntiCollisionSample, ...],
     index: int,
+    *,
+    half_width_cap_m: float | None = None,
 ) -> float:
     current_md = float(samples[int(index)].md_m)
     if int(index) >= len(samples) - 1:
         return current_md
     next_md = float(samples[int(index) + 1].md_m)
-    return 0.5 * (current_md + next_md)
+    end_m = 0.5 * (current_md + next_md)
+    if half_width_cap_m is not None:
+        end_m = min(end_m, current_md + float(half_width_cap_m))
+    return float(end_m)
 
 
 def _overlap_core_radius_m(*, overlap_depth_m: float) -> float:
     return float(max(3.0, 0.5 * float(overlap_depth_m)))
+
+
+def _sample_uncertainty_ring_xyz(
+    sample: AntiCollisionSample,
+    *,
+    model: PlanningUncertaintyModel,
+) -> np.ndarray:
+    center = np.asarray(sample.center_xyz, dtype=float)
+    tangent, primary_axis, secondary_axis = local_uncertainty_axes_xyz(
+        inc_deg=float(sample.inc_deg),
+        azi_deg=float(sample.azi_deg),
+    )
+    if abs(float(sample.inc_deg)) < float(model.near_vertical_isotropic_threshold_deg):
+        primary_axis, secondary_axis = _stable_normal_plane_basis(tangent)
+    semi_primary_m, semi_secondary_m, primary_axis, secondary_axis = (
+        _normal_plane_ellipse_axes_from_covariance(
+            covariance_xyz=np.asarray(sample.covariance_xyz, dtype=float),
+            tangent=tangent,
+            primary_axis=primary_axis,
+            secondary_axis=secondary_axis,
+            confidence_scale=float(model.confidence_scale),
+        )
+    )
+    angles = np.linspace(
+        0.0,
+        2.0 * np.pi,
+        int(max(model.ellipse_points, 12)),
+        endpoint=False,
+    )
+    return (
+        center[None, :]
+        + np.cos(angles)[:, None] * (semi_primary_m * primary_axis[None, :])
+        + np.sin(angles)[:, None] * (semi_secondary_m * secondary_axis[None, :])
+    )
+
+
+def _normal_plane_ellipse_axes_from_covariance(
+    *,
+    covariance_xyz: np.ndarray,
+    tangent: np.ndarray,
+    primary_axis: np.ndarray,
+    secondary_axis: np.ndarray,
+    confidence_scale: float,
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    tangent = np.asarray(tangent, dtype=float)
+    tangent_norm = float(np.linalg.norm(tangent))
+    if tangent_norm <= SMALL:
+        tangent = np.array([0.0, 0.0, 1.0], dtype=float)
+    else:
+        tangent = tangent / tangent_norm
+    u = np.asarray(primary_axis, dtype=float)
+    u = u - tangent * float(np.dot(u, tangent))
+    u_norm = float(np.linalg.norm(u))
+    if u_norm <= SMALL:
+        u, v = _stable_normal_plane_basis(tangent)
+    else:
+        u = u / u_norm
+        v = np.cross(tangent, u)
+        v_norm = float(np.linalg.norm(v))
+        if v_norm <= SMALL:
+            u, v = _stable_normal_plane_basis(tangent)
+        else:
+            v = v / v_norm
+    covariance = np.asarray(covariance_xyz, dtype=float)
+    projected = np.array(
+        [
+            [float(u @ covariance @ u), float(u @ covariance @ v)],
+            [float(v @ covariance @ u), float(v @ covariance @ v)],
+        ],
+        dtype=float,
+    )
+    projected = 0.5 * (projected + projected.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(projected)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = np.clip(eigenvalues[order], 0.0, None)
+    eigenvectors = eigenvectors[:, order]
+    axis_major = eigenvectors[0, 0] * u + eigenvectors[1, 0] * v
+    axis_minor = eigenvectors[0, 1] * u + eigenvectors[1, 1] * v
+    axis_major_norm = float(np.linalg.norm(axis_major))
+    axis_minor_norm = float(np.linalg.norm(axis_minor))
+    if axis_major_norm <= SMALL or axis_minor_norm <= SMALL:
+        axis_major, axis_minor = u, v
+    else:
+        axis_major = axis_major / axis_major_norm
+        axis_minor = axis_minor / axis_minor_norm
+    scale = float(max(confidence_scale, 0.0))
+    return (
+        scale * float(np.sqrt(eigenvalues[0])),
+        scale * float(np.sqrt(eigenvalues[1])),
+        np.asarray(axis_major, dtype=float),
+        np.asarray(axis_minor, dtype=float),
+    )
 
 
 def _overlap_ring_between_samples(
@@ -1241,17 +2359,12 @@ def _overlap_ring_between_samples(
     ring_a_xyz: np.ndarray,
     ring_b_xyz: np.ndarray,
     center_xyz: np.ndarray,
-    fallback_radius_m: float,
     resample_points: int = 32,
 ) -> np.ndarray:
     ring_a = _open_ring(np.asarray(ring_a_xyz, dtype=float))
     ring_b = _open_ring(np.asarray(ring_b_xyz, dtype=float))
     if len(ring_a) < 3 or len(ring_b) < 3:
-        return _fallback_circle_ring(
-            center_xyz=np.asarray(center_xyz, dtype=float),
-            radius_m=float(fallback_radius_m),
-            point_count=int(resample_points),
-        )
+        return np.empty((0, 3), dtype=float)
 
     basis_u, basis_v = _shared_overlap_plane_basis(ring_a=ring_a, ring_b=ring_b)
     center = np.asarray(center_xyz, dtype=float)
@@ -1261,11 +2374,7 @@ def _overlap_ring_between_samples(
     polygon_b_2d = _ensure_ccw_convex_polygon(polygon_b_2d)
     overlap_polygon_2d = _convex_polygon_intersection(polygon_a_2d, polygon_b_2d)
     if len(overlap_polygon_2d) < 3:
-        return _fallback_circle_ring(
-            center_xyz=np.asarray(center_xyz, dtype=float),
-            radius_m=float(fallback_radius_m),
-            point_count=int(resample_points),
-        )
+        return np.empty((0, 3), dtype=float)
     resampled_polygon_2d = _resample_closed_polygon_2d(
         overlap_polygon_2d,
         point_count=int(resample_points),
@@ -1453,24 +2562,6 @@ def _resample_closed_polygon_2d(
     return np.asarray(resampled, dtype=float)
 
 
-def _fallback_circle_ring(
-    *,
-    center_xyz: np.ndarray,
-    radius_m: float,
-    point_count: int,
-) -> np.ndarray:
-    basis_u, basis_v = _stable_normal_plane_basis(
-        np.array([0.0, 0.0, 1.0], dtype=float)
-    )
-    angles = np.linspace(0.0, 2.0 * np.pi, int(max(point_count, 12)), endpoint=False)
-    radius = float(max(radius_m, 1.0))
-    return (
-        np.asarray(center_xyz, dtype=float)[None, :]
-        + np.cos(angles)[:, None] * (radius * basis_u[None, :])
-        + np.sin(angles)[:, None] * (radius * basis_v[None, :])
-    )
-
-
 def _corridor_summary_zone(corridor: AntiCollisionCorridor) -> AntiCollisionZone:
     worst_index = _corridor_representative_index(corridor)
     midpoint_xyz = np.asarray(corridor.midpoint_xyz, dtype=float)
@@ -1533,14 +2624,14 @@ def _report_event_group_can_merge(
     *,
     tolerance_m: float,
 ) -> bool:
-    if (
-        str(event.well_a) != str(corridor.well_a)
-        or str(event.well_b) != str(corridor.well_b)
+    if str(event.well_a) != str(corridor.well_a) or str(event.well_b) != str(
+        corridor.well_b
     ):
         return False
-    if str(event.classification) == "target-target" or str(
-        corridor.classification
-    ) == "target-target":
+    if (
+        str(event.classification) == "target-target"
+        or str(corridor.classification) == "target-target"
+    ):
         if (
             str(event.classification) != str(corridor.classification)
             or str(event.label_a) != str(corridor.label_a)
@@ -1642,9 +2733,7 @@ def _target_labels_are_merge_compatible(
     event_labels = _target_label_signature(event.label_a, event.label_b)
     corridor_labels = _target_label_signature(corridor.label_a, corridor.label_b)
     return bool(
-        not event_labels
-        or not corridor_labels
-        or event_labels == corridor_labels
+        not event_labels or not corridor_labels or event_labels == corridor_labels
     )
 
 
@@ -1658,8 +2747,19 @@ def _corridor_merge_tolerance_m(
     wells: tuple[AntiCollisionWell, ...],
 ) -> float:
     return float(
-        max((well.overlay.model.sample_step_m for well in wells), default=100.0) * 1.05
+        max((_well_sample_step_m(well) for well in wells), default=100.0) * 1.05
     )
+
+
+def _well_sample_step_m(well: AntiCollisionWell) -> float:
+    md_values = np.asarray([sample.md_m for sample in well.samples], dtype=float)
+    if md_values.size < 2:
+        return float(well.overlay.model.sample_step_m)
+    diffs = np.diff(np.sort(md_values))
+    diffs = diffs[np.isfinite(diffs) & (diffs > 1e-6)]
+    if diffs.size == 0:
+        return float(well.overlay.model.sample_step_m)
+    return float(np.median(diffs))
 
 
 def _md_interval_label(md_start_m: float, md_end_m: float) -> str:
@@ -1695,7 +2795,7 @@ def _collect_well_overlap_segments(
     if not corridors:
         return []
     step_tolerance_m = float(
-        max((well.overlay.model.sample_step_m for well in wells), default=100.0) * 1.05
+        max((_well_sample_step_m(well) for well in wells), default=100.0) * 1.05
     )
     raw_segments: list[AntiCollisionWellSegment] = []
     for corridor in corridors:

@@ -2651,6 +2651,7 @@
         function addLine(item) {
           const segments = Array.isArray(item.segments) ? item.segments : [];
           const role = String(item.role || "line");
+          const isConflictSegment = role === "conflict_segment";
           addMiniMapTrajectoryOverlay(item);
           const materialOptions = {
             color: hexOrDefault(item.color, "#0f172a"),
@@ -2659,40 +2660,59 @@
               role === "cone_tip"
                 ? Math.min(Number(item.opacity || 1.0), 0.46)
                 : Number(item.opacity || 1.0),
-            depthTest: true,
-            depthWrite: role !== "cone_tip",
+            depthTest: !isConflictSegment,
+            depthWrite: role !== "cone_tip" && !isConflictSegment,
           };
           function addPolylineTube() {
-            if (role !== "line" || String(item.dash || "solid") !== "solid") {
+            if (
+              !(role === "line" || isConflictSegment) ||
+              String(item.dash || "solid") !== "solid"
+            ) {
               return;
             }
             const pointCount = segments.reduce(
               (acc, segment) => acc + (Array.isArray(segment) ? segment.length : 0),
               0,
             );
-            if (sceneComplexity > 90000 || pointCount > 2200) {
+            if (!isConflictSegment && (sceneComplexity > 90000 || pointCount > 2200)) {
               return;
             }
-            const radius = Math.min(Math.max(maxSpan * 0.00032, 0.9), 3.2);
+            if (isConflictSegment && pointCount > 8000) {
+              return;
+            }
+            const radius = isConflictSegment
+              ? Math.min(Math.max(maxSpan * 0.0009, 3.0), 8.0)
+              : Math.min(Math.max(maxSpan * 0.00032, 0.9), 3.2);
             const radialSegments = 6;
-            const material = new THREE.MeshLambertMaterial({
+            const MaterialClass = isConflictSegment
+              ? THREE.MeshBasicMaterial
+              : THREE.MeshLambertMaterial;
+            const material = new MaterialClass({
               color: materialOptions.color,
               transparent: true,
-              opacity: Math.min(Number(materialOptions.opacity || 1.0), 0.72),
+              opacity: isConflictSegment
+                ? Math.min(Number(materialOptions.opacity || 1.0), 0.96)
+                : Math.min(Number(materialOptions.opacity || 1.0), 0.72),
               side: THREE.DoubleSide,
               depthWrite: false,
-              depthTest: true,
+              depthTest: !isConflictSegment,
             });
             material.forceSinglePass = true;
-            const depthMaterial = new THREE.MeshBasicMaterial({
-              color: materialOptions.color,
-              side: THREE.DoubleSide,
-              depthWrite: true,
-              depthTest: true,
-              colorWrite: false,
-            });
-            depthMaterial.forceSinglePass = true;
-            registerEditableBaseMaterial(material, materialOptions.color, item.name);
+            const depthMaterial = isConflictSegment
+              ? null
+              : new THREE.MeshBasicMaterial({
+                  color: materialOptions.color,
+                  side: THREE.DoubleSide,
+                  depthWrite: true,
+                  depthTest: true,
+                  colorWrite: false,
+                });
+            if (depthMaterial) {
+              depthMaterial.forceSinglePass = true;
+            }
+            if (!isConflictSegment) {
+              registerEditableBaseMaterial(material, materialOptions.color, item.name);
+            }
             segments.forEach((segment) => {
               if (!Array.isArray(segment) || segment.length < 2) {
                 return;
@@ -2776,11 +2796,14 @@
               );
               geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
               geometry.computeVertexNormals();
-              const depthMesh = new THREE.Mesh(geometry, depthMaterial);
-              depthMesh.renderOrder = -1;
-              scene.add(depthMesh);
+              if (!isConflictSegment) {
+                const depthMesh = new THREE.Mesh(geometry, depthMaterial);
+                depthMesh.renderOrder = -1;
+                scene.add(depthMesh);
+              }
               const mesh = new THREE.Mesh(geometry, material);
-              mesh.renderOrder = 0;
+              mesh.renderOrder = isConflictSegment ? 8 : 0;
+              registerAntiCollisionVisualObject(mesh, item);
               scene.add(mesh);
             });
           }
@@ -2836,6 +2859,7 @@
           const material = new THREE.LineBasicMaterial(materialOptions);
           registerEditableBaseMaterial(material, materialOptions.color, item.name);
           const lineSegments = new THREE.LineSegments(geometry, material);
+          lineSegments.renderOrder = isConflictSegment ? 9 : 0;
           registerAntiCollisionVisualObject(lineSegments, item);
           if (role === "cone_tip") {
             registerMiniMapHiddenContourObject(lineSegments);
@@ -3011,6 +3035,9 @@
             material.opacity = Math.min(opacity, 0.42);
           }
           if (role === "cone") {
+            addMiniMapConeOverlay(item, geometry);
+          }
+          if (role === "cone") {
             const wireGeometry = new THREE.WireframeGeometry(geometry);
             const wireMaterial = new THREE.LineBasicMaterial({
               color: baseColor,
@@ -3089,7 +3116,8 @@
         }
 
         function miniMapOverlayEligibleLine(item) {
-          return String((item && item.role) || "line") === "line";
+          const role = String((item && item.role) || "line");
+          return role === "line" || role === "conflict_segment";
         }
 
         function miniMapStripGeometryForSegment(segment, widthM) {
@@ -3150,8 +3178,12 @@
           if (!miniMapOverlayEligibleLine(item)) {
             return;
           }
+          const isConflictSegment =
+            String((item && item.role) || "") === "conflict_segment";
           const segments = Array.isArray(item.segments) ? item.segments : [];
-          const opacity = Math.min(Math.max(Number(item.opacity || 1.0), 0.42), 0.95);
+          const opacity = isConflictSegment
+            ? 1.0
+            : Math.min(Math.max(Number(item.opacity || 1.0), 0.42), 0.95);
           const material = new THREE.MeshBasicMaterial({
             color: hexOrDefault(item.color, "#0f172a"),
             transparent: true,
@@ -3160,15 +3192,44 @@
             depthTest: false,
             depthWrite: false,
           });
-          const widthM = miniMapTrajectoryOverlayWidth();
+          const widthM = isConflictSegment
+            ? miniMapTrajectoryOverlayWidth() * 1.45
+            : miniMapTrajectoryOverlayWidth();
           segments.forEach((segment) => {
             const geometry = miniMapStripGeometryForSegment(segment, widthM);
             if (!geometry) {
               return;
             }
             const mesh = new THREE.Mesh(geometry, material);
+            if (isConflictSegment) {
+              mesh.renderOrder = 12;
+              registerAntiCollisionVisualObject(mesh, item);
+            }
             miniMapOverlayScene.add(mesh);
           });
+        }
+
+        function addMiniMapConeOverlay(item, sourceGeometry) {
+          if (String((item && item.role) || "") !== "cone" || !sourceGeometry) {
+            return;
+          }
+          const geometry = sourceGeometry.clone();
+          const material = new THREE.MeshBasicMaterial({
+            color: hexOrDefault(item.color, "#94a3b8"),
+            transparent: true,
+            opacity: Math.min(
+              Math.max(numberOrDefault(item.opacity, 0.18), 0.12),
+              0.22,
+            ),
+            side: THREE.DoubleSide,
+            depthTest: false,
+            depthWrite: false,
+          });
+          material.forceSinglePass = true;
+          const mesh = new THREE.Mesh(geometry, material);
+          mesh.renderOrder = -10;
+          registerAntiCollisionVisualObject(mesh, item);
+          miniMapOverlayScene.add(mesh);
         }
 
         function addMarkers(item) {

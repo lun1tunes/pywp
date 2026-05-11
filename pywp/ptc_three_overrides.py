@@ -33,6 +33,7 @@ __all__ = [
 ]
 
 MAX_EDIT_BASE_POINTS = 700
+MAX_OVERLAP_VOLUME_RINGS = 48
 
 
 def successful_plan_raw_bounds(
@@ -638,18 +639,7 @@ def _overlap_volume_rings_for_corridors(
     ]
     rings = _aligned_overlap_rings(raw_rings)
     if len(rings) >= 2:
-        return rings
-    if len(rings) == 1:
-        return _thin_volume_from_single_ring(rings[0])
-
-    fallback_rings = [
-        ring
-        for corridor in corridor_list
-        for ring in _fallback_overlap_rings_from_corridor(corridor)
-    ]
-    rings = _aligned_overlap_rings(fallback_rings)
-    if len(rings) >= 2:
-        return rings
+        return _downsample_volume_rings(rings)
     if len(rings) == 1:
         return _thin_volume_from_single_ring(rings[0])
     return []
@@ -658,10 +648,24 @@ def _overlap_volume_rings_for_corridors(
 def _overlap_volume_rings(corridor: object) -> list[np.ndarray]:
     rings = _aligned_overlap_rings(getattr(corridor, "overlap_rings_xyz", ()))
     if len(rings) >= 2:
-        return rings
+        return _downsample_volume_rings(rings)
     if len(rings) == 1:
         return _thin_volume_from_single_ring(rings[0])
-    return _fallback_overlap_rings_from_corridor(corridor)
+    return []
+
+
+def _downsample_volume_rings(rings: list[np.ndarray]) -> list[np.ndarray]:
+    if len(rings) <= MAX_OVERLAP_VOLUME_RINGS:
+        return rings
+    indices = np.unique(
+        np.linspace(
+            0,
+            len(rings) - 1,
+            num=MAX_OVERLAP_VOLUME_RINGS,
+            dtype=int,
+        )
+    )
+    return [rings[int(index)] for index in indices.tolist()]
 
 
 def _aligned_overlap_rings(
@@ -693,65 +697,6 @@ def _thin_volume_from_single_ring(ring: np.ndarray) -> list[np.ndarray]:
     ]
 
 
-def _fallback_overlap_rings_from_corridor(corridor: object) -> list[np.ndarray]:
-    centers = _finite_xyz_rows(getattr(corridor, "midpoint_xyz", ()))
-    if centers.size == 0:
-        return []
-    radii = _positive_values(getattr(corridor, "overlap_core_radius_m", ()))
-    if radii.size == 0:
-        radii = _positive_values(getattr(corridor, "overlap_depth_values_m", ()))
-    if radii.size == 0:
-        radii = np.full(len(centers), 2.0, dtype=float)
-    if len(radii) < len(centers):
-        radii = np.pad(radii, (0, len(centers) - len(radii)), mode="edge")
-    radii = radii[: len(centers)]
-    rings: list[np.ndarray] = []
-    if len(centers) == 1:
-        radius = float(max(radii[0], 1.0))
-        normal = np.array([0.0, 0.0, 1.0], dtype=float)
-        thickness = _overlap_fallback_thickness(radius)
-        for offset in (-0.5, 0.5):
-            rings.append(
-                _circle_ring(
-                    center=centers[0] + normal * thickness * offset,
-                    normal=normal,
-                    radius=radius,
-                )
-            )
-        return rings
-    for index, center in enumerate(centers):
-        tangent = _centerline_tangent(centers, index)
-        rings.append(
-            _circle_ring(
-                center=center,
-                normal=tangent,
-                radius=float(max(radii[index], 1.0)),
-            )
-        )
-    return _aligned_overlap_rings(rings)
-
-
-def _finite_xyz_rows(values: object) -> np.ndarray:
-    try:
-        rows = np.asarray(values, dtype=float)
-    except (TypeError, ValueError):
-        return np.empty((0, 3), dtype=float)
-    if rows.ndim == 1 and rows.shape[0] == 3:
-        rows = rows.reshape(1, 3)
-    if rows.ndim != 2 or rows.shape[1] != 3:
-        return np.empty((0, 3), dtype=float)
-    return np.asarray(rows[np.all(np.isfinite(rows), axis=1)], dtype=float)
-
-
-def _positive_values(values: object) -> np.ndarray:
-    try:
-        array = np.asarray(values, dtype=float).reshape(-1)
-    except (TypeError, ValueError):
-        return np.empty(0, dtype=float)
-    array = array[np.isfinite(array) & (array > 0.0)]
-    return np.asarray(array, dtype=float)
-
-
 def _overlap_fallback_thickness(radius: float) -> float:
     return float(np.clip(max(float(radius), 1.0) * 0.12, 0.6, 8.0))
 
@@ -768,58 +713,6 @@ def _ring_normal_vector(ring: np.ndarray) -> np.ndarray:
     if not np.isfinite(norm) or norm <= 1e-9:
         return np.array([0.0, 0.0, 1.0], dtype=float)
     return normal / norm
-
-
-def _centerline_tangent(centers: np.ndarray, index: int) -> np.ndarray:
-    if len(centers) <= 1:
-        return np.array([0.0, 0.0, 1.0], dtype=float)
-    if index <= 0:
-        tangent = centers[1] - centers[0]
-    elif index >= len(centers) - 1:
-        tangent = centers[-1] - centers[-2]
-    else:
-        tangent = centers[index + 1] - centers[index - 1]
-    norm = float(np.linalg.norm(tangent))
-    if not np.isfinite(norm) or norm <= 1e-9:
-        return np.array([0.0, 0.0, 1.0], dtype=float)
-    return np.asarray(tangent / norm, dtype=float)
-
-
-def _circle_ring(
-    *,
-    center: np.ndarray,
-    normal: np.ndarray,
-    radius: float,
-    point_count: int = 24,
-) -> np.ndarray:
-    normal = np.asarray(normal, dtype=float)
-    normal_norm = float(np.linalg.norm(normal))
-    if not np.isfinite(normal_norm) or normal_norm <= 1e-9:
-        normal = np.array([0.0, 0.0, 1.0], dtype=float)
-    else:
-        normal = normal / normal_norm
-    seed = (
-        np.array([0.0, 0.0, 1.0], dtype=float)
-        if abs(float(normal[2])) < 0.92
-        else np.array([0.0, 1.0, 0.0], dtype=float)
-    )
-    basis_u = np.cross(normal, seed)
-    basis_u_norm = float(np.linalg.norm(basis_u))
-    if not np.isfinite(basis_u_norm) or basis_u_norm <= 1e-9:
-        basis_u = np.array([1.0, 0.0, 0.0], dtype=float)
-    else:
-        basis_u = basis_u / basis_u_norm
-    basis_v = np.cross(normal, basis_u)
-    basis_v = basis_v / max(float(np.linalg.norm(basis_v)), 1e-9)
-    angles = np.linspace(0.0, 2.0 * np.pi, int(max(point_count, 8)), endpoint=False)
-    safe_radius = float(max(radius, 1.0))
-    return np.asarray(
-        [
-            center + safe_radius * (np.cos(angle) * basis_u + np.sin(angle) * basis_v)
-            for angle in angles
-        ],
-        dtype=float,
-    )
 
 
 def _open_finite_ring(raw_ring: object) -> np.ndarray | None:

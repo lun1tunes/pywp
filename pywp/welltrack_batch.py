@@ -51,7 +51,7 @@ from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.solver_diagnostics import summarize_problem_ru
-from pywp.uncertainty import PlanningUncertaintyModel
+from pywp.uncertainty import PlanningUncertaintyModel, fast_proxy_uncertainty_model
 from pywp.ui_utils import dls_to_pi
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -160,6 +160,16 @@ def _uncertainty_model_to_worker_payload(
             model.directional_refine_threshold_deg
         ),
         "min_refined_step_m": float(model.min_refined_step_m),
+        "iscwsa_tool_code": model.iscwsa_tool_code,
+        "iscwsa_environment": {
+            "gtot_mps2": float(model.iscwsa_environment.gtot_mps2),
+            "mtot_nt": float(model.iscwsa_environment.mtot_nt),
+            "dip_deg": float(model.iscwsa_environment.dip_deg),
+            "declination_deg": float(model.iscwsa_environment.declination_deg),
+            "lateral_singularity_inc_deg": float(
+                model.iscwsa_environment.lateral_singularity_inc_deg
+            ),
+        },
     }
 
 
@@ -170,7 +180,15 @@ def _uncertainty_model_from_worker_payload(
         return payload
     if not isinstance(payload, Mapping):
         raise ValueError("Uncertainty model payload must be a mapping.")
-    return PlanningUncertaintyModel(**dict(payload))
+    model_payload = dict(payload)
+    environment_payload = model_payload.get("iscwsa_environment")
+    if isinstance(environment_payload, Mapping):
+        from pywp.iscwsa_mwd import IscwsaMwdEnvironment
+
+        model_payload["iscwsa_environment"] = IscwsaMwdEnvironment(
+            **dict(environment_payload)
+        )
+    return PlanningUncertaintyModel(**model_payload)
 
 
 def _optimization_context_to_worker_payload(
@@ -963,7 +981,9 @@ class WelltrackBatchPlanner:
             return 1e6, 0.0, 0
         analysis = build_anti_collision_analysis_for_successes(
             successes,
-            model=dynamic_cluster_context.uncertainty_model,
+            model=fast_proxy_uncertainty_model(
+                dynamic_cluster_context.uncertainty_model
+            ),
             reference_wells=dynamic_cluster_context.reference_wells,
             include_display_geometry=False,
             build_overlap_geometry=False,
@@ -1058,7 +1078,9 @@ class WelltrackBatchPlanner:
             return 1e6, 0.0, 0
         analysis = build_anti_collision_analysis_for_successes(
             successes,
-            model=dynamic_cluster_context.uncertainty_model,
+            model=fast_proxy_uncertainty_model(
+                dynamic_cluster_context.uncertainty_model
+            ),
             reference_wells=dynamic_cluster_context.reference_wells,
             include_display_geometry=False,
             build_overlap_geometry=False,

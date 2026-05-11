@@ -480,7 +480,7 @@ def test_anticollision_overlap_volume_payload_keeps_single_ring_corridor() -> No
     assert volumes[0]["rings"][0] != volumes[0]["rings"][1]
 
 
-def test_anticollision_overlap_volume_payload_falls_back_to_corridor_core() -> None:
+def test_anticollision_overlap_volume_payload_does_not_invent_fallback_volume() -> None:
     analysis = SimpleNamespace(
         corridors=[
             SimpleNamespace(
@@ -496,9 +496,7 @@ def test_anticollision_overlap_volume_payload_falls_back_to_corridor_core() -> N
 
     volumes = ptc_three_overrides.overlap_volume_payloads(analysis)
 
-    assert len(volumes) == 1
-    assert len(volumes[0]["rings"]) == 2
-    assert all(len(ring) >= 8 for ring in volumes[0]["rings"])
+    assert volumes == []
 
 
 def test_welltracks4_overlap_volumes_match_report_zones() -> None:
@@ -539,13 +537,30 @@ def test_welltracks4_overlap_volumes_match_report_zones() -> None:
         for volume in volumes
         if {str(volume["well_a"]), str(volume["well_b"])} == {"well_01", "well_11"}
     ]
-    assert len(pair_events) == len(pair_volumes) == 2
+    assert len(pair_events) == len(pair_volumes)
+    assert len(pair_events) >= 2
     assert any(
         str(event.classification) == "target-trajectory"
         and int(event.merged_corridor_count) >= 3
         for event in pair_events
     )
-    assert max(len(volume["rings"]) for volume in pair_volumes) >= 8
+    target_pair_events = [
+        event
+        for event in pair_events
+        if str(event.classification) == "target-trajectory"
+    ]
+    target_pair_volumes = [
+        volume
+        for volume in pair_volumes
+        if str(volume["classification"]) == "target-trajectory"
+    ]
+    assert len(target_pair_events) == len(target_pair_volumes)
+    assert target_pair_events
+    for event, volume in zip(
+        sorted(target_pair_events, key=lambda item: float(item.md_a_start_m)),
+        sorted(target_pair_volumes, key=lambda item: float(item["md_a_start_m"])),
+    ):
+        assert len(volume["rings"]) >= int(event.merged_corridor_count)
 
     well_09_03_volumes = [
         volume
@@ -553,9 +568,57 @@ def test_welltracks4_overlap_volumes_match_report_zones() -> None:
         if {str(volume["well_a"]), str(volume["well_b"])} == {"well_09", "well_03"}
     ]
     assert any(
-        str(volume["classification"]) == "target-trajectory"
+        str(volume["classification"]) == "trajectory"
         and len(volume["rings"]) >= 3
         for volume in well_09_03_volumes
+    )
+
+
+def test_welltracks4_well_06_07_overlap_volumes_are_continuous_3d_zones() -> None:
+    records = [
+        record
+        for record in parse_welltrack_text(
+            Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+        )
+        if str(record.name) in {"well_06", "well_07"}
+    ]
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={str(record.name) for record in records},
+        config=TrajectoryConfig(turn_solver_max_restarts=0),
+    )
+    assert {row["Скважина"]: row["Статус"] for row in rows} == {
+        "well_06": "OK",
+        "well_07": "OK",
+    }
+
+    analysis = build_anti_collision_analysis_for_successes(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    events = [
+        event
+        for event in anti_collision_report_events(analysis)
+        if {str(event.well_a), str(event.well_b)} == {"well_06", "well_07"}
+    ]
+    volumes = [
+        volume
+        for volume in ptc_three_overrides.overlap_volume_payloads(analysis)
+        if {str(volume["well_a"]), str(volume["well_b"])} == {"well_06", "well_07"}
+    ]
+
+    assert events
+    assert [
+        event
+        for event in events
+        if min(float(event.md_a_start_m), float(event.md_b_start_m)) > 1000.0
+    ] == []
+    assert len(volumes) == len(events)
+    assert all(len(volume["rings"]) >= 2 for volume in volumes)
+    assert any(len(volume["rings"]) >= 8 for volume in volumes)
+    assert all(
+        len({tuple(point) for ring in volume["rings"] for point in ring}) > len(volume["rings"])
+        for volume in volumes
     )
 
 

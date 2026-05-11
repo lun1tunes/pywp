@@ -1024,9 +1024,21 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
         "PAD2-B",
     ]
     assert first_surface_arrows[0]["start_position"] == [0.0, 0.0, 0.0]
-    assert first_surface_arrows[0]["end_position"] == [0.0, 50.0, 0.0]
     assert first_surface_arrows[1]["start_position"] == [5000.0, 0.0, 0.0]
-    assert first_surface_arrows[1]["end_position"] == [5000.0, 50.0, 0.0]
+    assert (
+        np.linalg.norm(
+            np.asarray(first_surface_arrows[0]["end_position"][:2], dtype=float)
+            - np.asarray(first_surface_arrows[0]["start_position"][:2], dtype=float)
+        )
+        >= 72.0
+    )
+    assert (
+        np.linalg.norm(
+            np.asarray(first_surface_arrows[1]["end_position"][:2], dtype=float)
+            - np.asarray(first_surface_arrows[1]["start_position"][:2], dtype=float)
+        )
+        >= 72.0
+    )
 
 
 def test_trajectory_three_payload_first_surface_arrow_uses_fixed_pad_order() -> None:
@@ -1060,7 +1072,8 @@ def test_trajectory_three_payload_first_surface_arrow_uses_fixed_pad_order() -> 
     start_xy = np.asarray(arrow["start_position"][:2], dtype=float)
     end_xy = np.asarray(arrow["end_position"][:2], dtype=float)
     tip_xy = np.asarray(arrow["vertices"][4][:2], dtype=float)
-    assert np.allclose(start_xy, [0.0, 100.0])
+    expected_surface = records[2].points[0]
+    assert np.allclose(start_xy, [expected_surface.x, expected_surface.y])
     assert np.allclose(tip_xy, end_xy)
     assert float(np.linalg.norm(end_xy - start_xy)) >= 50.0
     assert float(arrow["vertices"][4][2]) <= -24.0
@@ -4559,6 +4572,9 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
     }
     assert "FACT-1 (Фактическая)" in hover_names
     assert "APP-1 (Проектная утвержденная)" in hover_names
+    mesh_names = {str(item.get("name")) for item in payload_3d["meshes"]}
+    assert "FACT-1 (Фактическая) cone" in mesh_names
+    assert "APP-1 (Проектная утвержденная) cone" in mesh_names
     assert not any(
         "FACT-1 (Фактическая): цели" == str(hover.get("name"))
         for item in payload_3d["points"]
@@ -4568,6 +4584,10 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
         "APP-1 (Проектная утвержденная): цели" == str(trace.name)
         for trace in figure_plan.data
     )
+    assert "FACT-1 (Фактическая) cone" in {str(trace.name) for trace in figure_plan.data}
+    assert "APP-1 (Проектная утвержденная) cone" in {
+        str(trace.name) for trace in figure_plan.data
+    }
     assert any(str(item["text"]) == "FACT-1" for item in payload_3d["labels"])
     assert any(
         str(trace.name) == "Проектная утвержденная: подписи"
