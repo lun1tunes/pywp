@@ -66,7 +66,6 @@ def run_page() -> None:
     wt._render_raw_records_table(records=records)
 
     st.markdown("## 2. Кусты и расчёт устьев")
-    wt._render_t1_t3_order_panel(records=records)
     wt._render_pad_layout_panel(records=records)
 
     render_reference_section()

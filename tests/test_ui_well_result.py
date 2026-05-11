@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
 from pydantic import BaseModel
 
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import Point3D
+from pywp.ptc_page_results import _single_well_pilot_context
 from pywp.ui_well_result import (
     SUMMARY_TECH_HIDDEN_METRICS,
     SingleWellResultView,
@@ -130,6 +134,43 @@ def test_single_well_result_view_accepts_model_like_inputs_from_stale_session_st
     assert view.config.turn_solver_mode == "least_squares"
 
 
+def test_single_well_pilot_context_pairs_parent_with_pilot_record() -> None:
+    pilot_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "X_m": [0.0, 10.0],
+            "Y_m": [0.0, 20.0],
+            "Z_m": [0.0, 30.0],
+        }
+    )
+    parent_success = SimpleNamespace(
+        name="well_04",
+        summary={"pilot_well_name": "well_04_PL"},
+    )
+    pilot_success = SimpleNamespace(name="well_04_PL", stations=pilot_stations)
+    pilot_record = WelltrackRecord(
+        name="well_04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=10.0, y=20.0, z=30.0, md=100.0),
+            WelltrackPoint(x=40.0, y=50.0, z=60.0, md=200.0),
+        ),
+    )
+
+    pilot_name, stations, study_points = _single_well_pilot_context(
+        parent_success=parent_success,
+        successes=[parent_success, pilot_success],
+        records=[pilot_record],
+    )
+
+    assert pilot_name == "well_04_PL"
+    assert stations is pilot_stations
+    assert study_points == (
+        Point3D(10.0, 20.0, 30.0),
+        Point3D(40.0, 50.0, 60.0),
+    )
+
+
 def test_uncertainty_toggle_key_is_stable_per_well_name() -> None:
     assert uncertainty_toggle_key(well_name="WELL-1") == "show_uncertainty_ellipses::WELL-1"
 
@@ -159,6 +200,10 @@ def test_build_key_metrics_rows_single_column_format() -> None:
             "max_dls_total_deg_per_30m": 3.0,
             "kop_md_m": 560.0,
             "horizontal_length_m": 1200.0,
+            "lateral_distance_t1_m": 26.7,
+            "lateral_distance_t3_m": 26.6,
+            "vertical_distance_t1_m": 0.18,
+            "vertical_distance_t3_m": 0.17,
             "max_inc_actual_deg": 88.0,
             "max_inc_deg": 95.0,
             "md_total_m": 4300.0,
@@ -186,3 +231,5 @@ def test_build_key_metrics_rows_single_column_format() -> None:
     assert by_label["BUILD1 / BUILD2 / Макс ПИ"]["Значение"] == "1.00 / 1.00 / 1.00 deg/10m"
     assert by_label["Итоговая MD"]["Значение"] == "4300.00 m"
     assert by_label["Оптимизация"]["Значение"] == "Минимизация MD"
+    assert by_label["Промах по латерали t1 / t3"]["Значение"] == "t1 26.70 m / t3 26.60 m"
+    assert by_label["Промах по вертикали t1 / t3"]["Значение"] == "t1 0.1800 m / t3 0.1700 m"

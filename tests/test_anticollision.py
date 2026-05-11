@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -31,12 +33,21 @@ from pywp.anticollision_recommendations import (
     build_anti_collision_recommendations,
     AntiCollisionWellContext,
 )
-from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, Point3D
+from pywp.eclipse_welltrack import parse_welltrack_text
+from pywp.models import (
+    OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
+    Point3D,
+    TrajectoryConfig,
+)
 from pywp.reference_trajectories import (
     parse_reference_trajectory_dev_directories,
     parse_reference_trajectory_table,
 )
-from pywp.welltrack_batch import SuccessfulWellPlan
+from pywp.uncertainty import (
+    DEFAULT_UNCERTAINTY_PRESET,
+    planning_uncertainty_model_for_preset,
+)
+from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 
 def _straight_stations(*, y_offset_m: float) -> pd.DataFrame:
@@ -591,6 +602,44 @@ def test_lightweight_runtime_analysis_matches_full_report_events_and_recommendat
         assert runtime_item.max_overlap_depth_m == pytest.approx(
             full_item.max_overlap_depth_m
         )
+
+
+def test_welltracks4_well_03_well_09_target_overlap_is_reported() -> None:
+    records = [
+        record
+        for record in parse_welltrack_text(
+            Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+        )
+        if str(record.name) in {"well_03", "well_09"}
+    ]
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={str(record.name) for record in records},
+        config=TrajectoryConfig(turn_solver_max_restarts=0),
+    )
+    assert {str(row["Скважина"]): str(row["Статус"]) for row in rows} == {
+        "well_03": "OK",
+        "well_09": "OK",
+    }
+
+    analysis = build_anti_collision_analysis_for_successes(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    pair_events = [
+        event
+        for event in anti_collision_report_events(analysis)
+        if {str(event.well_a), str(event.well_b)} == {"well_03", "well_09"}
+    ]
+    assert any(str(event.classification) == "target-target" for event in pair_events)
+    assert any(
+        str(event.classification) == "target-trajectory"
+        and float(event.max_overlap_depth_m) > 40.0
+        for event in pair_events
+    )
 
 
 def test_overlap_ring_is_not_reduced_to_uniform_circle_for_offset_wells() -> None:

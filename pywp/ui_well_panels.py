@@ -94,6 +94,9 @@ def render_trajectory_dls_panel(
     plan_csb_stations: pd.DataFrame | None = None,
     actual_stations: pd.DataFrame | None = None,
     uncertainty_overlay: WellUncertaintyOverlay | None = None,
+    pilot_name: str | None = None,
+    pilot_stations: pd.DataFrame | None = None,
+    pilot_study_points: tuple[Point3D, ...] = (),
     render_3d_override: Callable[[object, dict[str, object]], None] | None = None,
 ) -> None:
     def _render_body() -> None:
@@ -111,6 +114,9 @@ def render_trajectory_dls_panel(
             plan_csb_df=plan_csb_stations,
             actual_df=actual_stations,
             uncertainty_overlay=uncertainty_overlay,
+            pilot_name=pilot_name,
+            pilot_stations=pilot_stations,
+            pilot_study_points=pilot_study_points,
         )
         if render_3d_override is not None:
             render_3d_override(row1_col1, payload)
@@ -147,6 +153,9 @@ def render_plan_section_panel(
     plan_csb_stations: pd.DataFrame | None = None,
     actual_stations: pd.DataFrame | None = None,
     uncertainty_overlay: WellUncertaintyOverlay | None = None,
+    pilot_name: str | None = None,
+    pilot_stations: pd.DataFrame | None = None,
+    pilot_study_points: tuple[Point3D, ...] = (),
 ) -> None:
     def _render_body() -> None:
         if title:
@@ -163,6 +172,9 @@ def render_plan_section_panel(
                 plan_csb_df=plan_csb_stations,
                 actual_df=actual_stations,
                 uncertainty_overlay=uncertainty_overlay,
+                pilot_name=pilot_name,
+                pilot_stations=pilot_stations,
+                pilot_study_points=pilot_study_points,
             ),
             width="stretch",
         )
@@ -178,6 +190,9 @@ def render_plan_section_panel(
                 plan_csb_df=plan_csb_stations,
                 actual_df=actual_stations,
                 uncertainty_overlay=uncertainty_overlay,
+                pilot_name=pilot_name,
+                pilot_stations=pilot_stations,
+                pilot_study_points=pilot_study_points,
             ),
             width="stretch",
         )

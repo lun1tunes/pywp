@@ -298,7 +298,7 @@ def parse_reference_trajectory_dev_text(
         try:
             x = _parse_dev_float(tokens[1])
             y = _parse_dev_float(tokens[2])
-            z = _parse_dev_float(tokens[3])
+            z = -_parse_dev_float(tokens[3])
         except ValueError as exc:
             raise WelltrackParseError(
                 f".dev '{normalized_name}': не удалось прочитать X Y Z "

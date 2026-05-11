@@ -14,6 +14,8 @@ from pywp.coordinate_integration import (
     should_auto_convert,
     transform_stations_to_crs,
 )
+from pywp.models import Point3D
+from pywp.pilot_wells import is_pilot_name, pilot_name_key_for_parent, well_name_key
 from pywp.ui_well_result import (
     SingleWellResultView,
     render_key_metrics,
@@ -24,6 +26,104 @@ from pywp.uncertainty import UNCERTAINTY_PRESET_OPTIONS
 from pywp.uncertainty import planning_uncertainty_model_for_preset
 
 __all__ = ["render_success_tabs"]
+
+
+def _single_well_pilot_context(
+    *,
+    parent_success: object,
+    successes: list[object],
+    records: list[object],
+) -> tuple[str | None, pd.DataFrame | None, tuple[Point3D, ...]]:
+    pilot_success = _pilot_success_for_parent(
+        parent_success=parent_success,
+        successes=successes,
+    )
+    pilot_record = _pilot_record_for_parent(
+        parent_name=getattr(parent_success, "name", ""),
+        pilot_name=getattr(pilot_success, "name", None),
+        records=records,
+    )
+    pilot_name = str(
+        getattr(pilot_success, "name", "")
+        or getattr(pilot_record, "name", "")
+        or ""
+    ).strip()
+    if not pilot_name:
+        return None, None, ()
+    study_points = (
+        _pilot_study_points_from_record(pilot_record)
+        if pilot_record is not None
+        else _pilot_study_points_from_success(pilot_success)
+    )
+    return pilot_name, getattr(pilot_success, "stations", None), study_points
+
+
+def _pilot_success_for_parent(
+    *,
+    parent_success: object,
+    successes: list[object],
+) -> object | None:
+    parent_name = getattr(parent_success, "name", "")
+    expected_names = {pilot_name_key_for_parent(parent_name)}
+    summary = getattr(parent_success, "summary", {}) or {}
+    pilot_name = str(
+        summary.get("pilot_well_name", "") if hasattr(summary, "get") else ""
+    ).strip()
+    if pilot_name:
+        expected_names.add(well_name_key(pilot_name))
+    return next(
+        (
+            success
+            for success in successes
+            if is_pilot_name(getattr(success, "name", ""))
+            and well_name_key(getattr(success, "name", "")) in expected_names
+        ),
+        None,
+    )
+
+
+def _pilot_record_for_parent(
+    *,
+    parent_name: object,
+    pilot_name: object | None,
+    records: list[object],
+) -> object | None:
+    expected_names = {pilot_name_key_for_parent(parent_name)}
+    if pilot_name:
+        expected_names.add(well_name_key(pilot_name))
+    return next(
+        (
+            record
+            for record in records
+            if is_pilot_name(getattr(record, "name", ""))
+            and well_name_key(getattr(record, "name", "")) in expected_names
+        ),
+        None,
+    )
+
+
+def _pilot_study_points_from_record(record: object) -> tuple[Point3D, ...]:
+    points = tuple(getattr(record, "points", ()) or ())
+    return tuple(
+        Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+        for point in points[1:]
+    )
+
+
+def _pilot_study_points_from_success(
+    pilot_success: object | None,
+) -> tuple[Point3D, ...]:
+    if pilot_success is None:
+        return ()
+    result: list[Point3D] = []
+    for attr_name in ("t1", "t3"):
+        point = getattr(pilot_success, attr_name, None)
+        if point is None:
+            continue
+        candidate = Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+        if candidate not in result:
+            result.append(candidate)
+    return tuple(result)
 
 
 def _render_anticollision_panel(
@@ -304,12 +404,23 @@ def render_success_tabs(
         label_visibility="collapsed",
     )
     if str(view_mode) == "Отдельная скважина":
+        visible_successes = [
+            item for item in successes if not is_pilot_name(getattr(item, "name", ""))
+        ]
+        if not visible_successes:
+            st.info("Нет рассчитанных продуктивных стволов для просмотра.")
+            return
         selected_name = st.selectbox(
-            "Скважина", options=[item.name for item in successes]
+            "Скважина", options=[item.name for item in visible_successes]
         )
         selected = wt._find_selected_success(
             selected_name=str(selected_name),
             successes=successes,
+        )
+        pilot_name, pilot_stations, pilot_study_points = _single_well_pilot_context(
+            parent_success=selected,
+            successes=successes,
+            records=records,
         )
         well_view = SingleWellResultView(
             well_name=str(selected.name),
@@ -330,6 +441,9 @@ def render_success_tabs(
             trajectory_line_dash=(
                 "dash" if bool(selected.md_postcheck_exceeded) else "solid"
             ),
+            pilot_name=pilot_name,
+            pilot_stations=pilot_stations,
+            pilot_study_points=pilot_study_points,
         )
         survey_export_stations = None
         survey_export_xy_label_suffix = ""

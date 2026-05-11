@@ -38,6 +38,15 @@ from pywp.anticollision_stage import (
 )
 from pywp.models import INTERPOLATION_RODRIGUES, Point3D, SummaryDict, TrajectoryConfig
 from pywp.parallel import process_pool_context
+from pywp.pilot_wells import (
+    build_pilot_trajectory,
+    combine_pilot_and_sidetrack,
+    is_pilot_record,
+    order_records_with_pilots_first,
+    pilot_name_key_for_parent,
+    select_sidetrack_window,
+    well_name_key,
+)
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.reference_trajectories import ImportedTrajectoryWell
@@ -59,6 +68,8 @@ class DynamicClusterExecutionContext:
 
 
 _MAX_DYNAMIC_CLUSTER_PASSES = 3
+_TARGET_MISS_WARNING_ABS_M = 5.0
+_TARGET_MISS_WARNING_TOLERANCE_FRACTION = 0.5
 
 
 def _anti_collision_segment_to_worker_payload(
@@ -136,9 +147,7 @@ def _uncertainty_model_to_worker_payload(
     return {
         "sigma_inc_deg": float(model.sigma_inc_deg),
         "sigma_azi_deg": float(model.sigma_azi_deg),
-        "sigma_lateral_drift_m_per_1000m": float(
-            model.sigma_lateral_drift_m_per_1000m
-        ),
+        "sigma_lateral_drift_m_per_1000m": float(model.sigma_lateral_drift_m_per_1000m),
         "confidence_scale": float(model.confidence_scale),
         "sample_step_m": float(model.sample_step_m),
         "max_display_ellipses": int(model.max_display_ellipses),
@@ -206,7 +215,9 @@ def _optimization_context_from_worker_payload(
     if isinstance(payload, AntiCollisionOptimizationContext):
         return payload
     if not isinstance(payload, Mapping):
-        raise ValueError("Anti-collision optimization context payload must be a mapping.")
+        raise ValueError(
+            "Anti-collision optimization context payload must be a mapping."
+        )
     return AntiCollisionOptimizationContext(
         candidate_md_start_m=float(payload["candidate_md_start_m"]),
         candidate_md_end_m=float(payload["candidate_md_end_m"]),
@@ -335,7 +346,6 @@ def rebuild_optimization_context(
     )
 
 
-
 def _normalized_attempted_anticollision_stages(
     summary: Mapping[str, object],
 ) -> list[str]:
@@ -395,9 +405,7 @@ def _evaluate_record_from_dicts(
     config = TrajectoryConfig.model_validate(config_dict)
     opt_ctx: AntiCollisionOptimizationContext | None = None
     if optimization_context_dict is not None:
-        opt_ctx = _optimization_context_from_worker_payload(
-            optimization_context_dict
-        )
+        opt_ctx = _optimization_context_from_worker_payload(optimization_context_dict)
     row, success = _evaluate_record_standalone(record, config, opt_ctx)
     return row, success.model_dump() if success is not None else None
 
@@ -412,6 +420,9 @@ def _evaluate_record_standalone(
     Creates its own ``TrajectoryPlanner`` inside the worker process so that
     nothing unpicklable needs to cross the process boundary.
     """
+    if is_pilot_record(record):
+        return _evaluate_pilot_record_standalone(record, config)
+
     base_row = WelltrackBatchPlanner._base_row(record=record)
     if len(record.points) != 3:
         base_row["Статус"] = "Ошибка формата"
@@ -444,16 +455,7 @@ def _evaluate_record_standalone(
     if ac_stage is not None:
         summary["anti_collision_stage"] = ac_stage
         summary["anti_collision_attempted_stages"] = ac_stage
-    md_total_m = float(summary.get("md_total_m", 0.0))
-    md_limit_m = float(summary.get("max_total_md_postcheck_m", 0.0))
-    md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
-    md_postcheck_exceeded = bool(md_postcheck_excess_m > 1e-6)
-    md_postcheck_message = ""
-    if md_postcheck_exceeded:
-        md_postcheck_message = (
-            "Превышен лимит итоговой MD (постпроверка): "
-            f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
-        )
+    postcheck_exceeded, postcheck_message = _postcheck_state(summary)
 
     success = SuccessfulWellPlan(
         name=record.name,
@@ -466,11 +468,136 @@ def _evaluate_record_standalone(
         md_t1_m=result.md_t1_m,
         config=config,
         runtime_s=runtime_s,
-        md_postcheck_exceeded=md_postcheck_exceeded,
-        md_postcheck_message=md_postcheck_message,
+        md_postcheck_exceeded=postcheck_exceeded,
+        md_postcheck_message=postcheck_message,
     )
     row = WelltrackBatchPlanner._row_from_success(record=record, success=success)
     return row, success
+
+
+def _evaluate_pilot_record_standalone(
+    record: WelltrackRecord,
+    config: TrajectoryConfig,
+) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
+    row = WelltrackBatchPlanner._base_row(record=record)
+    try:
+        started = perf_counter()
+        pilot = build_pilot_trajectory(record, config=config)
+        runtime_s = float(perf_counter() - started)
+    except (ValueError, PlanningError) as exc:
+        row["Статус"] = "Ошибка расчета"
+        row["Проблема"] = summarize_problem_ru(str(exc))
+        return row, None
+
+    success = _pilot_build_to_success(
+        record=record, pilot=pilot, config=config, runtime_s=runtime_s
+    )
+    row = WelltrackBatchPlanner._row_from_success(record=record, success=success)
+    return row, success
+
+
+def _pilot_build_to_success(
+    *,
+    record: WelltrackRecord,
+    pilot: object,
+    config: TrajectoryConfig,
+    runtime_s: float,
+) -> SuccessfulWellPlan:
+    summary = dict(pilot.summary)
+    postcheck_exceeded, postcheck_message = _postcheck_state(summary)
+    return SuccessfulWellPlan(
+        name=record.name,
+        surface=pilot.surface,
+        t1=pilot.first_target,
+        t3=pilot.final_target,
+        stations=pilot.stations,
+        summary=summary,
+        azimuth_deg=float(pilot.azimuth_deg),
+        md_t1_m=float(pilot.md_first_target_m),
+        config=config,
+        runtime_s=runtime_s,
+        md_postcheck_exceeded=postcheck_exceeded,
+        md_postcheck_message=postcheck_message,
+    )
+
+
+def _postcheck_state(summary: Mapping[str, object]) -> tuple[bool, str]:
+    messages: list[str] = []
+    md_total_m = float(summary.get("md_total_m", 0.0))
+    md_limit_m = float(summary.get("max_total_md_postcheck_m", 0.0))
+    md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
+    if md_postcheck_excess_m > 1e-6:
+        messages.append(
+            "Превышен лимит итоговой MD (постпроверка): "
+            f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
+        )
+    dls_excess = float(summary.get("dls_postcheck_excess_deg_per_30m", 0.0))
+    if dls_excess > 1e-6:
+        max_dls = float(summary.get("max_dls_total_deg_per_30m", 0.0))
+        messages.append(
+            "Превышен лимит ПИ (постпроверка): "
+            f"{dls_to_pi(max_dls):.2f} deg/10m > "
+            f"{dls_to_pi(max_dls - dls_excess):.2f} deg/10m."
+        )
+    target_miss_warning = _target_miss_warning_message(summary)
+    if target_miss_warning:
+        messages.append(target_miss_warning)
+    return bool(messages), " ".join(messages)
+
+
+def _target_miss_warning_message(summary: Mapping[str, object]) -> str:
+    lateral_tolerance_m = _summary_float(summary, "lateral_tolerance_m")
+    vertical_tolerance_m = _summary_float(summary, "vertical_tolerance_m")
+    if lateral_tolerance_m <= 0.0 or vertical_tolerance_m <= 0.0:
+        return ""
+
+    t1_lateral_m = _summary_float(summary, "lateral_distance_t1_m")
+    t3_lateral_m = _summary_float(summary, "lateral_distance_t3_m")
+    t1_vertical_m = _summary_float(summary, "vertical_distance_t1_m")
+    t3_vertical_m = _summary_float(summary, "vertical_distance_t3_m")
+    max_lateral_m = max(t1_lateral_m, t3_lateral_m)
+    max_vertical_m = max(t1_vertical_m, t3_vertical_m)
+    lateral_warning_threshold_m = max(
+        _TARGET_MISS_WARNING_ABS_M,
+        _TARGET_MISS_WARNING_TOLERANCE_FRACTION * lateral_tolerance_m,
+    )
+    vertical_warning_threshold_m = max(
+        1.0,
+        _TARGET_MISS_WARNING_TOLERANCE_FRACTION * vertical_tolerance_m,
+    )
+    if (
+        max_lateral_m <= lateral_warning_threshold_m
+        and max_vertical_m <= vertical_warning_threshold_m
+    ):
+        return ""
+
+    message = (
+        "Цели достигнуты только по допуску: "
+        f"промах t1/t3 по латерали {t1_lateral_m:.2f}/{t3_lateral_m:.2f} м "
+        f"(допуск {lateral_tolerance_m:.2f} м), "
+        f"по вертикали {t1_vertical_m:.2f}/{t3_vertical_m:.2f} м "
+        f"(допуск {vertical_tolerance_m:.2f} м)."
+    )
+    build_limit = _summary_float(summary, "build_dls_max_config_deg_per_30m")
+    build1_dls = _summary_float(summary, "build1_dls_selected_deg_per_30m")
+    build2_dls = _summary_float(summary, "build2_dls_selected_deg_per_30m")
+    if build_limit > 0.0 and max(build1_dls, build2_dls) >= build_limit - 1e-3:
+        message += (
+            " BUILD ПИ уже на лимите "
+            f"{dls_to_pi(build_limit):.2f} deg/10m; для точного попадания "
+            "увеличьте лимит или скорректируйте геометрию целей."
+        )
+    return message
+
+
+def _summary_float(summary: Mapping[str, object], key: str) -> float:
+    try:
+        value = float(summary.get(key, 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    if not np.isfinite(value):
+        return 0.0
+    return value
 
 
 class WelltrackBatchPlanner:
@@ -489,7 +616,9 @@ class WelltrackBatchPlanner:
         config: TrajectoryConfig,
         selected_order: list[str] | None = None,
         config_by_name: dict[str, TrajectoryConfig] | None = None,
-        optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None = None,
+        optimization_context_by_name: (
+            dict[str, AntiCollisionOptimizationContext] | None
+        ) = None,
         dynamic_cluster_context: DynamicClusterExecutionContext | None = None,
         progress_callback: ProgressCallback | None = None,
         solver_progress_callback: SolverProgressCallback | None = None,
@@ -511,6 +640,7 @@ class WelltrackBatchPlanner:
             int(parallel_workers) > 1
             and dynamic_cluster_context is None
             and len(selected_records) > 1
+            and not self._has_pilot_dependencies(selected_records)
         ):
             return self._evaluate_parallel(
                 selected_records=selected_records,
@@ -537,9 +667,7 @@ class WelltrackBatchPlanner:
                 else ()
             )
         }
-        remaining_selected_names = [
-            str(record.name) for record in selected_records
-        ]
+        remaining_selected_names = [str(record.name) for record in selected_records]
         recalculated_success_by_name: dict[str, SuccessfulWellPlan] = {}
         executed_well_names: list[str] = []
         skipped_selected_names: list[str] = []
@@ -558,14 +686,12 @@ class WelltrackBatchPlanner:
                     reseed_resolved,
                     current_cluster_score,
                     next_prefer_trajectory_stage,
-                ) = (
-                    self._extend_dynamic_cluster_queue(
-                        selected_records_by_name=selected_records_by_name,
-                        dynamic_cluster_context=dynamic_cluster_context,
-                        recalculated_success_by_name=recalculated_success_by_name,
-                        previous_cluster_score=previous_cluster_score,
-                        dynamic_cluster_pass_count=dynamic_cluster_pass_count,
-                    )
+                ) = self._extend_dynamic_cluster_queue(
+                    selected_records_by_name=selected_records_by_name,
+                    dynamic_cluster_context=dynamic_cluster_context,
+                    recalculated_success_by_name=recalculated_success_by_name,
+                    previous_cluster_score=previous_cluster_score,
+                    dynamic_cluster_pass_count=dynamic_cluster_pass_count,
                 )
                 dynamic_cluster_prefer_trajectory_stage = bool(
                     next_prefer_trajectory_stage
@@ -597,7 +723,9 @@ class WelltrackBatchPlanner:
                     name for name in pruned_names if name not in skipped_selected_names
                 )
                 if dynamic_cluster_plan is not None:
-                    resolution_state = str(dynamic_cluster_plan.resolution_state).strip()
+                    resolution_state = str(
+                        dynamic_cluster_plan.resolution_state
+                    ).strip()
                     if resolution_state == DYNAMIC_CLUSTER_PLAN_RESOLVED:
                         cluster_resolved_early = True
                     elif resolution_state == DYNAMIC_CLUSTER_PLAN_BLOCKED:
@@ -643,12 +771,27 @@ class WelltrackBatchPlanner:
 
                 planner_progress_callback = _planner_progress
 
-            row, success = self._evaluate_record(
+            missing_pilot = self._missing_required_pilot_success(
                 record=record,
-                config=runtime_override["config"],
-                optimization_context=runtime_override["optimization_context"],
-                planner_progress_callback=planner_progress_callback,
+                selected_records_by_name=selected_records_by_name,
+                recalculated_success_by_name=recalculated_success_by_name,
             )
+            if missing_pilot is not None:
+                row = self._base_row(record=record)
+                row["Статус"] = "Ошибка расчета"
+                row["Проблема"] = (
+                    f"Пилот {missing_pilot.name} не рассчитан; "
+                    "боковой продуктивный ствол не может быть построен от окна зарезки."
+                )
+                success = None
+            else:
+                row, success = self._evaluate_record(
+                    record=record,
+                    config=runtime_override["config"],
+                    optimization_context=runtime_override["optimization_context"],
+                    planner_progress_callback=planner_progress_callback,
+                    recalculated_success_by_name=recalculated_success_by_name,
+                )
             if success is not None:
                 optimization_context = runtime_override["optimization_context"]
                 previous_success = recalculated_success_by_name.get(str(record.name))
@@ -658,18 +801,17 @@ class WelltrackBatchPlanner:
                 if dynamic_cluster_context is not None:
                     current_success_by_name = dict(initial_success_by_name)
                     current_success_by_name.update(recalculated_success_by_name)
-                    retained_success = self._select_cluster_monotonic_anticollision_success(
-                        candidate_success=success,
-                        existing_success=previous_success,
-                        current_success_by_name=current_success_by_name,
-                        dynamic_cluster_context=dynamic_cluster_context,
-                    )
-                    if (
-                        retained_success is None
-                        and not isinstance(
-                            optimization_context,
-                            AntiCollisionOptimizationContext,
+                    retained_success = (
+                        self._select_cluster_monotonic_anticollision_success(
+                            candidate_success=success,
+                            existing_success=previous_success,
+                            current_success_by_name=current_success_by_name,
+                            dynamic_cluster_context=dynamic_cluster_context,
                         )
+                    )
+                    if retained_success is None and not isinstance(
+                        optimization_context,
+                        AntiCollisionOptimizationContext,
                     ):
                         retained_success = self._select_monotonic_anticollision_success(
                             candidate_success=success,
@@ -692,7 +834,9 @@ class WelltrackBatchPlanner:
                         ),
                     )
                     success = retained_success
-                    row = self._row_from_success(record=record, success=retained_success)
+                    row = self._row_from_success(
+                        record=record, success=retained_success
+                    )
                 if success is not None and previous_success is not None:
                     for attempted_stage in _normalized_attempted_anticollision_stages(
                         previous_success.summary
@@ -722,7 +866,9 @@ class WelltrackBatchPlanner:
         selected_records: list[WelltrackRecord],
         config: TrajectoryConfig,
         config_by_name: dict[str, TrajectoryConfig] | None,
-        optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None,
+        optimization_context_by_name: (
+            dict[str, AntiCollisionOptimizationContext] | None
+        ),
         progress_callback: ProgressCallback | None,
         record_done_callback: RecordDoneCallback | None,
         parallel_workers: int,
@@ -735,17 +881,15 @@ class WelltrackBatchPlanner:
         # Preserve submission order so results come back in the same order.
         ordered_names: list[str] = [str(r.name) for r in selected_records]
         future_to_name: dict[Future, str] = {}
-        results_by_name: dict[str, tuple[dict[str, Any], SuccessfulWellPlan | None]] = {}
+        results_by_name: dict[str, tuple[dict[str, Any], SuccessfulWellPlan | None]] = (
+            {}
+        )
 
         pool = ProcessPoolExecutor(max_workers=workers, mp_context=_mp_ctx)
         try:
             for record in selected_records:
-                well_config = (
-                    (config_by_name or {}).get(str(record.name)) or config
-                )
-                opt_ctx = (
-                    (optimization_context_by_name or {}).get(str(record.name))
-                )
+                well_config = (config_by_name or {}).get(str(record.name)) or config
+                opt_ctx = (optimization_context_by_name or {}).get(str(record.name))
                 fut = pool.submit(
                     _evaluate_record_from_dicts,
                     record.model_dump(),
@@ -767,9 +911,7 @@ class WelltrackBatchPlanner:
                     )
                 except Exception as exc:  # noqa: BLE001
                     row = self._base_row(
-                        record=next(
-                            r for r in selected_records if str(r.name) == name
-                        )
+                        record=next(r for r in selected_records if str(r.name) == name)
                     )
                     row["Статус"] = "Ошибка расчета"
                     row["Проблема"] = summarize_problem_ru(str(exc))
@@ -787,14 +929,15 @@ class WelltrackBatchPlanner:
         successes: list[SuccessfulWellPlan] = []
         executed_well_names: list[str] = []
         for name in ordered_names:
-            row, success = results_by_name.get(name, (
-                self._base_row(
-                    record=next(
-                        r for r in selected_records if str(r.name) == name
-                    )
+            row, success = results_by_name.get(
+                name,
+                (
+                    self._base_row(
+                        record=next(r for r in selected_records if str(r.name) == name)
+                    ),
+                    None,
                 ),
-                None,
-            ))
+            )
             summary_rows.append(row)
             if success is not None:
                 successes.append(success)
@@ -842,7 +985,9 @@ class WelltrackBatchPlanner:
         ]
         if not relevant_clusters:
             return 1e6, 0.0, 0
-        worst_sf = min(float(cluster.worst_separation_factor) for cluster in relevant_clusters)
+        worst_sf = min(
+            float(cluster.worst_separation_factor) for cluster in relevant_clusters
+        )
         max_overlap = max(
             float(recommendation.max_overlap_depth_m)
             for cluster in relevant_clusters
@@ -1034,6 +1179,8 @@ class WelltrackBatchPlanner:
         if not text or text == "—":
             return "—"
         text_lower = text.lower()
+        if "пилот" in text_lower:
+            return "Пилот"
         if "обрат" in text_lower:
             return "В обратном направлении"
         return "В прямом направлении"
@@ -1066,26 +1213,52 @@ class WelltrackBatchPlanner:
         selected_order: list[str] | None,
     ) -> list[WelltrackRecord]:
         ordered_records = list(records)
-        selected_name_set = {str(name) for name in selected_names}
-        by_name = {str(record.name): record for record in ordered_records}
+        selected_name_keys = {well_name_key(name) for name in selected_names}
+        by_name = {well_name_key(record.name): record for record in ordered_records}
         resolved: list[WelltrackRecord] = []
         seen: set[str] = set()
+
+        def append_with_pilot(record: WelltrackRecord) -> None:
+            name = str(record.name)
+            name_key = well_name_key(name)
+            if not is_pilot_record(record):
+                pilot = by_name.get(pilot_name_key_for_parent(name))
+                if pilot is not None and well_name_key(pilot.name) not in seen:
+                    resolved.append(pilot)
+                    seen.add(well_name_key(pilot.name))
+            if name_key not in seen:
+                resolved.append(record)
+                seen.add(name_key)
+
         for name in selected_order or ():
             well_name = str(name)
-            if well_name not in selected_name_set or well_name in seen:
+            if (
+                well_name_key(well_name) not in selected_name_keys
+                or well_name_key(well_name) in seen
+            ):
                 continue
-            record = by_name.get(well_name)
+            record = by_name.get(well_name_key(well_name))
             if record is None:
                 continue
-            resolved.append(record)
-            seen.add(well_name)
+            append_with_pilot(record)
         for record in ordered_records:
             well_name = str(record.name)
-            if well_name not in selected_name_set or well_name in seen:
+            if (
+                well_name_key(well_name) not in selected_name_keys
+                or well_name_key(well_name) in seen
+            ):
                 continue
-            resolved.append(record)
-            seen.add(well_name)
-        return resolved
+            append_with_pilot(record)
+        return order_records_with_pilots_first(resolved)
+
+    @staticmethod
+    def _has_pilot_dependencies(records: Iterable[WelltrackRecord]) -> bool:
+        names = {well_name_key(record.name) for record in records}
+        return any(
+            not is_pilot_record(record)
+            and pilot_name_key_for_parent(record.name) in names
+            for record in records
+        )
 
     def _next_record_for_evaluation(
         self,
@@ -1095,7 +1268,9 @@ class WelltrackBatchPlanner:
         selected_order: list[str] | None,
         base_config: TrajectoryConfig,
         config_by_name: dict[str, TrajectoryConfig] | None,
-        optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None,
+        optimization_context_by_name: (
+            dict[str, AntiCollisionOptimizationContext] | None
+        ),
         dynamic_cluster_plan: DynamicClusterExecutionPlan | None,
         recalculated_success_by_name: dict[str, SuccessfulWellPlan],
     ) -> tuple[WelltrackRecord, dict[str, object]]:
@@ -1108,6 +1283,27 @@ class WelltrackBatchPlanner:
         )
         if runtime_override is not None:
             record_name = str(runtime_override["well_name"])
+            pilot_key = pilot_name_key_for_parent(record_name)
+            pilot_name = next(
+                (
+                    str(name)
+                    for name in remaining_selected_names
+                    if well_name_key(name) == pilot_key
+                ),
+                "",
+            )
+            if pilot_name and well_name_key(pilot_name) not in {
+                well_name_key(name) for name in recalculated_success_by_name
+            }:
+                pilot_record = selected_records_by_name[pilot_name]
+                return pilot_record, {
+                    "well_name": pilot_name,
+                    "config": (config_by_name or {}).get(pilot_name, base_config),
+                    "optimization_context": self._resolve_optimization_context(
+                        context=(optimization_context_by_name or {}).get(pilot_name),
+                        recalculated_success_by_name=recalculated_success_by_name,
+                    ),
+                }
             record = selected_records_by_name[record_name]
             return record, runtime_override
         ordered_names = [
@@ -1115,7 +1311,22 @@ class WelltrackBatchPlanner:
             for name in (selected_order or remaining_selected_names)
             if str(name) in set(remaining_selected_names)
         ]
-        next_name = ordered_names[0] if ordered_names else str(remaining_selected_names[0])
+        next_name = (
+            ordered_names[0] if ordered_names else str(remaining_selected_names[0])
+        )
+        pilot_key = pilot_name_key_for_parent(next_name)
+        pilot_name = next(
+            (
+                str(name)
+                for name in remaining_selected_names
+                if well_name_key(name) == pilot_key
+            ),
+            "",
+        )
+        if pilot_name and well_name_key(pilot_name) not in {
+            well_name_key(name) for name in recalculated_success_by_name
+        }:
+            next_name = pilot_name
         record = selected_records_by_name[next_name]
         context = self._resolve_optimization_context(
             context=(optimization_context_by_name or {}).get(str(record.name)),
@@ -1128,12 +1339,39 @@ class WelltrackBatchPlanner:
             "optimization_context": context,
         }
 
+    @staticmethod
+    def _missing_required_pilot_success(
+        *,
+        record: WelltrackRecord,
+        selected_records_by_name: Mapping[str, WelltrackRecord],
+        recalculated_success_by_name: Mapping[str, SuccessfulWellPlan],
+    ) -> WelltrackRecord | None:
+        if is_pilot_record(record):
+            return None
+        pilot_key = pilot_name_key_for_parent(record.name)
+        pilot_record = next(
+            (
+                item
+                for name, item in selected_records_by_name.items()
+                if well_name_key(name) == pilot_key
+            ),
+            None,
+        )
+        if pilot_record is None:
+            return None
+        has_pilot_success = any(
+            well_name_key(name) == pilot_key for name in recalculated_success_by_name
+        )
+        return None if has_pilot_success else pilot_record
+
     def _runtime_override_for_next_record(
         self,
         *,
         base_config: TrajectoryConfig,
         config_by_name: dict[str, TrajectoryConfig] | None,
-        optimization_context_by_name: dict[str, AntiCollisionOptimizationContext] | None,
+        optimization_context_by_name: (
+            dict[str, AntiCollisionOptimizationContext] | None
+        ),
         dynamic_cluster_plan: DynamicClusterExecutionPlan | None,
         recalculated_success_by_name: dict[str, SuccessfulWellPlan],
     ) -> dict[str, object] | None:
@@ -1200,6 +1438,10 @@ class WelltrackBatchPlanner:
             prefer_trajectory_stage=bool(prefer_trajectory_stage),
         )
         if plan is None:
+            pruned_names = WelltrackBatchPlanner._include_pending_pilot_dependencies(
+                pruned_names=cluster_scoped_remaining,
+                remaining_selected_names=remaining_selected_names,
+            )
             blocking_reason = (
                 "Iterative cluster-aware execution не нашел актуальных шагов "
                 "для оставшихся скважин. Текущий прогон остановлен, чтобы не "
@@ -1209,22 +1451,45 @@ class WelltrackBatchPlanner:
                 cluster=None,
                 ordered_well_names=(),
                 prepared_by_well={},
-                skipped_wells=cluster_scoped_remaining,
+                skipped_wells=pruned_names,
                 resolution_state=DYNAMIC_CLUSTER_PLAN_BLOCKED,
                 blocking_reason=blocking_reason,
             )
-            for name in cluster_scoped_remaining:
-                remaining_selected_names.remove(str(name))
-            return fallback_plan, cluster_scoped_remaining
+            for name in pruned_names:
+                if str(name) in remaining_selected_names:
+                    remaining_selected_names.remove(str(name))
+            return fallback_plan, pruned_names
         resolution_state = str(plan.resolution_state).strip()
         if resolution_state in {
             DYNAMIC_CLUSTER_PLAN_RESOLVED,
             DYNAMIC_CLUSTER_PLAN_BLOCKED,
         }:
-            for name in cluster_scoped_remaining:
-                remaining_selected_names.remove(str(name))
-            return plan, cluster_scoped_remaining
+            pruned_names = WelltrackBatchPlanner._include_pending_pilot_dependencies(
+                pruned_names=cluster_scoped_remaining,
+                remaining_selected_names=remaining_selected_names,
+            )
+            for name in pruned_names:
+                if str(name) in remaining_selected_names:
+                    remaining_selected_names.remove(str(name))
+            return plan, pruned_names
         return plan, ()
+
+    @staticmethod
+    def _include_pending_pilot_dependencies(
+        *,
+        pruned_names: tuple[str, ...],
+        remaining_selected_names: list[str],
+    ) -> tuple[str, ...]:
+        result = [str(name) for name in pruned_names]
+        result_keys = {well_name_key(name) for name in result}
+        pilot_keys = {pilot_name_key_for_parent(name) for name in result}
+        for pending_name in remaining_selected_names:
+            pending_key = well_name_key(pending_name)
+            if pending_key in result_keys or pending_key not in pilot_keys:
+                continue
+            result.append(str(pending_name))
+            result_keys.add(pending_key)
+        return tuple(result)
 
     @staticmethod
     def _extend_dynamic_cluster_queue(
@@ -1302,7 +1567,11 @@ class WelltrackBatchPlanner:
         if resolution_state == DYNAMIC_CLUSTER_PLAN_BLOCKED:
             return (
                 (),
-                str(plan.blocking_reason).strip() if plan.blocking_reason is not None else None,
+                (
+                    str(plan.blocking_reason).strip()
+                    if plan.blocking_reason is not None
+                    else None
+                ),
                 False,
                 current_cluster_score,
                 prefer_trajectory_stage,
@@ -1320,7 +1589,13 @@ class WelltrackBatchPlanner:
                 current_cluster_score,
                 prefer_trajectory_stage,
             )
-        return pending_names, None, False, current_cluster_score, prefer_trajectory_stage
+        return (
+            pending_names,
+            None,
+            False,
+            current_cluster_score,
+            prefer_trajectory_stage,
+        )
 
     @staticmethod
     def _resolve_optimization_context(
@@ -1385,7 +1660,10 @@ class WelltrackBatchPlanner:
             return None
         if not isinstance(optimization_context, AntiCollisionOptimizationContext):
             return None
-        if str(candidate_success.config.optimization_mode).strip() != "anti_collision_avoidance":
+        if (
+            str(candidate_success.config.optimization_mode).strip()
+            != "anti_collision_avoidance"
+        ):
             return None
         try:
             existing_clearance = evaluate_stations_anti_collision_clearance(
@@ -1428,60 +1706,119 @@ class WelltrackBatchPlanner:
         config: TrajectoryConfig,
         optimization_context: AntiCollisionOptimizationContext | None = None,
         planner_progress_callback: Callable[[str, float], None] | None = None,
+        recalculated_success_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
     ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
+        if is_pilot_record(record):
+            return self._evaluate_pilot_record(record=record, config=config)
+
         row = self._base_row(record=record)
         if len(record.points) != 3:
             row["Статус"] = "Ошибка формата"
-            row["Проблема"] = f"Ожидалось 3 точки (S, t1, t3), получено {len(record.points)}."
+            row["Проблема"] = (
+                f"Ожидалось 3 точки (S, t1, t3), получено {len(record.points)}."
+            )
             return row, None
 
         try:
             surface, t1, t3 = welltrack_points_to_targets(record.points)
+            success_surface = surface
             started = perf_counter()
-            plan_kwargs: dict[str, Any] = {
-                "surface": surface,
-                "t1": t1,
-                "t3": t3,
-                "config": config,
-                "progress_callback": planner_progress_callback,
-            }
-            if optimization_context is not None:
-                plan_kwargs["optimization_context"] = optimization_context
-            result = self._planner.plan(**plan_kwargs)
+            pilot_key = pilot_name_key_for_parent(record.name)
+            pilot_success = next(
+                (
+                    success
+                    for name, success in (recalculated_success_by_name or {}).items()
+                    if well_name_key(name) == pilot_key
+                ),
+                None,
+            )
+            if pilot_success is not None:
+                window, sidetrack_result = select_sidetrack_window(
+                    pilot_name=str(pilot_success.name),
+                    parent_name=str(record.name),
+                    pilot_stations=pilot_success.stations,
+                    parent_t1=t1,
+                    parent_t3=t3,
+                    config=config,
+                    planner=self._planner,
+                    optimization_context=optimization_context,
+                )
+                sidetrack = combine_pilot_and_sidetrack(
+                    pilot_stations=pilot_success.stations,
+                    sidetrack_result=sidetrack_result,
+                    window=window,
+                    config=config,
+                )
+                result = sidetrack.result
+                stations = sidetrack.stations
+                summary = dict(sidetrack.summary)
+                md_t1_m = float(sidetrack.md_t1_m)
+                azimuth_deg = float(sidetrack.azimuth_deg)
+                success_surface = sidetrack.window.point
+            else:
+                plan_kwargs: dict[str, Any] = {
+                    "surface": surface,
+                    "t1": t1,
+                    "t3": t3,
+                    "config": config,
+                    "progress_callback": planner_progress_callback,
+                }
+                if optimization_context is not None:
+                    plan_kwargs["optimization_context"] = optimization_context
+                result = self._planner.plan(**plan_kwargs)
+                stations = result.stations
+                summary = dict(result.summary)
+                md_t1_m = float(result.md_t1_m)
+                azimuth_deg = float(result.azimuth_deg)
             runtime_s = float(perf_counter() - started)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
             row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
-        summary = dict(result.summary)
         anti_collision_stage = anti_collision_stage_from_context(optimization_context)
         if anti_collision_stage is not None:
             summary["anti_collision_stage"] = anti_collision_stage
             summary["anti_collision_attempted_stages"] = anti_collision_stage
-        md_total_m = float(summary.get("md_total_m", 0.0))
-        md_limit_m = float(summary.get("max_total_md_postcheck_m", 0.0))
-        md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
-        md_postcheck_exceeded = bool(md_postcheck_excess_m > 1e-6)
-        md_postcheck_message = ""
-        if md_postcheck_exceeded:
-            md_postcheck_message = (
-                "Превышен лимит итоговой MD (постпроверка): "
-                f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
-            )
+        postcheck_exceeded, postcheck_message = _postcheck_state(summary)
 
         success = SuccessfulWellPlan(
             name=record.name,
-            surface=surface,
+            surface=success_surface,
             t1=t1,
             t3=t3,
-            stations=result.stations,
+            stations=stations,
             summary=summary,
-            azimuth_deg=result.azimuth_deg,
-            md_t1_m=result.md_t1_m,
+            azimuth_deg=azimuth_deg,
+            md_t1_m=md_t1_m,
             config=config,
             runtime_s=runtime_s,
-            md_postcheck_exceeded=md_postcheck_exceeded,
-            md_postcheck_message=md_postcheck_message,
+            md_postcheck_exceeded=postcheck_exceeded,
+            md_postcheck_message=postcheck_message,
+        )
+        row = self._row_from_success(record=record, success=success)
+        return row, success
+
+    def _evaluate_pilot_record(
+        self,
+        *,
+        record: WelltrackRecord,
+        config: TrajectoryConfig,
+    ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
+        row = self._base_row(record=record)
+        try:
+            started = perf_counter()
+            pilot = build_pilot_trajectory(record, config=config)
+            runtime_s = float(perf_counter() - started)
+        except (ValueError, PlanningError) as exc:
+            row["Статус"] = "Ошибка расчета"
+            row["Проблема"] = summarize_problem_ru(str(exc))
+            return row, None
+
+        success = _pilot_build_to_success(
+            record=record,
+            pilot=pilot,
+            config=config,
+            runtime_s=runtime_s,
         )
         row = self._row_from_success(record=record, success=success)
         return row, success
@@ -1535,9 +1872,7 @@ def merge_batch_results(
 
     merged_rows = [rows_by_name[name] for name in ordered_names]
     merged_successes = [
-        successes_by_name[name]
-        for name in ordered_names
-        if name in successes_by_name
+        successes_by_name[name] for name in ordered_names if name in successes_by_name
     ]
     return merged_rows, merged_successes
 
@@ -1557,9 +1892,7 @@ def recommended_batch_selection(
     if summary_rows is None:
         return ordered_names
 
-    rows_by_name = {
-        str(row.get("Скважина", "")).strip(): row for row in summary_rows
-    }
+    rows_by_name = {str(row.get("Скважина", "")).strip(): row for row in summary_rows}
     recommended: list[str] = []
     for name in ordered_names:
         row = rows_by_name.get(name)

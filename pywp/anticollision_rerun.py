@@ -25,6 +25,7 @@ from pywp.anticollision_recommendations import (
     recommendation_display_label,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
+from pywp.pilot_wells import paired_pilot_parent_names
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
     REFERENCE_WELL_KIND_COLORS,
@@ -143,6 +144,10 @@ def build_anti_collision_analysis_for_successes(
     return analyze_anti_collision(
         wells,
         build_overlap_geometry=build_overlap_geometry,
+        pair_filter=lambda left, right: not paired_pilot_parent_names(
+            left.name,
+            right.name,
+        ),
     )
 
 

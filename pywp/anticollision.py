@@ -158,8 +158,8 @@ def anti_collision_method_caption(
     return (
         "Anti-collision scan выполнен по planning-level 2σ конусам неопределенности. "
         "Для каждой пары скважин считается расстояние между центрами сечений и "
-        "combined directional 2σ radius по суммарной ковариации двух скважин "
-        "(uncorrelated uncertainty assumption). Красный volume/polygon показывает "
+        "geometric directional 2σ overlap radius как сумма опорных радиусов "
+        "двух uncertainty-конусов. Красный volume/polygon показывает "
         "приближенное общее пересечение двух конусов: в каждом конфликтном "
         "сечении строится polygon-intersection uncertainty-контуров в общей "
         "локальной плоскости. Красные участки стволов показывают MD-интервалы "
@@ -957,19 +957,22 @@ def _pair_overlap_corridors(
         principal_vectors = principal_vectors / principal_norm[:, None]
         direction[zero_mask] = principal_vectors
 
-    combined_sigma2 = np.einsum(
+    directional_sigma2_a = np.einsum(
         "abi,aij,abj->ab",
         direction,
         covariances_a,
         direction,
-    ) + np.einsum(
+    )
+    directional_sigma2_b = np.einsum(
         "abi,bij,abj->ab",
         direction,
         covariances_b,
         direction,
     )
     confidence_scale = float(max(well_a.overlay.model.confidence_scale, SMALL))
-    combined_radius = confidence_scale * np.sqrt(np.clip(combined_sigma2, 0.0, None))
+    radius_a = confidence_scale * np.sqrt(np.clip(directional_sigma2_a, 0.0, None))
+    radius_b = confidence_scale * np.sqrt(np.clip(directional_sigma2_b, 0.0, None))
+    combined_radius = radius_a + radius_b
     overlap_mask = (combined_radius > SMALL) & (distance <= combined_radius)
     if not np.any(overlap_mask):
         return []

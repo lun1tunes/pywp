@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp import ptc_target_import as target_import
 
 
@@ -205,6 +206,39 @@ def test_store_imported_records_mutates_state_and_runs_callbacks() -> None:
         "clear_results",
         "auto_layout:TAB-01",
     ]
+
+
+def test_store_imported_records_keeps_pilot_internal_to_parent_selection() -> None:
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1000.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=1500.0),
+        ),
+    )
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=80.0, y=0.0, z=800.0, md=800.0),
+        ),
+    )
+    session_state: dict[str, object] = {}
+
+    result = target_import.store_imported_records(
+        session_state,
+        records=[parent, pilot],
+        loaded_at_text="2026-05-08 12:00:00",
+        clear_t1_t3_order_state=lambda: None,
+        clear_pad_state=lambda: None,
+        clear_results=lambda: None,
+        auto_apply_pad_layout=lambda imported: False,
+    )
+
+    assert result.well_names == ("WELL-04", "WELL-04_PL")
+    assert session_state["wt_records"] == [parent, pilot]
+    assert session_state["wt_selected_names"] == ["WELL-04"]
 
 
 def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:

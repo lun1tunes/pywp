@@ -13,6 +13,7 @@ from pywp.eclipse_welltrack import (
     parse_welltrack_points_table,
     parse_welltrack_text,
 )
+from pywp.pilot_wells import visible_well_names
 
 __all__ = [
     "AUTO_LAYOUT_APPLIED_MESSAGE",
@@ -262,7 +263,7 @@ def store_imported_records(
     session_state["wt_last_error"] = ""
     clear_results()
     auto_layout_applied = bool(auto_apply_pad_layout(list(normalized_records)))
-    session_state["wt_selected_names"] = list(well_names)
+    session_state["wt_selected_names"] = visible_well_names(normalized_records)
     return TargetImportStoreResult(
         well_names=well_names,
         auto_layout_applied=auto_layout_applied,

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import math
+
+import pytest
+
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp import ptc_target_records as target_records
+from pywp.welltrack_quality import swap_t1_t3_for_wells
 
 
 def _record(
@@ -29,15 +34,63 @@ def test_records_overview_dataframe_uses_status_icons_and_problem_text() -> None
         ),
     )
 
-    overview_df = target_records.records_overview_dataframe(
-        [_record(), incomplete]
-    )
+    overview_df = target_records.records_overview_dataframe([_record(), incomplete])
 
-    assert list(overview_df.columns) == ["Скважина", "Точек", "Статус", "Проблема"]
+    assert list(overview_df.columns) == [
+        "Скважина",
+        "Точек",
+        "Отход t1, м",
+        "Длина ГС, м",
+        "Примечание",
+        "Статус",
+        "Проблема",
+    ]
     assert list(overview_df["Статус"]) == ["✅", "❌"]
     assert list(overview_df["Точек"]) == [2, 1]
+    assert list(overview_df["Отход t1, м"]) == [1000.0, 1000.0]
+    assert round(float(overview_df.iloc[0]["Длина ГС, м"]), 2) == 1503.33
+    assert math.isnan(float(overview_df.iloc[1]["Длина ГС, м"]))
     assert str(overview_df.iloc[0]["Проблема"]) == "—"
     assert "Не хватает одной из точек" in str(overview_df.iloc[1]["Проблема"])
+
+
+def test_records_overview_dataframe_recalculates_t1_metrics_after_t1_t3_swap() -> None:
+    source = _record(
+        "BAD-ORDER",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=2600.0, md=1400.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2800.0),
+        ),
+    )
+
+    before_df = target_records.records_overview_dataframe([source])
+    fixed = swap_t1_t3_for_wells([source], well_names={"BAD-ORDER"})[0]
+    after_df = target_records.records_overview_dataframe([fixed])
+
+    assert float(before_df.iloc[0]["Отход t1, м"]) == 1200.0
+    assert float(after_df.iloc[0]["Отход t1, м"]) == 500.0
+    assert float(after_df.iloc[0]["Длина ГС, м"]) == pytest.approx(
+        math.hypot(700.0, 100.0)
+    )
+
+
+def test_records_overview_dataframe_rejects_nonfinite_coordinates() -> None:
+    source = _record(
+        "BAD-NAN",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=float("nan"), y=800.0, z=2400.0, md=2400.0),
+            WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([source])
+
+    assert target_records.record_has_finite_points(source) is False
+    assert str(overview_df.iloc[0]["Статус"]) == "❌"
+    assert overview_df.iloc[0]["Отход t1, м"] is None
+    assert "конечными числами" in str(overview_df.iloc[0]["Проблема"])
 
 
 def test_record_problem_text_detects_missing_surface_and_md_order() -> None:
@@ -93,3 +146,86 @@ def test_raw_records_dataframe_labels_extra_points_without_md_column() -> None:
     assert list(raw_df.columns) == ["Скважина", "Точка", "X, м", "Y, м", "Z, м"]
     assert list(raw_df["Точка"]) == ["S", "t1", "t3", "p4"]
     assert "MD (из файла), м" not in list(raw_df.columns)
+
+
+def test_pilot_records_allow_multiple_study_points() -> None:
+    pilot = _record(
+        "well_04_pl",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1200.0, md=2.0),
+            WelltrackPoint(x=450.0, y=120.0, z=2400.0, md=3.0),
+            WelltrackPoint(x=700.0, y=180.0, z=2550.0, md=4.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([pilot])
+    raw_df = target_records.raw_records_dataframe([pilot])
+
+    assert overview_df.empty
+    assert list(overview_df.columns) == [
+        "Скважина",
+        "Точек",
+        "Отход t1, м",
+        "Длина ГС, м",
+        "Примечание",
+        "Статус",
+        "Проблема",
+    ]
+    assert list(raw_df["Точка"]) == ["S", "p1", "p2", "p3"]
+
+
+def test_records_overview_marks_parent_wells_with_pilot() -> None:
+    parent = _record(
+        "well_04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=2.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1200.0, md=3.0),
+        ),
+    )
+    pilot = _record(
+        "well_04_pl",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=50.0, y=0.0, z=700.0, md=2.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([parent, pilot])
+
+    assert list(overview_df.columns) == [
+        "Скважина",
+        "Точек",
+        "Отход t1, м",
+        "Длина ГС, м",
+        "Примечание",
+        "Статус",
+        "Проблема",
+    ]
+    assert list(overview_df["Скважина"]) == ["well_04"]
+    by_name = overview_df.set_index("Скважина")
+    assert str(by_name.loc["well_04", "Примечание"]) == "Есть пилот"
+
+
+def test_records_overview_hides_pilot_row_but_reports_pilot_problem_on_parent() -> None:
+    parent = _record(
+        "well_04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=2.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1200.0, md=3.0),
+        ),
+    )
+    pilot = _record(
+        "well_04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([parent, pilot])
+
+    assert list(overview_df["Скважина"]) == ["well_04"]
+    assert str(overview_df.iloc[0]["Статус"]) == "❌"
+    assert "Пилот:" in str(overview_df.iloc[0]["Проблема"])

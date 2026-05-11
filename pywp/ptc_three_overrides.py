@@ -62,6 +62,21 @@ def legend_pad_label(pad: WellPad) -> str:
     return f"Куст {str(pad.pad_id)}"
 
 
+def _record_surface_by_name(records: Iterable[WelltrackRecord]) -> dict[str, Point3D]:
+    surface_by_name: dict[str, Point3D] = {}
+    for record in records:
+        points = tuple(record.points)
+        if not points:
+            continue
+        surface = points[0]
+        surface_by_name[str(record.name)] = Point3D(
+            x=float(surface.x),
+            y=float(surface.y),
+            z=float(surface.z),
+        )
+    return surface_by_name
+
+
 def three_legend_tree_payload(
     session_state: MutableMapping[str, object],
     *,
@@ -360,6 +375,7 @@ def trajectory_three_payload_overrides(
         well_name = str(getattr(target_only, "name"))
         well_bounds_by_name[well_name] = target_only_raw_bounds(target_only)
         surface_by_name[well_name] = getattr(target_only, "surface")
+    surface_by_name.update(_record_surface_by_name(records))
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
         records=records,
@@ -410,6 +426,7 @@ def anticollision_three_payload_overrides(
         merged_bounds = ptc_three_payload.merge_raw_bounds((bounds, extra_bounds))
         if merged_bounds is not None:
             well_bounds_by_name[str(well.name)] = merged_bounds
+    surface_by_name.update(_record_surface_by_name(records))
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
         records=records,

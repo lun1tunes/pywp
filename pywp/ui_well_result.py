@@ -87,11 +87,21 @@ class SingleWellResultView(FrozenArbitraryModel):
     trajectory_line_dash: str = "solid"
     plan_csb_stations: pd.DataFrame | None = None
     actual_stations: pd.DataFrame | None = None
+    pilot_name: str | None = None
+    pilot_stations: pd.DataFrame | None = None
+    pilot_study_points: tuple[Point3D, ...] = ()
 
     @field_validator("surface", "t1", "t3", mode="before")
     @classmethod
     def _coerce_point3d(cls, value: object) -> Point3D:
         return coerce_model_like(value, Point3D)
+
+    @field_validator("pilot_study_points", mode="before")
+    @classmethod
+    def _coerce_pilot_points(cls, value: object) -> tuple[Point3D, ...]:
+        if value is None:
+            return ()
+        return tuple(coerce_model_like(item, Point3D) for item in value)
 
     @field_validator("config", mode="before")
     @classmethod
@@ -198,6 +208,21 @@ def _format_runtime_text(runtime_s: float | None, *, missing_text: str = "-") ->
     return f"{float(runtime_s):.2f} с"
 
 
+def _format_miss_pair(
+    summary: Mapping[str, SummaryValue],
+    *,
+    t1_key: str,
+    t3_key: str,
+    missing_text: str = "-",
+) -> str:
+    if t1_key not in summary or t3_key not in summary:
+        return missing_text
+    return (
+        f"t1 {format_distance(float(summary[t1_key]))} / "
+        f"t3 {format_distance(float(summary[t3_key]))}"
+    )
+
+
 def _format_solver_restart_text(
     summary: Mapping[str, SummaryValue],
     *,
@@ -250,6 +275,22 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
         {
             "Показатель": "Отход t1",
             "Значение": format_distance(t1_horizontal_offset_m),
+        },
+        {
+            "Показатель": "Промах по латерали t1 / t3",
+            "Значение": _format_miss_pair(
+                summary,
+                t1_key="lateral_distance_t1_m",
+                t3_key="lateral_distance_t3_m",
+            ),
+        },
+        {
+            "Показатель": "Промах по вертикали t1 / t3",
+            "Значение": _format_miss_pair(
+                summary,
+                t1_key="vertical_distance_t1_m",
+                t3_key="vertical_distance_t3_m",
+            ),
         },
         {
             "Показатель": "INC t1 / ЗУ HOLD",
@@ -463,6 +504,9 @@ def render_result_plots(
         plan_csb_stations=view.plan_csb_stations,
         actual_stations=view.actual_stations,
         uncertainty_overlay=uncertainty_overlay,
+        pilot_name=view.pilot_name,
+        pilot_stations=view.pilot_stations,
+        pilot_study_points=view.pilot_study_points,
         render_3d_override=render_3d_override,
     )
     render_plan_section_panel(
@@ -478,6 +522,9 @@ def render_result_plots(
         plan_csb_stations=view.plan_csb_stations,
         actual_stations=view.actual_stations,
         uncertainty_overlay=uncertainty_overlay,
+        pilot_name=view.pilot_name,
+        pilot_stations=view.pilot_stations,
+        pilot_study_points=view.pilot_study_points,
     )
 
 

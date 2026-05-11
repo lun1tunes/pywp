@@ -11,6 +11,14 @@ import pandas as pd
 
 from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, TrajectoryConfig
+from pywp.pilot_wells import (
+    is_pilot_name,
+    parent_name_for_pilot,
+    pilot_name_key_for_parent,
+    sync_pilot_surfaces_to_parents,
+    visible_well_names,
+    well_name_key,
+)
 from pywp.planner import TrajectoryPlanner
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.ui_calc_params import kop_min_vertical_function_from_state
@@ -86,22 +94,22 @@ def sync_selection_state(
     *,
     records: list[WelltrackRecord],
 ) -> tuple[list[str], list[str]]:
-    all_names = [str(record.name) for record in records]
-    recommended_names = recommended_batch_selection(
+    all_names = visible_well_names(records)
+    recommended_names = _visible_recommended_names(
         records=records,
         summary_rows=state.get("wt_summary_rows"),
     )
     pending_general = state.pop("wt_pending_selected_names", None)
     if pending_general is not None:
-        state["wt_selected_names"] = [
-            str(name) for name in pending_general if str(name) in all_names
-        ]
+        state["wt_selected_names"] = _coerce_visible_selection(
+            pending_general,
+            all_names=all_names,
+        )
 
-    current = [
-        str(name)
-        for name in state.get("wt_selected_names", [])
-        if str(name) in all_names
-    ]
+    current = _coerce_visible_selection(
+        state.get("wt_selected_names", []),
+        all_names=all_names,
+    )
     if current != state.get("wt_selected_names", []):
         state["wt_selected_names"] = list(current)
     if not current and recommended_names:
@@ -114,27 +122,21 @@ def batch_selection_status(
     records: list[WelltrackRecord],
     summary_rows: list[dict[str, object]] | None,
 ) -> BatchSelectionStatus:
-    all_names = [str(record.name) for record in records]
-    rows_by_name = {
-        str(row.get("Скважина", "")).strip(): row for row in (summary_rows or [])
+    all_names = visible_well_names(records)
+    rows_by_key = {
+        well_name_key(row.get("Скважина", "")): row for row in (summary_rows or [])
     }
     ok_count = 0
     warning_count = 0
     error_count = 0
     not_run_count = 0
     for name in all_names:
-        row = rows_by_name.get(name)
-        if row is None:
-            not_run_count += 1
-            continue
-        status = str(row.get("Статус", "")).strip()
-        if status == "OK":
-            if _has_problem_text(row.get("Проблема", "")):
-                warning_count += 1
-            else:
-                ok_count += 1
-            continue
-        if status == "Не рассчитана":
+        state = _combined_visible_row_state(name=name, rows_by_key=rows_by_key)
+        if state == "ok":
+            ok_count += 1
+        elif state == "warning":
+            warning_count += 1
+        elif state == "not_run":
             not_run_count += 1
         else:
             error_count += 1
@@ -145,6 +147,81 @@ def batch_selection_status(
         error_count=error_count,
         not_run_count=not_run_count,
     )
+
+
+def _coerce_visible_selection(
+    names: object,
+    *,
+    all_names: list[str],
+) -> list[str]:
+    visible_by_key = {well_name_key(name): str(name) for name in all_names}
+    coerced: list[str] = []
+    seen: set[str] = set()
+    for raw_name in names if isinstance(names, (list, tuple, set)) else []:
+        name = str(raw_name)
+        name_key = well_name_key(name)
+        if name_key not in visible_by_key and is_pilot_name(name):
+            name_key = well_name_key(parent_name_for_pilot(name))
+        visible_name = visible_by_key.get(name_key)
+        if visible_name is None or visible_name in seen:
+            continue
+        coerced.append(visible_name)
+        seen.add(visible_name)
+    return coerced
+
+
+def _visible_recommended_names(
+    *,
+    records: list[WelltrackRecord],
+    summary_rows: object,
+) -> list[str]:
+    raw_recommended = recommended_batch_selection(
+        records=records,
+        summary_rows=summary_rows,
+    )
+    recommended_keys = {well_name_key(name) for name in raw_recommended}
+    result: list[str] = []
+    for name in visible_well_names(records):
+        if (
+            well_name_key(name) in recommended_keys
+            or pilot_name_key_for_parent(name) in recommended_keys
+        ):
+            result.append(str(name))
+    return result
+
+
+def _combined_visible_row_state(
+    *,
+    name: str,
+    rows_by_key: Mapping[str, dict[str, object]],
+) -> str:
+    rows = [
+        row
+        for row in (
+            rows_by_key.get(well_name_key(name)),
+            rows_by_key.get(pilot_name_key_for_parent(name)),
+        )
+        if row is not None
+    ]
+    if not rows:
+        return "not_run"
+    states = [_row_state(row) for row in rows]
+    if "error" in states:
+        return "error"
+    if "warning" in states:
+        return "warning"
+    if "not_run" in states:
+        return "not_run"
+    return "ok"
+
+
+def _row_state(row: Mapping[str, object]) -> str:
+    status = str(row.get("Статус", "")).strip()
+    if status == "OK":
+        return "warning" if _has_problem_text(row.get("Проблема", "")) else "ok"
+    if status == "Не рассчитана":
+        return "not_run"
+    return "error"
 
 
 def _has_problem_text(value: object) -> bool:
@@ -225,10 +302,12 @@ def run_batch_if_clicked(
         if base_records:
             pads = hooks.ensure_pad_configs(base_records=list(base_records))
             plan_map = hooks.build_pad_plan_map(pads)
-            records_for_run = apply_pad_layout(
-                records=list(base_records),
-                pads=pads,
-                plan_by_pad_id=plan_map,
+            records_for_run = sync_pilot_surfaces_to_parents(
+                apply_pad_layout(
+                    records=list(base_records),
+                    pads=pads,
+                    plan_by_pad_id=plan_map,
+                )
             )
             state["wt_records"] = list(records_for_run)
 

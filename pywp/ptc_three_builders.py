@@ -77,6 +77,9 @@ def single_well_three_payload(
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
     uncertainty_overlay: WellUncertaintyOverlay | None = None,
+    pilot_name: str | None = None,
+    pilot_stations: pd.DataFrame | None = None,
+    pilot_study_points: tuple[Point3D, ...] = (),
 ) -> dict[str, object]:
     x_arrays: list[np.ndarray] = []
     y_arrays: list[np.ndarray] = []
@@ -130,6 +133,18 @@ def single_well_three_payload(
             y_arrays=y_arrays,
             z_arrays=z_arrays,
         )
+    if pilot_stations is not None and len(pilot_stations) > 0:
+        _append_station_line(
+            payload,
+            stations=pilot_stations,
+            name=str(pilot_name or "Пилот"),
+            color=TRAJECTORY_COLOR_PRIMARY,
+            width_role="line",
+            hover_name=str(pilot_name or "Пилот"),
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+        )
 
     target_points = [_point3d_payload(surface), _point3d_payload(t1), _point3d_payload(t3)]
     _append_arrays_for_points(x_arrays, y_arrays, z_arrays, target_points)
@@ -151,6 +166,15 @@ def single_well_three_payload(
     )
     if well_name:
         payload["labels"].append(_well_name_label(str(well_name), t3, TARGET_COLOR_PRIMARY))
+    _append_pilot_study_markers(
+        payload,
+        pilot_name=pilot_name,
+        study_points=pilot_study_points,
+        color=TRAJECTORY_COLOR_PRIMARY,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
 
     if md_t1_m is not None and not stations.empty and "MD_m" in stations.columns:
         calc_points = _calculated_t1_t3_points(stations, md_t1_m=float(md_t1_m))
@@ -353,7 +377,7 @@ def anticollision_three_payload(
                 faces_ijk=np.column_stack([tube_mesh.i, tube_mesh.j, tube_mesh.k]),
                 name=f"{well_label} cone",
                 color=str(well.color),
-                opacity=0.12,
+                opacity=0.10,
                 role="cone",
                 x_arrays=x_arrays,
                 y_arrays=y_arrays,
@@ -369,7 +393,7 @@ def anticollision_three_payload(
                 segments=[_points_from_xyz_array(terminal_ring)],
                 name=f"{well_label}: граница конуса",
                 color=_lighten_hex(str(well.color), 0.55),
-                opacity=1.0,
+                opacity=0.72,
                 dash="solid",
                 role="cone_tip",
             )
@@ -416,7 +440,7 @@ def anticollision_three_payload(
                 stations=previous_success.stations,
                 name=f"{well_name}: до anti-collision",
                 color=str(well.color),
-                opacity=0.55,
+                opacity=0.78,
                 width_role="line",
                 dash="dot",
                 hover_name=f"{well_name}: до anti-collision",
@@ -723,13 +747,13 @@ def _append_uncertainty_overlay(
             faces_ijk=np.column_stack([tube_mesh.i, tube_mesh.j, tube_mesh.k]),
             name=legend_label,
             color=color,
-            opacity=0.16,
+            opacity=0.14,
             role="cone",
             x_arrays=x_arrays,
             y_arrays=y_arrays,
             z_arrays=z_arrays,
         )
-        _append_unique_legend_item(payload, label=legend_label, color=color, opacity=0.16)
+        _append_unique_legend_item(payload, label=legend_label, color=color, opacity=0.14)
     if overlay.samples:
         terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
         _append_line_segments(
@@ -737,7 +761,7 @@ def _append_uncertainty_overlay(
             segments=[_points_from_xyz_array(terminal_ring)],
             name="Граница конуса неопределенности",
             color=terminal_boundary_color,
-            opacity=1.0,
+            opacity=0.72,
             dash="solid",
             role="cone_tip",
         )
@@ -779,6 +803,42 @@ def _append_target_markers(
             ],
             "role": "marker",
         }
+    )
+
+
+def _append_pilot_study_markers(
+    payload: dict[str, object],
+    *,
+    pilot_name: str | None,
+    study_points: tuple[Point3D, ...],
+    color: str,
+    x_arrays: list[np.ndarray],
+    y_arrays: list[np.ndarray],
+    z_arrays: list[np.ndarray],
+) -> None:
+    if not pilot_name or not study_points:
+        return
+    labels = [f"{str(pilot_name)}: {index}" for index in range(1, len(study_points) + 1)]
+    points = [_point3d_payload(point) for point in study_points]
+    _append_arrays_for_points(x_arrays, y_arrays, z_arrays, points)
+    payload["points"].append(
+        {
+            "name": f"{str(pilot_name)}: точки пилота",
+            "points": points,
+            "color": str(color),
+            "opacity": 1.0,
+            "size": 6.0,
+            "symbol": "diamond",
+            "hover": [
+                {"name": f"{str(pilot_name)}: точки пилота", "point": label}
+                for label in labels
+            ],
+            "role": "marker",
+        }
+    )
+    payload["labels"].extend(
+        _well_name_label(label, point, color)
+        for label, point in zip(labels, study_points, strict=False)
     )
 
 

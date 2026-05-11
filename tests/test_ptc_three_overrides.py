@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from pywp.anticollision import anti_collision_report_events
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    AntiCollisionWell,
+    anti_collision_report_events,
+)
 from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord, parse_welltrack_text
 from pywp.models import Point3D, TrajectoryConfig
@@ -192,11 +196,108 @@ def test_first_surface_arrow_honors_fixed_pad_order() -> None:
     start_xy = np.asarray(arrow["start_position"][:2], dtype=float)
     end_xy = np.asarray(arrow["end_position"][:2], dtype=float)
     tip_xy = np.asarray(arrow["vertices"][4][:2], dtype=float)
-    assert np.allclose(start_xy, [0.0, 100.0])
+    expected_surface = records[2].points[0]
+    assert np.allclose(start_xy, [expected_surface.x, expected_surface.y])
     assert np.allclose(tip_xy, end_xy)
     assert float(np.linalg.norm(end_xy - start_xy)) >= 50.0
     assert float(arrow["vertices"][4][2]) <= -24.0
     assert float(arrow["vertices"][11][2] - arrow["vertices"][4][2]) >= 5.0
+
+
+def test_first_surface_arrow_uses_record_wellhead_for_sidetrack_surface() -> None:
+    record_surface = WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0)
+    records = [
+        WelltrackRecord(
+            name="well_04",
+            points=(
+                record_surface,
+                WelltrackPoint(x=456978.0, y=890541.0, z=1852.0, md=2.0),
+                WelltrackPoint(x=459130.0, y=887003.0, z=2554.0, md=3.0),
+            ),
+        )
+    ]
+    sidetrack_success = _successful_plan_xy(
+        name="well_04",
+        x_offset_m=456950.0,
+        y_offset_m=890500.0,
+    )
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        {},
+        records=records,
+        successes=[sidetrack_success],
+        target_only_wells=[],
+        name_to_color={},
+    )
+
+    arrow = list(overrides["extra_meshes"])[0]
+    assert arrow["start_position"] == [
+        float(record_surface.x),
+        float(record_surface.y),
+        float(record_surface.z),
+    ]
+    assert arrow["start_position"] != [
+        float(sidetrack_success.surface.x),
+        float(sidetrack_success.surface.y),
+        float(sidetrack_success.surface.z),
+    ]
+
+
+def test_anticollision_arrow_uses_record_wellhead_for_sidetrack_surface() -> None:
+    record_surface = WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0)
+    records = [
+        WelltrackRecord(
+            name="well_04",
+            points=(
+                record_surface,
+                WelltrackPoint(x=456978.0, y=890541.0, z=1852.0, md=2.0),
+                WelltrackPoint(x=459130.0, y=887003.0, z=2554.0, md=3.0),
+            ),
+        )
+    ]
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "X_m": [456950.0, 457050.0],
+            "Y_m": [890500.0, 890520.0],
+            "Z_m": [1800.0, 1850.0],
+        }
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            AntiCollisionWell(
+                name="well_04",
+                color="#2563eb",
+                overlay=SimpleNamespace(),
+                samples=(),
+                stations=stations,
+                surface=Point3D(x=456950.0, y=890500.0, z=1800.0),
+                t1=None,
+                t3=None,
+                md_t1_m=None,
+                md_t3_m=None,
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    overrides = ptc_three_overrides.anticollision_three_payload_overrides(
+        {},
+        records=records,
+        analysis=analysis,
+    )
+
+    assert list(overrides["extra_meshes"])[0]["start_position"] == [
+        float(record_surface.x),
+        float(record_surface.y),
+        float(record_surface.z),
+    ]
 
 
 def test_first_surface_arrow_mesh_spans_first_to_seventh_surface() -> None:
@@ -446,12 +547,16 @@ def test_welltracks4_overlap_volumes_match_report_zones() -> None:
     )
     assert max(len(volume["rings"]) for volume in pair_volumes) >= 8
 
-    well_09_03_volume = next(
+    well_09_03_volumes = [
         volume
         for volume in volumes
         if {str(volume["well_a"]), str(volume["well_b"])} == {"well_09", "well_03"}
+    ]
+    assert any(
+        str(volume["classification"]) == "target-trajectory"
+        and len(volume["rings"]) >= 3
+        for volume in well_09_03_volumes
     )
-    assert len(well_09_03_volume["rings"]) >= 3
 
 
 def test_augment_three_payload_appends_overlap_volume_and_legend_once() -> None:

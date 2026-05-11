@@ -3,6 +3,7 @@ from __future__ import annotations
 import colorsys
 import hashlib
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
@@ -87,6 +88,14 @@ from pywp.eclipse_welltrack import (
     welltrack_points_to_targets,
 )
 from pywp.models import Point3D
+from pywp.pilot_wells import (
+    is_pilot_name,
+    parent_name_for_pilot,
+    pilot_name_key_for_parent,
+    sync_pilot_surfaces_to_parents,
+    visible_well_records,
+    well_name_key,
+)
 from pywp.planner_config import optimization_display_label
 from pywp.plot_axes import (
     equalized_axis_ranges,
@@ -309,7 +318,7 @@ def _well_color_map(records: list[WelltrackRecord]) -> dict[str, str]:
     try:
         _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
             st.session_state,
-            records,
+            visible_well_records(records),
         )
     except Exception:
         well_names_by_pad_id = {}
@@ -324,6 +333,17 @@ def _well_color_map(records: list[WelltrackRecord]) -> dict[str, str]:
             continue
         color_map[name] = _well_color(fallback_index)
         fallback_index += 1
+    name_by_key = {well_name_key(record.name): str(record.name) for record in records}
+    for record in records:
+        name = str(record.name)
+        if is_pilot_name(name):
+            parent_name = name_by_key.get(well_name_key(parent_name_for_pilot(name)))
+            if parent_name is not None and parent_name in color_map:
+                color_map[name] = color_map[parent_name]
+            continue
+        pilot_name = name_by_key.get(pilot_name_key_for_parent(name))
+        if pilot_name is not None:
+            color_map[pilot_name] = color_map[name]
     return color_map
 
 
@@ -3245,7 +3265,7 @@ def _render_source_input() -> _WelltrackSourcePayload:
                 "Текст WELLTRACK",
                 key="wt_source_inline",
                 height=220,
-                placeholder="WELLTRACK 'WELL-1' ...",
+                placeholder="WELLTRACK 'WELL-1'\n457091 891257 -63.2 0\n457707 890374 1852 1\n/",
             ),
         )
 
@@ -3311,6 +3331,9 @@ def _store_parsed_records(records: list[WelltrackRecord]) -> bool:
         clear_results=_clear_results,
         auto_apply_pad_layout=_auto_apply_pad_layout_if_shared_surface,
     )
+    _set_import_pilot_fixed_slots(
+        records=list(st.session_state.get("wt_records_original") or records)
+    )
     return bool(result.auto_layout_applied)
 
 
@@ -3318,6 +3341,7 @@ def _auto_apply_pad_layout_if_shared_surface(
     records: list[WelltrackRecord],
 ) -> bool:
     pads = _ensure_pad_configs(base_records=list(records))
+    _set_import_pilot_fixed_slots(records=list(records), pads=pads)
     metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
     auto_layout_pad_ids = {
         str(pad.pad_id)
@@ -3332,10 +3356,12 @@ def _auto_apply_pad_layout_if_shared_surface(
     plan_map = _build_pad_plan_map(pads)
     if not any(str(pad_id) in auto_layout_pad_ids for pad_id in plan_map):
         return False
-    updated_records = apply_pad_layout(
-        records=list(records),
-        pads=pads,
-        plan_by_pad_id=plan_map,
+    updated_records = sync_pilot_surfaces_to_parents(
+        apply_pad_layout(
+            records=list(records),
+            pads=pads,
+            plan_by_pad_id=plan_map,
+        )
     )
     if updated_records == list(records):
         return False
@@ -3345,6 +3371,53 @@ def _auto_apply_pad_layout_if_shared_surface(
     )
     st.session_state["wt_pad_auto_applied_on_import"] = True
     return True
+
+
+def _set_import_pilot_fixed_slots(
+    *,
+    records: list[WelltrackRecord],
+    pads: list[WellPad] | None = None,
+) -> bool:
+    pilot_parent_keys = {
+        well_name_key(parent_name_for_pilot(record.name))
+        for record in records
+        if is_pilot_name(record.name)
+    }
+    if not pilot_parent_keys:
+        return False
+    resolved_pads = pads if pads is not None else _ensure_pad_configs(base_records=records)
+    config_raw = st.session_state.get("wt_pad_configs", {})
+    config_map = dict(config_raw if isinstance(config_raw, Mapping) else {})
+    changed = False
+    for pad in resolved_pads:
+        pilot_parent_names = [
+            str(well.name)
+            for well in pad.wells
+            if well_name_key(well.name) in pilot_parent_keys
+        ]
+        if not pilot_parent_names:
+            continue
+        preferred_name = pilot_parent_names[0]
+        pad_id = str(pad.pad_id)
+        current_raw = config_map.get(pad_id, _pad_config_defaults(pad))
+        current = dict(current_raw if isinstance(current_raw, Mapping) else {})
+        current_slots = _pad_fixed_slots_from_config(pad=pad, config=current)
+        next_slots = (
+            (1, preferred_name),
+            *(
+                (int(slot), str(name))
+                for slot, name in current_slots
+                if int(slot) != 1 and str(name) != preferred_name
+            ),
+        )
+        if current_slots == next_slots:
+            continue
+        current["fixed_slots"] = next_slots
+        config_map[pad_id] = current
+        changed = True
+    if changed:
+        st.session_state["wt_pad_configs"] = config_map
+    return changed
 
 
 def _handle_import_actions(
@@ -3410,15 +3483,16 @@ def _handle_import_actions(
 
 def _render_records_overview(records: list[WelltrackRecord]) -> None:
     parsed_df = _records_overview_dataframe(records)
-    ready_count = int(sum(str(item) == "✅" for item in parsed_df["Статус"].tolist()))
-    problem_count = int(len(parsed_df) - ready_count)
+    problem_count = int(sum(str(item) != "✅" for item in parsed_df["Статус"].tolist()))
+    well_count = int(sum(not is_pilot_name(record.name) for record in records))
+    pilot_count = int(sum(is_pilot_name(record.name) for record in records))
     x1, x2, x3 = st.columns(3, gap="small")
-    x1.metric("Скважин", f"{len(records)}")
-    x2.metric("Готово", f"{ready_count}")
+    x1.metric("Скважин", f"{well_count}")
+    x2.metric("Пилотов", f"{pilot_count}")
     x3.metric("Проблем", f"{problem_count}")
 
     with st.expander(
-        "Статус загрузки точек целей",
+        "Статус загрузки целей",
         expanded=bool(problem_count > 0),
     ):
         st.dataframe(
@@ -3432,6 +3506,22 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                     format="%d",
                     width="small",
                     help="Считаются только целевые точки `t1/t3`, без устья `S`.",
+                ),
+                "Отход t1, м": st.column_config.NumberColumn(
+                    "Отход t1, м",
+                    format="%.2f",
+                    width="small",
+                    help="Горизонтальное расстояние от устья `S` до точки `t1`.",
+                ),
+                "Длина ГС, м": st.column_config.NumberColumn(
+                    "Длина ГС, м",
+                    format="%.2f",
+                    width="small",
+                    help="Пространственное расстояние между точками `t1` и `t3`.",
+                ),
+                "Примечание": st.column_config.TextColumn(
+                    "Примечание",
+                    width="small",
                 ),
                 "Статус": st.column_config.TextColumn(
                     "Статус",
@@ -4382,7 +4472,7 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                 "Запустите расчёт для обновления траекторий."
             )
         raw_df = arrow_safe_text_dataframe(
-            ptc_target_records.raw_records_dataframe(records)
+            ptc_target_records.raw_records_dataframe(visible_well_records(records))
         )
         if highlight_names and not raw_df.empty:
             highlight_mask = raw_df["Скважина"].astype(str).isin(
@@ -4407,9 +4497,14 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
         )
 
 
-def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
-    with st.container(border=True):
-        st.markdown("### Проверка порядка t1/t3")
+def _render_t1_t3_order_panel(
+    records: list[WelltrackRecord],
+    *,
+    border: bool = True,
+) -> None:
+    visible_records = visible_well_records(records)
+    panel_context = st.container(border=True) if border else nullcontext()
+    with panel_context:
         resolution_message = _t1_t3_order_resolution_message()
         if resolution_message is not None:
             level, message = resolution_message
@@ -4418,7 +4513,7 @@ def _render_t1_t3_order_panel(records: list[WelltrackRecord]) -> None:
             else:
                 st.info(message)
         detected_issues = detect_t1_t3_order_issues(
-            records, min_delta_m=WT_T1T3_MIN_DELTA_M
+            visible_records, min_delta_m=WT_T1T3_MIN_DELTA_M
         )
         acknowledged_well_names = _t1_t3_order_acknowledged_well_names()
         issues = [
@@ -4655,7 +4750,7 @@ def _detect_ui_pads(
 def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
     return ptc_pad_state.ensure_pad_configs(
         st.session_state,
-        base_records=base_records,
+        base_records=visible_well_records(base_records),
     )
 
 
@@ -4664,7 +4759,9 @@ def _build_pad_plan_map(pads: list[WellPad]) -> dict[str, PadLayoutPlan]:
 
 
 def _project_pads_for_ui(records: list[WelltrackRecord]) -> list[WellPad]:
-    return ptc_pad_state.project_pads_for_ui(st.session_state, records)
+    return ptc_pad_state.project_pads_for_ui(
+        st.session_state, visible_well_records(records)
+    )
 
 
 def _pad_display_label(pad: WellPad) -> str:
@@ -4682,7 +4779,9 @@ def _pad_anchor_mode_label(mode: object) -> str:
 def _pad_membership(
     records: list[WelltrackRecord],
 ) -> tuple[list[WellPad], dict[str, str], dict[str, tuple[str, ...]]]:
-    return ptc_pad_state.pad_membership(st.session_state, records)
+    return ptc_pad_state.pad_membership(
+        st.session_state, visible_well_records(records)
+    )
 
 
 def _normalize_focus_pad_id(
@@ -4692,7 +4791,7 @@ def _normalize_focus_pad_id(
 ) -> str:
     return ptc_pad_state.normalize_focus_pad_id(
         st.session_state,
-        records=records,
+        records=visible_well_records(records),
         requested_pad_id=requested_pad_id,
     )
 
@@ -4704,7 +4803,7 @@ def _focus_pad_well_names(
 ) -> tuple[str, ...]:
     return ptc_pad_state.focus_pad_well_names(
         st.session_state,
-        records=records,
+        records=visible_well_records(records),
         focus_pad_id=focus_pad_id,
     )
 
@@ -4716,7 +4815,7 @@ def _focus_pad_fixed_well_names(
 ) -> tuple[str, ...]:
     return ptc_pad_state.focus_pad_fixed_well_names(
         st.session_state,
-        records=records,
+        records=visible_well_records(records),
         focus_pad_id=focus_pad_id,
     )
 
@@ -4795,6 +4894,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         return
 
     with st.container(border=True):
+        _render_t1_t3_order_panel(records=records, border=False)
         if bool(st.session_state.get("wt_pad_auto_applied_on_import", False)):
             st.info(
                 "После импорта исходные устья скважин совпадали, "
@@ -4989,10 +5089,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             f"wt_pad_fixed_slots_editor_{selected_id}_{fixed_editor_revision}"
         )
         st.markdown("**Фиксированный порядок скважин**")
-        st.caption(
-            "Зафиксируйте конкретные скважины в нужных позициях. "
-            "Остальные скважины будут упорядочены автоматически."
-        )
         fixed_editor_df = st.data_editor(
             _pad_fixed_slots_editor_rows(
                 pad=selected_pad,
@@ -5130,10 +5226,12 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
 
         if apply_clicked:
             plan_map = _build_pad_plan_map(pads)
-            updated_records = apply_pad_layout(
-                records=list(base_records),
-                pads=pads,
-                plan_by_pad_id=plan_map,
+            updated_records = sync_pilot_surfaces_to_parents(
+                apply_pad_layout(
+                    records=list(base_records),
+                    pads=pads,
+                    plan_by_pad_id=plan_map,
+                )
             )
             st.session_state["wt_records"] = list(updated_records)
             st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(
@@ -5259,6 +5357,57 @@ def _build_batch_survey_csv(
     )
 
 
+def _build_batch_survey_welltrack(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_survey_welltrack(
+        successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs,
+        transform_stations_func=transform_stations_to_crs,
+    )
+
+
+def _build_batch_survey_dev_7z(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_survey_dev_7z(
+        successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs,
+        transform_stations_func=transform_stations_to_crs,
+    )
+
+
+def _build_batch_survey_dev_file(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_survey_dev_file(
+        successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs,
+        transform_stations_func=transform_stations_to_crs,
+    )
+
+
 def _render_batch_summary(
     summary_rows: list[dict[str, object]],
     *,
@@ -5277,6 +5426,9 @@ def _render_batch_summary(
         arrow_safe_text_dataframe_func=arrow_safe_text_dataframe,
         batch_summary_display_df_func=_batch_summary_display_df,
         build_batch_survey_csv_func=_build_batch_survey_csv,
+        build_batch_survey_welltrack_func=_build_batch_survey_welltrack,
+        build_batch_survey_dev_7z_func=_build_batch_survey_dev_7z,
+        build_batch_survey_dev_file_func=_build_batch_survey_dev_file,
         render_small_note_func=render_small_note,
     )
 

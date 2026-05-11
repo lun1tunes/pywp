@@ -114,8 +114,8 @@ def test_parse_reference_trajectory_welltrack_text_rejects_duplicate_md() -> Non
                 [
                     "WELLTRACK 'DUP'",
                     "0 0 0 0",
-                    "100 0 100 500",
-                    "200 0 100 500",
+                    "500 100 0 100",
+                    "500 200 0 100",
                     "/",
                 ]
             ),
@@ -128,9 +128,9 @@ def test_parse_reference_trajectory_welltrack_text_builds_reference_wells() -> N
         "\n".join(
             [
                 "WELLTRACK 'APP-1'",
-                "0 50 0 0",
-                "780 50 220 830",
-                "1580 50 280 1680",
+                "0 0 50 0",
+                "830 780 50 220",
+                "1680 1580 50 280",
                 "/",
             ]
         ),
@@ -162,7 +162,7 @@ def test_parse_reference_trajectory_dev_text_uses_md_xyz_columns() -> None:
     assert list(well.stations["MD_m"]) == [0.0, 100.0, 250.0]
     assert list(well.stations["X_m"]) == [606207.5, 606208.5, 606220.5]
     assert list(well.stations["Y_m"]) == [7409801.6, 7409803.6, 7409810.6]
-    assert list(well.stations["Z_m"]) == [40.9, -59.1, -209.1]
+    assert list(well.stations["Z_m"]) == [-40.9, 59.1, 209.1]
     assert float(well.stations["INC_deg"].iloc[0]) < 2.0
     assert float(well.stations["INC_deg"].max()) < 6.0
 
@@ -184,7 +184,7 @@ def test_parse_reference_trajectory_dev_text_accepts_decimal_commas() -> None:
     assert list(well.stations["MD_m"]) == [0.0, 100.0, 250.0]
     assert list(well.stations["X_m"]) == [606207.5, 606208.5, 606220.5]
     assert list(well.stations["Y_m"]) == [7409801.6, 7409803.6, 7409810.6]
-    assert list(well.stations["Z_m"]) == [40.9, -59.1, -209.1]
+    assert list(well.stations["Z_m"]) == [-40.9, 59.1, 209.1]
 
 
 def test_parse_reference_trajectory_dev_text_accepts_semicolon_rows_with_decimal_commas() -> None:
@@ -203,7 +203,7 @@ def test_parse_reference_trajectory_dev_text_accepts_semicolon_rows_with_decimal
     assert list(well.stations["MD_m"]) == [0.0, 100.0]
     assert list(well.stations["X_m"]) == [606207.5, 606208.5]
     assert list(well.stations["Y_m"]) == [7409801.6, 7409803.6]
-    assert list(well.stations["Z_m"]) == [40.9, -59.1]
+    assert list(well.stations["Z_m"]) == [-40.9, 59.1]
 
 
 def test_parse_reference_trajectory_dev_directories_uses_filename_stems(

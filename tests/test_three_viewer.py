@@ -192,9 +192,13 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "box-shadow: none;" in html
     assert "text-shadow: 0 1px 2px rgba(255,255,255,0.95);" in html
     assert 'id="minimap-toggle-btn"' in html
-    assert "План E-N ‹" in html
+    assert ">План E-N</button>" in html
+    assert "План E-N ‹" not in html
+    assert "#minimap-control:not(.is-expanded) #minimap-toggle-btn::before" in html
+    assert 'content: "‹";' in html
+    assert "font-weight: 500;" in html
     assert "#minimap-control:not(.is-expanded) #minimap-label" in html
-    assert 'miniMapToggleBtn.textContent = "План E-N ‹";' in html
+    assert 'miniMapToggleBtn.textContent = "План E-N";' in html
     assert "new THREE.OrthographicCamera" in html
     assert "function miniMapCanvasRect()" in html
     assert "function miniMapSizeConfig(canvasWidth, canvasHeight)" in html
@@ -212,6 +216,12 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "const miniMapHiddenContourObjects = [];" in html
     assert "function renderMiniMapScene()" in html
     assert "registerMiniMapHiddenContourObject(wireframe)" in html
+    assert "const miniMapOverlayScene = new THREE.Scene();" in html
+    assert "function addMiniMapTrajectoryOverlay(item)" in html
+    assert "function addMiniMapMarkerOverlay(item)" in html
+    assert "renderer.clearDepth();" in html
+    assert "renderer.render(miniMapOverlayScene, miniMapCamera);" in html
+    assert "depthTest: false,\n            depthWrite: false," in html
     assert "role === \"cone_tip\"" in html
     assert "renderMiniMapScene();" in html
     assert "handleMiniMapWheel" in html
@@ -244,12 +254,17 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "THREE.MeshLambertMaterial" in html
     assert "THREE.WireframeGeometry" in html
     assert "new THREE.LineSegments(wireGeometry, wireMaterial)" in html
-    assert 'depthWrite: role === "cone"' in html
+    assert 'depthWrite: role === "cone"' not in html
+    assert 'mesh.renderOrder = role === "overlap" ? 4 : role === "cone" ? 1 : 2' in html
+    assert "mesh.renderOrder = 4;" in html
     assert 'depthWrite: role !== "cone_tip"' in html
     assert "wireframe.renderOrder = mesh.renderOrder + 0.05" in html
     assert 'role === "cone" || role === "overlap" || role === "pad_first_surface_arrow"' in html
-    assert "Math.min(opacity, 0.12)" in html
-    assert "opacity: 0.10" in html
+    assert "Math.min(opacity, 0.10)" in html
+    assert "opacity: 0.07" in html
+    assert 'x: "#16A34A"' in html
+    assert 'y: "#2563EB"' in html
+    assert 'z: "#DC2626"' in html
     assert "function numberOrDefault(value, fallback)" in html
     assert "numberOrDefault(item.opacity, 0.34)" in html
     assert "numberOrDefault(item.opacity, 0.25)" in html

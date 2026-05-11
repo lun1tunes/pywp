@@ -72,6 +72,26 @@ def _t1_label_trace_2d(
     )
 
 
+def _pilot_study_points_dataframe(
+    *,
+    pilot_name: str | None,
+    study_points: tuple[Point3D, ...],
+) -> pd.DataFrame:
+    if not pilot_name or not study_points:
+        return pd.DataFrame(columns=["X_m", "Y_m", "Z_m", "name"])
+    return pd.DataFrame(
+        {
+            "X_m": [float(point.x) for point in study_points],
+            "Y_m": [float(point.y) for point in study_points],
+            "Z_m": [float(point.z) for point in study_points],
+            "name": [
+                f"{str(pilot_name)}: {index}"
+                for index in range(1, len(study_points) + 1)
+            ],
+        }
+    )
+
+
 def _segment_blocks(segment_names: np.ndarray) -> list[tuple[int, int, str]]:
     if len(segment_names) == 0:
         return []
@@ -418,7 +438,14 @@ def plan_view_figure(
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
     uncertainty_overlay: WellUncertaintyOverlay | None = None,
+    pilot_name: str | None = None,
+    pilot_stations: pd.DataFrame | None = None,
+    pilot_study_points: tuple[Point3D, ...] = (),
 ) -> go.Figure:
+    pilot_points_df = _pilot_study_points_dataframe(
+        pilot_name=pilot_name,
+        study_points=pilot_study_points,
+    )
     x_arrays = [
         df["X_m"].to_numpy(dtype=float),
         np.array([surface.x, t1.x, t3.x], dtype=float),
@@ -433,6 +460,12 @@ def plan_view_figure(
     if actual_df is not None and len(actual_df) > 0:
         x_arrays.append(actual_df["X_m"].to_numpy(dtype=float))
         y_arrays.append(actual_df["Y_m"].to_numpy(dtype=float))
+    if pilot_stations is not None and len(pilot_stations) > 0:
+        x_arrays.append(pilot_stations["X_m"].to_numpy(dtype=float))
+        y_arrays.append(pilot_stations["Y_m"].to_numpy(dtype=float))
+    if not pilot_points_df.empty:
+        x_arrays.append(pilot_points_df["X_m"].to_numpy(dtype=float))
+        y_arrays.append(pilot_points_df["Y_m"].to_numpy(dtype=float))
     if uncertainty_overlay is not None:
         for sample in uncertainty_overlay.samples:
             x_arrays.append(sample.ring_plan_xy[:, 0])
@@ -500,6 +533,19 @@ def plan_view_figure(
                 hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
             )
         )
+    if pilot_stations is not None and len(pilot_stations) > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=pilot_stations["X_m"],
+                y=pilot_stations["Y_m"],
+                mode="lines",
+                name=str(pilot_name or "Пилот"),
+                line={"width": 4, "color": TRAJECTORY_COLOR_PRIMARY},
+                opacity=0.95,
+                customdata=_station_hover_customdata(pilot_stations),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
     targets_df = pd.DataFrame(
         {
             "X_m": [surface.x, t1.x, t3.x],
@@ -532,6 +578,24 @@ def plan_view_figure(
     )
     if t1_label_trace is not None:
         fig.add_trace(t1_label_trace)
+    if not pilot_points_df.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=pilot_points_df["X_m"],
+                y=pilot_points_df["Y_m"],
+                mode="markers+text",
+                text=pilot_points_df["name"],
+                textposition="top center",
+                name=f"{str(pilot_name)}: точки пилота",
+                marker={"size": 8, "color": TARGET_COLOR_PRIMARY, "symbol": "diamond"},
+                customdata=_build_hover_customdata(
+                    x_values=pilot_points_df["X_m"].to_numpy(dtype=float),
+                    y_values=pilot_points_df["Y_m"].to_numpy(dtype=float),
+                    z_values=pilot_points_df["Z_m"].to_numpy(dtype=float),
+                ),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
 
     fig.update_layout(
         title="План (E-N)",
@@ -573,8 +637,15 @@ def section_view_figure(
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
     uncertainty_overlay: WellUncertaintyOverlay | None = None,
+    pilot_name: str | None = None,
+    pilot_stations: pd.DataFrame | None = None,
+    pilot_study_points: tuple[Point3D, ...] = (),
 ) -> go.Figure:
     vs = _section_coordinate(df=df, surface=surface, azimuth_deg=azimuth_deg)
+    pilot_points_df = _pilot_study_points_dataframe(
+        pilot_name=pilot_name,
+        study_points=pilot_study_points,
+    )
 
     t_points = pd.DataFrame(
         {
@@ -646,6 +717,24 @@ def section_view_figure(
                 hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
             )
         )
+    if pilot_stations is not None and len(pilot_stations) > 0:
+        pilot_vs = _section_coordinate(
+            df=pilot_stations,
+            surface=surface,
+            azimuth_deg=azimuth_deg,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=pilot_vs,
+                y=pilot_stations["Z_m"],
+                mode="lines",
+                name=str(pilot_name or "Пилот"),
+                line={"width": 4, "color": TRAJECTORY_COLOR_PRIMARY},
+                opacity=0.95,
+                customdata=_station_hover_customdata(pilot_stations),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
     if uncertainty_overlay is not None and uncertainty_overlay.samples:
         _add_uncertainty_plan_or_section_traces(
             fig,
@@ -677,6 +766,29 @@ def section_view_figure(
     )
     if t1_label_trace is not None:
         fig.add_trace(t1_label_trace)
+    if not pilot_points_df.empty:
+        pilot_points_df["VS_m"] = _section_coordinate(
+            pilot_points_df,
+            surface=surface,
+            azimuth_deg=azimuth_deg,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=pilot_points_df["VS_m"],
+                y=pilot_points_df["Z_m"],
+                mode="markers+text",
+                text=pilot_points_df["name"],
+                textposition="top center",
+                name=f"{str(pilot_name)}: точки пилота",
+                marker={"size": 8, "color": TARGET_COLOR_PRIMARY, "symbol": "diamond"},
+                customdata=_build_hover_customdata(
+                    x_values=pilot_points_df["X_m"].to_numpy(dtype=float),
+                    y_values=pilot_points_df["Y_m"].to_numpy(dtype=float),
+                    z_values=pilot_points_df["Z_m"].to_numpy(dtype=float),
+                ),
+                hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
+            )
+        )
     _add_section_inc_labels(fig=fig, df=df, section_x=vs)
     section_y_values = np.concatenate(
         [

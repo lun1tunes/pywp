@@ -228,6 +228,56 @@ def test_plan_and_actual_overlays_are_rendered_on_2d_views() -> None:
     assert actual_section[0].mode == "lines"
 
 
+def test_plan_and_section_render_pilot_family_labels() -> None:
+    df = _sample_df()
+    pilot_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 600.0, 1200.0],
+            "X_m": [0.0, 100.0, 300.0],
+            "Y_m": [0.0, 50.0, 100.0],
+            "Z_m": [0.0, 650.0, 1100.0],
+            "DLS_deg_per_30m": [0.0, 1.0, 1.0],
+        }
+    )
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(35.0, 0.0, 85.0)
+    t3 = Point3D(120.0, 0.0, 85.0)
+    study_points = (
+        Point3D(100.0, 50.0, 650.0),
+        Point3D(300.0, 100.0, 1100.0),
+    )
+
+    fig_plan = plan_view_figure(
+        df,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        pilot_name="well_04_PL",
+        pilot_stations=pilot_stations,
+        pilot_study_points=study_points,
+    )
+    fig_section = section_view_figure(
+        df,
+        surface=surface,
+        azimuth_deg=90.0,
+        t1=t1,
+        t3=t3,
+        pilot_name="well_04_PL",
+        pilot_stations=pilot_stations,
+        pilot_study_points=study_points,
+    )
+
+    expected_labels = ["well_04_PL: 1", "well_04_PL: 2"]
+    for fig in (fig_plan, fig_section):
+        assert any(str(trace.name) == "well_04_PL" for trace in fig.data)
+        pilot_points = next(
+            trace
+            for trace in fig.data
+            if str(trace.name) == "well_04_PL: точки пилота"
+        )
+        assert list(pilot_points.text) == expected_labels
+
+
 def test_uncertainty_ellipses_are_rendered_on_plan_and_section_views() -> None:
     df = _sample_df()
     surface = Point3D(0.0, 0.0, 0.0)

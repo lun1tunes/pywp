@@ -107,7 +107,9 @@ class _StubPlanner:
             "solver_turn_restarts_used": 0.0,
             "solver_turn_max_restarts": float(config.turn_solver_max_restarts),
         }
-        return PlannerResult(stations=stations, summary=summary, azimuth_deg=0.0, md_t1_m=1000.0)
+        return PlannerResult(
+            stations=stations, summary=summary, azimuth_deg=0.0, md_t1_m=1000.0
+        )
 
 
 def _straight_success(
@@ -183,6 +185,21 @@ def _straight_reference_wells(
     )
 
 
+def test_paired_parent_pilot_is_excluded_from_anticollision_pair_scoring() -> None:
+    parent = _straight_success("WELL-04", y_offset_m=0.0)
+    pilot = _straight_success("WELL-04_PL", y_offset_m=0.0)
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [parent, pilot],
+        model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 0
+    assert analysis.overlapping_pair_count == 0
+
+
 @pytest.mark.integration
 def test_batch_planner_evaluates_success_and_format_error() -> None:
     records = [
@@ -221,8 +238,32 @@ def test_batch_planner_evaluates_success_and_format_error() -> None:
     assert successes[0].name == "OK-1"
 
 
+def test_batch_selection_matches_well_names_case_insensitively() -> None:
+    record = WelltrackRecord(
+        name="OK-1",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+            WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+        ),
+    )
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[record],
+        selected_names={"ok-1"},
+        selected_order=["ok-1"],
+        config=_fast_batch_config(),
+    )
+
+    assert [row["Скважина"] for row in rows] == ["OK-1"]
+    assert rows[0]["Статус"] == "OK"
+    assert [success.name for success in successes] == ["OK-1"]
+
+
 @pytest.mark.integration
-def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike() -> None:
+def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike() -> (
+    None
+):
     records = parse_welltrack_text(
         Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
     )
@@ -241,11 +282,37 @@ def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike
     assert successes[0].config.dls_limits_deg_per_30m["HORIZONTAL"] == pytest.approx(
         config.dls_build_max_deg_per_30m
     )
-    horizontal_dls = successes[0].stations.loc[
-        successes[0].stations["segment"] == "HORIZONTAL",
-        "DLS_deg_per_30m",
-    ].dropna()
+    horizontal_dls = (
+        successes[0]
+        .stations.loc[
+            successes[0].stations["segment"] == "HORIZONTAL",
+            "DLS_deg_per_30m",
+        ]
+        .dropna()
+    )
     assert float(horizontal_dls.max()) <= float(config.dls_build_max_deg_per_30m) + 1e-5
+
+
+@pytest.mark.integration
+def test_welltracks4_well_12_near_tolerance_target_hit_is_reported_as_warning() -> (
+    None
+):
+    records = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+    )
+    well_12 = next(record for record in records if record.name == "well_12")
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=[well_12],
+        selected_names={"well_12"},
+        config=TrajectoryConfig(),
+    )
+
+    assert rows[0]["Статус"] == "OK"
+    assert "Цели достигнуты только по допуску" in rows[0]["Проблема"]
+    assert "BUILD ПИ уже на лимите" in rows[0]["Проблема"]
+    assert len(successes) == 1
+    assert float(successes[0].summary["lateral_distance_t1_m"]) > 20.0
 
 
 def test_batch_planner_reports_progress_callback_for_selected_wells() -> None:
@@ -548,7 +615,9 @@ def test_batch_planner_respects_selected_execution_order() -> None:
     assert planner.seen_names == [650.0, 600.0]
 
 
-def test_batch_planner_rebuilds_reference_paths_from_recalculated_earlier_steps() -> None:
+def test_batch_planner_rebuilds_reference_paths_from_recalculated_earlier_steps() -> (
+    None
+):
     class _ReferenceCapturePlanner(_StubPlanner):
         def __init__(self) -> None:
             self.reference_terminal_x_by_target_x: dict[float, list[float]] = {}
@@ -565,9 +634,9 @@ def test_batch_planner_rebuilds_reference_paths_from_recalculated_earlier_steps(
         ) -> PlannerResult:
             if optimization_context is not None:
                 terminal_x = float(optimization_context.references[0].xyz_m[-1, 0])
-                self.reference_terminal_x_by_target_x.setdefault(float(t1.x), []).append(
-                    terminal_x
-                )
+                self.reference_terminal_x_by_target_x.setdefault(
+                    float(t1.x), []
+                ).append(terminal_x)
             return super().plan(
                 surface=surface,
                 t1=t1,
@@ -637,7 +706,9 @@ def test_batch_planner_rebuilds_reference_paths_from_recalculated_earlier_steps(
     assert planner.reference_terminal_x_by_target_x[650.0] == [1500.0]
 
 
-def test_batch_planner_dynamic_cluster_context_recomputes_execution_order_per_step(monkeypatch) -> None:
+def test_batch_planner_dynamic_cluster_context_recomputes_execution_order_per_step(
+    monkeypatch,
+) -> None:
     import pywp.welltrack_batch as batch_module
 
     class _OrderCapturePlanner(_StubPlanner):
@@ -701,7 +772,9 @@ def test_batch_planner_dynamic_cluster_context_recomputes_execution_order_per_st
                 ordered_well_names=("WELL-A", "WELL-B"),
                 prepared_by_well={
                     "WELL-A": {
-                        "update_fields": {"optimization_mode": "anti_collision_avoidance"},
+                        "update_fields": {
+                            "optimization_mode": "anti_collision_avoidance"
+                        },
                         "optimization_context": None,
                     },
                     "WELL-B": {
@@ -851,7 +924,9 @@ def test_build_dynamic_cluster_execution_plan_uses_real_cluster_filtering() -> N
     assert set(plan.ordered_well_names).issubset({"WELL-A", "WELL-B"})
 
 
-def test_dynamic_cluster_execution_plan_includes_single_well_reference_conflict() -> None:
+def test_dynamic_cluster_execution_plan_includes_single_well_reference_conflict() -> (
+    None
+):
     success = _straight_success("WELL-P", y_offset_m=0.0)
     reference_wells = _straight_reference_wells(y_offset_m=5.0)
 
@@ -916,7 +991,10 @@ def test_build_dynamic_cluster_execution_plan_stages_mixed_and_trajectory_fronti
                     "segment": ["VERTICAL", "BUILD1", "BUILD2"],
                 }
             ),
-            summary={"md_total_m": 2200.0, "trajectory_target_direction": "Цели в одном направлении"},
+            summary={
+                "md_total_m": 2200.0,
+                "trajectory_target_direction": "Цели в одном направлении",
+            },
             azimuth_deg=45.0,
             md_t1_m=1800.0,
             config=TrajectoryConfig(),
@@ -937,7 +1015,10 @@ def test_build_dynamic_cluster_execution_plan_stages_mixed_and_trajectory_fronti
                     "segment": ["VERTICAL", "BUILD1", "BUILD2"],
                 }
             ),
-            summary={"md_total_m": 2200.0, "trajectory_target_direction": "Цели в одном направлении"},
+            summary={
+                "md_total_m": 2200.0,
+                "trajectory_target_direction": "Цели в одном направлении",
+            },
             azimuth_deg=42.0,
             md_t1_m=1750.0,
             config=TrajectoryConfig(),
@@ -1016,8 +1097,12 @@ def test_build_dynamic_cluster_execution_plan_stages_mixed_and_trajectory_fronti
         "build_cluster_prepared_overrides",
         lambda cluster, **kwargs: (
             {
-                "well_02": {"update_fields": {"optimization_mode": "anti_collision_avoidance"}},
-                "well_05": {"update_fields": {"optimization_mode": "anti_collision_avoidance"}},
+                "well_02": {
+                    "update_fields": {"optimization_mode": "anti_collision_avoidance"}
+                },
+                "well_05": {
+                    "update_fields": {"optimization_mode": "anti_collision_avoidance"}
+                },
                 "well_04": {"update_fields": {"optimization_mode": "minimize_kop"}},
             },
             [],
@@ -1042,7 +1127,9 @@ def test_build_dynamic_cluster_execution_plan_can_switch_to_trajectory_stage(
 ) -> None:
     import pywp.anticollision_rerun as rerun_module
 
-    def make_success(*, name: str, y_offset_m: float, kop_md_m: float) -> SuccessfulWellPlan:
+    def make_success(
+        *, name: str, y_offset_m: float, kop_md_m: float
+    ) -> SuccessfulWellPlan:
         return SuccessfulWellPlan(
             name=name,
             surface={"x": 0.0, "y": y_offset_m, "z": 0.0},
@@ -1137,8 +1224,12 @@ def test_build_dynamic_cluster_execution_plan_can_switch_to_trajectory_stage(
         captured_flags.append(bool(kwargs.get("prefer_trajectory_stage", False)))
         return (
             {
-                "well_02": {"update_fields": {"optimization_mode": "anti_collision_avoidance"}},
-                "well_05": {"update_fields": {"optimization_mode": "anti_collision_avoidance"}},
+                "well_02": {
+                    "update_fields": {"optimization_mode": "anti_collision_avoidance"}
+                },
+                "well_05": {
+                    "update_fields": {"optimization_mode": "anti_collision_avoidance"}
+                },
             },
             [],
         )
@@ -1343,7 +1434,9 @@ def test_batch_planner_dynamic_cluster_context_stops_when_cluster_becomes_blocke
                         "optimization_context": None,
                     },
                     "WELL-B": {
-                        "update_fields": {"optimization_mode": "anti_collision_avoidance"},
+                        "update_fields": {
+                            "optimization_mode": "anti_collision_avoidance"
+                        },
                         "optimization_context": None,
                     },
                 },
@@ -1488,9 +1581,10 @@ def test_batch_planner_dynamic_cluster_context_stops_when_no_remaining_actionabl
     assert planner.last_evaluation_metadata.cluster_resolved_early is False
     assert planner.last_evaluation_metadata.cluster_blocked is True
     assert planner.last_evaluation_metadata.skipped_selected_names == ("WELL-B",)
-    assert "не нашел актуальных шагов" in str(
-        planner.last_evaluation_metadata.cluster_blocking_reason
-    ).lower()
+    assert (
+        "не нашел актуальных шагов"
+        in str(planner.last_evaluation_metadata.cluster_blocking_reason).lower()
+    )
 
 
 def test_batch_planner_dynamic_cluster_context_reseeds_second_cluster_pass(
@@ -1639,9 +1733,10 @@ def test_batch_planner_dynamic_cluster_context_reseeds_second_cluster_pass(
     assert len(successes) == 3
     assert planner._planner.seen_names == ["600.0", "650.0", "600.0"]
     assert planner.last_evaluation_metadata.cluster_blocked is True
-    assert "не дал заметного улучшения" in str(
-        planner.last_evaluation_metadata.cluster_blocking_reason
-    ).lower()
+    assert (
+        "не дал заметного улучшения"
+        in str(planner.last_evaluation_metadata.cluster_blocking_reason).lower()
+    )
 
 
 def test_monotonic_anticollision_success_keeps_existing_when_new_sf_is_worse(
@@ -1813,7 +1908,9 @@ def test_cluster_monotonic_anticollision_success_keeps_existing_when_cluster_sco
 def test_cluster_monotonic_anticollision_success_keeps_existing_when_well_local_score_worsens(
     monkeypatch,
 ) -> None:
-    def make_success(*, name: str, optimization_mode: str, md_total_m: float) -> SuccessfulWellPlan:
+    def make_success(
+        *, name: str, optimization_mode: str, md_total_m: float
+    ) -> SuccessfulWellPlan:
         return SuccessfulWellPlan(
             name=name,
             surface={"x": 0.0, "y": 0.0, "z": 0.0},
@@ -1872,8 +1969,13 @@ def test_cluster_monotonic_anticollision_success_keeps_existing_when_well_local_
     def fake_cluster_score(*, success_by_name, dynamic_cluster_context):
         return 0.55, 3.0, 4
 
-    def fake_well_local_score(*, success_by_name, dynamic_cluster_context, target_well_name):
-        if str(success_by_name["WELL-A"].config.optimization_mode) == "anti_collision_avoidance":
+    def fake_well_local_score(
+        *, success_by_name, dynamic_cluster_context, target_well_name
+    ):
+        if (
+            str(success_by_name["WELL-A"].config.optimization_mode)
+            == "anti_collision_avoidance"
+        ):
             return 0.72, 2.0, 1
         return 0.31, 7.0, 2
 
@@ -1965,7 +2067,9 @@ def test_batch_evaluate_uses_context_monotonic_for_anticollision_steps(
         "_select_monotonic_anticollision_success",
         staticmethod(
             lambda **kwargs: (_ for _ in ()).throw(
-                AssertionError("context guard should not run inside dynamic cluster mode")
+                AssertionError(
+                    "context guard should not run inside dynamic cluster mode"
+                )
             )
         ),
     )
@@ -2014,7 +2118,9 @@ def test_batch_planner_defers_unoptimized_reference_for_optimized_mode() -> None
             )
             summary = dict(result.summary)
             summary["optimization_mode"] = str(config.optimization_mode)
-            summary["md_total_m"] = 2100.0 if str(config.optimization_mode) != "none" else 2200.0
+            summary["md_total_m"] = (
+                2100.0 if str(config.optimization_mode) != "none" else 2200.0
+            )
             return PlannerResult(
                 stations=result.stations,
                 summary=summary,
@@ -2033,7 +2139,9 @@ def test_batch_planner_defers_unoptimized_reference_for_optimized_mode() -> None
         ),
     ]
 
-    rows, successes = WelltrackBatchPlanner(planner=_OptimizationStubPlanner()).evaluate(
+    rows, successes = WelltrackBatchPlanner(
+        planner=_OptimizationStubPlanner()
+    ).evaluate(
         records=records,
         selected_names={"WELL-OPT"},
         config=_fast_batch_config(optimization_mode="minimize_md"),
@@ -2047,7 +2155,9 @@ def test_batch_planner_defers_unoptimized_reference_for_optimized_mode() -> None
 
 
 @pytest.mark.integration
-def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_late_pair_rerun() -> None:
+def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_late_pair_rerun() -> (
+    None
+):
     records = parse_welltrack_text(
         Path("tests/test_data/WELLTRACKS3.INC").read_text(encoding="utf-8")
     )
@@ -2079,7 +2189,9 @@ def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_l
         "well_05",
     )
     config_by_name = {
-        str(well_name): base_config.validated_copy(**dict(payload.get("update_fields", {})))
+        str(well_name): base_config.validated_copy(
+            **dict(payload.get("update_fields", {}))
+        )
         for well_name, payload in plan.prepared_by_well.items()
     }
     optimization_context_by_name = {
@@ -2116,7 +2228,9 @@ def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_l
     assert metadata.skipped_selected_names == ("well_05",)
     assert metadata.cluster_blocked is True
     assert metadata.cluster_blocking_reason is not None
-    assert "не осталось автоматических шагов" in metadata.cluster_blocking_reason.lower()
+    assert (
+        "не осталось автоматических шагов" in metadata.cluster_blocking_reason.lower()
+    )
 
     success_by_name = {str(item.name): item for item in merged_successes}
     well_02 = success_by_name["well_02"]
@@ -2126,7 +2240,9 @@ def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_l
     assert str(dict(well_04.summary).get("anti_collision_stage")) == "early_kop_build1"
     attempted_stages_02 = {
         str(item).strip()
-        for item in str(dict(well_02.summary).get("anti_collision_attempted_stages", "")).split("|")
+        for item in str(
+            dict(well_02.summary).get("anti_collision_attempted_stages", "")
+        ).split("|")
         if str(item).strip()
     }
     assert attempted_stages_02 == {"early_kop_build1", "late_trajectory"}
@@ -2275,7 +2391,9 @@ def test_successful_well_plan_accepts_model_like_inputs() -> None:
         surface=LegacyPoint(x=0.0, y=0.0, z=0.0),
         t1=LegacyPoint(x=600.0, y=800.0, z=2400.0),
         t3=LegacyPoint(x=1500.0, y=2000.0, z=2500.0),
-        stations=pd.DataFrame({"MD_m": [0.0], "X_m": [0.0], "Y_m": [0.0], "Z_m": [0.0]}),
+        stations=pd.DataFrame(
+            {"MD_m": [0.0], "X_m": [0.0], "Y_m": [0.0], "Z_m": [0.0]}
+        ),
         summary={"trajectory_type": "Unified J Profile + Build + Azimuth Turn"},
         azimuth_deg=0.0,
         md_t1_m=1000.0,
@@ -2286,7 +2404,9 @@ def test_successful_well_plan_accepts_model_like_inputs() -> None:
     assert plan.config.turn_solver_mode == "least_squares"
 
 
-def test_merge_batch_results_preserves_other_wells_and_adds_not_calculated_rows() -> None:
+def test_merge_batch_results_preserves_other_wells_and_adds_not_calculated_rows() -> (
+    None
+):
     records = [
         WelltrackRecord(
             name="WELL-A",
@@ -2596,3 +2716,202 @@ def test_batch_planner_parallel_workers_produces_same_results() -> None:
     success_names = {s.name for s in successes}
     assert success_names == {"PAR-1", "PAR-2"}
     assert len(done_names) == 3
+
+
+def test_parent_selection_calculates_pilot_before_sidetrack() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+        ),
+    )
+    done_names: list[str] = []
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(kop_min_vertical_m=200.0),
+        record_done_callback=lambda _i, _t, name, _row: done_names.append(name),
+    )
+
+    assert done_names == ["WELL-04_PL", "WELL-04"]
+    assert [row["Скважина"] for row in rows] == ["WELL-04_PL", "WELL-04"]
+    assert {row["Статус"] for row in rows} == {"OK"}
+    assert rows[0]["Классификация целей"] == "Пилот"
+    by_name = {success.name: success for success in successes}
+    assert by_name["WELL-04"].summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert by_name["WELL-04"].summary["pilot_well_name"] == "WELL-04_PL"
+    assert by_name["WELL-04"].md_t1_m > by_name["WELL-04_PL"].md_t1_m
+
+
+def test_parent_with_failed_pilot_does_not_fallback_to_regular_well() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=2.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+        ),
+    )
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(kop_min_vertical_m=200.0),
+    )
+
+    by_name = {str(row["Скважина"]): row for row in rows}
+    assert by_name["WELL-04_PL"]["Статус"] == "Ошибка расчета"
+    assert by_name["WELL-04"]["Статус"] == "Ошибка расчета"
+    assert "Пилот WELL-04_PL не рассчитан" in by_name["WELL-04"]["Проблема"]
+    assert not successes
+
+
+def test_dynamic_cluster_runtime_override_keeps_pilot_before_parent(
+    monkeypatch,
+) -> None:
+    import pywp.welltrack_batch as batch_module
+
+    pilot = WelltrackRecord(
+        name="WELL-04_pl",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+        ),
+    )
+    done_names: list[str] = []
+
+    def fake_dynamic_plan(**kwargs):
+        if any(str(success.name) == "WELL-04" for success in kwargs["successes"]):
+            return DynamicClusterExecutionPlan(
+                cluster=None,
+                ordered_well_names=(),
+                prepared_by_well={},
+                skipped_wells=(),
+                resolution_state="resolved",
+            )
+        selected_names = {str(name) for name in kwargs["selected_names"]}
+        if "WELL-04" not in selected_names:
+            return DynamicClusterExecutionPlan(
+                cluster=None,
+                ordered_well_names=(),
+                prepared_by_well={},
+                skipped_wells=(),
+                resolution_state="resolved",
+            )
+        return DynamicClusterExecutionPlan(
+            cluster=type("Cluster", (), {"cluster_id": "pilot-cluster"})(),
+            ordered_well_names=("WELL-04",),
+            prepared_by_well={
+                "WELL-04": {
+                    "update_fields": {"optimization_mode": "minimize_md"},
+                    "optimization_context": None,
+                }
+            },
+            skipped_wells=(),
+        )
+
+    monkeypatch.setattr(
+        batch_module,
+        "build_dynamic_cluster_execution_plan",
+        fake_dynamic_plan,
+    )
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        config=_fast_batch_config(kop_min_vertical_m=200.0),
+        dynamic_cluster_context=DynamicClusterExecutionContext(
+            target_well_names=("WELL-04",),
+            uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+            initial_successes=(),
+        ),
+        record_done_callback=lambda _i, _t, name, _row: done_names.append(name),
+    )
+
+    assert done_names == ["WELL-04_pl", "WELL-04"]
+    assert [row["Скважина"] for row in rows] == ["WELL-04_pl", "WELL-04"]
+    by_name = {success.name: success for success in successes}
+    assert by_name["WELL-04"].summary["trajectory_type"] == "PILOT_SIDETRACK"
+
+
+def test_dynamic_cluster_prunes_auto_pilot_when_parent_is_pruned(monkeypatch) -> None:
+    import pywp.welltrack_batch as batch_module
+
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+        ),
+    )
+
+    def fake_dynamic_plan(**_kwargs):
+        return DynamicClusterExecutionPlan(
+            cluster=None,
+            ordered_well_names=(),
+            prepared_by_well={},
+            skipped_wells=("WELL-04",),
+            resolution_state="resolved",
+        )
+
+    monkeypatch.setattr(
+        batch_module,
+        "build_dynamic_cluster_execution_plan",
+        fake_dynamic_plan,
+    )
+
+    planner = WelltrackBatchPlanner(planner=_StubPlanner())
+    rows, successes = planner.evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        config=_fast_batch_config(kop_min_vertical_m=200.0),
+        dynamic_cluster_context=DynamicClusterExecutionContext(
+            target_well_names=("WELL-04",),
+            uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+            initial_successes=(),
+        ),
+    )
+
+    assert rows == []
+    assert successes == []
+    assert planner.last_evaluation_metadata.skipped_selected_names == (
+        "WELL-04",
+        "WELL-04_PL",
+    )
