@@ -48,20 +48,20 @@ class CoordinateSystem(Enum):
 
     # Pulkovo 1942 Gauss-Kruger zones (6-degree, legacy)
     PULKOVO_1942_ZONE_6 = "EPSG:28406"   # CM 33°
-    PULKOVO_1942_ZONE_7 = "EPSG:28407"   # CM 36°
-    PULKOVO_1942_ZONE_8 = "EPSG:28408"   # CM 39°
-    PULKOVO_1942_ZONE_9 = "EPSG:28409"   # CM 42°
-    PULKOVO_1942_ZONE_10 = "EPSG:28410"  # CM 45°
-    PULKOVO_1942_ZONE_11 = "EPSG:28411"  # CM 48°
-    PULKOVO_1942_ZONE_12 = "EPSG:28412"  # CM 51°
-    PULKOVO_1942_ZONE_13 = "EPSG:28413"  # CM 54°
-    PULKOVO_1942_ZONE_14 = "EPSG:28414"  # CM 57°
-    PULKOVO_1942_ZONE_15 = "EPSG:28415"  # CM 60°
-    PULKOVO_1942_ZONE_16 = "EPSG:28416"  # CM 63°
-    PULKOVO_1942_ZONE_17 = "EPSG:28417"  # CM 66°
-    PULKOVO_1942_ZONE_18 = "EPSG:28418"  # CM 69°
-    PULKOVO_1942_ZONE_19 = "EPSG:28419"  # CM 72°
-    PULKOVO_1942_ZONE_20 = "EPSG:28420"  # CM 75°
+    PULKOVO_1942_ZONE_7 = "EPSG:28407"   # CM 39°
+    PULKOVO_1942_ZONE_8 = "EPSG:28408"   # CM 45°
+    PULKOVO_1942_ZONE_9 = "EPSG:28409"   # CM 51°
+    PULKOVO_1942_ZONE_10 = "EPSG:28410"  # CM 57°
+    PULKOVO_1942_ZONE_11 = "EPSG:28411"  # CM 63°
+    PULKOVO_1942_ZONE_12 = "EPSG:28412"  # CM 69°
+    PULKOVO_1942_ZONE_13 = "EPSG:28413"  # CM 75°
+    PULKOVO_1942_ZONE_14 = "EPSG:28414"  # CM 81°
+    PULKOVO_1942_ZONE_15 = "EPSG:28415"  # CM 87°
+    PULKOVO_1942_ZONE_16 = "EPSG:28416"  # CM 93°
+    PULKOVO_1942_ZONE_17 = "EPSG:28417"  # CM 99°
+    PULKOVO_1942_ZONE_18 = "EPSG:28418"  # CM 105°
+    PULKOVO_1942_ZONE_19 = "EPSG:28419"  # CM 111°
+    PULKOVO_1942_ZONE_20 = "EPSG:28420"  # CM 117°
 
     # Pulkovo 1995 Gauss-Kruger zones (modern, per PDF EPSG:2472, 20073)
     PULKOVO_1995_ZONE_13 = "EPSG:2472"   # Zone 13, CM 75°E
@@ -331,15 +331,14 @@ def get_pulkovo_zone(longitude_deg: float) -> CoordinateSystem:
     Returns:
         Appropriate zone (6-20) or raises ValueError
     """
-    if not 18.0 <= longitude_deg <= 90.0:
+    if not 30.0 <= longitude_deg <= 120.0:
         raise ValueError(
-            f"Longitude {longitude_deg}° outside Russian Pulkovo zone range (18°-90°E)"
+            f"Longitude {longitude_deg}° outside supported Pulkovo zone range "
+            "(30°-120°E)"
         )
 
-    # Gauss-Kruger zones: 6° width, central meridians at 33°, 39°, 45°, 51°, 57°, 63°, 69°, 75°
-    # Simplified: zone number = int((lon + 3) / 6) + 1, but Russian zones have offset
-    # Actually zones 6-20 with central meridians 33° to 75°
-    zone = int((longitude_deg - 30) / 3)  # Rough approximation
+    # Gauss-Kruger 6-degree zones: zone N has central meridian 6N - 3.
+    zone = int(np.floor(float(longitude_deg) / 6.0)) + 1
 
     zone_mapping = {
         6: CoordinateSystem.PULKOVO_1942_ZONE_6,
@@ -359,9 +358,7 @@ def get_pulkovo_zone(longitude_deg: float) -> CoordinateSystem:
         20: CoordinateSystem.PULKOVO_1942_ZONE_20,
     }
 
-    if zone < 6:
-        zone = 6
-    elif zone > 20:
+    if zone > 20:
         zone = 20
 
     return zone_mapping.get(zone, CoordinateSystem.PULKOVO_1942_ZONE_10)
@@ -415,7 +412,7 @@ def define_pno_13_system(
     """
     # Default: zone-based (modern fields typically use zones)
     base = CoordinateSystem.PULKOVO_1942_ZONE_13
-    cm = 45.0
+    cm = 75.0
 
     if easting_hint is not None and easting_hint < 1_000_000:
         # Custom meridian case
@@ -445,7 +442,7 @@ def define_pno_16_system(
     """
     # Default: zone-based
     base = CoordinateSystem.PULKOVO_1942_ZONE_16
-    cm = 57.0
+    cm = 93.0
 
     if easting_hint is not None and easting_hint < 1_000_000:
         # Custom meridian case (< 1M easting)

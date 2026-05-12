@@ -850,8 +850,14 @@ def _sidetrack_window_score(
             float(first_tail["AZI_deg"]),
         )[()]
     )
-    planned_dls = float(result.summary.get("max_dls_total_deg_per_30m", 0.0))
-    score = max(junction_dls, planned_dls)
+    planned_dls = max(
+        junction_dls,
+        float(result.summary.get("max_dls_total_deg_per_30m", 0.0)),
+    )
+    sidetrack_md_m = float(result.summary.get("md_total_m", 0.0))
+    dls_limit = float(result.summary.get("build_dls_max_config_deg_per_30m", 0.0))
+    dls_excess = max(0.0, planned_dls - dls_limit) if dls_limit > SMALL else 0.0
+    score = sidetrack_md_m + 300.0 * planned_dls + 100_000.0 * dls_excess
     if optimization_context is not None:
         score += _sidetrack_anticollision_penalty(
             result=result,

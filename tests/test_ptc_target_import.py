@@ -116,6 +116,47 @@ def test_target_import_operation_parses_target_table_rows() -> None:
     assert [record.name for record in records] == ["TAB-01"]
 
 
+def test_target_import_operation_parses_pilot_target_table_rows() -> None:
+    operation = target_import.build_target_import_operation(
+        target_import.WelltrackSourcePayload(
+            mode=target_import.WT_SOURCE_MODE_TARGET_TABLE,
+            table_rows=pd.DataFrame(
+                [
+                    {"Wellname": "TAB-01", "Point": "S", "X": 0, "Y": 0, "Z": 0},
+                    {
+                        "Wellname": "TAB-01",
+                        "Point": "t1",
+                        "X": 600,
+                        "Y": 800,
+                        "Z": 2400,
+                    },
+                    {
+                        "Wellname": "TAB-01",
+                        "Point": "t3",
+                        "X": 1500,
+                        "Y": 2000,
+                        "Z": 2500,
+                    },
+                    {"Wellname": "TAB-01_PL", "Point": "S", "X": 0, "Y": 0, "Z": 0},
+                    {
+                        "Wellname": "TAB-01_PL",
+                        "Point": "PL1",
+                        "X": 300,
+                        "Y": 400,
+                        "Z": 1600,
+                    },
+                ]
+            ),
+        )
+    )
+
+    records = operation.parse_records()
+
+    assert [record.name for record in records] == ["TAB-01", "TAB-01_PL"]
+    assert len(records[1].points) == 2
+    assert records[1].points[1].md == pytest.approx(1.0)
+
+
 def test_target_import_operation_uses_injected_welltrack_parser() -> None:
     calls: list[str] = []
 

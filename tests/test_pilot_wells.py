@@ -173,6 +173,66 @@ def test_sidetrack_window_is_selected_50_to_100m_above_first_pilot_target() -> N
     assert 50.0 <= offset_m <= 100.0
 
 
+def test_single_point_pilot_window_minimizes_sidetrack_md() -> None:
+    config = TrajectoryConfig()
+    pilot = build_pilot_trajectory(
+        WelltrackRecord(
+            name="well_04_PL",
+            points=(
+                WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0),
+                WelltrackPoint(x=457667.0, y=889821.0, z=2554.0, md=2.0),
+            ),
+        ),
+        config=config,
+    )
+
+    window, result = select_sidetrack_window(
+        pilot_name="well_04_PL",
+        parent_name="well_04",
+        pilot_stations=pilot.stations,
+        parent_t1=Point3D(458200.0, 888775.0, 2452.0),
+        parent_t3=Point3D(459130.0, 887003.0, 2554.0),
+        config=config,
+        planner=object(),
+    )
+
+    assert float(window.md_m) > 2000.0
+    assert float(window.point.z) > 1700.0
+    assert float(result.summary["md_total_m"]) < 5000.0
+    assert float(result.summary["max_dls_total_deg_per_30m"]) <= 1.5
+
+
+def test_two_point_welltracks4_pilot_keeps_window_near_first_study_point() -> None:
+    config = TrajectoryConfig()
+    pilot = build_pilot_trajectory(
+        WelltrackRecord(
+            name="well_04_PL",
+            points=(
+                WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0),
+                WelltrackPoint(x=457653.0, y=890180.0, z=1821.0, md=2.0),
+                WelltrackPoint(x=457667.0, y=889821.0, z=2554.0, md=3.0),
+            ),
+        ),
+        config=config,
+    )
+
+    window, result = select_sidetrack_window(
+        pilot_name="well_04_PL",
+        parent_name="well_04",
+        pilot_stations=pilot.stations,
+        parent_t1=Point3D(458200.0, 888775.0, 2452.0),
+        parent_t3=Point3D(459130.0, 887003.0, 2554.0),
+        config=config,
+        planner=object(),
+    )
+
+    offset_m = float(pilot.md_first_target_m) - float(window.md_m)
+    assert 50.0 <= offset_m <= 100.0
+    assert 1750.0 <= float(window.point.z) <= 1850.0
+    assert float(result.summary["md_total_m"]) < 3800.0
+    assert float(result.summary["max_dls_total_deg_per_30m"]) <= 1.1
+
+
 def test_sidetrack_uncertainty_at_window_inherits_pilot_covariance() -> None:
     config = TrajectoryConfig(
         md_step_m=25.0,

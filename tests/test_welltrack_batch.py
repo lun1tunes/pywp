@@ -310,7 +310,39 @@ def test_welltracks4_well_12_near_tolerance_target_hit_is_reported_as_warning() 
     assert "Цели достигнуты только по допуску" in rows[0]["Проблема"]
     assert "BUILD ПИ уже на лимите" in rows[0]["Проблема"]
     assert len(successes) == 1
-    assert float(successes[0].summary["lateral_distance_t1_m"]) > 20.0
+    success = successes[0]
+    assert float(success.summary["lateral_distance_t1_m"]) > 20.0
+    assert float(success.stations["MD_m"].diff().dropna().min()) > 1e-3
+
+    y_shift_m = 10_000.0
+    shifted_stations = success.stations.copy()
+    shifted_stations["Y_m"] = shifted_stations["Y_m"].to_numpy(dtype=float) + y_shift_m
+    shifted_success = success.validated_copy(
+        name="well_12_offset",
+        surface=Point3D(
+            x=float(success.surface.x),
+            y=float(success.surface.y) + y_shift_m,
+            z=float(success.surface.z),
+        ),
+        t1=Point3D(
+            x=float(success.t1.x),
+            y=float(success.t1.y) + y_shift_m,
+            z=float(success.t1.z),
+        ),
+        t3=Point3D(
+            x=float(success.t3.x),
+            y=float(success.t3.y) + y_shift_m,
+            z=float(success.t3.z),
+        ),
+        stations=shifted_stations,
+    )
+    analysis = build_anti_collision_analysis_for_successes(
+        [success, shifted_success],
+        model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+    assert analysis.pair_count == 1
 
 
 def test_batch_planner_reports_progress_callback_for_selected_wells() -> None:

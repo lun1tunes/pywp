@@ -25,6 +25,7 @@ _TABLE_POINT_ALIASES: dict[str, str] = {
     "target": "t3",
     "end": "t3",
 }
+_TABLE_PILOT_POINT_RE = re.compile(r"^(?:pl|p)([1-9]\d*)$", flags=re.IGNORECASE)
 _TABLE_POINT_ORDER: tuple[str, ...] = ("wellhead", "t1", "t3")
 _TABLE_POINT_DISPLAY_LABELS: dict[str, str] = {
     "wellhead": "S",
@@ -173,7 +174,11 @@ def parse_welltrack_points_table(
                 f"Табличный WELLTRACK: пустое имя скважины в строке {row_no}."
             )
 
-        point_name = _normalize_table_point_name(point_raw, row_no=row_no)
+        point_name = _normalize_table_point_name(
+            point_raw,
+            row_no=row_no,
+            allow_pilot_points=_is_table_pilot_well_name(well_name),
+        )
         x = _coerce_table_float(x_raw, field_name="X", row_no=row_no)
         y = _coerce_table_float(y_raw, field_name="Y", row_no=row_no)
         z = _coerce_table_float(z_raw, field_name="Z", row_no=row_no)
@@ -188,7 +193,7 @@ def parse_welltrack_points_table(
                 f"'{point_name}' для скважины '{well_name}' в строке {row_no}."
             )
 
-        md_index = float(_TABLE_POINT_ORDER.index(point_name))
+        md_index = _table_point_md_index(point_name)
         grouped_points[well_name][point_name] = WelltrackPoint(
             x=x,
             y=y,
@@ -205,6 +210,16 @@ def parse_welltrack_points_table(
     records: list[WelltrackRecord] = []
     for well_name in well_order:
         points_by_name = grouped_points[well_name]
+        if _is_table_pilot_well_name(well_name):
+            ordered_names = _ordered_table_pilot_point_names(
+                points_by_name,
+                well_name=well_name,
+            )
+            ordered_points = tuple(points_by_name[name] for name in ordered_names)
+            _validate_record_md(points=list(ordered_points), well_name=well_name)
+            records.append(WelltrackRecord(name=well_name, points=ordered_points))
+            continue
+
         missing = [name for name in _TABLE_POINT_ORDER if name not in points_by_name]
         if missing:
             raise WelltrackParseError(
@@ -288,24 +303,87 @@ def _is_blank_table_value(value: object) -> bool:
     return bool(math.isnan(value)) if isinstance(value, float) else False
 
 
-def _normalize_table_point_name(value: object, *, row_no: int) -> str:
+def _normalize_table_point_name(
+    value: object,
+    *,
+    row_no: int,
+    allow_pilot_points: bool = False,
+) -> str:
     if _is_blank_table_value(value):
         raise WelltrackParseError(
             f"Табличный WELLTRACK: пустое значение Point в строке {row_no}."
         )
     normalized = str(value).strip().lower()
+    if allow_pilot_points:
+        if _TABLE_POINT_ALIASES.get(normalized) == "wellhead":
+            return "wellhead"
+        pilot_match = _TABLE_PILOT_POINT_RE.match(normalized)
+        if pilot_match is not None:
+            return f"pl{int(pilot_match.group(1))}"
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: unsupported Point="
+            f"{value!r} в строке {row_no}. "
+            "Для пилота ожидается S, PL1, PL2, ..."
+        )
+
     point_name = _TABLE_POINT_ALIASES.get(normalized)
     if point_name is None:
         raise WelltrackParseError(
             "Табличный WELLTRACK: unsupported Point="
             f"{value!r} в строке {row_no}. "
-            "Ожидается S, t1 или t3."
+            "Ожидается S, t1 или t3. Для пилота используйте имя wellname_PL "
+            "и точки S, PL1, PL2, ..."
         )
     return point_name
 
 
 def _table_point_display_name(point_name: str) -> str:
+    pilot_match = _TABLE_PILOT_POINT_RE.match(str(point_name))
+    if pilot_match is not None:
+        return f"PL{int(pilot_match.group(1))}"
     return _TABLE_POINT_DISPLAY_LABELS.get(str(point_name), str(point_name))
+
+
+def _table_point_md_index(point_name: str) -> float:
+    pilot_match = _TABLE_PILOT_POINT_RE.match(str(point_name))
+    if pilot_match is not None:
+        return float(int(pilot_match.group(1)))
+    return float(_TABLE_POINT_ORDER.index(point_name))
+
+
+def _is_table_pilot_well_name(well_name: object) -> bool:
+    return str(well_name).strip().upper().endswith("_PL")
+
+
+def _ordered_table_pilot_point_names(
+    points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+) -> tuple[str, ...]:
+    if "wellhead" not in points_by_name:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для скважины "
+            f"'{well_name}' отсутствуют точки: S."
+        )
+    pilot_indices = sorted(
+        int(match.group(1))
+        for point_name in points_by_name
+        if (match := _TABLE_PILOT_POINT_RE.match(str(point_name))) is not None
+    )
+    if not pilot_indices:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для скважины "
+            f"'{well_name}' отсутствуют точки: PL1."
+        )
+    expected_indices = list(range(1, int(pilot_indices[-1]) + 1))
+    missing = [index for index in expected_indices if index not in pilot_indices]
+    if missing:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для скважины "
+            f"'{well_name}' отсутствуют точки: "
+            f"{', '.join(f'PL{index}' for index in missing)}."
+        )
+    return ("wellhead", *(f"pl{index}" for index in expected_indices))
 
 
 def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float:

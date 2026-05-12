@@ -23,9 +23,9 @@ from pywp.ui_well_result import SingleWellResultView
 class TestCoordinateIntegration:
     """Test coordinate system integration functions."""
 
-    def test_default_crs_is_pno16_zone(self) -> None:
-        """Default CRS should be PNO-16 ZONE as per user requirements."""
-        assert DEFAULT_CRS == CoordinateSystem.PNO_16_ZONE
+    def test_default_crs_is_gk_13n_42(self) -> None:
+        """Default CRS should be ГК_13N_42 as per user requirements."""
+        assert DEFAULT_CRS == CoordinateSystem.PULKOVO_1942_ZONE_13
 
     def test_crs_options_contains_pno16(self) -> None:
         """CRS options should include PNO-16 variants."""
@@ -37,7 +37,7 @@ class TestCoordinateIntegration:
         """CRS options should include Pulkovo 1942 zones."""
         labels = [label for label, _ in CRS_OPTIONS]
         assert "СК-42 Зона 8" in labels
-        assert "СК-42 Зона 13" in labels
+        assert "ГК_13N_42" in labels
         assert "СК-42 Зона 16" in labels
 
     def test_format_coordinates_projected(self) -> None:
@@ -111,6 +111,11 @@ class TestCoordinateIntegration:
         """Display suffix for Pulkovo 1942."""
         suffix = get_crs_display_suffix(CoordinateSystem.PULKOVO_1942)
         assert "СК-42" in suffix
+
+    def test_get_crs_display_suffix_gk_13n_42(self) -> None:
+        """Display suffix for the default GK_13N_42 CRS."""
+        suffix = get_crs_display_suffix(CoordinateSystem.PULKOVO_1942_ZONE_13)
+        assert "ГК_13N_42" in suffix
 
     def test_get_crs_display_suffix_wgs84(self) -> None:
         """Display suffix for WGS84."""

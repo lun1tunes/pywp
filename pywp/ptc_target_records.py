@@ -266,7 +266,7 @@ def _point_label(index: int, *, is_pilot: bool = False) -> str:
     if int(index) == 1:
         return "S"
     if is_pilot:
-        return f"p{int(index) - 1}"
+        return f"PL{int(index) - 1}"
     if int(index) == 2:
         return "t1"
     if int(index) == 3:

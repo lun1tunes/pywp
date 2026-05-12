@@ -127,6 +127,36 @@ def test_parse_welltrack_points_table_accepts_tabular_rows() -> None:
     assert records[1].points[2].z == pytest.approx(2400.0)
 
 
+def test_parse_welltrack_points_table_accepts_pilot_rows() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-A", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "WELL-A_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-A_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1800.0},
+            {"Wellname": "WELL-A_PL", "Point": "pl2", "X": 300.0, "Y": 500.0, "Z": 2400.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["WELL-A", "WELL-A_PL"]
+    pilot = records[1]
+    assert [point.md for point in pilot.points] == [0.0, 1.0, 2.0]
+    assert pilot.points[1].z == pytest.approx(1800.0)
+    assert pilot.points[2].x == pytest.approx(300.0)
+
+
+def test_parse_welltrack_points_table_rejects_pilot_point_gaps() -> None:
+    with pytest.raises(WelltrackParseError, match="отсутствуют точки: PL2"):
+        parse_welltrack_points_table(
+            [
+                {"Wellname": "WELL-A_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {"Wellname": "WELL-A_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1800.0},
+                {"Wellname": "WELL-A_PL", "Point": "PL3", "X": 300.0, "Y": 500.0, "Z": 2400.0},
+            ]
+        )
+
+
 def test_parse_welltrack_points_table_rejects_missing_required_points() -> None:
     with pytest.raises(WelltrackParseError, match="отсутствуют точки: t3"):
         parse_welltrack_points_table(

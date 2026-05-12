@@ -172,7 +172,7 @@ def test_pilot_records_allow_multiple_study_points() -> None:
         "Статус",
         "Проблема",
     ]
-    assert list(raw_df["Точка"]) == ["S", "p1", "p2", "p3"]
+    assert list(raw_df["Точка"]) == ["S", "PL1", "PL2", "PL3"]
 
 
 def test_records_overview_marks_parent_wells_with_pilot() -> None:

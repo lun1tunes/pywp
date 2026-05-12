@@ -1,7 +1,7 @@
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
-Default CRS: PNO16 (as per user requirements).
+Default CRS: ГК_13N_42 / Pulkovo 1942 Gauss-Kruger zone 13.
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ CRS_SELECTED_KEY = "trajectory_crs_selected"
 CRS_SELECTBOX_KEY = "trajectory_crs_selectbox"  # Separate key for widget
 CRS_AUTO_CONVERT_KEY = "trajectory_crs_auto_convert"
 
-# Default CRS as per user requirement
-DEFAULT_CRS = CoordinateSystem.PNO_16_ZONE
+# Default CRS as per user requirement: ГК_13N_42.
+DEFAULT_CRS = CoordinateSystem.PULKOVO_1942_ZONE_13
 
 # Available CRS options for the UI
 CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
@@ -55,7 +55,7 @@ CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 10", CoordinateSystem.PULKOVO_1942_ZONE_10),
     ("СК-42 Зона 11", CoordinateSystem.PULKOVO_1942_ZONE_11),
     ("СК-42 Зона 12", CoordinateSystem.PULKOVO_1942_ZONE_12),
-    ("СК-42 Зона 13", CoordinateSystem.PULKOVO_1942_ZONE_13),
+    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_ZONE_13),
     ("СК-42 Зона 14", CoordinateSystem.PULKOVO_1942_ZONE_14),
     ("СК-42 Зона 15", CoordinateSystem.PULKOVO_1942_ZONE_15),
     ("СК-42 Зона 16", CoordinateSystem.PULKOVO_1942_ZONE_16),
@@ -114,15 +114,19 @@ def render_crs_sidebar() -> CoordinateSystem:
         if CRS_SELECTBOX_KEY not in st.session_state:
             st.session_state[CRS_SELECTBOX_KEY] = current_label
 
+        option_labels = [label for label, _ in CRS_OPTIONS]
+        if st.session_state.get(CRS_SELECTBOX_KEY) not in option_labels:
+            st.session_state[CRS_SELECTBOX_KEY] = current_label
+
         selected_label = st.selectbox(
             "Выберите CRS",
-            options=[label for label, _ in CRS_OPTIONS],
+            options=option_labels,
             index=_get_crs_index(current_crs),
             key=CRS_SELECTBOX_KEY,
             help=(
                 "Система координат применяется только к CSV-выгрузкам "
                 "инклинометрии. Экранные точки, кусты, графики и таблицы "
-                "остаются в расчётной системе. По умолчанию: PNO-16 (Зона)."
+                "остаются в расчётной системе. По умолчанию: ГК_13N_42."
             ),
         )
 
@@ -167,7 +171,7 @@ def get_selected_crs() -> CoordinateSystem:
     """Get currently selected coordinate system from session state.
 
     Returns:
-        Selected coordinate system (defaults to PNO_16_ZONE)
+        Selected coordinate system (defaults to ГК_13N_42)
     """
     return st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
 
@@ -586,6 +590,7 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         zone_crs = getattr(CoordinateSystem, f"PULKOVO_1942_ZONE_{zone_num}", None)
         if zone_crs:
             suffix_map[zone_crs] = f" (СК-42/З{zone_num})"
+    suffix_map[CoordinateSystem.PULKOVO_1942_ZONE_13] = " (ГК_13N_42)"
 
     # Add Pulkovo 1995 zone suffixes
     for zone_num in (13, 18):

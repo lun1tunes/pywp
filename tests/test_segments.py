@@ -9,6 +9,7 @@ from pywp import models as _models
 from pywp.segments import (
     BuildSegment,
     DEFAULT_INTERPOLATION_METHOD,
+    HoldSegment,
     INTERPOLATION_RODRIGUES,
     INTERPOLATION_SLERP,
     _direction_vector,
@@ -16,6 +17,7 @@ from pywp.segments import (
     _rodrigues_directions,
     _slerp_directions,
 )
+from pywp.trajectory import MIN_STATION_MD_INTERVAL_M, WellTrajectory
 
 
 def test_build_segment_length_uses_spatial_dogleg() -> None:
@@ -69,6 +71,68 @@ def test_make_md_grid_preserves_large_md_segment_endpoints() -> None:
     assert np.isclose(md[-2], md_end)
     assert md[-2] != pytest.approx(md_end, abs=1e-9)
     assert md[-1] == pytest.approx(md_end, abs=1e-12)
+
+
+def test_welltrajectory_skips_submillimeter_segment_boundary_station() -> None:
+    trajectory = WellTrajectory(
+        [
+            BuildSegment(
+                inc_from_deg=0.0,
+                inc_to_deg=30.0,
+                dls_deg_per_30m=3.0,
+                azi_deg=0.0,
+                name="BUILD1",
+            ),
+            HoldSegment(
+                length_m=MIN_STATION_MD_INTERVAL_M * 0.5,
+                inc_deg=30.0,
+                azi_deg=0.0,
+                name="HOLD",
+            ),
+            BuildSegment(
+                inc_from_deg=30.0,
+                inc_to_deg=60.0,
+                dls_deg_per_30m=3.0,
+                azi_deg=0.0,
+                name="BUILD2",
+            ),
+        ]
+    )
+
+    stations = trajectory.stations(md_step_m=10.0)
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+
+    assert "HOLD" not in set(stations["segment"])
+    assert np.min(np.diff(md_values)) > MIN_STATION_MD_INTERVAL_M
+    compute_positions_min_curv(stations=stations, start=Point3D(0.0, 0.0, 0.0))
+
+
+def test_welltrajectory_preserves_terminal_md_when_final_segment_is_submillimeter() -> None:
+    trajectory = WellTrajectory(
+        [
+            BuildSegment(
+                inc_from_deg=0.0,
+                inc_to_deg=30.0,
+                dls_deg_per_30m=3.0,
+                azi_deg=0.0,
+                name="BUILD1",
+            ),
+            HoldSegment(
+                length_m=MIN_STATION_MD_INTERVAL_M * 0.5,
+                inc_deg=30.0,
+                azi_deg=0.0,
+                name="HOLD",
+            ),
+        ]
+    )
+    expected_terminal_md = sum(segment.length_m for segment in trajectory.segments)
+
+    stations = trajectory.stations(md_step_m=10.0)
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+
+    assert "HOLD" not in set(stations["segment"])
+    assert float(md_values[-1]) == pytest.approx(expected_terminal_md, abs=1e-12)
+    assert np.min(np.diff(md_values)) > MIN_STATION_MD_INTERVAL_M
 
 
 # ---------------------------------------------------------------------------

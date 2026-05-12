@@ -163,16 +163,22 @@ def normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataFr
     normalized_df = expand_single_column_source_table_df(normalized_df)
     if "Point" in normalized_df.columns:
         normalized_df["Point"] = normalized_df["Point"].map(
-            lambda value: (
-                "S"
-                if str(value).strip().lower() in {"wellhead", "s"}
-                else value
-            )
+            _normalize_source_table_point_value
         )
     for column in _SOURCE_TABLE_COLUMNS:
         if column not in normalized_df.columns:
             normalized_df[column] = "" if column in {"Wellname", "Point"} else np.nan
     return normalized_df.loc[:, list(_SOURCE_TABLE_COLUMNS)]
+
+
+def _normalize_source_table_point_value(value: object) -> object:
+    text = str(value).strip()
+    if text.lower() in {"wellhead", "s"}:
+        return "S"
+    pilot_match = re.match(r"^pl([1-9]\d*)$", text, flags=re.IGNORECASE)
+    if pilot_match is not None:
+        return f"PL{int(pilot_match.group(1))}"
+    return value
 
 
 def init_target_source_state_defaults(
@@ -216,7 +222,7 @@ def build_target_import_operation(
         return TargetImportOperation(
             source_kind=_TARGET_IMPORT_KIND_TABLE,
             status_label="Чтение и преобразование таблицы точек...",
-            progress_message="Проверка строк таблицы и сборка точек S / t1 / t3.",
+            progress_message="Проверка строк таблицы и сборка точек S / t1 / t3 / PLn.",
             count_message_template="Собрано скважин из таблицы: {record_count}.",
             success_label_template="Импорт таблицы завершен за {elapsed_s:.2f} с",
             error_label="Ошибка разбора табличного WELLTRACK",

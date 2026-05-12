@@ -61,12 +61,10 @@ class TestLocalTransformations:
 class TestZoneDetection:
     def test_moscow_zone(self) -> None:
         zone = get_pulkovo_zone(37.6)  # Moscow longitude
-        # Zone 6 (33°E) or 7 (36°E) depending on zone formula used
-        assert zone in [
-            CoordinateSystem.PULKOVO_1942_ZONE_6,
-            CoordinateSystem.PULKOVO_1942_ZONE_7,
-            CoordinateSystem.PULKOVO_1942_ZONE_8,
-        ]
+        assert zone == CoordinateSystem.PULKOVO_1942_ZONE_7
+
+    def test_gk_13n_42_zone(self) -> None:
+        assert get_pulkovo_zone(75.0) == CoordinateSystem.PULKOVO_1942_ZONE_13
 
     def test_out_of_range(self) -> None:
         with pytest.raises(ValueError):
@@ -117,7 +115,16 @@ class TestPNODisambiguation:
         # Zone-based (default)
         zone_def = define_pno_16_system()
         assert "PNO-16" in zone_def.name
+        assert zone_def.base_system == CoordinateSystem.PULKOVO_1942_ZONE_16
+        assert zone_def.central_meridian_deg == 93.0
 
         # CM-based (with hint)
         cm_def = define_pno_16_system(easting_hint=500_000.0)
         assert cm_def.central_meridian_deg == 39.0  # Per implementation
+
+    def test_define_pno13_zone_metadata_matches_base_crs(self) -> None:
+        """PNO13 zone metadata should match its Pulkovo 1942 GK base zone."""
+        zone_def = define_pno_13_system()
+
+        assert zone_def.base_system == CoordinateSystem.PULKOVO_1942_ZONE_13
+        assert zone_def.central_meridian_deg == 75.0

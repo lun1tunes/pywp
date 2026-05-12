@@ -2207,6 +2207,46 @@ def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None
     ]
 
 
+def test_render_raw_records_table_shows_pilot_points(monkeypatch) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    page.st.session_state.pop("wt_edit_targets_highlight_names", None)
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(*args, **kwargs):
+        return _DummyExpander()
+
+    def _fake_dataframe(frame, **kwargs):
+        captured["frame"] = frame.copy()
+
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+
+    records = [
+        *_records()[:1],
+        WelltrackRecord(
+            name="WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=1.0),
+                WelltrackPoint(x=300.0, y=500.0, z=2400.0, md=2.0),
+            ),
+        ),
+    ]
+
+    page._render_raw_records_table(records)
+
+    frame = captured["frame"]
+    pilot_rows = frame.loc[frame["Скважина"] == "WELL-A_PL"]
+    assert list(pilot_rows["Точка"]) == ["S", "PL1", "PL2"]
+
+
 def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     page = wt_import_module
     page.st.session_state.clear()

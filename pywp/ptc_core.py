@@ -3276,8 +3276,10 @@ def _render_source_input() -> _WelltrackSourcePayload:
         with note_col:
             st.caption(
                 "Вставьте таблицу в формате `Wellname`, `Point`, `X`, `Y`, `Z`. "
-                "Поддерживается copy/paste из Excel, Google Sheets и похожих таблиц. "
-                "Point принимает `S`, `t1`, `t3`."
+                "Поддерживается copy/paste из Excel. Для обычной скважины "
+                "`Point` принимает `S`, `t1`, `t3`. Для пилота используйте имя "
+                "`wellname_PL`: точки `S`, `PL1`, `PL2`, ...; часть `wellname` "
+                "должна совпадать с основной скважиной."
             )
         with clear_col:
             if st.button(
@@ -3302,10 +3304,7 @@ def _render_source_input() -> _WelltrackSourcePayload:
             width="stretch",
             column_config={
                 "Wellname": st.column_config.TextColumn("Wellname"),
-                "Point": st.column_config.SelectboxColumn(
-                    "Point",
-                    options=["S", "t1", "t3"],
-                ),
+                "Point": st.column_config.TextColumn("Point"),
                 "X": st.column_config.NumberColumn("X"),
                 "Y": st.column_config.NumberColumn("Y"),
                 "Z": st.column_config.NumberColumn("Z"),
@@ -4472,7 +4471,7 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                 "Запустите расчёт для обновления траекторий."
             )
         raw_df = arrow_safe_text_dataframe(
-            ptc_target_records.raw_records_dataframe(visible_well_records(records))
+            ptc_target_records.raw_records_dataframe(records)
         )
         if highlight_names and not raw_df.empty:
             highlight_mask = raw_df["Скважина"].astype(str).isin(
