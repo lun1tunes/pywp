@@ -2680,9 +2680,8 @@
             if (isConflictSegment && pointCount > 8000) {
               return;
             }
-            const radius = isConflictSegment
-              ? Math.min(Math.max(maxSpan * 0.0009, 3.0), 8.0)
-              : Math.min(Math.max(maxSpan * 0.00032, 0.9), 3.2);
+            const baseRadius = Math.min(Math.max(maxSpan * 0.00032, 0.9), 3.2);
+            const radius = isConflictSegment ? baseRadius * 1.25 : baseRadius;
             const radialSegments = 6;
             const MaterialClass = isConflictSegment
               ? THREE.MeshBasicMaterial
@@ -3193,7 +3192,7 @@
             depthWrite: false,
           });
           const widthM = isConflictSegment
-            ? miniMapTrajectoryOverlayWidth() * 1.45
+            ? miniMapTrajectoryOverlayWidth() * 1.2
             : miniMapTrajectoryOverlayWidth();
           segments.forEach((segment) => {
             const geometry = miniMapStripGeometryForSegment(segment, widthM);

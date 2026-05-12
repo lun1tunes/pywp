@@ -358,6 +358,7 @@ def combine_pilot_and_sidetrack(
     ]
     stations = sidetrack_stations.sort_values("MD_m").reset_index(drop=True)
     stations = add_dls(stations)
+    stations.attrs["uncertainty_reference_stations"] = pilot_upper.copy()
     summary = dict(sidetrack_result.summary)
     md_total_m = float(stations["MD_m"].iloc[-1])
     max_dls = max(

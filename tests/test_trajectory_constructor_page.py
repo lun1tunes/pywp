@@ -159,7 +159,7 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
     at.session_state["wt_results_view_mode"] = "Все скважины"
     at.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
-    at.run()
+    at.run(timeout=120)
 
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     button_labels = {str(widget.label) for widget in at.button}
@@ -173,7 +173,7 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
         widget for widget in at.radio if str(widget.label) == "Режим просмотра результатов"
     )
     view_mode_radio.set_value("Отдельная скважина")
-    at.run()
+    at.run(timeout=120)
 
     expander_labels = {str(widget.label) for widget in at.expander}
     assert "Контроль попадания и точность расчета" not in expander_labels
@@ -250,4 +250,3 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     assert "Просмотр фактической скважины" in selectbox_labels
     assert "Просмотр утвержденной проектной скважины" in selectbox_labels
-

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
@@ -7,6 +8,7 @@ from pywp.models import Point3D, TrajectoryConfig
 from pywp.pilot_wells import (
     PilotWindow,
     build_pilot_trajectory,
+    combine_pilot_and_sidetrack,
     is_pilot_name,
     order_records_with_pilots_first,
     parent_name_for_pilot,
@@ -15,6 +17,11 @@ from pywp.pilot_wells import (
 )
 from pywp.planner_types import PlanningError
 from pywp.sidetrack_solver import SidetrackPlanner, SidetrackStart
+from pywp.uncertainty import (
+    DEFAULT_UNCERTAINTY_PRESET,
+    planning_uncertainty_model_for_preset,
+    station_uncertainty_covariance_samples_for_stations,
+)
 
 
 def test_pilot_name_helpers() -> None:
@@ -164,6 +171,60 @@ def test_sidetrack_window_is_selected_50_to_100m_above_first_pilot_target() -> N
 
     offset_m = float(pilot.md_first_target_m) - float(window.md_m)
     assert 50.0 <= offset_m <= 100.0
+
+
+def test_sidetrack_uncertainty_at_window_inherits_pilot_covariance() -> None:
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        kop_min_vertical_m=200.0,
+        max_inc_deg=100.0,
+    )
+    pilot = build_pilot_trajectory(
+        WelltrackRecord(
+            name="WELL-04_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+                WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+            ),
+        ),
+        config=config,
+    )
+    window, sidetrack_result = select_sidetrack_window(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_stations=pilot.stations,
+        parent_t1=Point3D(800.0, 0.0, 2200.0),
+        parent_t3=Point3D(1800.0, 0.0, 2200.0),
+        config=config,
+        planner=object(),
+    )
+    sidetrack = combine_pilot_and_sidetrack(
+        pilot_stations=pilot.stations,
+        sidetrack_result=sidetrack_result,
+        window=window,
+        config=config,
+    )
+    model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
+    sample_md = np.asarray([float(window.md_m)], dtype=float)
+
+    pilot_covariance = station_uncertainty_covariance_samples_for_stations(
+        stations=pilot.stations,
+        sample_md_m=sample_md,
+        model=model,
+    ).covariance_xyz[0]
+    sidetrack_covariance = station_uncertainty_covariance_samples_for_stations(
+        stations=sidetrack.stations,
+        sample_md_m=sample_md,
+        model=model,
+    ).covariance_xyz[0]
+
+    np.testing.assert_allclose(
+        sidetrack_covariance,
+        pilot_covariance,
+        atol=1e-9,
+        rtol=1e-9,
+    )
 
 
 def test_sidetrack_solver_preserves_window_pose_and_hits_t1_t3() -> None:

@@ -222,7 +222,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'role === "line" || role === "conflict_segment"' in html
     assert "mesh.renderOrder = isConflictSegment ? 8 : 0;" in html
     assert "lineSegments.renderOrder = isConflictSegment ? 9 : 0;" in html
-    assert "miniMapTrajectoryOverlayWidth() * 1.45" in html
+    assert "miniMapTrajectoryOverlayWidth() * 1.2" in html
     assert "mesh.renderOrder = 12;" in html
     assert "function addMiniMapConeOverlay(item, sourceGeometry)" in html
     assert 'String((item && item.role) || "") !== "cone"' in html

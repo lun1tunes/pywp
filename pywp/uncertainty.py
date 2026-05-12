@@ -477,7 +477,7 @@ def station_uncertainty_covariance_samples_for_stations(
     sample_md_m: np.ndarray,
     model: PlanningUncertaintyModel = DEFAULT_PLANNING_UNCERTAINTY_MODEL,
 ) -> UncertaintyCovarianceSamples:
-    md_values, inc_values, azi_values_deg, _, _, z_values = _validated_station_arrays(
+    md_values, inc_values, azi_values_deg, _, _, _ = _validated_station_arrays(
         stations=stations,
         context="uncertainty covariance",
     )
@@ -519,17 +519,31 @@ def station_uncertainty_covariance_samples_for_stations(
             global_source_vectors_xyz=(),
         )
 
-    path_md = [round(float(value), 6) for value in md_values]
+    history_stations = _uncertainty_history_stations(stations)
+    (
+        history_md_values,
+        history_inc_values,
+        history_azi_values_deg,
+        _history_x_values,
+        _history_y_values,
+        history_z_values,
+    ) = _validated_station_arrays(
+        stations=history_stations,
+        context="uncertainty covariance history",
+    )
+    path_md = [round(float(value), 6) for value in history_md_values]
     if path_md and path_md[0] > 0.0:
         path_md.insert(0, 0.0)
     path_md_array = np.asarray(path_md, dtype=float)
-    path_inc = np.interp(path_md_array, md_values, inc_values)
+    path_inc = np.interp(path_md_array, history_md_values, history_inc_values)
     path_azi_rad = np.interp(
-        path_md_array, md_values, np.unwrap(np.deg2rad(azi_values_deg))
+        path_md_array,
+        history_md_values,
+        np.unwrap(np.deg2rad(history_azi_values_deg)),
     )
     path_azi = np.rad2deg(path_azi_rad) % 360.0
-    path_z = np.interp(path_md_array, md_values, z_values)
-    path_tvd = path_z - float(z_values[0])
+    path_z = np.interp(path_md_array, history_md_values, history_z_values)
+    path_tvd = path_z - float(history_z_values[0])
     covariance_path = iscwsa_mwd_covariance_xyz(
         md_m=path_md_array,
         inc_deg=path_inc,
@@ -572,6 +586,26 @@ def station_uncertainty_covariance_samples_for_stations(
         covariance_xyz_global=_symmetrized_covariance_array(covariance_global),
         global_source_vectors_xyz=global_source_vectors_xyz,
     )
+
+
+def _uncertainty_history_stations(stations: pd.DataFrame) -> pd.DataFrame:
+    reference = stations.attrs.get("uncertainty_reference_stations")
+    if not isinstance(reference, pd.DataFrame) or reference.empty or stations.empty:
+        return stations
+    if not _REQUIRED_STATION_COLUMNS.issubset(reference.columns):
+        return stations
+
+    current_md = stations["MD_m"].to_numpy(dtype=float)
+    finite_current_md = current_md[np.isfinite(current_md)]
+    if finite_current_md.size == 0:
+        return stations
+    current_start_md = float(np.min(finite_current_md))
+    reference_md = reference["MD_m"].to_numpy(dtype=float)
+    prefix = reference.loc[reference_md < current_start_md - 1e-6].copy()
+    if prefix.empty:
+        return stations
+    combined = pd.concat([prefix, stations.copy()], ignore_index=True, sort=False)
+    return combined.sort_values("MD_m").reset_index(drop=True)
 
 
 def _model_uses_iscwsa(model: PlanningUncertaintyModel) -> bool:
