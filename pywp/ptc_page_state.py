@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import streamlit as st
 
 from pywp import ptc_core as wt
@@ -35,11 +37,18 @@ def _keep_ptc_calc_params_expanded() -> None:
     st.session_state[PTC_CALC_PARAMS_EXPAND_ONCE_KEY] = True
 
 
-def render_calc_params_panel() -> TrajectoryConfig:
+def render_calc_params_panel(
+    *,
+    extra_content: Callable[[], None] | None = None,
+) -> TrajectoryConfig:
     expanded = bool(st.session_state.pop(PTC_CALC_PARAMS_EXPAND_ONCE_KEY, False))
     with st.expander("Параметры расчёта", expanded=expanded):
-        return wt._build_config_form(
+        config = wt._build_config_form(
             binding=wt.WT_CALC_PARAMS,
             title="",
             on_change=_keep_ptc_calc_params_expanded,
         )
+        if extra_content is not None:
+            st.divider()
+            extra_content()
+        return config

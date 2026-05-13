@@ -39,10 +39,16 @@ def render_run_section(*, records: list[object]) -> None:
     ):
         st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
 
-    config = render_calc_params_panel()
-    sidetrack_overrides, _sidetrack_override_error = (
-        _render_sidetrack_window_params(records=records)
-    )
+    sidetrack_params: dict[str, object] = {
+        "overrides": {},
+    }
+
+    def _render_extra_calc_params() -> None:
+        overrides, _error = _render_sidetrack_window_params(records=records)
+        sidetrack_params["overrides"] = overrides
+
+    config = render_calc_params_panel(extra_content=_render_extra_calc_params)
+    sidetrack_overrides = _sidetrack_overrides_from_render_state(sidetrack_params)
 
     with st.form("ptc_run_form", clear_on_submit=False):
         select_all_clicked = False
@@ -206,26 +212,19 @@ def _render_sidetrack_window_params(
 
     state = st.session_state
     selected_parent = _selected_sidetrack_parent_name(parent_names, state)
-    st.markdown("### Параметры боковых стволов")
+    st.markdown("#### Параметры боковых стволов")
     c1, c2, c3, c4 = st.columns(
-        [2.3, 1.4, 1.1, 1.6],
+        [2.2, 1.25, 1.15, 1.6],
         gap="small",
         vertical_alignment="bottom",
     )
     with c1:
-        if len(parent_names) == 1:
-            st.text_input(
-                "Скважина с пилотом",
-                value=selected_parent,
-                disabled=True,
-                key=f"wt_sidetrack_window_single_parent_display::{selected_parent}",
-            )
-        else:
-            selected_parent = st.selectbox(
-                "Скважина с пилотом",
-                options=parent_names,
-                key=_SIDETRACK_PARENT_KEY,
-            )
+        selected_parent = st.selectbox(
+            "Скважина с пилотом",
+            options=parent_names,
+            key=_SIDETRACK_PARENT_KEY,
+            disabled=len(parent_names) == 1,
+        )
     mode_key = _sidetrack_mode_key(selected_parent)
     if state.get(mode_key) not in _SIDETRACK_MODE_OPTIONS:
         state[mode_key] = _SIDETRACK_AUTO
@@ -241,34 +240,31 @@ def _render_sidetrack_window_params(
     if state.get(kind_key) not in _SIDETRACK_KIND_OPTIONS:
         state[kind_key] = "Z"
     value_key = _sidetrack_value_key(selected_parent)
-    if mode == _SIDETRACK_MANUAL:
-        with c3:
-            kind_label = st.radio(
-                "Задать по",
-                options=_SIDETRACK_KIND_OPTIONS,
-                index=_SIDETRACK_KIND_OPTIONS.index(str(state.get(kind_key))),
-                key=kind_key,
-                horizontal=True,
-            )
-        value_label = (
-            "MD окна, м"
-            if str(kind_label or state.get(kind_key, "Z")).upper() == "MD"
-            else "Z окна, м"
+    manual_mode = mode == _SIDETRACK_MANUAL
+    with c3:
+        kind_label = st.radio(
+            "Задать по",
+            options=_SIDETRACK_KIND_OPTIONS,
+            index=_SIDETRACK_KIND_OPTIONS.index(str(state.get(kind_key))),
+            key=kind_key,
+            horizontal=True,
+            disabled=not manual_mode,
         )
-        with c4:
-            st.number_input(
-                value_label,
-                value=None,
-                step=10.0,
-                format="%.2f",
-                key=value_key,
-                placeholder="Введите значение",
-            )
-    else:
-        with c3:
-            st.caption("Режим")
-        with c4:
-            st.caption("Автоподбор")
+    value_label = (
+        "MD окна, м"
+        if str(kind_label or state.get(kind_key, "Z")).upper() == "MD"
+        else "Z окна, м"
+    )
+    with c4:
+        st.number_input(
+            value_label,
+            value=None,
+            step=10.0,
+            format="%.2f",
+            key=value_key,
+            placeholder="Авто" if not manual_mode else "Введите значение",
+            disabled=not manual_mode,
+        )
 
     overrides, error = _sidetrack_window_overrides_from_state(parent_names, state)
     if overrides:
@@ -280,6 +276,19 @@ def _render_sidetrack_window_params(
             )
         )
     return overrides, error
+
+
+def _sidetrack_overrides_from_render_state(
+    sidetrack_params: Mapping[str, object],
+) -> dict[str, SidetrackWindowOverride]:
+    raw_overrides = sidetrack_params.get("overrides", {})
+    if not isinstance(raw_overrides, Mapping):
+        return {}
+    return {
+        str(name): override
+        for name, override in raw_overrides.items()
+        if isinstance(override, SidetrackWindowOverride)
+    }
 
 
 def _sidetrack_parent_names(records: list[object]) -> list[str]:
