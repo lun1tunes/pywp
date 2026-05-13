@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
-from typing import Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -105,6 +105,7 @@ from pywp.plot_axes import (
     reversed_axis_range,
 )
 from pywp import ptc_anticollision_view
+from pywp import ptc_anticollision_params
 from pywp import ptc_batch_run
 from pywp import ptc_batch_results
 from pywp import ptc_batch_summary_panel
@@ -1095,6 +1096,9 @@ def _build_anti_collision_analysis(
     model: PlanningUncertaintyModel,
     name_to_color: dict[str, str] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
 ) -> AntiCollisionAnalysis:
     color_map = {
         str(item.name): (name_to_color or {}).get(str(item.name), _well_color(index))
@@ -1105,6 +1109,15 @@ def _build_anti_collision_analysis(
         model=model,
         name_to_color=color_map,
         reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
+
+
+def _reference_uncertainty_models_from_state(
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> dict[str, PlanningUncertaintyModel]:
+    return ptc_anticollision_params.reference_uncertainty_models_from_state(
+        reference_wells
     )
 
 
@@ -1114,22 +1127,17 @@ def _anti_collision_cache_key(
     model: PlanningUncertaintyModel,
     name_to_color: dict[str, str] | None,
     reference_wells: tuple[ImportedTrajectoryWell, ...],
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
 ) -> str:
     digest = hashlib.blake2b(digest_size=20)
-    digest.update(
-        np.asarray(
-            [
-                float(model.sigma_inc_deg),
-                float(model.sigma_azi_deg),
-                float(model.sigma_lateral_drift_m_per_1000m),
-                float(model.confidence_scale),
-                float(model.sample_step_m),
-                float(model.min_refined_step_m),
-                float(model.directional_refine_threshold_deg),
-            ],
-            dtype=np.float64,
-        ).tobytes()
-    )
+    _update_uncertainty_model_cache_digest(digest, model)
+    for well_name, reference_model in sorted(
+        (reference_uncertainty_models_by_name or {}).items()
+    ):
+        digest.update(str(well_name).encode("utf-8"))
+        _update_uncertainty_model_cache_digest(digest, reference_model)
     for well_name, color in sorted((name_to_color or {}).items()):
         digest.update(str(well_name).encode("utf-8"))
         digest.update(str(color).encode("utf-8"))
@@ -1205,6 +1213,32 @@ def _anti_collision_cache_key(
     return digest.hexdigest()
 
 
+def _update_uncertainty_model_cache_digest(
+    digest: Any,
+    model: PlanningUncertaintyModel,
+) -> None:
+    digest.update(str(model.iscwsa_tool_code or "").encode("utf-8"))
+    digest.update(
+        np.asarray(
+            [
+                float(model.sigma_inc_deg),
+                float(model.sigma_azi_deg),
+                float(model.sigma_lateral_drift_m_per_1000m),
+                float(model.confidence_scale),
+                float(model.sample_step_m),
+                float(model.min_refined_step_m),
+                float(model.directional_refine_threshold_deg),
+                float(model.iscwsa_environment.gtot_mps2),
+                float(model.iscwsa_environment.mtot_nt),
+                float(model.iscwsa_environment.dip_deg),
+                float(model.iscwsa_environment.declination_deg),
+                float(model.iscwsa_environment.lateral_singularity_inc_deg),
+            ],
+            dtype=np.float64,
+        ).tobytes()
+    )
+
+
 def _store_anticollision_failure_state(
     exc: Exception,
     *,
@@ -1246,6 +1280,9 @@ def _cached_anti_collision_view_model(
     uncertainty_model: PlanningUncertaintyModel,
     records: list[WelltrackRecord],
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
 ) -> tuple[
     AntiCollisionAnalysis,
@@ -1267,6 +1304,7 @@ def _cached_anti_collision_view_model(
         model=uncertainty_model,
         name_to_color=color_map,
         reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
     )
     cache = dict(st.session_state.get("wt_anticollision_analysis_cache") or {})
     if str(cache.get("key", "")) == cache_key:
@@ -1296,6 +1334,7 @@ def _cached_anti_collision_view_model(
             model=uncertainty_model,
             name_to_color=color_map,
             reference_wells=reference_wells,
+            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
         )
         _emit(72, "Построение рекомендаций anti-collision.")
         recommendations = build_anti_collision_recommendations(
@@ -2841,6 +2880,9 @@ def _clusters_touching_resolution_snapshot(
         successes,
         model=uncertainty_model,
         reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=(
+            _reference_uncertainty_models_from_state(reference_wells)
+        ),
         include_display_geometry=False,
         build_overlap_geometry=False,
     )
@@ -3071,13 +3113,17 @@ def _build_prepared_optimization_context(
     uncertainty_model: PlanningUncertaintyModel,
     all_successes: list[SuccessfulWellPlan] | None = None,
 ) -> AntiCollisionOptimizationContext | None:
+    reference_wells = _reference_wells_from_state()
     return build_prepared_optimization_context_shared(
         recommendation=recommendation,
         moving_success=moving_success,
         reference_success=reference_success,
         uncertainty_model=uncertainty_model,
         all_successes=all_successes,
-        reference_wells=_reference_wells_from_state(),
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=(
+            _reference_uncertainty_models_from_state(reference_wells)
+        ),
     )
 
 
@@ -3087,11 +3133,15 @@ def _build_cluster_prepared_overrides(
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
+    reference_wells = _reference_wells_from_state()
     return build_cluster_prepared_overrides_shared(
         cluster,
         successes=successes,
         uncertainty_model=uncertainty_model,
-        reference_wells=_reference_wells_from_state(),
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=(
+            _reference_uncertainty_models_from_state(reference_wells)
+        ),
     )
 
 
@@ -3101,11 +3151,15 @@ def _build_recommendation_prepared_overrides(
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
 ) -> tuple[dict[str, dict[str, object]], list[str], tuple[dict[str, object], ...]]:
+    reference_wells = _reference_wells_from_state()
     return build_recommendation_prepared_overrides_shared(
         recommendation,
         successes=successes,
         uncertainty_model=uncertainty_model,
-        reference_wells=_reference_wells_from_state(),
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=(
+            _reference_uncertainty_models_from_state(reference_wells)
+        ),
     )
 
 
@@ -5313,6 +5367,7 @@ def _batch_run_hooks() -> ptc_batch_run.BatchRunHooks:
         build_selected_override_configs=_build_selected_override_configs,
         build_selected_optimization_contexts=_build_selected_optimization_contexts,
         reference_wells_from_state=_reference_wells_from_state,
+        reference_uncertainty_models_from_state=_reference_uncertainty_models_from_state,
         resolution_snapshot_well_names=_resolution_snapshot_well_names,
         format_prepared_override_scope=_format_prepared_override_scope,
         prepared_plan_kind_label=_prepared_plan_kind_label,

@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from pywp import ptc_core as wt
+from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state as reference_state
 from pywp.anticollision import anti_collision_report_rows
 from pywp.coordinate_integration import (
@@ -169,6 +170,11 @@ def _render_anticollision_panel(
         key="wt_anticollision_uncertainty_preset",
     )
     uncertainty_model = planning_uncertainty_model_for_preset(selected_preset)
+    reference_uncertainty_models_by_name = (
+        ptc_anticollision_params.reference_uncertainty_models_from_state(
+            reference_wells
+        )
+    )
 
     anti_collision_progress = st.progress(
         8, text="Подготовка anti-collision анализа..."
@@ -183,6 +189,7 @@ def _render_anticollision_panel(
             uncertainty_model=uncertainty_model,
             records=records,
             reference_wells=reference_wells,
+            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
             progress_callback=_anti_collision_progress_update,
         )
     except Exception as exc:

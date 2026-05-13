@@ -6,6 +6,8 @@ from collections.abc import Mapping, MutableMapping
 import streamlit as st
 
 from pywp import ptc_core as wt
+from pywp import ptc_anticollision_params
+from pywp import ptc_reference_state
 from pywp.pilot_wells import (
     SidetrackWindowOverride,
     is_pilot_name,
@@ -46,6 +48,11 @@ def render_run_section(*, records: list[object]) -> None:
     def _render_extra_calc_params() -> None:
         overrides, _error = _render_sidetrack_window_params(records=records)
         sidetrack_params["overrides"] = overrides
+        if overrides or _sidetrack_parent_names(records):
+            st.divider()
+        ptc_anticollision_params.render_anticollision_params_block(
+            reference_wells=ptc_reference_state.reference_wells_from_state()
+        )
 
     config = render_calc_params_panel(extra_content=_render_extra_calc_params)
     sidetrack_overrides = _sidetrack_overrides_from_render_state(sidetrack_params)

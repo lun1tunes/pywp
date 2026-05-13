@@ -9,6 +9,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from pywp import ptc_core as wt_import_module
+from pywp import ptc_anticollision_params
 from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp.anticollision import (
     AntiCollisionAnalysis,
@@ -34,6 +35,8 @@ from pywp.ui_calc_params import (
 )
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC,
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC,
     planning_uncertainty_model_for_preset,
 )
 from pywp.well_pad import detect_well_pads
@@ -3254,7 +3257,7 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(
     monkeypatch.setattr(
         page,
         "_build_anti_collision_analysis",
-        lambda successes, *, model, name_to_color=None, reference_wells=(): (
+        lambda successes, *, model, name_to_color=None, reference_wells=(), **_kw: (
             calls.__setitem__("analysis", calls["analysis"] + 1) or analysis
         ),
     )
@@ -3296,6 +3299,35 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(
     assert "Использован кэш anti-collision анализа." in "\n".join(
         second_run["log_lines"]
     )
+
+
+def test_anti_collision_cache_key_includes_reference_mwd_assignment() -> None:
+    page = wt_import_module
+    reference_wells = _reference_wells()
+    successes = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    poor_model = planning_uncertainty_model_for_preset(
+        UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+    )
+    unknown_model = planning_uncertainty_model_for_preset(
+        UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+    )
+
+    poor_key = page._anti_collision_cache_key(
+        successes=successes,
+        model=poor_model,
+        name_to_color={},
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name={"FACT-1": poor_model},
+    )
+    unknown_key = page._anti_collision_cache_key(
+        successes=successes,
+        model=poor_model,
+        name_to_color={},
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name={"FACT-1": unknown_model},
+    )
+
+    assert poor_key != unknown_key
 
 
 def test_prepare_rerun_from_cluster_builds_multi_reference_cluster_plan() -> None:
@@ -4426,6 +4458,111 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     assert "APP-1" in label_by_text
     assert str(label_by_text["FACT-1"]["color"]) == "#111111"
     assert str(label_by_text["APP-1"]["color"]) == "#C62828"
+
+
+def test_actual_reference_mwd_assignment_defaults_to_poor_and_selects_unknown() -> None:
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 0.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+                {
+                    "Wellname": "FACT-2",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 100.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-2",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 100.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": "approved",
+                    "X": 0.0,
+                    "Y": 200.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": "approved",
+                    "X": 100.0,
+                    "Y": 200.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+            ]
+        )
+    )
+
+    model_by_name = (
+        ptc_anticollision_params.reference_uncertainty_models_for_unknown_actual_names(
+            reference_wells,
+            unknown_names=("FACT-2", "APP-1", "MISSING"),
+        )
+    )
+
+    assert set(model_by_name) == {"FACT-1", "FACT-2"}
+    assert (
+        model_by_name["FACT-1"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+        ).iscwsa_tool_code
+    )
+    assert (
+        model_by_name["FACT-2"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+        ).iscwsa_tool_code
+    )
+
+    string_model_by_name = (
+        ptc_anticollision_params.reference_uncertainty_models_for_unknown_actual_names(
+            reference_wells,
+            unknown_names="FACT-2",
+        )
+    )
+    assert (
+        string_model_by_name["FACT-2"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+        ).iscwsa_tool_code
+    )
+
+    none_model_by_name = (
+        ptc_anticollision_params.reference_uncertainty_models_for_unknown_actual_names(
+            reference_wells,
+            unknown_names=None,
+        )
+    )
+    assert {
+        model.iscwsa_tool_code for model in none_model_by_name.values()
+    } == {
+        planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+        ).iscwsa_tool_code
+    }
 
 
 def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> (

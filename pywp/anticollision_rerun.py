@@ -29,6 +29,7 @@ from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINI
 from pywp.pilot_wells import paired_pilot_parent_names
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
+    REFERENCE_WELL_ACTUAL,
     REFERENCE_WELL_KIND_COLORS,
     reference_well_collision_name,
     reference_well_duplicate_name_keys,
@@ -92,6 +93,9 @@ def build_anti_collision_analysis_for_successes(
     model: PlanningUncertaintyModel,
     name_to_color: Mapping[str, str] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
     include_display_geometry: bool = True,
     build_overlap_geometry: bool = True,
     analysis_sample_step_m: float | None = None,
@@ -133,6 +137,12 @@ def build_anti_collision_analysis_for_successes(
             planned_names=planned_names,
             duplicate_name_keys=duplicate_reference_name_keys,
         )
+        reference_model = _reference_uncertainty_model(
+            reference_well=item,
+            collision_name=collision_name,
+            default_model=model,
+            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        )
         wells.append(
             build_anti_collision_well(
                 name=collision_name,
@@ -147,7 +157,7 @@ def build_anti_collision_analysis_for_successes(
                 azimuth_deg=float(item.azimuth_deg),
                 md_t1_m=None,
                 md_t3_m=None,
-                model=model,
+                model=reference_model,
                 include_display_geometry=include_display_geometry,
                 well_kind=str(item.kind),
                 is_reference_only=True,
@@ -162,6 +172,37 @@ def build_anti_collision_analysis_for_successes(
             right.name,
         ),
     )
+
+
+def _reference_uncertainty_model(
+    *,
+    reference_well: ImportedTrajectoryWell,
+    collision_name: str,
+    default_model: PlanningUncertaintyModel,
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None,
+) -> PlanningUncertaintyModel:
+    if not reference_uncertainty_models_by_name:
+        return default_model
+    if str(getattr(reference_well, "kind", "")) != REFERENCE_WELL_ACTUAL:
+        return default_model
+    return (
+        reference_uncertainty_models_by_name.get(str(collision_name))
+        or reference_uncertainty_models_by_name.get(str(reference_well.name))
+        or default_model
+    )
+
+
+def _fast_proxy_reference_uncertainty_models(
+    models_by_name: Mapping[str, PlanningUncertaintyModel] | None,
+) -> dict[str, PlanningUncertaintyModel] | None:
+    if not models_by_name:
+        return None
+    return {
+        str(name): fast_proxy_uncertainty_model(model)
+        for name, model in models_by_name.items()
+    }
 
 
 def build_anticollision_well_contexts(
@@ -217,6 +258,9 @@ def build_dynamic_cluster_execution_plan(
     target_well_names: tuple[str, ...],
     uncertainty_model: PlanningUncertaintyModel,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
     prefer_trajectory_stage: bool = False,
 ) -> DynamicClusterExecutionPlan | None:
     if not selected_names:
@@ -233,6 +277,11 @@ def build_dynamic_cluster_execution_plan(
         successes,
         model=fast_proxy_uncertainty_model(uncertainty_model),
         reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=(
+            _fast_proxy_reference_uncertainty_models(
+                reference_uncertainty_models_by_name
+            )
+        ),
         include_display_geometry=False,
         build_overlap_geometry=False,
     )
@@ -457,6 +506,9 @@ def build_prepared_optimization_context(
     uncertainty_model: PlanningUncertaintyModel,
     all_successes: list[SuccessfulWellPlan] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
 ) -> AntiCollisionOptimizationContext | None:
     if moving_success is None:
         return None
@@ -492,6 +544,7 @@ def build_prepared_optimization_context(
         reference_wells=reference_wells,
         sample_step_m=runtime_sample_step_m,
         uncertainty_model=uncertainty_model,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
     )
     if not reference_paths:
         return None
@@ -549,6 +602,9 @@ def _build_reference_paths_for_candidate_window(
     reference_wells: tuple[ImportedTrajectoryWell, ...],
     sample_step_m: float,
     uncertainty_model: PlanningUncertaintyModel,
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
 ) -> list[object]:
     success_by_name = {str(item.name): item for item in successes}
     reference_by_name = _reference_wells_by_collision_name(
@@ -634,7 +690,12 @@ def _build_reference_paths_for_candidate_window(
                 md_start_m=float(window[0]),
                 md_end_m=float(window[1]),
                 sample_step_m=float(sample_step_m),
-                model=uncertainty_model,
+                model=_reference_uncertainty_model(
+                    reference_well=reference_well,
+                    collision_name=str(reference_name),
+                    default_model=uncertainty_model,
+                    reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+                ),
             )
         )
     return references
@@ -646,6 +707,9 @@ def build_recommendation_prepared_overrides(
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
 ) -> tuple[dict[str, dict[str, object]], list[str], tuple[dict[str, object], ...]]:
     prepared: dict[str, dict[str, object]] = {}
     skipped_wells: list[str] = []
@@ -674,6 +738,7 @@ def build_recommendation_prepared_overrides(
                 uncertainty_model=uncertainty_model,
                 all_successes=successes,
                 reference_wells=reference_wells,
+                reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
             )
             if optimization_context is None:
                 skipped_wells.append(str(suggestion.well_name))
@@ -722,6 +787,9 @@ def build_cluster_prepared_overrides(
     successes: list[SuccessfulWellPlan],
     uncertainty_model: PlanningUncertaintyModel,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None,
     prefer_trajectory_stage: bool = False,
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
     success_by_name = {str(item.name): item for item in successes}
@@ -947,7 +1015,12 @@ def build_cluster_prepared_overrides(
                         md_start_m=float(window[0]),
                         md_end_m=float(window[1]),
                         sample_step_m=runtime_sample_step_m,
-                        model=uncertainty_model,
+                        model=_reference_uncertainty_model(
+                            reference_well=reference_well,
+                            collision_name=str(reference_name),
+                            default_model=uncertainty_model,
+                            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+                        ),
                     )
                 )
             if not references:

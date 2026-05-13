@@ -317,6 +317,7 @@ def _batch_run_hooks() -> ptc_batch_run.BatchRunHooks:
         build_selected_override_configs=lambda **_kwargs: {},
         build_selected_optimization_contexts=lambda **_kwargs: {},
         reference_wells_from_state=lambda: (),
+        reference_uncertainty_models_from_state=lambda _reference_wells: {},
         resolution_snapshot_well_names=lambda _snapshot: (),
         format_prepared_override_scope=lambda **_kwargs: [],
         prepared_plan_kind_label=lambda _snapshot: "",

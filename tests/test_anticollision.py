@@ -50,6 +50,8 @@ from pywp.reference_trajectories import (
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
     PlanningUncertaintyModel,
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC,
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC,
     planning_uncertainty_model_for_preset,
     station_uncertainty_covariance_samples_for_stations,
 )
@@ -413,6 +415,133 @@ def test_reference_actual_and_approved_wells_use_station_history_iscwsa_ellipses
     np.testing.assert_allclose(
         reference_by_kind[REFERENCE_WELL_ACTUAL].samples[-1].covariance_xyz,
         reference_by_kind[REFERENCE_WELL_APPROVED].samples[-1].covariance_xyz,
+    )
+
+
+def test_reference_actual_well_can_use_selected_unknown_mwd_model() -> None:
+    poor_model = planning_uncertainty_model_for_preset(
+        UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+    )
+    unknown_model = planning_uncertainty_model_for_preset(
+        UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+    )
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, -600.0, 0.0),
+        t1=Point3D(200.0, -600.0, 700.0),
+        t3=Point3D(1300.0, -600.0, 900.0),
+        stations=_straight_stations(y_offset_m=-600.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+    reference_rows = []
+    for well_name, well_kind, y_m in (
+        ("REF-ACT", "actual", 0.0),
+        ("REF-APP", "approved", 100.0),
+    ):
+        for x_m, z_m, md_m in (
+            (0.0, 0.0, 0.0),
+            (200.0, 700.0, 760.0),
+            (1300.0, 900.0, 1900.0),
+        ):
+            reference_rows.append(
+                {
+                    "Wellname": well_name,
+                    "Type": well_kind,
+                    "X": x_m,
+                    "Y": y_m,
+                    "Z": z_m,
+                    "MD": md_m,
+                }
+            )
+    reference_wells = tuple(parse_reference_trajectory_table(reference_rows))
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=poor_model,
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name={"REF-ACT": unknown_model},
+        include_display_geometry=True,
+        build_overlap_geometry=False,
+    )
+    reference_by_kind = {
+        str(well.well_kind): well
+        for well in analysis.wells
+        if bool(well.is_reference_only)
+    }
+    actual_reference = reference_by_kind[REFERENCE_WELL_ACTUAL]
+    approved_reference = reference_by_kind[REFERENCE_WELL_APPROVED]
+
+    assert actual_reference.overlay.model.iscwsa_tool_code == unknown_model.iscwsa_tool_code
+    assert approved_reference.overlay.model.iscwsa_tool_code == poor_model.iscwsa_tool_code
+    assert float(np.trace(actual_reference.samples[-1].covariance_xyz)) > float(
+        np.trace(approved_reference.samples[-1].covariance_xyz)
+    )
+
+
+def test_reference_mwd_assignment_does_not_leak_to_approved_duplicate_name() -> None:
+    poor_model = planning_uncertainty_model_for_preset(
+        UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+    )
+    unknown_model = planning_uncertainty_model_for_preset(
+        UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+    )
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, -600.0, 0.0),
+        t1=Point3D(200.0, -600.0, 700.0),
+        t3=Point3D(1300.0, -600.0, 900.0),
+        stations=_straight_stations(y_offset_m=-600.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+    reference_rows = []
+    for well_kind, y_m in (
+        ("actual", 0.0),
+        ("approved", 100.0),
+    ):
+        for x_m, z_m, md_m in (
+            (0.0, 0.0, 0.0),
+            (200.0, 700.0, 760.0),
+            (1300.0, 900.0, 1900.0),
+        ):
+            reference_rows.append(
+                {
+                    "Wellname": "REF-SAME",
+                    "Type": well_kind,
+                    "X": x_m,
+                    "Y": y_m,
+                    "Z": z_m,
+                    "MD": md_m,
+                }
+            )
+    reference_wells = tuple(parse_reference_trajectory_table(reference_rows))
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=poor_model,
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name={"REF-SAME": unknown_model},
+        include_display_geometry=True,
+        build_overlap_geometry=False,
+    )
+    reference_by_kind = {
+        str(well.well_kind): well
+        for well in analysis.wells
+        if bool(well.is_reference_only)
+    }
+
+    assert (
+        reference_by_kind[REFERENCE_WELL_ACTUAL].overlay.model.iscwsa_tool_code
+        == unknown_model.iscwsa_tool_code
+    )
+    assert (
+        reference_by_kind[REFERENCE_WELL_APPROVED].overlay.model.iscwsa_tool_code
+        == poor_model.iscwsa_tool_code
     )
 
 

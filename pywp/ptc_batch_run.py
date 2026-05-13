@@ -85,6 +85,7 @@ class BatchRunHooks:
     build_selected_override_configs: Callable[..., dict[str, TrajectoryConfig]]
     build_selected_optimization_contexts: Callable[..., dict[str, Any]]
     reference_wells_from_state: Callable[[], tuple[Any, ...]]
+    reference_uncertainty_models_from_state: Callable[[tuple[Any, ...]], Mapping[str, Any]]
     resolution_snapshot_well_names: Callable[[dict[str, object]], tuple[str, ...]]
     format_prepared_override_scope: Callable[..., list[dict[str, object]]]
     prepared_plan_kind_label: Callable[[Mapping[str, object] | None], str]
@@ -343,6 +344,7 @@ def run_batch_if_clicked(
     }
     dynamic_cluster_context = None
     if str(prepared_snapshot.get("kind", "")).strip() == "cluster":
+        reference_wells = hooks.reference_wells_from_state()
         target_well_names = tuple(
             str(name)
             for name in prepared_snapshot.get("target_well_names", ()) or ()
@@ -360,7 +362,10 @@ def run_batch_if_clicked(
                     )
                 ),
                 initial_successes=tuple(state.get("wt_successes") or ()),
-                reference_wells=hooks.reference_wells_from_state(),
+                reference_wells=reference_wells,
+                reference_uncertainty_models_by_name=(
+                    hooks.reference_uncertainty_models_from_state(reference_wells)
+                ),
             )
     missing_anticollision_context = sorted(
         well_name

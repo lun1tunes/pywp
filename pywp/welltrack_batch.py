@@ -66,11 +66,39 @@ class DynamicClusterExecutionContext:
     uncertainty_model: PlanningUncertaintyModel
     initial_successes: tuple["SuccessfulWellPlan", ...]
     reference_wells: tuple[ImportedTrajectoryWell, ...] = ()
+    reference_uncertainty_models_by_name: Mapping[
+        str, PlanningUncertaintyModel
+    ] | None = None
 
 
 _MAX_DYNAMIC_CLUSTER_PASSES = 3
 _TARGET_MISS_WARNING_ABS_M = 5.0
 _TARGET_MISS_WARNING_TOLERANCE_FRACTION = 0.5
+
+
+def _fast_proxy_reference_uncertainty_models(
+    models_by_name: Mapping[str, PlanningUncertaintyModel] | None,
+) -> dict[str, PlanningUncertaintyModel] | None:
+    if not models_by_name:
+        return None
+    return {
+        str(name): fast_proxy_uncertainty_model(model)
+        for name, model in models_by_name.items()
+    }
+
+
+def _dynamic_cluster_plan_kwargs(
+    *,
+    dynamic_cluster_context: DynamicClusterExecutionContext,
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "reference_wells": dynamic_cluster_context.reference_wells,
+    }
+    if dynamic_cluster_context.reference_uncertainty_models_by_name:
+        kwargs["reference_uncertainty_models_by_name"] = (
+            dynamic_cluster_context.reference_uncertainty_models_by_name
+        )
+    return kwargs
 
 
 def _anti_collision_segment_to_worker_payload(
@@ -996,6 +1024,11 @@ class WelltrackBatchPlanner:
                 dynamic_cluster_context.uncertainty_model
             ),
             reference_wells=dynamic_cluster_context.reference_wells,
+            reference_uncertainty_models_by_name=(
+                _fast_proxy_reference_uncertainty_models(
+                    dynamic_cluster_context.reference_uncertainty_models_by_name
+                )
+            ),
             include_display_geometry=False,
             build_overlap_geometry=False,
         )
@@ -1093,6 +1126,11 @@ class WelltrackBatchPlanner:
                 dynamic_cluster_context.uncertainty_model
             ),
             reference_wells=dynamic_cluster_context.reference_wells,
+            reference_uncertainty_models_by_name=(
+                _fast_proxy_reference_uncertainty_models(
+                    dynamic_cluster_context.reference_uncertainty_models_by_name
+                )
+            ),
             include_display_geometry=False,
             build_overlap_geometry=False,
         )
@@ -1462,13 +1500,16 @@ class WelltrackBatchPlanner:
             str(item.name): item for item in dynamic_cluster_context.initial_successes
         }
         current_success_by_name.update(recalculated_success_by_name)
+        plan_kwargs = _dynamic_cluster_plan_kwargs(
+            dynamic_cluster_context=dynamic_cluster_context
+        )
         plan = build_dynamic_cluster_execution_plan(
             successes=list(current_success_by_name.values()),
             selected_names=set(str(name) for name in remaining_selected_names),
             target_well_names=dynamic_cluster_context.target_well_names,
             uncertainty_model=dynamic_cluster_context.uncertainty_model,
-            reference_wells=dynamic_cluster_context.reference_wells,
             prefer_trajectory_stage=bool(prefer_trajectory_stage),
+            **plan_kwargs,
         )
         if plan is None:
             pruned_names = WelltrackBatchPlanner._include_pending_pilot_dependencies(
@@ -1565,13 +1606,16 @@ class WelltrackBatchPlanner:
             previous_score=previous_cluster_score,
         )
         prefer_trajectory_stage = bool(dynamic_cluster_pass_count >= 1)
+        plan_kwargs = _dynamic_cluster_plan_kwargs(
+            dynamic_cluster_context=dynamic_cluster_context
+        )
         plan = build_dynamic_cluster_execution_plan(
             successes=list(current_success_by_name.values()),
             selected_names=set(selected_records_by_name),
             target_well_names=dynamic_cluster_context.target_well_names,
             uncertainty_model=dynamic_cluster_context.uncertainty_model,
-            reference_wells=dynamic_cluster_context.reference_wells,
             prefer_trajectory_stage=prefer_trajectory_stage,
+            **plan_kwargs,
         )
         if plan is None:
             return (), None, False, current_cluster_score, prefer_trajectory_stage

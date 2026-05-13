@@ -74,6 +74,8 @@ def clear_reference_import_state(
     on_clear: Callable[[], None] | None = None,
 ) -> None:
     set_reference_wells_for_kind(kind=kind, wells=())
+    if str(kind) == REFERENCE_WELL_ACTUAL:
+        st.session_state["wt_actual_reference_mwd_unknown_names"] = []
     st.session_state[reference_source_text_key(kind)] = ""
     st.session_state[reference_welltrack_path_key(kind)] = ""
     clear_reference_dev_folder_state(kind)
