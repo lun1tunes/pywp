@@ -3110,6 +3110,49 @@
           scene.add(mesh);
         }
 
+        function addHoverPointCloud(points, item, hoverItems) {
+          const positions = [];
+          const itemHoverData = [];
+          points.forEach((point, index) => {
+            const vector = displayPoint(point);
+            if (
+              Number.isFinite(vector.x) &&
+              Number.isFinite(vector.y) &&
+              Number.isFinite(vector.z)
+            ) {
+              positions.push(vector.x, vector.y, vector.z);
+              itemHoverData.push(hoverItems[index] || {});
+            }
+          });
+          if (!positions.length) {
+            return;
+          }
+          const markerScale = Math.max(
+            worldMarkerSize * Number(item.size || 6) / 8.0,
+            5.0,
+          );
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3),
+          );
+          const material = new THREE.PointsMaterial({
+            color: hexOrDefault(item.color, "#64748b"),
+            transparent: true,
+            opacity: 0.0,
+            size: markerScale,
+            sizeAttenuation: true,
+            depthWrite: false,
+            depthTest: false,
+          });
+          material.colorWrite = false;
+          const pointCloud = new THREE.Points(geometry, material);
+          pointCloud.userData.hoverItems = itemHoverData;
+          hoverTargets.push(pointCloud);
+          registerAntiCollisionVisualObject(pointCloud, item);
+          scene.add(pointCloud);
+        }
+
         function miniMapTrajectoryOverlayWidth() {
           return Math.min(Math.max(maxSpan * 0.0032, 7.0), 24.0);
         }
@@ -3240,9 +3283,7 @@
           const hoverOnly = Boolean(item.hover_only);
           const symbol = String(item.symbol || "circle");
           if (hoverOnly) {
-            points.forEach((point, index) => {
-              addHoverSphere(point, item, hoverItems[index] || {});
-            });
+            addHoverPointCloud(points, item, hoverItems);
             return;
           }
           addMiniMapMarkerOverlay(item);
@@ -3402,6 +3443,7 @@
         }
 
         const raycaster = new THREE.Raycaster();
+        raycaster.params.Points.threshold = Math.max(worldMarkerSize * 0.55, 3.0);
         const pointer = new THREE.Vector2();
 
         function hideTooltip() {
@@ -3426,7 +3468,15 @@
             return;
           }
           const hoverObject = intersections[0].object;
-          const hoverData = Object.assign({}, hoverObject.userData.hover || {});
+          const indexedHoverItems = Array.isArray(hoverObject.userData.hoverItems)
+            ? hoverObject.userData.hoverItems
+            : null;
+          const hoverData = Object.assign(
+            {},
+            indexedHoverItems && Number.isInteger(intersections[0].index)
+              ? indexedHoverItems[intersections[0].index] || {}
+              : hoverObject.userData.hover || {},
+          );
           hoverData.color = hexOrDefault(hoverData.color, "#64748b");
           const html = formatTooltip(hoverData);
           if (!html) {

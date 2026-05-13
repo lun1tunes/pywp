@@ -4408,8 +4408,8 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
         for hover in list(item.get("hover") or [])
     }
 
-    assert "FACT-1 (Фактическая)" in hover_names_3d
-    assert "APP-1 (Проектная утвержденная)" in hover_names_3d
+    assert "FACT-1" in hover_names_3d
+    assert "APP-1" in hover_names_3d
     assert "FACT-1 (Фактическая)" in trace_names_plan
     assert "APP-1 (Проектная утвержденная)" in trace_names_plan
 
@@ -4610,8 +4610,8 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
         for item in payload_3d["points"]
         for hover in list(item.get("hover") or [])
     }
-    assert "FACT-1 (Фактическая)" in hover_names
-    assert "APP-1 (Проектная утвержденная)" in hover_names
+    assert "FACT-1" in hover_names
+    assert "APP-1" in hover_names
     mesh_names = {str(item.get("name")) for item in payload_3d["meshes"]}
     assert "FACT-1 (Фактическая) cone" in mesh_names
     assert "APP-1 (Проектная утвержденная) cone" in mesh_names
@@ -4674,6 +4674,8 @@ def test_all_wells_three_payload_aggregates_reference_wells_in_fast_mode() -> No
     }
     assert "#6B7280" in line_colors
     assert "#C62828" in line_colors
+    assert "FACT-1" in hover_names
+    assert "APP-1" in hover_names
     assert "FACT-1 (Фактическая)" not in hover_names
     assert "APP-1 (Проектная утвержденная)" not in hover_names
 
@@ -4739,6 +4741,8 @@ def test_anticollision_three_payload_aggregates_non_conflicting_reference_wells_
     }
     assert "#6B7280" in line_colors
     assert "#C62828" in line_colors
+    assert "FACT-FAR" in hover_names
+    assert "APP-FAR" in hover_names
     assert "FACT-FAR (Фактическая)" not in hover_names
     assert "APP-FAR (Проектная утвержденная)" not in hover_names
 
@@ -5152,6 +5156,68 @@ def test_three_payload_decimates_reference_hover_points() -> None:
         len(hover_only_points[0]["hover"])
         == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
     )
+    assert {
+        str(item.get("name")) for item in hover_only_points[0]["hover"]
+    } == {"FACT-001"}
+
+
+def test_fast_three_payload_keeps_reference_well_hover_names() -> None:
+    page = wt_import_module
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-001",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-001",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 0.0,
+                    "Z": 1000.0,
+                    "MD": 1000.0,
+                },
+                {
+                    "Wellname": "APR-007",
+                    "Type": "approved",
+                    "X": 0.0,
+                    "Y": 50.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "APR-007",
+                    "Type": "approved",
+                    "X": 100.0,
+                    "Y": 50.0,
+                    "Z": 1000.0,
+                    "MD": 1000.0,
+                },
+            ]
+        )
+    )
+
+    payload = page._all_wells_three_payload(
+        [],
+        reference_wells=reference_wells,
+        render_mode=page.WT_3D_RENDER_FAST,
+    )
+    reference_hover = [
+        item for item in payload["points"] if str(item.get("role")) == "reference_hover"
+    ]
+    hover_names = {
+        str(hover.get("name"))
+        for item in reference_hover
+        for hover in item.get("hover", [])
+    }
+
+    assert len(reference_hover) <= 2
+    assert {"FACT-001", "APR-007"}.issubset(hover_names)
 
 
 def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
@@ -5218,6 +5284,12 @@ def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
     reference_cone = next(
         item for item in payload["meshes"] if str(item.get("color")) == "#6B7280"
     )
+    hover_names = {
+        str(hover.get("name"))
+        for item in payload["points"]
+        if str(item.get("role")) == "reference_hover"
+        for hover in list(item.get("hover") or [])
+    }
     near_only_reference_cone = next(
         item
         for item in near_only_payload["meshes"]
@@ -5225,6 +5297,7 @@ def test_fast_anticollision_3d_keeps_near_reference_cone_by_xy_gap() -> None:
     )
 
     assert len(reference_cone["vertices"]) == len(near_only_reference_cone["vertices"])
+    assert "FACT-NEAR" in hover_names
 
 
 def test_all_wells_three_payload_sets_default_camera() -> None:

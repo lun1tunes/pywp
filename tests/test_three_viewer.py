@@ -279,6 +279,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "numberOrDefault(item.opacity, 0.34)" in html
     assert "numberOrDefault(item.opacity, 0.25)" in html
     assert "markerScale * 0.52" in html
+    assert "function addHoverPointCloud(points, item, hoverItems)" in html
+    assert "pointCloud.userData.hoverItems = itemHoverData" in html
+    assert "raycaster.params.Points.threshold = Math.max(worldMarkerSize * 0.55, 3.0)" in html
+    assert "indexedHoverItems && Number.isInteger(intersections[0].index)" in html
     assert "<strong>DLS:</strong>" in html
     assert "<strong>INC:</strong>" in html
     assert 'id="reset-camera-btn"' not in html

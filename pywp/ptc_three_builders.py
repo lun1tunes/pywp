@@ -416,15 +416,12 @@ def anticollision_three_payload(
             name=well_label,
             color=str(well.color),
             width_role="line",
-            hover_name=well_label,
+            hover_name=_reference_hover_name(well) if is_reference_only else well_label,
             hover_role="reference_hover" if is_reference_only else "trajectory_hover",
             x_arrays=x_arrays,
             y_arrays=y_arrays,
             z_arrays=z_arrays,
             focus_arrays=focus_arrays,
-            show_hover=(
-                str(render_mode).strip() != WT_3D_RENDER_FAST or not is_reference_only
-            ),
         )
         if not is_reference_only:
             _append_unique_legend_item(
@@ -640,35 +637,13 @@ def _append_station_line(
     if focus_arrays is not None:
         _append_arrays_from_xyz(*focus_arrays, x_values, y_values, z_values)
     if show_hover:
-        hover_points = _points_from_xyz_arrays(x_values, y_values, z_values)
-        hover_items = _hover_items_from_stations(
-            stations,
-            fallback_name=hover_name or name,
+        _append_station_hover_points(
+            payload,
+            stations=stations,
+            name=hover_name or name,
+            color=color,
+            hover_role=hover_role,
         )
-        if hover_points and hover_items:
-            max_points = (
-                WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
-                if hover_role == "reference_hover"
-                else WT_THREE_MAX_HOVER_POINTS_PER_TRACE
-            )
-            hover_points, hover_items = ptc_three_payload.decimate_hover_payload(
-                points=hover_points,
-                hover_items=hover_items,
-                max_points=max_points,
-            )
-            payload["points"].append(
-                {
-                    "name": hover_name or name,
-                    "points": hover_points,
-                    "color": color,
-                    "opacity": 0.001,
-                    "size": 8.5,
-                    "symbol": "circle",
-                    "hover": hover_items,
-                    "hover_only": True,
-                    "role": hover_role,
-                }
-            )
 
 
 def _append_line_segments(
@@ -909,7 +884,7 @@ def _append_reference_wells(
                 name=reference_well_display_label(reference_well),
                 color=color,
                 width_role="line",
-                hover_name=reference_well_display_label(reference_well),
+                hover_name=_reference_hover_name(reference_well),
                 hover_role="reference_hover",
                 x_arrays=x_arrays,
                 y_arrays=y_arrays,
@@ -931,6 +906,7 @@ def _append_combined_reference_wells(
 ) -> None:
     reference_tuple = tuple(reference_wells)
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
+        label = REFERENCE_WELL_KIND_LABELS.get(str(kind), str(kind))
         matching = [
             well
             for well in reference_tuple
@@ -955,8 +931,22 @@ def _append_combined_reference_wells(
                     z_values=z_values,
                 )
             )
-            _append_arrays_from_xyz(x_arrays, y_arrays, z_arrays, x_values, y_values, z_values)
-        label = REFERENCE_WELL_KIND_LABELS.get(str(kind), str(kind))
+            _append_arrays_from_xyz(
+                x_arrays,
+                y_arrays,
+                z_arrays,
+                x_values,
+                y_values,
+                z_values,
+            )
+            _append_station_hover_points(
+                payload,
+                stations=stations,
+                name=_reference_hover_name(well),
+                color=REFERENCE_WELL_KIND_COLORS.get(str(kind), "#A0A0A0"),
+                hover_role="reference_hover",
+                payload_name=f"{label}: hover",
+            )
         _append_line_segments(
             payload,
             segments=segments,
@@ -966,6 +956,53 @@ def _append_combined_reference_wells(
             dash="solid",
             role="line",
         )
+
+
+def _append_station_hover_points(
+    payload: dict[str, object],
+    *,
+    stations: pd.DataFrame,
+    name: str,
+    color: str,
+    hover_role: str,
+    payload_name: str | None = None,
+) -> None:
+    if stations.empty or not {"X_m", "Y_m", "Z_m"}.issubset(stations.columns):
+        return
+    hover_points = _points_from_xyz_arrays(
+        stations["X_m"].to_numpy(dtype=float),
+        stations["Y_m"].to_numpy(dtype=float),
+        stations["Z_m"].to_numpy(dtype=float),
+    )
+    hover_items = _hover_items_from_stations(
+        stations,
+        fallback_name=str(name),
+    )
+    if not hover_points or not hover_items:
+        return
+    max_points = (
+        WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+        if hover_role == "reference_hover"
+        else WT_THREE_MAX_HOVER_POINTS_PER_TRACE
+    )
+    hover_points, hover_items = ptc_three_payload.decimate_hover_payload(
+        points=hover_points,
+        hover_items=hover_items,
+        max_points=max_points,
+    )
+    payload["points"].append(
+        {
+            "name": str(payload_name or name),
+            "points": hover_points,
+            "color": color,
+            "opacity": 0.001,
+            "size": 8.5,
+            "symbol": "circle",
+            "hover": hover_items,
+            "hover_only": True,
+            "role": hover_role,
+        }
+    )
 
 
 def _append_reference_legend(payload: dict[str, object], reference_wells: Iterable[object]) -> None:
@@ -1519,6 +1556,13 @@ def _reference_label_color(kind: str) -> str:
     if str(kind) == REFERENCE_WELL_APPROVED:
         return REFERENCE_LABEL_APPROVED_COLOR
     return REFERENCE_LABEL_ACTUAL_COLOR
+
+
+def _reference_hover_name(reference_well: object) -> str:
+    name = str(getattr(reference_well, "name", "")).strip()
+    if name:
+        return name
+    return reference_well_display_label(reference_well)
 
 
 def _reference_pad_numeric_id(well_name: str) -> str | None:
