@@ -39,6 +39,7 @@ from pywp.anticollision_stage import (
 from pywp.models import INTERPOLATION_RODRIGUES, Point3D, SummaryDict, TrajectoryConfig
 from pywp.parallel import process_pool_context
 from pywp.pilot_wells import (
+    SidetrackWindowOverride,
     build_pilot_trajectory,
     combine_pilot_and_sidetrack,
     is_pilot_record,
@@ -637,6 +638,9 @@ class WelltrackBatchPlanner:
         optimization_context_by_name: (
             dict[str, AntiCollisionOptimizationContext] | None
         ) = None,
+        sidetrack_window_overrides_by_name: (
+            Mapping[str, SidetrackWindowOverride] | None
+        ) = None,
         dynamic_cluster_context: DynamicClusterExecutionContext | None = None,
         progress_callback: ProgressCallback | None = None,
         solver_progress_callback: SolverProgressCallback | None = None,
@@ -648,6 +652,10 @@ class WelltrackBatchPlanner:
             selected_names=selected_names,
             selected_order=selected_order,
         )
+        sidetrack_window_overrides_by_key = {
+            well_name_key(name): override
+            for name, override in (sidetrack_window_overrides_by_name or {}).items()
+        }
 
         # ------------------------------------------------------------------
         # Parallel fast-path: when workers > 1 and no dynamic cluster
@@ -809,6 +817,9 @@ class WelltrackBatchPlanner:
                     optimization_context=runtime_override["optimization_context"],
                     planner_progress_callback=planner_progress_callback,
                     recalculated_success_by_name=recalculated_success_by_name,
+                    sidetrack_window_override=sidetrack_window_overrides_by_key.get(
+                        well_name_key(record.name)
+                    ),
                 )
             if success is not None:
                 optimization_context = runtime_override["optimization_context"]
@@ -1729,6 +1740,7 @@ class WelltrackBatchPlanner:
         optimization_context: AntiCollisionOptimizationContext | None = None,
         planner_progress_callback: Callable[[str, float], None] | None = None,
         recalculated_success_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+        sidetrack_window_override: SidetrackWindowOverride | None = None,
     ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
         if is_pilot_record(record):
             return self._evaluate_pilot_record(record=record, config=config)
@@ -1764,6 +1776,7 @@ class WelltrackBatchPlanner:
                     config=config,
                     planner=self._planner,
                     optimization_context=optimization_context,
+                    window_override=sidetrack_window_override,
                 )
                 sidetrack = combine_pilot_and_sidetrack(
                     pilot_stations=pilot_success.stations,

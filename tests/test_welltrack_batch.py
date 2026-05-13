@@ -34,6 +34,7 @@ from pywp.eclipse_welltrack import (
     parse_welltrack_text,
 )
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
+from pywp.pilot_wells import SidetrackWindowOverride
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
     parse_reference_trajectory_table,
@@ -2785,6 +2786,42 @@ def test_parent_selection_calculates_pilot_before_sidetrack() -> None:
     assert by_name["WELL-04"].summary["trajectory_type"] == "PILOT_SIDETRACK"
     assert by_name["WELL-04"].summary["pilot_well_name"] == "WELL-04_PL"
     assert by_name["WELL-04"].md_t1_m > by_name["WELL-04_PL"].md_t1_m
+
+
+def test_batch_planner_applies_manual_sidetrack_window_override() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+        ),
+    )
+    manual_md = 760.0
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(kop_min_vertical_m=200.0),
+        sidetrack_window_overrides_by_name={
+            "well-04": SidetrackWindowOverride(kind="md", value_m=manual_md)
+        },
+    )
+
+    by_name = {success.name: success for success in successes}
+    assert by_name["WELL-04"].summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert by_name["WELL-04"].summary["sidetrack_window_md_m"] == pytest.approx(
+        manual_md
+    )
 
 
 def test_parent_with_failed_pilot_does_not_fallback_to_regular_well() -> None:

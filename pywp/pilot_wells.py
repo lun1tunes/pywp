@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Literal
 
 import numpy as np
 import pandas as pd
@@ -61,6 +61,21 @@ class PilotWindow(FrozenArbitraryModel):
             inc_deg=float(row["INC_deg"]),
             azi_deg=float(row["AZI_deg"]),
         )
+
+
+@dataclass(frozen=True)
+class SidetrackWindowOverride:
+    kind: Literal["md", "z"]
+    value_m: float
+
+    def __post_init__(self) -> None:
+        normalized_kind = str(self.kind).strip().lower()
+        if normalized_kind not in {"md", "z"}:
+            raise ValueError("Тип ручного окна зарезки должен быть 'md' или 'z'.")
+        if not math.isfinite(float(self.value_m)):
+            raise ValueError("Значение ручного окна зарезки должно быть конечным.")
+        object.__setattr__(self, "kind", normalized_kind)
+        object.__setattr__(self, "value_m", float(self.value_m))
 
 
 @dataclass(frozen=True)
@@ -284,8 +299,35 @@ def select_sidetrack_window(
     config: TrajectoryConfig,
     planner: object,
     optimization_context: AntiCollisionOptimizationContext | None = None,
+    window_override: SidetrackWindowOverride | None = None,
 ) -> tuple[PilotWindow, PlannerResult]:
     del planner
+    sidetrack_planner = SidetrackPlanner()
+    if window_override is not None:
+        window = _manual_sidetrack_window(
+            pilot_name=pilot_name,
+            parent_name=parent_name,
+            pilot_stations=pilot_stations,
+            override=window_override,
+        )
+        try:
+            return window, sidetrack_planner.plan(
+                start=SidetrackStart(
+                    point=window.point,
+                    inc_deg=float(window.inc_deg),
+                    azi_deg=float(window.azi_deg),
+                ),
+                t1=parent_t1,
+                t3=parent_t3,
+                config=config,
+            )
+        except (ValueError, PlanningError) as exc:
+            coordinate_label = "MD" if window_override.kind == "md" else "Z"
+            raise ValueError(
+                f"Ручное окно зарезки {parent_name} по {coordinate_label}="
+                f"{window_override.value_m:.2f} м не дало расчет бокового ствола: {exc}"
+            ) from exc
+
     candidates = _sidetrack_window_candidates(
         pilot_name=pilot_name,
         parent_name=parent_name,
@@ -295,7 +337,6 @@ def select_sidetrack_window(
     )
     last_problem = ""
     best: tuple[float, float, PilotWindow, PlannerResult] | None = None
-    sidetrack_planner = SidetrackPlanner()
     for window in candidates:
         try:
             result = sidetrack_planner.plan(
@@ -825,6 +866,142 @@ def _pilot_windows_from_rows(
         )
         for row in iterable
     ]
+
+
+def _manual_sidetrack_window(
+    *,
+    pilot_name: str,
+    parent_name: str,
+    pilot_stations: pd.DataFrame,
+    override: SidetrackWindowOverride,
+) -> PilotWindow:
+    if pilot_stations.empty:
+        raise ValueError("Ручное окно зарезки невозможно: инклинометрия пилота пуста.")
+    stations = pilot_stations.copy()
+    required = {"MD_m", "X_m", "Y_m", "Z_m", "INC_deg", "AZI_deg"}
+    if not required.issubset(stations.columns):
+        raise ValueError(
+            "Ручное окно зарезки невозможно: в инклинометрии пилота нет "
+            "MD/X/Y/Z/INC/AZI."
+        )
+    finite_mask = np.isfinite(stations[list(required)].to_numpy(dtype=float)).all(axis=1)
+    stations = stations.loc[finite_mask].copy()
+    stations = (
+        stations.sort_values("MD_m", ascending=True)
+        .drop_duplicates(subset=["MD_m"], keep="last")
+        .reset_index(drop=True)
+    )
+    if len(stations) < 2:
+        raise ValueError(
+            "Ручное окно зарезки невозможно: у пилота меньше двух станций."
+        )
+    if override.kind == "md":
+        row = _interpolate_station_by_md(stations, float(override.value_m))
+    else:
+        row = _interpolate_station_by_z(stations, float(override.value_m))
+    return PilotWindow.from_station(
+        pilot_name=pilot_name,
+        parent_name=parent_name,
+        row=row,
+    )
+
+
+def _interpolate_station_by_md(stations: pd.DataFrame, target_md_m: float) -> pd.Series:
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    md_min = float(np.nanmin(md_values))
+    md_max = float(np.nanmax(md_values))
+    if target_md_m < md_min - SMALL or target_md_m > md_max + SMALL:
+        raise ValueError(
+            f"Ручное окно зарезки по MD={target_md_m:.2f} м вне диапазона "
+            f"пилота {md_min:.2f}–{md_max:.2f} м."
+        )
+    for index, row in stations.iterrows():
+        if abs(float(row["MD_m"]) - target_md_m) <= SMALL:
+            return row.copy()
+    for index in range(len(stations) - 1):
+        start = stations.iloc[index]
+        end = stations.iloc[index + 1]
+        start_md = float(start["MD_m"])
+        end_md = float(end["MD_m"])
+        if abs(end_md - start_md) <= SMALL:
+            continue
+        if start_md - SMALL <= target_md_m <= end_md + SMALL:
+            fraction = (target_md_m - start_md) / (end_md - start_md)
+            return _interpolated_station_row(
+                start=start,
+                end=end,
+                fraction=float(max(0.0, min(1.0, fraction))),
+                md_m=target_md_m,
+            )
+    raise ValueError(
+        f"Не удалось интерполировать ручное окно зарезки по MD={target_md_m:.2f} м."
+    )
+
+
+def _interpolate_station_by_z(stations: pd.DataFrame, target_z_m: float) -> pd.Series:
+    z_values = stations["Z_m"].to_numpy(dtype=float)
+    z_min = float(np.nanmin(z_values))
+    z_max = float(np.nanmax(z_values))
+    if target_z_m < z_min - SMALL or target_z_m > z_max + SMALL:
+        raise ValueError(
+            f"Ручное окно зарезки по Z={target_z_m:.2f} м вне диапазона "
+            f"пилота {z_min:.2f}–{z_max:.2f} м."
+        )
+    for _, row in stations.iterrows():
+        if abs(float(row["Z_m"]) - target_z_m) <= SMALL:
+            return row.copy()
+    for index in range(len(stations) - 1):
+        start = stations.iloc[index]
+        end = stations.iloc[index + 1]
+        start_z = float(start["Z_m"])
+        end_z = float(end["Z_m"])
+        if abs(end_z - start_z) <= SMALL:
+            continue
+        lower = min(start_z, end_z) - SMALL
+        upper = max(start_z, end_z) + SMALL
+        if lower <= target_z_m <= upper:
+            fraction = (target_z_m - start_z) / (end_z - start_z)
+            start_md = float(start["MD_m"])
+            end_md = float(end["MD_m"])
+            md_m = start_md + (end_md - start_md) * fraction
+            return _interpolated_station_row(
+                start=start,
+                end=end,
+                fraction=float(max(0.0, min(1.0, fraction))),
+                md_m=float(md_m),
+            )
+    raise ValueError(
+        f"Не удалось интерполировать ручное окно зарезки по Z={target_z_m:.2f} м."
+    )
+
+
+def _interpolated_station_row(
+    *,
+    start: pd.Series,
+    end: pd.Series,
+    fraction: float,
+    md_m: float,
+) -> pd.Series:
+    fraction = float(max(0.0, min(1.0, fraction)))
+    start_azi = float(start["AZI_deg"])
+    end_azi = float(end["AZI_deg"])
+    azi_delta = ((end_azi - start_azi + 180.0) % 360.0) - 180.0
+    segment = end.get("segment", start.get("segment", ""))
+    return pd.Series(
+        {
+            "MD_m": float(md_m),
+            "X_m": _lerp(float(start["X_m"]), float(end["X_m"]), fraction),
+            "Y_m": _lerp(float(start["Y_m"]), float(end["Y_m"]), fraction),
+            "Z_m": _lerp(float(start["Z_m"]), float(end["Z_m"]), fraction),
+            "INC_deg": _lerp(float(start["INC_deg"]), float(end["INC_deg"]), fraction),
+            "AZI_deg": _normalize_azimuth_deg(start_azi + azi_delta * fraction),
+            "segment": segment,
+        }
+    )
+
+
+def _lerp(start: float, end: float, fraction: float) -> float:
+    return float(start + (end - start) * fraction)
 
 
 def _sidetrack_window_score(

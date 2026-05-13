@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping, MutableMapping
+
 import streamlit as st
 
 from pywp import ptc_core as wt
+from pywp.pilot_wells import (
+    SidetrackWindowOverride,
+    is_pilot_name,
+    parent_name_for_pilot,
+    well_name_key,
+)
 from pywp.ptc_page_state import render_calc_params_panel
 
 __all__ = ["render_run_section"]
+
+_SIDETRACK_AUTO = "Авто"
+_SIDETRACK_MANUAL = "Ручной"
+_SIDETRACK_MODE_OPTIONS = (_SIDETRACK_AUTO, _SIDETRACK_MANUAL)
+_SIDETRACK_KIND_OPTIONS = ("MD", "Z")
+_SIDETRACK_PARENT_KEY = "wt_sidetrack_window_parent_name"
 
 
 def render_run_section(*, records: list[object]) -> None:
@@ -25,6 +40,9 @@ def render_run_section(*, records: list[object]) -> None:
         st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
 
     config = render_calc_params_panel()
+    sidetrack_overrides, _sidetrack_override_error = (
+        _render_sidetrack_window_params(records=records)
+    )
 
     with st.form("ptc_run_form", clear_on_submit=False):
         select_all_clicked = False
@@ -106,6 +124,27 @@ def render_run_section(*, records: list[object]) -> None:
             icon=":material/play_arrow:",
         )
 
+    if run_clicked:
+        selected_keys = {
+            well_name_key(name) for name in st.session_state.get("wt_selected_names", [])
+        }
+        active_parent_names = [
+            name
+            for name in _sidetrack_parent_names(records)
+            if well_name_key(name) in selected_keys
+        ]
+        _active_overrides, active_override_error = (
+            _sidetrack_window_overrides_from_state(
+                active_parent_names,
+                st.session_state,
+            )
+        )
+    else:
+        active_override_error = ""
+    if run_clicked and active_override_error:
+        st.warning(active_override_error)
+        run_clicked = False
+
     if select_all_clicked:
         st.session_state["wt_pending_selected_names"] = list(all_names)
         st.rerun()
@@ -143,6 +182,7 @@ def render_run_section(*, records: list[object]) -> None:
                 config=config,
                 run_clicked=bool(run_clicked),
                 parallel_workers=int(_parallel_workers),
+                sidetrack_window_overrides_by_name=sidetrack_overrides,
             )
         ],
         records=records,
@@ -154,3 +194,171 @@ def render_run_section(*, records: list[object]) -> None:
     ):
         st.session_state["wt_results_view_mode"] = "Все скважины"
         st.session_state["wt_results_all_view_mode"] = "Anti-collision"
+
+
+def _render_sidetrack_window_params(
+    *,
+    records: list[object],
+) -> tuple[dict[str, SidetrackWindowOverride], str]:
+    parent_names = _sidetrack_parent_names(records)
+    if not parent_names:
+        return {}, ""
+
+    state = st.session_state
+    selected_parent = _selected_sidetrack_parent_name(parent_names, state)
+    st.markdown("### Параметры боковых стволов")
+    c1, c2, c3, c4 = st.columns(
+        [2.3, 1.4, 1.1, 1.6],
+        gap="small",
+        vertical_alignment="bottom",
+    )
+    with c1:
+        if len(parent_names) == 1:
+            st.text_input(
+                "Скважина с пилотом",
+                value=selected_parent,
+                disabled=True,
+                key=f"wt_sidetrack_window_single_parent_display::{selected_parent}",
+            )
+        else:
+            selected_parent = st.selectbox(
+                "Скважина с пилотом",
+                options=parent_names,
+                key=_SIDETRACK_PARENT_KEY,
+            )
+    mode_key = _sidetrack_mode_key(selected_parent)
+    if state.get(mode_key) not in _SIDETRACK_MODE_OPTIONS:
+        state[mode_key] = _SIDETRACK_AUTO
+    with c2:
+        mode = st.radio(
+            "Окно зарезки",
+            options=_SIDETRACK_MODE_OPTIONS,
+            index=_SIDETRACK_MODE_OPTIONS.index(str(state.get(mode_key))),
+            key=mode_key,
+            horizontal=True,
+        )
+    kind_key = _sidetrack_kind_key(selected_parent)
+    if state.get(kind_key) not in _SIDETRACK_KIND_OPTIONS:
+        state[kind_key] = "Z"
+    value_key = _sidetrack_value_key(selected_parent)
+    if mode == _SIDETRACK_MANUAL:
+        with c3:
+            kind_label = st.radio(
+                "Задать по",
+                options=_SIDETRACK_KIND_OPTIONS,
+                index=_SIDETRACK_KIND_OPTIONS.index(str(state.get(kind_key))),
+                key=kind_key,
+                horizontal=True,
+            )
+        value_label = (
+            "MD окна, м"
+            if str(kind_label or state.get(kind_key, "Z")).upper() == "MD"
+            else "Z окна, м"
+        )
+        with c4:
+            st.number_input(
+                value_label,
+                value=None,
+                step=10.0,
+                format="%.2f",
+                key=value_key,
+                placeholder="Введите значение",
+            )
+    else:
+        with c3:
+            st.caption("Режим")
+        with c4:
+            st.caption("Автоподбор")
+
+    overrides, error = _sidetrack_window_overrides_from_state(parent_names, state)
+    if overrides:
+        st.caption(
+            "Ручные окна зарезки: "
+            + ", ".join(
+                f"{name} ({override.kind.upper()}={override.value_m:.2f} м)"
+                for name, override in overrides.items()
+            )
+        )
+    return overrides, error
+
+
+def _sidetrack_parent_names(records: list[object]) -> list[str]:
+    parent_by_key = {
+        well_name_key(getattr(record, "name", "")): str(getattr(record, "name", ""))
+        for record in records
+        if not is_pilot_name(getattr(record, "name", ""))
+    }
+    parent_names: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        if not is_pilot_name(getattr(record, "name", "")):
+            continue
+        parent_key = well_name_key(
+            parent_name_for_pilot(getattr(record, "name", ""))
+        )
+        parent_name = parent_by_key.get(parent_key)
+        if parent_name is None or parent_key in seen:
+            continue
+        parent_names.append(parent_name)
+        seen.add(parent_key)
+    return parent_names
+
+
+def _selected_sidetrack_parent_name(
+    parent_names: list[str],
+    state: MutableMapping[str, object],
+) -> str:
+    if not parent_names:
+        return ""
+    current = str(state.get(_SIDETRACK_PARENT_KEY, "")).strip()
+    if current not in parent_names:
+        current = parent_names[0]
+        state[_SIDETRACK_PARENT_KEY] = current
+    return current
+
+
+def _sidetrack_window_overrides_from_state(
+    parent_names: list[str],
+    state: Mapping[str, object],
+) -> tuple[dict[str, SidetrackWindowOverride], str]:
+    overrides: dict[str, SidetrackWindowOverride] = {}
+    errors: list[str] = []
+    for parent_name in parent_names:
+        mode = str(state.get(_sidetrack_mode_key(parent_name), _SIDETRACK_AUTO))
+        if mode != _SIDETRACK_MANUAL:
+            continue
+        kind_label = str(state.get(_sidetrack_kind_key(parent_name), "Z")).upper()
+        kind = "md" if kind_label == "MD" else "z"
+        raw_value = state.get(_sidetrack_value_key(parent_name))
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            errors.append(
+                f"{parent_name}: задайте значение {kind_label} окна зарезки."
+            )
+            continue
+        if not math.isfinite(value):
+            errors.append(
+                f"{parent_name}: значение {kind_label} должно быть конечным."
+            )
+            continue
+        try:
+            overrides[parent_name] = SidetrackWindowOverride(
+                kind=kind,
+                value_m=value,
+            )
+        except ValueError as exc:
+            errors.append(f"{parent_name}: {exc}")
+    return overrides, " ".join(errors)
+
+
+def _sidetrack_mode_key(parent_name: str) -> str:
+    return f"wt_sidetrack_window_mode::{parent_name}"
+
+
+def _sidetrack_kind_key(parent_name: str) -> str:
+    return f"wt_sidetrack_window_kind::{parent_name}"
+
+
+def _sidetrack_value_key(parent_name: str) -> str:
+    return f"wt_sidetrack_window_value::{parent_name}"

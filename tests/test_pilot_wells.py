@@ -7,6 +7,7 @@ from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.pilot_wells import (
     PilotWindow,
+    SidetrackWindowOverride,
     build_pilot_trajectory,
     combine_pilot_and_sidetrack,
     is_pilot_name,
@@ -231,6 +232,105 @@ def test_two_point_welltracks4_pilot_keeps_window_near_first_study_point() -> No
     assert 1750.0 <= float(window.point.z) <= 1850.0
     assert float(result.summary["md_total_m"]) < 3800.0
     assert float(result.summary["max_dls_total_deg_per_30m"]) <= 1.1
+
+
+def test_manual_sidetrack_window_md_override_interpolates_pilot_pose() -> None:
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        kop_min_vertical_m=200.0,
+        max_inc_deg=100.0,
+    )
+    pilot = build_pilot_trajectory(
+        WelltrackRecord(
+            name="WELL-04_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+                WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+            ),
+        ),
+        config=config,
+    )
+    manual_md = float(pilot.md_first_target_m) - 63.5
+
+    window, result = select_sidetrack_window(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_stations=pilot.stations,
+        parent_t1=Point3D(800.0, 0.0, 2200.0),
+        parent_t3=Point3D(1800.0, 0.0, 2200.0),
+        config=config,
+        planner=object(),
+        window_override=SidetrackWindowOverride(kind="md", value_m=manual_md),
+    )
+
+    first_station = result.stations.iloc[0]
+    assert float(window.md_m) == pytest.approx(manual_md)
+    assert float(first_station["X_m"]) == pytest.approx(float(window.point.x))
+    assert float(first_station["Y_m"]) == pytest.approx(float(window.point.y))
+    assert float(first_station["Z_m"]) == pytest.approx(float(window.point.z))
+    assert float(first_station["INC_deg"]) == pytest.approx(float(window.inc_deg))
+    assert float(first_station["AZI_deg"]) == pytest.approx(float(window.azi_deg))
+
+
+def test_manual_sidetrack_window_z_override_interpolates_pilot_pose() -> None:
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        kop_min_vertical_m=200.0,
+        max_inc_deg=100.0,
+    )
+    pilot = build_pilot_trajectory(
+        WelltrackRecord(
+            name="WELL-04_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+                WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+            ),
+        ),
+        config=config,
+    )
+    manual_z = 760.0
+
+    window, _result = select_sidetrack_window(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_stations=pilot.stations,
+        parent_t1=Point3D(800.0, 0.0, 2200.0),
+        parent_t3=Point3D(1800.0, 0.0, 2200.0),
+        config=config,
+        planner=object(),
+        window_override=SidetrackWindowOverride(kind="z", value_m=manual_z),
+    )
+
+    assert float(window.point.z) == pytest.approx(manual_z)
+    assert 0.0 < float(window.md_m) < float(pilot.md_total_m)
+
+
+def test_manual_sidetrack_window_rejects_out_of_range_value() -> None:
+    config = TrajectoryConfig(md_step_m=25.0, kop_min_vertical_m=200.0)
+    pilot = build_pilot_trajectory(
+        WelltrackRecord(
+            name="WELL-04_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            ),
+        ),
+        config=config,
+    )
+
+    with pytest.raises(ValueError, match="вне диапазона пилота"):
+        select_sidetrack_window(
+            pilot_name="WELL-04_PL",
+            parent_name="WELL-04",
+            pilot_stations=pilot.stations,
+            parent_t1=Point3D(800.0, 0.0, 2200.0),
+            parent_t3=Point3D(1800.0, 0.0, 2200.0),
+            config=config,
+            planner=object(),
+            window_override=SidetrackWindowOverride(kind="md", value_m=-1.0),
+        )
 
 
 def test_sidetrack_uncertainty_at_window_inherits_pilot_covariance() -> None:

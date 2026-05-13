@@ -12,6 +12,7 @@ import pandas as pd
 from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, TrajectoryConfig
 from pywp.pilot_wells import (
+    SidetrackWindowOverride,
     is_pilot_name,
     parent_name_for_pilot,
     pilot_name_key_for_parent,
@@ -61,6 +62,9 @@ class BatchRunRequest:
     config: TrajectoryConfig
     run_clicked: bool
     parallel_workers: int = 0
+    sidetrack_window_overrides_by_name: Mapping[
+        str, SidetrackWindowOverride
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -418,6 +422,23 @@ def run_batch_if_clicked(
                     "Для части выбранных скважин активирован anti-collision avoidance "
                     "mode на конфликтном окне."
                 )
+            selected_name_keys = {well_name_key(item) for item in selected_set}
+            active_sidetrack_overrides = {
+                str(name): override
+                for name, override in (
+                    request.sidetrack_window_overrides_by_name or {}
+                ).items()
+                if well_name_key(name) in selected_name_keys
+            }
+            if active_sidetrack_overrides:
+                append_log(
+                    "Активны ручные окна зарезки: "
+                    + ", ".join(
+                        f"{name} ({override.kind.upper()}={override.value_m:.2f} м)"
+                        for name, override in active_sidetrack_overrides.items()
+                    )
+                    + "."
+                )
             active_kop_function = kop_min_vertical_function_from_state(
                 prefix=calc_params_prefix
             )
@@ -545,6 +566,9 @@ def run_batch_if_clicked(
                 config=request.config,
                 config_by_name=config_by_name,
                 optimization_context_by_name=optimization_context_by_name,
+                sidetrack_window_overrides_by_name=(
+                    request.sidetrack_window_overrides_by_name
+                ),
                 dynamic_cluster_context=dynamic_cluster_context,
                 progress_callback=on_progress,
                 solver_progress_callback=on_solver_progress,
