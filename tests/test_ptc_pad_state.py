@@ -75,6 +75,21 @@ def test_pad_config_defaults_to_center_anchor_mode() -> None:
     )
 
 
+def test_record_midpoint_xyz_uses_all_multi_horizontal_targets() -> None:
+    record = WelltrackRecord(
+        name="MULTI",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=700.0, y=0.0, z=1040.0, md=3.0),
+            WelltrackPoint(x=1100.0, y=0.0, z=1040.0, md=4.0),
+        ),
+    )
+
+    assert ptc_pad_state.record_midpoint_xyz(record) == (600.0, 0.0, 1020.0)
+
+
 def test_detect_ui_pads_marks_source_defined_surfaces() -> None:
     pads, metadata = ptc_pad_state.detect_ui_pads(_prepositioned_records())
 

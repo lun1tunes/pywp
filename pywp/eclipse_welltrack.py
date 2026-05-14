@@ -26,6 +26,10 @@ _TABLE_POINT_ALIASES: dict[str, str] = {
     "end": "t3",
 }
 _TABLE_PILOT_POINT_RE = re.compile(r"^(?:pl|p)([1-9]\d*)$", flags=re.IGNORECASE)
+_TABLE_MULTI_HORIZONTAL_POINT_RE = re.compile(
+    r"^([1-9]\d*)_t([13])$",
+    flags=re.IGNORECASE,
+)
 _TABLE_POINT_ORDER: tuple[str, ...] = ("wellhead", "t1", "t3")
 _TABLE_POINT_DISPLAY_LABELS: dict[str, str] = {
     "wellhead": "S",
@@ -220,6 +224,16 @@ def parse_welltrack_points_table(
             records.append(WelltrackRecord(name=well_name, points=ordered_points))
             continue
 
+        if _has_multi_horizontal_table_points(points_by_name):
+            ordered_names = _ordered_table_multi_horizontal_point_names(
+                points_by_name,
+                well_name=well_name,
+            )
+            ordered_points = tuple(points_by_name[name] for name in ordered_names)
+            _validate_record_md(points=list(ordered_points), well_name=well_name)
+            records.append(WelltrackRecord(name=well_name, points=ordered_points))
+            continue
+
         missing = [name for name in _TABLE_POINT_ORDER if name not in points_by_name]
         if missing:
             raise WelltrackParseError(
@@ -278,6 +292,73 @@ def welltrack_points_to_targets(
     return surface, t1, t3
 
 
+def welltrack_points_to_target_pairs(
+    points: tuple[WelltrackPoint, ...],
+    *,
+    order_mode: Literal["strict_file_order", "sort_by_md"] = "strict_file_order",
+) -> tuple[Point3D, tuple[tuple[Point3D, Point3D], ...]]:
+    if len(points) < 3:
+        raise ValueError(
+            f"Expected at least 3 points (S, t1, t3), got {len(points)}."
+        )
+    target_count = len(points) - 1
+    if target_count % 2 != 0:
+        raise ValueError(
+            "Expected S plus complete t1/t3 pairs for multi-horizontal well "
+            f"(got {target_count} target points)."
+        )
+    if order_mode not in {"strict_file_order", "sort_by_md"}:
+        raise ValueError(
+            f"Unsupported order_mode={order_mode!r}. "
+            "Supported values: 'strict_file_order', 'sort_by_md'."
+        )
+
+    ordered_points = points
+    if order_mode == "sort_by_md":
+        ordered_points = tuple(sorted(points, key=lambda point: float(point.md)))
+
+    md_values = [float(point.md) for point in ordered_points]
+    if not all(math.isfinite(value) for value in md_values):
+        raise ValueError("All MD values must be finite numbers for target mapping.")
+    if not all(
+        left + _MD_EPS < right
+        for left, right in zip(md_values, md_values[1:], strict=False)
+    ):
+        raise ValueError(
+            "Expected strictly increasing MD for points S and t1/t3 pairs "
+            f"(got MD sequence: {', '.join(f'{value:.3f}' for value in md_values)})."
+        )
+
+    surface = Point3D(
+        x=ordered_points[0].x,
+        y=ordered_points[0].y,
+        z=ordered_points[0].z,
+    )
+    pairs: list[tuple[Point3D, Point3D]] = []
+    for index in range(1, len(ordered_points), 2):
+        t1 = Point3D(
+            x=ordered_points[index].x,
+            y=ordered_points[index].y,
+            z=ordered_points[index].z,
+        )
+        t3 = Point3D(
+            x=ordered_points[index + 1].x,
+            y=ordered_points[index + 1].y,
+            z=ordered_points[index + 1].z,
+        )
+        pairs.append((t1, t3))
+    return surface, tuple(pairs)
+
+
+def welltrack_multi_horizontal_level_count(
+    points: tuple[WelltrackPoint, ...],
+) -> int:
+    target_count = int(max(len(tuple(points)) - 1, 0))
+    if target_count < 4 or target_count % 2 != 0:
+        return 0
+    return int(target_count // 2)
+
+
 def _table_row_value(row: Mapping[str, object], *keys: str) -> object:
     for key in keys:
         if key in row:
@@ -327,20 +408,28 @@ def _normalize_table_point_name(
         )
 
     point_name = _TABLE_POINT_ALIASES.get(normalized)
+    if point_name is not None:
+        return point_name
+    multi_match = _TABLE_MULTI_HORIZONTAL_POINT_RE.match(normalized)
+    if multi_match is not None:
+        return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
     if point_name is None:
         raise WelltrackParseError(
             "Табличный WELLTRACK: unsupported Point="
             f"{value!r} в строке {row_no}. "
-            "Ожидается S, t1 или t3. Для пилота используйте имя wellname_PL "
-            "и точки S, PL1, PL2, ..."
+            "Ожидается S, t1 или t3; для многопластовой скважины используйте "
+            "пары 1_t1, 1_t3, 2_t1, 2_t3, ... "
+            "Для пилота используйте имя wellname_PL и точки S, PL1, PL2, ..."
         )
-    return point_name
 
 
 def _table_point_display_name(point_name: str) -> str:
     pilot_match = _TABLE_PILOT_POINT_RE.match(str(point_name))
     if pilot_match is not None:
         return f"PL{int(pilot_match.group(1))}"
+    multi_match = _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name))
+    if multi_match is not None:
+        return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
     return _TABLE_POINT_DISPLAY_LABELS.get(str(point_name), str(point_name))
 
 
@@ -348,6 +437,11 @@ def _table_point_md_index(point_name: str) -> float:
     pilot_match = _TABLE_PILOT_POINT_RE.match(str(point_name))
     if pilot_match is not None:
         return float(int(pilot_match.group(1)))
+    multi_match = _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name))
+    if multi_match is not None:
+        level = int(multi_match.group(1))
+        point_kind = int(multi_match.group(2))
+        return float(2 * (level - 1) + (1 if point_kind == 1 else 2))
     return float(_TABLE_POINT_ORDER.index(point_name))
 
 
@@ -384,6 +478,64 @@ def _ordered_table_pilot_point_names(
             f"{', '.join(f'PL{index}' for index in missing)}."
         )
     return ("wellhead", *(f"pl{index}" for index in expected_indices))
+
+
+def _has_multi_horizontal_table_points(
+    points_by_name: Mapping[str, WelltrackPoint],
+) -> bool:
+    return any(
+        _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name)) is not None
+        for point_name in points_by_name
+    )
+
+
+def _ordered_table_multi_horizontal_point_names(
+    points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+) -> tuple[str, ...]:
+    if "wellhead" not in points_by_name:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для скважины "
+            f"'{well_name}' отсутствуют точки: S."
+        )
+    legacy_points = sorted(
+        point_name
+        for point_name in points_by_name
+        if point_name in {"t1", "t3"}
+    )
+    if legacy_points:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластовой скважины "
+            f"'{well_name}' используйте только пары 1_t1/1_t3, 2_t1/2_t3, ... "
+            f"без обычных точек {', '.join(legacy_points)}."
+        )
+    levels = sorted(
+        int(match.group(1))
+        for point_name in points_by_name
+        if (match := _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name))) is not None
+    )
+    if not levels:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластовой скважины "
+            f"'{well_name}' отсутствует точка 1_t1."
+        )
+    max_level = int(max(levels))
+    missing: list[str] = []
+    ordered = ["wellhead"]
+    for level in range(1, max_level + 1):
+        for suffix in ("t1", "t3"):
+            point_name = f"{level}_{suffix}"
+            if point_name not in points_by_name:
+                missing.append(point_name)
+            else:
+                ordered.append(point_name)
+    if missing:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластовой скважины "
+            f"'{well_name}' отсутствуют точки: {', '.join(missing)}."
+        )
+    return tuple(ordered)
 
 
 def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float:

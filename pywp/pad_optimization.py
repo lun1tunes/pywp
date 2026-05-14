@@ -12,7 +12,11 @@ from pywp.anticollision import (
     analyze_anti_collision,
     build_anti_collision_well,
 )
-from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
+from pywp.eclipse_welltrack import (
+    WelltrackRecord,
+    welltrack_points_to_target_pairs,
+)
+from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.models import TrajectoryConfig
 from pywp.parallel import process_pool_context
 from pywp.planner import TrajectoryPlanner
@@ -68,17 +72,26 @@ def recalculate_well(
 ) -> SuccessfulWellPlan | None:
     start_t = perf_counter()
     try:
-        surface, t1, t3 = welltrack_points_to_targets(record.points)
+        surface, target_pairs = welltrack_points_to_target_pairs(record.points)
+        t1, t3 = target_pairs[0]
     except (ValueError, IndexError):
         return None
     planner = TrajectoryPlanner()
     try:
         result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
+        if len(target_pairs) > 1:
+            result = extend_plan_with_multi_horizontal_targets(
+                base_result=result,
+                target_pairs=target_pairs,
+                config=config,
+            )
+            t3 = target_pairs[-1][1]
         return SuccessfulWellPlan(
             name=record.name,
             surface=surface,
             t1=t1,
             t3=t3,
+            target_pairs=target_pairs,
             stations=result.stations,
             summary=result.summary,
             azimuth_deg=result.azimuth_deg,

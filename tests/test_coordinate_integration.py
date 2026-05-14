@@ -286,6 +286,50 @@ class TestCoordinateIntegration:
         assert result.surface.x == pytest.approx(11.0)
         assert result.summary["display_crs_xy_unit"] == "deg"
 
+    def test_apply_crs_to_well_view_transforms_multi_horizontal_pairs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stations = pd.DataFrame({"X_m": [0.0], "Y_m": [0.0], "Z_m": [0.0]})
+        view = SingleWellResultView(
+            well_name="MULTI",
+            surface=Point3D(x=10.0, y=20.0, z=0.0),
+            t1=Point3D(x=100.0, y=200.0, z=1000.0),
+            t3=Point3D(x=900.0, y=200.0, z=1040.0),
+            target_pairs=(
+                (
+                    Point3D(x=100.0, y=200.0, z=1000.0),
+                    Point3D(x=500.0, y=200.0, z=1000.0),
+                ),
+                (
+                    Point3D(x=600.0, y=200.0, z=1040.0),
+                    Point3D(x=900.0, y=200.0, z=1040.0),
+                ),
+            ),
+            stations=stations,
+            summary={"md_m": 5000.0},
+            config={"lateral_tolerance_m": 30.0},
+            azimuth_deg=45.0,
+            md_t1_m=3000.0,
+        )
+        monkeypatch.setattr(ci, "HAS_PYPROJ", True)
+        monkeypatch.setattr(
+            ci,
+            "_transform_xy",
+            lambda x, y, _from_crs, _to_crs: (float(x) + 1.0, float(y) + 2.0),
+        )
+
+        result = apply_crs_to_well_view(
+            view,
+            CoordinateSystem.WGS84,
+            CoordinateSystem.PULKOVO_1942_ZONE_16,
+        )
+
+        assert result.target_pairs[0][0].x == pytest.approx(101.0)
+        assert result.target_pairs[0][0].y == pytest.approx(202.0)
+        assert result.target_pairs[1][1].x == pytest.approx(901.0)
+        assert result.target_pairs[1][1].z == pytest.approx(1040.0)
+
     def test_transform_stations_can_keep_standard_columns(
         self,
         monkeypatch: pytest.MonkeyPatch,

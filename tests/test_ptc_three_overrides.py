@@ -389,6 +389,33 @@ def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
     )
 
 
+def test_build_edit_wells_payload_skips_multi_horizontal_wells() -> None:
+    regular = _successful_plan_xy(
+        name="WELL-A",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+    )
+    multi = _successful_plan_xy(
+        name="MULTI",
+        x_offset_m=5000.0,
+        y_offset_m=0.0,
+    ).model_copy(
+        update={
+            "target_pairs": (
+                (Point3D(6000.0, 0.0, 0.0), Point3D(6500.0, 0.0, 0.0)),
+                (Point3D(6700.0, 0.0, 30.0), Point3D(7200.0, 0.0, 30.0)),
+            ),
+        }
+    )
+
+    edit_wells = ptc_three_overrides.build_edit_wells_payload(
+        [regular, multi],
+        {"WELL-A": "#123456", "MULTI": "#abcdef"},
+    )
+
+    assert [item["name"] for item in edit_wells] == ["WELL-A"]
+
+
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
     payload = {
         "legend": [

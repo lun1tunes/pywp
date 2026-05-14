@@ -10,6 +10,8 @@ from pywp.eclipse_welltrack import (
     decode_welltrack_bytes,
     parse_welltrack_points_table,
     parse_welltrack_text,
+    welltrack_multi_horizontal_level_count,
+    welltrack_points_to_target_pairs,
     welltrack_points_to_targets,
 )
 
@@ -105,6 +107,43 @@ def test_points_to_targets_requires_exactly_three_points() -> None:
     record = parse_welltrack_text(text)[0]
     with pytest.raises(ValueError, match="Expected exactly 3 points"):
         welltrack_points_to_targets(record.points)
+
+
+def test_points_to_target_pairs_supports_multi_horizontal_welltrack_order() -> None:
+    text = """
+    WELLTRACK 'MULTI'
+    0 0 0 0
+    100 0 1000 1
+    500 0 1000 2
+    650 0 1020 3
+    1050 0 1020 4
+    /
+    """
+    record = parse_welltrack_text(text)[0]
+
+    surface, pairs = welltrack_points_to_target_pairs(record.points)
+
+    assert surface.z == pytest.approx(0.0)
+    assert welltrack_multi_horizontal_level_count(record.points) == 2
+    assert len(pairs) == 2
+    assert pairs[0][0].x == pytest.approx(100.0)
+    assert pairs[1][1].z == pytest.approx(1020.0)
+
+
+def test_parse_welltrack_points_table_accepts_multi_horizontal_rows() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "MULTI", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "MULTI", "Point": "1_t1", "X": 100.0, "Y": 0.0, "Z": 1000.0},
+            {"Wellname": "MULTI", "Point": "1_t3", "X": 500.0, "Y": 0.0, "Z": 1000.0},
+            {"Wellname": "MULTI", "Point": "2_t1", "X": 650.0, "Y": 0.0, "Z": 1020.0},
+            {"Wellname": "MULTI", "Point": "2_t3", "X": 1050.0, "Y": 0.0, "Z": 1020.0},
+        ]
+    )
+
+    assert len(records) == 1
+    assert [point.md for point in records[0].points] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert welltrack_multi_horizontal_level_count(records[0].points) == 2
 
 
 def test_parse_welltrack_points_table_accepts_tabular_rows() -> None:

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from pywp.constants import SMALL
-from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
+from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_target_pairs
 from pywp.models import Point3D
 from pywp.well_pad import (
     PAD_SURFACE_ANCHOR_CENTER,
@@ -212,11 +212,16 @@ def record_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
     points = tuple(record.points)
     if len(points) >= 3:
         try:
-            _, t1, t3 = welltrack_points_to_targets(tuple(points[:3]))
+            _, target_pairs = welltrack_points_to_target_pairs(points)
+            target_points = [
+                point
+                for pair_t1, pair_t3 in target_pairs
+                for point in (pair_t1, pair_t3)
+            ]
             return (
-                float(0.5 * (t1.x + t3.x)),
-                float(0.5 * (t1.y + t3.y)),
-                float(0.5 * (t1.z + t3.z)),
+                float(np.mean([point.x for point in target_points])),
+                float(np.mean([point.y for point in target_points])),
+                float(np.mean([point.z for point in target_points])),
             )
         except (TypeError, ValueError):
             pass

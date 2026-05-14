@@ -40,7 +40,12 @@ def successful_plan_raw_bounds(
     success: SuccessfulWellPlan,
 ) -> dict[str, list[float]] | None:
     stations = success.stations
-    point_bounds = _point_triplet_bounds(success.surface, success.t1, success.t3)
+    point_bounds = _target_point_bounds(
+        surface=success.surface,
+        t1=success.t1,
+        t3=success.t3,
+        target_pairs=tuple(getattr(success, "target_pairs", ()) or ()),
+    )
     if stations.empty or not {"X_m", "Y_m", "Z_m"}.issubset(stations.columns):
         return point_bounds
     station_bounds = ptc_three_payload.raw_bounds_from_xyz_arrays(
@@ -52,10 +57,11 @@ def successful_plan_raw_bounds(
 
 
 def target_only_raw_bounds(target_only: object) -> dict[str, list[float]]:
-    return _point_triplet_bounds(
-        getattr(target_only, "surface"),
-        getattr(target_only, "t1"),
-        getattr(target_only, "t3"),
+    return _target_point_bounds(
+        surface=getattr(target_only, "surface"),
+        t1=getattr(target_only, "t1"),
+        t3=getattr(target_only, "t3"),
+        target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
     ) or {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
 
 
@@ -334,6 +340,9 @@ def build_edit_wells_payload(
 ) -> list[dict[str, object]]:
     edit_wells: list[dict[str, object]] = []
     for success in successes:
+        target_pairs = tuple(getattr(success, "target_pairs", ()) or ())
+        if len(target_pairs) > 1:
+            continue
         config = success.config
         base_points = _decimated_base_points(success)
         edit_wells.append(
@@ -342,6 +351,10 @@ def build_edit_wells_payload(
                 "surface": _point3d_payload(success.surface),
                 "t1": _point3d_payload(success.t1),
                 "t3": _point3d_payload(success.t3),
+                "target_pairs": [
+                    [_point3d_payload(pair_t1), _point3d_payload(pair_t3)]
+                    for pair_t1, pair_t3 in target_pairs
+                ],
                 "color": str(name_to_color.get(str(success.name), "#2563eb")),
                 "base_points": base_points,
                 "config": {
@@ -423,7 +436,12 @@ def anticollision_three_payload_overrides(
         )
         extra_bounds = None
         if well.t1 is not None and well.t3 is not None:
-            extra_bounds = _point_triplet_bounds(well.surface, well.t1, well.t3)
+            extra_bounds = _target_point_bounds(
+                surface=well.surface,
+                t1=well.t1,
+                t3=well.t3,
+                target_pairs=tuple(getattr(well, "target_pairs", ()) or ()),
+            )
         merged_bounds = ptc_three_payload.merge_raw_bounds((bounds, extra_bounds))
         if merged_bounds is not None:
             well_bounds_by_name[str(well.name)] = merged_bounds
@@ -453,21 +471,36 @@ def anticollision_three_payload_overrides(
     return result
 
 
-def _point_triplet_bounds(
+def _target_point_bounds(
+    *,
     surface: Point3D,
     t1: Point3D,
     t3: Point3D,
-) -> dict[str, list[float]]:
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+) -> dict[str, list[float]] | None:
+    points = [surface]
+    if len(target_pairs) > 1:
+        for pair_t1, pair_t3 in target_pairs:
+            points.extend([pair_t1, pair_t3])
+    else:
+        points.extend([t1, t3])
+    return _points_bounds(points)
+
+
+def _points_bounds(points: Iterable[Point3D]) -> dict[str, list[float]] | None:
+    point_list = list(points)
+    if not point_list:
+        return None
     return {
         "min": [
-            float(min(surface.x, t1.x, t3.x)),
-            float(min(surface.y, t1.y, t3.y)),
-            float(min(surface.z, t1.z, t3.z)),
+            float(min(point.x for point in point_list)),
+            float(min(point.y for point in point_list)),
+            float(min(point.z for point in point_list)),
         ],
         "max": [
-            float(max(surface.x, t1.x, t3.x)),
-            float(max(surface.y, t1.y, t3.y)),
-            float(max(surface.z, t1.z, t3.z)),
+            float(max(point.x for point in point_list)),
+            float(max(point.y for point in point_list)),
+            float(max(point.z for point in point_list)),
         ],
     }
 

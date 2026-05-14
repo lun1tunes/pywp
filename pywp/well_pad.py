@@ -9,7 +9,7 @@ from pywp.constants import SMALL
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
-    welltrack_points_to_targets,
+    welltrack_points_to_target_pairs,
 )
 from pywp.models import Point3D
 from pywp.pydantic_base import FrozenModel
@@ -318,11 +318,16 @@ def _surface_key(
 def _well_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
     if len(record.points) >= 3:
         try:
-            _, t1, t3 = welltrack_points_to_targets(tuple(record.points[:3]))
+            _, target_pairs = welltrack_points_to_target_pairs(tuple(record.points))
+            target_points = [
+                point
+                for pair_t1, pair_t3 in target_pairs
+                for point in (pair_t1, pair_t3)
+            ]
             return (
-                float(0.5 * (t1.x + t3.x)),
-                float(0.5 * (t1.y + t3.y)),
-                float(0.5 * (t1.z + t3.z)),
+                float(np.mean([point.x for point in target_points])),
+                float(np.mean([point.y for point in target_points])),
+                float(np.mean([point.z for point in target_points])),
             )
         except (TypeError, ValueError):
             pass

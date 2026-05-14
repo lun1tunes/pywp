@@ -85,7 +85,7 @@ from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackRecord,
     parse_welltrack_text,
-    welltrack_points_to_targets,
+    welltrack_points_to_target_pairs,
 )
 from pywp.models import Point3D
 from pywp.pilot_wells import (
@@ -242,6 +242,7 @@ class _TargetOnlyWell:
     t3: Point3D
     status: str
     problem: str
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = ()
 
 
 _DetectedPadUiMeta = ptc_pad_state.DetectedPadUiMeta
@@ -370,15 +371,17 @@ def _failed_target_only_wells(
         ):
             continue
         try:
-            surface, t1, t3 = welltrack_points_to_targets(record.points)
+            surface, target_pairs = welltrack_points_to_target_pairs(record.points)
         except ValueError:
             continue
+        t1, t3 = target_pairs[0][0], target_pairs[-1][1]
         target_only_wells.append(
             _TargetOnlyWell(
                 name=str(record.name),
                 surface=surface,
                 t1=t1,
                 t3=t3,
+                target_pairs=target_pairs,
                 status=status or "Ошибка расчета",
                 problem=str(row.get("Проблема", "")).strip(),
             )
@@ -2470,9 +2473,10 @@ def _format_prepared_override_scope(
 
 def _welltrack_record_entry_tvd_m(record: WelltrackRecord) -> float | None:
     try:
-        _, t1, _ = welltrack_points_to_targets(record.points)
+        _, target_pairs = welltrack_points_to_target_pairs(record.points)
     except ValueError:
         return None
+    t1, _ = target_pairs[0]
     return float(t1.z)
 
 
@@ -3331,7 +3335,10 @@ def _render_source_input() -> _WelltrackSourcePayload:
             st.caption(
                 "Вставьте таблицу в формате `Wellname`, `Point`, `X`, `Y`, `Z`. "
                 "Поддерживается copy/paste из Excel. Для обычной скважины "
-                "`Point` принимает `S`, `t1`, `t3`. Для пилота используйте имя "
+                "`Point` принимает `S`, `t1`, `t3`. Для многопластовой скважины "
+                "задавайте пары `1_t1`, `1_t3`, `2_t1`, `2_t3`, ... в одном "
+                "`Wellname`: каждый номер — отдельный горизонтальный уровень. "
+                "Для пилота используйте имя "
                 "`wellname_PL`: точки `S`, `PL1`, `PL2`, ...; часть `wellname` "
                 "должна совпадать с основной скважиной."
             )

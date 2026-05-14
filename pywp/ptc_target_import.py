@@ -175,6 +175,9 @@ def _normalize_source_table_point_value(value: object) -> object:
     text = str(value).strip()
     if text.lower() in {"wellhead", "s"}:
         return "S"
+    multi_match = re.match(r"^([1-9]\d*)_t([13])$", text, flags=re.IGNORECASE)
+    if multi_match is not None:
+        return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
     pilot_match = re.match(r"^pl([1-9]\d*)$", text, flags=re.IGNORECASE)
     if pilot_match is not None:
         return f"PL{int(pilot_match.group(1))}"

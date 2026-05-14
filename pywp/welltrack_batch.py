@@ -10,7 +10,10 @@ import numpy as np
 import pandas as pd
 from pydantic import field_validator
 
-from pywp.eclipse_welltrack import WelltrackRecord, welltrack_points_to_targets
+from pywp.eclipse_welltrack import (
+    WelltrackRecord,
+    welltrack_points_to_target_pairs,
+)
 from pywp.anticollision_optimization import (
     AntiCollisionReferencePath,
     AntiCollisionSegment,
@@ -36,7 +39,14 @@ from pywp.anticollision_stage import (
     ANTI_COLLISION_STAGE_LATE_TRAJECTORY,
     anti_collision_stage_from_context,
 )
-from pywp.models import INTERPOLATION_RODRIGUES, Point3D, SummaryDict, TrajectoryConfig
+from pywp.models import (
+    INTERPOLATION_RODRIGUES,
+    PlannerResult,
+    Point3D,
+    SummaryDict,
+    TrajectoryConfig,
+)
+from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.parallel import process_pool_context
 from pywp.pilot_wells import (
     SidetrackWindowOverride,
@@ -312,6 +322,7 @@ class SuccessfulWellPlan(FrozenArbitraryModel):
     surface: Point3D
     t1: Point3D
     t3: Point3D
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = ()
     stations: pd.DataFrame
     summary: SummaryDict
     azimuth_deg: float
@@ -325,6 +336,27 @@ class SuccessfulWellPlan(FrozenArbitraryModel):
     @classmethod
     def _coerce_point3d(cls, value: object) -> Point3D:
         return coerce_model_like(value, Point3D)
+
+    @field_validator("target_pairs", mode="before")
+    @classmethod
+    def _coerce_target_pairs(
+        cls,
+        value: object,
+    ) -> tuple[tuple[Point3D, Point3D], ...]:
+        if value is None:
+            return ()
+        pairs: list[tuple[Point3D, Point3D]] = []
+        for raw_pair in tuple(value):
+            pair = tuple(raw_pair)  # type: ignore[arg-type]
+            if len(pair) != 2:
+                raise ValueError("target_pairs entries must contain t1 and t3.")
+            pairs.append(
+                (
+                    coerce_model_like(pair[0], Point3D),
+                    coerce_model_like(pair[1], Point3D),
+                )
+            )
+        return tuple(pairs)
 
     @field_validator("config", mode="before")
     @classmethod
@@ -471,15 +503,15 @@ def _evaluate_record_standalone(
         return _evaluate_pilot_record_standalone(record, config)
 
     base_row = WelltrackBatchPlanner._base_row(record=record)
-    if len(record.points) != 3:
+    try:
+        surface, target_pairs = welltrack_points_to_target_pairs(record.points)
+    except ValueError as exc:
         base_row["Статус"] = "Ошибка формата"
-        base_row["Проблема"] = (
-            f"Ожидалось 3 точки (S, t1, t3), получено {len(record.points)}."
-        )
+        base_row["Проблема"] = summarize_problem_ru(str(exc))
         return base_row, None
 
     try:
-        surface, t1, t3 = welltrack_points_to_targets(record.points)
+        t1, t3 = target_pairs[0]
         started = perf_counter()
         planner = TrajectoryPlanner()
         plan_kwargs: dict[str, Any] = {
@@ -491,6 +523,13 @@ def _evaluate_record_standalone(
         if optimization_context is not None:
             plan_kwargs["optimization_context"] = optimization_context
         result = planner.plan(**plan_kwargs)
+        if len(target_pairs) > 1:
+            result = extend_plan_with_multi_horizontal_targets(
+                base_result=result,
+                target_pairs=target_pairs,
+                config=config,
+            )
+            t3 = target_pairs[-1][1]
         runtime_s = float(perf_counter() - started)
     except (ValueError, PlanningError) as exc:
         base_row["Статус"] = "Ошибка расчета"
@@ -509,6 +548,7 @@ def _evaluate_record_standalone(
         surface=surface,
         t1=t1,
         t3=t3,
+        target_pairs=target_pairs,
         stations=result.stations,
         summary=summary,
         azimuth_deg=result.azimuth_deg,
@@ -1790,15 +1830,15 @@ class WelltrackBatchPlanner:
             return self._evaluate_pilot_record(record=record, config=config)
 
         row = self._base_row(record=record)
-        if len(record.points) != 3:
+        try:
+            surface, target_pairs = welltrack_points_to_target_pairs(record.points)
+        except ValueError as exc:
             row["Статус"] = "Ошибка формата"
-            row["Проблема"] = (
-                f"Ожидалось 3 точки (S, t1, t3), получено {len(record.points)}."
-            )
+            row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
 
         try:
-            surface, t1, t3 = welltrack_points_to_targets(record.points)
+            t1, t3 = target_pairs[0]
             success_surface = surface
             started = perf_counter()
             pilot_key = pilot_name_key_for_parent(record.name)
@@ -1849,6 +1889,23 @@ class WelltrackBatchPlanner:
                 summary = dict(result.summary)
                 md_t1_m = float(result.md_t1_m)
                 azimuth_deg = float(result.azimuth_deg)
+            if len(target_pairs) > 1:
+                base_result = PlannerResult(
+                    stations=stations,
+                    summary=summary,
+                    azimuth_deg=azimuth_deg,
+                    md_t1_m=md_t1_m,
+                )
+                multi_result = extend_plan_with_multi_horizontal_targets(
+                    base_result=base_result,
+                    target_pairs=target_pairs,
+                    config=config,
+                )
+                stations = multi_result.stations
+                summary = dict(multi_result.summary)
+                md_t1_m = float(multi_result.md_t1_m)
+                azimuth_deg = float(multi_result.azimuth_deg)
+                t3 = target_pairs[-1][1]
             runtime_s = float(perf_counter() - started)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
@@ -1865,6 +1922,7 @@ class WelltrackBatchPlanner:
             surface=success_surface,
             t1=t1,
             t3=t3,
+            target_pairs=target_pairs,
             stations=stations,
             summary=summary,
             azimuth_deg=azimuth_deg,

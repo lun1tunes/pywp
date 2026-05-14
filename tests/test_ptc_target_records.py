@@ -148,6 +148,45 @@ def test_raw_records_dataframe_labels_extra_points_without_md_column() -> None:
     assert "MD (из файла), м" not in list(raw_df.columns)
 
 
+def test_multi_horizontal_records_are_ready_and_labeled_by_levels() -> None:
+    source = _record(
+        "MULTI",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=650.0, y=0.0, z=1020.0, md=3.0),
+            WelltrackPoint(x=1050.0, y=0.0, z=1020.0, md=4.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([source])
+    raw_df = target_records.raw_records_dataframe([source])
+
+    assert str(overview_df.iloc[0]["Статус"]) == "✅"
+    assert str(overview_df.iloc[0]["Проблема"]) == "—"
+    assert str(overview_df.iloc[0]["Примечание"]) == "Многопластовая: 2 уровней"
+    assert float(overview_df.iloc[0]["Длина ГС, м"]) == pytest.approx(800.0)
+    assert list(raw_df["Точка"]) == ["S", "1_t1", "1_t3", "2_t1", "2_t3"]
+
+
+def test_multi_horizontal_records_require_complete_t1_t3_pairs() -> None:
+    source = _record(
+        "MULTI-BROKEN",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=650.0, y=0.0, z=1020.0, md=3.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([source])
+
+    assert str(overview_df.iloc[0]["Статус"]) == "❌"
+    assert "полные пары" in str(overview_df.iloc[0]["Проблема"])
+
+
 def test_pilot_records_allow_multiple_study_points() -> None:
     pilot = _record(
         "well_04_pl",

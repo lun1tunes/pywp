@@ -121,6 +121,7 @@ def build_anti_collision_analysis_for_successes(
             surface=item.surface,
             t1=item.t1,
             t3=item.t3,
+            target_pairs=tuple(getattr(item, "target_pairs", ()) or ()),
             azimuth_deg=float(item.azimuth_deg),
             md_t1_m=float(item.md_t1_m),
             model=model,

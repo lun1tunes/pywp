@@ -77,6 +77,7 @@ class SingleWellResultView(FrozenArbitraryModel):
     surface: Point3D
     t1: Point3D
     t3: Point3D
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = ()
     stations: pd.DataFrame
     summary: Mapping[str, SummaryValue]
     config: TrajectoryConfig
@@ -95,6 +96,27 @@ class SingleWellResultView(FrozenArbitraryModel):
     @classmethod
     def _coerce_point3d(cls, value: object) -> Point3D:
         return coerce_model_like(value, Point3D)
+
+    @field_validator("target_pairs", mode="before")
+    @classmethod
+    def _coerce_target_pairs(
+        cls,
+        value: object,
+    ) -> tuple[tuple[Point3D, Point3D], ...]:
+        if value is None:
+            return ()
+        pairs: list[tuple[Point3D, Point3D]] = []
+        for raw_pair in tuple(value):
+            pair = tuple(raw_pair)  # type: ignore[arg-type]
+            if len(pair) != 2:
+                raise ValueError("target_pairs entries must contain t1 and t3.")
+            pairs.append(
+                (
+                    coerce_model_like(pair[0], Point3D),
+                    coerce_model_like(pair[1], Point3D),
+                )
+            )
+        return tuple(pairs)
 
     @field_validator("pilot_study_points", mode="before")
     @classmethod
@@ -496,6 +518,7 @@ def render_result_plots(
         surface=view.surface,
         t1=view.t1,
         t3=view.t3,
+        target_pairs=view.target_pairs,
         md_t1_m=float(view.md_t1_m),
         dls_limits=view.config.dls_limits_deg_per_30m,
         title=title_trajectory,

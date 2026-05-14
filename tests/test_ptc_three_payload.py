@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
 
 from pywp import ptc_three_payload
@@ -286,3 +288,79 @@ def test_all_wells_three_payload_keeps_original_target_markers() -> None:
     assert marker["points"][1] == [1000.0, 50.0, 1500.0]
     assert marker["points"][2] == [2000.0, 50.0, 1500.0]
     assert label["position"] == [2000.0, 50.0, 1500.0]
+
+
+def test_all_wells_three_payload_includes_multi_horizontal_target_pairs() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 1600.0, 1900.0, 2500.0],
+            "X_m": [0.0, 100.0, 500.0, 650.0, 1050.0],
+            "Y_m": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "Z_m": [0.0, 1000.0, 1000.0, 1020.0, 1020.0],
+        }
+    )
+    success = SuccessfulWellPlan(
+        name="multi",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(100.0, 0.0, 1000.0),
+        t3=Point3D(1050.0, 0.0, 1020.0),
+        target_pairs=(
+            (Point3D(100.0, 0.0, 1000.0), Point3D(500.0, 0.0, 1000.0)),
+            (Point3D(650.0, 0.0, 1020.0), Point3D(1050.0, 0.0, 1020.0)),
+        ),
+        stations=stations,
+        summary={},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+
+    payload = all_wells_three_payload([success])
+    marker = next(
+        item for item in payload["points"] if str(item.get("name")) == "multi: цели"
+    )
+
+    assert marker["points"] == [
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 1000.0],
+        [500.0, 0.0, 1000.0],
+        [650.0, 0.0, 1020.0],
+        [1050.0, 0.0, 1020.0],
+    ]
+    assert [item["point"] for item in marker["hover"]] == [
+        "S",
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+    ]
+
+
+def test_all_wells_three_payload_includes_multi_horizontal_target_only_pairs() -> None:
+    target_only = SimpleNamespace(
+        name="multi_failed",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(100.0, 0.0, 1000.0),
+        t3=Point3D(1050.0, 0.0, 1020.0),
+        target_pairs=(
+            (Point3D(100.0, 0.0, 1000.0), Point3D(500.0, 0.0, 1000.0)),
+            (Point3D(650.0, 0.0, 1020.0), Point3D(1050.0, 0.0, 1020.0)),
+        ),
+        status="Ошибка расчета",
+        problem="short transition",
+    )
+
+    payload = all_wells_three_payload([], target_only_wells=[target_only])
+    marker = next(
+        item
+        for item in payload["points"]
+        if str(item.get("name")) == "multi_failed: цели (без траектории)"
+    )
+
+    assert marker["points"] == [
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 1000.0],
+        [500.0, 0.0, 1000.0],
+        [650.0, 0.0, 1020.0],
+        [1050.0, 0.0, 1020.0],
+    ]

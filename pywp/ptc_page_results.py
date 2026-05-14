@@ -434,6 +434,7 @@ def render_success_tabs(
             surface=selected.surface,
             t1=selected.t1,
             t3=selected.t3,
+            target_pairs=tuple(getattr(selected, "target_pairs", ()) or ()),
             stations=selected.stations,
             summary=selected.summary,
             config=selected.config,

@@ -60,6 +60,7 @@ class AntiCollisionWell:
     t3: Point3D | None
     md_t1_m: float | None
     md_t3_m: float | None
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = ()
     well_kind: str = "project"
     is_reference_only: bool = False
 
@@ -224,6 +225,7 @@ def build_anti_collision_well(
     well_kind: str = "project",
     is_reference_only: bool = False,
     analysis_sample_step_m: float | None = None,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
 ) -> AntiCollisionWell:
     md_t3_m = (
         float(md_t3_m)
@@ -272,6 +274,7 @@ def build_anti_collision_well(
         surface=surface,
         t1=t1,
         t3=t3,
+        target_pairs=tuple(target_pairs),
         md_t1_m=None if md_t1_m is None else float(md_t1_m),
         md_t3_m=None if md_t3_m is None else float(md_t3_m),
         well_kind=str(well_kind),

@@ -531,6 +531,13 @@ def apply_crs_to_well_view(
     surface_tx = transform_point_to_crs(view.surface, source_crs, target_crs)
     t1_tx = transform_point_to_crs(view.t1, source_crs, target_crs)
     t3_tx = transform_point_to_crs(view.t3, source_crs, target_crs)
+    target_pairs_tx = tuple(
+        (
+            transform_point_to_crs(pair_t1, source_crs, target_crs),
+            transform_point_to_crs(pair_t3, source_crs, target_crs),
+        )
+        for pair_t1, pair_t3 in tuple(view.target_pairs)
+    )
 
     # Transform stations
     stations_tx = transform_stations_to_crs(
@@ -557,6 +564,7 @@ def apply_crs_to_well_view(
             "surface": surface_tx,
             "t1": t1_tx,
             "t3": t3_tx,
+            "target_pairs": target_pairs_tx,
             "stations": stations_tx,
             "issue_messages": tuple(new_messages),
             "summary": summary,

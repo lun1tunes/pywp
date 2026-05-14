@@ -4,7 +4,11 @@ import math
 
 import pandas as pd
 
-from pywp.eclipse_welltrack import WelltrackRecord
+from pywp.eclipse_welltrack import (
+    WelltrackRecord,
+    welltrack_multi_horizontal_level_count,
+    welltrack_points_to_target_pairs,
+)
 from pywp.pilot_wells import (
     is_pilot_record,
     parent_name_for_pilot,
@@ -60,10 +64,9 @@ def records_overview_dataframe(
                 "Точек": record_target_point_count(record),
                 "Отход t1, м": _record_t1_offset_m(record),
                 "Длина ГС, м": _record_t1_t3_length_m(record),
-                "Примечание": (
-                    "Есть пилот"
-                    if pilot_name_key_for_parent(record.name) in record_names
-                    else ""
+                "Примечание": _record_note(
+                    record,
+                    has_pilot=pilot_name_key_for_parent(record.name) in record_names,
                 ),
                 "Статус": (
                     "✅"
@@ -92,11 +95,17 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
 
     raw_rows: list[dict[str, object]] = []
     for record in records:
+        is_pilot = is_pilot_record(record)
+        multi_level_count = welltrack_multi_horizontal_level_count(record.points)
         for index, point in enumerate(record.points, start=1):
             raw_rows.append(
                 {
                     "Скважина": record.name,
-                    "Точка": _point_label(index, is_pilot=is_pilot_record(record)),
+                    "Точка": _point_label(
+                        index,
+                        is_pilot=is_pilot,
+                        multi_level_count=multi_level_count,
+                    ),
                     "X, м": float(point.x),
                     "Y, м": float(point.y),
                     "Z, м": float(point.z),
@@ -128,16 +137,20 @@ def _record_t1_t3_length_m(record: WelltrackRecord) -> float | None:
     points = tuple(record.points)
     if len(points) < 3:
         return None
-    t1, t3 = points[1], points[2]
-    if not (_point_has_finite_xyz(t1) and _point_has_finite_xyz(t3)):
+    if not all(_point_has_finite_xyz(point) for point in points[1:]):
         return None
-    return float(
-        math.hypot(
+    try:
+        _, target_pairs = welltrack_points_to_target_pairs(points)
+    except ValueError:
+        return None
+    length_m = 0.0
+    for t1, t3 in target_pairs:
+        length_m += math.hypot(
             float(t3.x) - float(t1.x),
             float(t3.y) - float(t1.y),
             float(t3.z) - float(t1.z),
         )
-    )
+    return float(length_m)
 
 
 def record_has_finite_points(record: WelltrackRecord) -> bool:
@@ -217,7 +230,11 @@ def record_import_problem_text(
         else:
             problems.append("Не хватает одной из точек `t1/t3`.")
     elif target_count > 2 and not is_pilot_record(record):
-        problems.append("Лишние точки: ожидаются только `S`, `t1`, `t3`.")
+        if target_count % 2 != 0:
+            problems.append(
+                "Для многопластовой скважины после `S` ожидаются полные пары "
+                "`N_t1/N_t3`."
+            )
     if is_pilot_record(record):
         pilot_problem = pilot_record_problem_text(record)
         if pilot_problem != "—":
@@ -262,16 +279,36 @@ def _record_overview_problem_text(
     return "—" if not problems else " ".join(problems)
 
 
-def _point_label(index: int, *, is_pilot: bool = False) -> str:
+def _point_label(
+    index: int,
+    *,
+    is_pilot: bool = False,
+    multi_level_count: int = 0,
+) -> str:
     if int(index) == 1:
         return "S"
     if is_pilot:
         return f"PL{int(index) - 1}"
+    if int(multi_level_count) > 1:
+        target_index = int(index) - 2
+        level = int(target_index // 2) + 1
+        suffix = "t1" if target_index % 2 == 0 else "t3"
+        return f"{level}_{suffix}"
     if int(index) == 2:
         return "t1"
     if int(index) == 3:
         return "t3"
     return f"p{int(index)}"
+
+
+def _record_note(record: WelltrackRecord, *, has_pilot: bool) -> str:
+    notes: list[str] = []
+    if has_pilot:
+        notes.append("Есть пилот")
+    level_count = welltrack_multi_horizontal_level_count(record.points)
+    if level_count > 1:
+        notes.append(f"Многопластовая: {level_count} уровней")
+    return "; ".join(notes)
 
 
 def _point_has_finite_xyz(point: object) -> bool:

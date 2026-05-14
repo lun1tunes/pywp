@@ -83,6 +83,28 @@ def test_detect_well_pads_groups_by_surface() -> None:
     assert counts == [1, 2]
 
 
+def test_detect_well_pads_uses_all_multi_horizontal_targets_for_midpoint() -> None:
+    records = [
+        WelltrackRecord(
+            name="MULTI",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+                WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=2.0),
+                WelltrackPoint(x=700.0, y=0.0, z=1040.0, md=3.0),
+                WelltrackPoint(x=1100.0, y=0.0, z=1040.0, md=4.0),
+            ),
+        )
+    ]
+
+    pad = detect_well_pads(records)[0]
+    well = pad.wells[0]
+
+    assert well.midpoint_x == 600.0
+    assert well.midpoint_y == 0.0
+    assert well.midpoint_z == 1020.0
+
+
 def test_ordered_pad_wells_uses_projection_along_nds() -> None:
     records = [
         _record(

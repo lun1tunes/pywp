@@ -71,6 +71,7 @@ def single_well_three_payload(
     surface: Point3D,
     t1: Point3D,
     t3: Point3D,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
     well_name: str | None = None,
     md_t1_m: float | None = None,
     trajectory_line_dash: str = "solid",
@@ -146,7 +147,12 @@ def single_well_three_payload(
             z_arrays=z_arrays,
         )
 
-    target_points = [_point3d_payload(surface), _point3d_payload(t1), _point3d_payload(t3)]
+    target_points, target_labels = _target_marker_points_and_labels(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        target_pairs=target_pairs,
+    )
     _append_arrays_for_points(x_arrays, y_arrays, z_arrays, target_points)
     payload["points"].append(
         {
@@ -157,9 +163,8 @@ def single_well_three_payload(
             "size": 6.0,
             "symbol": "circle",
             "hover": [
-                _target_hover_item("S", "Цели"),
-                _target_hover_item("t1", "Цели"),
-                _target_hover_item("t3", "Цели"),
+                _target_hover_item(label, "Цели")
+                for label in target_labels
             ],
             "role": "marker",
         }
@@ -256,6 +261,7 @@ def all_wells_three_payload(
             surface=success.surface,
             t1=success.t1,
             t3=success.t3,
+            target_pairs=tuple(getattr(success, "target_pairs", ()) or ()),
             color=color,
             size=5.0,
             symbol="circle",
@@ -287,6 +293,7 @@ def all_wells_three_payload(
             surface=getattr(target_only, "surface"),
             t1=getattr(target_only, "t1"),
             t3=getattr(target_only, "t3"),
+            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
             color=color,
             size=10.0,
             symbol="cross",
@@ -453,6 +460,7 @@ def anticollision_three_payload(
                 surface=well.surface,
                 t1=well.t1,
                 t3=well.t3,
+                target_pairs=tuple(getattr(well, "target_pairs", ()) or ()),
                 color=str(well.color),
                 size=5.0,
                 symbol="circle",
@@ -758,8 +766,14 @@ def _append_target_markers(
     z_arrays: list[np.ndarray],
     focus_arrays: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]] | None = None,
     hover_extra: Mapping[str, str] | None = None,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
 ) -> None:
-    points = [_point3d_payload(surface), _point3d_payload(t1), _point3d_payload(t3)]
+    points, labels = _target_marker_points_and_labels(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        target_pairs=target_pairs,
+    )
     _append_arrays_for_points(x_arrays, y_arrays, z_arrays, points)
     if focus_arrays is not None:
         _append_arrays_for_points(*focus_arrays, points)
@@ -772,13 +786,35 @@ def _append_target_markers(
             "size": float(size),
             "symbol": str(symbol),
             "hover": [
-                _target_hover_item("S", name, hover_extra=hover_extra),
-                _target_hover_item("t1", name, hover_extra=hover_extra),
-                _target_hover_item("t3", name, hover_extra=hover_extra),
+                _target_hover_item(label, name, hover_extra=hover_extra)
+                for label in labels
             ],
             "role": "marker",
         }
     )
+
+
+def _target_marker_points_and_labels(
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+) -> tuple[list[list[float]], list[str]]:
+    pairs = tuple(target_pairs or ())
+    if len(pairs) <= 1:
+        return (
+            [_point3d_payload(surface), _point3d_payload(t1), _point3d_payload(t3)],
+            ["S", "t1", "t3"],
+        )
+    points = [_point3d_payload(surface)]
+    labels = ["S"]
+    for index, (pair_t1, pair_t3) in enumerate(pairs, start=1):
+        points.append(_point3d_payload(pair_t1))
+        labels.append(f"{index}_t1")
+        points.append(_point3d_payload(pair_t3))
+        labels.append(f"{index}_t3")
+    return points, labels
 
 
 def _append_pilot_study_markers(

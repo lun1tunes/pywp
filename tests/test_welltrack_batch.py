@@ -49,6 +49,7 @@ from pywp.welltrack_batch import (
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
     _evaluate_record_from_dicts,
+    _evaluate_record_standalone,
     _optimization_context_from_worker_payload,
     _optimization_context_to_worker_payload,
     merge_batch_results,
@@ -111,6 +112,50 @@ class _StubPlanner:
         return PlannerResult(
             stations=stations, summary=summary, azimuth_deg=0.0, md_t1_m=1000.0
         )
+
+
+def test_multi_horizontal_record_extends_base_plan_with_numbered_segments() -> None:
+    record = WelltrackRecord(
+        name="multi_ok",
+        points=(
+            WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0),
+            WelltrackPoint(x=456008.0, y=889281.0, z=2339.0, md=2.0),
+            WelltrackPoint(x=456601.0, y=889139.0, z=2339.0, md=3.0),
+            WelltrackPoint(x=456900.0, y=889068.0, z=2365.0, md=4.0),
+            WelltrackPoint(x=457483.0, y=888929.0, z=2365.0, md=5.0),
+        ),
+    )
+
+    row, success = _evaluate_record_standalone(record, TrajectoryConfig())
+
+    assert success is not None
+    assert row["Статус"] == "OK"
+    assert success.summary["multi_horizontal_levels"] == 2
+    assert success.t3.z == pytest.approx(2365.0)
+    assert {
+        "HORIZONTAL1",
+        "HORIZONTAL_BUILD1",
+        "HORIZONTAL2",
+    }.issubset(set(success.stations["segment"]))
+    assert float(success.stations["DLS_deg_per_30m"].max()) <= (
+        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+    )
+
+
+def test_multi_horizontal_record_reports_short_transition_recommendation() -> None:
+    text = Path("tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC").read_text(
+        encoding="utf-8"
+    )
+    record = next(
+        item for item in parse_welltrack_text(text) if str(item.name) == "well_08"
+    )
+
+    row, success = _evaluate_record_standalone(record, TrajectoryConfig())
+
+    assert success is None
+    assert row["Статус"] == "Ошибка расчета"
+    assert "HORIZONTAL_BUILD1" in str(row["Проблема"])
+    assert "сократить соседние мини-горизонты" in str(row["Проблема"])
 
 
 def _straight_success(
