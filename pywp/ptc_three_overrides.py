@@ -341,16 +341,45 @@ def build_edit_wells_payload(
     edit_wells: list[dict[str, object]] = []
     for success in successes:
         target_pairs = tuple(getattr(success, "target_pairs", ()) or ())
-        if len(target_pairs) > 1:
-            continue
         config = success.config
         base_points = _decimated_base_points(success)
+        edit_points: list[dict[str, object]] = []
+        if len(target_pairs) > 1:
+            edit_points.append(
+                {
+                    "index": 0,
+                    "label": "S",
+                    "point_type": "surface",
+                    "position": _point3d_payload(success.surface),
+                }
+            )
+            point_index = 1
+            for level_index, (pair_t1, pair_t3) in enumerate(target_pairs, start=1):
+                edit_points.append(
+                    {
+                        "index": point_index,
+                        "label": f"{level_index}_t1",
+                        "point_type": "t1",
+                        "position": _point3d_payload(pair_t1),
+                    }
+                )
+                point_index += 1
+                edit_points.append(
+                    {
+                        "index": point_index,
+                        "label": f"{level_index}_t3",
+                        "point_type": "t3",
+                        "position": _point3d_payload(pair_t3),
+                    }
+                )
+                point_index += 1
         edit_wells.append(
             {
                 "name": str(success.name),
                 "surface": _point3d_payload(success.surface),
                 "t1": _point3d_payload(success.t1),
                 "t3": _point3d_payload(success.t3),
+                "edit_points": edit_points,
                 "target_pairs": [
                     [_point3d_payload(pair_t1), _point3d_payload(pair_t3)]
                     for pair_t1, pair_t3 in target_pairs

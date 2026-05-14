@@ -67,6 +67,39 @@ def test_records_with_edit_targets_updates_only_three_point_records() -> None:
     assert updated_records[1] is incomplete
 
 
+def test_records_with_edit_targets_updates_multi_horizontal_points_by_index() -> None:
+    record = _record(
+        "MULTI",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=3.0),
+            WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=4.0),
+            WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=5.0),
+        ),
+    )
+
+    updated_records, updated_names = ptc_edit_targets.records_with_edit_targets(
+        [record],
+        {
+            "MULTI": {
+                "points": [
+                    {"index": 0, "position": [10.0, 11.0, -5.0]},
+                    {"index": 3, "position": [330.0, 13.0, 2025.0]},
+                ],
+            },
+        },
+    )
+
+    assert updated_names == ["MULTI"]
+    updated = updated_records[0]
+    assert updated.points[0].x == pytest.approx(10.0)
+    assert updated.points[0].md == pytest.approx(1.0)
+    assert updated.points[3].x == pytest.approx(330.0)
+    assert updated.points[3].z == pytest.approx(2025.0)
+    assert updated.points[4] == record.points[4]
+
+
 def test_pending_edit_target_names_prefers_pending_and_dedupes() -> None:
     session_state: dict[str, object] = {
         "wt_edit_targets_pending_names": [" WELL-A ", "WELL-A", "", "WELL-B"],
@@ -138,6 +171,51 @@ def test_apply_edit_targets_changes_invalidates_only_changed_wells() -> None:
     assert changed_record.points[1].x == pytest.approx(610.25)
     assert changed_record.points[2].z == pytest.approx(2502.0)
     assert changed_original.points[1].x == pytest.approx(610.25)
+
+
+def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> None:
+    record = _record(
+        "MULTI",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=3.0),
+            WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=4.0),
+            WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=5.0),
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [record],
+        "wt_records_original": [record],
+        "wt_successes": [SimpleNamespace(name="MULTI")],
+        "wt_summary_rows": [{"Скважина": "MULTI", "Статус": "OK", "Проблема": ""}],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "MULTI",
+                "points": [
+                    {"index": 0, "position": [1.0, 2.0, -10.0]},
+                    {"index": 4, "position": [410.0, 20.0, 2022.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["MULTI"]
+    assert session_state["wt_successes"] == []
+    assert session_state["wt_summary_rows"] == [
+        {"Скважина": "MULTI", "Статус": "Не рассчитана", "Проблема": ""}
+    ]
+    updated_record = session_state["wt_records"][0]
+    updated_original = session_state["wt_records_original"][0]
+    assert updated_record.points[0].z == pytest.approx(-10.0)
+    assert updated_record.points[4].x == pytest.approx(410.0)
+    assert updated_original.points[4].y == pytest.approx(20.0)
 
 
 def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:

@@ -213,14 +213,17 @@ def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
         item for item in parse_welltrack_text(text) if str(item.name) == "well_08"
     )
 
-    row, success = _evaluate_record_standalone(record, TrajectoryConfig())
+    row, success = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(dls_build_max_deg_per_30m=1.0),
+    )
 
     assert success is not None
     assert row["Статус"] == "OK"
     assert success.summary["multi_horizontal_levels"] == 3
-    assert success.t3.x == pytest.approx(458356.0)
-    assert success.t3.y == pytest.approx(888722.0)
-    assert success.t3.z == pytest.approx(2390.0)
+    assert success.t3.x == pytest.approx(455022.7)
+    assert success.t3.y == pytest.approx(887483.3)
+    assert success.t3.z == pytest.approx(2379.0)
     assert {
         "HORIZONTAL1",
         "HORIZONTAL_BUILD1",
@@ -231,7 +234,38 @@ def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
         float(success.config.dls_build_max_deg_per_30m) + 1e-6
     )
+    assert float(success.summary["md_total_m"]) < 6500.0
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
+
+
+def test_turn_solver_build_limit_search_is_monotonic_for_debug_geometry() -> None:
+    record = WelltrackRecord(
+        name="debug_monotonic",
+        points=(
+            WelltrackPoint(x=377899.9, y=930000.4, z=-20.0, md=1.0),
+            WelltrackPoint(x=377459.9, y=930020.8, z=3651.51, md=2.0),
+            WelltrackPoint(x=376107.3, y=929390.1, z=3749.49, md=3.0),
+        ),
+    )
+
+    row_tighter, success_tighter = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(dls_build_max_deg_per_30m=2.4),
+    )
+    row_wider, success_wider = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(dls_build_max_deg_per_30m=3.0),
+    )
+
+    assert success_tighter is not None, row_tighter["Проблема"]
+    assert success_wider is not None, row_wider["Проблема"]
+    assert row_tighter["Статус"] == "OK"
+    assert row_wider["Статус"] == "OK"
+    assert float(success_wider.summary["build1_dls_selected_deg_per_30m"]) <= 3.0
+    assert float(success_wider.summary["build2_dls_selected_deg_per_30m"]) <= 3.0
+    assert float(success_wider.summary["md_total_m"]) < float(
+        success_tighter.summary["md_total_m"]
+    )
 
 
 def _straight_success(

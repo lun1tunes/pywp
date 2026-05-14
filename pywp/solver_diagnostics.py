@@ -24,26 +24,14 @@ def _pi_text_from_dls_text(value_text: str) -> str:
         value = float(value_text)
     except (TypeError, ValueError):
         return value_text
-    return f"{value / 3.0:.2f}"
+    return f"{value:.2f}"
 
 
 def _replace_dls_terms_for_ui(text: str) -> str:
     source = str(text or "")
     if not source:
         return source
-
-    def _convert_deg_30_to_deg_10(match: re.Match[str]) -> str:
-        value_text = match.group(1)
-        return f"{_pi_text_from_dls_text(value_text)} deg/10m"
-
-    converted = re.sub(
-        rf"({_RE_FLOAT})\s*deg/30m",
-        _convert_deg_30_to_deg_10,
-        source,
-    )
-    converted = converted.replace("deg/30m", "deg/10m")
-    converted = converted.replace("DLS", "ПИ")
-    return converted
+    return source.replace("DLS", "ПИ")
 
 
 def ui_error_text(raw_message: str) -> str:
@@ -151,8 +139,8 @@ def _item_from_text(line: str) -> DiagnosticItem:
     if match:
         dls_max, dls_req = match.group(1), match.group(2)
         pi_max = _pi_text_from_dls_text(dls_max)
-        pi_req_f = float(dls_req) / 3.0
-        pi_max_f = float(dls_max) / 3.0
+        pi_req_f = float(dls_req)
+        pi_max_f = float(dls_max)
         build_vert = match.group(3)
         kop_min = match.group(4)
         t1_tvd = match.group(5)
@@ -164,7 +152,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
         build_vert_f = float(build_vert) if build_vert is not None else float("inf")
         is_absurd_pi = pi_req_f > 5.0 * max(pi_max_f, 0.1)
         is_tight_vertical = build_vert_f < 50.0  # less than 50m is tight
-        # Physical limit: >15 deg/10m is unrealistic for any drilling
+        # Physical limit: >15 deg/30m is unrealistic for any drilling
         is_unphysical_pi = pi_req_f > 15.0
 
         if is_absurd_pi and is_tight_vertical:
@@ -172,14 +160,14 @@ def _item_from_text(line: str) -> DiagnosticItem:
                 reason = (
                     f"Недостаточно вертикального пространства для BUILD: "
                     f"доступно {build_vert} м для набора угла "
-                    f"(это нефизично мало — требуется ПИ >15 deg/10m, "
+                    f"(это нефизично мало — требуется ПИ >15 deg/30m, "
                     f"t1 TVD={t1_tvd or '?'} м, Мин VERTICAL до KOP={kop_min or '?'} м)."
                 )
             else:
                 reason = (
                     f"Недостаточно вертикального пространства для BUILD: "
                     f"доступно {build_vert} м для набора угла "
-                    f"(требуется ПИ ~{pi_req_f:.1f} deg/10m, "
+                    f"(требуется ПИ ~{pi_req_f:.1f} deg/30m, "
                     f"t1 TVD={t1_tvd or '?'} м, Мин VERTICAL до KOP={kop_min or '?'} м)."
                 )
             action = (
@@ -191,7 +179,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
             if is_unphysical_pi:
                 reason = (
                     f"Геометрия t1 недостижима с текущими ограничениями: "
-                    f"требуется нефизично высокий ПИ (>15 deg/10m) при доступном max {pi_max} deg/10m. "
+                    f"требуется нефизично высокий ПИ (>15 deg/30m) при доступном max {pi_max} deg/30m. "
                     f"(BUILD vertical доступно: {build_vert} м — это достаточно, "
                     f"проблема в других ограничениях: горизонтальный отход или угол входа)."
                 )
@@ -199,7 +187,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
                 pi_req = _pi_text_from_dls_text(dls_req)
                 reason = (
                     f"Геометрия t1 недостижима с текущими ограничениями: "
-                    f"требуется ~{pi_req} deg/10m при доступном max {pi_max} deg/10m. "
+                    f"требуется ~{pi_req} deg/30m при доступном max {pi_max} deg/30m. "
                     f"(BUILD vertical доступно: {build_vert} м — это достаточно, "
                     f"проблема в других ограничениях: горизонтальный отход или угол входа)."
                 )
@@ -211,7 +199,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
             pi_req = _pi_text_from_dls_text(dls_req)
             reason = (
                 f"Ограничение BUILD по ПИ недостаточно для достижения t1: "
-                f"доступно max {pi_max} deg/10m, требуется примерно {pi_req} deg/10m."
+                f"доступно max {pi_max} deg/30m, требуется примерно {pi_req} deg/30m."
             )
             action = (
                 "Увеличьте max ПИ BUILD, уменьшите «Мин VERTICAL до KOP», "
@@ -230,7 +218,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
         return DiagnosticItem(
             reason_ru=(
                 f"Превышен лимит ПИ на сегменте {segment_name}: "
-                f"{pi_actual} > {pi_limit} deg/10m."
+                f"{pi_actual} > {pi_limit} deg/30m."
             ),
             action_ru="Снизьте фактический ПИ на этом сегменте или увеличьте допустимый лимит ПИ.",
         )
@@ -292,8 +280,8 @@ def _item_from_text(line: str) -> DiagnosticItem:
         pi_req = _pi_text_from_dls_text(dls_req)
         return DiagnosticItem(
             reason_ru=(
-                f"Участок после входа в пласт не бурим при лимите BUILD/HORIZONTAL ПИ {pi_lim} deg/10m: "
-                f"нужно примерно {pi_req} deg/10m."
+                f"Участок после входа в пласт не бурим при лимите BUILD/HORIZONTAL ПИ {pi_lim} deg/30m: "
+                f"нужно примерно {pi_req} deg/30m."
             ),
             action_ru="Увеличьте лимит BUILD/HORIZONTAL ПИ или переместите t3 ближе к t1 по разрезу.",
         )
@@ -302,12 +290,64 @@ def _item_from_text(line: str) -> DiagnosticItem:
         pi_scan_max = _pi_text_from_dls_text("30")
         return DiagnosticItem(
             reason_ru=(
-                f"Участок после входа в пласт небурим даже при высоком ПИ (проверка до {pi_scan_max} deg/10m)."
+                f"Участок после входа в пласт небурим даже при высоком ПИ (проверка до {pi_scan_max} deg/30m)."
             ),
             action_ru=(
                 "Измените геометрию целей: увеличьте TVD t3 и/или сократите отход t1->t3; "
                 "при необходимости смягчите entry INC target/max INC."
             ),
+        )
+
+    match = re.search(
+        rf"Solver searched BUILD DLS interval \[({_RE_FLOAT}),\s*({_RE_FLOAT})\] deg/30m; "
+        rf"closest candidate was at ({_RE_FLOAT}) deg/30m",
+        text,
+    )
+    if match:
+        lower, upper, closest = match.group(1), match.group(2), match.group(3)
+        return DiagnosticItem(
+            reason_ru=(
+                "Решатель перебрал интервал BUILD ПИ "
+                f"[{lower}, {upper}] deg/30m; ближайший кандидат был "
+                f"на {closest} deg/30m."
+            ),
+            action_ru=(
+                "Это диагностическая строка поиска. Смотрите следующую причину: "
+                "обычно она показывает реальный ограничитель геометрии, координат или допусков."
+            ),
+        )
+
+    match = re.search(
+        rf"Solver endpoint miss to t1 after optimization is lateral ({_RE_FLOAT}) m / vertical ({_RE_FLOAT}) m "
+        rf"\(tolerances ({_RE_FLOAT}) / ({_RE_FLOAT}) m\)",
+        text,
+    )
+    if match:
+        lateral, vertical, lateral_tol, vertical_tol = (
+            match.group(1),
+            match.group(2),
+            match.group(3),
+            match.group(4),
+        )
+        lateral_f = float(lateral)
+        vertical_f = float(vertical)
+        if lateral_f > 100_000.0 or vertical_f > 10_000.0:
+            action = (
+                "Проверьте входные координаты и CRS: такой промах обычно означает "
+                "лишний/потерянный разряд, смешение систем координат или неверные единицы."
+            )
+        else:
+            action = (
+                "Увеличьте допустимое число рестартов решателя, ослабьте допуск по позиции "
+                "или скорректируйте геометрию целей."
+            )
+        return DiagnosticItem(
+            reason_ru=(
+                "После оптимизации решателя промах по t1 составил "
+                f"{lateral} м по латерали и {vertical} м по вертикали "
+                f"(допуски {lateral_tol} / {vertical_tol} м)."
+            ),
+            action_ru=action,
         )
 
     match = re.search(

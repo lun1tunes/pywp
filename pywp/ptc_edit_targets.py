@@ -34,7 +34,7 @@ def edit_target_point(value: object) -> list[float] | None:
 
 def records_with_edit_targets(
     records: Iterable[WelltrackRecord],
-    change_map: Mapping[str, Mapping[str, list[float]]],
+    change_map: Mapping[str, Mapping[str, object]],
 ) -> tuple[list[WelltrackRecord], list[str]]:
     updated_records: list[WelltrackRecord] = []
     updated_names: list[str] = []
@@ -44,6 +44,44 @@ def records_with_edit_targets(
             updated_records.append(record)
             continue
         delta = change_map[record_name]
+        raw_points = delta.get("points")
+        if isinstance(raw_points, list):
+            old_points = list(record.points)
+            changed = False
+            for raw_entry in raw_points:
+                if not isinstance(raw_entry, Mapping):
+                    continue
+                try:
+                    point_index = int(raw_entry.get("index", -1))
+                except (TypeError, ValueError):
+                    continue
+                new_point = edit_target_point(raw_entry.get("position"))
+                if (
+                    new_point is None
+                    or point_index < 0
+                    or point_index >= len(old_points)
+                ):
+                    continue
+                old_point = old_points[point_index]
+                old_points[point_index] = WelltrackPoint(
+                    x=float(new_point[0]),
+                    y=float(new_point[1]),
+                    z=float(new_point[2]),
+                    md=float(old_point.md),
+                )
+                changed = True
+            if changed:
+                updated_records.append(
+                    WelltrackRecord(name=record.name, points=tuple(old_points))
+                )
+                updated_names.append(record_name)
+            else:
+                updated_records.append(record)
+            continue
+
+        if "t1" not in delta or "t3" not in delta:
+            updated_records.append(record)
+            continue
         new_t1 = delta["t1"]
         new_t3 = delta["t3"]
         if len(record.points) != 3:
@@ -162,11 +200,33 @@ def apply_edit_targets_changes(
     records = session_state.get("wt_records")
     if not records:
         return []
-    change_map: dict[str, dict[str, list[float]]] = {}
+    change_map: dict[str, dict[str, object]] = {}
     for entry in changes:
         if not isinstance(entry, Mapping):
             continue
         name = str(entry.get("name", "")).strip()
+        raw_points = entry.get("points")
+        parsed_points: list[dict[str, object]] = []
+        if isinstance(raw_points, list):
+            for raw_point in raw_points:
+                if not isinstance(raw_point, Mapping):
+                    continue
+                try:
+                    point_index = int(raw_point.get("index", -1))
+                except (TypeError, ValueError):
+                    continue
+                point = edit_target_point(raw_point.get("position"))
+                if point is None or point_index < 0:
+                    continue
+                parsed_points.append(
+                    {
+                        "index": point_index,
+                        "position": point,
+                    }
+                )
+        if name and parsed_points:
+            change_map[name] = {"points": parsed_points}
+            continue
         t1 = edit_target_point(entry.get("t1"))
         t3 = edit_target_point(entry.get("t3"))
         if name and t1 is not None and t3 is not None:

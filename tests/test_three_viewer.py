@@ -33,6 +33,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
     assert ".scene-label.well-name-label" in html
+    assert "max-width: min(220px, calc(100vw - 24px));" in html
+    assert "overflow-wrap: anywhere;" in html
+    assert "white-space: normal;" in html
+    assert "transform: translate(8px, -50%);" in html
+    assert "contain: layout paint;" in html
     assert 'roleClassName = labelRole === "well_label" ? "well-name-label" : ""' in html
     assert "font-size: 10px;" in html
     assert ".axes-gizmo-line" in html
@@ -78,6 +83,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function editWellTargetFocusBounds(index)" in html
     assert "function fitCameraToEditWellTargets(index)" in html
     assert "selectEditWell(editableIndex, { focus: !editModeActive })" in html
+    assert "row.dataset.editWellIndex = String(editableIndex)" in html
     assert "targetBounds && !editModeActive" in html
     assert "fitCameraToEditWellTargets(nextIndex)" in html
     assert "data-edit-well-index" in html
@@ -94,6 +100,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'data-scope="pair"' in html
     assert "function setEditMoveScope(scope)" in html
     assert 'let editMoveScope = "point";' in html
+    assert 'title="Изменить точки скважины"' in html
+    assert 'data-scope="pair" type="button">Все</button>' in html
     assert 'id="edit-operation-selector"' in html
     assert 'data-operation="move"' in html
     assert 'data-operation="rotate"' in html
@@ -113,6 +121,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "rebuildRotatedPreviewTrajectory(" in html
     assert "editRotationModeEnabled()" in html
     assert "editRotationPickMeshes" in html
+    assert "function editPointDefinitionsForWell(well)" in html
+    assert "const editOriginalPoints = []" in html
+    assert "function updateWellEditPoints(wellIndex, nextPoints)" in html
+    assert "editWellHasExplicitPoints(wellIndex)" in html
+    assert "points: (editCurrentPoints[idx] || []).map" in html
     assert 'editDragMoveScope === "pair"' in html
     assert "updateWellEditTargets(wi, nextT1, nextT3)" in html
     assert 'id="edit-undo-btn"' in html
@@ -280,9 +293,16 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "numberOrDefault(item.opacity, 0.25)" in html
     assert "markerScale * 0.52" in html
     assert "function addHoverPointCloud(points, item, hoverItems)" in html
+    assert 'const defaultHoverColor = hexOrDefault(item.color, "#64748b")' in html
+    assert "{ color: defaultHoverColor }" in html
+    assert "pointCloud.userData.hover = { color: defaultHoverColor }" in html
     assert "pointCloud.userData.hoverItems = itemHoverData" in html
     assert "raycaster.params.Points.threshold = Math.max(worldMarkerSize * 0.55, 3.0)" in html
     assert "indexedHoverItems && Number.isInteger(intersections[0].index)" in html
+    assert "const labelOffsetX = 6;" in html
+    assert "rect.width - labelWidth - padding - labelOffsetX" in html
+    assert "max-width: min(160px, calc(100% - 16px));" in html
+    assert "max-width: calc(100% - 48px);" in html
     assert "<strong>DLS:</strong>" in html
     assert "<strong>INC:</strong>" in html
     assert 'id="reset-camera-btn"' not in html

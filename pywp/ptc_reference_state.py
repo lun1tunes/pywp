@@ -4,6 +4,10 @@ from collections.abc import Callable, Iterable
 
 import streamlit as st
 
+from pywp.ptc_anticollision_params import (
+    ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY,
+    ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
+)
 from pywp.reference_trajectories import (
     REFERENCE_WELL_ACTUAL,
     REFERENCE_WELL_APPROVED,
@@ -75,7 +79,8 @@ def clear_reference_import_state(
 ) -> None:
     set_reference_wells_for_kind(kind=kind, wells=())
     if str(kind) == REFERENCE_WELL_ACTUAL:
-        st.session_state["wt_actual_reference_mwd_unknown_names"] = []
+        st.session_state[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = []
+        st.session_state[ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY] = []
     st.session_state[reference_source_text_key(kind)] = ""
     st.session_state[reference_welltrack_path_key(kind)] = ""
     clear_reference_dev_folder_state(kind)

@@ -389,7 +389,7 @@ def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
     )
 
 
-def test_build_edit_wells_payload_skips_multi_horizontal_wells() -> None:
+def test_build_edit_wells_payload_includes_multi_horizontal_edit_points() -> None:
     regular = _successful_plan_xy(
         name="WELL-A",
         x_offset_m=0.0,
@@ -413,7 +413,41 @@ def test_build_edit_wells_payload_skips_multi_horizontal_wells() -> None:
         {"WELL-A": "#123456", "MULTI": "#abcdef"},
     )
 
-    assert [item["name"] for item in edit_wells] == ["WELL-A"]
+    assert [item["name"] for item in edit_wells] == ["WELL-A", "MULTI"]
+    multi_payload = edit_wells[1]
+    assert multi_payload["color"] == "#abcdef"
+    assert multi_payload["edit_points"] == [
+        {
+            "index": 0,
+            "label": "S",
+            "point_type": "surface",
+            "position": [5000.0, 0.0, 0.0],
+        },
+        {
+            "index": 1,
+            "label": "1_t1",
+            "point_type": "t1",
+            "position": [6000.0, 0.0, 0.0],
+        },
+        {
+            "index": 2,
+            "label": "1_t3",
+            "point_type": "t3",
+            "position": [6500.0, 0.0, 0.0],
+        },
+        {
+            "index": 3,
+            "label": "2_t1",
+            "point_type": "t1",
+            "position": [6700.0, 0.0, 30.0],
+        },
+        {
+            "index": 4,
+            "label": "2_t3",
+            "point_type": "t3",
+            "position": [7200.0, 0.0, 30.0],
+        },
+    ]
 
 
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:

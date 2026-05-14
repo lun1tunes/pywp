@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state as reference_state
 from pywp.reference_trajectories import parse_reference_trajectory_table
 
@@ -85,3 +86,31 @@ def test_reference_kind_wells_migrates_legacy_state_on_direct_access() -> None:
     st.session_state["wt_reference_wells"] = (actual, approved)
 
     assert reference_state.reference_kind_wells("approved") == (approved,)
+
+
+def test_clear_actual_reference_import_resets_mwd_unknown_widget_state() -> None:
+    st.session_state.clear()
+    actual, _approved = _reference_wells()
+    reference_state.set_reference_wells_for_kind(kind="actual", wells=[actual])
+    st.session_state[
+        ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY
+    ] = ["FACT-1"]
+    st.session_state[
+        ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY
+    ] = ["FACT-1"]
+
+    reference_state.clear_reference_import_state(kind="actual")
+
+    assert (
+        st.session_state[
+            ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY
+        ]
+        == []
+    )
+    assert (
+        st.session_state[
+            ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY
+        ]
+        == []
+    )
+    assert reference_state.reference_kind_wells("actual") == ()

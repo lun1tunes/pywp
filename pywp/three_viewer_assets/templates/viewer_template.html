@@ -478,6 +478,10 @@
       .scene-label {
         position: absolute;
         display: none;
+        box-sizing: border-box;
+        max-width: min(240px, calc(100vw - 24px));
+        overflow: hidden;
+        text-overflow: ellipsis;
         transform: translate(-50%, -100%);
         transform-origin: 50% 100%;
         font-size: 12px;
@@ -489,6 +493,7 @@
         text-shadow:
           0 1px 0 rgba(255, 255, 255, 0.95),
           0 0 8px rgba(255, 255, 255, 0.8);
+        contain: layout paint;
       }
 
       .scene-label.well-name-label,
@@ -505,7 +510,15 @@
       }
 
       .scene-label.well-name-label {
+        max-width: min(220px, calc(100vw - 24px));
         font-size: 12px;
+        line-height: 1.12;
+        overflow: visible;
+        overflow-wrap: anywhere;
+        text-overflow: clip;
+        transform: translate(8px, -50%);
+        transform-origin: 0 50%;
+        white-space: normal;
       }
 
       .scene-axis-label {
@@ -532,6 +545,10 @@
       .tooltip-title {
         color: #163a8a;
         font-weight: 700;
+        min-width: 0;
+        max-width: 184px;
+        overflow-wrap: anywhere;
+        white-space: normal;
       }
 
       .tooltip-kv {
@@ -951,18 +968,20 @@
       .minimap-well-label {
         position: absolute;
         display: none;
-        max-width: 120px;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        box-sizing: border-box;
+        max-width: min(160px, calc(100% - 16px));
+        overflow: visible;
+        overflow-wrap: anywhere;
         color: #0f172a;
         font-size: 10px;
-        line-height: 1;
+        line-height: 1.12;
         text-shadow:
           0 1px 0 rgba(255,255,255,0.98),
           0 0 7px rgba(255,255,255,0.95),
           0 1px 4px rgba(15,23,42,0.18);
         transform: translate(6px, -50%);
-        white-space: nowrap;
+        white-space: normal;
+        contain: layout paint;
       }
 
       #minimap-axes {
@@ -1061,6 +1080,7 @@
       #minimap-control.is-expanded {
         height: 28px;
         justify-content: center;
+        overflow: hidden;
       }
 
       #minimap-label {
@@ -1082,6 +1102,9 @@
         position: absolute;
         left: 50%;
         top: 6px;
+        max-width: calc(100% - 48px);
+        overflow: hidden;
+        text-overflow: ellipsis;
         transform: translateX(-50%);
         background: transparent;
         box-shadow: none;
@@ -1185,7 +1208,7 @@
     <div id="root">
       <div id="toolbar-left">
         <button id="fit-camera-btn" class="toolbar-btn" type="button" title="Подогнать сцену под кадр">Сброс вида</button>
-        <button id="edit-targets-btn" class="toolbar-btn" type="button" title="Изменить точки t1/t3" style="display:none">Редактировать точки</button>
+        <button id="edit-targets-btn" class="toolbar-btn" type="button" title="Изменить точки скважины" style="display:none">Редактировать точки</button>
         <div id="anti-collision-control-wrap">
           <button id="anti-collision-btn" class="toolbar-btn" type="button" title="Настроить слои anti-collision">Anti-collision</button>
           <div id="anti-collision-controls">
@@ -1223,7 +1246,7 @@
             <div class="edit-toolbox-label">Точки</div>
             <div id="edit-scope-selector">
               <button class="scope-btn is-active" data-scope="point" type="button">Одна</button>
-              <button class="scope-btn" data-scope="pair" type="button">t1 + t3</button>
+              <button class="scope-btn" data-scope="pair" type="button">Все</button>
             </div>
           </div>
           <div class="edit-toolbox-section">
@@ -1238,7 +1261,7 @@
             <div class="edit-toolbox-action-row">
               <button id="edit-undo-btn" class="edit-tool-btn" type="button" title="Отменить последнее изменение выбранной скважины">Назад</button>
               <button id="edit-redo-btn" class="edit-tool-btn" type="button" title="Повторить отменённое изменение выбранной скважины">Вперёд</button>
-              <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным t1/t3">Сброс</button>
+              <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
             </div>
           </div>
         </div>
@@ -1916,8 +1939,27 @@
               return;
             }
             item.element.style.display = "block";
-            item.element.style.left = `${Math.round(localX)}px`;
-            item.element.style.top = `${Math.round(localY)}px`;
+            const labelWidth = Math.min(
+              Number(item.element.offsetWidth || 0),
+              Math.max(rect.width - padding * 2, 1),
+            );
+            const labelHeight = Math.min(
+              Number(item.element.offsetHeight || 0),
+              Math.max(rect.height - padding * 2, 1),
+            );
+            const labelOffsetX = 6;
+            const clampedX = clampValue(
+              localX,
+              padding,
+              Math.max(rect.width - labelWidth - padding - labelOffsetX, padding),
+            );
+            const clampedY = clampValue(
+              localY,
+              padding + labelHeight * 0.5,
+              Math.max(rect.height - padding - labelHeight * 0.5, padding),
+            );
+            item.element.style.left = `${Math.round(clampedX)}px`;
+            item.element.style.top = `${Math.round(clampedY)}px`;
           });
         }
 
@@ -2197,6 +2239,31 @@
             return null;
           }
           const well = editWells[wellIndex] || {};
+          const editPoints = editCurrentPoints[wellIndex] || [];
+          if (editPoints.length > 2) {
+            const xs = editPoints.map((entry) => Number(entry.position[0]));
+            const ys = editPoints.map((entry) => Number(entry.position[1]));
+            const zs = editPoints.map((entry) => Number(entry.position[2]));
+            const finiteValues = [...xs, ...ys, ...zs].filter(Number.isFinite);
+            if (!finiteValues.length) {
+              return null;
+            }
+            const minX = Math.min(...xs.filter(Number.isFinite));
+            const maxX = Math.max(...xs.filter(Number.isFinite));
+            const minY = Math.min(...ys.filter(Number.isFinite));
+            const maxY = Math.max(...ys.filter(Number.isFinite));
+            const minZ = Math.min(...zs.filter(Number.isFinite));
+            const maxZ = Math.max(...zs.filter(Number.isFinite));
+            const radius = Math.max(
+              Math.max(maxX - minX, maxY - minY, maxZ - minZ) * 0.12,
+              maxSpan * 0.035,
+              40.0,
+            );
+            return {
+              min: [minX - radius, minY - radius, minZ - radius],
+              max: [maxX + radius, maxY + radius, maxZ + radius],
+            };
+          }
           const t1 = editCurrentT1[wellIndex] || well.t1;
           const t3 = editCurrentT3[wellIndex] || well.t3;
           if (!Array.isArray(t1) || !Array.isArray(t3)) {
@@ -2259,10 +2326,19 @@
           label.className = "legend-label";
           label.textContent = String(item.label || "");
           row.appendChild(label);
+          const editableIndex = editableIndexForLegendItem(item);
+          if (editableIndex !== null) {
+            row.classList.add("is-focusable", "is-editable");
+            row.dataset.editWellIndex = String(editableIndex);
+          }
           const targetBounds = focusTargets[String(item.id || "")];
-          if (targetBounds) {
+          if (targetBounds || editableIndex !== null) {
             row.classList.add("is-focusable");
             row.addEventListener("click", () => {
+              if (editableIndex !== null) {
+                selectEditWell(editableIndex, { focus: !editModeActive });
+                return;
+              }
               if (!editModeActive) {
                 fitCameraToRawBounds(targetBounds);
               }
@@ -3113,6 +3189,7 @@
         function addHoverPointCloud(points, item, hoverItems) {
           const positions = [];
           const itemHoverData = [];
+          const defaultHoverColor = hexOrDefault(item.color, "#64748b");
           points.forEach((point, index) => {
             const vector = displayPoint(point);
             if (
@@ -3121,7 +3198,13 @@
               Number.isFinite(vector.z)
             ) {
               positions.push(vector.x, vector.y, vector.z);
-              itemHoverData.push(hoverItems[index] || {});
+              const hoverItem = hoverItems[index] || {};
+              itemHoverData.push(
+                Object.assign(
+                  { color: defaultHoverColor },
+                  hoverItem && typeof hoverItem === "object" ? hoverItem : {},
+                ),
+              );
             }
           });
           if (!positions.length) {
@@ -3147,6 +3230,7 @@
           });
           material.colorWrite = false;
           const pointCloud = new THREE.Points(geometry, material);
+          pointCloud.userData.hover = { color: defaultHoverColor };
           pointCloud.userData.hoverItems = itemHoverData;
           hoverTargets.push(pointCloud);
           registerAntiCollisionVisualObject(pointCloud, item);
@@ -3883,12 +3967,14 @@
         let editPlane = "xy"; // "xy" | "z"
         let editMoveScope = "point"; // "point" | "pair"
         let editTransformMode = "move"; // "move" | "rotate"
-        const editHandles = []; // {mesh, pickMesh, previewMesh, wellIndex, pointType, dataPos[3], guide}
+        const editHandles = []; // {mesh, pickMesh, previewMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
         const editRotationControls = []; // ring controls per well for t1-anchored XY rotation
         const editRotationPickMeshes = [];
+        const editOriginalPoints = []; // all editable target points per well
+        const editCurrentPoints = []; // current editable target points per well
         const editOriginalT1 = []; // original t1 [x,y,z] per well
         const editOriginalT3 = []; // original t3 [x,y,z] per well
         const editCurrentT1 = []; // current (dragged) t1 per well
@@ -3961,8 +4047,89 @@
           ];
         }
 
+        function editPointDefinitionsForWell(well) {
+          const rawPoints = Array.isArray(well && well.edit_points)
+            ? well.edit_points
+            : [];
+          const points = rawPoints
+            .map((entry, fallbackIndex) => {
+              const position = copyEditPoint(entry && entry.position);
+              const pointIndex = Number(entry && entry.index);
+              return {
+                index: Number.isInteger(pointIndex) ? pointIndex : fallbackIndex,
+                label: String((entry && entry.label) || `P${fallbackIndex + 1}`),
+                pointType: String((entry && entry.point_type) || "point"),
+                position: position,
+              };
+            })
+            .filter((entry) =>
+              entry.position.every((value) => Number.isFinite(value)),
+            );
+          if (points.length > 0) {
+            return points;
+          }
+          return [
+            {
+              index: 1,
+              label: "t1",
+              pointType: "t1",
+              position: copyEditPoint(well && well.t1),
+            },
+            {
+              index: 2,
+              label: "t3",
+              pointType: "t3",
+              position: copyEditPoint(well && well.t3),
+            },
+          ];
+        }
+
+        function copyEditPointEntries(entries) {
+          return (Array.isArray(entries) ? entries : []).map((entry) => ({
+            index: Number(entry && entry.index) || 0,
+            label: String((entry && entry.label) || ""),
+            pointType: String((entry && entry.pointType) || "point"),
+            position: copyEditPoint(entry && entry.position),
+          }));
+        }
+
+        function editPointByRole(points, role, fallbackIndex) {
+          const roleText = String(role || "");
+          const candidates = (Array.isArray(points) ? points : []).filter(
+            (entry) => String(entry && entry.pointType) === roleText,
+          );
+          if (candidates.length > 0) {
+            return candidates[Math.min(Math.max(fallbackIndex || 0, 0), candidates.length - 1)]
+              .position;
+          }
+          return null;
+        }
+
+        function syncPrimaryEditTargetsFromPoints(wellIndex) {
+          const points = editCurrentPoints[wellIndex] || [];
+          const firstT1 = editPointByRole(points, "t1", 0);
+          const lastT3Candidates = points.filter(
+            (entry) => String(entry && entry.pointType) === "t3",
+          );
+          const lastT3 = lastT3Candidates.length
+            ? lastT3Candidates[lastT3Candidates.length - 1].position
+            : null;
+          if (firstT1) {
+            editCurrentT1[wellIndex] = copyEditPoint(firstT1);
+          }
+          if (lastT3) {
+            editCurrentT3[wellIndex] = copyEditPoint(lastT3);
+          }
+        }
+
+        function editWellHasExplicitPoints(wellIndex) {
+          const well = editWells[wellIndex] || {};
+          return Array.isArray(well.edit_points) && well.edit_points.length > 0;
+        }
+
         function cloneEditState(wellIndex) {
           return {
+            points: copyEditPointEntries(editCurrentPoints[wellIndex]),
             t1: copyEditPoint(editCurrentT1[wellIndex]),
             t3: copyEditPoint(editCurrentT3[wellIndex]),
           };
@@ -3970,6 +4137,7 @@
 
         function originalEditState(wellIndex) {
           return {
+            points: copyEditPointEntries(editOriginalPoints[wellIndex]),
             t1: copyEditPoint(editOriginalT1[wellIndex]),
             t3: copyEditPoint(editOriginalT3[wellIndex]),
           };
@@ -3987,6 +4155,16 @@
         }
 
         function editStatesEqual(left, right) {
+          const leftPoints = Array.isArray(left && left.points) ? left.points : [];
+          const rightPoints = Array.isArray(right && right.points) ? right.points : [];
+          if (leftPoints.length || rightPoints.length) {
+            if (leftPoints.length !== rightPoints.length) {
+              return false;
+            }
+            return leftPoints.every((entry, index) =>
+              pointsNearlyEqual(entry.position, rightPoints[index].position),
+            );
+          }
           return (
             Boolean(left) &&
             Boolean(right) &&
@@ -4049,7 +4227,13 @@
         }
 
         function editRotationModeEnabled() {
-          return editModeActive && editMoveScope === "pair" && editTransformMode === "rotate";
+          return (
+            editModeActive &&
+            editMoveScope === "pair" &&
+            editTransformMode === "rotate" &&
+            Number.isInteger(selectedEditWellIndex) &&
+            !editWellHasExplicitPoints(selectedEditWellIndex)
+          );
         }
 
         function editRotationCenterDisplay(wellIndex) {
@@ -4294,10 +4478,12 @@
             return;
           }
           const wellIndex = handle.wellIndex;
-          const original =
-            handle.pointType === "t1"
-              ? editOriginalT1[wellIndex]
-              : editOriginalT3[wellIndex];
+          const originalEntry = (editOriginalPoints[wellIndex] || [])[handle.pointIndex];
+          const original = originalEntry
+            ? originalEntry.position
+            : handle.pointType === "t1"
+            ? editOriginalT1[wellIndex]
+            : editOriginalT3[wellIndex];
           const current = handle.dataPos;
           const dx = current[0] - original[0];
           const dy = current[1] - original[1];
@@ -4398,8 +4584,13 @@
             return;
           }
           label.position.copy(displayPoint(t1T3Midpoint(wellIndex)));
-          label.element.textContent =
-            `Длина ГС ${formatLengthMeters(t1T3Length(wellIndex))}`;
+          if (editWellHasExplicitPoints(wellIndex)) {
+            const pointCount = (editCurrentPoints[wellIndex] || []).length;
+            label.element.textContent = `Точек: ${pointCount}`;
+          } else {
+            label.element.textContent =
+              `Длина ГС ${formatLengthMeters(t1T3Length(wellIndex))}`;
+          }
           label.visible =
             editModeActive &&
             Number.isInteger(selectedEditWellIndex) &&
@@ -4414,10 +4605,13 @@
           if (!handle) {
             return 0.0;
           }
-          const original =
-            handle.pointType === "t1"
-              ? editOriginalT1[handle.wellIndex]
-              : editOriginalT3[handle.wellIndex];
+          const originalEntry =
+            (editOriginalPoints[handle.wellIndex] || [])[handle.pointIndex];
+          const original = originalEntry
+            ? originalEntry.position
+            : handle.pointType === "t1"
+            ? editOriginalT1[handle.wellIndex]
+            : editOriginalT3[handle.wellIndex];
           const current = handle.dataPos;
           if (!original || !current) {
             return 0.0;
@@ -4440,14 +4634,22 @@
           }
         }
 
+        function editWellLabelAnchorPoint(wellIndex) {
+          const points = editCurrentPoints[wellIndex] || [];
+          if (points.length > 0) {
+            return points[points.length - 1].position;
+          }
+          return editCurrentT3[wellIndex];
+        }
+
         function syncEditWellNameLabelPosition(wellIndex) {
           const well = editWells[wellIndex] || {};
           const wellName = String(well.name || "");
-          const t3 = editCurrentT3[wellIndex];
-          if (!wellName || !t3) {
+          const anchor = editWellLabelAnchorPoint(wellIndex);
+          if (!wellName || !anchor) {
             return;
           }
-          const displayPosition = displayPoint(t3);
+          const displayPosition = displayPoint(anchor);
           sceneLabels.forEach((item) => {
             if (item.role === "well_label" && item.text === wellName) {
               item.position.copy(displayPosition);
@@ -4460,19 +4662,50 @@
           });
         }
 
-        function updateWellEditTargets(wellIndex, t1, t3) {
-          editCurrentT1[wellIndex] = copyEditPoint(t1);
-          editCurrentT3[wellIndex] = copyEditPoint(t3);
+        function updateWellEditPoints(wellIndex, nextPoints) {
+          editCurrentPoints[wellIndex] = copyEditPointEntries(nextPoints);
+          syncPrimaryEditTargetsFromPoints(wellIndex);
           editHandles.forEach((handle) => {
             if (handle.wellIndex !== wellIndex) {
               return;
             }
-            updateHandlePosition(
-              handle,
-              handle.pointType === "t1"
-                ? editCurrentT1[wellIndex]
-                : editCurrentT3[wellIndex],
-            );
+            const pointEntry = editCurrentPoints[wellIndex][handle.pointIndex];
+            if (!pointEntry) {
+              return;
+            }
+            updateHandlePosition(handle, pointEntry.position);
+          });
+          syncEditWellNameLabelPosition(wellIndex);
+        }
+
+        function updateWellEditTargets(wellIndex, t1, t3) {
+          editCurrentT1[wellIndex] = copyEditPoint(t1);
+          editCurrentT3[wellIndex] = copyEditPoint(t3);
+          const currentPoints = editCurrentPoints[wellIndex] || [];
+          const nextPoints = copyEditPointEntries(currentPoints);
+          let firstT1Updated = false;
+          let lastT3Index = -1;
+          nextPoints.forEach((entry, index) => {
+            if (entry.pointType === "t1" && !firstT1Updated) {
+              entry.position = copyEditPoint(t1);
+              firstT1Updated = true;
+            }
+            if (entry.pointType === "t3") {
+              lastT3Index = index;
+            }
+          });
+          if (lastT3Index >= 0) {
+            nextPoints[lastT3Index].position = copyEditPoint(t3);
+          }
+          editCurrentPoints[wellIndex] = nextPoints;
+          editHandles.forEach((handle) => {
+            if (handle.wellIndex !== wellIndex) {
+              return;
+            }
+            const pointEntry = editCurrentPoints[wellIndex][handle.pointIndex];
+            if (pointEntry) {
+              updateHandlePosition(handle, pointEntry.position);
+            }
           });
           syncEditWellNameLabelPosition(wellIndex);
         }
@@ -4481,7 +4714,11 @@
           if (!Number.isInteger(wellIndex) || !state) {
             return;
           }
-          updateWellEditTargets(wellIndex, state.t1, state.t3);
+          if (Array.isArray(state.points) && state.points.length > 0) {
+            updateWellEditPoints(wellIndex, state.points);
+          } else {
+            updateWellEditTargets(wellIndex, state.t1, state.t3);
+          }
           editDirtyFlags[wellIndex] = isEditWellDirty(wellIndex);
           rebuildPreviewTrajectory(wellIndex);
           resetEditSaveButtonState();
@@ -4500,6 +4737,7 @@
           }
           const undoStack = editUndoStacks[wellIndex];
           undoStack.push({
+            points: copyEditPointEntries(previousState.points),
             t1: copyEditPoint(previousState.t1),
             t3: copyEditPoint(previousState.t3),
           });
@@ -4518,6 +4756,8 @@
             ? selectedEditWellIndex
             : null;
           const hasSelection = selectedIndex !== null;
+          const selectedHasExplicitPoints =
+            hasSelection && editWellHasExplicitPoints(selectedIndex);
           editUndoBtn.disabled =
             !editModeActive ||
             !hasSelection ||
@@ -4542,7 +4782,8 @@
             btn.disabled =
               !editModeActive ||
               !hasSelection ||
-              (btn.dataset.operation === "rotate" && editMoveScope !== "pair");
+              (btn.dataset.operation === "rotate" &&
+                (editMoveScope !== "pair" || selectedHasExplicitPoints));
           });
         }
 
@@ -4602,11 +4843,23 @@
           pickMaterial.colorWrite = false;
           editWells.forEach((well, idx) => {
             const surface = well.surface || [0, 0, 0];
-            const t1 = well.t1 || [0, 0, 0];
-            const t3 = well.t3 || [0, 0, 0];
             const color = well.color || "#2563eb";
             const config = well.config || {};
+            const pointDefinitions = editPointDefinitionsForWell(well);
+            const originalPointEntries = copyEditPointEntries(pointDefinitions);
+            const currentPointEntries = copyEditPointEntries(pointDefinitions);
+            const firstT1 = editPointByRole(currentPointEntries, "t1", 0) || well.t1 || [0, 0, 0];
+            const t3Candidates = currentPointEntries.filter(
+              (entry) => String(entry && entry.pointType) === "t3",
+            );
+            const lastT3 = t3Candidates.length
+              ? t3Candidates[t3Candidates.length - 1].position
+              : well.t3 || [0, 0, 0];
+            const t1 = copyEditPoint(firstT1);
+            const t3 = copyEditPoint(lastT3);
 
+            editOriginalPoints.push(originalPointEntries);
+            editCurrentPoints.push(currentPointEntries);
             editOriginalT1.push(t1.slice());
             editOriginalT3.push(t3.slice());
             editCurrentT1.push(t1.slice());
@@ -4632,82 +4885,47 @@
               },
             }));
 
-            // t1 handle
-            const t1Mat = new THREE.MeshBasicMaterial({
-              color: color,
-              transparent: true,
-              opacity: 0.85,
-              depthTest: true,
-            });
-            const t1Mesh = new THREE.Mesh(handleGeometry, t1Mat);
-            t1Mesh.position.copy(displayPoint(t1));
-            t1Mesh.visible = false;
-            t1Mesh.renderOrder = 10;
-            scene.add(t1Mesh);
-            const t1PreviewMat = new THREE.MeshBasicMaterial({
-              color: color,
-              transparent: true,
-              opacity: 0.42,
-              depthTest: false,
-              depthWrite: false,
-            });
-            const t1PreviewMesh = new THREE.Mesh(handleGeometry, t1PreviewMat);
-            t1PreviewMesh.position.copy(t1Mesh.position);
-            t1PreviewMesh.visible = false;
-            t1PreviewMesh.renderOrder = 8;
-            scene.add(t1PreviewMesh);
-            const t1PickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
-            t1PickMesh.position.copy(t1Mesh.position);
-            t1PickMesh.visible = false;
-            t1PickMesh.renderOrder = 11;
-            scene.add(t1PickMesh);
-            editHandles.push({
-              mesh: t1Mesh,
-              pickMesh: t1PickMesh,
-              previewMesh: t1PreviewMesh,
-              wellIndex: idx,
-              pointType: "t1",
-              dataPos: t1.slice(),
-              guide: createEditDeltaGuide("t1", color),
-            });
-
-            // t3 handle
-            const t3Mat = new THREE.MeshBasicMaterial({
-              color: color,
-              transparent: true,
-              opacity: 0.85,
-              depthTest: true,
-            });
-            const t3Mesh = new THREE.Mesh(handleGeometry, t3Mat);
-            t3Mesh.position.copy(displayPoint(t3));
-            t3Mesh.visible = false;
-            t3Mesh.renderOrder = 10;
-            scene.add(t3Mesh);
-            const t3PreviewMat = new THREE.MeshBasicMaterial({
-              color: color,
-              transparent: true,
-              opacity: 0.42,
-              depthTest: false,
-              depthWrite: false,
-            });
-            const t3PreviewMesh = new THREE.Mesh(handleGeometry, t3PreviewMat);
-            t3PreviewMesh.position.copy(t3Mesh.position);
-            t3PreviewMesh.visible = false;
-            t3PreviewMesh.renderOrder = 8;
-            scene.add(t3PreviewMesh);
-            const t3PickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
-            t3PickMesh.position.copy(t3Mesh.position);
-            t3PickMesh.visible = false;
-            t3PickMesh.renderOrder = 11;
-            scene.add(t3PickMesh);
-            editHandles.push({
-              mesh: t3Mesh,
-              pickMesh: t3PickMesh,
-              previewMesh: t3PreviewMesh,
-              wellIndex: idx,
-              pointType: "t3",
-              dataPos: t3.slice(),
-              guide: createEditDeltaGuide("t3", color),
+            currentPointEntries.forEach((pointEntry, pointIndex) => {
+              const pointType = String(pointEntry.label || pointEntry.pointType || `P${pointIndex + 1}`);
+              const point = copyEditPoint(pointEntry.position);
+              const pointMat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.85,
+                depthTest: true,
+              });
+              const pointMesh = new THREE.Mesh(handleGeometry, pointMat);
+              pointMesh.position.copy(displayPoint(point));
+              pointMesh.visible = false;
+              pointMesh.renderOrder = 10;
+              scene.add(pointMesh);
+              const previewMat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.42,
+                depthTest: false,
+                depthWrite: false,
+              });
+              const previewMesh = new THREE.Mesh(handleGeometry, previewMat);
+              previewMesh.position.copy(pointMesh.position);
+              previewMesh.visible = false;
+              previewMesh.renderOrder = 8;
+              scene.add(previewMesh);
+              const pickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
+              pickMesh.position.copy(pointMesh.position);
+              pickMesh.visible = false;
+              pickMesh.renderOrder = 11;
+              scene.add(pickMesh);
+              editHandles.push({
+                mesh: pointMesh,
+                pickMesh: pickMesh,
+                previewMesh: previewMesh,
+                wellIndex: idx,
+                pointType: pointType,
+                pointIndex: pointIndex,
+                dataPos: point.slice(),
+                guide: createEditDeltaGuide(pointType, color),
+              });
             });
 
             // Preview line (initially empty, hidden)
@@ -4846,6 +5064,9 @@
             return;
           }
           selectedEditWellIndex = nextIndex;
+          if (editWellHasExplicitPoints(nextIndex) && editTransformMode === "rotate") {
+            setEditTransformMode("move");
+          }
           syncEditVisibility();
           syncEditToolboxState();
           if (options && options.focus) {
@@ -4918,7 +5139,12 @@
           if (operation !== "move" && operation !== "rotate") {
             return;
           }
-          if (operation === "rotate" && editMoveScope !== "pair") {
+          if (
+            operation === "rotate" &&
+            (editMoveScope !== "pair" ||
+              (Number.isInteger(selectedEditWellIndex) &&
+                editWellHasExplicitPoints(selectedEditWellIndex)))
+          ) {
             return;
           }
           editTransformMode = operation;
@@ -4937,6 +5163,14 @@
         }
 
         function rebuildPreviewTrajectory(wellIndex) {
+          if (editWellHasExplicitPoints(wellIndex)) {
+            const points = (editCurrentPoints[wellIndex] || [])
+              .map((entry) => copyEditPoint(entry.position))
+              .filter((point) => point.every((value) => Number.isFinite(value)));
+            updateLineGeometry(editLineObjects[wellIndex], points, Z_DISPLAY_SIGN);
+            syncEditVisibility();
+            return;
+          }
           const replanner = editReplanners[wellIndex];
           const t1 = editCurrentT1[wellIndex];
           const t3 = editCurrentT3[wellIndex];
@@ -5398,33 +5632,66 @@
           const dataY = newPos.y;
           const dataZ = newPos.z * Z_DISPLAY_SIGN;
           const wi = editDragHandle.wellIndex;
+          const currentEntries = copyEditPointEntries(editCurrentPoints[wi]);
           if (editDragMoveScope === "pair" && editDragHistoryStartState) {
-            const startPoint = editDragHistoryStartState[editDragHandle.pointType];
+            const historyPoints = copyEditPointEntries(editDragHistoryStartState.points);
+            const startEntry = historyPoints[editDragHandle.pointIndex];
+            const startPoint =
+              startEntry && startEntry.position
+                ? startEntry.position
+                : editDragHistoryStartState[editDragHandle.pointType];
+            if (!startPoint) {
+              return;
+            }
             const dx = dataX - startPoint[0];
             const dy = dataY - startPoint[1];
             const dz = dataZ - startPoint[2];
-            const nextT1 = copyEditPoint(editDragHistoryStartState.t1);
-            const nextT3 = copyEditPoint(editDragHistoryStartState.t3);
-            nextT1[0] += dx;
-            nextT1[1] += dy;
-            nextT1[2] += dz;
-            nextT3[0] += dx;
-            nextT3[1] += dy;
-            nextT3[2] += dz;
-            updateWellEditTargets(wi, nextT1, nextT3);
-          } else {
-            const nextT1 = copyEditPoint(editCurrentT1[wi]);
-            const nextT3 = copyEditPoint(editCurrentT3[wi]);
-            if (editDragHandle.pointType === "t1") {
-              nextT1[0] = dataX;
-              nextT1[1] = dataY;
-              nextT1[2] = dataZ;
+            if (editWellHasExplicitPoints(wi)) {
+              const nextPoints = historyPoints.map((entry) => ({
+                index: entry.index,
+                label: entry.label,
+                pointType: entry.pointType,
+                position: [
+                  entry.position[0] + dx,
+                  entry.position[1] + dy,
+                  entry.position[2] + dz,
+                ],
+              }));
+              updateWellEditPoints(wi, nextPoints);
             } else {
-              nextT3[0] = dataX;
-              nextT3[1] = dataY;
-              nextT3[2] = dataZ;
+              const nextT1 = copyEditPoint(editDragHistoryStartState.t1);
+              const nextT3 = copyEditPoint(editDragHistoryStartState.t3);
+              nextT1[0] += dx;
+              nextT1[1] += dy;
+              nextT1[2] += dz;
+              nextT3[0] += dx;
+              nextT3[1] += dy;
+              nextT3[2] += dz;
+              updateWellEditTargets(wi, nextT1, nextT3);
             }
-            updateWellEditTargets(wi, nextT1, nextT3);
+          } else {
+            if (editWellHasExplicitPoints(wi)) {
+              const nextPoints = currentEntries;
+              const nextEntry = nextPoints[editDragHandle.pointIndex];
+              if (!nextEntry) {
+                return;
+              }
+              nextEntry.position = [dataX, dataY, dataZ];
+              updateWellEditPoints(wi, nextPoints);
+            } else {
+              const nextT1 = copyEditPoint(editCurrentT1[wi]);
+              const nextT3 = copyEditPoint(editCurrentT3[wi]);
+              if (editDragHandle.pointType === "t1") {
+                nextT1[0] = dataX;
+                nextT1[1] = dataY;
+                nextT1[2] = dataZ;
+              } else {
+                nextT3[0] = dataX;
+                nextT3[1] = dataY;
+                nextT3[2] = dataZ;
+              }
+              updateWellEditTargets(wi, nextT1, nextT3);
+            }
           }
           editDirtyFlags[wi] = isEditWellDirty(wi);
           rebuildPreviewTrajectory(wi);
@@ -5482,11 +5749,22 @@
           const changes = [];
           editWells.forEach((well, idx) => {
             if (!editDirtyFlags[idx]) return;
-            changes.push({
-              name: well.name,
-              t1: editCurrentT1[idx].map((v) => Math.round(v * 100) / 100),
-              t3: editCurrentT3[idx].map((v) => Math.round(v * 100) / 100),
-            });
+            if (editWellHasExplicitPoints(idx)) {
+              changes.push({
+                name: well.name,
+                points: (editCurrentPoints[idx] || []).map((entry) => ({
+                  index: Number(entry.index),
+                  label: String(entry.label || ""),
+                  position: entry.position.map((v) => Math.round(v * 100) / 100),
+                })),
+              });
+            } else {
+              changes.push({
+                name: well.name,
+                t1: editCurrentT1[idx].map((v) => Math.round(v * 100) / 100),
+                t3: editCurrentT3[idx].map((v) => Math.round(v * 100) / 100),
+              });
+            }
           });
           if (changes.length === 0) return;
           // Visual feedback

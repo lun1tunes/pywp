@@ -3390,10 +3390,10 @@ def _turn_seed_vectors(
 def _build_unit_seed_values(search_settings: TurnSearchSettings) -> np.ndarray:
     level = max(int(search_settings.restart_index), 0)
     if level <= 0:
-        return np.array([1.0], dtype=float)
+        return np.array([1.0, 0.8], dtype=float)
     if level == 1:
-        return np.array([1.0, 0.2], dtype=float)
-    return np.array([1.0, 0.6, 0.2], dtype=float)
+        return np.array([1.0, 0.8, 0.5, 0.2], dtype=float)
+    return np.array([1.0, 0.8, 0.6, 0.4, 0.2], dtype=float)
 
 
 def _axis_samples(lower: float, upper: float, count: int) -> np.ndarray:

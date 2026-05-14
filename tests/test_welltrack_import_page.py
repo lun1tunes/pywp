@@ -4578,7 +4578,10 @@ def test_actual_reference_mwd_assignment_defaults_to_poor_and_selects_unknown() 
 def test_actual_reference_mwd_models_from_state_does_not_mutate_widget_key() -> None:
     class ReadOnlyWidgetState(dict):
         def __setitem__(self, key: object, value: object) -> None:
-            if key == ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY:
+            if key in {
+                ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY,
+                ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
+            }:
                 raise AssertionError("widget key must not be mutated after render")
             super().__setitem__(key, value)
 
@@ -4650,6 +4653,70 @@ def test_actual_reference_mwd_models_from_state_does_not_mutate_widget_key() -> 
         "FACT-2",
         "MISSING",
     ]
+
+
+def test_actual_reference_mwd_models_from_state_accepts_widget_key_fallback() -> None:
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 0.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+                {
+                    "Wellname": "FACT-2",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 100.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-2",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 100.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+            ]
+        )
+    )
+    state = {
+        ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY: [
+            "FACT-2",
+        ]
+    }
+
+    model_by_name = ptc_anticollision_params.reference_uncertainty_models_from_state(
+        reference_wells,
+        state=state,
+    )
+
+    assert (
+        model_by_name["FACT-1"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+        ).iscwsa_tool_code
+    )
+    assert (
+        model_by_name["FACT-2"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+        ).iscwsa_tool_code
+    )
 
 
 def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> (

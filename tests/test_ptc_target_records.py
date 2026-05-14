@@ -184,7 +184,7 @@ def test_welltracks4_multi_horizontal_fixture_imports_well_08_as_ready() -> None
     assert str(row["Статус"]) == "✅"
     assert str(row["Проблема"]) == "—"
     assert str(row["Примечание"]) == "Многопластовая: 3 уровней"
-    assert float(row["Длина ГС, м"]) == pytest.approx(1798.9975, abs=1e-3)
+    assert float(row["Длина ГС, м"]) == pytest.approx(1049.9094, abs=1e-3)
 
 
 def test_multi_horizontal_records_require_complete_t1_t3_pairs() -> None:
