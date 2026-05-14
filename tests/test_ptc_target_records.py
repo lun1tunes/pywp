@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
-from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord, parse_welltrack_text
 from pywp import ptc_target_records as target_records
 from pywp.welltrack_quality import swap_t1_t3_for_wells
 
@@ -168,6 +169,22 @@ def test_multi_horizontal_records_are_ready_and_labeled_by_levels() -> None:
     assert str(overview_df.iloc[0]["Примечание"]) == "Многопластовая: 2 уровней"
     assert float(overview_df.iloc[0]["Длина ГС, м"]) == pytest.approx(800.0)
     assert list(raw_df["Точка"]) == ["S", "1_t1", "1_t3", "2_t1", "2_t3"]
+
+
+def test_welltracks4_multi_horizontal_fixture_imports_well_08_as_ready() -> None:
+    records = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    overview_df = target_records.records_overview_dataframe(records)
+    row = overview_df.loc[overview_df["Скважина"].eq("well_08")].iloc[0]
+
+    assert str(row["Статус"]) == "✅"
+    assert str(row["Проблема"]) == "—"
+    assert str(row["Примечание"]) == "Многопластовая: 3 уровней"
+    assert float(row["Длина ГС, м"]) == pytest.approx(1798.9975, abs=1e-3)
 
 
 def test_multi_horizontal_records_require_complete_t1_t3_pairs() -> None:

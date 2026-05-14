@@ -28,6 +28,21 @@ def _record(
     )
 
 
+def _multi_horizontal_record(name: str = "MH-1") -> WelltrackRecord:
+    return WelltrackRecord(
+        name=name,
+        points=(
+            WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0),
+            WelltrackPoint(x=456008.0, y=889281.0, z=2339.0, md=2.0),
+            WelltrackPoint(x=456601.0, y=889139.0, z=2339.0, md=3.0),
+            WelltrackPoint(x=456699.0, y=889116.0, z=2365.0, md=4.0),
+            WelltrackPoint(x=457282.0, y=888977.0, z=2365.0, md=5.0),
+            WelltrackPoint(x=457379.0, y=888953.0, z=2390.0, md=6.0),
+            WelltrackPoint(x=457954.0, y=888817.0, z=2390.0, md=7.0),
+        ),
+    )
+
+
 def test_detect_t1_t3_order_issues_by_horizontal_offset() -> None:
     records = [
         _record(
@@ -46,6 +61,14 @@ def test_detect_t1_t3_order_issues_by_horizontal_offset() -> None:
     issues = detect_t1_t3_order_issues(records, min_delta_m=0.1)
     assert [item.well_name for item in issues] == ["BAD-1"]
     assert issues[0].delta_m > 0.0
+
+
+def test_detect_t1_t3_order_issues_skips_multi_horizontal_records() -> None:
+    source = _multi_horizontal_record()
+
+    issues = detect_t1_t3_order_issues([source], min_delta_m=0.1)
+
+    assert issues == []
 
 
 def test_swap_t1_t3_for_wells_preserves_md_positions() -> None:
@@ -67,3 +90,11 @@ def test_swap_t1_t3_for_wells_preserves_md_positions() -> None:
 
     issues_after = detect_t1_t3_order_issues([fixed], min_delta_m=0.1)
     assert issues_after == []
+
+
+def test_swap_t1_t3_for_wells_leaves_multi_horizontal_records_unchanged() -> None:
+    source = _multi_horizontal_record()
+
+    updated = swap_t1_t3_for_wells([source], well_names={str(source.name)})
+
+    assert tuple(updated[0].points) == tuple(source.points)

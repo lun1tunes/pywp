@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,6 +11,7 @@ from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.planner_types import PlanningError
 
 SMALL = 1e-9
+MAX_TRANSITION_MD_MULTIPLIER = 4.0
 
 
 @dataclass(frozen=True)
@@ -81,7 +81,7 @@ def extend_plan_with_multi_horizontal_targets(
             raise PlanningError(_transition_problem_text(transition))
         transitions.append(transition)
 
-        transition_rows = _linear_transition_rows(
+        transition_rows = _smooth_transition_rows(
             current=current,
             target=next_t1,
             target_inc_deg=next_hold[0],
@@ -172,7 +172,8 @@ def _validate_extended_stations(
     if max_inc > float(config.max_inc_deg) + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: построенный HORIZONTAL_BUILD превышает "
-            f"ограничение INC ({max_inc:.3f} > {float(config.max_inc_deg):.3f}°)."
+            f"ограничение INC ({max_inc:.3f} > {float(config.max_inc_deg):.3f}°). "
+            "Увеличьте горизонтальный зазор между уровнями или уменьшите ΔZ."
         )
 
     dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
@@ -264,7 +265,7 @@ def _transition_feasibility(
     )
 
 
-def _linear_transition_rows(
+def _smooth_transition_rows(
     *,
     current: dict[str, float],
     target: Point3D,
@@ -274,50 +275,194 @@ def _linear_transition_rows(
     config: TrajectoryConfig,
 ) -> list[dict[str, object]]:
     gap = _distance_from_current(current, target)
-    direct_inc, direct_azi = _direction_angles_from_current(current, target)
+    p0 = np.array([current["x"], current["y"], current["z"]], dtype=float)
+    p3 = np.array([target.x, target.y, target.z], dtype=float)
+    start_dir = _xyz_direction_vector(
+        inc_deg=float(current["inc_deg"]),
+        azi_deg=float(current["azi_deg"]),
+    )
+    end_dir = _xyz_direction_vector(
+        inc_deg=float(target_inc_deg),
+        azi_deg=float(target_azi_deg),
+    )
     dls_limit = float(config.dls_build_max_deg_per_30m)
-    build_in_m = _dogleg_build_length_m(
-        float(current["inc_deg"]),
-        float(current["azi_deg"]),
-        direct_inc,
-        direct_azi,
-        dls_limit,
+    min_control_m = float(
+        max(
+            float(config.min_structural_segment_m),
+            float(config.md_step_m),
+            1.0,
+        )
     )
-    build_out_m = _dogleg_build_length_m(
-        direct_inc,
-        direct_azi,
-        target_inc_deg,
-        target_azi_deg,
-        dls_limit,
+    control_lengths = _candidate_control_lengths(
+        gap_m=gap,
+        min_control_m=min_control_m,
     )
 
-    def angles(distance_m: float) -> tuple[float, float]:
-        remaining_m = float(gap - distance_m)
-        if build_in_m > SMALL and distance_m < build_in_m:
-            return _interpolate_angles(
-                float(current["inc_deg"]),
-                float(current["azi_deg"]),
-                direct_inc,
-                direct_azi,
-                float(distance_m / build_in_m),
+    best: pd.DataFrame | None = None
+    best_score = float("inf")
+    best_dls = float("inf")
+    best_inc = float("inf")
+    for lead_m in control_lengths:
+        for tail_m in control_lengths:
+            p1 = p0 + start_dir * float(lead_m)
+            p2 = p3 - end_dir * float(tail_m)
+            xyz = _sample_cubic_bezier(
+                p0=p0,
+                p1=p1,
+                p2=p2,
+                p3=p3,
+                step_m=float(config.md_step_m),
             )
-        if build_out_m > SMALL and remaining_m < build_out_m:
-            return _interpolate_angles(
-                direct_inc,
-                direct_azi,
-                target_inc_deg,
-                target_azi_deg,
-                float(1.0 - remaining_m / build_out_m),
+            try:
+                candidate = _stations_from_xyz_path(
+                    xyz=xyz,
+                    segment_name=segment_name,
+                    start_md_m=float(current["md_m"]),
+                    start_inc_deg=float(current["inc_deg"]),
+                    start_azi_deg=float(current["azi_deg"]),
+                    end_inc_deg=float(target_inc_deg),
+                    end_azi_deg=float(target_azi_deg),
+                )
+            except PlanningError:
+                continue
+            md_span = float(candidate["MD_m"].iloc[-1] - candidate["MD_m"].iloc[0])
+            if md_span > max(float(gap) * MAX_TRANSITION_MD_MULTIPLIER, float(gap) + 500.0):
+                continue
+            max_dls = _max_finite(candidate["DLS_deg_per_30m"].to_numpy(dtype=float))
+            max_inc = _max_finite(candidate["INC_deg"].to_numpy(dtype=float))
+            dls_excess = max(0.0, max_dls - dls_limit)
+            inc_excess = max(0.0, max_inc - float(config.max_inc_deg))
+            score = float(
+                1000.0 * dls_excess
+                + 1000.0 * inc_excess
+                + max_dls
+                + 0.001 * md_span
             )
-        return direct_inc, direct_azi
+            if score < best_score:
+                best = candidate
+                best_score = score
+                best_dls = max_dls
+                best_inc = max_inc
 
-    return _linear_rows(
-        current=current,
-        target=target,
-        segment_name=segment_name,
-        md_step_m=float(config.md_step_m),
-        angles_at_distance=angles,
+    if best is None:
+        raise PlanningError(
+            "Многопластовая скважина: не удалось построить плавный "
+            f"{segment_name} между уровнями без вырожденной геометрии. "
+            "Увеличьте расстояние между горизонтальными участками или уменьшите ΔZ."
+        )
+    if best_dls > dls_limit + 1e-6:
+        raise PlanningError(
+            "Многопластовая скважина: плавный "
+            f"{segment_name} требует ПИ {best_dls:.2f} deg/30m, что выше "
+            f"лимита {dls_limit:.2f}. Увеличьте расстояние между уровнями, "
+            "сократите соседние мини-горизонты или уменьшите ΔZ."
+        )
+    if best_inc > float(config.max_inc_deg) + 1e-6:
+        raise PlanningError(
+            "Многопластовая скважина: плавный "
+            f"{segment_name} требует INC {best_inc:.2f}°, что выше "
+            f"ограничения {float(config.max_inc_deg):.2f}°. "
+            "Увеличьте горизонтальный зазор между уровнями или уменьшите ΔZ."
+        )
+    return [dict(row) for row in best.iloc[1:].to_dict("records")]
+
+
+def _candidate_control_lengths(*, gap_m: float, min_control_m: float) -> tuple[float, ...]:
+    values = {
+        float(min_control_m),
+        *(float(gap_m) * scale for scale in (0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50)),
+    }
+    return tuple(sorted(value for value in values if value > SMALL))
+
+
+def _sample_cubic_bezier(
+    *,
+    p0: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+    p3: np.ndarray,
+    step_m: float,
+) -> np.ndarray:
+    chord_m = float(np.linalg.norm(p3 - p0))
+    control_m = float(
+        np.linalg.norm(p1 - p0)
+        + np.linalg.norm(p2 - p1)
+        + np.linalg.norm(p3 - p2)
     )
+    samples = max(int(np.ceil(max(chord_m, control_m) / max(float(step_m), 1.0))), 8)
+    samples = min(samples, 2000)
+    t = np.linspace(0.0, 1.0, samples + 1)
+    omt = 1.0 - t
+    xyz = (
+        (omt**3)[:, None] * p0
+        + (3.0 * omt * omt * t)[:, None] * p1
+        + (3.0 * omt * t * t)[:, None] * p2
+        + (t**3)[:, None] * p3
+    )
+    return _deduplicate_xyz(xyz)
+
+
+def _deduplicate_xyz(xyz: np.ndarray) -> np.ndarray:
+    points = np.asarray(xyz, dtype=float)
+    if len(points) <= 1:
+        return points
+    keep = [0]
+    for index in range(1, len(points)):
+        if float(np.linalg.norm(points[index] - points[keep[-1]])) > SMALL:
+            keep.append(index)
+    return points[keep]
+
+
+def _stations_from_xyz_path(
+    *,
+    xyz: np.ndarray,
+    segment_name: str,
+    start_md_m: float,
+    start_inc_deg: float,
+    start_azi_deg: float,
+    end_inc_deg: float,
+    end_azi_deg: float,
+) -> pd.DataFrame:
+    points = np.asarray(xyz, dtype=float)
+    if len(points) < 3:
+        raise PlanningError("Многопластовая скважина: слишком мало точек перехода.")
+    distances = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    if np.any(~np.isfinite(distances)) or np.any(distances <= SMALL):
+        raise PlanningError(
+            "Многопластовая скважина: переход содержит совпадающие станции."
+        )
+    md = float(start_md_m) + np.concatenate([[0.0], np.cumsum(distances)])
+    tangent_x = np.gradient(points[:, 0], md, edge_order=2)
+    tangent_y = np.gradient(points[:, 1], md, edge_order=2)
+    tangent_z = np.gradient(points[:, 2], md, edge_order=2)
+    horizontal = np.hypot(tangent_x, tangent_y)
+    inc_deg = np.degrees(np.arctan2(horizontal, tangent_z))
+    azi_deg = (np.degrees(np.arctan2(tangent_x, tangent_y)) + 360.0) % 360.0
+    inc_deg[0] = float(start_inc_deg)
+    azi_deg[0] = float(start_azi_deg) % 360.0
+    inc_deg[-1] = float(end_inc_deg)
+    azi_deg[-1] = float(end_azi_deg) % 360.0
+    stations = pd.DataFrame(
+        {
+            "MD_m": md,
+            "INC_deg": inc_deg,
+            "AZI_deg": azi_deg,
+            "segment": str(segment_name),
+            "N_m": points[:, 1],
+            "E_m": points[:, 0],
+            "TVD_m": points[:, 2],
+            "X_m": points[:, 0],
+            "Y_m": points[:, 1],
+            "Z_m": points[:, 2],
+        }
+    )
+    return add_dls(stations)
+
+
+def _max_finite(values: np.ndarray) -> float:
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    return float(np.max(finite)) if len(finite) else 0.0
 
 
 def _linear_hold_rows(
@@ -333,22 +478,24 @@ def _linear_hold_rows(
         raise PlanningError(
             f"Многопластовая скважина: участок {segment_name} имеет нулевую длину."
         )
-    return _linear_rows(
+    return _straight_rows(
         current=current,
         target=target,
         segment_name=segment_name,
         md_step_m=float(config.md_step_m),
-        angles_at_distance=lambda _distance_m: (float(inc_deg), float(azi_deg)),
+        inc_deg=float(inc_deg),
+        azi_deg=float(azi_deg),
     )
 
 
-def _linear_rows(
+def _straight_rows(
     *,
     current: dict[str, float],
     target: Point3D,
     segment_name: str,
     md_step_m: float,
-    angles_at_distance: Callable[[float], tuple[float, float]],
+    inc_deg: float,
+    azi_deg: float,
 ) -> list[dict[str, object]]:
     start_xyz = np.array([current["x"], current["y"], current["z"]], dtype=float)
     end_xyz = np.array([target.x, target.y, target.z], dtype=float)
@@ -367,7 +514,6 @@ def _linear_rows(
     for distance in distances:
         fraction = float(distance / length)
         xyz = start_xyz + delta * fraction
-        inc_deg, azi_deg = angles_at_distance(float(distance))
         rows.append(
             {
                 "MD_m": float(current["md_m"] + distance),
@@ -495,19 +641,6 @@ def _validate_inc_limit(
     )
 
 
-def _interpolate_angles(
-    inc_from_deg: float,
-    azi_from_deg: float,
-    inc_to_deg: float,
-    azi_to_deg: float,
-    fraction: float,
-) -> tuple[float, float]:
-    start = _direction_vector(inc_from_deg, azi_from_deg)
-    end = _direction_vector(inc_to_deg, azi_to_deg)
-    vector = _slerp_direction(start, end, float(np.clip(fraction, 0.0, 1.0)))
-    return _angles_from_direction(vector)
-
-
 def _direction_vector(inc_deg: float, azi_deg: float) -> np.ndarray:
     inc_rad = np.radians(float(inc_deg))
     azi_rad = np.radians(float(azi_deg))
@@ -521,32 +654,9 @@ def _direction_vector(inc_deg: float, azi_deg: float) -> np.ndarray:
     )
 
 
-def _slerp_direction(start: np.ndarray, end: np.ndarray, fraction: float) -> np.ndarray:
-    start = np.asarray(start, dtype=float)
-    end = np.asarray(end, dtype=float)
-    start = start / max(float(np.linalg.norm(start)), SMALL)
-    end = end / max(float(np.linalg.norm(end)), SMALL)
-    dot = float(np.clip(np.dot(start, end), -1.0, 1.0))
-    theta = float(np.arccos(dot))
-    if theta <= 1e-12:
-        return start
-    sin_theta = float(np.sin(theta))
-    if abs(sin_theta) <= SMALL:
-        return start
-    return (
-        np.sin((1.0 - fraction) * theta) / sin_theta * start
-        + np.sin(fraction * theta) / sin_theta * end
-    )
-
-
-def _angles_from_direction(vector: np.ndarray) -> tuple[float, float]:
-    north = float(vector[0])
-    east = float(vector[1])
-    down = float(vector[2])
-    horizontal = float(np.hypot(north, east))
-    inc_deg = float(np.degrees(np.arctan2(horizontal, down)))
-    azi_deg = float(np.degrees(np.arctan2(east, north)) % 360.0)
-    return inc_deg, azi_deg
+def _xyz_direction_vector(inc_deg: float, azi_deg: float) -> np.ndarray:
+    north, east, down = _direction_vector(inc_deg=inc_deg, azi_deg=azi_deg)
+    return np.array([east, north, down], dtype=float)
 
 
 def _max_feasible_delta_z_m(

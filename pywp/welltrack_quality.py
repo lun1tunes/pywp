@@ -3,7 +3,11 @@ from __future__ import annotations
 import math
 from typing import Iterable
 
-from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.eclipse_welltrack import (
+    WelltrackPoint,
+    WelltrackRecord,
+    welltrack_multi_horizontal_level_count,
+)
 from pywp.pydantic_base import FrozenModel
 
 
@@ -25,6 +29,8 @@ def detect_t1_t3_order_issues(
     for record in records:
         points = tuple(record.points)
         if len(points) < 3:
+            continue
+        if welltrack_multi_horizontal_level_count(points) > 1:
             continue
         surface = points[0]
         t1 = points[1]
@@ -59,6 +65,9 @@ def swap_t1_t3_for_wells(
         points = tuple(record.points)
         name = str(record.name)
         if len(points) < 3 or name not in well_names:
+            updated.append(record)
+            continue
+        if welltrack_multi_horizontal_level_count(points) > 1:
             updated.append(record)
             continue
 

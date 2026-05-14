@@ -6,6 +6,7 @@ from dataclasses import asdict
 from typing import Any
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 from pydantic import BaseModel
@@ -34,6 +35,7 @@ from pywp.eclipse_welltrack import (
     parse_welltrack_text,
 )
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
+from pywp.mcm import compute_positions_min_curv
 from pywp.pilot_wells import SidetrackWindowOverride
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -55,6 +57,19 @@ from pywp.welltrack_batch import (
     merge_batch_results,
     recommended_batch_selection,
 )
+
+
+def _max_mcm_xyz_mismatch_m(success: SuccessfulWellPlan) -> float:
+    rebuilt = compute_positions_min_curv(
+        success.stations[["MD_m", "INC_deg", "AZI_deg"]],
+        start=success.surface,
+    )
+    mismatch_m = np.sqrt(
+        (rebuilt["X_m"].to_numpy() - success.stations["X_m"].to_numpy()) ** 2
+        + (rebuilt["Y_m"].to_numpy() - success.stations["Y_m"].to_numpy()) ** 2
+        + (rebuilt["Z_m"].to_numpy() - success.stations["Z_m"].to_numpy()) ** 2
+    )
+    return float(np.max(mismatch_m))
 
 
 def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
@@ -140,9 +155,57 @@ def test_multi_horizontal_record_extends_base_plan_with_numbered_segments() -> N
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
         float(success.config.dls_build_max_deg_per_30m) + 1e-6
     )
+    assert _max_mcm_xyz_mismatch_m(success) < 0.25
+
+
+def test_multi_horizontal_record_supports_shallower_next_level_with_enough_gap() -> None:
+    record = WelltrackRecord(
+        name="multi_shallower_ok",
+        points=(
+            WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0),
+            WelltrackPoint(x=456008.0, y=889281.0, z=2365.0, md=2.0),
+            WelltrackPoint(x=456601.0, y=889139.0, z=2365.0, md=3.0),
+            WelltrackPoint(x=457201.0, y=888995.0, z=2339.0, md=4.0),
+            WelltrackPoint(x=457784.0, y=888856.0, z=2339.0, md=5.0),
+        ),
+    )
+
+    row, success = _evaluate_record_standalone(record, TrajectoryConfig())
+
+    assert success is not None
+    assert row["Статус"] == "OK"
+    assert success.summary["multi_horizontal_levels"] == 2
+    assert success.t3.z == pytest.approx(2339.0)
+    assert float(success.stations["INC_deg"].max()) <= (
+        float(success.config.max_inc_deg) + 1e-6
+    )
+    assert float(success.stations["DLS_deg_per_30m"].max()) <= (
+        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+    )
+    assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
 
 def test_multi_horizontal_record_reports_short_transition_recommendation() -> None:
+    record = WelltrackRecord(
+        name="multi_short_transition",
+        points=(
+            WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0),
+            WelltrackPoint(x=456008.0, y=889281.0, z=2339.0, md=2.0),
+            WelltrackPoint(x=456601.0, y=889139.0, z=2339.0, md=3.0),
+            WelltrackPoint(x=456699.0, y=889116.0, z=2365.0, md=4.0),
+            WelltrackPoint(x=457282.0, y=888977.0, z=2365.0, md=5.0),
+        ),
+    )
+
+    row, success = _evaluate_record_standalone(record, TrajectoryConfig())
+
+    assert success is None
+    assert row["Статус"] == "Ошибка расчета"
+    assert "HORIZONTAL_BUILD1" in str(row["Проблема"])
+    assert "сократить соседние мини-горизонты" in str(row["Проблема"])
+
+
+def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
     text = Path("tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC").read_text(
         encoding="utf-8"
     )
@@ -152,10 +215,23 @@ def test_multi_horizontal_record_reports_short_transition_recommendation() -> No
 
     row, success = _evaluate_record_standalone(record, TrajectoryConfig())
 
-    assert success is None
-    assert row["Статус"] == "Ошибка расчета"
-    assert "HORIZONTAL_BUILD1" in str(row["Проблема"])
-    assert "сократить соседние мини-горизонты" in str(row["Проблема"])
+    assert success is not None
+    assert row["Статус"] == "OK"
+    assert success.summary["multi_horizontal_levels"] == 3
+    assert success.t3.x == pytest.approx(458356.0)
+    assert success.t3.y == pytest.approx(888722.0)
+    assert success.t3.z == pytest.approx(2390.0)
+    assert {
+        "HORIZONTAL1",
+        "HORIZONTAL_BUILD1",
+        "HORIZONTAL2",
+        "HORIZONTAL_BUILD2",
+        "HORIZONTAL3",
+    }.issubset(set(success.stations["segment"]))
+    assert float(success.stations["DLS_deg_per_30m"].max()) <= (
+        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+    )
+    assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
 
 def _straight_success(
