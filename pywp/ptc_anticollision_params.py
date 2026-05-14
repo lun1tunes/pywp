@@ -77,7 +77,6 @@ def reference_uncertainty_models_from_state(
         state_mapping.get(ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY, ()),
         actual_names=actual_names,
     )
-    state_mapping[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = list(unknown_names)
     return reference_uncertainty_models_for_unknown_actual_names(
         reference_wells,
         unknown_names=unknown_names,

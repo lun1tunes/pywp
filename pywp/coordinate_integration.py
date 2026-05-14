@@ -103,20 +103,11 @@ def render_crs_sidebar() -> CoordinateSystem:
         if CRS_SELECTED_KEY not in st.session_state:
             st.session_state[CRS_SELECTED_KEY] = DEFAULT_CRS
 
-        # Get current selection label from stored enum
         current_crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
-        current_label = next(
-            (label for label, crs in CRS_OPTIONS if crs == current_crs),
-            CRS_OPTIONS[_DEFAULT_CRS_INDEX][0],  # Default fallback label
-        )
-
-        # Pre-set widget state as string label (not enum)
-        if CRS_SELECTBOX_KEY not in st.session_state:
-            st.session_state[CRS_SELECTBOX_KEY] = current_label
 
         option_labels = [label for label, _ in CRS_OPTIONS]
         if st.session_state.get(CRS_SELECTBOX_KEY) not in option_labels:
-            st.session_state[CRS_SELECTBOX_KEY] = current_label
+            st.session_state.pop(CRS_SELECTBOX_KEY, None)
 
         selected_label = st.selectbox(
             "Выберите CRS",
