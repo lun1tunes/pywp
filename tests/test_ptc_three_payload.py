@@ -6,7 +6,11 @@ import pandas as pd
 
 from pywp import ptc_three_payload
 from pywp.models import Point3D, TrajectoryConfig
-from pywp.ptc_three_builders import all_wells_three_payload, single_well_three_payload
+from pywp.ptc_three_builders import (
+    all_wells_three_payload,
+    anticollision_three_payload,
+    single_well_three_payload,
+)
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -249,6 +253,118 @@ def test_single_well_three_payload_renders_pilot_family_labels() -> None:
     assert "well_04_PL: 1" in label_texts
     assert "well_04_PL: 2" in label_texts
     assert len(pilot_marker["points"]) == 2
+
+
+def test_all_wells_three_payload_renders_pilot_point_labels() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 600.0, 1200.0],
+            "X_m": [0.0, 200.0, 500.0],
+            "Y_m": [0.0, 50.0, 100.0],
+            "Z_m": [0.0, 650.0, 1100.0],
+        }
+    )
+    pilot_success = SuccessfulWellPlan(
+        name="well_04_PL",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(200.0, 50.0, 650.0),
+        t3=Point3D(500.0, 100.0, 1100.0),
+        stations=stations,
+        summary={"trajectory_type": "PILOT"},
+        azimuth_deg=0.0,
+        md_t1_m=600.0,
+        config=TrajectoryConfig(),
+    )
+
+    payload = all_wells_three_payload(
+        [pilot_success],
+        pilot_study_points_by_name={
+            "well_04_PL": (
+                Point3D(200.0, 50.0, 650.0),
+                Point3D(350.0, 75.0, 900.0),
+                Point3D(500.0, 100.0, 1100.0),
+            )
+        },
+    )
+
+    label_texts = [str(item.get("text")) for item in payload["labels"]]
+    pilot_marker = next(
+        item
+        for item in payload["points"]
+        if str(item.get("name")) == "well_04_PL: цели"
+    )
+
+    assert "well_04_PL: 1" in label_texts
+    assert "well_04_PL: 2" in label_texts
+    assert "well_04_PL: 3" in label_texts
+    assert [hover["point"] for hover in pilot_marker["hover"]] == [
+        "well_04_PL: 1",
+        "well_04_PL: 2",
+        "well_04_PL: 3",
+    ]
+    assert pilot_marker["points"] == [
+        [200.0, 50.0, 650.0],
+        [350.0, 75.0, 900.0],
+        [500.0, 100.0, 1100.0],
+    ]
+
+
+def test_anticollision_three_payload_renders_pilot_point_labels() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 600.0, 1200.0],
+            "X_m": [0.0, 200.0, 500.0],
+            "Y_m": [0.0, 50.0, 100.0],
+            "Z_m": [0.0, 650.0, 1100.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0],
+        }
+    )
+    analysis = SimpleNamespace(
+        wells=(
+            SimpleNamespace(
+                name="well_04_PL",
+                color="#22C55E",
+                overlay=SimpleNamespace(samples=()),
+                stations=stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(200.0, 50.0, 650.0),
+                t3=Point3D(500.0, 100.0, 1100.0),
+                md_t1_m=600.0,
+                is_reference_only=False,
+                target_pairs=(),
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+    )
+
+    payload = anticollision_three_payload(
+        analysis,
+        pilot_study_points_by_name={
+            "well_04_PL": (
+                Point3D(200.0, 50.0, 650.0),
+                Point3D(350.0, 75.0, 900.0),
+                Point3D(500.0, 100.0, 1100.0),
+            )
+        },
+    )
+
+    label_texts = [str(item.get("text")) for item in payload["labels"]]
+    pilot_marker = next(
+        item
+        for item in payload["points"]
+        if str(item.get("name")) == "well_04_PL: цели"
+    )
+
+    assert "well_04_PL: 1" in label_texts
+    assert "well_04_PL: 2" in label_texts
+    assert "well_04_PL: 3" in label_texts
+    assert [hover["point"] for hover in pilot_marker["hover"]] == [
+        "well_04_PL: 1",
+        "well_04_PL: 2",
+        "well_04_PL: 3",
+    ]
 
 
 def test_all_wells_three_payload_keeps_original_target_markers() -> None:

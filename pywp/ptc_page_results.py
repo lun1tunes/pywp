@@ -26,7 +26,7 @@ from pywp.ui_well_result import (
 from pywp.uncertainty import UNCERTAINTY_PRESET_OPTIONS
 from pywp.uncertainty import planning_uncertainty_model_for_preset
 
-__all__ = ["render_success_tabs"]
+__all__ = ["render_failed_target_only_results", "render_success_tabs"]
 
 
 def _single_well_pilot_context(
@@ -125,6 +125,14 @@ def _pilot_study_points_from_success(
         if candidate not in result:
             result.append(candidate)
     return tuple(result)
+
+
+def _pilot_study_points_by_name(records: list[object]) -> dict[str, tuple[Point3D, ...]]:
+    return {
+        str(getattr(record, "name", "")): _pilot_study_points_from_record(record)
+        for record in records
+        if is_pilot_name(getattr(record, "name", ""))
+    }
 
 
 def _render_anticollision_panel(
@@ -243,6 +251,7 @@ def _render_anticollision_panel(
         anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
             analysis,
             previous_successes_by_name={},
+            pilot_study_points_by_name=_pilot_study_points_by_name(records),
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
             render_mode=wt.WT_3D_RENDER_DETAIL,
         )
@@ -393,6 +402,116 @@ def _render_anticollision_panel(
                     100,
                     text="Текущий порядок уже оптимален (или улучшить не удалось).",
                 )
+
+
+def _render_target_edit_overview(
+    *,
+    successes: list[object],
+    records: list[object],
+    summary_rows: list[dict[str, object]],
+    title: str,
+    empty_message: str,
+    focus_pad_well_names: list[str] | None = None,
+    show_focus_selector: bool = True,
+) -> bool:
+    target_only_wells = wt._failed_target_only_wells(
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
+    if not successes and not target_only_wells:
+        st.info(empty_message)
+        return False
+
+    name_to_color = wt._well_color_map(list(records))
+    st.markdown(title)
+    if target_only_wells:
+        st.caption(
+            "Скважины без успешной траектории показаны как исходные точки. "
+            "Их можно выбрать в легенде 3D и подвинуть через редактор целей."
+        )
+
+    if focus_pad_well_names is None:
+        pads, _, _ = wt._pad_membership(records)
+        if show_focus_selector and len(pads) > 1:
+            focus_options = [
+                wt.WT_PAD_FOCUS_ALL,
+                *(str(pad.pad_id) for pad in pads),
+            ]
+            normalized_focus_pad_id = wt._normalize_focus_pad_id(
+                records=records,
+                requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
+            )
+            if normalized_focus_pad_id != str(
+                st.session_state.get("wt_results_focus_pad_id", "")
+            ):
+                st.session_state["wt_results_focus_pad_id"] = normalized_focus_pad_id
+            st.selectbox(
+                "Фокус камеры по кусту",
+                options=focus_options,
+                format_func=lambda value: (
+                    "Все кусты"
+                    if str(value) == wt.WT_PAD_FOCUS_ALL
+                    else wt._pad_display_label(
+                        next(pad for pad in pads if str(pad.pad_id) == str(value))
+                    )
+                ),
+                key="wt_results_focus_pad_id",
+            )
+        focus_pad_id = wt._normalize_focus_pad_id(
+            records=records,
+            requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
+        )
+        focus_pad_well_names = wt._focus_pad_well_names(
+            records=records,
+            focus_pad_id=focus_pad_id,
+        )
+    payload = wt._all_wells_three_payload(
+        list(successes),
+        target_only_wells=target_only_wells,
+        name_to_color=name_to_color,
+        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
+        focus_well_names=tuple(focus_pad_well_names),
+        render_mode=wt.WT_3D_RENDER_DETAIL,
+    )
+    chart_col1, chart_col2 = st.columns(2, gap="medium")
+    wt._render_three_payload(
+        container=chart_col1,
+        payload=payload,
+        height=660,
+        payload_overrides=wt._trajectory_three_payload_overrides(
+            records=list(records),
+            successes=list(successes),
+            target_only_wells=target_only_wells,
+            name_to_color=name_to_color,
+        ),
+    )
+    chart_col2.plotly_chart(
+        wt._all_wells_plan_figure(
+            list(successes),
+            target_only_wells=target_only_wells,
+            name_to_color=name_to_color,
+            focus_well_names=tuple(focus_pad_well_names),
+        ),
+        width="stretch",
+    )
+    return True
+
+
+def render_failed_target_only_results(
+    *,
+    records: list[object],
+    summary_rows: list[dict[str, object]],
+) -> None:
+    _render_target_edit_overview(
+        successes=[],
+        records=records,
+        summary_rows=summary_rows,
+        title="### Исходные точки для правки",
+        empty_message=(
+            "Не удалось подготовить исходные точки для 3D-редактора. "
+            "Проверьте статус импорта целей выше."
+        ),
+    )
 
 
 def render_success_tabs(
@@ -554,6 +673,20 @@ def render_success_tabs(
         records=records,
         focus_pad_id=focus_pad_id,
     )
+    target_only_wells = wt._failed_target_only_wells(
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
+    if target_only_wells:
+        _render_target_edit_overview(
+            successes=list(successes),
+            records=records,
+            summary_rows=summary_rows,
+            title="### Все скважины и точки без траектории",
+            empty_message="Нет данных для 3D-обзора целей.",
+            focus_pad_well_names=list(focus_pad_well_names),
+            show_focus_selector=False,
+        )
 
     _render_anticollision_panel(
         successes=successes,

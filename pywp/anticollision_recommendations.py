@@ -22,6 +22,7 @@ from pywp.models import (
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_NONE,
 )
+from pywp.ui_utils import dls_to_pi
 
 RECOMMENDATION_TARGET_SPACING = "target_spacing"
 RECOMMENDATION_REDUCE_KOP = "reduce_kop"
@@ -442,7 +443,7 @@ def _build_single_recommendation(
                     detail_parts.append(
                         f"{well_name}: ранний уход уже исчерпан "
                         f"(KOP {float(current_kop):.1f} м, BUILD1 "
-                        f"{float(current_build1 or 0.0):.2f} deg/30m)."
+                        f"{dls_to_pi(float(current_build1 or 0.0)):.2f} deg/10m)."
                     )
                 elif float(current_kop) <= float(kop_floor) + 1e-3:
                     detail_parts.append(
@@ -462,8 +463,8 @@ def _build_single_recommendation(
                     < float(build_limit) - _BUILD_DLS_SATURATION_TOLERANCE_DEG_PER_30M
                 ):
                     detail_parts.append(
-                        f"{well_name}: BUILD1 {float(current_build1):.2f} из "
-                        f"{float(build_limit):.2f} deg/30m."
+                        f"{well_name}: BUILD1 {dls_to_pi(float(current_build1)):.2f} из "
+                        f"{dls_to_pi(float(build_limit)):.2f} deg/10m."
                     )
             if not can_adjust_early:
                 continue

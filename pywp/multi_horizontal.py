@@ -9,6 +9,7 @@ from pywp.constants import RAD2DEG
 from pywp.mcm import add_dls, dogleg_angle_rad
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.planner_types import PlanningError
+from pywp.ui_utils import dls_to_pi
 
 SMALL = 1e-9
 MAX_TRANSITION_MD_MULTIPLIER = 4.0
@@ -182,8 +183,8 @@ def _validate_extended_stations(
     if max_dls > float(config.dls_build_max_deg_per_30m) + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: построенный HORIZONTAL_BUILD превышает "
-            f"лимит ПИ ({max_dls:.3f} > {float(config.dls_build_max_deg_per_30m):.3f} "
-            "deg/30m)."
+            f"лимит ПИ ({dls_to_pi(max_dls):.3f} > "
+            f"{dls_to_pi(float(config.dls_build_max_deg_per_30m)):.3f} deg/10m)."
         )
 
     final_row = stations.iloc[-1]
@@ -353,8 +354,8 @@ def _smooth_transition_rows(
     if best_dls > dls_limit + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: плавный "
-            f"{segment_name} требует ПИ {best_dls:.2f} deg/30m, что выше "
-            f"лимита {dls_limit:.2f}. Увеличьте расстояние между уровнями, "
+            f"{segment_name} требует ПИ {dls_to_pi(best_dls):.2f} deg/10m, что выше "
+            f"лимита {dls_to_pi(dls_limit):.2f}. Увеличьте расстояние между уровнями, "
             "сократите соседние мини-горизонты или уменьшите ΔZ."
         )
     if best_inc > float(config.max_inc_deg) + 1e-6:

@@ -2260,6 +2260,73 @@ def test_render_raw_records_table_shows_pilot_points(monkeypatch) -> None:
     assert list(pilot_rows["Точка"]) == ["S", "PL1", "PL2"]
 
 
+def test_render_raw_records_table_highlights_changed_regular_pilot_and_multi_points(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    page.st.session_state["wt_edit_targets_highlight_names"] = [
+        "WELL-A",
+        "WELL-A_PL",
+        "WELL-M",
+    ]
+    page.st.session_state["wt_edit_targets_highlight_points"] = {
+        "WELL-A": [1, 2],
+        "WELL-A_PL": [0, 2],
+        "WELL-M": [0, 3],
+    }
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(*args, **kwargs):
+        return _DummyExpander()
+
+    def _fake_dataframe(frame, **kwargs):
+        captured["frame"] = frame
+
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "success", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+
+    records = [
+        _records()[0],
+        WelltrackRecord(
+            name="WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=1.0),
+                WelltrackPoint(x=300.0, y=500.0, z=2400.0, md=2.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-M",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=1.0),
+                WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=2.0),
+                WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=3.0),
+                WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=4.0),
+            ),
+        ),
+    ]
+
+    page._render_raw_records_table(records)
+
+    styler = captured["frame"]
+    styler._compute()
+    highlighted_rows = {
+        row_index
+        for (row_index, _col_index), styles in styler.ctx.items()
+        if ("background-color", "rgba(34, 197, 94, 0.14)") in styles
+    }
+    assert highlighted_rows == {1, 2, 3, 5, 6, 9}
+
+
 def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     page = wt_import_module
     page.st.session_state.clear()
@@ -2312,6 +2379,9 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     assert page.st.session_state["wt_pending_selected_names"] == ["WELL-A"]
     assert page.st.session_state["wt_edit_targets_pending_names"] == ["WELL-A"]
     assert page.st.session_state["wt_edit_targets_highlight_names"] == ["WELL-A"]
+    assert page.st.session_state["wt_edit_targets_highlight_points"] == {
+        "WELL-A": [1, 2]
+    }
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
     assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
@@ -2334,6 +2404,7 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     ]
     assert page.st.session_state["wt_edit_targets_pending_names"] == []
     assert page.st.session_state["wt_edit_targets_highlight_names"] == []
+    assert page.st.session_state["wt_edit_targets_highlight_points"] == {}
     assert page.st.session_state["wt_anticollision_analysis_cache"] == {}
 
 
@@ -4427,6 +4498,105 @@ def test_all_wells_overview_figures_show_targets_for_failed_wells_without_fake_t
     assert "Точка: %{customdata[0]}" in str(failed_plan_traces[0].hovertemplate)
     assert str(failed_3d_markers[0]["symbol"]) == "cross"
     assert str(failed_plan_traces[0].marker.symbol) == "x"
+
+
+def test_all_wells_three_payload_renders_pilot_labels_from_records_mapping() -> None:
+    page = wt_import_module
+    payload = page._all_wells_three_payload(
+        [
+            _successful_plan(
+                name="WELL-A_PL",
+                y_offset_m=0.0,
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 500.0, 1000.0],
+                        "X_m": [0.0, 200.0, 500.0],
+                        "Y_m": [0.0, 50.0, 100.0],
+                        "Z_m": [0.0, 650.0, 1100.0],
+                        "INC_deg": [0.0, 10.0, 20.0],
+                        "AZI_deg": [0.0, 90.0, 90.0],
+                        "DLS_deg_per_30m": [0.0, 1.0, 1.0],
+                        "segment": ["PILOT", "PILOT", "PILOT"],
+                    }
+                ),
+            )
+        ],
+        pilot_study_points_by_name={
+            "WELL-A_PL": (
+                Point3D(200.0, 50.0, 650.0),
+                Point3D(350.0, 75.0, 900.0),
+                Point3D(500.0, 100.0, 1100.0),
+            )
+        },
+    )
+
+    pilot_marker = next(
+        item
+        for item in payload["points"]
+        if str(item.get("name")) == "WELL-A_PL: цели"
+    )
+    label_texts = [str(item.get("text")) for item in payload["labels"]]
+
+    assert [hover["point"] for hover in pilot_marker["hover"]] == [
+        "WELL-A_PL: 1",
+        "WELL-A_PL: 2",
+        "WELL-A_PL: 3",
+    ]
+    assert "WELL-A_PL: 1" in label_texts
+    assert "WELL-A_PL: 2" in label_texts
+    assert "WELL-A_PL: 3" in label_texts
+
+
+def test_failed_target_only_wells_include_single_point_pilot_targets() -> None:
+    page = wt_import_module
+    records = [
+        WelltrackRecord(
+            name="WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=50.0, z=900.0, md=1.0),
+            ),
+        )
+    ]
+    summary_rows = [
+        {
+            "Скважина": "WELL-A_PL",
+            "Статус": "Ошибка расчета",
+            "Проблема": "pilot target is incomplete",
+        }
+    ]
+
+    target_only_wells = page._failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+    payload_3d = page._all_wells_three_payload(
+        [],
+        target_only_wells=target_only_wells,
+        name_to_color={"WELL-A_PL": "#123456"},
+    )
+    figure_plan = page._all_wells_plan_figure(
+        [],
+        target_only_wells=target_only_wells,
+        name_to_color={"WELL-A_PL": "#123456"},
+    )
+
+    marker = next(
+        item
+        for item in payload_3d["points"]
+        if str(item.get("name")) == "WELL-A_PL: цели (без траектории)"
+    )
+    plan_trace = next(
+        trace
+        for trace in figure_plan.data
+        if str(trace.name) == "WELL-A_PL: цели (без траектории)"
+    )
+
+    assert len(target_only_wells) == 1
+    assert target_only_wells[0].target_labels == ("S", "PL1")
+    assert marker["points"] == [[0.0, 0.0, 0.0], [100.0, 50.0, 900.0]]
+    assert [hover["point"] for hover in marker["hover"]] == ["S", "PL1"]
+    assert list(plan_trace.customdata[:, 0]) == ["S", "PL1"]
 
 
 def test_all_wells_overview_figures_include_reference_trajectories() -> None:

@@ -23,6 +23,7 @@ __all__ = [
     "anticollision_three_payload_overrides",
     "augment_three_payload",
     "build_edit_wells_payload",
+    "build_target_only_edit_wells_payload",
     "legend_pad_label",
     "overlap_volume_payloads",
     "pad_first_surface_arrow_payloads",
@@ -57,6 +58,12 @@ def successful_plan_raw_bounds(
 
 
 def target_only_raw_bounds(target_only: object) -> dict[str, list[float]]:
+    target_points = tuple(getattr(target_only, "target_points", ()) or ())
+    if target_points:
+        return _points_bounds(target_points) or {
+            "min": [0.0, 0.0, 0.0],
+            "max": [0.0, 0.0, 0.0],
+        }
     return _target_point_bounds(
         surface=getattr(target_only, "surface"),
         t1=getattr(target_only, "t1"),
@@ -399,6 +406,50 @@ def build_edit_wells_payload(
     return edit_wells
 
 
+def build_target_only_edit_wells_payload(
+    target_only_wells: Iterable[object],
+    name_to_color: Mapping[str, str],
+) -> list[dict[str, object]]:
+    edit_wells: list[dict[str, object]] = []
+    for target_only in target_only_wells:
+        edit_points = _target_only_edit_points(target_only)
+        if not edit_points:
+            continue
+        surface = _edit_point_by_type(edit_points, "surface") or list(
+            edit_points[0]["position"]
+        )
+        first_t1 = _edit_point_by_type(edit_points, "t1")
+        last_t3 = _edit_point_by_type(edit_points, "t3", last=True)
+        fallback_target = list(edit_points[-1]["position"])
+        t1 = first_t1 or fallback_target
+        t3 = last_t3 or fallback_target
+        well_name = str(getattr(target_only, "name", ""))
+        edit_wells.append(
+            {
+                "name": well_name,
+                "surface": surface,
+                "t1": t1,
+                "t3": t3,
+                "edit_points": edit_points,
+                "target_pairs": [
+                    [_point3d_payload(pair_t1), _point3d_payload(pair_t3)]
+                    for pair_t1, pair_t3 in tuple(
+                        getattr(target_only, "target_pairs", ()) or ()
+                    )
+                ],
+                "color": str(name_to_color.get(well_name, "#6B7280")),
+                "base_points": [],
+                "config": {
+                    "entry_inc_target_deg": 86.0,
+                    "max_inc_deg": 95.0,
+                    "dls_build_max_deg_per_30m": 3.0,
+                    "kop_min_vertical_m": 550.0,
+                },
+            }
+        )
+    return edit_wells
+
+
 def trajectory_three_payload_overrides(
     session_state: MutableMapping[str, object],
     *,
@@ -430,7 +481,10 @@ def trajectory_three_payload_overrides(
         "legend_tree": legend_tree,
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
-        "edit_wells": build_edit_wells_payload(successes, name_to_color),
+        "edit_wells": [
+            *build_edit_wells_payload(successes, name_to_color),
+            *build_target_only_edit_wells_payload(target_only_wells, name_to_color),
+        ],
         "extra_meshes": pad_first_surface_arrow_payloads(
             session_state,
             records=records,
@@ -532,6 +586,89 @@ def _points_bounds(points: Iterable[Point3D]) -> dict[str, list[float]] | None:
             float(max(point.z for point in point_list)),
         ],
     }
+
+
+def _target_only_edit_points(target_only: object) -> list[dict[str, object]]:
+    target_points = tuple(getattr(target_only, "target_points", ()) or ())
+    if not target_points:
+        target_pairs = tuple(getattr(target_only, "target_pairs", ()) or ())
+        target_points = (getattr(target_only, "surface"),)
+        if len(target_pairs) > 1:
+            target_points = (
+                *target_points,
+                *(point for pair in target_pairs for point in pair),
+            )
+        else:
+            target_points = (
+                *target_points,
+                getattr(target_only, "t1"),
+                getattr(target_only, "t3"),
+            )
+    labels = tuple(getattr(target_only, "target_labels", ()) or ())
+    if len(labels) != len(target_points):
+        labels = _fallback_target_labels(
+            len(target_points),
+            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+        )
+    edit_points: list[dict[str, object]] = []
+    for index, point in enumerate(target_points):
+        label = str(labels[index]) if index < len(labels) else f"P{index}"
+        edit_points.append(
+            {
+                "index": int(index),
+                "label": label,
+                "point_type": _target_point_type(label=label, index=index),
+                "position": _point3d_payload(point),
+            }
+        )
+    return edit_points
+
+
+def _fallback_target_labels(
+    point_count: int,
+    *,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+) -> tuple[str, ...]:
+    if point_count <= 0:
+        return ()
+    if len(target_pairs) > 1 and point_count == 1 + 2 * len(target_pairs):
+        labels = ["S"]
+        for level_index in range(1, len(target_pairs) + 1):
+            labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
+        return tuple(labels)
+    if point_count == 3:
+        return ("S", "t1", "t3")
+    return ("S", *(f"P{index}" for index in range(1, point_count)))
+
+
+def _target_point_type(*, label: str, index: int) -> str:
+    normalized = str(label).strip().lower()
+    if index == 0 or normalized in {"s", "surface", "wellhead"}:
+        return "surface"
+    if normalized == "t1" or normalized.endswith("_t1"):
+        return "t1"
+    if normalized == "t3" or normalized.endswith("_t3"):
+        return "t3"
+    if normalized.startswith("pl"):
+        return "pilot"
+    return "point"
+
+
+def _edit_point_by_type(
+    edit_points: Iterable[Mapping[str, object]],
+    point_type: str,
+    *,
+    last: bool = False,
+) -> list[float] | None:
+    matches = [
+        list(entry["position"])
+        for entry in edit_points
+        if str(entry.get("point_type", "")) == str(point_type)
+        and isinstance(entry.get("position"), list)
+    ]
+    if not matches:
+        return None
+    return matches[-1] if last else matches[0]
 
 
 def _point3d_payload(point: Point3D) -> list[float]:

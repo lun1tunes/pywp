@@ -203,6 +203,7 @@ def test_multi_horizontal_record_reports_short_transition_recommendation() -> No
     assert row["Статус"] == "Ошибка расчета"
     assert "HORIZONTAL_BUILD1" in str(row["Проблема"])
     assert "сократить соседние мини-горизонты" in str(row["Проблема"])
+    assert "deg/30m" not in str(row["Проблема"])
 
 
 def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:

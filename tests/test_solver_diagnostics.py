@@ -22,8 +22,8 @@ def test_parse_solver_error_converts_reasons_and_actions_to_russian_table() -> N
     assert "Не найдено допустимое решение профиля" in parsed.title_ru
     assert len(rows) == 2
     assert "BUILD по ПИ" in rows[0]["Причина"]
-    assert "2.00 deg/30m" in rows[0]["Причина"]
-    assert "3.50 deg/30m" in rows[0]["Причина"]
+    assert "0.67 deg/10m" in rows[0]["Причина"]
+    assert "1.17 deg/10m" in rows[0]["Причина"]
     assert "Увеличьте max ПИ BUILD" in rows[0]["Что изменить"]
     assert "kop_min_vertical=500.0 м" in rows[1]["Причина"]
 
@@ -46,8 +46,18 @@ def test_ui_error_text_converts_dls_units_to_pi_units() -> None:
     text = "BUILD DLS upper bound is insufficient: available max 3.00 deg/30m."
     converted = ui_error_text(text)
     assert "ПИ" in converted
-    assert "deg/30m" in converted
-    assert "3.00 deg/30m" in converted
+    assert "deg/10m" in converted
+    assert "1.00 deg/10m" in converted
+
+
+def test_summarize_problem_ru_converts_embedded_dls_units_to_pi_units() -> None:
+    summary = summarize_problem_ru(
+        "Многопластовая скважина: плавный HORIZONTAL_BUILD1 требует ПИ "
+        "4.53 deg/30m, что выше лимита 3.00."
+    )
+
+    assert "1.51 deg/10m" in summary
+    assert "deg/30m" not in summary
 
 
 def test_parse_solver_error_handles_postcheck_md_limit_message() -> None:
@@ -95,7 +105,7 @@ def test_parse_solver_error_flags_huge_lateral_vertical_miss_as_coordinate_issue
     assert "лишний/потерянный разряд" in rows[0]["Что изменить"]
 
 
-def test_parse_solver_error_keeps_solver_search_interval_in_deg_per_30m() -> None:
+def test_parse_solver_error_formats_solver_search_interval_in_deg_per_10m() -> None:
     text = (
         "No valid trajectory solution found within configured limits.\n"
         "Reasons and actions:\n"
@@ -106,9 +116,9 @@ def test_parse_solver_error_keeps_solver_search_interval_in_deg_per_30m() -> Non
     rows = diagnostics_rows_ru(text)
 
     assert rows
-    assert "Решатель перебрал интервал BUILD ПИ [0.10, 3.00] deg/30m" in rows[0]["Причина"]
-    assert "3.00 deg/30m" in rows[0]["Причина"]
-    assert "deg/10m" not in rows[0]["Причина"]
+    assert "Решатель перебрал интервал BUILD ПИ [0.03, 1.00] deg/10m" in rows[0]["Причина"]
+    assert "1.00 deg/10m" in rows[0]["Причина"]
+    assert "deg/30m" not in rows[0]["Причина"]
 
 
 def test_parse_solver_error_build_dls_absurd_pi_shows_kop_recommendation() -> None:
@@ -123,7 +133,7 @@ def test_parse_solver_error_build_dls_absurd_pi_shows_kop_recommendation() -> No
     )
     rows = diagnostics_rows_ru(error_text)
     assert rows
-    # Unphysical PI > 15 shows ">15 deg/30m" instead of exact 162.84
+    # Unphysical PI > 15 shows ">15 deg/10m" instead of exact 54.28
     assert ">15" in rows[0]["Причина"]
     assert "нефизично" in rows[0]["Причина"]
     assert "10.6" in rows[0]["Причина"]
@@ -145,7 +155,7 @@ def test_parse_solver_error_build_dls_absurd_pi_with_space_shows_geometry_issue(
     )
     rows = diagnostics_rows_ru(error_text)
     assert rows
-    # Unphysical PI > 15 shows ">15 deg/30m" with geometry context
+    # Unphysical PI > 15 shows ">15 deg/10m" with geometry context
     assert ">15" in rows[0]["Причина"]
     assert "нефизично высокий ПИ" in rows[0]["Причина"]
     assert "1340.2" in rows[0]["Причина"]
@@ -168,7 +178,7 @@ def test_parse_solver_error_build_dls_moderate_pi_shows_value() -> None:
     rows = diagnostics_rows_ru(error_text)
     assert rows
     # Should show the PI value
-    assert "4.50" in rows[0]["Причина"]
+    assert "1.50" in rows[0]["Причина"]
     assert "BUILD по ПИ" in rows[0]["Причина"]
     # Should still mention KOP as one of the options
     assert "Мин VERTICAL до KOP" in rows[0]["Что изменить"]
@@ -187,8 +197,8 @@ def test_parse_solver_error_build_horizontal_post_entry_limit() -> None:
 
     assert rows
     assert "BUILD/HORIZONTAL ПИ" in rows[0]["Причина"]
-    assert "3.00 deg/30m" in rows[0]["Причина"]
-    assert "4.50 deg/30m" in rows[0]["Причина"]
+    assert "1.00 deg/10m" in rows[0]["Причина"]
+    assert "1.50 deg/10m" in rows[0]["Причина"]
     assert "BUILD/HORIZONTAL ПИ" in rows[0]["Что изменить"]
 
 

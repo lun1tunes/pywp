@@ -100,6 +100,36 @@ def test_records_with_edit_targets_updates_multi_horizontal_points_by_index() ->
     assert updated.points[4] == record.points[4]
 
 
+def test_records_with_edit_targets_updates_pilot_points_by_index() -> None:
+    record = _record(
+        "WELL-A_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=2.0),
+            WelltrackPoint(x=300.0, y=500.0, z=2400.0, md=3.0),
+        ),
+    )
+
+    updated_records, updated_names = ptc_edit_targets.records_with_edit_targets(
+        [record],
+        {
+            "WELL-A_PL": {
+                "points": [
+                    {"index": 0, "position": [10.0, 20.0, -5.0]},
+                    {"index": 2, "position": [330.0, 530.0, 2410.0]},
+                ],
+            },
+        },
+    )
+
+    assert updated_names == ["WELL-A_PL"]
+    updated = updated_records[0]
+    assert updated.points[0].x == pytest.approx(10.0)
+    assert updated.points[0].md == pytest.approx(1.0)
+    assert updated.points[2].y == pytest.approx(530.0)
+    assert updated.points[2].md == pytest.approx(3.0)
+
+
 def test_pending_edit_target_names_prefers_pending_and_dedupes() -> None:
     session_state: dict[str, object] = {
         "wt_edit_targets_pending_names": [" WELL-A ", "WELL-A", "", "WELL-B"],
@@ -161,6 +191,7 @@ def test_apply_edit_targets_changes_invalidates_only_changed_wells() -> None:
     ]
     assert session_state["wt_edit_targets_pending_names"] == ["WELL-C", "WELL-A"]
     assert session_state["wt_edit_targets_highlight_names"] == ["WELL-C", "WELL-A"]
+    assert session_state["wt_edit_targets_highlight_points"] == {"WELL-A": [1, 2]}
     assert session_state["wt_pending_selected_names"] == ["WELL-C", "WELL-A"]
     assert session_state["wt_pending_all_wells_results_focus"] is True
     assert session_state["wt_last_anticollision_resolution"] is None
@@ -207,6 +238,7 @@ def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> 
     )
 
     assert updated_names == ["MULTI"]
+    assert session_state["wt_edit_targets_highlight_points"] == {"MULTI": [0, 4]}
     assert session_state["wt_successes"] == []
     assert session_state["wt_summary_rows"] == [
         {"Скважина": "MULTI", "Статус": "Не рассчитана", "Проблема": ""}

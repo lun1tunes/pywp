@@ -10,6 +10,7 @@ import pandas as pd
 from pywp.anticollision import AntiCollisionAnalysis
 from pywp.constants import SMALL
 from pywp.models import Point3D
+from pywp.pilot_wells import is_pilot_name
 from pywp.plot_axes import equalized_axis_ranges
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp import ptc_three_overrides
@@ -218,6 +219,7 @@ def all_wells_three_payload(
     target_only_wells: list[object] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: Mapping[str, str] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
     fallback_color: Callable[[int], str] | None = None,
@@ -231,10 +233,21 @@ def all_wells_three_payload(
     z_focus_arrays: list[np.ndarray] = []
     focus_set = _clean_name_set(focus_well_names)
     color_map = dict(name_to_color or {})
+    pilot_points_map = dict(pilot_study_points_by_name or {})
 
     for index, success in enumerate(successes):
         well_name = str(success.name)
         color = color_map.get(well_name, _fallback_color(index, fallback_color))
+        is_pilot = is_pilot_name(well_name)
+        pilot_study_points = (
+            _pilot_study_points_for_well(
+                well_name,
+                pilot_points_map,
+                fallback_points=(success.t1, success.t3),
+            )
+            if is_pilot
+            else ()
+        )
         stations = _maybe_decimated_stations(
             success.stations,
             render_mode=render_mode,
@@ -262,6 +275,13 @@ def all_wells_three_payload(
             t1=success.t1,
             t3=success.t3,
             target_pairs=tuple(getattr(success, "target_pairs", ()) or ()),
+            target_points=pilot_study_points,
+            target_labels=_pilot_study_label_texts(
+                well_name,
+                len(pilot_study_points),
+            )
+            if is_pilot
+            else (),
             color=color,
             size=5.0,
             symbol="circle",
@@ -273,6 +293,13 @@ def all_wells_three_payload(
             else None,
         )
         payload["labels"].append(_well_name_label(well_name, success.t3, color))
+        if pilot_study_points:
+            _append_pilot_study_labels(
+                payload,
+                pilot_name=well_name,
+                study_points=pilot_study_points,
+                color=color,
+            )
         _append_unique_legend_item(payload, label=well_name, color=color, opacity=1.0)
 
     _append_reference_wells(
@@ -294,6 +321,8 @@ def all_wells_three_payload(
             t1=getattr(target_only, "t1"),
             t3=getattr(target_only, "t3"),
             target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            target_points=tuple(getattr(target_only, "target_points", ()) or ()),
+            target_labels=tuple(getattr(target_only, "target_labels", ()) or ()),
             color=color,
             size=10.0,
             symbol="cross",
@@ -328,6 +357,7 @@ def anticollision_three_payload(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
 ) -> dict[str, object]:
@@ -339,6 +369,7 @@ def anticollision_three_payload(
     y_focus_arrays: list[np.ndarray] = []
     z_focus_arrays: list[np.ndarray] = []
     focus_set = _clean_name_set(focus_well_names)
+    pilot_points_map = dict(pilot_study_points_by_name or {})
     reference_wells = tuple(well for well in analysis.wells if bool(well.is_reference_only))
     focus_reference_names = (
         _anticollision_reference_cone_focus_names(analysis)
@@ -454,6 +485,16 @@ def anticollision_three_payload(
                 focus_arrays=focus_arrays,
             )
         if (well.t1 is not None) and (well.t3 is not None) and not is_reference_only:
+            is_pilot = is_pilot_name(well_name)
+            pilot_points = (
+                _pilot_study_points_for_well(
+                    well_name,
+                    pilot_points_map,
+                    fallback_points=(well.t1, well.t3),
+                )
+                if is_pilot
+                else ()
+            )
             _append_target_markers(
                 payload,
                 name=f"{well_label}: цели",
@@ -461,6 +502,13 @@ def anticollision_three_payload(
                 t1=well.t1,
                 t3=well.t3,
                 target_pairs=tuple(getattr(well, "target_pairs", ()) or ()),
+                target_points=pilot_points,
+                target_labels=_pilot_study_label_texts(
+                    well_name,
+                    len(pilot_points),
+                )
+                if is_pilot
+                else (),
                 color=str(well.color),
                 size=5.0,
                 symbol="circle",
@@ -469,6 +517,13 @@ def anticollision_three_payload(
                 z_arrays=z_arrays,
                 focus_arrays=focus_arrays,
             )
+            if pilot_points:
+                _append_pilot_study_labels(
+                    payload,
+                    pilot_name=well_name,
+                    study_points=pilot_points,
+                    color=str(well.color),
+                )
             payload["labels"].append(_well_name_label(well_name, well.t3, str(well.color)))
 
     if aggregated_reference_wells:
@@ -767,13 +822,23 @@ def _append_target_markers(
     focus_arrays: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]] | None = None,
     hover_extra: Mapping[str, str] | None = None,
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+    target_points: tuple[Point3D, ...] = (),
+    target_labels: tuple[str, ...] = (),
 ) -> None:
-    points, labels = _target_marker_points_and_labels(
-        surface=surface,
-        t1=t1,
-        t3=t3,
-        target_pairs=target_pairs,
-    )
+    if target_points:
+        points = [_point3d_payload(point) for point in target_points]
+        labels = _target_labels_for_points(
+            point_count=len(points),
+            target_labels=target_labels,
+            target_pairs=target_pairs,
+        )
+    else:
+        points, labels = _target_marker_points_and_labels(
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            target_pairs=target_pairs,
+        )
     _append_arrays_for_points(x_arrays, y_arrays, z_arrays, points)
     if focus_arrays is not None:
         _append_arrays_for_points(*focus_arrays, points)
@@ -817,6 +882,24 @@ def _target_marker_points_and_labels(
     return points, labels
 
 
+def _target_labels_for_points(
+    *,
+    point_count: int,
+    target_labels: tuple[str, ...],
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+) -> list[str]:
+    if len(target_labels) == point_count:
+        return [str(label) for label in target_labels]
+    if len(target_pairs) > 1 and point_count == 1 + 2 * len(target_pairs):
+        labels = ["S"]
+        for index in range(1, len(target_pairs) + 1):
+            labels.extend([f"{index}_t1", f"{index}_t3"])
+        return labels
+    if point_count == 3:
+        return ["S", "t1", "t3"]
+    return ["S", *(f"P{index}" for index in range(1, point_count))]
+
+
 def _append_pilot_study_markers(
     payload: dict[str, object],
     *,
@@ -829,7 +912,7 @@ def _append_pilot_study_markers(
 ) -> None:
     if not pilot_name or not study_points:
         return
-    labels = [f"{str(pilot_name)}: {index}" for index in range(1, len(study_points) + 1)]
+    labels = _pilot_study_label_texts(str(pilot_name), len(study_points))
     points = [_point3d_payload(point) for point in study_points]
     _append_arrays_for_points(x_arrays, y_arrays, z_arrays, points)
     payload["points"].append(
@@ -847,10 +930,65 @@ def _append_pilot_study_markers(
             "role": "marker",
         }
     )
+    _append_pilot_study_labels(
+        payload,
+        pilot_name=str(pilot_name),
+        study_points=study_points,
+        color=color,
+    )
+
+
+def _append_pilot_study_labels(
+    payload: dict[str, object],
+    *,
+    pilot_name: str,
+    study_points: tuple[Point3D, ...],
+    color: str,
+) -> None:
+    if not pilot_name or not study_points:
+        return
+    labels = _pilot_study_label_texts(str(pilot_name), len(study_points))
     payload["labels"].extend(
         _well_name_label(label, point, color)
         for label, point in zip(labels, study_points, strict=False)
     )
+
+
+def _pilot_study_label_texts(pilot_name: str, point_count: int) -> tuple[str, ...]:
+    return tuple(
+        f"{str(pilot_name)}: {index}"
+        for index in range(1, int(max(point_count, 0)) + 1)
+    )
+
+
+def _pilot_study_points_for_well(
+    well_name: str,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]],
+    *,
+    fallback_points: Iterable[Point3D | None],
+) -> tuple[Point3D, ...]:
+    mapped_points = tuple(pilot_study_points_by_name.get(str(well_name), ()) or ())
+    if mapped_points:
+        return mapped_points
+    return _unique_points(fallback_points)
+
+
+def _unique_points(points: Iterable[Point3D | None]) -> tuple[Point3D, ...]:
+    result: list[Point3D] = []
+    seen: set[tuple[float, float, float]] = set()
+    for point in points:
+        if point is None:
+            continue
+        key = (
+            round(float(point.x), 9),
+            round(float(point.y), 9),
+            round(float(point.z), 9),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(point)
+    return tuple(result)
 
 
 def _append_single_well_zero_axes(

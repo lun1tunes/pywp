@@ -135,6 +135,53 @@ def pending_edit_target_names(
     )
 
 
+def _edit_target_highlight_indices(
+    delta: Mapping[str, object],
+    *,
+    record: WelltrackRecord | None = None,
+) -> list[int]:
+    def _point_changed(point_index: int, next_position: list[float] | None) -> bool:
+        if record is None or next_position is None:
+            return True
+        if point_index < 0 or point_index >= len(record.points):
+            return False
+        old_point = record.points[point_index]
+        return not (
+            math.isclose(float(old_point.x), float(next_position[0]), abs_tol=1e-9)
+            and math.isclose(float(old_point.y), float(next_position[1]), abs_tol=1e-9)
+            and math.isclose(float(old_point.z), float(next_position[2]), abs_tol=1e-9)
+        )
+
+    raw_points = delta.get("points")
+    if isinstance(raw_points, list):
+        result: list[int] = []
+        for raw_entry in raw_points:
+            if not isinstance(raw_entry, Mapping):
+                continue
+            try:
+                point_index = int(raw_entry.get("index", -1))
+            except (TypeError, ValueError):
+                continue
+            position = edit_target_point(raw_entry.get("position"))
+            if (
+                point_index >= 0
+                and point_index not in result
+                and _point_changed(point_index, position)
+            ):
+                result.append(point_index)
+        return result
+    if "t1" in delta and "t3" in delta:
+        result = []
+        t1 = edit_target_point(delta.get("t1"))
+        t3 = edit_target_point(delta.get("t3"))
+        if _point_changed(1, t1):
+            result.append(1)
+        if _point_changed(2, t3):
+            result.append(2)
+        return result
+    return []
+
+
 def invalidate_results_for_edited_targets(
     session_state: MutableMapping[str, object],
     *,
@@ -233,6 +280,11 @@ def apply_edit_targets_changes(
             change_map[name] = {"t1": t1, "t3": t3}
     if not change_map:
         return []
+    record_by_name = {
+        str(record.name): record
+        for record in records  # type: ignore[union-attr]
+        if isinstance(record, WelltrackRecord)
+    }
     updated_records, updated_names = records_with_edit_targets(
         records=records,  # type: ignore[arg-type]
         change_map=change_map,
@@ -267,6 +319,31 @@ def apply_edit_targets_changes(
     session_state["wt_edit_targets_pending_names"] = pending_names
     session_state["wt_edit_targets_applied"] = updated_names
     session_state["wt_edit_targets_highlight_names"] = pending_names
+    existing_highlight_points = session_state.get("wt_edit_targets_highlight_points")
+    if isinstance(existing_highlight_points, Mapping):
+        highlight_points: dict[str, list[int]] = {
+            str(name): [
+                int(index)
+                for index in indices
+                if isinstance(index, int) or str(index).lstrip("-").isdigit()
+            ]
+            for name, indices in existing_highlight_points.items()
+            if isinstance(indices, list)
+        }
+    else:
+        highlight_points = {}
+    for name in updated_names:
+        point_indices = _edit_target_highlight_indices(
+            change_map.get(name, {}),
+            record=record_by_name.get(str(name)),
+        )
+        if point_indices:
+            highlight_points[str(name)] = point_indices
+    session_state["wt_edit_targets_highlight_points"] = {
+        name: indices
+        for name, indices in highlight_points.items()
+        if name in pending_names
+    }
     session_state["wt_edit_targets_last_source"] = str(source)
     session_state["wt_edit_targets_highlight_version"] = (
         int(session_state.get("wt_edit_targets_highlight_version", 0)) + 1

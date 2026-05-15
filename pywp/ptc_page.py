@@ -18,7 +18,10 @@ from pywp.coordinate_integration import (
 )
 from pywp.ptc_page_import import render_target_import_section
 from pywp.ptc_page_reference import render_reference_section
-from pywp.ptc_page_results import render_success_tabs
+from pywp.ptc_page_results import (
+    render_failed_target_only_results,
+    render_success_tabs,
+)
 from pywp.ptc_page_run import render_run_section
 from pywp.ptc_page_state import force_ptc_defaults
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
@@ -96,6 +99,10 @@ def run_page() -> None:
     )
     if not successes:
         st.warning("Все выбранные скважины завершились ошибками расчёта.")
+        render_failed_target_only_results(
+            records=list(records),
+            summary_rows=list(summary_rows),
+        )
         return
     render_success_tabs(
         successes=successes,

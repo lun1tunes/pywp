@@ -450,6 +450,110 @@ def test_build_edit_wells_payload_includes_multi_horizontal_edit_points() -> Non
     ]
 
 
+def test_build_target_only_edit_wells_payload_preserves_failed_record_points() -> None:
+    surface = Point3D(0.0, 0.0, 0.0)
+    pilot_point = Point3D(100.0, 5.0, 900.0)
+    multi_pairs = (
+        (Point3D(1000.0, 0.0, 2100.0), Point3D(1500.0, 0.0, 2100.0)),
+        (Point3D(1700.0, 0.0, 2140.0), Point3D(2200.0, 0.0, 2140.0)),
+    )
+    target_only_wells = [
+        SimpleNamespace(
+            name="ORDINARY",
+            surface=surface,
+            t1=Point3D(500.0, 0.0, 2000.0),
+            t3=Point3D(1200.0, 0.0, 2000.0),
+            target_pairs=(),
+            target_points=(
+                surface,
+                Point3D(500.0, 0.0, 2000.0),
+                Point3D(1200.0, 0.0, 2000.0),
+            ),
+            target_labels=("S", "t1", "t3"),
+        ),
+        SimpleNamespace(
+            name="ORDINARY_PL",
+            surface=surface,
+            t1=pilot_point,
+            t3=pilot_point,
+            target_pairs=(),
+            target_points=(surface, pilot_point),
+            target_labels=("S", "PL1"),
+        ),
+        SimpleNamespace(
+            name="MULTI",
+            surface=surface,
+            t1=multi_pairs[0][0],
+            t3=multi_pairs[-1][1],
+            target_pairs=multi_pairs,
+            target_points=(surface, *(point for pair in multi_pairs for point in pair)),
+            target_labels=("S", "1_t1", "1_t3", "2_t1", "2_t3"),
+        ),
+    ]
+
+    edit_wells = ptc_three_overrides.build_target_only_edit_wells_payload(
+        target_only_wells,
+        {"ORDINARY": "#111111", "ORDINARY_PL": "#222222", "MULTI": "#333333"},
+    )
+
+    assert [item["name"] for item in edit_wells] == [
+        "ORDINARY",
+        "ORDINARY_PL",
+        "MULTI",
+    ]
+    assert [point["label"] for point in edit_wells[0]["edit_points"]] == [
+        "S",
+        "t1",
+        "t3",
+    ]
+    assert [point["label"] for point in edit_wells[1]["edit_points"]] == ["S", "PL1"]
+    assert edit_wells[1]["edit_points"][1]["point_type"] == "pilot"
+    assert edit_wells[1]["t1"] == [100.0, 5.0, 900.0]
+    assert edit_wells[1]["t3"] == [100.0, 5.0, 900.0]
+    assert [point["label"] for point in edit_wells[2]["edit_points"]] == [
+        "S",
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+    ]
+
+
+def test_trajectory_overrides_make_failed_target_only_wells_editable() -> None:
+    records = _records()
+    target_only = SimpleNamespace(
+        name="WELL-C",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(700.0, 760.0, 2200.0),
+        t3=Point3D(1600.0, 1960.0, 2350.0),
+        target_pairs=(),
+        target_points=(
+            Point3D(0.0, 0.0, 0.0),
+            Point3D(700.0, 760.0, 2200.0),
+            Point3D(1600.0, 1960.0, 2350.0),
+        ),
+        target_labels=("S", "t1", "t3"),
+    )
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        {},
+        records=records,
+        successes=[],
+        target_only_wells=[target_only],
+        name_to_color={"WELL-C": "#abcdef"},
+    )
+
+    edit_wells = list(overrides["edit_wells"])
+    assert len(edit_wells) == 1
+    assert edit_wells[0]["name"] == "WELL-C"
+    assert edit_wells[0]["color"] == "#abcdef"
+    assert [point["label"] for point in edit_wells[0]["edit_points"]] == [
+        "S",
+        "t1",
+        "t3",
+    ]
+
+
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
     payload = {
         "legend": [

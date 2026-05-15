@@ -11,6 +11,7 @@ from pywp.mcm import add_dls
 from pywp.models import PlannerResult, Point3D, SummaryDict, TrajectoryConfig
 from pywp.planner_types import PlanningError
 from pywp.reference_trajectories import build_reference_trajectory_stations
+from pywp.ui_utils import dls_to_pi
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,7 @@ class SidetrackPlanner:
             if dls_excess > 1e-6:
                 last_problem = (
                     "ПИ бокового ствола превышает лимит расчетной модели: "
-                    f"{max_dls:.2f} > {dls_limit:.2f} deg/30m."
+                    f"{dls_to_pi(max_dls):.2f} > {dls_to_pi(dls_limit):.2f} deg/10m."
                 )
                 if best_dls_excess is None or dls_excess < best_dls_excess[0]:
                     best_dls_excess = (dls_excess, max_dls)
@@ -76,7 +77,7 @@ class SidetrackPlanner:
                 dls_limit = float(config.dls_build_max_deg_per_30m)
                 last_problem = (
                     "ПИ бокового ствола превышает лимит расчетной модели: "
-                    f"{max_dls:.2f} > {dls_limit:.2f} deg/30m."
+                    f"{dls_to_pi(max_dls):.2f} > {dls_to_pi(dls_limit):.2f} deg/10m."
                 )
             suffix = f" Последняя причина: {last_problem}" if last_problem else ""
             raise PlanningError(

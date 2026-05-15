@@ -266,6 +266,13 @@ def store_merged_batch_results(
             for name in (state.get("wt_edit_targets_highlight_names") or [])
             if str(name) not in successful_names
         ]
+        highlight_points = state.get("wt_edit_targets_highlight_points")
+        if isinstance(highlight_points, Mapping):
+            state["wt_edit_targets_highlight_points"] = {
+                str(name): value
+                for name, value in highlight_points.items()
+                if str(name) not in successful_names
+            }
         state["wt_edit_targets_pending_names"] = [
             str(name)
             for name in pending_edit_target_names()

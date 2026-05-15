@@ -11,6 +11,7 @@ from pywp.constants import SMALL
 from pywp.mcm import add_dls, wrap_azimuth_deg
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.reference_trajectories import ImportedTrajectoryWell
+from pywp.ui_utils import dls_to_pi
 
 HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 HORIZONTAL_MIN_INTERVAL_M = 100.0
@@ -27,6 +28,12 @@ KOP_BUILD_RATE_THRESHOLD_DEG_PER_30M = 0.55
 KOP_MIN_BUILD_INTERVAL_M = 60.0
 KOP_VERTICAL_BASELINE_MAX_INC_DEG = 10.0
 KOP_INC_BUFFER_DEG = 3.0
+
+
+def _optional_dls_to_pi(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return float(dls_to_pi(float(value)))
 
 
 class ActualFundWellMetrics(FrozenArbitraryModel):
@@ -446,8 +453,10 @@ def actual_fund_metrics_rows(
             "Азимут HOLD, deg": item.hold_azi_deg,
             "HOLD, м": item.hold_length_m,
             "Макс INC, deg": item.max_inc_deg,
-            "Макс ПИ, deg/30м": item.max_dls_deg_per_30m,
-            "Макс ПИ до HOLD, deg/30м": item.max_build_dls_before_hold_deg_per_30m,
+            "Макс ПИ, deg/10м": _optional_dls_to_pi(item.max_dls_deg_per_30m),
+            "Макс ПИ до HOLD, deg/10м": _optional_dls_to_pi(
+                item.max_build_dls_before_hold_deg_per_30m
+            ),
         }
         for item in metrics
     ]
@@ -465,7 +474,7 @@ def actual_fund_pad_rows(
             "Медианный KOP MD, м": item.median_kop_md_m,
             "Медианный HOLD INC, deg": item.median_hold_inc_deg,
             "Медианный HOLD, м": item.median_hold_length_m,
-            "Макс ПИ, deg/30м": item.max_pi_deg_per_30m,
+            "Макс ПИ, deg/10м": _optional_dls_to_pi(item.max_pi_deg_per_30m),
             "Медианная длина ГС, м": item.median_horizontal_length_m,
         }
         for item in summaries

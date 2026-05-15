@@ -243,6 +243,8 @@ class _TargetOnlyWell:
     status: str
     problem: str
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = ()
+    target_points: tuple[Point3D, ...] = ()
+    target_labels: tuple[str, ...] = ()
 
 
 _DetectedPadUiMeta = ptc_pad_state.DetectedPadUiMeta
@@ -370,11 +372,23 @@ def _failed_target_only_wells(
             status == "Не рассчитана" and str(record.name) not in pending_edit_names
         ):
             continue
+        target_points = tuple(
+            Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+            for point in tuple(record.points)
+        )
+        if not target_points:
+            continue
         try:
             surface, target_pairs = welltrack_points_to_target_pairs(record.points)
         except ValueError:
-            continue
-        t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+            surface = target_points[0]
+            target_pairs = ()
+        if target_pairs:
+            t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+        elif len(target_points) >= 2:
+            t1, t3 = target_points[1], target_points[-1]
+        else:
+            t1 = t3 = target_points[0]
         target_only_wells.append(
             _TargetOnlyWell(
                 name=str(record.name),
@@ -382,11 +396,30 @@ def _failed_target_only_wells(
                 t1=t1,
                 t3=t3,
                 target_pairs=target_pairs,
+                target_points=target_points,
+                target_labels=_record_target_point_labels(record),
                 status=status or "Ошибка расчета",
                 problem=str(row.get("Проблема", "")).strip(),
             )
         )
     return target_only_wells
+
+
+def _record_target_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
+    point_count = len(tuple(record.points))
+    if point_count <= 0:
+        return ()
+    if is_pilot_name(record.name):
+        return ("S", *(f"PL{index}" for index in range(1, point_count)))
+    target_count = point_count - 1
+    if target_count >= 4 and target_count % 2 == 0:
+        labels = ["S"]
+        for level_index in range(1, target_count // 2 + 1):
+            labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
+        return tuple(labels)
+    if point_count == 3:
+        return ("S", "t1", "t3")
+    return ("S", *(f"P{index}" for index in range(1, point_count)))
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -970,6 +1003,7 @@ def _all_wells_three_payload(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
 ) -> dict[str, object]:
@@ -983,6 +1017,7 @@ def _all_wells_three_payload(
         target_only_wells=target_only_wells,
         reference_wells=reference_wells,
         name_to_color=name_to_color,
+        pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
         render_mode=resolved_render_mode,
         fallback_color=_well_color,
@@ -993,6 +1028,7 @@ def _all_wells_anticollision_three_payload(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
 ) -> dict[str, object]:
@@ -1009,6 +1045,7 @@ def _all_wells_anticollision_three_payload(
     return ptc_three_builders.anticollision_three_payload(
         analysis,
         previous_successes_by_name=previous_successes_by_name,
+        pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
         render_mode=resolved_render_mode,
     )
@@ -1766,6 +1803,7 @@ def _clear_results() -> None:
     st.session_state["wt_anticollision_analysis_cache"] = {}
     st.session_state["wt_edit_targets_pending_names"] = []
     st.session_state["wt_edit_targets_highlight_names"] = []
+    st.session_state["wt_edit_targets_highlight_points"] = {}
 
 
 def _set_all_wells_results_focus_state() -> None:
@@ -1996,14 +2034,17 @@ def _all_wells_plan_figure(
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
-        marker_x = np.array(
-            [target_only.surface.x, target_only.t1.x, target_only.t3.x],
-            dtype=float,
-        )
-        marker_y = np.array(
-            [target_only.surface.y, target_only.t1.y, target_only.t3.y],
-            dtype=float,
-        )
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        if not target_points:
+            target_points = (target_only.surface, target_only.t1, target_only.t3)
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        if len(target_labels) != len(target_points):
+            target_labels = _target_only_fallback_labels(
+                point_count=len(target_points),
+                target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            )
+        marker_x = np.array([point.x for point in target_points], dtype=float)
+        marker_y = np.array([point.y for point in target_points], dtype=float)
         x_arrays.append(marker_x)
         y_arrays.append(marker_y)
         if not focus_set or str(target_only.name) in focus_set:
@@ -2011,9 +2052,8 @@ def _all_wells_plan_figure(
             y_focus_arrays.append(marker_y)
         customdata = np.array(
             [
-                ["S", target_only.status, target_only.problem or "—"],
-                ["t1", target_only.status, target_only.problem or "—"],
-                ["t3", target_only.status, target_only.problem or "—"],
+                [label, target_only.status, target_only.problem or "—"]
+                for label in target_labels
             ],
             dtype=object,
         )
@@ -2040,11 +2080,12 @@ def _all_wells_plan_figure(
                 ),
             )
         )
+        label_point = target_points[min(1, len(target_points) - 1)]
         fig.add_trace(
             _t1_name_trace_2d(
                 well_name=str(target_only.name),
-                x_value=float(target_only.t1.x),
-                y_value=float(target_only.t1.y),
+                x_value=float(label_point.x),
+                y_value=float(label_point.y),
                 color=line_color,
             )
         )
@@ -2091,6 +2132,23 @@ def _all_wells_plan_figure(
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
     )
     return fig
+
+
+def _target_only_fallback_labels(
+    *,
+    point_count: int,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+) -> tuple[str, ...]:
+    if point_count <= 0:
+        return ()
+    if len(target_pairs) > 1 and point_count == 1 + 2 * len(target_pairs):
+        labels = ["S"]
+        for level_index in range(1, len(target_pairs) + 1):
+            labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
+        return tuple(labels)
+    if point_count == 3:
+        return ("S", "t1", "t3")
+    return ("S", *(f"P{index}" for index in range(1, point_count)))
 
 
 def _all_wells_anticollision_plan_figure(
@@ -3812,9 +3870,21 @@ def _actual_fund_zone_table_rows(
             "INC min, deg": item.inc_min_deg,
             "INC avg, deg": item.inc_mean_deg,
             "INC max, deg": item.inc_max_deg,
-            "DLS min, deg/30м": item.dls_min_deg_per_30m,
-            "DLS avg, deg/30м": item.dls_mean_deg_per_30m,
-            "DLS max, deg/30м": item.dls_max_deg_per_30m,
+            "ПИ min, deg/10м": (
+                None
+                if item.dls_min_deg_per_30m is None
+                else dls_to_pi(item.dls_min_deg_per_30m)
+            ),
+            "ПИ avg, deg/10м": (
+                None
+                if item.dls_mean_deg_per_30m is None
+                else dls_to_pi(item.dls_mean_deg_per_30m)
+            ),
+            "ПИ max, deg/10м": (
+                None
+                if item.dls_max_deg_per_30m is None
+                else dls_to_pi(item.dls_max_deg_per_30m)
+            ),
         }
         for item in detail.zone_summaries
     ]
@@ -4522,25 +4592,54 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
         for name in (st.session_state.get("wt_edit_targets_highlight_names") or [])
         if str(name).strip()
     }
+    raw_highlight_points = st.session_state.get("wt_edit_targets_highlight_points")
+    highlight_points: dict[str, set[int]] = {}
+    if isinstance(raw_highlight_points, Mapping):
+        for raw_name, raw_indices in raw_highlight_points.items():
+            if not isinstance(raw_indices, list):
+                continue
+            indices: set[int] = set()
+            for raw_index in raw_indices:
+                try:
+                    index = int(raw_index)
+                except (TypeError, ValueError):
+                    continue
+                if index >= 0:
+                    indices.add(index)
+            if indices:
+                highlight_points[str(raw_name)] = indices
     with st.expander(
         "Текущие точки скважин (используются в расчете, включая обновленные устья S)",
         expanded=bool(highlight_names),
     ):
         if highlight_names:
             st.success(
-                "Изменённые в 3D-редакторе точки t1/t3 подсвечены. "
+                "Изменённые в 3D-редакторе точки подсвечены. "
                 "Запустите расчёт для обновления траекторий."
             )
         raw_df = arrow_safe_text_dataframe(
             ptc_target_records.raw_records_dataframe(records)
         )
         if highlight_names and not raw_df.empty:
-            highlight_mask = raw_df["Скважина"].astype(str).isin(
-                highlight_names
-            ) & raw_df["Точка"].astype(str).isin({"t1", "t3"})
+            point_indices = raw_df.groupby("Скважина", sort=False).cumcount()
 
             def _highlight_edit_rows(row: pd.Series) -> list[str]:
-                if bool(highlight_mask.loc[row.name]):
+                well_name = str(row.get("Скважина", ""))
+                point_index = int(point_indices.loc[row.name])
+                explicit_indices = highlight_points.get(well_name)
+                point_label = str(row.get("Точка", ""))
+                is_legacy_target = (
+                    point_label in {"t1", "t3"}
+                    or point_label.endswith("_t1")
+                    or point_label.endswith("_t3")
+                )
+                if (
+                    well_name in highlight_names
+                    and (
+                        (explicit_indices is not None and point_index in explicit_indices)
+                        or (explicit_indices is None and is_legacy_target)
+                    )
+                ):
                     return [
                         "background-color: rgba(34, 197, 94, 0.14); "
                         "font-weight: 600;"

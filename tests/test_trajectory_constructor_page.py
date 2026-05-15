@@ -210,6 +210,38 @@ def test_ptc_page_defers_anticollision_when_three_edits_are_pending() -> None:
     assert "Проверено пар" not in metric_labels
 
 
+def test_ptc_page_renders_target_editor_when_all_results_failed() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {
+            "Скважина": "WELL-A",
+            "Статус": "Ошибка расчета",
+            "Проблема": "endpoint miss",
+            "Точек": 3,
+        },
+        {
+            "Скважина": "WELL-B",
+            "Статус": "Ошибка расчета",
+            "Проблема": "endpoint miss",
+            "Точек": 3,
+        },
+    ]
+    at.session_state["wt_successes"] = []
+
+    at.run(timeout=120)
+
+    warning_values = [str(widget.value) for widget in at.warning]
+    markdown_values = [str(widget.value) for widget in at.markdown]
+    assert any(
+        "Все выбранные скважины завершились ошибками" in value
+        for value in warning_values
+    )
+    assert any("Исходные точки для правки" in value for value in markdown_values)
+
+
 def test_ptc_page_wraps_reference_well_table_into_expander() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()

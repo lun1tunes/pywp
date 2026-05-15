@@ -1444,7 +1444,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/actual_fund_analysis.py	44220
+===BEGIN_FILE===	pywp/actual_fund_analysis.py	44497
 from __future__ import annotations
 
 import re
@@ -1458,6 +1458,7 @@ from pywp.constants import SMALL
 from pywp.mcm import add_dls, wrap_azimuth_deg
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.reference_trajectories import ImportedTrajectoryWell
+from pywp.ui_utils import dls_to_pi
 
 HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 HORIZONTAL_MIN_INTERVAL_M = 100.0
@@ -1474,6 +1475,12 @@ KOP_BUILD_RATE_THRESHOLD_DEG_PER_30M = 0.55
 KOP_MIN_BUILD_INTERVAL_M = 60.0
 KOP_VERTICAL_BASELINE_MAX_INC_DEG = 10.0
 KOP_INC_BUFFER_DEG = 3.0
+
+
+def _optional_dls_to_pi(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return float(dls_to_pi(float(value)))
 
 
 class ActualFundWellMetrics(FrozenArbitraryModel):
@@ -1893,8 +1900,10 @@ def actual_fund_metrics_rows(
             "Азимут HOLD, deg": item.hold_azi_deg,
             "HOLD, м": item.hold_length_m,
             "Макс INC, deg": item.max_inc_deg,
-            "Макс ПИ, deg/30м": item.max_dls_deg_per_30m,
-            "Макс ПИ до HOLD, deg/30м": item.max_build_dls_before_hold_deg_per_30m,
+            "Макс ПИ, deg/10м": _optional_dls_to_pi(item.max_dls_deg_per_30m),
+            "Макс ПИ до HOLD, deg/10м": _optional_dls_to_pi(
+                item.max_build_dls_before_hold_deg_per_30m
+            ),
         }
         for item in metrics
     ]
@@ -1912,7 +1921,7 @@ def actual_fund_pad_rows(
             "Медианный KOP MD, м": item.median_kop_md_m,
             "Медианный HOLD INC, deg": item.median_hold_inc_deg,
             "Медианный HOLD, м": item.median_hold_length_m,
-            "Макс ПИ, deg/30м": item.max_pi_deg_per_30m,
+            "Макс ПИ, deg/10м": _optional_dls_to_pi(item.max_pi_deg_per_30m),
             "Медианная длина ГС, м": item.median_horizontal_length_m,
         }
         for item in summaries
@@ -6789,7 +6798,7 @@ def _sample_md_grid(
     return np.asarray(sorted(set(round(float(value), 6) for value in values)), dtype=float)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_recommendations.py	46202
+===BEGIN_FILE===	pywp/anticollision_recommendations.py	46271
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -6814,6 +6823,7 @@ from pywp.models import (
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_NONE,
 )
+from pywp.ui_utils import dls_to_pi
 
 RECOMMENDATION_TARGET_SPACING = "target_spacing"
 RECOMMENDATION_REDUCE_KOP = "reduce_kop"
@@ -7234,7 +7244,7 @@ def _build_single_recommendation(
                     detail_parts.append(
                         f"{well_name}: ранний уход уже исчерпан "
                         f"(KOP {float(current_kop):.1f} м, BUILD1 "
-                        f"{float(current_build1 or 0.0):.2f} deg/30m)."
+                        f"{dls_to_pi(float(current_build1 or 0.0)):.2f} deg/10m)."
                     )
                 elif float(current_kop) <= float(kop_floor) + 1e-3:
                     detail_parts.append(
@@ -7254,8 +7264,8 @@ def _build_single_recommendation(
                     < float(build_limit) - _BUILD_DLS_SATURATION_TOLERANCE_DEG_PER_30M
                 ):
                     detail_parts.append(
-                        f"{well_name}: BUILD1 {float(current_build1):.2f} из "
-                        f"{float(build_limit):.2f} deg/30m."
+                        f"{well_name}: BUILD1 {dls_to_pi(float(current_build1)):.2f} из "
+                        f"{dls_to_pi(float(build_limit)):.2f} deg/10m."
                     )
             if not can_adjust_early:
                 continue
@@ -9446,7 +9456,7 @@ SMALL: float = 1e-9
 __all__ = ["DEG2RAD", "RAD2DEG", "SMALL"]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_integration.py	21152
+===BEGIN_FILE===	pywp/coordinate_integration.py	20727
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
@@ -9552,20 +9562,11 @@ def render_crs_sidebar() -> CoordinateSystem:
         if CRS_SELECTED_KEY not in st.session_state:
             st.session_state[CRS_SELECTED_KEY] = DEFAULT_CRS
 
-        # Get current selection label from stored enum
         current_crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
-        current_label = next(
-            (label for label, crs in CRS_OPTIONS if crs == current_crs),
-            CRS_OPTIONS[_DEFAULT_CRS_INDEX][0],  # Default fallback label
-        )
-
-        # Pre-set widget state as string label (not enum)
-        if CRS_SELECTBOX_KEY not in st.session_state:
-            st.session_state[CRS_SELECTBOX_KEY] = current_label
 
         option_labels = [label for label, _ in CRS_OPTIONS]
         if st.session_state.get(CRS_SELECTBOX_KEY) not in option_labels:
-            st.session_state[CRS_SELECTBOX_KEY] = current_label
+            st.session_state.pop(CRS_SELECTBOX_KEY, None)
 
         selected_label = st.selectbox(
             "Выберите CRS",
@@ -12335,7 +12336,7 @@ class PlannerResult(FrozenArbitraryModel):
     md_t1_m: float
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/multi_horizontal.py	24574
+===BEGIN_FILE===	pywp/multi_horizontal.py	24655
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12347,6 +12348,7 @@ from pywp.constants import RAD2DEG
 from pywp.mcm import add_dls, dogleg_angle_rad
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.planner_types import PlanningError
+from pywp.ui_utils import dls_to_pi
 
 SMALL = 1e-9
 MAX_TRANSITION_MD_MULTIPLIER = 4.0
@@ -12520,8 +12522,8 @@ def _validate_extended_stations(
     if max_dls > float(config.dls_build_max_deg_per_30m) + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: построенный HORIZONTAL_BUILD превышает "
-            f"лимит ПИ ({max_dls:.3f} > {float(config.dls_build_max_deg_per_30m):.3f} "
-            "deg/30m)."
+            f"лимит ПИ ({dls_to_pi(max_dls):.3f} > "
+            f"{dls_to_pi(float(config.dls_build_max_deg_per_30m)):.3f} deg/10m)."
         )
 
     final_row = stations.iloc[-1]
@@ -12691,8 +12693,8 @@ def _smooth_transition_rows(
     if best_dls > dls_limit + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: плавный "
-            f"{segment_name} требует ПИ {best_dls:.2f} deg/30m, что выше "
-            f"лимита {dls_limit:.2f}. Увеличьте расстояние между уровнями, "
+            f"{segment_name} требует ПИ {dls_to_pi(best_dls):.2f} deg/10m, что выше "
+            f"лимита {dls_to_pi(dls_limit):.2f}. Увеличьте расстояние между уровнями, "
             "сократите соседние мини-горизонты или уменьшите ΔZ."
         )
     if best_inc > float(config.max_inc_deg) + 1e-6:
@@ -13561,7 +13563,7 @@ def process_pool_context(platform: str | None = None) -> BaseContext:
         return multiprocessing.get_context("spawn")
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/pilot_wells.py	37172
+===BEGIN_FILE===	pywp/pilot_wells.py	37219
 from __future__ import annotations
 
 import math
@@ -13591,6 +13593,7 @@ from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.segments import BuildSegment, HoldSegment
 from pywp.sidetrack_solver import SidetrackPlanner, SidetrackStart
 from pywp.trajectory import WellTrajectory
+from pywp.ui_utils import dls_to_pi
 
 PILOT_SUFFIX = "_PL"
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M = 50.0
@@ -14182,7 +14185,7 @@ def _pilot_build_hold_leg_to_target(
     if (not bool(result.success)) or miss_m > max(tolerance_m, 0.25):
         raise ValueError(
             "Не удалось построить буримый пилотный участок BUILD+HOLD до точки "
-            f"p{int(segment_index)} при ПИ <= {dls_limit:.2f} deg/30m. "
+            f"p{int(segment_index)} при ПИ <= {dls_to_pi(dls_limit):.2f} deg/10m. "
             f"Остаточное отклонение {miss_m:.2f} м."
         )
 
@@ -14685,7 +14688,7 @@ def _first_valid_azimuth_deg(stations: pd.DataFrame) -> float:
     return float((math.degrees(math.atan2(dx[index], dy[index])) + 360.0) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner.py	144468
+===BEGIN_FILE===	pywp/planner.py	144493
 from __future__ import annotations
 
 from typing import Callable
@@ -18078,10 +18081,10 @@ def _turn_seed_vectors(
 def _build_unit_seed_values(search_settings: TurnSearchSettings) -> np.ndarray:
     level = max(int(search_settings.restart_index), 0)
     if level <= 0:
-        return np.array([1.0], dtype=float)
+        return np.array([1.0, 0.8], dtype=float)
     if level == 1:
-        return np.array([1.0, 0.2], dtype=float)
-    return np.array([1.0, 0.6, 0.2], dtype=float)
+        return np.array([1.0, 0.8, 0.5, 0.2], dtype=float)
+    return np.array([1.0, 0.8, 0.6, 0.4, 0.2], dtype=float)
 
 
 def _axis_samples(lower: float, upper: float, count: int) -> np.ndarray:
@@ -19751,7 +19754,7 @@ def linear_tick_values(axis_range: list[float], step: float) -> list[float]:
     return np.round(values, 6).tolist()
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_anticollision_params.py	5102
+===BEGIN_FILE===	pywp/ptc_anticollision_params.py	5590
 from __future__ import annotations
 
 from collections.abc import Iterable, MutableMapping
@@ -19771,6 +19774,7 @@ from pywp.uncertainty import (
 
 __all__ = [
     "ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY",
+    "ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY",
     "actual_reference_names",
     "reference_uncertainty_models_from_state",
     "reference_uncertainty_models_for_unknown_actual_names",
@@ -19778,6 +19782,9 @@ __all__ = [
 ]
 
 ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY = "wt_actual_reference_mwd_unknown_names"
+ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY = (
+    "wt_actual_reference_mwd_unknown_widget_names"
+)
 _ACTUAL_REFERENCE_MWD_POOR_DISPLAY_NAMES_KEY = (
     "wt_actual_reference_mwd_poor_display_names"
 )
@@ -19827,11 +19834,14 @@ def reference_uncertainty_models_from_state(
 ) -> dict[str, PlanningUncertaintyModel]:
     state_mapping = st.session_state if state is None else state
     actual_names = actual_reference_names(reference_wells)
+    raw_unknown_names = state_mapping.get(
+        ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY,
+        state_mapping.get(ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY, ()),
+    )
     unknown_names = _sanitize_unknown_names(
-        state_mapping.get(ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY, ()),
+        raw_unknown_names,
         actual_names=actual_names,
     )
-    state_mapping[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = list(unknown_names)
     return reference_uncertainty_models_for_unknown_actual_names(
         reference_wells,
         unknown_names=unknown_names,
@@ -19849,22 +19859,28 @@ def render_anticollision_params_block(
     if not actual_names:
         st.caption("Фактический фонд не загружен.")
         state_mapping[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = []
+        state_mapping[_ACTUAL_REFERENCE_MWD_POOR_DISPLAY_NAMES_KEY] = []
         return
 
     unknown_names = _sanitize_unknown_names(
-        state_mapping.get(ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY, ()),
+        state_mapping.get(
+            ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
+            state_mapping.get(ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY, ()),
+        ),
         actual_names=actual_names,
     )
-    state_mapping[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = list(unknown_names)
     poor_names = tuple(name for name in actual_names if name not in set(unknown_names))
+    state_mapping[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = list(unknown_names)
     state_mapping[_ACTUAL_REFERENCE_MWD_POOR_DISPLAY_NAMES_KEY] = list(poor_names)
+    if ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY not in state_mapping:
+        state_mapping[ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY] = list(unknown_names)
 
     c1, c2 = st.columns([1.0, 1.0], gap="small", vertical_alignment="bottom")
     with c1:
         st.multiselect(
             "MWD POOR Magnetic",
             options=list(actual_names),
-            key=_ACTUAL_REFERENCE_MWD_POOR_DISPLAY_NAMES_KEY,
+            default=list(poor_names),
             disabled=True,
             help=(
                 "Дефолтная ISCWSA модель для фактического фонда. "
@@ -19875,7 +19891,7 @@ def render_anticollision_params_block(
         st.multiselect(
             "MWD Unknown Magnetic",
             options=list(actual_names),
-            key=ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY,
+            key=ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
             help=(
                 "Более консервативная ISCWSA модель. Выбранные скважины "
                 "считаются Unknown и исключаются из списка MWD POOR."
@@ -20807,7 +20823,7 @@ def find_selected_success(
     return next(item for item in successes if str(item.name) == str(selected_name))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_run.py	27982
+===BEGIN_FILE===	pywp/ptc_batch_run.py	28323
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -21076,6 +21092,13 @@ def store_merged_batch_results(
             for name in (state.get("wt_edit_targets_highlight_names") or [])
             if str(name) not in successful_names
         ]
+        highlight_points = state.get("wt_edit_targets_highlight_points")
+        if isinstance(highlight_points, Mapping):
+            state["wt_edit_targets_highlight_points"] = {
+                str(name): value
+                for name, value in highlight_points.items()
+                if str(name) not in successful_names
+            }
         state["wt_edit_targets_pending_names"] = [
             str(name)
             for name in pending_edit_target_names()
@@ -21946,7 +21969,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	198714
+===BEGIN_FILE===	pywp/ptc_core.py	202976
 from __future__ import annotations
 
 import colorsys
@@ -22192,6 +22215,8 @@ class _TargetOnlyWell:
     status: str
     problem: str
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = ()
+    target_points: tuple[Point3D, ...] = ()
+    target_labels: tuple[str, ...] = ()
 
 
 _DetectedPadUiMeta = ptc_pad_state.DetectedPadUiMeta
@@ -22319,11 +22344,23 @@ def _failed_target_only_wells(
             status == "Не рассчитана" and str(record.name) not in pending_edit_names
         ):
             continue
+        target_points = tuple(
+            Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+            for point in tuple(record.points)
+        )
+        if not target_points:
+            continue
         try:
             surface, target_pairs = welltrack_points_to_target_pairs(record.points)
         except ValueError:
-            continue
-        t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+            surface = target_points[0]
+            target_pairs = ()
+        if target_pairs:
+            t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+        elif len(target_points) >= 2:
+            t1, t3 = target_points[1], target_points[-1]
+        else:
+            t1 = t3 = target_points[0]
         target_only_wells.append(
             _TargetOnlyWell(
                 name=str(record.name),
@@ -22331,11 +22368,30 @@ def _failed_target_only_wells(
                 t1=t1,
                 t3=t3,
                 target_pairs=target_pairs,
+                target_points=target_points,
+                target_labels=_record_target_point_labels(record),
                 status=status or "Ошибка расчета",
                 problem=str(row.get("Проблема", "")).strip(),
             )
         )
     return target_only_wells
+
+
+def _record_target_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
+    point_count = len(tuple(record.points))
+    if point_count <= 0:
+        return ()
+    if is_pilot_name(record.name):
+        return ("S", *(f"PL{index}" for index in range(1, point_count)))
+    target_count = point_count - 1
+    if target_count >= 4 and target_count % 2 == 0:
+        labels = ["S"]
+        for level_index in range(1, target_count // 2 + 1):
+            labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
+        return tuple(labels)
+    if point_count == 3:
+        return ("S", "t1", "t3")
+    return ("S", *(f"P{index}" for index in range(1, point_count)))
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -22919,6 +22975,7 @@ def _all_wells_three_payload(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
 ) -> dict[str, object]:
@@ -22932,6 +22989,7 @@ def _all_wells_three_payload(
         target_only_wells=target_only_wells,
         reference_wells=reference_wells,
         name_to_color=name_to_color,
+        pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
         render_mode=resolved_render_mode,
         fallback_color=_well_color,
@@ -22942,6 +23000,7 @@ def _all_wells_anticollision_three_payload(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
 ) -> dict[str, object]:
@@ -22958,6 +23017,7 @@ def _all_wells_anticollision_three_payload(
     return ptc_three_builders.anticollision_three_payload(
         analysis,
         previous_successes_by_name=previous_successes_by_name,
+        pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
         render_mode=resolved_render_mode,
     )
@@ -23715,6 +23775,7 @@ def _clear_results() -> None:
     st.session_state["wt_anticollision_analysis_cache"] = {}
     st.session_state["wt_edit_targets_pending_names"] = []
     st.session_state["wt_edit_targets_highlight_names"] = []
+    st.session_state["wt_edit_targets_highlight_points"] = {}
 
 
 def _set_all_wells_results_focus_state() -> None:
@@ -23945,14 +24006,17 @@ def _all_wells_plan_figure(
 
     for target_only in target_only_wells or ():
         line_color = color_map.get(str(target_only.name), "#6B7280")
-        marker_x = np.array(
-            [target_only.surface.x, target_only.t1.x, target_only.t3.x],
-            dtype=float,
-        )
-        marker_y = np.array(
-            [target_only.surface.y, target_only.t1.y, target_only.t3.y],
-            dtype=float,
-        )
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        if not target_points:
+            target_points = (target_only.surface, target_only.t1, target_only.t3)
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        if len(target_labels) != len(target_points):
+            target_labels = _target_only_fallback_labels(
+                point_count=len(target_points),
+                target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            )
+        marker_x = np.array([point.x for point in target_points], dtype=float)
+        marker_y = np.array([point.y for point in target_points], dtype=float)
         x_arrays.append(marker_x)
         y_arrays.append(marker_y)
         if not focus_set or str(target_only.name) in focus_set:
@@ -23960,9 +24024,8 @@ def _all_wells_plan_figure(
             y_focus_arrays.append(marker_y)
         customdata = np.array(
             [
-                ["S", target_only.status, target_only.problem or "—"],
-                ["t1", target_only.status, target_only.problem or "—"],
-                ["t3", target_only.status, target_only.problem or "—"],
+                [label, target_only.status, target_only.problem or "—"]
+                for label in target_labels
             ],
             dtype=object,
         )
@@ -23989,11 +24052,12 @@ def _all_wells_plan_figure(
                 ),
             )
         )
+        label_point = target_points[min(1, len(target_points) - 1)]
         fig.add_trace(
             _t1_name_trace_2d(
                 well_name=str(target_only.name),
-                x_value=float(target_only.t1.x),
-                y_value=float(target_only.t1.y),
+                x_value=float(label_point.x),
+                y_value=float(label_point.y),
                 color=line_color,
             )
         )
@@ -24040,6 +24104,23 @@ def _all_wells_plan_figure(
         margin={"l": 20, "r": 20, "t": 40, "b": 20},
     )
     return fig
+
+
+def _target_only_fallback_labels(
+    *,
+    point_count: int,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+) -> tuple[str, ...]:
+    if point_count <= 0:
+        return ()
+    if len(target_pairs) > 1 and point_count == 1 + 2 * len(target_pairs):
+        labels = ["S"]
+        for level_index in range(1, len(target_pairs) + 1):
+            labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
+        return tuple(labels)
+    if point_count == 3:
+        return ("S", "t1", "t3")
+    return ("S", *(f"P{index}" for index in range(1, point_count)))
 
 
 def _all_wells_anticollision_plan_figure(
@@ -25761,9 +25842,21 @@ def _actual_fund_zone_table_rows(
             "INC min, deg": item.inc_min_deg,
             "INC avg, deg": item.inc_mean_deg,
             "INC max, deg": item.inc_max_deg,
-            "DLS min, deg/30м": item.dls_min_deg_per_30m,
-            "DLS avg, deg/30м": item.dls_mean_deg_per_30m,
-            "DLS max, deg/30м": item.dls_max_deg_per_30m,
+            "ПИ min, deg/10м": (
+                None
+                if item.dls_min_deg_per_30m is None
+                else dls_to_pi(item.dls_min_deg_per_30m)
+            ),
+            "ПИ avg, deg/10м": (
+                None
+                if item.dls_mean_deg_per_30m is None
+                else dls_to_pi(item.dls_mean_deg_per_30m)
+            ),
+            "ПИ max, deg/10м": (
+                None
+                if item.dls_max_deg_per_30m is None
+                else dls_to_pi(item.dls_max_deg_per_30m)
+            ),
         }
         for item in detail.zone_summaries
     ]
@@ -26471,25 +26564,54 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
         for name in (st.session_state.get("wt_edit_targets_highlight_names") or [])
         if str(name).strip()
     }
+    raw_highlight_points = st.session_state.get("wt_edit_targets_highlight_points")
+    highlight_points: dict[str, set[int]] = {}
+    if isinstance(raw_highlight_points, Mapping):
+        for raw_name, raw_indices in raw_highlight_points.items():
+            if not isinstance(raw_indices, list):
+                continue
+            indices: set[int] = set()
+            for raw_index in raw_indices:
+                try:
+                    index = int(raw_index)
+                except (TypeError, ValueError):
+                    continue
+                if index >= 0:
+                    indices.add(index)
+            if indices:
+                highlight_points[str(raw_name)] = indices
     with st.expander(
         "Текущие точки скважин (используются в расчете, включая обновленные устья S)",
         expanded=bool(highlight_names),
     ):
         if highlight_names:
             st.success(
-                "Изменённые в 3D-редакторе точки t1/t3 подсвечены. "
+                "Изменённые в 3D-редакторе точки подсвечены. "
                 "Запустите расчёт для обновления траекторий."
             )
         raw_df = arrow_safe_text_dataframe(
             ptc_target_records.raw_records_dataframe(records)
         )
         if highlight_names and not raw_df.empty:
-            highlight_mask = raw_df["Скважина"].astype(str).isin(
-                highlight_names
-            ) & raw_df["Точка"].astype(str).isin({"t1", "t3"})
+            point_indices = raw_df.groupby("Скважина", sort=False).cumcount()
 
             def _highlight_edit_rows(row: pd.Series) -> list[str]:
-                if bool(highlight_mask.loc[row.name]):
+                well_name = str(row.get("Скважина", ""))
+                point_index = int(point_indices.loc[row.name])
+                explicit_indices = highlight_points.get(well_name)
+                point_label = str(row.get("Точка", ""))
+                is_legacy_target = (
+                    point_label in {"t1", "t3"}
+                    or point_label.endswith("_t1")
+                    or point_label.endswith("_t3")
+                )
+                if (
+                    well_name in highlight_names
+                    and (
+                        (explicit_indices is not None and point_index in explicit_indices)
+                        or (explicit_indices is None and is_legacy_target)
+                    )
+                ):
                     return [
                         "background-color: rgba(34, 197, 94, 0.14); "
                         "font-weight: 600;"
@@ -27458,7 +27580,7 @@ def _find_selected_success(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_edit_targets.py	7993
+===BEGIN_FILE===	pywp/ptc_edit_targets.py	13173
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
@@ -27495,7 +27617,7 @@ def edit_target_point(value: object) -> list[float] | None:
 
 def records_with_edit_targets(
     records: Iterable[WelltrackRecord],
-    change_map: Mapping[str, Mapping[str, list[float]]],
+    change_map: Mapping[str, Mapping[str, object]],
 ) -> tuple[list[WelltrackRecord], list[str]]:
     updated_records: list[WelltrackRecord] = []
     updated_names: list[str] = []
@@ -27505,6 +27627,44 @@ def records_with_edit_targets(
             updated_records.append(record)
             continue
         delta = change_map[record_name]
+        raw_points = delta.get("points")
+        if isinstance(raw_points, list):
+            old_points = list(record.points)
+            changed = False
+            for raw_entry in raw_points:
+                if not isinstance(raw_entry, Mapping):
+                    continue
+                try:
+                    point_index = int(raw_entry.get("index", -1))
+                except (TypeError, ValueError):
+                    continue
+                new_point = edit_target_point(raw_entry.get("position"))
+                if (
+                    new_point is None
+                    or point_index < 0
+                    or point_index >= len(old_points)
+                ):
+                    continue
+                old_point = old_points[point_index]
+                old_points[point_index] = WelltrackPoint(
+                    x=float(new_point[0]),
+                    y=float(new_point[1]),
+                    z=float(new_point[2]),
+                    md=float(old_point.md),
+                )
+                changed = True
+            if changed:
+                updated_records.append(
+                    WelltrackRecord(name=record.name, points=tuple(old_points))
+                )
+                updated_names.append(record_name)
+            else:
+                updated_records.append(record)
+            continue
+
+        if "t1" not in delta or "t3" not in delta:
+            updated_records.append(record)
+            continue
         new_t1 = delta["t1"]
         new_t3 = delta["t3"]
         if len(record.points) != 3:
@@ -27556,6 +27716,53 @@ def pending_edit_target_names(
     return unique_well_names(
         session_state.get("wt_edit_targets_highlight_names") or []
     )
+
+
+def _edit_target_highlight_indices(
+    delta: Mapping[str, object],
+    *,
+    record: WelltrackRecord | None = None,
+) -> list[int]:
+    def _point_changed(point_index: int, next_position: list[float] | None) -> bool:
+        if record is None or next_position is None:
+            return True
+        if point_index < 0 or point_index >= len(record.points):
+            return False
+        old_point = record.points[point_index]
+        return not (
+            math.isclose(float(old_point.x), float(next_position[0]), abs_tol=1e-9)
+            and math.isclose(float(old_point.y), float(next_position[1]), abs_tol=1e-9)
+            and math.isclose(float(old_point.z), float(next_position[2]), abs_tol=1e-9)
+        )
+
+    raw_points = delta.get("points")
+    if isinstance(raw_points, list):
+        result: list[int] = []
+        for raw_entry in raw_points:
+            if not isinstance(raw_entry, Mapping):
+                continue
+            try:
+                point_index = int(raw_entry.get("index", -1))
+            except (TypeError, ValueError):
+                continue
+            position = edit_target_point(raw_entry.get("position"))
+            if (
+                point_index >= 0
+                and point_index not in result
+                and _point_changed(point_index, position)
+            ):
+                result.append(point_index)
+        return result
+    if "t1" in delta and "t3" in delta:
+        result = []
+        t1 = edit_target_point(delta.get("t1"))
+        t3 = edit_target_point(delta.get("t3"))
+        if _point_changed(1, t1):
+            result.append(1)
+        if _point_changed(2, t3):
+            result.append(2)
+        return result
+    return []
 
 
 def invalidate_results_for_edited_targets(
@@ -27623,17 +27830,44 @@ def apply_edit_targets_changes(
     records = session_state.get("wt_records")
     if not records:
         return []
-    change_map: dict[str, dict[str, list[float]]] = {}
+    change_map: dict[str, dict[str, object]] = {}
     for entry in changes:
         if not isinstance(entry, Mapping):
             continue
         name = str(entry.get("name", "")).strip()
+        raw_points = entry.get("points")
+        parsed_points: list[dict[str, object]] = []
+        if isinstance(raw_points, list):
+            for raw_point in raw_points:
+                if not isinstance(raw_point, Mapping):
+                    continue
+                try:
+                    point_index = int(raw_point.get("index", -1))
+                except (TypeError, ValueError):
+                    continue
+                point = edit_target_point(raw_point.get("position"))
+                if point is None or point_index < 0:
+                    continue
+                parsed_points.append(
+                    {
+                        "index": point_index,
+                        "position": point,
+                    }
+                )
+        if name and parsed_points:
+            change_map[name] = {"points": parsed_points}
+            continue
         t1 = edit_target_point(entry.get("t1"))
         t3 = edit_target_point(entry.get("t3"))
         if name and t1 is not None and t3 is not None:
             change_map[name] = {"t1": t1, "t3": t3}
     if not change_map:
         return []
+    record_by_name = {
+        str(record.name): record
+        for record in records  # type: ignore[union-attr]
+        if isinstance(record, WelltrackRecord)
+    }
     updated_records, updated_names = records_with_edit_targets(
         records=records,  # type: ignore[arg-type]
         change_map=change_map,
@@ -27668,6 +27902,31 @@ def apply_edit_targets_changes(
     session_state["wt_edit_targets_pending_names"] = pending_names
     session_state["wt_edit_targets_applied"] = updated_names
     session_state["wt_edit_targets_highlight_names"] = pending_names
+    existing_highlight_points = session_state.get("wt_edit_targets_highlight_points")
+    if isinstance(existing_highlight_points, Mapping):
+        highlight_points: dict[str, list[int]] = {
+            str(name): [
+                int(index)
+                for index in indices
+                if isinstance(index, int) or str(index).lstrip("-").isdigit()
+            ]
+            for name, indices in existing_highlight_points.items()
+            if isinstance(indices, list)
+        }
+    else:
+        highlight_points = {}
+    for name in updated_names:
+        point_indices = _edit_target_highlight_indices(
+            change_map.get(name, {}),
+            record=record_by_name.get(str(name)),
+        )
+        if point_indices:
+            highlight_points[str(name)] = point_indices
+    session_state["wt_edit_targets_highlight_points"] = {
+        name: indices
+        for name, indices in highlight_points.items()
+        if name in pending_names
+    }
     session_state["wt_edit_targets_last_source"] = str(source)
     session_state["wt_edit_targets_highlight_version"] = (
         int(session_state.get("wt_edit_targets_highlight_version", 0)) + 1
@@ -28383,7 +28642,7 @@ def _merge_pad_config(
     }
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page.py	3330
+===BEGIN_FILE===	pywp/ptc_page.py	3511
 from __future__ import annotations
 
 import logging
@@ -28404,7 +28663,10 @@ from pywp.coordinate_integration import (
 )
 from pywp.ptc_page_import import render_target_import_section
 from pywp.ptc_page_reference import render_reference_section
-from pywp.ptc_page_results import render_success_tabs
+from pywp.ptc_page_results import (
+    render_failed_target_only_results,
+    render_success_tabs,
+)
 from pywp.ptc_page_run import render_run_section
 from pywp.ptc_page_state import force_ptc_defaults
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
@@ -28482,6 +28744,10 @@ def run_page() -> None:
     )
     if not successes:
         st.warning("Все выбранные скважины завершились ошибками расчёта.")
+        render_failed_target_only_results(
+            records=list(records),
+            summary_rows=list(summary_rows),
+        )
         return
     render_success_tabs(
         successes=successes,
@@ -28786,7 +29052,7 @@ def render_reference_section() -> None:
                 )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_results.py	20462
+===BEGIN_FILE===	pywp/ptc_page_results.py	25143
 from __future__ import annotations
 
 import pandas as pd
@@ -28815,7 +29081,7 @@ from pywp.ui_well_result import (
 from pywp.uncertainty import UNCERTAINTY_PRESET_OPTIONS
 from pywp.uncertainty import planning_uncertainty_model_for_preset
 
-__all__ = ["render_success_tabs"]
+__all__ = ["render_failed_target_only_results", "render_success_tabs"]
 
 
 def _single_well_pilot_context(
@@ -28914,6 +29180,14 @@ def _pilot_study_points_from_success(
         if candidate not in result:
             result.append(candidate)
     return tuple(result)
+
+
+def _pilot_study_points_by_name(records: list[object]) -> dict[str, tuple[Point3D, ...]]:
+    return {
+        str(getattr(record, "name", "")): _pilot_study_points_from_record(record)
+        for record in records
+        if is_pilot_name(getattr(record, "name", ""))
+    }
 
 
 def _render_anticollision_panel(
@@ -29032,6 +29306,7 @@ def _render_anticollision_panel(
         anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
             analysis,
             previous_successes_by_name={},
+            pilot_study_points_by_name=_pilot_study_points_by_name(records),
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
             render_mode=wt.WT_3D_RENDER_DETAIL,
         )
@@ -29182,6 +29457,116 @@ def _render_anticollision_panel(
                     100,
                     text="Текущий порядок уже оптимален (или улучшить не удалось).",
                 )
+
+
+def _render_target_edit_overview(
+    *,
+    successes: list[object],
+    records: list[object],
+    summary_rows: list[dict[str, object]],
+    title: str,
+    empty_message: str,
+    focus_pad_well_names: list[str] | None = None,
+    show_focus_selector: bool = True,
+) -> bool:
+    target_only_wells = wt._failed_target_only_wells(
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
+    if not successes and not target_only_wells:
+        st.info(empty_message)
+        return False
+
+    name_to_color = wt._well_color_map(list(records))
+    st.markdown(title)
+    if target_only_wells:
+        st.caption(
+            "Скважины без успешной траектории показаны как исходные точки. "
+            "Их можно выбрать в легенде 3D и подвинуть через редактор целей."
+        )
+
+    if focus_pad_well_names is None:
+        pads, _, _ = wt._pad_membership(records)
+        if show_focus_selector and len(pads) > 1:
+            focus_options = [
+                wt.WT_PAD_FOCUS_ALL,
+                *(str(pad.pad_id) for pad in pads),
+            ]
+            normalized_focus_pad_id = wt._normalize_focus_pad_id(
+                records=records,
+                requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
+            )
+            if normalized_focus_pad_id != str(
+                st.session_state.get("wt_results_focus_pad_id", "")
+            ):
+                st.session_state["wt_results_focus_pad_id"] = normalized_focus_pad_id
+            st.selectbox(
+                "Фокус камеры по кусту",
+                options=focus_options,
+                format_func=lambda value: (
+                    "Все кусты"
+                    if str(value) == wt.WT_PAD_FOCUS_ALL
+                    else wt._pad_display_label(
+                        next(pad for pad in pads if str(pad.pad_id) == str(value))
+                    )
+                ),
+                key="wt_results_focus_pad_id",
+            )
+        focus_pad_id = wt._normalize_focus_pad_id(
+            records=records,
+            requested_pad_id=st.session_state.get("wt_results_focus_pad_id"),
+        )
+        focus_pad_well_names = wt._focus_pad_well_names(
+            records=records,
+            focus_pad_id=focus_pad_id,
+        )
+    payload = wt._all_wells_three_payload(
+        list(successes),
+        target_only_wells=target_only_wells,
+        name_to_color=name_to_color,
+        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
+        focus_well_names=tuple(focus_pad_well_names),
+        render_mode=wt.WT_3D_RENDER_DETAIL,
+    )
+    chart_col1, chart_col2 = st.columns(2, gap="medium")
+    wt._render_three_payload(
+        container=chart_col1,
+        payload=payload,
+        height=660,
+        payload_overrides=wt._trajectory_three_payload_overrides(
+            records=list(records),
+            successes=list(successes),
+            target_only_wells=target_only_wells,
+            name_to_color=name_to_color,
+        ),
+    )
+    chart_col2.plotly_chart(
+        wt._all_wells_plan_figure(
+            list(successes),
+            target_only_wells=target_only_wells,
+            name_to_color=name_to_color,
+            focus_well_names=tuple(focus_pad_well_names),
+        ),
+        width="stretch",
+    )
+    return True
+
+
+def render_failed_target_only_results(
+    *,
+    records: list[object],
+    summary_rows: list[dict[str, object]],
+) -> None:
+    _render_target_edit_overview(
+        successes=[],
+        records=records,
+        summary_rows=summary_rows,
+        title="### Исходные точки для правки",
+        empty_message=(
+            "Не удалось подготовить исходные точки для 3D-редактора. "
+            "Проверьте статус импорта целей выше."
+        ),
+    )
 
 
 def render_success_tabs(
@@ -29343,6 +29728,20 @@ def render_success_tabs(
         records=records,
         focus_pad_id=focus_pad_id,
     )
+    target_only_wells = wt._failed_target_only_wells(
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
+    if target_only_wells:
+        _render_target_edit_overview(
+            successes=list(successes),
+            records=records,
+            summary_rows=summary_rows,
+            title="### Все скважины и точки без траектории",
+            empty_message="Нет данных для 3D-обзора целей.",
+            focus_pad_well_names=list(focus_pad_well_names),
+            show_focus_selector=False,
+        )
 
     _render_anticollision_panel(
         successes=successes,
@@ -29792,13 +30191,17 @@ def render_calc_params_panel(
         return config
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_reference_state.py	5843
+===BEGIN_FILE===	pywp/ptc_reference_state.py	6048
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
 import streamlit as st
 
+from pywp.ptc_anticollision_params import (
+    ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY,
+    ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
+)
 from pywp.reference_trajectories import (
     REFERENCE_WELL_ACTUAL,
     REFERENCE_WELL_APPROVED,
@@ -29870,7 +30273,8 @@ def clear_reference_import_state(
 ) -> None:
     set_reference_wells_for_kind(kind=kind, wells=())
     if str(kind) == REFERENCE_WELL_ACTUAL:
-        st.session_state["wt_actual_reference_mwd_unknown_names"] = []
+        st.session_state[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = []
+        st.session_state[ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY] = []
     st.session_state[reference_source_text_key(kind)] = ""
     st.session_state[reference_welltrack_path_key(kind)] = ""
     clear_reference_dev_folder_state(kind)
@@ -30680,7 +31084,7 @@ def _value_is_finite(value: object) -> bool:
         return False
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_builders.py	57474
+===BEGIN_FILE===	pywp/ptc_three_builders.py	62064
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
@@ -30693,6 +31097,7 @@ import pandas as pd
 from pywp.anticollision import AntiCollisionAnalysis
 from pywp.constants import SMALL
 from pywp.models import Point3D
+from pywp.pilot_wells import is_pilot_name
 from pywp.plot_axes import equalized_axis_ranges
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp import ptc_three_overrides
@@ -30901,6 +31306,7 @@ def all_wells_three_payload(
     target_only_wells: list[object] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: Mapping[str, str] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
     fallback_color: Callable[[int], str] | None = None,
@@ -30914,10 +31320,21 @@ def all_wells_three_payload(
     z_focus_arrays: list[np.ndarray] = []
     focus_set = _clean_name_set(focus_well_names)
     color_map = dict(name_to_color or {})
+    pilot_points_map = dict(pilot_study_points_by_name or {})
 
     for index, success in enumerate(successes):
         well_name = str(success.name)
         color = color_map.get(well_name, _fallback_color(index, fallback_color))
+        is_pilot = is_pilot_name(well_name)
+        pilot_study_points = (
+            _pilot_study_points_for_well(
+                well_name,
+                pilot_points_map,
+                fallback_points=(success.t1, success.t3),
+            )
+            if is_pilot
+            else ()
+        )
         stations = _maybe_decimated_stations(
             success.stations,
             render_mode=render_mode,
@@ -30945,6 +31362,13 @@ def all_wells_three_payload(
             t1=success.t1,
             t3=success.t3,
             target_pairs=tuple(getattr(success, "target_pairs", ()) or ()),
+            target_points=pilot_study_points,
+            target_labels=_pilot_study_label_texts(
+                well_name,
+                len(pilot_study_points),
+            )
+            if is_pilot
+            else (),
             color=color,
             size=5.0,
             symbol="circle",
@@ -30956,6 +31380,13 @@ def all_wells_three_payload(
             else None,
         )
         payload["labels"].append(_well_name_label(well_name, success.t3, color))
+        if pilot_study_points:
+            _append_pilot_study_labels(
+                payload,
+                pilot_name=well_name,
+                study_points=pilot_study_points,
+                color=color,
+            )
         _append_unique_legend_item(payload, label=well_name, color=color, opacity=1.0)
 
     _append_reference_wells(
@@ -30977,6 +31408,8 @@ def all_wells_three_payload(
             t1=getattr(target_only, "t1"),
             t3=getattr(target_only, "t3"),
             target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            target_points=tuple(getattr(target_only, "target_points", ()) or ()),
+            target_labels=tuple(getattr(target_only, "target_labels", ()) or ()),
             color=color,
             size=10.0,
             symbol="cross",
@@ -31011,6 +31444,7 @@ def anticollision_three_payload(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
 ) -> dict[str, object]:
@@ -31022,6 +31456,7 @@ def anticollision_three_payload(
     y_focus_arrays: list[np.ndarray] = []
     z_focus_arrays: list[np.ndarray] = []
     focus_set = _clean_name_set(focus_well_names)
+    pilot_points_map = dict(pilot_study_points_by_name or {})
     reference_wells = tuple(well for well in analysis.wells if bool(well.is_reference_only))
     focus_reference_names = (
         _anticollision_reference_cone_focus_names(analysis)
@@ -31137,6 +31572,16 @@ def anticollision_three_payload(
                 focus_arrays=focus_arrays,
             )
         if (well.t1 is not None) and (well.t3 is not None) and not is_reference_only:
+            is_pilot = is_pilot_name(well_name)
+            pilot_points = (
+                _pilot_study_points_for_well(
+                    well_name,
+                    pilot_points_map,
+                    fallback_points=(well.t1, well.t3),
+                )
+                if is_pilot
+                else ()
+            )
             _append_target_markers(
                 payload,
                 name=f"{well_label}: цели",
@@ -31144,6 +31589,13 @@ def anticollision_three_payload(
                 t1=well.t1,
                 t3=well.t3,
                 target_pairs=tuple(getattr(well, "target_pairs", ()) or ()),
+                target_points=pilot_points,
+                target_labels=_pilot_study_label_texts(
+                    well_name,
+                    len(pilot_points),
+                )
+                if is_pilot
+                else (),
                 color=str(well.color),
                 size=5.0,
                 symbol="circle",
@@ -31152,6 +31604,13 @@ def anticollision_three_payload(
                 z_arrays=z_arrays,
                 focus_arrays=focus_arrays,
             )
+            if pilot_points:
+                _append_pilot_study_labels(
+                    payload,
+                    pilot_name=well_name,
+                    study_points=pilot_points,
+                    color=str(well.color),
+                )
             payload["labels"].append(_well_name_label(well_name, well.t3, str(well.color)))
 
     if aggregated_reference_wells:
@@ -31450,13 +31909,23 @@ def _append_target_markers(
     focus_arrays: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]] | None = None,
     hover_extra: Mapping[str, str] | None = None,
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+    target_points: tuple[Point3D, ...] = (),
+    target_labels: tuple[str, ...] = (),
 ) -> None:
-    points, labels = _target_marker_points_and_labels(
-        surface=surface,
-        t1=t1,
-        t3=t3,
-        target_pairs=target_pairs,
-    )
+    if target_points:
+        points = [_point3d_payload(point) for point in target_points]
+        labels = _target_labels_for_points(
+            point_count=len(points),
+            target_labels=target_labels,
+            target_pairs=target_pairs,
+        )
+    else:
+        points, labels = _target_marker_points_and_labels(
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            target_pairs=target_pairs,
+        )
     _append_arrays_for_points(x_arrays, y_arrays, z_arrays, points)
     if focus_arrays is not None:
         _append_arrays_for_points(*focus_arrays, points)
@@ -31500,6 +31969,24 @@ def _target_marker_points_and_labels(
     return points, labels
 
 
+def _target_labels_for_points(
+    *,
+    point_count: int,
+    target_labels: tuple[str, ...],
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+) -> list[str]:
+    if len(target_labels) == point_count:
+        return [str(label) for label in target_labels]
+    if len(target_pairs) > 1 and point_count == 1 + 2 * len(target_pairs):
+        labels = ["S"]
+        for index in range(1, len(target_pairs) + 1):
+            labels.extend([f"{index}_t1", f"{index}_t3"])
+        return labels
+    if point_count == 3:
+        return ["S", "t1", "t3"]
+    return ["S", *(f"P{index}" for index in range(1, point_count))]
+
+
 def _append_pilot_study_markers(
     payload: dict[str, object],
     *,
@@ -31512,7 +31999,7 @@ def _append_pilot_study_markers(
 ) -> None:
     if not pilot_name or not study_points:
         return
-    labels = [f"{str(pilot_name)}: {index}" for index in range(1, len(study_points) + 1)]
+    labels = _pilot_study_label_texts(str(pilot_name), len(study_points))
     points = [_point3d_payload(point) for point in study_points]
     _append_arrays_for_points(x_arrays, y_arrays, z_arrays, points)
     payload["points"].append(
@@ -31530,10 +32017,65 @@ def _append_pilot_study_markers(
             "role": "marker",
         }
     )
+    _append_pilot_study_labels(
+        payload,
+        pilot_name=str(pilot_name),
+        study_points=study_points,
+        color=color,
+    )
+
+
+def _append_pilot_study_labels(
+    payload: dict[str, object],
+    *,
+    pilot_name: str,
+    study_points: tuple[Point3D, ...],
+    color: str,
+) -> None:
+    if not pilot_name or not study_points:
+        return
+    labels = _pilot_study_label_texts(str(pilot_name), len(study_points))
     payload["labels"].extend(
         _well_name_label(label, point, color)
         for label, point in zip(labels, study_points, strict=False)
     )
+
+
+def _pilot_study_label_texts(pilot_name: str, point_count: int) -> tuple[str, ...]:
+    return tuple(
+        f"{str(pilot_name)}: {index}"
+        for index in range(1, int(max(point_count, 0)) + 1)
+    )
+
+
+def _pilot_study_points_for_well(
+    well_name: str,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]],
+    *,
+    fallback_points: Iterable[Point3D | None],
+) -> tuple[Point3D, ...]:
+    mapped_points = tuple(pilot_study_points_by_name.get(str(well_name), ()) or ())
+    if mapped_points:
+        return mapped_points
+    return _unique_points(fallback_points)
+
+
+def _unique_points(points: Iterable[Point3D | None]) -> tuple[Point3D, ...]:
+    result: list[Point3D] = []
+    seen: set[tuple[float, float, float]] = set()
+    for point in points:
+        if point is None:
+            continue
+        key = (
+            round(float(point.x), 9),
+            round(float(point.y), 9),
+            round(float(point.z), 9),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(point)
+    return tuple(result)
 
 
 def _append_single_well_zero_axes(
@@ -32392,7 +32934,7 @@ def _reference_pad_labels(reference_wells: Iterable[object]) -> list[_ReferenceP
     return pad_labels
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_overrides.py	28854
+===BEGIN_FILE===	pywp/ptc_three_overrides.py	34869
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, MutableMapping
@@ -32418,6 +32960,7 @@ __all__ = [
     "anticollision_three_payload_overrides",
     "augment_three_payload",
     "build_edit_wells_payload",
+    "build_target_only_edit_wells_payload",
     "legend_pad_label",
     "overlap_volume_payloads",
     "pad_first_surface_arrow_payloads",
@@ -32452,6 +32995,12 @@ def successful_plan_raw_bounds(
 
 
 def target_only_raw_bounds(target_only: object) -> dict[str, list[float]]:
+    target_points = tuple(getattr(target_only, "target_points", ()) or ())
+    if target_points:
+        return _points_bounds(target_points) or {
+            "min": [0.0, 0.0, 0.0],
+            "max": [0.0, 0.0, 0.0],
+        }
     return _target_point_bounds(
         surface=getattr(target_only, "surface"),
         t1=getattr(target_only, "t1"),
@@ -32736,16 +33285,45 @@ def build_edit_wells_payload(
     edit_wells: list[dict[str, object]] = []
     for success in successes:
         target_pairs = tuple(getattr(success, "target_pairs", ()) or ())
-        if len(target_pairs) > 1:
-            continue
         config = success.config
         base_points = _decimated_base_points(success)
+        edit_points: list[dict[str, object]] = []
+        if len(target_pairs) > 1:
+            edit_points.append(
+                {
+                    "index": 0,
+                    "label": "S",
+                    "point_type": "surface",
+                    "position": _point3d_payload(success.surface),
+                }
+            )
+            point_index = 1
+            for level_index, (pair_t1, pair_t3) in enumerate(target_pairs, start=1):
+                edit_points.append(
+                    {
+                        "index": point_index,
+                        "label": f"{level_index}_t1",
+                        "point_type": "t1",
+                        "position": _point3d_payload(pair_t1),
+                    }
+                )
+                point_index += 1
+                edit_points.append(
+                    {
+                        "index": point_index,
+                        "label": f"{level_index}_t3",
+                        "point_type": "t3",
+                        "position": _point3d_payload(pair_t3),
+                    }
+                )
+                point_index += 1
         edit_wells.append(
             {
                 "name": str(success.name),
                 "surface": _point3d_payload(success.surface),
                 "t1": _point3d_payload(success.t1),
                 "t3": _point3d_payload(success.t3),
+                "edit_points": edit_points,
                 "target_pairs": [
                     [_point3d_payload(pair_t1), _point3d_payload(pair_t3)]
                     for pair_t1, pair_t3 in target_pairs
@@ -32759,6 +33337,50 @@ def build_edit_wells_payload(
                         config.dls_build_max_deg_per_30m
                     ),
                     "kop_min_vertical_m": float(config.kop_min_vertical_m),
+                },
+            }
+        )
+    return edit_wells
+
+
+def build_target_only_edit_wells_payload(
+    target_only_wells: Iterable[object],
+    name_to_color: Mapping[str, str],
+) -> list[dict[str, object]]:
+    edit_wells: list[dict[str, object]] = []
+    for target_only in target_only_wells:
+        edit_points = _target_only_edit_points(target_only)
+        if not edit_points:
+            continue
+        surface = _edit_point_by_type(edit_points, "surface") or list(
+            edit_points[0]["position"]
+        )
+        first_t1 = _edit_point_by_type(edit_points, "t1")
+        last_t3 = _edit_point_by_type(edit_points, "t3", last=True)
+        fallback_target = list(edit_points[-1]["position"])
+        t1 = first_t1 or fallback_target
+        t3 = last_t3 or fallback_target
+        well_name = str(getattr(target_only, "name", ""))
+        edit_wells.append(
+            {
+                "name": well_name,
+                "surface": surface,
+                "t1": t1,
+                "t3": t3,
+                "edit_points": edit_points,
+                "target_pairs": [
+                    [_point3d_payload(pair_t1), _point3d_payload(pair_t3)]
+                    for pair_t1, pair_t3 in tuple(
+                        getattr(target_only, "target_pairs", ()) or ()
+                    )
+                ],
+                "color": str(name_to_color.get(well_name, "#6B7280")),
+                "base_points": [],
+                "config": {
+                    "entry_inc_target_deg": 86.0,
+                    "max_inc_deg": 95.0,
+                    "dls_build_max_deg_per_30m": 3.0,
+                    "kop_min_vertical_m": 550.0,
                 },
             }
         )
@@ -32796,7 +33418,10 @@ def trajectory_three_payload_overrides(
         "legend_tree": legend_tree,
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
-        "edit_wells": build_edit_wells_payload(successes, name_to_color),
+        "edit_wells": [
+            *build_edit_wells_payload(successes, name_to_color),
+            *build_target_only_edit_wells_payload(target_only_wells, name_to_color),
+        ],
         "extra_meshes": pad_first_surface_arrow_payloads(
             session_state,
             records=records,
@@ -32898,6 +33523,89 @@ def _points_bounds(points: Iterable[Point3D]) -> dict[str, list[float]] | None:
             float(max(point.z for point in point_list)),
         ],
     }
+
+
+def _target_only_edit_points(target_only: object) -> list[dict[str, object]]:
+    target_points = tuple(getattr(target_only, "target_points", ()) or ())
+    if not target_points:
+        target_pairs = tuple(getattr(target_only, "target_pairs", ()) or ())
+        target_points = (getattr(target_only, "surface"),)
+        if len(target_pairs) > 1:
+            target_points = (
+                *target_points,
+                *(point for pair in target_pairs for point in pair),
+            )
+        else:
+            target_points = (
+                *target_points,
+                getattr(target_only, "t1"),
+                getattr(target_only, "t3"),
+            )
+    labels = tuple(getattr(target_only, "target_labels", ()) or ())
+    if len(labels) != len(target_points):
+        labels = _fallback_target_labels(
+            len(target_points),
+            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+        )
+    edit_points: list[dict[str, object]] = []
+    for index, point in enumerate(target_points):
+        label = str(labels[index]) if index < len(labels) else f"P{index}"
+        edit_points.append(
+            {
+                "index": int(index),
+                "label": label,
+                "point_type": _target_point_type(label=label, index=index),
+                "position": _point3d_payload(point),
+            }
+        )
+    return edit_points
+
+
+def _fallback_target_labels(
+    point_count: int,
+    *,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+) -> tuple[str, ...]:
+    if point_count <= 0:
+        return ()
+    if len(target_pairs) > 1 and point_count == 1 + 2 * len(target_pairs):
+        labels = ["S"]
+        for level_index in range(1, len(target_pairs) + 1):
+            labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
+        return tuple(labels)
+    if point_count == 3:
+        return ("S", "t1", "t3")
+    return ("S", *(f"P{index}" for index in range(1, point_count)))
+
+
+def _target_point_type(*, label: str, index: int) -> str:
+    normalized = str(label).strip().lower()
+    if index == 0 or normalized in {"s", "surface", "wellhead"}:
+        return "surface"
+    if normalized == "t1" or normalized.endswith("_t1"):
+        return "t1"
+    if normalized == "t3" or normalized.endswith("_t3"):
+        return "t3"
+    if normalized.startswith("pl"):
+        return "pilot"
+    return "point"
+
+
+def _edit_point_by_type(
+    edit_points: Iterable[Mapping[str, object]],
+    point_type: str,
+    *,
+    last: bool = False,
+) -> list[float] | None:
+    matches = [
+        list(entry["position"])
+        for entry in edit_points
+        if str(entry.get("point_type", "")) == str(point_type)
+        and isinstance(entry.get("position"), list)
+    ]
+    if not matches:
+        return None
+    return matches[-1] if last else matches[0]
 
 
 def _point3d_payload(point: Point3D) -> list[float]:
@@ -34574,7 +35282,7 @@ def _angles_from_directions(directions: np.ndarray) -> tuple[np.ndarray, np.ndar
     return inc_deg.astype(float), azi_deg.astype(float)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/sidetrack_solver.py	18825
+===BEGIN_FILE===	pywp/sidetrack_solver.py	18905
 from __future__ import annotations
 
 import math
@@ -34588,6 +35296,7 @@ from pywp.mcm import add_dls
 from pywp.models import PlannerResult, Point3D, SummaryDict, TrajectoryConfig
 from pywp.planner_types import PlanningError
 from pywp.reference_trajectories import build_reference_trajectory_stations
+from pywp.ui_utils import dls_to_pi
 
 
 @dataclass(frozen=True)
@@ -34638,7 +35347,7 @@ class SidetrackPlanner:
             if dls_excess > 1e-6:
                 last_problem = (
                     "ПИ бокового ствола превышает лимит расчетной модели: "
-                    f"{max_dls:.2f} > {dls_limit:.2f} deg/30m."
+                    f"{dls_to_pi(max_dls):.2f} > {dls_to_pi(dls_limit):.2f} deg/10m."
                 )
                 if best_dls_excess is None or dls_excess < best_dls_excess[0]:
                     best_dls_excess = (dls_excess, max_dls)
@@ -34653,7 +35362,7 @@ class SidetrackPlanner:
                 dls_limit = float(config.dls_build_max_deg_per_30m)
                 last_problem = (
                     "ПИ бокового ствола превышает лимит расчетной модели: "
-                    f"{max_dls:.2f} > {dls_limit:.2f} deg/30m."
+                    f"{dls_to_pi(max_dls):.2f} > {dls_to_pi(dls_limit):.2f} deg/10m."
                 )
             suffix = f" Последняя причина: {last_problem}" if last_problem else ""
             raise PlanningError(
@@ -35106,7 +35815,7 @@ def _shortest_azimuth_delta_deg(
     return float(delta)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/solver_diagnostics.py	16196
+===BEGIN_FILE===	pywp/solver_diagnostics.py	18330
 from __future__ import annotations
 
 import re
@@ -35142,17 +35851,19 @@ def _replace_dls_terms_for_ui(text: str) -> str:
         return source
 
     def _convert_deg_30_to_deg_10(match: re.Match[str]) -> str:
-        value_text = match.group(1)
-        return f"{_pi_text_from_dls_text(value_text)} deg/10m"
+        return f"{_pi_text_from_dls_text(match.group(1))} deg/10m"
 
     converted = re.sub(
         rf"({_RE_FLOAT})\s*deg/30m",
         _convert_deg_30_to_deg_10,
         source,
     )
-    converted = converted.replace("deg/30m", "deg/10m")
-    converted = converted.replace("DLS", "ПИ")
-    return converted
+    converted = re.sub(
+        rf"({_RE_FLOAT})\s*deg/30м",
+        _convert_deg_30_to_deg_10,
+        converted,
+    )
+    return converted.replace("DLS", "ПИ")
 
 
 def ui_error_text(raw_message: str) -> str:
@@ -35260,8 +35971,8 @@ def _item_from_text(line: str) -> DiagnosticItem:
     if match:
         dls_max, dls_req = match.group(1), match.group(2)
         pi_max = _pi_text_from_dls_text(dls_max)
-        pi_req_f = float(dls_req) / 3.0
-        pi_max_f = float(dls_max) / 3.0
+        pi_req_f = float(_pi_text_from_dls_text(dls_req))
+        pi_max_f = float(_pi_text_from_dls_text(dls_max))
         build_vert = match.group(3)
         kop_min = match.group(4)
         t1_tvd = match.group(5)
@@ -35417,6 +36128,58 @@ def _item_from_text(line: str) -> DiagnosticItem:
                 "Измените геометрию целей: увеличьте TVD t3 и/или сократите отход t1->t3; "
                 "при необходимости смягчите entry INC target/max INC."
             ),
+        )
+
+    match = re.search(
+        rf"Solver searched BUILD DLS interval \[({_RE_FLOAT}),\s*({_RE_FLOAT})\] deg/30m; "
+        rf"closest candidate was at ({_RE_FLOAT}) deg/30m",
+        text,
+    )
+    if match:
+        lower, upper, closest = match.group(1), match.group(2), match.group(3)
+        return DiagnosticItem(
+            reason_ru=(
+                "Решатель перебрал интервал BUILD ПИ "
+                f"[{_pi_text_from_dls_text(lower)}, {_pi_text_from_dls_text(upper)}] deg/10m; ближайший кандидат был "
+                f"на {_pi_text_from_dls_text(closest)} deg/10m."
+            ),
+            action_ru=(
+                "Это диагностическая строка поиска. Смотрите следующую причину: "
+                "обычно она показывает реальный ограничитель геометрии, координат или допусков."
+            ),
+        )
+
+    match = re.search(
+        rf"Solver endpoint miss to t1 after optimization is lateral ({_RE_FLOAT}) m / vertical ({_RE_FLOAT}) m "
+        rf"\(tolerances ({_RE_FLOAT}) / ({_RE_FLOAT}) m\)",
+        text,
+    )
+    if match:
+        lateral, vertical, lateral_tol, vertical_tol = (
+            match.group(1),
+            match.group(2),
+            match.group(3),
+            match.group(4),
+        )
+        lateral_f = float(lateral)
+        vertical_f = float(vertical)
+        if lateral_f > 100_000.0 or vertical_f > 10_000.0:
+            action = (
+                "Проверьте входные координаты и CRS: такой промах обычно означает "
+                "лишний/потерянный разряд, смешение систем координат или неверные единицы."
+            )
+        else:
+            action = (
+                "Увеличьте допустимое число рестартов решателя, ослабьте допуск по позиции "
+                "или скорректируйте геометрию целей."
+            )
+        return DiagnosticItem(
+            reason_ru=(
+                "После оптимизации решателя промах по t1 составил "
+                f"{lateral} м по латерали и {vertical} м по вертикали "
+                f"(допуски {lateral_tol} / {vertical_tol} м)."
+            ),
+            action_ru=action,
         )
 
     match = re.search(
@@ -36304,7 +37067,7 @@ class FastReplan {
 // window.updateLineGeometry = updateLineGeometry;
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	197166
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	209338
 <!doctype html>
 <html lang="en">
   <head>
@@ -36785,6 +37548,10 @@ class FastReplan {
       .scene-label {
         position: absolute;
         display: none;
+        box-sizing: border-box;
+        max-width: min(240px, calc(100vw - 24px));
+        overflow: hidden;
+        text-overflow: ellipsis;
         transform: translate(-50%, -100%);
         transform-origin: 50% 100%;
         font-size: 12px;
@@ -36796,6 +37563,7 @@ class FastReplan {
         text-shadow:
           0 1px 0 rgba(255, 255, 255, 0.95),
           0 0 8px rgba(255, 255, 255, 0.8);
+        contain: layout paint;
       }
 
       .scene-label.well-name-label,
@@ -36812,7 +37580,15 @@ class FastReplan {
       }
 
       .scene-label.well-name-label {
+        max-width: min(220px, calc(100vw - 24px));
         font-size: 12px;
+        line-height: 1.12;
+        overflow: visible;
+        overflow-wrap: anywhere;
+        text-overflow: clip;
+        transform: translate(8px, -50%);
+        transform-origin: 0 50%;
+        white-space: normal;
       }
 
       .scene-axis-label {
@@ -36839,6 +37615,10 @@ class FastReplan {
       .tooltip-title {
         color: #163a8a;
         font-weight: 700;
+        min-width: 0;
+        max-width: 184px;
+        overflow-wrap: anywhere;
+        white-space: normal;
       }
 
       .tooltip-kv {
@@ -37258,18 +38038,20 @@ class FastReplan {
       .minimap-well-label {
         position: absolute;
         display: none;
-        max-width: 120px;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        box-sizing: border-box;
+        max-width: min(160px, calc(100% - 16px));
+        overflow: visible;
+        overflow-wrap: anywhere;
         color: #0f172a;
         font-size: 10px;
-        line-height: 1;
+        line-height: 1.12;
         text-shadow:
           0 1px 0 rgba(255,255,255,0.98),
           0 0 7px rgba(255,255,255,0.95),
           0 1px 4px rgba(15,23,42,0.18);
         transform: translate(6px, -50%);
-        white-space: nowrap;
+        white-space: normal;
+        contain: layout paint;
       }
 
       #minimap-axes {
@@ -37368,6 +38150,7 @@ class FastReplan {
       #minimap-control.is-expanded {
         height: 28px;
         justify-content: center;
+        overflow: hidden;
       }
 
       #minimap-label {
@@ -37389,6 +38172,9 @@ class FastReplan {
         position: absolute;
         left: 50%;
         top: 6px;
+        max-width: calc(100% - 48px);
+        overflow: hidden;
+        text-overflow: ellipsis;
         transform: translateX(-50%);
         background: transparent;
         box-shadow: none;
@@ -37492,7 +38278,7 @@ class FastReplan {
     <div id="root">
       <div id="toolbar-left">
         <button id="fit-camera-btn" class="toolbar-btn" type="button" title="Подогнать сцену под кадр">Сброс вида</button>
-        <button id="edit-targets-btn" class="toolbar-btn" type="button" title="Изменить точки t1/t3" style="display:none">Редактировать точки</button>
+        <button id="edit-targets-btn" class="toolbar-btn" type="button" title="Изменить точки скважины" style="display:none">Редактировать точки</button>
         <div id="anti-collision-control-wrap">
           <button id="anti-collision-btn" class="toolbar-btn" type="button" title="Настроить слои anti-collision">Anti-collision</button>
           <div id="anti-collision-controls">
@@ -37530,7 +38316,7 @@ class FastReplan {
             <div class="edit-toolbox-label">Точки</div>
             <div id="edit-scope-selector">
               <button class="scope-btn is-active" data-scope="point" type="button">Одна</button>
-              <button class="scope-btn" data-scope="pair" type="button">t1 + t3</button>
+              <button class="scope-btn" data-scope="pair" type="button">Все</button>
             </div>
           </div>
           <div class="edit-toolbox-section">
@@ -37545,7 +38331,7 @@ class FastReplan {
             <div class="edit-toolbox-action-row">
               <button id="edit-undo-btn" class="edit-tool-btn" type="button" title="Отменить последнее изменение выбранной скважины">Назад</button>
               <button id="edit-redo-btn" class="edit-tool-btn" type="button" title="Повторить отменённое изменение выбранной скважины">Вперёд</button>
-              <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным t1/t3">Сброс</button>
+              <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
             </div>
           </div>
         </div>
@@ -38223,8 +39009,27 @@ class FastReplan {
               return;
             }
             item.element.style.display = "block";
-            item.element.style.left = `${Math.round(localX)}px`;
-            item.element.style.top = `${Math.round(localY)}px`;
+            const labelWidth = Math.min(
+              Number(item.element.offsetWidth || 0),
+              Math.max(rect.width - padding * 2, 1),
+            );
+            const labelHeight = Math.min(
+              Number(item.element.offsetHeight || 0),
+              Math.max(rect.height - padding * 2, 1),
+            );
+            const labelOffsetX = 6;
+            const clampedX = clampValue(
+              localX,
+              padding,
+              Math.max(rect.width - labelWidth - padding - labelOffsetX, padding),
+            );
+            const clampedY = clampValue(
+              localY,
+              padding + labelHeight * 0.5,
+              Math.max(rect.height - padding - labelHeight * 0.5, padding),
+            );
+            item.element.style.left = `${Math.round(clampedX)}px`;
+            item.element.style.top = `${Math.round(clampedY)}px`;
           });
         }
 
@@ -38504,6 +39309,31 @@ class FastReplan {
             return null;
           }
           const well = editWells[wellIndex] || {};
+          const editPoints = editCurrentPoints[wellIndex] || [];
+          if (editPoints.length > 2) {
+            const xs = editPoints.map((entry) => Number(entry.position[0]));
+            const ys = editPoints.map((entry) => Number(entry.position[1]));
+            const zs = editPoints.map((entry) => Number(entry.position[2]));
+            const finiteValues = [...xs, ...ys, ...zs].filter(Number.isFinite);
+            if (!finiteValues.length) {
+              return null;
+            }
+            const minX = Math.min(...xs.filter(Number.isFinite));
+            const maxX = Math.max(...xs.filter(Number.isFinite));
+            const minY = Math.min(...ys.filter(Number.isFinite));
+            const maxY = Math.max(...ys.filter(Number.isFinite));
+            const minZ = Math.min(...zs.filter(Number.isFinite));
+            const maxZ = Math.max(...zs.filter(Number.isFinite));
+            const radius = Math.max(
+              Math.max(maxX - minX, maxY - minY, maxZ - minZ) * 0.12,
+              maxSpan * 0.035,
+              40.0,
+            );
+            return {
+              min: [minX - radius, minY - radius, minZ - radius],
+              max: [maxX + radius, maxY + radius, maxZ + radius],
+            };
+          }
           const t1 = editCurrentT1[wellIndex] || well.t1;
           const t3 = editCurrentT3[wellIndex] || well.t3;
           if (!Array.isArray(t1) || !Array.isArray(t3)) {
@@ -38566,10 +39396,19 @@ class FastReplan {
           label.className = "legend-label";
           label.textContent = String(item.label || "");
           row.appendChild(label);
+          const editableIndex = editableIndexForLegendItem(item);
+          if (editableIndex !== null) {
+            row.classList.add("is-focusable", "is-editable");
+            row.dataset.editWellIndex = String(editableIndex);
+          }
           const targetBounds = focusTargets[String(item.id || "")];
-          if (targetBounds) {
+          if (targetBounds || editableIndex !== null) {
             row.classList.add("is-focusable");
             row.addEventListener("click", () => {
+              if (editableIndex !== null) {
+                selectEditWell(editableIndex, { focus: !editModeActive });
+                return;
+              }
               if (!editModeActive) {
                 fitCameraToRawBounds(targetBounds);
               }
@@ -39420,6 +40259,7 @@ class FastReplan {
         function addHoverPointCloud(points, item, hoverItems) {
           const positions = [];
           const itemHoverData = [];
+          const defaultHoverColor = hexOrDefault(item.color, "#64748b");
           points.forEach((point, index) => {
             const vector = displayPoint(point);
             if (
@@ -39428,7 +40268,13 @@ class FastReplan {
               Number.isFinite(vector.z)
             ) {
               positions.push(vector.x, vector.y, vector.z);
-              itemHoverData.push(hoverItems[index] || {});
+              const hoverItem = hoverItems[index] || {};
+              itemHoverData.push(
+                Object.assign(
+                  { color: defaultHoverColor },
+                  hoverItem && typeof hoverItem === "object" ? hoverItem : {},
+                ),
+              );
             }
           });
           if (!positions.length) {
@@ -39454,6 +40300,7 @@ class FastReplan {
           });
           material.colorWrite = false;
           const pointCloud = new THREE.Points(geometry, material);
+          pointCloud.userData.hover = { color: defaultHoverColor };
           pointCloud.userData.hoverItems = itemHoverData;
           hoverTargets.push(pointCloud);
           registerAntiCollisionVisualObject(pointCloud, item);
@@ -40190,12 +41037,14 @@ class FastReplan {
         let editPlane = "xy"; // "xy" | "z"
         let editMoveScope = "point"; // "point" | "pair"
         let editTransformMode = "move"; // "move" | "rotate"
-        const editHandles = []; // {mesh, pickMesh, previewMesh, wellIndex, pointType, dataPos[3], guide}
+        const editHandles = []; // {mesh, pickMesh, previewMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
         const editRotationControls = []; // ring controls per well for t1-anchored XY rotation
         const editRotationPickMeshes = [];
+        const editOriginalPoints = []; // all editable target points per well
+        const editCurrentPoints = []; // current editable target points per well
         const editOriginalT1 = []; // original t1 [x,y,z] per well
         const editOriginalT3 = []; // original t3 [x,y,z] per well
         const editCurrentT1 = []; // current (dragged) t1 per well
@@ -40268,8 +41117,89 @@ class FastReplan {
           ];
         }
 
+        function editPointDefinitionsForWell(well) {
+          const rawPoints = Array.isArray(well && well.edit_points)
+            ? well.edit_points
+            : [];
+          const points = rawPoints
+            .map((entry, fallbackIndex) => {
+              const position = copyEditPoint(entry && entry.position);
+              const pointIndex = Number(entry && entry.index);
+              return {
+                index: Number.isInteger(pointIndex) ? pointIndex : fallbackIndex,
+                label: String((entry && entry.label) || `P${fallbackIndex + 1}`),
+                pointType: String((entry && entry.point_type) || "point"),
+                position: position,
+              };
+            })
+            .filter((entry) =>
+              entry.position.every((value) => Number.isFinite(value)),
+            );
+          if (points.length > 0) {
+            return points;
+          }
+          return [
+            {
+              index: 1,
+              label: "t1",
+              pointType: "t1",
+              position: copyEditPoint(well && well.t1),
+            },
+            {
+              index: 2,
+              label: "t3",
+              pointType: "t3",
+              position: copyEditPoint(well && well.t3),
+            },
+          ];
+        }
+
+        function copyEditPointEntries(entries) {
+          return (Array.isArray(entries) ? entries : []).map((entry) => ({
+            index: Number(entry && entry.index) || 0,
+            label: String((entry && entry.label) || ""),
+            pointType: String((entry && entry.pointType) || "point"),
+            position: copyEditPoint(entry && entry.position),
+          }));
+        }
+
+        function editPointByRole(points, role, fallbackIndex) {
+          const roleText = String(role || "");
+          const candidates = (Array.isArray(points) ? points : []).filter(
+            (entry) => String(entry && entry.pointType) === roleText,
+          );
+          if (candidates.length > 0) {
+            return candidates[Math.min(Math.max(fallbackIndex || 0, 0), candidates.length - 1)]
+              .position;
+          }
+          return null;
+        }
+
+        function syncPrimaryEditTargetsFromPoints(wellIndex) {
+          const points = editCurrentPoints[wellIndex] || [];
+          const firstT1 = editPointByRole(points, "t1", 0);
+          const lastT3Candidates = points.filter(
+            (entry) => String(entry && entry.pointType) === "t3",
+          );
+          const lastT3 = lastT3Candidates.length
+            ? lastT3Candidates[lastT3Candidates.length - 1].position
+            : null;
+          if (firstT1) {
+            editCurrentT1[wellIndex] = copyEditPoint(firstT1);
+          }
+          if (lastT3) {
+            editCurrentT3[wellIndex] = copyEditPoint(lastT3);
+          }
+        }
+
+        function editWellHasExplicitPoints(wellIndex) {
+          const well = editWells[wellIndex] || {};
+          return Array.isArray(well.edit_points) && well.edit_points.length > 0;
+        }
+
         function cloneEditState(wellIndex) {
           return {
+            points: copyEditPointEntries(editCurrentPoints[wellIndex]),
             t1: copyEditPoint(editCurrentT1[wellIndex]),
             t3: copyEditPoint(editCurrentT3[wellIndex]),
           };
@@ -40277,6 +41207,7 @@ class FastReplan {
 
         function originalEditState(wellIndex) {
           return {
+            points: copyEditPointEntries(editOriginalPoints[wellIndex]),
             t1: copyEditPoint(editOriginalT1[wellIndex]),
             t3: copyEditPoint(editOriginalT3[wellIndex]),
           };
@@ -40294,6 +41225,16 @@ class FastReplan {
         }
 
         function editStatesEqual(left, right) {
+          const leftPoints = Array.isArray(left && left.points) ? left.points : [];
+          const rightPoints = Array.isArray(right && right.points) ? right.points : [];
+          if (leftPoints.length || rightPoints.length) {
+            if (leftPoints.length !== rightPoints.length) {
+              return false;
+            }
+            return leftPoints.every((entry, index) =>
+              pointsNearlyEqual(entry.position, rightPoints[index].position),
+            );
+          }
           return (
             Boolean(left) &&
             Boolean(right) &&
@@ -40356,7 +41297,13 @@ class FastReplan {
         }
 
         function editRotationModeEnabled() {
-          return editModeActive && editMoveScope === "pair" && editTransformMode === "rotate";
+          return (
+            editModeActive &&
+            editMoveScope === "pair" &&
+            editTransformMode === "rotate" &&
+            Number.isInteger(selectedEditWellIndex) &&
+            !editWellHasExplicitPoints(selectedEditWellIndex)
+          );
         }
 
         function editRotationCenterDisplay(wellIndex) {
@@ -40601,10 +41548,12 @@ class FastReplan {
             return;
           }
           const wellIndex = handle.wellIndex;
-          const original =
-            handle.pointType === "t1"
-              ? editOriginalT1[wellIndex]
-              : editOriginalT3[wellIndex];
+          const originalEntry = (editOriginalPoints[wellIndex] || [])[handle.pointIndex];
+          const original = originalEntry
+            ? originalEntry.position
+            : handle.pointType === "t1"
+            ? editOriginalT1[wellIndex]
+            : editOriginalT3[wellIndex];
           const current = handle.dataPos;
           const dx = current[0] - original[0];
           const dy = current[1] - original[1];
@@ -40705,8 +41654,13 @@ class FastReplan {
             return;
           }
           label.position.copy(displayPoint(t1T3Midpoint(wellIndex)));
-          label.element.textContent =
-            `Длина ГС ${formatLengthMeters(t1T3Length(wellIndex))}`;
+          if (editWellHasExplicitPoints(wellIndex)) {
+            const pointCount = (editCurrentPoints[wellIndex] || []).length;
+            label.element.textContent = `Точек: ${pointCount}`;
+          } else {
+            label.element.textContent =
+              `Длина ГС ${formatLengthMeters(t1T3Length(wellIndex))}`;
+          }
           label.visible =
             editModeActive &&
             Number.isInteger(selectedEditWellIndex) &&
@@ -40721,10 +41675,13 @@ class FastReplan {
           if (!handle) {
             return 0.0;
           }
-          const original =
-            handle.pointType === "t1"
-              ? editOriginalT1[handle.wellIndex]
-              : editOriginalT3[handle.wellIndex];
+          const originalEntry =
+            (editOriginalPoints[handle.wellIndex] || [])[handle.pointIndex];
+          const original = originalEntry
+            ? originalEntry.position
+            : handle.pointType === "t1"
+            ? editOriginalT1[handle.wellIndex]
+            : editOriginalT3[handle.wellIndex];
           const current = handle.dataPos;
           if (!original || !current) {
             return 0.0;
@@ -40747,14 +41704,22 @@ class FastReplan {
           }
         }
 
+        function editWellLabelAnchorPoint(wellIndex) {
+          const points = editCurrentPoints[wellIndex] || [];
+          if (points.length > 0) {
+            return points[points.length - 1].position;
+          }
+          return editCurrentT3[wellIndex];
+        }
+
         function syncEditWellNameLabelPosition(wellIndex) {
           const well = editWells[wellIndex] || {};
           const wellName = String(well.name || "");
-          const t3 = editCurrentT3[wellIndex];
-          if (!wellName || !t3) {
+          const anchor = editWellLabelAnchorPoint(wellIndex);
+          if (!wellName || !anchor) {
             return;
           }
-          const displayPosition = displayPoint(t3);
+          const displayPosition = displayPoint(anchor);
           sceneLabels.forEach((item) => {
             if (item.role === "well_label" && item.text === wellName) {
               item.position.copy(displayPosition);
@@ -40767,19 +41732,50 @@ class FastReplan {
           });
         }
 
-        function updateWellEditTargets(wellIndex, t1, t3) {
-          editCurrentT1[wellIndex] = copyEditPoint(t1);
-          editCurrentT3[wellIndex] = copyEditPoint(t3);
+        function updateWellEditPoints(wellIndex, nextPoints) {
+          editCurrentPoints[wellIndex] = copyEditPointEntries(nextPoints);
+          syncPrimaryEditTargetsFromPoints(wellIndex);
           editHandles.forEach((handle) => {
             if (handle.wellIndex !== wellIndex) {
               return;
             }
-            updateHandlePosition(
-              handle,
-              handle.pointType === "t1"
-                ? editCurrentT1[wellIndex]
-                : editCurrentT3[wellIndex],
-            );
+            const pointEntry = editCurrentPoints[wellIndex][handle.pointIndex];
+            if (!pointEntry) {
+              return;
+            }
+            updateHandlePosition(handle, pointEntry.position);
+          });
+          syncEditWellNameLabelPosition(wellIndex);
+        }
+
+        function updateWellEditTargets(wellIndex, t1, t3) {
+          editCurrentT1[wellIndex] = copyEditPoint(t1);
+          editCurrentT3[wellIndex] = copyEditPoint(t3);
+          const currentPoints = editCurrentPoints[wellIndex] || [];
+          const nextPoints = copyEditPointEntries(currentPoints);
+          let firstT1Updated = false;
+          let lastT3Index = -1;
+          nextPoints.forEach((entry, index) => {
+            if (entry.pointType === "t1" && !firstT1Updated) {
+              entry.position = copyEditPoint(t1);
+              firstT1Updated = true;
+            }
+            if (entry.pointType === "t3") {
+              lastT3Index = index;
+            }
+          });
+          if (lastT3Index >= 0) {
+            nextPoints[lastT3Index].position = copyEditPoint(t3);
+          }
+          editCurrentPoints[wellIndex] = nextPoints;
+          editHandles.forEach((handle) => {
+            if (handle.wellIndex !== wellIndex) {
+              return;
+            }
+            const pointEntry = editCurrentPoints[wellIndex][handle.pointIndex];
+            if (pointEntry) {
+              updateHandlePosition(handle, pointEntry.position);
+            }
           });
           syncEditWellNameLabelPosition(wellIndex);
         }
@@ -40788,7 +41784,11 @@ class FastReplan {
           if (!Number.isInteger(wellIndex) || !state) {
             return;
           }
-          updateWellEditTargets(wellIndex, state.t1, state.t3);
+          if (Array.isArray(state.points) && state.points.length > 0) {
+            updateWellEditPoints(wellIndex, state.points);
+          } else {
+            updateWellEditTargets(wellIndex, state.t1, state.t3);
+          }
           editDirtyFlags[wellIndex] = isEditWellDirty(wellIndex);
           rebuildPreviewTrajectory(wellIndex);
           resetEditSaveButtonState();
@@ -40807,6 +41807,7 @@ class FastReplan {
           }
           const undoStack = editUndoStacks[wellIndex];
           undoStack.push({
+            points: copyEditPointEntries(previousState.points),
             t1: copyEditPoint(previousState.t1),
             t3: copyEditPoint(previousState.t3),
           });
@@ -40825,6 +41826,8 @@ class FastReplan {
             ? selectedEditWellIndex
             : null;
           const hasSelection = selectedIndex !== null;
+          const selectedHasExplicitPoints =
+            hasSelection && editWellHasExplicitPoints(selectedIndex);
           editUndoBtn.disabled =
             !editModeActive ||
             !hasSelection ||
@@ -40849,7 +41852,8 @@ class FastReplan {
             btn.disabled =
               !editModeActive ||
               !hasSelection ||
-              (btn.dataset.operation === "rotate" && editMoveScope !== "pair");
+              (btn.dataset.operation === "rotate" &&
+                (editMoveScope !== "pair" || selectedHasExplicitPoints));
           });
         }
 
@@ -40909,11 +41913,23 @@ class FastReplan {
           pickMaterial.colorWrite = false;
           editWells.forEach((well, idx) => {
             const surface = well.surface || [0, 0, 0];
-            const t1 = well.t1 || [0, 0, 0];
-            const t3 = well.t3 || [0, 0, 0];
             const color = well.color || "#2563eb";
             const config = well.config || {};
+            const pointDefinitions = editPointDefinitionsForWell(well);
+            const originalPointEntries = copyEditPointEntries(pointDefinitions);
+            const currentPointEntries = copyEditPointEntries(pointDefinitions);
+            const firstT1 = editPointByRole(currentPointEntries, "t1", 0) || well.t1 || [0, 0, 0];
+            const t3Candidates = currentPointEntries.filter(
+              (entry) => String(entry && entry.pointType) === "t3",
+            );
+            const lastT3 = t3Candidates.length
+              ? t3Candidates[t3Candidates.length - 1].position
+              : well.t3 || [0, 0, 0];
+            const t1 = copyEditPoint(firstT1);
+            const t3 = copyEditPoint(lastT3);
 
+            editOriginalPoints.push(originalPointEntries);
+            editCurrentPoints.push(currentPointEntries);
             editOriginalT1.push(t1.slice());
             editOriginalT3.push(t3.slice());
             editCurrentT1.push(t1.slice());
@@ -40939,82 +41955,47 @@ class FastReplan {
               },
             }));
 
-            // t1 handle
-            const t1Mat = new THREE.MeshBasicMaterial({
-              color: color,
-              transparent: true,
-              opacity: 0.85,
-              depthTest: true,
-            });
-            const t1Mesh = new THREE.Mesh(handleGeometry, t1Mat);
-            t1Mesh.position.copy(displayPoint(t1));
-            t1Mesh.visible = false;
-            t1Mesh.renderOrder = 10;
-            scene.add(t1Mesh);
-            const t1PreviewMat = new THREE.MeshBasicMaterial({
-              color: color,
-              transparent: true,
-              opacity: 0.42,
-              depthTest: false,
-              depthWrite: false,
-            });
-            const t1PreviewMesh = new THREE.Mesh(handleGeometry, t1PreviewMat);
-            t1PreviewMesh.position.copy(t1Mesh.position);
-            t1PreviewMesh.visible = false;
-            t1PreviewMesh.renderOrder = 8;
-            scene.add(t1PreviewMesh);
-            const t1PickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
-            t1PickMesh.position.copy(t1Mesh.position);
-            t1PickMesh.visible = false;
-            t1PickMesh.renderOrder = 11;
-            scene.add(t1PickMesh);
-            editHandles.push({
-              mesh: t1Mesh,
-              pickMesh: t1PickMesh,
-              previewMesh: t1PreviewMesh,
-              wellIndex: idx,
-              pointType: "t1",
-              dataPos: t1.slice(),
-              guide: createEditDeltaGuide("t1", color),
-            });
-
-            // t3 handle
-            const t3Mat = new THREE.MeshBasicMaterial({
-              color: color,
-              transparent: true,
-              opacity: 0.85,
-              depthTest: true,
-            });
-            const t3Mesh = new THREE.Mesh(handleGeometry, t3Mat);
-            t3Mesh.position.copy(displayPoint(t3));
-            t3Mesh.visible = false;
-            t3Mesh.renderOrder = 10;
-            scene.add(t3Mesh);
-            const t3PreviewMat = new THREE.MeshBasicMaterial({
-              color: color,
-              transparent: true,
-              opacity: 0.42,
-              depthTest: false,
-              depthWrite: false,
-            });
-            const t3PreviewMesh = new THREE.Mesh(handleGeometry, t3PreviewMat);
-            t3PreviewMesh.position.copy(t3Mesh.position);
-            t3PreviewMesh.visible = false;
-            t3PreviewMesh.renderOrder = 8;
-            scene.add(t3PreviewMesh);
-            const t3PickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
-            t3PickMesh.position.copy(t3Mesh.position);
-            t3PickMesh.visible = false;
-            t3PickMesh.renderOrder = 11;
-            scene.add(t3PickMesh);
-            editHandles.push({
-              mesh: t3Mesh,
-              pickMesh: t3PickMesh,
-              previewMesh: t3PreviewMesh,
-              wellIndex: idx,
-              pointType: "t3",
-              dataPos: t3.slice(),
-              guide: createEditDeltaGuide("t3", color),
+            currentPointEntries.forEach((pointEntry, pointIndex) => {
+              const pointType = String(pointEntry.label || pointEntry.pointType || `P${pointIndex + 1}`);
+              const point = copyEditPoint(pointEntry.position);
+              const pointMat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.85,
+                depthTest: true,
+              });
+              const pointMesh = new THREE.Mesh(handleGeometry, pointMat);
+              pointMesh.position.copy(displayPoint(point));
+              pointMesh.visible = false;
+              pointMesh.renderOrder = 10;
+              scene.add(pointMesh);
+              const previewMat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.42,
+                depthTest: false,
+                depthWrite: false,
+              });
+              const previewMesh = new THREE.Mesh(handleGeometry, previewMat);
+              previewMesh.position.copy(pointMesh.position);
+              previewMesh.visible = false;
+              previewMesh.renderOrder = 8;
+              scene.add(previewMesh);
+              const pickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
+              pickMesh.position.copy(pointMesh.position);
+              pickMesh.visible = false;
+              pickMesh.renderOrder = 11;
+              scene.add(pickMesh);
+              editHandles.push({
+                mesh: pointMesh,
+                pickMesh: pickMesh,
+                previewMesh: previewMesh,
+                wellIndex: idx,
+                pointType: pointType,
+                pointIndex: pointIndex,
+                dataPos: point.slice(),
+                guide: createEditDeltaGuide(pointType, color),
+              });
             });
 
             // Preview line (initially empty, hidden)
@@ -41153,6 +42134,9 @@ class FastReplan {
             return;
           }
           selectedEditWellIndex = nextIndex;
+          if (editWellHasExplicitPoints(nextIndex) && editTransformMode === "rotate") {
+            setEditTransformMode("move");
+          }
           syncEditVisibility();
           syncEditToolboxState();
           if (options && options.focus) {
@@ -41225,7 +42209,12 @@ class FastReplan {
           if (operation !== "move" && operation !== "rotate") {
             return;
           }
-          if (operation === "rotate" && editMoveScope !== "pair") {
+          if (
+            operation === "rotate" &&
+            (editMoveScope !== "pair" ||
+              (Number.isInteger(selectedEditWellIndex) &&
+                editWellHasExplicitPoints(selectedEditWellIndex)))
+          ) {
             return;
           }
           editTransformMode = operation;
@@ -41244,6 +42233,14 @@ class FastReplan {
         }
 
         function rebuildPreviewTrajectory(wellIndex) {
+          if (editWellHasExplicitPoints(wellIndex)) {
+            const points = (editCurrentPoints[wellIndex] || [])
+              .map((entry) => copyEditPoint(entry.position))
+              .filter((point) => point.every((value) => Number.isFinite(value)));
+            updateLineGeometry(editLineObjects[wellIndex], points, Z_DISPLAY_SIGN);
+            syncEditVisibility();
+            return;
+          }
           const replanner = editReplanners[wellIndex];
           const t1 = editCurrentT1[wellIndex];
           const t3 = editCurrentT3[wellIndex];
@@ -41705,33 +42702,66 @@ class FastReplan {
           const dataY = newPos.y;
           const dataZ = newPos.z * Z_DISPLAY_SIGN;
           const wi = editDragHandle.wellIndex;
+          const currentEntries = copyEditPointEntries(editCurrentPoints[wi]);
           if (editDragMoveScope === "pair" && editDragHistoryStartState) {
-            const startPoint = editDragHistoryStartState[editDragHandle.pointType];
+            const historyPoints = copyEditPointEntries(editDragHistoryStartState.points);
+            const startEntry = historyPoints[editDragHandle.pointIndex];
+            const startPoint =
+              startEntry && startEntry.position
+                ? startEntry.position
+                : editDragHistoryStartState[editDragHandle.pointType];
+            if (!startPoint) {
+              return;
+            }
             const dx = dataX - startPoint[0];
             const dy = dataY - startPoint[1];
             const dz = dataZ - startPoint[2];
-            const nextT1 = copyEditPoint(editDragHistoryStartState.t1);
-            const nextT3 = copyEditPoint(editDragHistoryStartState.t3);
-            nextT1[0] += dx;
-            nextT1[1] += dy;
-            nextT1[2] += dz;
-            nextT3[0] += dx;
-            nextT3[1] += dy;
-            nextT3[2] += dz;
-            updateWellEditTargets(wi, nextT1, nextT3);
-          } else {
-            const nextT1 = copyEditPoint(editCurrentT1[wi]);
-            const nextT3 = copyEditPoint(editCurrentT3[wi]);
-            if (editDragHandle.pointType === "t1") {
-              nextT1[0] = dataX;
-              nextT1[1] = dataY;
-              nextT1[2] = dataZ;
+            if (editWellHasExplicitPoints(wi)) {
+              const nextPoints = historyPoints.map((entry) => ({
+                index: entry.index,
+                label: entry.label,
+                pointType: entry.pointType,
+                position: [
+                  entry.position[0] + dx,
+                  entry.position[1] + dy,
+                  entry.position[2] + dz,
+                ],
+              }));
+              updateWellEditPoints(wi, nextPoints);
             } else {
-              nextT3[0] = dataX;
-              nextT3[1] = dataY;
-              nextT3[2] = dataZ;
+              const nextT1 = copyEditPoint(editDragHistoryStartState.t1);
+              const nextT3 = copyEditPoint(editDragHistoryStartState.t3);
+              nextT1[0] += dx;
+              nextT1[1] += dy;
+              nextT1[2] += dz;
+              nextT3[0] += dx;
+              nextT3[1] += dy;
+              nextT3[2] += dz;
+              updateWellEditTargets(wi, nextT1, nextT3);
             }
-            updateWellEditTargets(wi, nextT1, nextT3);
+          } else {
+            if (editWellHasExplicitPoints(wi)) {
+              const nextPoints = currentEntries;
+              const nextEntry = nextPoints[editDragHandle.pointIndex];
+              if (!nextEntry) {
+                return;
+              }
+              nextEntry.position = [dataX, dataY, dataZ];
+              updateWellEditPoints(wi, nextPoints);
+            } else {
+              const nextT1 = copyEditPoint(editCurrentT1[wi]);
+              const nextT3 = copyEditPoint(editCurrentT3[wi]);
+              if (editDragHandle.pointType === "t1") {
+                nextT1[0] = dataX;
+                nextT1[1] = dataY;
+                nextT1[2] = dataZ;
+              } else {
+                nextT3[0] = dataX;
+                nextT3[1] = dataY;
+                nextT3[2] = dataZ;
+              }
+              updateWellEditTargets(wi, nextT1, nextT3);
+            }
           }
           editDirtyFlags[wi] = isEditWellDirty(wi);
           rebuildPreviewTrajectory(wi);
@@ -41789,11 +42819,22 @@ class FastReplan {
           const changes = [];
           editWells.forEach((well, idx) => {
             if (!editDirtyFlags[idx]) return;
-            changes.push({
-              name: well.name,
-              t1: editCurrentT1[idx].map((v) => Math.round(v * 100) / 100),
-              t3: editCurrentT3[idx].map((v) => Math.round(v * 100) / 100),
-            });
+            if (editWellHasExplicitPoints(idx)) {
+              changes.push({
+                name: well.name,
+                points: (editCurrentPoints[idx] || []).map((entry) => ({
+                  index: Number(entry.index),
+                  label: String(entry.label || ""),
+                  position: entry.position.map((v) => Math.round(v * 100) / 100),
+                })),
+              });
+            } else {
+              changes.push({
+                name: well.name,
+                t1: editCurrentT1[idx].map((v) => Math.round(v * 100) / 100),
+                t3: editCurrentT3[idx].map((v) => Math.round(v * 100) / 100),
+              });
+            }
           });
           if (changes.length === 0) return;
           // Visual feedback
@@ -59795,7 +60836,7 @@ def test_batch_survey_csv_applies_selected_crs(
     assert result["Y_WGS_deg"].iloc[0] == pytest.approx(220.0)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_edit_targets.py	6231
+===BEGIN_FILE===	tests/test_ptc_edit_targets.py	10203
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -59865,6 +60906,69 @@ def test_records_with_edit_targets_updates_only_three_point_records() -> None:
     assert updated_records[1] is incomplete
 
 
+def test_records_with_edit_targets_updates_multi_horizontal_points_by_index() -> None:
+    record = _record(
+        "MULTI",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=3.0),
+            WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=4.0),
+            WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=5.0),
+        ),
+    )
+
+    updated_records, updated_names = ptc_edit_targets.records_with_edit_targets(
+        [record],
+        {
+            "MULTI": {
+                "points": [
+                    {"index": 0, "position": [10.0, 11.0, -5.0]},
+                    {"index": 3, "position": [330.0, 13.0, 2025.0]},
+                ],
+            },
+        },
+    )
+
+    assert updated_names == ["MULTI"]
+    updated = updated_records[0]
+    assert updated.points[0].x == pytest.approx(10.0)
+    assert updated.points[0].md == pytest.approx(1.0)
+    assert updated.points[3].x == pytest.approx(330.0)
+    assert updated.points[3].z == pytest.approx(2025.0)
+    assert updated.points[4] == record.points[4]
+
+
+def test_records_with_edit_targets_updates_pilot_points_by_index() -> None:
+    record = _record(
+        "WELL-A_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=2.0),
+            WelltrackPoint(x=300.0, y=500.0, z=2400.0, md=3.0),
+        ),
+    )
+
+    updated_records, updated_names = ptc_edit_targets.records_with_edit_targets(
+        [record],
+        {
+            "WELL-A_PL": {
+                "points": [
+                    {"index": 0, "position": [10.0, 20.0, -5.0]},
+                    {"index": 2, "position": [330.0, 530.0, 2410.0]},
+                ],
+            },
+        },
+    )
+
+    assert updated_names == ["WELL-A_PL"]
+    updated = updated_records[0]
+    assert updated.points[0].x == pytest.approx(10.0)
+    assert updated.points[0].md == pytest.approx(1.0)
+    assert updated.points[2].y == pytest.approx(530.0)
+    assert updated.points[2].md == pytest.approx(3.0)
+
+
 def test_pending_edit_target_names_prefers_pending_and_dedupes() -> None:
     session_state: dict[str, object] = {
         "wt_edit_targets_pending_names": [" WELL-A ", "WELL-A", "", "WELL-B"],
@@ -59926,6 +61030,7 @@ def test_apply_edit_targets_changes_invalidates_only_changed_wells() -> None:
     ]
     assert session_state["wt_edit_targets_pending_names"] == ["WELL-C", "WELL-A"]
     assert session_state["wt_edit_targets_highlight_names"] == ["WELL-C", "WELL-A"]
+    assert session_state["wt_edit_targets_highlight_points"] == {"WELL-A": [1, 2]}
     assert session_state["wt_pending_selected_names"] == ["WELL-C", "WELL-A"]
     assert session_state["wt_pending_all_wells_results_focus"] is True
     assert session_state["wt_last_anticollision_resolution"] is None
@@ -59936,6 +61041,52 @@ def test_apply_edit_targets_changes_invalidates_only_changed_wells() -> None:
     assert changed_record.points[1].x == pytest.approx(610.25)
     assert changed_record.points[2].z == pytest.approx(2502.0)
     assert changed_original.points[1].x == pytest.approx(610.25)
+
+
+def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> None:
+    record = _record(
+        "MULTI",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=3.0),
+            WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=4.0),
+            WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=5.0),
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [record],
+        "wt_records_original": [record],
+        "wt_successes": [SimpleNamespace(name="MULTI")],
+        "wt_summary_rows": [{"Скважина": "MULTI", "Статус": "OK", "Проблема": ""}],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "MULTI",
+                "points": [
+                    {"index": 0, "position": [1.0, 2.0, -10.0]},
+                    {"index": 4, "position": [410.0, 20.0, 2022.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["MULTI"]
+    assert session_state["wt_edit_targets_highlight_points"] == {"MULTI": [0, 4]}
+    assert session_state["wt_successes"] == []
+    assert session_state["wt_summary_rows"] == [
+        {"Скважина": "MULTI", "Статус": "Не рассчитана", "Проблема": ""}
+    ]
+    updated_record = session_state["wt_records"][0]
+    updated_original = session_state["wt_records_original"][0]
+    assert updated_record.points[0].z == pytest.approx(-10.0)
+    assert updated_record.points[4].x == pytest.approx(410.0)
+    assert updated_original.points[4].y == pytest.approx(20.0)
 
 
 def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:
@@ -60254,11 +61405,12 @@ def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:
     )
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_reference_state.py	2958
+===BEGIN_FILE===	tests/test_ptc_reference_state.py	3884
 from __future__ import annotations
 
 import streamlit as st
 
+from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state as reference_state
 from pywp.reference_trajectories import parse_reference_trajectory_table
 
@@ -60342,6 +61494,34 @@ def test_reference_kind_wells_migrates_legacy_state_on_direct_access() -> None:
     st.session_state["wt_reference_wells"] = (actual, approved)
 
     assert reference_state.reference_kind_wells("approved") == (approved,)
+
+
+def test_clear_actual_reference_import_resets_mwd_unknown_widget_state() -> None:
+    st.session_state.clear()
+    actual, _approved = _reference_wells()
+    reference_state.set_reference_wells_for_kind(kind="actual", wells=[actual])
+    st.session_state[
+        ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY
+    ] = ["FACT-1"]
+    st.session_state[
+        ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY
+    ] = ["FACT-1"]
+
+    reference_state.clear_reference_import_state(kind="actual")
+
+    assert (
+        st.session_state[
+            ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY
+        ]
+        == []
+    )
+    assert (
+        st.session_state[
+            ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY
+        ]
+        == []
+    )
+    assert reference_state.reference_kind_wells("actual") == ()
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_ptc_target_import.py	11396
@@ -60861,7 +62041,7 @@ def test_welltracks4_multi_horizontal_fixture_imports_well_08_as_ready() -> None
     assert str(row["Статус"]) == "✅"
     assert str(row["Проблема"]) == "—"
     assert str(row["Примечание"]) == "Многопластовая: 3 уровней"
-    assert float(row["Длина ГС, м"]) == pytest.approx(1798.9975, abs=1e-3)
+    assert float(row["Длина ГС, м"]) == pytest.approx(1049.9094, abs=1e-3)
 
 
 def test_multi_horizontal_records_require_complete_t1_t3_pairs() -> None:
@@ -60964,7 +62144,7 @@ def test_records_overview_hides_pilot_row_but_reports_pilot_problem_on_parent() 
     assert "Пилот:" in str(overview_df.iloc[0]["Проблема"])
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_three_overrides.py	22453
+===BEGIN_FILE===	tests/test_ptc_three_overrides.py	26658
 from __future__ import annotations
 
 from pathlib import Path
@@ -61356,7 +62536,7 @@ def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
     )
 
 
-def test_build_edit_wells_payload_skips_multi_horizontal_wells() -> None:
+def test_build_edit_wells_payload_includes_multi_horizontal_edit_points() -> None:
     regular = _successful_plan_xy(
         name="WELL-A",
         x_offset_m=0.0,
@@ -61380,7 +62560,145 @@ def test_build_edit_wells_payload_skips_multi_horizontal_wells() -> None:
         {"WELL-A": "#123456", "MULTI": "#abcdef"},
     )
 
-    assert [item["name"] for item in edit_wells] == ["WELL-A"]
+    assert [item["name"] for item in edit_wells] == ["WELL-A", "MULTI"]
+    multi_payload = edit_wells[1]
+    assert multi_payload["color"] == "#abcdef"
+    assert multi_payload["edit_points"] == [
+        {
+            "index": 0,
+            "label": "S",
+            "point_type": "surface",
+            "position": [5000.0, 0.0, 0.0],
+        },
+        {
+            "index": 1,
+            "label": "1_t1",
+            "point_type": "t1",
+            "position": [6000.0, 0.0, 0.0],
+        },
+        {
+            "index": 2,
+            "label": "1_t3",
+            "point_type": "t3",
+            "position": [6500.0, 0.0, 0.0],
+        },
+        {
+            "index": 3,
+            "label": "2_t1",
+            "point_type": "t1",
+            "position": [6700.0, 0.0, 30.0],
+        },
+        {
+            "index": 4,
+            "label": "2_t3",
+            "point_type": "t3",
+            "position": [7200.0, 0.0, 30.0],
+        },
+    ]
+
+
+def test_build_target_only_edit_wells_payload_preserves_failed_record_points() -> None:
+    surface = Point3D(0.0, 0.0, 0.0)
+    pilot_point = Point3D(100.0, 5.0, 900.0)
+    multi_pairs = (
+        (Point3D(1000.0, 0.0, 2100.0), Point3D(1500.0, 0.0, 2100.0)),
+        (Point3D(1700.0, 0.0, 2140.0), Point3D(2200.0, 0.0, 2140.0)),
+    )
+    target_only_wells = [
+        SimpleNamespace(
+            name="ORDINARY",
+            surface=surface,
+            t1=Point3D(500.0, 0.0, 2000.0),
+            t3=Point3D(1200.0, 0.0, 2000.0),
+            target_pairs=(),
+            target_points=(
+                surface,
+                Point3D(500.0, 0.0, 2000.0),
+                Point3D(1200.0, 0.0, 2000.0),
+            ),
+            target_labels=("S", "t1", "t3"),
+        ),
+        SimpleNamespace(
+            name="ORDINARY_PL",
+            surface=surface,
+            t1=pilot_point,
+            t3=pilot_point,
+            target_pairs=(),
+            target_points=(surface, pilot_point),
+            target_labels=("S", "PL1"),
+        ),
+        SimpleNamespace(
+            name="MULTI",
+            surface=surface,
+            t1=multi_pairs[0][0],
+            t3=multi_pairs[-1][1],
+            target_pairs=multi_pairs,
+            target_points=(surface, *(point for pair in multi_pairs for point in pair)),
+            target_labels=("S", "1_t1", "1_t3", "2_t1", "2_t3"),
+        ),
+    ]
+
+    edit_wells = ptc_three_overrides.build_target_only_edit_wells_payload(
+        target_only_wells,
+        {"ORDINARY": "#111111", "ORDINARY_PL": "#222222", "MULTI": "#333333"},
+    )
+
+    assert [item["name"] for item in edit_wells] == [
+        "ORDINARY",
+        "ORDINARY_PL",
+        "MULTI",
+    ]
+    assert [point["label"] for point in edit_wells[0]["edit_points"]] == [
+        "S",
+        "t1",
+        "t3",
+    ]
+    assert [point["label"] for point in edit_wells[1]["edit_points"]] == ["S", "PL1"]
+    assert edit_wells[1]["edit_points"][1]["point_type"] == "pilot"
+    assert edit_wells[1]["t1"] == [100.0, 5.0, 900.0]
+    assert edit_wells[1]["t3"] == [100.0, 5.0, 900.0]
+    assert [point["label"] for point in edit_wells[2]["edit_points"]] == [
+        "S",
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+    ]
+
+
+def test_trajectory_overrides_make_failed_target_only_wells_editable() -> None:
+    records = _records()
+    target_only = SimpleNamespace(
+        name="WELL-C",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(700.0, 760.0, 2200.0),
+        t3=Point3D(1600.0, 1960.0, 2350.0),
+        target_pairs=(),
+        target_points=(
+            Point3D(0.0, 0.0, 0.0),
+            Point3D(700.0, 760.0, 2200.0),
+            Point3D(1600.0, 1960.0, 2350.0),
+        ),
+        target_labels=("S", "t1", "t3"),
+    )
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        {},
+        records=records,
+        successes=[],
+        target_only_wells=[target_only],
+        name_to_color={"WELL-C": "#abcdef"},
+    )
+
+    edit_wells = list(overrides["edit_wells"])
+    assert len(edit_wells) == 1
+    assert edit_wells[0]["name"] == "WELL-C"
+    assert edit_wells[0]["color"] == "#abcdef"
+    assert [point["label"] for point in edit_wells[0]["edit_points"]] == [
+        "S",
+        "t1",
+        "t3",
+    ]
 
 
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
@@ -61642,7 +62960,7 @@ def test_augment_three_payload_appends_overlap_volume_and_legend_once() -> None:
     assert [str(item["label"]) for item in updated["legend"]] == ["Зоны пересечений"]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_three_payload.py	10948
+===BEGIN_FILE===	tests/test_ptc_three_payload.py	14261
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -61651,7 +62969,11 @@ import pandas as pd
 
 from pywp import ptc_three_payload
 from pywp.models import Point3D, TrajectoryConfig
-from pywp.ptc_three_builders import all_wells_three_payload, single_well_three_payload
+from pywp.ptc_three_builders import (
+    all_wells_three_payload,
+    anticollision_three_payload,
+    single_well_three_payload,
+)
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -61894,6 +63216,118 @@ def test_single_well_three_payload_renders_pilot_family_labels() -> None:
     assert "well_04_PL: 1" in label_texts
     assert "well_04_PL: 2" in label_texts
     assert len(pilot_marker["points"]) == 2
+
+
+def test_all_wells_three_payload_renders_pilot_point_labels() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 600.0, 1200.0],
+            "X_m": [0.0, 200.0, 500.0],
+            "Y_m": [0.0, 50.0, 100.0],
+            "Z_m": [0.0, 650.0, 1100.0],
+        }
+    )
+    pilot_success = SuccessfulWellPlan(
+        name="well_04_PL",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(200.0, 50.0, 650.0),
+        t3=Point3D(500.0, 100.0, 1100.0),
+        stations=stations,
+        summary={"trajectory_type": "PILOT"},
+        azimuth_deg=0.0,
+        md_t1_m=600.0,
+        config=TrajectoryConfig(),
+    )
+
+    payload = all_wells_three_payload(
+        [pilot_success],
+        pilot_study_points_by_name={
+            "well_04_PL": (
+                Point3D(200.0, 50.0, 650.0),
+                Point3D(350.0, 75.0, 900.0),
+                Point3D(500.0, 100.0, 1100.0),
+            )
+        },
+    )
+
+    label_texts = [str(item.get("text")) for item in payload["labels"]]
+    pilot_marker = next(
+        item
+        for item in payload["points"]
+        if str(item.get("name")) == "well_04_PL: цели"
+    )
+
+    assert "well_04_PL: 1" in label_texts
+    assert "well_04_PL: 2" in label_texts
+    assert "well_04_PL: 3" in label_texts
+    assert [hover["point"] for hover in pilot_marker["hover"]] == [
+        "well_04_PL: 1",
+        "well_04_PL: 2",
+        "well_04_PL: 3",
+    ]
+    assert pilot_marker["points"] == [
+        [200.0, 50.0, 650.0],
+        [350.0, 75.0, 900.0],
+        [500.0, 100.0, 1100.0],
+    ]
+
+
+def test_anticollision_three_payload_renders_pilot_point_labels() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 600.0, 1200.0],
+            "X_m": [0.0, 200.0, 500.0],
+            "Y_m": [0.0, 50.0, 100.0],
+            "Z_m": [0.0, 650.0, 1100.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0],
+        }
+    )
+    analysis = SimpleNamespace(
+        wells=(
+            SimpleNamespace(
+                name="well_04_PL",
+                color="#22C55E",
+                overlay=SimpleNamespace(samples=()),
+                stations=stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(200.0, 50.0, 650.0),
+                t3=Point3D(500.0, 100.0, 1100.0),
+                md_t1_m=600.0,
+                is_reference_only=False,
+                target_pairs=(),
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+    )
+
+    payload = anticollision_three_payload(
+        analysis,
+        pilot_study_points_by_name={
+            "well_04_PL": (
+                Point3D(200.0, 50.0, 650.0),
+                Point3D(350.0, 75.0, 900.0),
+                Point3D(500.0, 100.0, 1100.0),
+            )
+        },
+    )
+
+    label_texts = [str(item.get("text")) for item in payload["labels"]]
+    pilot_marker = next(
+        item
+        for item in payload["points"]
+        if str(item.get("name")) == "well_04_PL: цели"
+    )
+
+    assert "well_04_PL: 1" in label_texts
+    assert "well_04_PL: 2" in label_texts
+    assert "well_04_PL: 3" in label_texts
+    assert [hover["point"] for hover in pilot_marker["hover"]] == [
+        "well_04_PL: 1",
+        "well_04_PL: 2",
+        "well_04_PL: 3",
+    ]
 
 
 def test_all_wells_three_payload_keeps_original_target_markers() -> None:
@@ -62831,7 +64265,7 @@ def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
     assert any("ValueError" in value for value in warning_values)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_solver_diagnostics.py	7225
+===BEGIN_FILE===	tests/test_solver_diagnostics.py	8793
 from __future__ import annotations
 
 from pywp.solver_diagnostics import (
@@ -62884,6 +64318,16 @@ def test_ui_error_text_converts_dls_units_to_pi_units() -> None:
     assert "1.00 deg/10m" in converted
 
 
+def test_summarize_problem_ru_converts_embedded_dls_units_to_pi_units() -> None:
+    summary = summarize_problem_ru(
+        "Многопластовая скважина: плавный HORIZONTAL_BUILD1 требует ПИ "
+        "4.53 deg/30m, что выше лимита 3.00."
+    )
+
+    assert "1.51 deg/10m" in summary
+    assert "deg/30m" not in summary
+
+
 def test_parse_solver_error_handles_postcheck_md_limit_message() -> None:
     text = (
         "Total MD exceeds configured post-check limit. "
@@ -62910,6 +64354,39 @@ def test_parse_solver_error_recommends_turn_restarts_for_turn_miss() -> None:
     assert "7.87 м" in rows[0]["Причина"]
     assert "dX=1.00 м" in rows[0]["Причина"]
     assert "рестартов решателя" in rows[0]["Что изменить"]
+
+
+def test_parse_solver_error_flags_huge_lateral_vertical_miss_as_coordinate_issue() -> None:
+    text = (
+        "No valid trajectory solution found within configured limits.\n"
+        "Reasons and actions:\n"
+        "- Solver endpoint miss to t1 after optimization is lateral 4853037.02 m / "
+        "vertical 274060.81 m (tolerances 30.00 / 2.00 m).\n"
+    )
+
+    rows = diagnostics_rows_ru(text)
+
+    assert rows
+    assert "4853037.02 м по латерали" in rows[0]["Причина"]
+    assert "274060.81 м по вертикали" in rows[0]["Причина"]
+    assert "Проверьте входные координаты" in rows[0]["Что изменить"]
+    assert "лишний/потерянный разряд" in rows[0]["Что изменить"]
+
+
+def test_parse_solver_error_formats_solver_search_interval_in_deg_per_10m() -> None:
+    text = (
+        "No valid trajectory solution found within configured limits.\n"
+        "Reasons and actions:\n"
+        "- Solver searched BUILD DLS interval [0.10, 3.00] deg/30m; "
+        "closest candidate was at 3.00 deg/30m.\n"
+    )
+
+    rows = diagnostics_rows_ru(text)
+
+    assert rows
+    assert "Решатель перебрал интервал BUILD ПИ [0.03, 1.00] deg/10m" in rows[0]["Причина"]
+    assert "1.00 deg/10m" in rows[0]["Причина"]
+    assert "deg/30m" not in rows[0]["Причина"]
 
 
 def test_parse_solver_error_build_dls_absurd_pi_shows_kop_recommendation() -> None:
@@ -63018,7 +64495,7 @@ def test_default_three_camera_uses_z_up_eye() -> None:
     assert DEFAULT_THREE_CAMERA["eye"] == {"x": 1.25, "y": 1.25, "z": 1.25}
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	19090
+===BEGIN_FILE===	tests/test_three_viewer.py	20281
 from __future__ import annotations
 
 from pathlib import Path
@@ -63054,6 +64531,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
     assert ".scene-label.well-name-label" in html
+    assert "max-width: min(220px, calc(100vw - 24px));" in html
+    assert "overflow-wrap: anywhere;" in html
+    assert "white-space: normal;" in html
+    assert "transform: translate(8px, -50%);" in html
+    assert "contain: layout paint;" in html
     assert 'roleClassName = labelRole === "well_label" ? "well-name-label" : ""' in html
     assert "font-size: 10px;" in html
     assert ".axes-gizmo-line" in html
@@ -63099,6 +64581,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function editWellTargetFocusBounds(index)" in html
     assert "function fitCameraToEditWellTargets(index)" in html
     assert "selectEditWell(editableIndex, { focus: !editModeActive })" in html
+    assert "row.dataset.editWellIndex = String(editableIndex)" in html
     assert "targetBounds && !editModeActive" in html
     assert "fitCameraToEditWellTargets(nextIndex)" in html
     assert "data-edit-well-index" in html
@@ -63115,6 +64598,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'data-scope="pair"' in html
     assert "function setEditMoveScope(scope)" in html
     assert 'let editMoveScope = "point";' in html
+    assert 'title="Изменить точки скважины"' in html
+    assert 'data-scope="pair" type="button">Все</button>' in html
     assert 'id="edit-operation-selector"' in html
     assert 'data-operation="move"' in html
     assert 'data-operation="rotate"' in html
@@ -63134,6 +64619,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "rebuildRotatedPreviewTrajectory(" in html
     assert "editRotationModeEnabled()" in html
     assert "editRotationPickMeshes" in html
+    assert "function editPointDefinitionsForWell(well)" in html
+    assert "const editOriginalPoints = []" in html
+    assert "function updateWellEditPoints(wellIndex, nextPoints)" in html
+    assert "editWellHasExplicitPoints(wellIndex)" in html
+    assert "points: (editCurrentPoints[idx] || []).map" in html
     assert 'editDragMoveScope === "pair"' in html
     assert "updateWellEditTargets(wi, nextT1, nextT3)" in html
     assert 'id="edit-undo-btn"' in html
@@ -63301,9 +64791,16 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "numberOrDefault(item.opacity, 0.25)" in html
     assert "markerScale * 0.52" in html
     assert "function addHoverPointCloud(points, item, hoverItems)" in html
+    assert 'const defaultHoverColor = hexOrDefault(item.color, "#64748b")' in html
+    assert "{ color: defaultHoverColor }" in html
+    assert "pointCloud.userData.hover = { color: defaultHoverColor }" in html
     assert "pointCloud.userData.hoverItems = itemHoverData" in html
     assert "raycaster.params.Points.threshold = Math.max(worldMarkerSize * 0.55, 3.0)" in html
     assert "indexedHoverItems && Number.isInteger(intersections[0].index)" in html
+    assert "const labelOffsetX = 6;" in html
+    assert "rect.width - labelWidth - padding - labelOffsetX" in html
+    assert "max-width: min(160px, calc(100% - 16px));" in html
+    assert "max-width: calc(100% - 48px);" in html
     assert "<strong>DLS:</strong>" in html
     assert "<strong>INC:</strong>" in html
     assert 'id="reset-camera-btn"' not in html
@@ -63422,7 +64919,7 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     assert " B " in second
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	9234
+===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	10275
 from __future__ import annotations
 
 import pandas as pd
@@ -63633,6 +65130,38 @@ def test_ptc_page_defers_anticollision_when_three_edits_are_pending() -> None:
     metric_labels = {str(widget.label) for widget in at.metric}
     assert "Пресет неопределенности для anti-collision" not in selectbox_labels
     assert "Проверено пар" not in metric_labels
+
+
+def test_ptc_page_renders_target_editor_when_all_results_failed() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {
+            "Скважина": "WELL-A",
+            "Статус": "Ошибка расчета",
+            "Проблема": "endpoint miss",
+            "Точек": 3,
+        },
+        {
+            "Скважина": "WELL-B",
+            "Статус": "Ошибка расчета",
+            "Проблема": "endpoint miss",
+            "Точек": 3,
+        },
+    ]
+    at.session_state["wt_successes"] = []
+
+    at.run(timeout=120)
+
+    warning_values = [str(widget.value) for widget in at.warning]
+    markdown_values = [str(widget.value) for widget in at.markdown]
+    assert any(
+        "Все выбранные скважины завершились ошибками" in value
+        for value in warning_values
+    )
+    assert any("Исходные точки для правки" in value for value in markdown_values)
 
 
 def test_ptc_page_wraps_reference_well_table_into_expander() -> None:
@@ -65937,7 +67466,7 @@ def test_welltracks2_pad_detection_and_layout() -> None:
         assert before.points[1:] == after.points[1:]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_batch.py	107064
+===BEGIN_FILE===	tests/test_welltrack_batch.py	108381
 from __future__ import annotations
 
 import multiprocessing
@@ -66143,6 +67672,7 @@ def test_multi_horizontal_record_reports_short_transition_recommendation() -> No
     assert row["Статус"] == "Ошибка расчета"
     assert "HORIZONTAL_BUILD1" in str(row["Проблема"])
     assert "сократить соседние мини-горизонты" in str(row["Проблема"])
+    assert "deg/30m" not in str(row["Проблема"])
 
 
 def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
@@ -66153,14 +67683,17 @@ def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
         item for item in parse_welltrack_text(text) if str(item.name) == "well_08"
     )
 
-    row, success = _evaluate_record_standalone(record, TrajectoryConfig())
+    row, success = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(dls_build_max_deg_per_30m=1.0),
+    )
 
     assert success is not None
     assert row["Статус"] == "OK"
     assert success.summary["multi_horizontal_levels"] == 3
-    assert success.t3.x == pytest.approx(458356.0)
-    assert success.t3.y == pytest.approx(888722.0)
-    assert success.t3.z == pytest.approx(2390.0)
+    assert success.t3.x == pytest.approx(455022.7)
+    assert success.t3.y == pytest.approx(887483.3)
+    assert success.t3.z == pytest.approx(2379.0)
     assert {
         "HORIZONTAL1",
         "HORIZONTAL_BUILD1",
@@ -66171,7 +67704,38 @@ def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
         float(success.config.dls_build_max_deg_per_30m) + 1e-6
     )
+    assert float(success.summary["md_total_m"]) < 6500.0
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
+
+
+def test_turn_solver_build_limit_search_is_monotonic_for_debug_geometry() -> None:
+    record = WelltrackRecord(
+        name="debug_monotonic",
+        points=(
+            WelltrackPoint(x=377899.9, y=930000.4, z=-20.0, md=1.0),
+            WelltrackPoint(x=377459.9, y=930020.8, z=3651.51, md=2.0),
+            WelltrackPoint(x=376107.3, y=929390.1, z=3749.49, md=3.0),
+        ),
+    )
+
+    row_tighter, success_tighter = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(dls_build_max_deg_per_30m=2.4),
+    )
+    row_wider, success_wider = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(dls_build_max_deg_per_30m=3.0),
+    )
+
+    assert success_tighter is not None, row_tighter["Проблема"]
+    assert success_wider is not None, row_wider["Проблема"]
+    assert row_tighter["Статус"] == "OK"
+    assert row_wider["Статус"] == "OK"
+    assert float(success_wider.summary["build1_dls_selected_deg_per_30m"]) <= 3.0
+    assert float(success_wider.summary["build2_dls_selected_deg_per_30m"]) <= 3.0
+    assert float(success_wider.summary["md_total_m"]) < float(
+        success_tighter.summary["md_total_m"]
+    )
 
 
 def _straight_success(
@@ -69152,7 +70716,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	196424
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	206396
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -69668,6 +71232,16 @@ def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> N
     button_labels = {str(widget.label) for widget in at.button}
     assert "Исправить порядок для выбранных скважин" in button_labels
     assert "Оставить все точки без изменений" in button_labels
+
+
+def test_welltrack_page_initial_crs_selectbox_has_no_session_state_default_warning() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+
+    at.run(timeout=120)
+
+    assert not any(
+        "trajectory_crs_selectbox" in str(widget.value) for widget in at.warning
+    )
 
 
 def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None:
@@ -71405,6 +72979,73 @@ def test_render_raw_records_table_shows_pilot_points(monkeypatch) -> None:
     assert list(pilot_rows["Точка"]) == ["S", "PL1", "PL2"]
 
 
+def test_render_raw_records_table_highlights_changed_regular_pilot_and_multi_points(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    page.st.session_state["wt_edit_targets_highlight_names"] = [
+        "WELL-A",
+        "WELL-A_PL",
+        "WELL-M",
+    ]
+    page.st.session_state["wt_edit_targets_highlight_points"] = {
+        "WELL-A": [1, 2],
+        "WELL-A_PL": [0, 2],
+        "WELL-M": [0, 3],
+    }
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(*args, **kwargs):
+        return _DummyExpander()
+
+    def _fake_dataframe(frame, **kwargs):
+        captured["frame"] = frame
+
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "success", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+
+    records = [
+        _records()[0],
+        WelltrackRecord(
+            name="WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=1.0),
+                WelltrackPoint(x=300.0, y=500.0, z=2400.0, md=2.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-M",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=1.0),
+                WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=2.0),
+                WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=3.0),
+                WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=4.0),
+            ),
+        ),
+    ]
+
+    page._render_raw_records_table(records)
+
+    styler = captured["frame"]
+    styler._compute()
+    highlighted_rows = {
+        row_index
+        for (row_index, _col_index), styles in styler.ctx.items()
+        if ("background-color", "rgba(34, 197, 94, 0.14)") in styles
+    }
+    assert highlighted_rows == {1, 2, 3, 5, 6, 9}
+
+
 def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     page = wt_import_module
     page.st.session_state.clear()
@@ -71457,6 +73098,9 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     assert page.st.session_state["wt_pending_selected_names"] == ["WELL-A"]
     assert page.st.session_state["wt_edit_targets_pending_names"] == ["WELL-A"]
     assert page.st.session_state["wt_edit_targets_highlight_names"] == ["WELL-A"]
+    assert page.st.session_state["wt_edit_targets_highlight_points"] == {
+        "WELL-A": [1, 2]
+    }
     assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
     assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
     assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
@@ -71479,6 +73123,7 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     ]
     assert page.st.session_state["wt_edit_targets_pending_names"] == []
     assert page.st.session_state["wt_edit_targets_highlight_names"] == []
+    assert page.st.session_state["wt_edit_targets_highlight_points"] == {}
     assert page.st.session_state["wt_anticollision_analysis_cache"] == {}
 
 
@@ -73574,6 +75219,105 @@ def test_all_wells_overview_figures_show_targets_for_failed_wells_without_fake_t
     assert str(failed_plan_traces[0].marker.symbol) == "x"
 
 
+def test_all_wells_three_payload_renders_pilot_labels_from_records_mapping() -> None:
+    page = wt_import_module
+    payload = page._all_wells_three_payload(
+        [
+            _successful_plan(
+                name="WELL-A_PL",
+                y_offset_m=0.0,
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 500.0, 1000.0],
+                        "X_m": [0.0, 200.0, 500.0],
+                        "Y_m": [0.0, 50.0, 100.0],
+                        "Z_m": [0.0, 650.0, 1100.0],
+                        "INC_deg": [0.0, 10.0, 20.0],
+                        "AZI_deg": [0.0, 90.0, 90.0],
+                        "DLS_deg_per_30m": [0.0, 1.0, 1.0],
+                        "segment": ["PILOT", "PILOT", "PILOT"],
+                    }
+                ),
+            )
+        ],
+        pilot_study_points_by_name={
+            "WELL-A_PL": (
+                Point3D(200.0, 50.0, 650.0),
+                Point3D(350.0, 75.0, 900.0),
+                Point3D(500.0, 100.0, 1100.0),
+            )
+        },
+    )
+
+    pilot_marker = next(
+        item
+        for item in payload["points"]
+        if str(item.get("name")) == "WELL-A_PL: цели"
+    )
+    label_texts = [str(item.get("text")) for item in payload["labels"]]
+
+    assert [hover["point"] for hover in pilot_marker["hover"]] == [
+        "WELL-A_PL: 1",
+        "WELL-A_PL: 2",
+        "WELL-A_PL: 3",
+    ]
+    assert "WELL-A_PL: 1" in label_texts
+    assert "WELL-A_PL: 2" in label_texts
+    assert "WELL-A_PL: 3" in label_texts
+
+
+def test_failed_target_only_wells_include_single_point_pilot_targets() -> None:
+    page = wt_import_module
+    records = [
+        WelltrackRecord(
+            name="WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=50.0, z=900.0, md=1.0),
+            ),
+        )
+    ]
+    summary_rows = [
+        {
+            "Скважина": "WELL-A_PL",
+            "Статус": "Ошибка расчета",
+            "Проблема": "pilot target is incomplete",
+        }
+    ]
+
+    target_only_wells = page._failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+    payload_3d = page._all_wells_three_payload(
+        [],
+        target_only_wells=target_only_wells,
+        name_to_color={"WELL-A_PL": "#123456"},
+    )
+    figure_plan = page._all_wells_plan_figure(
+        [],
+        target_only_wells=target_only_wells,
+        name_to_color={"WELL-A_PL": "#123456"},
+    )
+
+    marker = next(
+        item
+        for item in payload_3d["points"]
+        if str(item.get("name")) == "WELL-A_PL: цели (без траектории)"
+    )
+    plan_trace = next(
+        trace
+        for trace in figure_plan.data
+        if str(trace.name) == "WELL-A_PL: цели (без траектории)"
+    )
+
+    assert len(target_only_wells) == 1
+    assert target_only_wells[0].target_labels == ("S", "PL1")
+    assert marker["points"] == [[0.0, 0.0, 0.0], [100.0, 50.0, 900.0]]
+    assert [hover["point"] for hover in marker["hover"]] == ["S", "PL1"]
+    assert list(plan_trace.customdata[:, 0]) == ["S", "PL1"]
+
+
 def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     page = wt_import_module
     reference_wells = _reference_wells()
@@ -73718,6 +75462,150 @@ def test_actual_reference_mwd_assignment_defaults_to_poor_and_selects_unknown() 
             UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
         ).iscwsa_tool_code
     }
+
+
+def test_actual_reference_mwd_models_from_state_does_not_mutate_widget_key() -> None:
+    class ReadOnlyWidgetState(dict):
+        def __setitem__(self, key: object, value: object) -> None:
+            if key in {
+                ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY,
+                ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
+            }:
+                raise AssertionError("widget key must not be mutated after render")
+            super().__setitem__(key, value)
+
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 0.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+                {
+                    "Wellname": "FACT-2",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 100.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-2",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 100.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+            ]
+        )
+    )
+    state = ReadOnlyWidgetState(
+        {
+            ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY: [
+                "FACT-2",
+                "MISSING",
+            ]
+        }
+    )
+
+    model_by_name = ptc_anticollision_params.reference_uncertainty_models_from_state(
+        reference_wells,
+        state=state,
+    )
+
+    assert (
+        model_by_name["FACT-1"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+        ).iscwsa_tool_code
+    )
+    assert (
+        model_by_name["FACT-2"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+        ).iscwsa_tool_code
+    )
+    assert state[ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] == [
+        "FACT-2",
+        "MISSING",
+    ]
+
+
+def test_actual_reference_mwd_models_from_state_accepts_widget_key_fallback() -> None:
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 0.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+                {
+                    "Wellname": "FACT-2",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 100.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-2",
+                    "Type": "actual",
+                    "X": 100.0,
+                    "Y": 100.0,
+                    "Z": 500.0,
+                    "MD": 510.0,
+                },
+            ]
+        )
+    )
+    state = {
+        ptc_anticollision_params.ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY: [
+            "FACT-2",
+        ]
+    }
+
+    model_by_name = ptc_anticollision_params.reference_uncertainty_models_from_state(
+        reference_wells,
+        state=state,
+    )
+
+    assert (
+        model_by_name["FACT-1"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+        ).iscwsa_tool_code
+    )
+    assert (
+        model_by_name["FACT-2"].iscwsa_tool_code
+        == planning_uncertainty_model_for_preset(
+            UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+        ).iscwsa_tool_code
+    )
 
 
 def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> (

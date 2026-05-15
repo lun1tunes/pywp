@@ -27,6 +27,7 @@ from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.segments import BuildSegment, HoldSegment
 from pywp.sidetrack_solver import SidetrackPlanner, SidetrackStart
 from pywp.trajectory import WellTrajectory
+from pywp.ui_utils import dls_to_pi
 
 PILOT_SUFFIX = "_PL"
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M = 50.0
@@ -618,7 +619,7 @@ def _pilot_build_hold_leg_to_target(
     if (not bool(result.success)) or miss_m > max(tolerance_m, 0.25):
         raise ValueError(
             "Не удалось построить буримый пилотный участок BUILD+HOLD до точки "
-            f"p{int(segment_index)} при ПИ <= {dls_limit:.2f} deg/30m. "
+            f"p{int(segment_index)} при ПИ <= {dls_to_pi(dls_limit):.2f} deg/10m. "
             f"Остаточное отклонение {miss_m:.2f} м."
         )
 
