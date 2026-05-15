@@ -154,6 +154,76 @@ def test_higher_build_dls_reduces_total_md() -> None:
     )
 
 
+def test_deep_low_angle_turn_solution_survives_relaxed_build_limit() -> None:
+    record = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
+    )[0]
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    planner = TrajectoryPlanner()
+    config_08_pi = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=2.4,
+        turn_solver_max_restarts=0,
+    )
+    config_10_pi = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=3.0,
+        turn_solver_max_restarts=0,
+    )
+
+    result_08_pi = planner.plan(surface=surface, t1=t1, t3=t3, config=config_08_pi)
+    result_10_pi = planner.plan(surface=surface, t1=t1, t3=t3, config=config_10_pi)
+
+    assert (
+        float(result_08_pi.summary["distance_t1_m"])
+        <= config_08_pi.pos_tolerance_m
+    )
+    assert (
+        float(result_10_pi.summary["distance_t1_m"])
+        <= config_10_pi.pos_tolerance_m
+    )
+    assert float(result_10_pi.summary["md_total_m"]) <= float(
+        result_08_pi.summary["md_total_m"]
+    )
+    assert float(result_10_pi.summary["kop_vertical_m"]) == pytest.approx(
+        550.0, abs=1e-6
+    )
+    assert (
+        float(result_10_pi.summary["max_dls_total_deg_per_30m"])
+        <= float(config_10_pi.dls_build_max_deg_per_30m) + 1e-6
+    )
+    assert int(result_10_pi.summary["solver_turn_restarts_used"]) == 0
+
+
+def test_post_entry_solver_keeps_boundary_case_within_numerical_tolerance() -> None:
+    import pywp.planner as planner_module
+    from pywp.mcm import minimum_curvature_increment
+
+    post_entry = planner_module._solve_post_entry_section(
+        ds_m=1000.0,
+        dz_m=0.0,
+        inc_entry_deg=86.0,
+        dls_deg_per_30m=3.6,
+        max_inc_deg=95.0,
+    )
+
+    assert post_entry is not None
+    dn_arc, _, dz_arc = minimum_curvature_increment(
+        md1_m=0.0,
+        inc1_deg=86.0,
+        azi1_deg=0.0,
+        md2_m=float(post_entry.transition_length_m),
+        inc2_deg=float(post_entry.hold_inc_deg),
+        azi2_deg=0.0,
+    )
+    hold_inc_rad = np.radians(float(post_entry.hold_inc_deg))
+    ds_pred = float(dn_arc + post_entry.hold_length_m * np.sin(hold_inc_rad))
+    dz_pred = float(dz_arc + post_entry.hold_length_m * np.cos(hold_inc_rad))
+
+    assert ds_pred == pytest.approx(1000.0, abs=1e-6)
+    assert dz_pred == pytest.approx(0.0, abs=1e-6)
+
+
 def test_md_optimization_stops_within_theoretical_gap_when_solution_is_already_short() -> (
     None
 ):
@@ -1397,7 +1467,7 @@ def test_md_optimization_2d_refinement_can_improve_total_md_when_boundary_stage_
         "within_md_theoretical_gap_after_2d",
         "at_md_boundary_extremum",
     }
-    assert int(result_md.summary["optimization_runs_used"]) >= 4
+    assert int(result_md.summary["optimization_runs_used"]) >= 2
 
 
 def test_removed_legacy_max_total_md_does_not_create_hidden_solver_limit() -> None:
@@ -1862,7 +1932,7 @@ def test_exact_endpoint_metrics_are_stable_across_control_grid_density() -> None
 
 def test_planner_reports_exact_miss_components_in_failure_message() -> None:
     planner = TrajectoryPlanner()
-    config = _fast_config(lateral_tolerance_m=1e-6, vertical_tolerance_m=1e-6)
+    config = _fast_config(lateral_tolerance_m=1e-10, vertical_tolerance_m=1e-10)
 
     with pytest.raises(PlanningError, match="Analytical delta: dX=.*dY=.*dZ="):
         planner.plan(

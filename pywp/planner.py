@@ -77,8 +77,9 @@ MD_BOUNDARY_REFINEMENT_MAX_NFEV_FACTOR = 0.18
 KOP_BOUNDARY_REFINEMENT_MAX_BASE_CANDIDATES = 2
 KOP_BOUNDARY_REFINEMENT_MAX_NFEV_FACTOR = 0.18
 MD_2D_REFINEMENT_MAX_BASE_CANDIDATES = 2
-MD_2D_REFINEMENT_MAX_SEEDS = 8
-MD_2D_REFINEMENT_MAXITER = 36
+MD_2D_REFINEMENT_MAX_SEEDS = 2
+MD_2D_REFINEMENT_MAXITER = 20
+MD_FULL_SLSQP_MAX_SEEDS = 2
 MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE = 1e-6
 MD_BOUNDARY_EXTREMUM_KOP_TOLERANCE_M = 1e-3
 ANTI_COLLISION_SF_TOLERANCE = 1e-3
@@ -765,6 +766,37 @@ def _solve_turn_profile(
             0.60 + 0.36 * float(index / max(total_starts, 1)),
         )
 
+    if not candidates and not zero_azimuth_turn:
+        _emit_progress(
+            progress_callback,
+            "Солвер: fallback-поиск для глубокого низкоуглового азимутального перехода.",
+            0.97,
+        )
+        fallback_candidates, fallback_best = _collect_deep_low_angle_turn_candidates(
+            geometry=geometry,
+            build_dls_upper_deg_per_30m=build_dls_upper,
+            bounds=bounds,
+            profile_builder=profile_builder,
+            target_point=target_point,
+            config=config,
+            search_settings=search_settings,
+        )
+        candidates.extend(fallback_candidates)
+        (
+            fallback_miss,
+            fallback_lateral_m,
+            fallback_vertical_m,
+            fallback_build_dls,
+        ) = fallback_best
+        if (
+            fallback_miss < best_miss - SMALL
+            or abs(fallback_miss - best_miss) <= SMALL
+        ):
+            best_miss = fallback_miss
+            best_lateral_m = fallback_lateral_m
+            best_vertical_m = fallback_vertical_m
+            best_miss_build_dls = fallback_build_dls
+
     if candidates:
         _emit_progress(progress_callback, "Солвер: найден допустимый профиль.", 1.00)
         return _select_feasible_candidate(
@@ -794,6 +826,7 @@ def _solve_turn_profile(
             z1_m=max(geometry.z1_m - float(config.kop_min_vertical_m), SMALL),
             inc_entry_deg=geometry.inc_entry_deg,
         ),
+        zero_azimuth_turn=zero_azimuth_turn,
     )
     if build_dls_upper > build_dls_lower + SMALL:
         diagnostics.append(
@@ -2878,6 +2911,8 @@ def _select_feasible_candidate(
         bounds=optimization_bounds,
         split_build=True,
     )
+    if optimization_mode == OPTIMIZATION_MINIMIZE_MD:
+        optimization_seed_vectors = optimization_seed_vectors[:MD_FULL_SLSQP_MAX_SEEDS]
     optimized_candidates: list[ProfileParameters] = list(ranked)
     runs_used = 0
     kop_lower_bound = float(bounds[1][0])
@@ -3387,6 +3422,99 @@ def _turn_seed_vectors(
     return _dedupe_seed_vectors(seed_vectors)
 
 
+def _deep_low_angle_turn_seed_vectors(
+    *,
+    geometry: SectionGeometry,
+    build_units: np.ndarray,
+    bounds: tuple[tuple[float, float], ...],
+    build_dls_upper_deg_per_30m: float,
+) -> list[np.ndarray]:
+    kop_min = float(bounds[1][0])
+    inc_min, inc_max = float(bounds[2][0]), float(bounds[2][1])
+    hold_min, hold_max = float(bounds[3][0]), float(bounds[3][1])
+    vertical_room_m = float(max(geometry.z1_m - kop_min, 0.0))
+    lateral_to_t1_m = float(np.hypot(geometry.t1_east_m, geometry.t1_north_m))
+
+    if float(build_dls_upper_deg_per_30m) <= 2.4 + SMALL:
+        return []
+    if vertical_room_m < 1000.0:
+        return []
+    if vertical_room_m < 1.5 * max(lateral_to_t1_m, 100.0):
+        return []
+
+    inc_very_low = float(
+        np.clip(float(geometry.inc_entry_deg) * 0.06, inc_min, inc_max)
+    )
+    inc_low = float(np.clip(float(geometry.inc_entry_deg) * 0.14, inc_min, inc_max))
+    hold_deep = float(np.clip(0.45 * vertical_room_m, hold_min, hold_max))
+    hold_deeper = float(np.clip(0.70 * vertical_room_m, hold_min, hold_max))
+
+    focused_build_units = _dedupe_scalar_values(
+        [
+            *[float(unit) for unit in np.asarray(build_units, dtype=float).tolist()],
+            0.60,
+            0.40,
+        ],
+        lower=float(bounds[0][0]),
+        upper=float(bounds[0][1]),
+    )
+    turnaround_azimuths = _dedupe_scalar_values(
+        [
+            _normalize_azimuth_deg(float(geometry.azimuth_entry_deg) + 150.0),
+            _normalize_azimuth_deg(float(geometry.azimuth_entry_deg) - 150.0),
+        ],
+        lower=0.0,
+        upper=360.0,
+    )
+
+    seeds: list[np.ndarray] = []
+    for build_unit in focused_build_units:
+        for azimuth_deg in turnaround_azimuths:
+            seeds.append(
+                np.array(
+                    [
+                        float(build_unit),
+                        kop_min,
+                        inc_very_low,
+                        hold_deep,
+                        float(azimuth_deg),
+                    ],
+                    dtype=float,
+                )
+            )
+            seeds.append(
+                np.array(
+                    [
+                        float(build_unit),
+                        kop_min,
+                        inc_low,
+                        hold_deeper,
+                        float(azimuth_deg),
+                    ],
+                    dtype=float,
+                )
+            )
+    return seeds
+
+
+def _dedupe_scalar_values(
+    values: list[float],
+    *,
+    lower: float,
+    upper: float,
+) -> tuple[float, ...]:
+    deduped: list[float] = []
+    seen: set[float] = set()
+    for value in values:
+        clipped = float(np.clip(float(value), float(lower), float(upper)))
+        key = round(clipped, 8)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(clipped)
+    return tuple(deduped)
+
+
 def _build_unit_seed_values(search_settings: TurnSearchSettings) -> np.ndarray:
     level = max(int(search_settings.restart_index), 0)
     if level <= 0:
@@ -3462,6 +3590,97 @@ def _turn_scalar_cost(
         config=config,
     )
     return float(miss * 1e6 + candidate.md_total_m)
+
+
+def _collect_deep_low_angle_turn_candidates(
+    *,
+    geometry: SectionGeometry,
+    build_dls_upper_deg_per_30m: float,
+    bounds: tuple[tuple[float, float], ...],
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+    search_settings: TurnSearchSettings,
+) -> tuple[list[ProfileParameters], tuple[float, float, float, float]]:
+    seed_vectors = _deep_low_angle_turn_seed_vectors(
+        geometry=geometry,
+        build_units=_build_unit_seed_values(search_settings=search_settings),
+        bounds=bounds,
+        build_dls_upper_deg_per_30m=build_dls_upper_deg_per_30m,
+    )
+    if not seed_vectors:
+        return [], (np.inf, np.inf, np.inf, float(build_dls_upper_deg_per_30m))
+
+    lower = np.array([item[0] for item in bounds], dtype=float)
+    upper = np.array([item[1] for item in bounds], dtype=float)
+    max_nfev = max(80, min(int(search_settings.local_max_nfev), 160))
+    candidates: list[ProfileParameters] = []
+    best_miss = np.inf
+    best_lateral_m = np.inf
+    best_vertical_m = np.inf
+    best_build_dls = float(build_dls_upper_deg_per_30m)
+
+    for seed in _dedupe_seed_vectors(seed_vectors):
+        clipped_seed = _clip_to_bounds(np.asarray(seed, dtype=float), bounds=bounds)
+        solution = least_squares(
+            fun=lambda values: _turn_residuals(
+                values=np.asarray(values, dtype=float),
+                profile_builder=profile_builder,
+                target_point=target_point,
+                config=config,
+            ),
+            x0=clipped_seed,
+            bounds=(lower, upper),
+            method="trf",
+            jac="2-point",
+            x_scale="jac",
+            ftol=1e-10,
+            xtol=1e-10,
+            gtol=1e-10,
+            max_nfev=max_nfev,
+        )
+        probes = [clipped_seed]
+        if solution.success and np.all(np.isfinite(solution.x)):
+            probes.append(
+                _clip_to_bounds(np.asarray(solution.x, dtype=float), bounds=bounds)
+            )
+
+        for probe in probes:
+            candidate = profile_builder(probe)
+            if candidate is None:
+                continue
+            endpoint = np.array(
+                _estimate_t1_endpoint_for_profile(candidate), dtype=float
+            )
+            _, _, _, lateral_m, vertical_m, _ = _target_miss_components(
+                endpoint, target_point
+            )
+            miss = _normalized_target_miss(
+                endpoint=endpoint,
+                target_point=target_point,
+                config=config,
+            )
+            if miss < best_miss - SMALL or abs(miss - best_miss) <= SMALL:
+                best_miss = miss
+                best_lateral_m = float(lateral_m)
+                best_vertical_m = float(vertical_m)
+                best_build_dls = float(candidate.dls_build1_deg_per_30m)
+            if not _target_miss_within_tolerance(
+                lateral_m=lateral_m,
+                vertical_m=vertical_m,
+                config=config,
+            ):
+                continue
+            if not _is_candidate_feasible(candidate=candidate, config=config):
+                continue
+            candidates.append(candidate)
+
+    return candidates, (
+        float(best_miss),
+        float(best_lateral_m),
+        float(best_vertical_m),
+        float(best_build_dls),
+    )
 
 
 def _build_profile_from_effective_targets(
@@ -3614,7 +3833,8 @@ def _solve_post_entry_section(
         )
 
     radius_m = _radius_from_dls(dls_deg_per_30m)
-    tolerance = 1e-3
+    root_tolerance = 1e-9
+    candidate_tolerance = 1e-6
 
     def arc_displacement(inc_from_rad: float, inc_to_rad: float) -> tuple[float, float]:
         delta_rad = float(inc_to_rad - inc_from_rad)
@@ -3648,14 +3868,14 @@ def _solve_post_entry_section(
         hold_length_m = float(
             ds_rem * np.sin(inc_hold_rad) + dz_rem * np.cos(inc_hold_rad)
         )
-        if hold_length_m < -tolerance:
+        if hold_length_m < -candidate_tolerance:
             return None
         hold_length_m = float(max(hold_length_m, 0.0))
 
         ds_pred = float(ds_arc + hold_length_m * np.sin(inc_hold_rad))
         dz_pred = float(dz_arc + hold_length_m * np.cos(inc_hold_rad))
         miss = float(np.hypot(ds_pred - ds_m, dz_pred - dz_m))
-        if miss > 5e-3:
+        if miss > candidate_tolerance:
             return None
 
         transition_length_m = float(radius_m * abs(inc_hold_rad - inc_entry_rad))
@@ -3675,10 +3895,10 @@ def _solve_post_entry_section(
         f1 = values[idx + 1]
         a0 = float(samples[idx])
         a1 = float(samples[idx + 1])
-        if abs(f0) <= tolerance:
+        if abs(f0) <= root_tolerance:
             candidate_angles.append(a0)
             continue
-        if abs(f1) <= tolerance:
+        if abs(f1) <= root_tolerance:
             candidate_angles.append(a1)
             continue
         if np.signbit(f0) == np.signbit(f1):
@@ -3689,7 +3909,7 @@ def _solve_post_entry_section(
         for _ in range(60):
             mid = 0.5 * (lo + hi)
             fmid = residual(mid)
-            if abs(fmid) <= tolerance:
+            if abs(fmid) <= root_tolerance:
                 lo = mid
                 hi = mid
                 break
@@ -3827,6 +4047,7 @@ def _diagnose_same_direction_no_solution(
     lower_dls: float,
     upper_dls: float,
     required_dls: float,
+    zero_azimuth_turn: bool,
 ) -> list[str]:
     messages: list[str] = []
     horizontal_dls = _resolve_horizontal_dls(config=config)
@@ -3840,7 +4061,8 @@ def _diagnose_same_direction_no_solution(
         geometry.z1_m - float(config.kop_min_vertical_m), 0.0
     )
     if (
-        np.isfinite(required_dls)
+        bool(zero_azimuth_turn)
+        and np.isfinite(required_dls)
         and required_dls > 0.0
         and upper_dls + SMALL < required_dls
     ):
