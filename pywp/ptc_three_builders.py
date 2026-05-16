@@ -31,6 +31,7 @@ from pywp.welltrack_batch import SuccessfulWellPlan
 
 __all__ = [
     "single_well_three_payload",
+    "single_well_target_only_three_payload",
     "all_wells_three_payload",
     "anticollision_three_payload",
 ]
@@ -256,6 +257,69 @@ def single_well_three_payload(
     return ptc_three_payload.optimize_three_payload(payload)
 
 
+def single_well_target_only_three_payload(
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    well_name: str = "single_well",
+    color: str = TARGET_COLOR_PRIMARY,
+) -> dict[str, object]:
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
+    z_arrays: list[np.ndarray] = []
+    payload = _base_payload(title="3D цели (без траектории)")
+    marker_name = f"{well_name}: цели (без траектории)"
+    target_points, target_labels = _target_marker_points_and_labels(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+    )
+    _append_target_markers(
+        payload,
+        name=marker_name,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        color=color,
+        size=8.0,
+        symbol="cross",
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+    for label, point in zip(target_labels, target_points, strict=False):
+        payload["labels"].append(
+            _point_payload_label(
+                str(label),
+                point,
+                str(color),
+                role="target_label",
+            )
+        )
+    payload["labels"].append(_well_name_label(str(well_name), t3, str(color)))
+    _append_unique_legend_item(
+        payload,
+        label=marker_name,
+        color=str(color),
+        opacity=1.0,
+        symbol="point",
+    )
+    _append_single_well_zero_axes(
+        payload,
+        surface=surface,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+    payload["bounds"] = _bounds_from_arrays(
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+    return ptc_three_payload.optimize_three_payload(payload)
+
+
 def all_wells_three_payload(
     successes: list[SuccessfulWellPlan],
     *,
@@ -386,6 +450,7 @@ def all_wells_three_payload(
             label=f"{well_name}: цели (без траектории)",
             color=color,
             opacity=1.0,
+            symbol="point",
         )
 
     payload["bounds"] = _bounds_from_arrays(
@@ -1274,6 +1339,7 @@ def _append_unique_legend_item(
     label: str,
     color: str,
     opacity: float,
+    symbol: str = "line",
 ) -> None:
     label_text = str(label).strip()
     if not label_text:
@@ -1281,7 +1347,14 @@ def _append_unique_legend_item(
     legend = list(payload.get("legend") or [])
     if any(str(item.get("label", "")).strip() == label_text for item in legend):
         return
-    legend.append({"label": label_text, "color": str(color), "opacity": float(opacity)})
+    legend.append(
+        {
+            "label": label_text,
+            "color": str(color),
+            "opacity": float(opacity),
+            "symbol": str(symbol or "line"),
+        }
+    )
     payload["legend"] = legend
 
 

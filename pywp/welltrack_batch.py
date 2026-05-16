@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
+from pickle import PicklingError
 from typing import Any, Callable, Iterable, Mapping
 from time import perf_counter
 from dataclasses import dataclass
@@ -747,7 +748,13 @@ class WelltrackBatchPlanner:
                     record_done_callback=record_done_callback,
                     parallel_workers=int(parallel_workers),
                 )
-            except (BrokenProcessPool, OSError, RuntimeError, ValueError):
+            except (
+                BrokenProcessPool,
+                PicklingError,
+                OSError,
+                RuntimeError,
+                ValueError,
+            ):
                 pass
 
         summary_rows: list[dict[str, Any]] = []
@@ -1010,7 +1017,7 @@ class WelltrackBatchPlanner:
                         if success_dict is not None
                         else None
                     )
-                except BrokenProcessPool:
+                except (BrokenProcessPool, PicklingError):
                     raise
                 except Exception as exc:  # noqa: BLE001
                     row = self._base_row(

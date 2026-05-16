@@ -144,6 +144,120 @@ def test_validate_input_rejects_invalid_t1_t3_geometry() -> None:
     assert "Точка t1 должна отличаться от устья S в плане." in errors
 
 
+def test_single_well_edit_wells_payload_exposes_surface_t1_t3_handles() -> None:
+    payload = app._single_well_edit_wells_payload(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=TrajectoryConfig(),
+    )
+
+    edit_well = payload[0]
+    edit_points = edit_well["edit_points"]
+
+    assert edit_well["name"] == "single_well"
+    assert [point["label"] for point in edit_points] == ["S", "t1", "t3"]
+    assert [point["point_type"] for point in edit_points] == [
+        "surface",
+        "t1",
+        "t3",
+    ]
+
+
+def test_single_well_three_edit_event_is_queued_before_widget_state_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyStreamlit:
+        def __init__(self, session_state: dict[str, object]) -> None:
+            self.session_state = session_state
+
+    state: dict[str, object] = {
+        "surface_x": 0.0,
+        "surface_y": 0.0,
+        "surface_z": 0.0,
+        "t1_x": 600.0,
+        "t1_y": 800.0,
+        "t1_z": 2400.0,
+        "t3_x": 1500.0,
+        "t3_y": 2000.0,
+        "t3_z": 2500.0,
+        "last_result": {"stale": True},
+        "last_error": "old",
+        "last_built_at": "old",
+        "last_runtime_s": 1.0,
+        "last_input_signature": ("old",),
+        "last_run_log_lines": ["old"],
+        "single_well_three_edit_version": 0,
+        "single_well_last_three_edit_nonce": "",
+    }
+    monkeypatch.setattr(app, "st", _DummyStreamlit(state))
+
+    applied = app._queue_single_well_target_edit(
+        {
+            "type": "pywp:editTargets",
+            "nonce": "nonce-1",
+            "changes": [
+                {
+                    "name": "single_well",
+                    "points": [
+                        {"index": 0, "label": "S", "position": [10.0, 20.0, -5.0]},
+                        {"index": 1, "label": "t1", "position": [610.0, 810.0, 2410.0]},
+                        {"index": 2, "label": "t3", "position": [1510.0, 2010.0, 2510.0]},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert applied is True
+    assert state["surface_x"] == 0.0
+    assert state["t1_x"] == 600.0
+    assert state["last_result"] is None
+    assert state["last_error"] == ""
+    assert state["single_well_pending_three_edit"] == {
+        "surface": [10.0, 20.0, -5.0],
+        "t1": [610.0, 810.0, 2410.0],
+        "t3": [1510.0, 2010.0, 2510.0],
+    }
+    assert state["single_well_three_edit_version"] == 1
+
+    app._apply_pending_single_well_target_edit()
+
+    assert state["surface_x"] == 10.0
+    assert state["surface_y"] == 20.0
+    assert state["surface_z"] == -5.0
+    assert state["t1_x"] == 610.0
+    assert state["t3_z"] == 2510.0
+    assert "single_well_pending_three_edit" not in state
+
+
+def test_failed_single_well_run_discards_stale_result_but_keeps_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyStreamlit:
+        def __init__(self, session_state: dict[str, object]) -> None:
+            self.session_state = session_state
+
+    state: dict[str, object] = {
+        "last_result": {"stale": True},
+        "last_error": "solver failed",
+        "last_built_at": "old",
+        "last_runtime_s": 9.0,
+        "last_input_signature": ("old",),
+        "last_run_log_lines": ["keep"],
+    }
+    monkeypatch.setattr(app, "st", _DummyStreamlit(state))
+
+    app._discard_previous_result_after_failed_run()
+
+    assert state["last_result"] is None
+    assert state["last_built_at"] == ""
+    assert state["last_runtime_s"] is None
+    assert state["last_input_signature"] is None
+    assert state["last_error"] == "solver failed"
+    assert state["last_run_log_lines"] == ["keep"]
+
+
 def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
     at = AppTest.from_file("pages/02_single_well.py")
     at.session_state["last_result"] = {"broken": True}

@@ -444,6 +444,13 @@
         flex: 0 0 16px;
       }
 
+      .legend-swatch.is-point {
+        width: 8px;
+        height: 8px;
+        flex-basis: 8px;
+        margin: 0 4px;
+      }
+
       .legend-label {
         overflow: hidden;
         text-overflow: ellipsis;
@@ -2303,9 +2310,12 @@
           return true;
         }
 
-        function createLegendSwatch(color, opacity) {
+        function createLegendSwatch(color, opacity, symbol) {
           const swatch = document.createElement("div");
           swatch.className = "legend-swatch";
+          if (String(symbol || "line").toLowerCase() === "point") {
+            swatch.classList.add("is-point");
+          }
           swatch.style.background = hexOrDefault(color, "#9ca3af");
           swatch.style.opacity = String(
             Number.isFinite(opacity) ? opacity : 1.0,
@@ -2320,6 +2330,7 @@
             createLegendSwatch(
               item.color,
               Number.isFinite(item.opacity) ? item.opacity : 1.0,
+              item.symbol,
             ),
           );
           const label = document.createElement("div");
@@ -2401,7 +2412,11 @@
             button.appendChild(caret);
           } else {
             button.appendChild(
-              createLegendSwatch(item.color, Number.isFinite(item.opacity) ? item.opacity : 1.0),
+              createLegendSwatch(
+                item.color,
+                Number.isFinite(item.opacity) ? item.opacity : 1.0,
+                item.symbol,
+              ),
             );
           }
           const label = document.createElement("div");
@@ -2883,6 +2898,7 @@
             });
           }
           if (String(item.dash || "solid") !== "solid") {
+            const dashPattern = lineDashPattern(item);
             segments.forEach((segment) => {
               if (!Array.isArray(segment) || segment.length < 2) {
                 return;
@@ -2891,8 +2907,8 @@
               const geometry = new THREE.BufferGeometry().setFromPoints(points);
               const material = new THREE.LineDashedMaterial({
                 ...materialOptions,
-                dashSize: Math.max(maxSpan * 0.025, 14.0),
-                gapSize: Math.max(maxSpan * 0.015, 8.0),
+                dashSize: dashPattern.dashSize,
+                gapSize: dashPattern.gapSize,
               });
               registerEditableBaseMaterial(material, materialOptions.color, item.name);
               const line = new THREE.Line(geometry, material);
@@ -2941,6 +2957,20 @@
           }
           addPolylineTube();
           scene.add(lineSegments);
+        }
+
+        function lineDashPattern(item) {
+          const dashKind = String((item && item.dash) || "solid").toLowerCase();
+          if (dashKind === "dot") {
+            return {
+              dashSize: Math.max(maxSpan * 0.004, 5.0),
+              gapSize: Math.max(maxSpan * 0.003, 3.0),
+            };
+          }
+          return {
+            dashSize: Math.max(maxSpan * 0.006, 6.0),
+            gapSize: Math.max(maxSpan * 0.0012, 1.6),
+          };
         }
 
         function resampledRingPoint(ring, sampleIndex, sampleCount) {

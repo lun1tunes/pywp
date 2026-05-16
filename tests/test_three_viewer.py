@@ -72,6 +72,12 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'Math.abs(dx) < 6 ? "middle"' in html
     assert "#legend.is-collapsed" in html
     assert "#legend {" in html
+    assert ".legend-swatch.is-point" in html
+    assert 'String(symbol || "line").toLowerCase() === "point"' in html
+    assert "item.symbol" in html
+    assert "function lineDashPattern(item)" in html
+    assert "dashSize: Math.max(maxSpan * 0.006, 6.0)" in html
+    assert "gapSize: Math.max(maxSpan * 0.0012, 1.6)" in html
     assert "#collisions-panel {" in html
     assert "z-index: 8;" in html
     assert "function syncLegendVisibility()" in html

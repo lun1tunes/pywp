@@ -10,6 +10,7 @@ from pywp.ptc_three_builders import (
     all_wells_three_payload,
     anticollision_three_payload,
     single_well_three_payload,
+    single_well_target_only_three_payload,
 )
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp.welltrack_batch import SuccessfulWellPlan
@@ -284,6 +285,35 @@ def test_single_well_three_payload_labels_targets_and_kop() -> None:
     assert kop_marker["points"] == [[100.0, 0.0, 500.0]]
 
 
+def test_single_well_target_only_three_payload_shows_editable_targets_context() -> None:
+    payload = single_well_target_only_three_payload(
+        well_name="single_well",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+    )
+
+    point_trace = next(
+        item
+        for item in payload["points"]
+        if str(item.get("name")) == "single_well: цели (без траектории)"
+    )
+    label_texts = {str(item.get("text")) for item in payload["labels"]}
+    legend_item = next(
+        item
+        for item in payload["legend"]
+        if str(item.get("label")) == "single_well: цели (без траектории)"
+    )
+
+    assert point_trace["points"] == [
+        [0.0, 0.0, 0.0],
+        [600.0, 800.0, 2400.0],
+        [1500.0, 2000.0, 2500.0],
+    ]
+    assert {"S", "t1", "t3", "single_well"}.issubset(label_texts)
+    assert legend_item["symbol"] == "point"
+
+
 def test_all_wells_three_payload_renders_pilot_point_labels() -> None:
     stations = pd.DataFrame(
         {
@@ -435,6 +465,36 @@ def test_all_wells_three_payload_keeps_original_target_markers() -> None:
     assert label["position"] == [2000.0, 50.0, 1500.0]
 
 
+def test_all_wells_three_payload_marks_warning_wells_as_dashed() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "X_m": [0.0, 1000.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 1500.0, 1500.0],
+        }
+    )
+    success = SuccessfulWellPlan(
+        name="warning_well",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 1500.0),
+        t3=Point3D(2000.0, 0.0, 1500.0),
+        stations=stations,
+        summary={},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+        md_postcheck_exceeded=True,
+    )
+
+    payload = all_wells_three_payload([success])
+    line = next(
+        item for item in payload["lines"] if str(item.get("name")) == "warning_well"
+    )
+
+    assert line["dash"] == "dash"
+
+
 def test_all_wells_three_payload_includes_multi_horizontal_target_pairs() -> None:
     stations = pd.DataFrame(
         {
@@ -501,6 +561,11 @@ def test_all_wells_three_payload_includes_multi_horizontal_target_only_pairs() -
         for item in payload["points"]
         if str(item.get("name")) == "multi_failed: цели (без траектории)"
     )
+    legend_item = next(
+        item
+        for item in payload["legend"]
+        if str(item.get("label")) == "multi_failed: цели (без траектории)"
+    )
 
     assert marker["points"] == [
         [0.0, 0.0, 0.0],
@@ -509,3 +574,4 @@ def test_all_wells_three_payload_includes_multi_horizontal_target_only_pairs() -
         [650.0, 0.0, 1020.0],
         [1050.0, 0.0, 1020.0],
     ]
+    assert legend_item["symbol"] == "point"

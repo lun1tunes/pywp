@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Mapping
 from datetime import datetime
 from time import perf_counter
 from typing import Callable
@@ -32,6 +34,11 @@ from pywp.planner import PlanningError
 from pywp.pydantic_base import FrozenModel
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
+from pywp.ptc_three_builders import (
+    TRAJECTORY_COLOR_PRIMARY,
+    single_well_target_only_three_payload,
+)
+from pywp.three_viewer import render_local_three_scene
 from pywp.ui_calc_params import (
     CalcParamBinding,
 )
@@ -187,6 +194,11 @@ COMPLEXITY_SELECTOR_LABELS = {
 }
 UI_DEFAULTS_VERSION = 11
 APP_CALC_PARAMS = CalcParamBinding(prefix="")
+SINGLE_WELL_NAME = "single_well"
+SINGLE_WELL_PENDING_EDIT_KEY = "single_well_pending_three_edit"
+SINGLE_WELL_LAST_EDIT_NONCE_KEY = "single_well_last_three_edit_nonce"
+SINGLE_WELL_EDIT_VERSION_KEY = "single_well_three_edit_version"
+SINGLE_WELL_EDIT_MESSAGE_KEY = "single_well_edit_message"
 
 
 def _depth_filter_label(value: str | float) -> str:
@@ -314,6 +326,199 @@ def _apply_points_to_state(surface: Point3D, t1: Point3D, t3: Point3D) -> None:
     st.session_state["t3_z"] = float(t3.z)
 
 
+def _point_payload(point: Point3D) -> list[float]:
+    return [float(point.x), float(point.y), float(point.z)]
+
+
+def _point_from_payload(value: object) -> Point3D | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        x, y, z = float(value[0]), float(value[1]), float(value[2])
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in (x, y, z)):
+        return None
+    return Point3D(x=x, y=y, z=z)
+
+
+def _single_well_edit_points(
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "index": 0,
+            "label": "S",
+            "point_type": "surface",
+            "position": _point_payload(surface),
+        },
+        {
+            "index": 1,
+            "label": "t1",
+            "point_type": "t1",
+            "position": _point_payload(t1),
+        },
+        {
+            "index": 2,
+            "label": "t3",
+            "point_type": "t3",
+            "position": _point_payload(t3),
+        },
+    ]
+
+
+def _single_well_edit_wells_payload(
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    config: TrajectoryConfig,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "name": SINGLE_WELL_NAME,
+            "surface": _point_payload(surface),
+            "t1": _point_payload(t1),
+            "t3": _point_payload(t3),
+            "edit_points": _single_well_edit_points(
+                surface=surface,
+                t1=t1,
+                t3=t3,
+            ),
+            "target_pairs": [],
+            "color": TRAJECTORY_COLOR_PRIMARY,
+            "base_points": [],
+            "config": {
+                "entry_inc_target_deg": float(config.entry_inc_target_deg),
+                "max_inc_deg": float(config.max_inc_deg),
+                "dls_build_max_deg_per_30m": float(config.dls_build_max_deg_per_30m),
+                "kop_min_vertical_m": float(config.kop_min_vertical_m),
+            },
+        }
+    ]
+
+
+def _edited_points_from_entry(
+    entry: Mapping[str, object],
+    *,
+    current_surface: Point3D,
+    current_t1: Point3D,
+    current_t3: Point3D,
+) -> tuple[Point3D, Point3D, Point3D] | None:
+    surface = current_surface
+    t1 = current_t1
+    t3 = current_t3
+
+    raw_points = entry.get("points")
+    if isinstance(raw_points, list):
+        changed = False
+        for raw_point in raw_points:
+            if not isinstance(raw_point, Mapping):
+                continue
+            point = _point_from_payload(raw_point.get("position"))
+            if point is None:
+                continue
+            label = str(raw_point.get("label", "")).strip().lower()
+            try:
+                point_index = int(raw_point.get("index", -1))
+            except (TypeError, ValueError):
+                point_index = -1
+            if point_index == 0 or label in {"s", "surface", "wellhead"}:
+                surface = point
+                changed = True
+            elif point_index == 1 or label == "t1" or label.endswith("_t1"):
+                t1 = point
+                changed = True
+            elif point_index == 2 or label == "t3" or label.endswith("_t3"):
+                t3 = point
+                changed = True
+        return (surface, t1, t3) if changed else None
+
+    next_t1 = _point_from_payload(entry.get("t1"))
+    next_t3 = _point_from_payload(entry.get("t3"))
+    if next_t1 is None and next_t3 is None:
+        return None
+    return (
+        surface,
+        next_t1 if next_t1 is not None else t1,
+        next_t3 if next_t3 is not None else t3,
+    )
+
+
+def _points_from_single_well_edit_event(
+    event: object,
+) -> tuple[Point3D, Point3D, Point3D] | None:
+    if not isinstance(event, Mapping):
+        return None
+    if str(event.get("type") or "") != "pywp:editTargets":
+        return None
+    changes = event.get("changes")
+    if not isinstance(changes, list):
+        return None
+
+    current_surface, current_t1, current_t3 = _build_points_from_state()
+    for change in changes:
+        if not isinstance(change, Mapping):
+            continue
+        name = str(change.get("name", "")).strip()
+        if name and name != SINGLE_WELL_NAME:
+            continue
+        points = _edited_points_from_entry(
+            change,
+            current_surface=current_surface,
+            current_t1=current_t1,
+            current_t3=current_t3,
+        )
+        if points is not None:
+            return points
+    return None
+
+
+def _apply_pending_single_well_target_edit() -> None:
+    pending = st.session_state.pop(SINGLE_WELL_PENDING_EDIT_KEY, None)
+    if not isinstance(pending, Mapping):
+        return
+    surface = _point_from_payload(pending.get("surface"))
+    t1 = _point_from_payload(pending.get("t1"))
+    t3 = _point_from_payload(pending.get("t3"))
+    if surface is None or t1 is None or t3 is None:
+        return
+    _apply_points_to_state(surface=surface, t1=t1, t3=t3)
+
+
+def _queue_single_well_target_edit(event: object) -> bool:
+    if not isinstance(event, Mapping):
+        return False
+    nonce = str(event.get("nonce") or "")
+    if nonce and nonce == str(
+        st.session_state.get(SINGLE_WELL_LAST_EDIT_NONCE_KEY, "")
+    ):
+        return False
+    points = _points_from_single_well_edit_event(event)
+    if points is None:
+        return False
+    surface, t1, t3 = points
+    st.session_state[SINGLE_WELL_PENDING_EDIT_KEY] = {
+        "surface": _point_payload(surface),
+        "t1": _point_payload(t1),
+        "t3": _point_payload(t3),
+    }
+    if nonce:
+        st.session_state[SINGLE_WELL_LAST_EDIT_NONCE_KEY] = nonce
+    st.session_state[SINGLE_WELL_EDIT_VERSION_KEY] = int(
+        st.session_state.get(SINGLE_WELL_EDIT_VERSION_KEY, 0)
+    ) + 1
+    st.session_state[SINGLE_WELL_EDIT_MESSAGE_KEY] = (
+        "Точки S/t1/t3 обновлены из 3D. "
+        "Пересчитайте траекторию, чтобы построить ствол по новым целям."
+    )
+    _clear_result()
+    return True
+
+
 def _parse_points_import_text(raw_text: str) -> tuple[Point3D, Point3D, Point3D]:
     normalized = str(raw_text).replace("\\n", "\n").replace("\\r", "\n")
     lines = [line.strip() for line in normalized.splitlines() if line.strip()]
@@ -423,6 +628,10 @@ def _init_state() -> None:
     st.session_state.setdefault("actual_profile_df", None)
     st.session_state.setdefault("actual_trajectory_import_text", "")
     st.session_state.setdefault("actual_trajectory_df", None)
+    st.session_state.setdefault(SINGLE_WELL_EDIT_VERSION_KEY, 0)
+    st.session_state.setdefault(SINGLE_WELL_LAST_EDIT_NONCE_KEY, "")
+    st.session_state.setdefault(SINGLE_WELL_EDIT_MESSAGE_KEY, "")
+    _apply_pending_single_well_target_edit()
     legacy_plan_df = st.session_state.get("actual_trajectory_df")
     if (
         st.session_state.get("plan_csb_df") is None
@@ -439,6 +648,13 @@ def _clear_result() -> None:
     st.session_state["last_runtime_s"] = None
     st.session_state["last_input_signature"] = None
     st.session_state["last_run_log_lines"] = []
+
+
+def _discard_previous_result_after_failed_run() -> None:
+    st.session_state["last_result"] = None
+    st.session_state["last_built_at"] = ""
+    st.session_state["last_runtime_s"] = None
+    st.session_state["last_input_signature"] = None
 
 
 def _bump_profile_version(*, plan: bool = False, actual: bool = False) -> None:
@@ -985,6 +1201,7 @@ def _run_planner_if_clicked(
             progress.progress(100, text="Расчет завершен.")
             phase_placeholder.success(f"Расчет завершен за {elapsed_s:.2f} с")
     except PlanningError as exc:
+        _discard_previous_result_after_failed_run()
         st.session_state["last_error"] = str(exc)
         st.session_state["last_runtime_s"] = None
         err_msg = format_run_log_line(
@@ -994,6 +1211,7 @@ def _run_planner_if_clicked(
         log_lines.append(err_msg)
         phase_placeholder.error("Расчет завершился ошибкой")
     except Exception as exc:
+        _discard_previous_result_after_failed_run()
         message = f"{exc.__class__.__name__}: {exc}".strip().rstrip(":")
         st.session_state["last_error"] = message
         st.session_state["last_runtime_s"] = None
@@ -1064,10 +1282,95 @@ def _build_single_well_result_view(
     )
 
 
+def _render_editable_single_well_scene(
+    container: object,
+    payload: dict[str, object],
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    config: TrajectoryConfig,
+    component_key: str,
+) -> None:
+    editable_payload = dict(payload)
+    editable_payload["edit_wells"] = _single_well_edit_wells_payload(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=config,
+    )
+
+    def _render_scene() -> object:
+        return render_local_three_scene(
+            editable_payload,
+            height=560,
+            key=component_key,
+            instance_token=int(st.session_state.get(SINGLE_WELL_EDIT_VERSION_KEY, 0)),
+        )
+
+    if hasattr(container, "__enter__") and hasattr(container, "__exit__"):
+        with container:
+            event = _render_scene()
+    else:
+        event = _render_scene()
+    if _queue_single_well_target_edit(event):
+        st.rerun()
+
+
+def _render_target_only_editor(
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    config: TrajectoryConfig,
+) -> None:
+    with st.container(border=True):
+        st.markdown("### 3D цели")
+        st.caption(
+            "Траектория не построена или устарела. "
+            "Точки S/t1/t3 можно двигать в 3D и затем пересчитать."
+        )
+        payload = single_well_target_only_three_payload(
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            well_name=SINGLE_WELL_NAME,
+            color=TRAJECTORY_COLOR_PRIMARY,
+        )
+        _render_editable_single_well_scene(
+            st,
+            payload,
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            config=config,
+            component_key="single-well-targets-only-3d",
+        )
+
+
+def _render_pending_single_well_edit_message() -> None:
+    message = str(st.session_state.pop(SINGLE_WELL_EDIT_MESSAGE_KEY, "") or "").strip()
+    if message:
+        st.success(message)
+
+
 def _render_last_result() -> None:
     last_result = st.session_state.get("last_result")
     if last_result is None:
-        st.info("Задайте параметры и нажмите «Построить траекторию».")
+        if st.session_state.get("last_error"):
+            st.info(
+                "Траектория не построена. Проверьте диагностику выше, "
+                "подвиньте цели в 3D при необходимости и запустите расчет заново."
+            )
+        else:
+            st.info("Задайте параметры и нажмите «Построить траекторию».")
+        surface, t1, t3 = _build_points_from_state()
+        _render_target_only_editor(
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            config=_build_config_from_state(),
+        )
         return
 
     is_stale = (
@@ -1086,6 +1389,13 @@ def _render_last_result() -> None:
             "Предыдущий результат устарел или поврежден. "
             f"Причина: {exc.__class__.__name__}: {exc}. Выполните расчет заново."
         )
+        surface, t1, t3 = _build_points_from_state()
+        _render_target_only_editor(
+            surface=surface,
+            t1=t1,
+            t3=t3,
+            config=_build_config_from_state(),
+        )
         return
     t1_horizontal_offset_m = render_key_metrics(
         view=well_view,
@@ -1097,6 +1407,15 @@ def _render_last_result() -> None:
         title_trajectory=None,
         title_plan=None,
         border=True,
+        render_3d_override=lambda container, payload: _render_editable_single_well_scene(
+            container,
+            payload,
+            surface=well_view.surface,
+            t1=well_view.t1,
+            t3=well_view.t3,
+            config=well_view.config,
+            component_key="single-well-result-3d",
+        ),
     )
     render_result_tables(
         view=well_view,
@@ -1134,6 +1453,7 @@ def run_app() -> None:
         config_input=config_input,
     )
     _render_calculation_feedback()
+    _render_pending_single_well_edit_message()
     _render_last_result()
 
 

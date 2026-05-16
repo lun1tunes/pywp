@@ -320,6 +320,64 @@ def test_parallel_anti_collision_falls_back_when_process_pool_breaks(
     assert anti_collision_report_rows(fallback) == anti_collision_report_rows(serial)
 
 
+def test_parallel_anti_collision_falls_back_when_payload_cannot_pickle(
+    monkeypatch,
+) -> None:
+    model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=4)
+    wells = [
+        build_anti_collision_well(
+            name=name,
+            color="#123456",
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            model=model,
+            include_display_geometry=False,
+            analysis_sample_step_m=10.0,
+        )
+        for name, y_offset_m in (
+            ("WELL-A", 0.0),
+            ("WELL-B", 6.0),
+            ("WELL-C", 80.0),
+        )
+    ]
+
+    class PicklingExecutor:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+        def submit(self, *args, **kwargs):
+            raise anticollision_module.PicklingError(
+                "Can't pickle <class 'pywp.models.Point3D'>"
+            )
+
+    monkeypatch.setattr(anticollision_module, "ProcessPoolExecutor", PicklingExecutor)
+
+    serial = analyze_anti_collision(
+        wells,
+        build_overlap_geometry=False,
+        parallel_workers=0,
+    )
+    fallback = analyze_anti_collision(
+        wells,
+        build_overlap_geometry=False,
+        parallel_workers=2,
+    )
+
+    assert fallback.pair_count == serial.pair_count
+    assert fallback.overlapping_pair_count == serial.overlapping_pair_count
+    assert anti_collision_report_rows(fallback) == anti_collision_report_rows(serial)
+
+
 def test_local_refine_finds_overlap_between_coarse_scan_stations() -> None:
     covariance = np.diag([36.0, 36.0, 36.0])
     zero = np.zeros((3, 3), dtype=float)

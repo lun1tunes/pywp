@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
+from pickle import PicklingError
 from time import perf_counter
 from typing import Callable, Mapping
 
@@ -711,7 +712,7 @@ def _calculate_pair_overlap_jobs(
                 completed_parallel_count += 1
                 if progress_callback is not None:
                     progress_callback()
-    except (BrokenProcessPool, OSError, RuntimeError, ValueError):
+    except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
         return calculate_serial(
             progress_limit=max(len(jobs) - completed_parallel_count, 0)
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from pickle import PicklingError
 from time import perf_counter
 from typing import Callable
 
@@ -283,7 +284,7 @@ def _swap_surfaces_and_recalculate(
                 if raw_b is not None
                 else None
             )
-        except (BrokenProcessPool, OSError, RuntimeError, ValueError):
+        except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
             r_a = recalculate_well(new_records[g_a], cfg_a)
             r_b = recalculate_well(new_records[g_b], cfg_b)
     else:
@@ -350,7 +351,7 @@ def optimize_pad_order(
             max_workers=2,
             mp_context=_mp_ctx,
         )
-    except (BrokenProcessPool, OSError, RuntimeError, ValueError):
+    except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
         pool = None
 
     # --- Pre-build lightweight AC wells (no display geometry). ---
