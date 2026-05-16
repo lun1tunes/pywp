@@ -398,7 +398,7 @@ def render_calc_params_block(
         **widget_change_kwargs,
     )
 
-    d1, d2, d3, d4 = st.columns(4, gap="small")
+    d1, d2, d3 = st.columns(3, gap="small")
     d1.number_input(
         "Макс ПИ BUILD, deg/10m",
         key=_state_key(prefix, "dls_build_max"),
@@ -443,7 +443,7 @@ def render_calc_params_block(
         ),
         **widget_change_kwargs,
     )
-    d4.checkbox(
+    st.checkbox(
         "Предлагать J-образную траекторию",
         key=_state_key(prefix, "offer_j_profile"),
         help=(

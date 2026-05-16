@@ -79,6 +79,17 @@ def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:
     at.session_state[_sidetrack_value_key("WELL-04")] = 760.0
 
     at.run(timeout=120)
+    warning_values = [str(widget.value) for widget in at.warning]
+    assert not any(
+        "wt_sidetrack_window_mode::WELL-04" in item for item in warning_values
+    )
+    assert not any(
+        "wt_sidetrack_window_kind::WELL-04" in item for item in warning_values
+    )
+    assert not any(
+        "wt_sidetrack_window_value::WELL-04" in item for item in warning_values
+    )
+
     run_buttons = [
         index
         for index, widget in enumerate(at.button)

@@ -166,4 +166,4 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
     assert config.dls_limits_deg_per_30m["HORIZONTAL"] == 0.8
     assert config.optimization_mode == OPTIMIZATION_NONE
     assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts
-    assert config.offer_j_profile is True
+    assert config.offer_j_profile is False

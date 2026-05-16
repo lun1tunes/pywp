@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Callable, Iterable, Mapping
 from time import perf_counter
 from dataclasses import dataclass
@@ -736,15 +737,18 @@ class WelltrackBatchPlanner:
             and len(selected_records) > 1
             and not self._has_pilot_dependencies(selected_records)
         ):
-            return self._evaluate_parallel(
-                selected_records=selected_records,
-                config=config,
-                config_by_name=config_by_name,
-                optimization_context_by_name=optimization_context_by_name,
-                progress_callback=progress_callback,
-                record_done_callback=record_done_callback,
-                parallel_workers=int(parallel_workers),
-            )
+            try:
+                return self._evaluate_parallel(
+                    selected_records=selected_records,
+                    config=config,
+                    config_by_name=config_by_name,
+                    optimization_context_by_name=optimization_context_by_name,
+                    progress_callback=progress_callback,
+                    record_done_callback=record_done_callback,
+                    parallel_workers=int(parallel_workers),
+                )
+            except (BrokenProcessPool, OSError, RuntimeError, ValueError):
+                pass
 
         summary_rows: list[dict[str, Any]] = []
         successes: list[SuccessfulWellPlan] = []
@@ -1006,6 +1010,8 @@ class WelltrackBatchPlanner:
                         if success_dict is not None
                         else None
                     )
+                except BrokenProcessPool:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     row = self._base_row(
                         record=next(r for r in selected_records if str(r.name) == name)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from time import perf_counter
 from typing import Callable
 
@@ -259,20 +260,32 @@ def _swap_surfaces_and_recalculate(
     # We submit dicts to avoid PicklingError when Streamlit reloads modules
     # (class identity changes between reruns).
     if pool is not None:
-        future_a = pool.submit(
-            _recalculate_well_from_dicts,
-            new_records[g_a].model_dump(),
-            cfg_a.model_dump(),
-        )
-        future_b = pool.submit(
-            _recalculate_well_from_dicts,
-            new_records[g_b].model_dump(),
-            cfg_b.model_dump(),
-        )
-        raw_a = future_a.result()
-        raw_b = future_b.result()
-        r_a = SuccessfulWellPlan.model_validate(raw_a) if raw_a is not None else None
-        r_b = SuccessfulWellPlan.model_validate(raw_b) if raw_b is not None else None
+        try:
+            future_a = pool.submit(
+                _recalculate_well_from_dicts,
+                new_records[g_a].model_dump(),
+                cfg_a.model_dump(),
+            )
+            future_b = pool.submit(
+                _recalculate_well_from_dicts,
+                new_records[g_b].model_dump(),
+                cfg_b.model_dump(),
+            )
+            raw_a = future_a.result()
+            raw_b = future_b.result()
+            r_a = (
+                SuccessfulWellPlan.model_validate(raw_a)
+                if raw_a is not None
+                else None
+            )
+            r_b = (
+                SuccessfulWellPlan.model_validate(raw_b)
+                if raw_b is not None
+                else None
+            )
+        except (BrokenProcessPool, OSError, RuntimeError, ValueError):
+            r_a = recalculate_well(new_records[g_a], cfg_a)
+            r_b = recalculate_well(new_records[g_b], cfg_b)
     else:
         r_a = recalculate_well(new_records[g_a], cfg_a)
         r_b = recalculate_well(new_records[g_b], cfg_b)
@@ -332,7 +345,13 @@ def optimize_pad_order(
     ref_wells = tuple(reference_wells)
     # Use a Streamlit-safe context: spawn on Windows/macOS, forkserver on Linux.
     _mp_ctx = process_pool_context()
-    pool = ProcessPoolExecutor(max_workers=2, mp_context=_mp_ctx)
+    try:
+        pool: ProcessPoolExecutor | None = ProcessPoolExecutor(
+            max_workers=2,
+            mp_context=_mp_ctx,
+        )
+    except (BrokenProcessPool, OSError, RuntimeError, ValueError):
+        pool = None
 
     # --- Pre-build lightweight AC wells (no display geometry). ---
     # Reused across candidates; only swapped wells are rebuilt.
@@ -462,7 +481,8 @@ def optimize_pad_order(
             if not swap_accepted:
                 break
     finally:
-        pool.shutdown(wait=True)
+        if pool is not None:
+            pool.shutdown(wait=True)
 
     progress_callback(100, f"Готово! Лучший score: {best_score:.3f}")
     return best_records, best_successes, improved

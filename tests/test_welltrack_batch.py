@@ -3055,6 +3055,47 @@ def test_batch_planner_parallel_workers_produces_same_results() -> None:
     assert len(done_names) == 3
 
 
+def test_batch_planner_parallel_workers_fall_back_when_pool_breaks(monkeypatch) -> None:
+    import pywp.welltrack_batch as batch_module
+
+    class BrokenExecutor:
+        def __init__(self, *args, **kwargs) -> None:
+            raise batch_module.BrokenProcessPool("spawn pool unavailable")
+
+    monkeypatch.setattr(batch_module, "ProcessPoolExecutor", BrokenExecutor)
+    records = [
+        WelltrackRecord(
+            name="PAR-FALLBACK-1",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="PAR-FALLBACK-2",
+            points=(
+                WelltrackPoint(x=50.0, y=50.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=850.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1550.0, y=2050.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={record.name for record in records},
+        config=_fast_batch_config(turn_solver_max_restarts=0),
+        parallel_workers=2,
+    )
+
+    assert [row["Статус"] for row in rows] == ["OK", "OK"]
+    assert {success.name for success in successes} == {
+        "PAR-FALLBACK-1",
+        "PAR-FALLBACK-2",
+    }
+
+
 def test_parent_selection_calculates_pilot_before_sidetrack() -> None:
     pilot = WelltrackRecord(
         name="WELL-04_PL",

@@ -43,6 +43,7 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["turn_solver_mode"] == str(cfg.turn_solver_mode)
     assert defaults["interpolation_method"] == str(cfg.interpolation_method)
     assert defaults["offer_j_profile"] == bool(cfg.offer_j_profile)
+    assert defaults["offer_j_profile"] is False
 
 
 def test_apply_defaults_resyncs_when_signature_changed(monkeypatch) -> None:
@@ -179,6 +180,9 @@ def test_invalid_kop_depth_function_payload_reverts_to_constant(monkeypatch) -> 
 def test_offer_j_profile_control_is_rendered_above_solver_expander() -> None:
     source = Path("pywp/ui_calc_params.py").read_text(encoding="utf-8")
 
+    assert source.index('"Макс итоговая MD (постпроверка), м"') < source.index(
+        '"Предлагать J-образную траекторию"'
+    )
     assert source.index('"Предлагать J-образную траекторию"') < source.index(
         'with st.expander("Параметры солвера"'
     )

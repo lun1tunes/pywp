@@ -233,27 +233,31 @@ def _render_sidetrack_window_params(
             disabled=len(parent_names) == 1,
         )
     mode_key = _sidetrack_mode_key(selected_parent)
-    if state.get(mode_key) not in _SIDETRACK_MODE_OPTIONS:
-        state[mode_key] = _SIDETRACK_AUTO
     with c2:
         mode = st.radio(
             "Окно зарезки",
             options=_SIDETRACK_MODE_OPTIONS,
-            index=_SIDETRACK_MODE_OPTIONS.index(str(state.get(mode_key))),
-            key=mode_key,
+            **_sidetrack_radio_state_kwargs(
+                state=state,
+                key=mode_key,
+                options=_SIDETRACK_MODE_OPTIONS,
+                default_value=_SIDETRACK_AUTO,
+            ),
             horizontal=True,
         )
     kind_key = _sidetrack_kind_key(selected_parent)
-    if state.get(kind_key) not in _SIDETRACK_KIND_OPTIONS:
-        state[kind_key] = "Z"
     value_key = _sidetrack_value_key(selected_parent)
     manual_mode = mode == _SIDETRACK_MANUAL
     with c3:
         kind_label = st.radio(
             "Задать по",
             options=_SIDETRACK_KIND_OPTIONS,
-            index=_SIDETRACK_KIND_OPTIONS.index(str(state.get(kind_key))),
-            key=kind_key,
+            **_sidetrack_radio_state_kwargs(
+                state=state,
+                key=kind_key,
+                options=_SIDETRACK_KIND_OPTIONS,
+                default_value="Z",
+            ),
             horizontal=True,
             disabled=not manual_mode,
         )
@@ -262,15 +266,17 @@ def _render_sidetrack_window_params(
         if str(kind_label or state.get(kind_key, "Z")).upper() == "MD"
         else "Z окна, м"
     )
+    value_kwargs: dict[str, object] = {"key": value_key}
+    if value_key not in state:
+        value_kwargs["value"] = None
     with c4:
         st.number_input(
             value_label,
-            value=None,
             step=10.0,
             format="%.2f",
-            key=value_key,
             placeholder="Авто" if not manual_mode else "Введите значение",
             disabled=not manual_mode,
+            **value_kwargs,
         )
 
     overrides, error = _sidetrack_window_overrides_from_state(parent_names, state)
@@ -283,6 +289,25 @@ def _render_sidetrack_window_params(
             )
         )
     return overrides, error
+
+
+def _sidetrack_radio_state_kwargs(
+    *,
+    state: MutableMapping[str, object],
+    key: str,
+    options: tuple[str, ...],
+    default_value: str,
+) -> dict[str, object]:
+    """Return Streamlit radio kwargs without duplicating session-state defaults."""
+
+    if state.get(key) in options:
+        return {"key": key}
+    if key in state:
+        del state[key]
+    return {
+        "key": key,
+        "index": options.index(default_value),
+    }
 
 
 def _sidetrack_overrides_from_render_state(

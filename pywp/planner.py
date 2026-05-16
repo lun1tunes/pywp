@@ -1048,7 +1048,7 @@ def _solve_turn_profile(
     )
     j_candidates_cache: list[ProfileParameters] | None = None
     if (
-        bool(getattr(config, "offer_j_profile", True))
+        bool(getattr(config, "offer_j_profile", False))
         and str(config.optimization_mode) == OPTIMIZATION_NONE
     ):
         _emit_progress(
@@ -1319,7 +1319,7 @@ def _solve_turn_profile(
             0.60 + 0.36 * float(index / max(total_starts, 1)),
         )
 
-    if bool(getattr(config, "offer_j_profile", True)) and (
+    if bool(getattr(config, "offer_j_profile", False)) and (
         not candidates or str(config.optimization_mode) == OPTIMIZATION_NONE
     ):
         if j_candidates_cache is None:

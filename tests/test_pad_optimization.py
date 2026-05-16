@@ -334,3 +334,49 @@ def test_pad_swap_recalculation_runs_under_spawn_context() -> None:
     assert swapped_records[0].points[0].x == pytest.approx(50.0)
     assert swapped_records[1].points[0].x == pytest.approx(0.0)
     assert set(swapped_successes) == {"PAD-A", "PAD-B"}
+
+
+def test_pad_swap_recalculation_falls_back_when_pool_breaks() -> None:
+    records = [
+        WelltrackRecord(
+            name="PAD-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="PAD-B",
+            points=(
+                WelltrackPoint(x=50.0, y=50.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=850.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1550.0, y=2050.0, z=2500.0, md=3500.0),
+            ),
+        ),
+    ]
+    config = TrajectoryConfig(
+        md_step_m=10.0,
+        md_step_control_m=2.0,
+        pos_tolerance_m=2.0,
+        turn_solver_max_restarts=0,
+    )
+
+    class BrokenPool:
+        def submit(self, *args, **kwargs):
+            raise pad_optimization.BrokenProcessPool("spawn pool unavailable")
+
+    result = pad_optimization._swap_surfaces_and_recalculate(
+        records=records,
+        successes={},
+        name_a="PAD-A",
+        name_b="PAD-B",
+        config_by_name={"PAD-A": config, "PAD-B": config},
+        pool=BrokenPool(),
+    )
+
+    assert result is not None
+    swapped_records, swapped_successes = result
+    assert swapped_records[0].points[0].x == pytest.approx(50.0)
+    assert swapped_records[1].points[0].x == pytest.approx(0.0)
+    assert set(swapped_successes) == {"PAD-A", "PAD-B"}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Callable, Mapping
@@ -665,9 +666,12 @@ def _calculate_pair_overlap_jobs(
 ) -> list[_AntiCollisionPairCalculation]:
     if not jobs:
         return []
-    workers = int(max(parallel_workers, 0))
-    if workers <= 1 or len(jobs) <= 1:
+    def calculate_serial(
+        *,
+        progress_limit: int | None = None,
+    ) -> list[_AntiCollisionPairCalculation]:
         results: list[_AntiCollisionPairCalculation] = []
+        progress_count = 0
         for job in jobs:
             results.append(
                 _calculate_pair_overlap_job_serial(
@@ -675,27 +679,42 @@ def _calculate_pair_overlap_jobs(
                     job=job,
                 )
             )
-            if progress_callback is not None:
+            if (
+                progress_callback is not None
+                and (progress_limit is None or progress_count < progress_limit)
+            ):
                 progress_callback()
+                progress_count += 1
         return results
+
+    workers = int(max(parallel_workers, 0))
+    if workers <= 1 or len(jobs) <= 1:
+        return calculate_serial()
 
     workers = min(workers, len(jobs))
     results_by_index: dict[int, _AntiCollisionPairCalculation] = {}
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=process_pool_context(allow_stdin_fork=True),
-        initializer=_initialize_parallel_pair_worker,
-        initargs=(ordered_wells,),
-    ) as executor:
-        futures = {
-            executor.submit(_calculate_pair_overlap_job_parallel, job): job
-            for job in jobs
-        }
-        for future in as_completed(futures):
-            result = future.result()
-            results_by_index[int(result.job_index)] = result
-            if progress_callback is not None:
-                progress_callback()
+    completed_parallel_count = 0
+    try:
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=process_pool_context(allow_stdin_fork=True),
+            initializer=_initialize_parallel_pair_worker,
+            initargs=(ordered_wells,),
+        ) as executor:
+            futures = {
+                executor.submit(_calculate_pair_overlap_job_parallel, job): job
+                for job in jobs
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                results_by_index[int(result.job_index)] = result
+                completed_parallel_count += 1
+                if progress_callback is not None:
+                    progress_callback()
+    except (BrokenProcessPool, OSError, RuntimeError, ValueError):
+        return calculate_serial(
+            progress_limit=max(len(jobs) - completed_parallel_count, 0)
+        )
     return [
         results_by_index[int(job.job_index)]
         for job in sorted(jobs, key=lambda item: int(item.job_index))
