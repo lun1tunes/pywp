@@ -45,7 +45,7 @@ def _fast_config(**overrides: object) -> TrajectoryConfig:
 
 
 def test_same_direction_reference_case_solves_with_minimum_kop() -> None:
-    config = _fast_config(kop_min_vertical_m=550.0)
+    config = _fast_config(kop_min_vertical_m=550.0, offer_j_profile=False)
     result = TrajectoryPlanner().plan(
         surface=Point3D(0.0, 0.0, 0.0),
         t1=Point3D(600.0, 800.0, 2400.0),
@@ -107,8 +107,8 @@ def test_planner_wraps_minimum_curvature_output_errors_as_planning_error(
 
 
 def test_higher_min_vertical_pushes_kop_up_deterministically() -> None:
-    config_low = _fast_config(kop_min_vertical_m=550.0)
-    config_high = _fast_config(kop_min_vertical_m=900.0)
+    config_low = _fast_config(kop_min_vertical_m=550.0, offer_j_profile=False)
+    config_high = _fast_config(kop_min_vertical_m=900.0, offer_j_profile=False)
     planner = TrajectoryPlanner()
 
     result_low = planner.plan(
@@ -133,8 +133,8 @@ def test_higher_min_vertical_pushes_kop_up_deterministically() -> None:
 
 def test_higher_build_dls_reduces_total_md() -> None:
     planner = TrajectoryPlanner()
-    config_soft = _fast_config(dls_build_max_deg_per_30m=3.0)
-    config_hard = _fast_config(dls_build_max_deg_per_30m=6.0)
+    config_soft = _fast_config(dls_build_max_deg_per_30m=3.0, offer_j_profile=False)
+    config_hard = _fast_config(dls_build_max_deg_per_30m=6.0, offer_j_profile=False)
 
     result_soft = planner.plan(
         surface=Point3D(0.0, 0.0, 0.0),
@@ -174,14 +174,8 @@ def test_deep_low_angle_turn_solution_survives_relaxed_build_limit() -> None:
     result_08_pi = planner.plan(surface=surface, t1=t1, t3=t3, config=config_08_pi)
     result_10_pi = planner.plan(surface=surface, t1=t1, t3=t3, config=config_10_pi)
 
-    assert (
-        float(result_08_pi.summary["distance_t1_m"])
-        <= config_08_pi.pos_tolerance_m
-    )
-    assert (
-        float(result_10_pi.summary["distance_t1_m"])
-        <= config_10_pi.pos_tolerance_m
-    )
+    assert float(result_08_pi.summary["distance_t1_m"]) <= config_08_pi.pos_tolerance_m
+    assert float(result_10_pi.summary["distance_t1_m"]) <= config_10_pi.pos_tolerance_m
     assert float(result_10_pi.summary["md_total_m"]) <= float(
         result_08_pi.summary["md_total_m"]
     )
@@ -189,10 +183,330 @@ def test_deep_low_angle_turn_solution_survives_relaxed_build_limit() -> None:
         550.0, abs=1e-6
     )
     assert (
+        str(result_10_pi.summary["trajectory_type"])
+        == "Unified J Profile + Build + Azimuth Turn"
+    )
+    assert str(result_10_pi.summary["trajectory_profile_family"]) == "unified"
+    assert (
         float(result_10_pi.summary["max_dls_total_deg_per_30m"])
         <= float(config_10_pi.dls_build_max_deg_per_30m) + 1e-6
     )
     assert int(result_10_pi.summary["solver_turn_restarts_used"]) == 0
+
+
+def test_j_profile_proposal_does_not_label_spatial_turn_as_j_profile() -> None:
+    record = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
+    )[0]
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    planner = TrajectoryPlanner()
+    messages_enabled: list[str] = []
+    messages_disabled: list[str] = []
+
+    enabled = planner.plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=_fast_config(
+            kop_min_vertical_m=550.0,
+            dls_build_max_deg_per_30m=3.0,
+            turn_solver_max_restarts=0,
+            offer_j_profile=True,
+        ),
+        progress_callback=lambda message, _fraction: messages_enabled.append(message),
+    )
+    disabled = planner.plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=_fast_config(
+            kop_min_vertical_m=550.0,
+            dls_build_max_deg_per_30m=3.0,
+            turn_solver_max_restarts=0,
+            offer_j_profile=False,
+        ),
+        progress_callback=lambda message, _fraction: messages_disabled.append(message),
+    )
+
+    assert str(enabled.summary["trajectory_type"]) == (
+        "Unified J Profile + Build + Azimuth Turn"
+    )
+    assert str(enabled.summary["trajectory_profile_family"]) == "unified"
+    assert str(disabled.summary["trajectory_type"]) == (
+        "Unified J Profile + Build + Azimuth Turn"
+    )
+    assert str(disabled.summary["trajectory_profile_family"]) == "unified"
+    assert not any("J-образные кандидаты" in message for message in messages_enabled)
+    assert any("fallback-поиск" in message for message in messages_enabled)
+    assert any("fallback-поиск" in message for message in messages_disabled)
+
+
+def test_classic_j_profile_uses_single_build_without_hold_or_second_build() -> None:
+    from pywp.planner import (
+        _evaluate_profile_candidate,
+        _profile_single_build_j,
+        _resolve_horizontal_dls,
+        _solve_post_entry_section,
+    )
+    from pywp.planner_geometry import _build_section_geometry
+    from pywp.planner_validation import _build_trajectory
+
+    entry_inc_deg = 60.0
+    build_dls_deg_per_30m = 3.0
+    radius_m = 30.0 * 180.0 / np.pi / build_dls_deg_per_30m
+    build_lateral_m = radius_m * (1.0 - np.cos(np.radians(entry_inc_deg)))
+    build_vertical_m = radius_m * np.sin(np.radians(entry_inc_deg))
+    kop_vertical_m = 550.0
+    horizontal_step_m = 1000.0
+    t1_tvd_m = kop_vertical_m + build_vertical_m
+    t3_tvd_m = t1_tvd_m + horizontal_step_m / np.tan(np.radians(entry_inc_deg))
+
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(0.0, build_lateral_m, t1_tvd_m)
+    t3 = Point3D(0.0, build_lateral_m + horizontal_step_m, t3_tvd_m)
+    config = _fast_config(
+        kop_min_vertical_m=kop_vertical_m,
+        entry_inc_target_deg=entry_inc_deg,
+        max_inc_deg=70.0,
+        dls_build_min_deg_per_30m=0.1,
+        dls_build_max_deg_per_30m=build_dls_deg_per_30m,
+        turn_solver_max_restarts=0,
+    )
+
+    geometry = _build_section_geometry(surface=surface, t1=t1, t3=t3, config=config)
+    post_entry = _solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=_resolve_horizontal_dls(config=config),
+        max_inc_deg=float(config.max_inc_deg),
+    )
+    assert post_entry is not None
+
+    profile = _profile_single_build_j(
+        geometry=geometry,
+        config=config,
+        post_entry=post_entry,
+        build_dls_lower_deg_per_30m=0.1,
+        build_dls_upper_deg_per_30m=build_dls_deg_per_30m,
+    )
+    assert profile is not None
+    trajectory = _build_trajectory(profile)
+
+    assert str(profile.profile_family) == "j_profile"
+    assert float(profile.hold_length_m) == pytest.approx(0.0, abs=1e-9)
+    assert float(profile.build2_length_m) == pytest.approx(0.0, abs=1e-9)
+    assert float(profile.dls_build2_deg_per_30m) == pytest.approx(
+        0.0,
+        abs=1e-9,
+    )
+    optimization_eval = _evaluate_profile_candidate(
+        candidate=profile,
+        target_point=np.array([t1.x, t1.y, t1.z], dtype=float),
+        config=config,
+    )
+    assert optimization_eval.feasible
+    assert float(optimization_eval.build2_margin_m) == pytest.approx(0.0, abs=1e-9)
+    assert [segment.name for segment in trajectory.segments] == [
+        "VERTICAL",
+        "BUILD1",
+        "HORIZONTAL",
+    ]
+
+
+def test_variable_build_j_profile_handles_non_coplanar_entry_without_hold() -> None:
+    surface = Point3D(377899.9, 930000.4, -20.0)
+    t1 = Point3D(377309.9, 929820.8, 3701.51)
+    t3 = Point3D(376307.3, 929590.1, 3749.49)
+    config = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=3.0,
+        optimization_mode="none",
+        turn_solver_max_restarts=0,
+        offer_j_profile=True,
+    )
+
+    result = TrajectoryPlanner().plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=config,
+    )
+
+    assert str(result.summary["trajectory_type"]) == "J-образная траектория"
+    assert str(result.summary["trajectory_profile_family"]) == "j_profile"
+    assert float(result.summary["distance_t1_m"]) <= 1e-6
+    assert float(result.summary["hold_length_m"]) == pytest.approx(0.0, abs=1e-9)
+    assert float(result.summary["build2_dls_selected_deg_per_30m"]) == pytest.approx(
+        0.0,
+        abs=1e-9,
+    )
+    assert list(result.stations["segment"].drop_duplicates()) == [
+        "VERTICAL",
+        "BUILD1",
+        "HORIZONTAL",
+    ]
+    assert float(result.stations["DLS_deg_per_30m"].max()) <= 3.0 + 1e-6
+
+
+def test_offer_j_profile_prefers_simple_j_before_unified_when_feasible() -> None:
+    record = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
+    )[0]
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    planner = TrajectoryPlanner()
+    messages: list[str] = []
+
+    enabled = planner.plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=_fast_config(
+            kop_min_vertical_m=550.0,
+            dls_build_max_deg_per_30m=6.0,
+            optimization_mode="none",
+            turn_solver_max_restarts=0,
+            offer_j_profile=True,
+        ),
+        progress_callback=lambda message, _fraction: messages.append(message),
+    )
+    disabled = planner.plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=_fast_config(
+            kop_min_vertical_m=550.0,
+            dls_build_max_deg_per_30m=6.0,
+            optimization_mode="none",
+            turn_solver_max_restarts=0,
+            offer_j_profile=False,
+        ),
+    )
+
+    assert str(enabled.summary["trajectory_type"]) == "J-образная траектория"
+    assert str(enabled.summary["trajectory_profile_family"]) == "j_profile"
+    assert list(enabled.stations["segment"].drop_duplicates()) == [
+        "VERTICAL",
+        "BUILD1",
+        "HORIZONTAL",
+    ]
+    assert str(disabled.summary["trajectory_profile_family"]) == "unified"
+    assert any("сначала проверяем classic J-профиль" in item for item in messages)
+    assert any("classic J-профиль принят" in item for item in messages)
+
+
+def test_minimize_md_keeps_shorter_unified_profile_over_feasible_j_profile() -> None:
+    records = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACK_ERD.INC").read_text(encoding="utf-8")
+    )
+    surface, t1, t3 = welltrack_points_to_targets(records[0].points)
+    result = TrajectoryPlanner().plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=_fast_config(
+            max_total_md_postcheck_m=9000.0,
+            turn_solver_max_restarts=0,
+            offer_j_profile=True,
+        ),
+    )
+
+    assert str(result.summary["trajectory_profile_family"]) == "unified"
+    assert 67.0 <= float(result.summary["hold_inc_deg"]) <= 73.0
+
+
+def test_split_build_rescue_can_find_independent_build_candidate() -> None:
+    import pywp.planner as planner_module
+    from pywp.planner_geometry import _build_section_geometry
+    from pywp.planner_validation import _estimate_t1_endpoint_for_profile
+
+    record = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
+    )[0]
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    config = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=3.0,
+        turn_solver_max_restarts=0,
+    )
+    geometry = _build_section_geometry(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=config,
+    )
+    build_dls_upper = planner_module._resolve_build_dls_max(
+        config=config,
+        constrained_segments=("BUILD1", "BUILD2"),
+    )
+    build_dls_lower = planner_module._effective_build_dls_lower_bound(
+        config=config,
+        upper_dls_deg_per_30m=build_dls_upper,
+    )
+    post_entry = planner_module._solve_post_entry_section(
+        ds_m=geometry.ds_13_m,
+        dz_m=geometry.dz_13_m,
+        inc_entry_deg=geometry.inc_entry_deg,
+        dls_deg_per_30m=planner_module._resolve_horizontal_dls(config=config),
+        max_inc_deg=float(config.max_inc_deg),
+    )
+    assert post_entry is not None
+
+    bounds = (
+        (0.0, 1.0),
+        (
+            float(max(config.kop_min_vertical_m, 0.0)),
+            float(max(geometry.z1_m - 1e-9, config.kop_min_vertical_m + 1e-9)),
+        ),
+        (0.5, float(geometry.inc_entry_deg - 0.5)),
+        (0.0, float(max(geometry.s1_m + geometry.z1_m, 1000.0))),
+        (0.0, 360.0),
+    )
+    search_settings = planner_module._turn_search_settings(restart_index=0)
+    base_seed_vectors = planner_module._turn_seed_vectors(
+        geometry=geometry,
+        build_dls_lower_deg_per_30m=build_dls_lower,
+        build_dls_upper_deg_per_30m=build_dls_upper,
+        bounds=bounds,
+        search_settings=search_settings,
+        zero_azimuth_turn=False,
+    )
+    target_point = np.array(
+        [geometry.t1_east_m, geometry.t1_north_m, geometry.t1_tvd_m],
+        dtype=float,
+    )
+
+    candidates, best = planner_module._collect_split_build_turn_candidates(
+        geometry=geometry,
+        build_dls_lower_deg_per_30m=build_dls_lower,
+        build_dls_upper_deg_per_30m=build_dls_upper,
+        bounds=bounds,
+        base_seed_vectors=base_seed_vectors,
+        post_entry=post_entry,
+        target_point=target_point,
+        config=config,
+        search_settings=search_settings,
+        zero_azimuth_turn=False,
+    )
+
+    assert candidates
+    candidate = candidates[0]
+    endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
+    _, _, _, lateral_m, vertical_m, _ = planner_module._target_miss_components(
+        endpoint,
+        target_point,
+    )
+    assert lateral_m <= config.lateral_tolerance_m
+    assert vertical_m <= config.vertical_tolerance_m
+    assert candidate.dls_build1_deg_per_30m != pytest.approx(
+        candidate.dls_build2_deg_per_30m,
+        abs=1e-3,
+    )
+    assert max(
+        candidate.dls_build1_deg_per_30m,
+        candidate.dls_build2_deg_per_30m,
+    ) <= build_dls_upper + 1e-6
+    assert best[0] < 1e-6
 
 
 def test_post_entry_solver_keeps_boundary_case_within_numerical_tolerance() -> None:
@@ -228,10 +542,11 @@ def test_md_optimization_stops_within_theoretical_gap_when_solution_is_already_s
     None
 ):
     planner = TrajectoryPlanner()
-    config_none = _fast_config(kop_min_vertical_m=200.0)
+    config_none = _fast_config(kop_min_vertical_m=200.0, offer_j_profile=False)
     config_md = _fast_config(
         kop_min_vertical_m=200.0,
         optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        offer_j_profile=False,
     )
 
     result_none = planner.plan(
@@ -786,11 +1101,13 @@ def test_md_optimization_boundary_refinement_can_improve_total_md() -> None:
         kop_min_vertical_m=200.0,
         optimization_mode="none",
         max_total_md_postcheck_m=25000.0,
+        offer_j_profile=False,
     )
     config_md = _fast_config(
         kop_min_vertical_m=200.0,
         optimization_mode=OPTIMIZATION_MINIMIZE_MD,
         max_total_md_postcheck_m=25000.0,
+        offer_j_profile=False,
     )
 
     result_none = planner.plan(surface=surface, t1=t1, t3=t3, config=config_none)
@@ -1448,11 +1765,13 @@ def test_md_optimization_2d_refinement_can_improve_total_md_when_boundary_stage_
         kop_min_vertical_m=200.0,
         optimization_mode="none",
         max_total_md_postcheck_m=25000.0,
+        offer_j_profile=False,
     )
     config_md = _fast_config(
         kop_min_vertical_m=200.0,
         optimization_mode=OPTIMIZATION_MINIMIZE_MD,
         max_total_md_postcheck_m=25000.0,
+        offer_j_profile=False,
     )
 
     result_none = planner.plan(surface=surface, t1=t1, t3=t3, config=config_none)
@@ -1686,6 +2005,7 @@ def test_kop_optimization_hits_minimum_kop_limit_for_shallow_turn_case() -> None
         optimization_mode=OPTIMIZATION_MINIMIZE_MD,
         turn_solver_max_restarts=0,
         max_total_md_postcheck_m=20000.0,
+        offer_j_profile=False,
     )
     config_kop = _fast_config(
         kop_min_vertical_m=550.0,
@@ -1693,6 +2013,7 @@ def test_kop_optimization_hits_minimum_kop_limit_for_shallow_turn_case() -> None
         optimization_mode=OPTIMIZATION_MINIMIZE_KOP,
         turn_solver_max_restarts=0,
         max_total_md_postcheck_m=20000.0,
+        offer_j_profile=False,
     )
 
     result_md = planner.plan(surface=surface, t1=t1, t3=t3, config=config_md)
@@ -1725,10 +2046,12 @@ def test_md_optimization_skips_full_slsqp_when_2d_stage_confirms_boundary_extrem
     config_md = TrajectoryConfig(
         optimization_mode=OPTIMIZATION_MINIMIZE_MD,
         turn_solver_max_restarts=2,
+        offer_j_profile=False,
     )
     config_kop = TrajectoryConfig(
         optimization_mode=OPTIMIZATION_MINIMIZE_KOP,
         turn_solver_max_restarts=2,
+        offer_j_profile=False,
     )
 
     result_md = planner.plan(surface=surface, t1=t1, t3=t3, config=config_md)

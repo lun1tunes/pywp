@@ -8,6 +8,7 @@ from pywp.classification import TRAJECTORY_REVERSE_DIRECTION
 
 class PlanningError(RuntimeError):
     """Raised when trajectory planning fails due to infeasible constraints or geometry."""
+
     pass
 
 
@@ -45,7 +46,9 @@ class SectionGeometry:
     t1_tvd_m: float
 
     def is_coplanar(self, tolerance_m: float) -> bool:
-        return bool(abs(self.t1_cross_m) <= tolerance_m and abs(self.t3_cross_m) <= tolerance_m)
+        return bool(
+            abs(self.t1_cross_m) <= tolerance_m and abs(self.t3_cross_m) <= tolerance_m
+        )
 
     def is_zero_azimuth_turn(self, target_direction: str, tolerance_m: float) -> bool:
         if str(target_direction) == TRAJECTORY_REVERSE_DIRECTION:
@@ -71,6 +74,8 @@ class ProfileParameters:
     horizontal_dls_deg_per_30m: float
     azimuth_hold_deg: float
     azimuth_entry_deg: float
+    profile_family: str = "unified"
+    build1_controls: tuple[tuple[float, float, float, float], ...] = ()
 
     @property
     def md_t1_m(self) -> float:

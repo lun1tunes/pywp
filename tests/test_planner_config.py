@@ -47,14 +47,14 @@ def test_build_segment_dls_limits_applies_shared_build_limit() -> None:
 
 def test_trajectory_config_defaults_use_shared_segment_limit_builder() -> None:
     cfg = TrajectoryConfig()
-    expected = build_segment_dls_limits_deg_per_30m(
-        DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
-    )
+    expected = build_segment_dls_limits_deg_per_30m(DEFAULT_BUILD_DLS_MAX_DEG_PER_30M)
     assert cfg.dls_build_max_deg_per_30m == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     assert cfg.dls_limits_deg_per_30m == expected
 
 
-def test_trajectory_config_auto_syncs_segment_limits_when_build_max_overridden() -> None:
+def test_trajectory_config_auto_syncs_segment_limits_when_build_max_overridden() -> (
+    None
+):
     cfg = TrajectoryConfig(dls_build_max_deg_per_30m=5.5)
     assert cfg.dls_limits_deg_per_30m["BUILD1"] == 5.5
     assert cfg.dls_limits_deg_per_30m["BUILD2"] == 5.5
@@ -74,8 +74,12 @@ def test_trajectory_config_validated_copy_revalidates_and_syncs_limits() -> None
         cfg.validated_copy(turn_solver_mode="unsupported_turn_solver")
 
 
-def test_trajectory_config_rejects_cross_field_invalid_values_at_model_boundary() -> None:
-    with pytest.raises(ValidationError, match="entry_inc_target_deg cannot exceed max_inc_deg"):
+def test_trajectory_config_rejects_cross_field_invalid_values_at_model_boundary() -> (
+    None
+):
+    with pytest.raises(
+        ValidationError, match="entry_inc_target_deg cannot exceed max_inc_deg"
+    ):
         TrajectoryConfig(entry_inc_target_deg=85.0, max_inc_deg=80.0)
 
     with pytest.raises(
@@ -111,7 +115,9 @@ def test_trajectory_config_rejects_unknown_dls_segment_names() -> None:
         TrajectoryConfig(dls_limits_deg_per_30m={"BUILD3": 4.0})
 
 
-def test_trajectory_config_strips_removed_legacy_fields_for_backward_compatibility() -> None:
+def test_trajectory_config_strips_removed_legacy_fields_for_backward_compatibility() -> (
+    None
+):
     cfg = TrajectoryConfig.model_validate(
         {
             "objective_mode": "minimize_total_md",
@@ -135,7 +141,9 @@ def test_point3d_rejects_non_finite_coordinates() -> None:
         Point3D(x=0.0, y=math.inf, z=0.0)
 
 
-def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits() -> None:
+def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits() -> (
+    None
+):
     config = build_trajectory_config(
         md_step_m=CFG_DEFAULTS.md_step_m,
         md_step_control_m=CFG_DEFAULTS.md_step_control_m,
@@ -158,3 +166,4 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
     assert config.dls_limits_deg_per_30m["HORIZONTAL"] == 0.8
     assert config.optimization_mode == OPTIMIZATION_NONE
     assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts
+    assert config.offer_j_profile is True

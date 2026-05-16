@@ -3469,6 +3469,8 @@
               ? 12
               : role === "reference_label"
               ? 10
+              : role === "target_label" || role === "control_point_label"
+              ? 10
               : 0;
           addSceneLabel(
             String(item.text || ""),

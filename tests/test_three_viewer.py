@@ -39,6 +39,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "transform: translate(8px, -50%);" in html
     assert "contain: layout paint;" in html
     assert 'roleClassName = labelRole === "well_label" ? "well-name-label" : ""' in html
+    assert 'role === "target_label" || role === "control_point_label"' in html
     assert "font-size: 10px;" in html
     assert ".axes-gizmo-line" in html
     assert ".axes-gizmo-label" in html
@@ -385,6 +386,17 @@ def test_ptc_single_well_view_uses_three_edit_override() -> None:
     assert '"component_key": f"ptc-single-well-{selected.name}"' in page_source
     assert "wt._build_edit_wells_payload(" in page_source
     assert "render_3d_override=render_3d_override" in page_source
+
+
+def test_three_viewer_edit_state_has_single_preview_line_declaration() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert (
+        html.count(
+            "const editLineObjects = []; // THREE.LineSegments per well for preview"
+        )
+        == 1
+    )
 
 
 def test_three_viewer_asset_loader_reloads_file_after_mtime_change(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,8 @@ from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp.anticollision import (
     AntiCollisionAnalysis,
     AntiCollisionCorridor,
+    AntiCollisionIncrementalStats,
+    AntiCollisionProgress,
     build_anti_collision_well,
 )
 from pywp.anticollision_optimization import (
@@ -39,7 +42,6 @@ from pywp.uncertainty import (
     UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC,
     planning_uncertainty_model_for_preset,
 )
-from pywp.well_pad import detect_well_pads
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 pytestmark = pytest.mark.integration
@@ -515,7 +517,9 @@ def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> N
     assert "Оставить все точки без изменений" in button_labels
 
 
-def test_welltrack_page_initial_crs_selectbox_has_no_session_state_default_warning() -> None:
+def test_welltrack_page_initial_crs_selectbox_has_no_session_state_default_warning() -> (
+    None
+):
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
 
     at.run(timeout=120)
@@ -683,6 +687,24 @@ def _successful_plan_xy(
         md_t1_m=1000.0,
         config=TrajectoryConfig(optimization_mode="none"),
     )
+
+
+def _ok_summary_row(name: str) -> dict[str, object]:
+    return {
+        "Скважина": str(name),
+        "Точек": 3,
+        "Статус": "OK",
+        "Модель траектории": "Unified J Profile + Build + Azimuth Turn",
+        "Классификация целей": "—",
+        "Сложность": "—",
+        "Отход t1, м": "—",
+        "Длина ГС, м": "—",
+        "INC в t1, deg": "—",
+        "ЗУ HOLD, deg": "—",
+        "Макс ПИ, deg/10m": "—",
+        "Макс MD, м": "—",
+        "Проблема": "",
+    }
 
 
 def _vertical_successful_plan(
@@ -1093,40 +1115,6 @@ def test_trajectory_three_payload_first_surface_arrow_uses_fixed_pad_order() -> 
     assert float(arrow["vertices"][11][2] - arrow["vertices"][4][2]) >= 5.0
 
 
-def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
-    page = wt_import_module
-    payload = {
-        "legend": [
-            {"label": "PAD1-A", "color": "#22c55e", "opacity": 1.0},
-            {"label": "PAD2-A", "color": "#f59e0b", "opacity": 1.0},
-            {"label": "Зоны пересечений", "color": "#fca5a5", "opacity": 0.4},
-        ]
-    }
-
-    updated = page._augment_three_payload(
-        payload=payload,
-        legend_tree=[
-            {
-                "id": "pad::PAD-01",
-                "label": "Куст PAD-01",
-                "children": [
-                    {"id": "well::PAD1-A", "label": "PAD1-A", "color": "#22c55e"}
-                ],
-            }
-        ],
-        focus_targets={"pad::PAD-01": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}},
-        hidden_flat_legend_labels={"PAD1-A", "PAD2-A"},
-    )
-
-    assert updated["legend_tree"]
-    assert updated["focus_targets"] == {
-        "pad::PAD-01": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}
-    }
-    assert list(updated["legend"]) == [
-        {"label": "Зоны пересечений", "color": "#fca5a5", "opacity": 0.4}
-    ]
-
-
 def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
     page = wt_import_module
 
@@ -1472,30 +1460,6 @@ def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> Non
     )
 
 
-def test_welltrack_successful_batch_run_clears_stale_error_and_updates_selection_on_next_run() -> (
-    None
-):
-    at = AppTest.from_file("pages/01_trajectory_constructor.py")
-    records = _records()
-    at.session_state["wt_records"] = records
-    at.session_state["wt_records_original"] = records
-    at.session_state["wt_last_error"] = "Batch-расчет завершился ошибкой"
-
-    at.run()
-    _click_button(at, "Рассчитать траектории")
-    at.run(timeout=120)
-
-    assert [error.value for error in at.error] == []
-    assert at.session_state["wt_last_error"] == ""
-
-    metrics = {widget.label: widget.value for widget in at.metric}
-    assert metrics["Без замечаний"] == "3"
-    assert metrics["Ошибки"] == "0"
-
-    at.run()
-    assert _multiselect_value(at, "Скважины для расчёта") == []
-
-
 def test_welltrack_page_keeps_single_general_run_form_after_results_exist() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
@@ -1611,24 +1575,13 @@ def test_fresh_import_prefills_pilot_parent_as_first_fixed_slot() -> None:
     ]
 
     page._store_parsed_records(records)
-    pads = page._ensure_pad_configs(
-        list(page.st.session_state["wt_records_original"])
-    )
+    pads = page._ensure_pad_configs(list(page.st.session_state["wt_records_original"]))
     pad_id = str(pads[0].pad_id)
 
     assert page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] == (
         (1, "WELL-A"),
     )
     assert [str(well.name) for well in pads[0].wells] == ["WELL-B", "WELL-A"]
-
-
-def test_pad_config_defaults_to_center_anchor_mode() -> None:
-    page = wt_import_module
-    pads = detect_well_pads(_multi_pad_records())
-
-    defaults = page._pad_config_defaults(pads[0])
-
-    assert str(defaults["surface_anchor_mode"]) == page.PAD_SURFACE_ANCHOR_CENTER
 
 
 def test_project_pads_for_ui_groups_prepositioned_surfaces_into_single_pad() -> None:
@@ -2015,36 +1968,8 @@ def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> 
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
     at.session_state["wt_summary_rows"] = [
-        {
-            "Скважина": "WELL-A",
-            "Точек": 3,
-            "Статус": "OK",
-            "Модель траектории": "Unified J Profile + Build + Azimuth Turn",
-            "Классификация целей": "—",
-            "Сложность": "—",
-            "Отход t1, м": "—",
-            "Длина ГС, м": "—",
-            "INC в t1, deg": "—",
-            "ЗУ HOLD, deg": "—",
-            "Макс ПИ, deg/10m": "—",
-            "Макс MD, м": "—",
-            "Проблема": "",
-        },
-        {
-            "Скважина": "WELL-B",
-            "Точек": 3,
-            "Статус": "OK",
-            "Модель траектории": "Unified J Profile + Build + Azimuth Turn",
-            "Классификация целей": "—",
-            "Сложность": "—",
-            "Отход t1, м": "—",
-            "Длина ГС, м": "—",
-            "INC в t1, deg": "—",
-            "ЗУ HOLD, deg": "—",
-            "Макс ПИ, deg/10m": "—",
-            "Макс MD, м": "—",
-            "Проблема": "",
-        },
+        _ok_summary_row("WELL-A"),
+        _ok_summary_row("WELL-B"),
     ]
     at.session_state["wt_successes"] = [
         _successful_plan(name="WELL-A", y_offset_m=0.0),
@@ -2068,36 +1993,8 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
     at.session_state["wt_summary_rows"] = [
-        {
-            "Скважина": "WELL-A",
-            "Точек": 3,
-            "Статус": "OK",
-            "Модель траектории": "Unified J Profile + Build + Azimuth Turn",
-            "Классификация целей": "—",
-            "Сложность": "—",
-            "Отход t1, м": "—",
-            "Длина ГС, м": "—",
-            "INC в t1, deg": "—",
-            "ЗУ HOLD, deg": "—",
-            "Макс ПИ, deg/10m": "—",
-            "Макс MD, м": "—",
-            "Проблема": "",
-        },
-        {
-            "Скважина": "WELL-B",
-            "Точек": 3,
-            "Статус": "OK",
-            "Модель траектории": "Unified J Profile + Build + Azimuth Turn",
-            "Классификация целей": "—",
-            "Сложность": "—",
-            "Отход t1, м": "—",
-            "Длина ГС, м": "—",
-            "INC в t1, deg": "—",
-            "ЗУ HOLD, deg": "—",
-            "Макс ПИ, deg/10m": "—",
-            "Макс MD, м": "—",
-            "Проблема": "",
-        },
+        _ok_summary_row("WELL-A"),
+        _ok_summary_row("WELL-B"),
     ]
     at.session_state["wt_successes"] = [
         _successful_plan(name="WELL-A", y_offset_m=0.0),
@@ -2405,7 +2302,7 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     assert page.st.session_state["wt_edit_targets_pending_names"] == []
     assert page.st.session_state["wt_edit_targets_highlight_names"] == []
     assert page.st.session_state["wt_edit_targets_highlight_points"] == {}
-    assert page.st.session_state["wt_anticollision_analysis_cache"] == {}
+    assert page.st.session_state["wt_anticollision_analysis_cache"] is cached_analysis
 
 
 def test_apply_three_edit_targets_defers_result_widget_state_update() -> None:
@@ -2792,8 +2689,10 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
     assert all_download["mime"] == "application/x-7z-compressed"
     assert selected_download["file_name"] == "WELL-A.dev"
     assert selected_download["mime"] == "text/plain"
-    assert bytes(selected_download["data"]).decode("utf-8").startswith(
-        "# SURVEY FROM PYWP"
+    assert (
+        bytes(selected_download["data"])
+        .decode("utf-8")
+        .startswith("# SURVEY FROM PYWP")
     )
 
 
@@ -3324,6 +3223,7 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(
 ) -> None:
     page = wt_import_module
     page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
     calls = {"analysis": 0}
     analysis = AntiCollisionAnalysis(
         wells=(),
@@ -3335,12 +3235,37 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(
         target_overlap_pair_count=0,
         worst_separation_factor=None,
     )
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        calls["analysis"] += 1
+        return (
+            analysis,
+            {str(success.name): ("sig", object()) for success in successes},
+            {},
+            AntiCollisionIncrementalStats(
+                reused_well_count=0,
+                rebuilt_well_count=len(successes) + len(reference_wells),
+                reused_pair_count=0,
+                recalculated_pair_count=0,
+            ),
+        )
+
     monkeypatch.setattr(
         page,
-        "_build_anti_collision_analysis",
-        lambda successes, *, model, name_to_color=None, reference_wells=(), **_kw: (
-            calls.__setitem__("analysis", calls["analysis"] + 1) or analysis
-        ),
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
     )
     monkeypatch.setattr(
         page,
@@ -3380,6 +3305,213 @@ def test_cached_anti_collision_view_model_reuses_analysis_for_identical_inputs(
     assert "Использован кэш anti-collision анализа." in "\n".join(
         second_run["log_lines"]
     )
+
+
+def test_cached_anti_collision_view_model_passes_previous_incremental_cache(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=3,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    calls: list[dict[str, object]] = []
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        call_index = len(calls)
+        calls.append(
+            {
+                "previous_well_cache": previous_well_cache,
+                "previous_pair_cache": previous_pair_cache,
+                "well_signature_by_name": dict(well_signature_by_name or {}),
+            }
+        )
+        return (
+            analysis,
+            {
+                str(success.name): (
+                    str((well_signature_by_name or {}).get(str(success.name), "")),
+                    object(),
+                )
+                for success in successes
+            },
+            {("WELL-A", "WELL-B"): object()},
+            AntiCollisionIncrementalStats(
+                reused_well_count=2 if call_index else 0,
+                rebuilt_well_count=1 if call_index else len(successes),
+                reused_pair_count=1 if call_index else 0,
+                recalculated_pair_count=2 if call_index else 3,
+            ),
+        )
+
+    monkeypatch.setattr(
+        page,
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+
+    model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
+    page._cached_anti_collision_view_model(
+        successes=[
+            _successful_plan(name="WELL-A", y_offset_m=0.0),
+            _successful_plan(name="WELL-B", y_offset_m=20.0),
+            _successful_plan(name="WELL-C", y_offset_m=40.0),
+        ],
+        uncertainty_model=model,
+        records=[],
+    )
+    page._cached_anti_collision_view_model(
+        successes=[
+            _successful_plan(name="WELL-A", y_offset_m=0.0),
+            _successful_plan(name="WELL-B", y_offset_m=25.0),
+            _successful_plan(name="WELL-C", y_offset_m=40.0),
+        ],
+        uncertainty_model=model,
+        records=[],
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["previous_well_cache"] is None
+    assert calls[0]["previous_pair_cache"] is None
+    assert isinstance(calls[1]["previous_well_cache"], Mapping)
+    assert isinstance(calls[1]["previous_pair_cache"], Mapping)
+    assert (
+        calls[0]["well_signature_by_name"]["WELL-A"]
+        == calls[1]["well_signature_by_name"]["WELL-A"]
+    )
+    assert (
+        calls[0]["well_signature_by_name"]["WELL-B"]
+        != calls[1]["well_signature_by_name"]["WELL-B"]
+    )
+    last_run = page.st.session_state["wt_anticollision_last_run"]
+    assert int(last_run["reused_pair_count"]) == 1
+    assert "Инкрементальный anti-collision" in "\n".join(last_run["log_lines"])
+
+
+def test_cached_anti_collision_view_model_reports_pair_progress_with_eta(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=10,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    captured_workers: list[int] = []
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        captured_workers.append(int(parallel_workers))
+        assert progress_callback is not None
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=10,
+                completed_pair_count=5,
+                reused_pair_count=2,
+                recalculated_pair_count=6,
+                prefiltered_pair_count=1,
+                elapsed_s=30.0,
+                parallel_workers=int(parallel_workers),
+            )
+        )
+        return (
+            analysis,
+            {str(success.name): ("sig", object()) for success in successes},
+            {},
+            AntiCollisionIncrementalStats(
+                reused_well_count=0,
+                rebuilt_well_count=len(successes) + len(reference_wells),
+                reused_pair_count=2,
+                recalculated_pair_count=8,
+            ),
+        )
+
+    monkeypatch.setattr(
+        page,
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+    progress_events: list[tuple[int, str]] = []
+
+    page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
+        records=[],
+        progress_callback=lambda value, text: progress_events.append(
+            (int(value), str(text))
+        ),
+        parallel_workers=4,
+    )
+
+    assert captured_workers == [4]
+    assert any(
+        value == 48
+        and "пары 5/10" in text
+        and "осталось оц. 30 с" in text
+        and "4 процессов" in text
+        for value, text in progress_events
+    )
+    assert page.st.session_state["wt_anticollision_last_run"]["parallel_workers"] == 4
 
 
 def test_anti_collision_cache_key_includes_reference_mwd_assignment() -> None:
@@ -4531,9 +4663,7 @@ def test_all_wells_three_payload_renders_pilot_labels_from_records_mapping() -> 
     )
 
     pilot_marker = next(
-        item
-        for item in payload["points"]
-        if str(item.get("name")) == "WELL-A_PL: цели"
+        item for item in payload["points"] if str(item.get("name")) == "WELL-A_PL: цели"
     )
     label_texts = [str(item.get("text")) for item in payload["labels"]]
 
@@ -4736,9 +4866,7 @@ def test_actual_reference_mwd_assignment_defaults_to_poor_and_selects_unknown() 
             unknown_names=None,
         )
     )
-    assert {
-        model.iscwsa_tool_code for model in none_model_by_name.values()
-    } == {
+    assert {model.iscwsa_tool_code for model in none_model_by_name.values()} == {
         planning_uncertainty_model_for_preset(
             UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
         ).iscwsa_tool_code
@@ -5085,7 +5213,9 @@ def test_anticollision_figures_include_reference_trajectory_wells_without_target
         "APP-1 (Проектная утвержденная): цели" == str(trace.name)
         for trace in figure_plan.data
     )
-    assert "FACT-1 (Фактическая) cone" in {str(trace.name) for trace in figure_plan.data}
+    assert "FACT-1 (Фактическая) cone" in {
+        str(trace.name) for trace in figure_plan.data
+    }
     assert "APP-1 (Проектная утвержденная) cone" in {
         str(trace.name) for trace in figure_plan.data
     }
@@ -5276,9 +5406,7 @@ def test_all_wells_and_anticollision_figures_show_well_names_at_t3() -> None:
         assert "WELL-B: t1 label" in trace_names
 
 
-def test_all_wells_three_payload_preserves_overview_labels_and_legend() -> (
-    None
-):
+def test_all_wells_three_payload_preserves_overview_labels_and_legend() -> None:
     page = wt_import_module
     success = _successful_plan(name="WELL-A", y_offset_m=0.0)
     payload = page._all_wells_three_payload(
@@ -5400,9 +5528,7 @@ def test_anticollision_three_payload_overrides_include_edit_wells() -> None:
     assert edit_wells[0]["t3"] == [2000.0, 0.0, 0.0]
 
 
-def test_all_wells_three_payload_preserves_hover_metadata_for_tooltip() -> (
-    None
-):
+def test_all_wells_three_payload_preserves_hover_metadata_for_tooltip() -> None:
     page = wt_import_module
     payload = page._all_wells_three_payload(
         [_successful_plan(name="WELL-A", y_offset_m=0.0)]
@@ -5490,40 +5616,6 @@ def test_optimize_three_payload_merges_same_style_objects() -> None:
     assert optimized["camera"] == DEFAULT_THREE_CAMERA
     assert optimized["labels"] == payload["labels"]
     assert optimized["legend"] == payload["legend"]
-
-
-def test_optimize_three_payload_keeps_mesh_roles_separate() -> None:
-    page = wt_import_module
-    payload = {
-        "background": "#FFFFFF",
-        "bounds": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
-        "camera": DEFAULT_THREE_CAMERA,
-        "lines": [],
-        "points": [],
-        "meshes": [
-            {
-                "vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                "faces": [[0, 1, 2]],
-                "color": "#15D562",
-                "opacity": 0.12,
-                "role": "cone",
-            },
-            {
-                "vertices": [[1.0, 1.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]],
-                "faces": [[0, 1, 2]],
-                "color": "#15D562",
-                "opacity": 0.12,
-                "role": "overlap",
-            },
-        ],
-        "labels": [],
-        "legend": [],
-    }
-
-    optimized = page._optimize_three_payload(payload)
-
-    assert len(optimized["meshes"]) == 2
-    assert {str(item["role"]) for item in optimized["meshes"]} == {"cone", "overlap"}
 
 
 def test_three_payload_marks_conflict_segments_as_anticollision_layer() -> None:
@@ -5617,9 +5709,9 @@ def test_three_payload_decimates_reference_hover_points() -> None:
         len(hover_only_points[0]["hover"])
         == page.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
     )
-    assert {
-        str(item.get("name")) for item in hover_only_points[0]["hover"]
-    } == {"FACT-001"}
+    assert {str(item.get("name")) for item in hover_only_points[0]["hover"]} == {
+        "FACT-001"
+    }
 
 
 def test_fast_three_payload_keeps_reference_well_hover_names() -> None:

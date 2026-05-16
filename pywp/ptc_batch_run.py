@@ -249,7 +249,6 @@ def store_merged_batch_results(
     new_successes: list[SuccessfulWellPlan],
     pending_edit_target_names: Callable[[], list[str]],
 ) -> None:
-    pending_before = set(pending_edit_target_names())
     merged_rows, merged_successes = merge_batch_results(
         records=records,
         existing_rows=state.get("wt_summary_rows"),
@@ -278,8 +277,6 @@ def store_merged_batch_results(
             for name in pending_edit_target_names()
             if str(name) not in successful_names
         ]
-        if pending_before and not pending_edit_target_names():
-            state["wt_anticollision_analysis_cache"] = {}
     state["wt_pending_selected_names"] = list(
         recommended_batch_selection(records=records, summary_rows=merged_rows)
     )
@@ -299,6 +296,7 @@ def run_batch_if_clicked(
     if request is None:
         return
     state = st_module.session_state
+    state["wt_last_parallel_workers"] = int(max(int(request.parallel_workers), 0))
     selected_names = [str(name) for name in request.selected_names]
     selected_set = set(selected_names)
     if not selected_set:

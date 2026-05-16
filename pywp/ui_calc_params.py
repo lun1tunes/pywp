@@ -28,8 +28,12 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "kop_min_vertical",
 )
 _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
-_STR_SUFFIXES: tuple[str, ...] = ("optimization_mode", "turn_solver_mode", "interpolation_method")
-_BOOL_SUFFIXES: tuple[str, ...] = ()
+_STR_SUFFIXES: tuple[str, ...] = (
+    "optimization_mode",
+    "turn_solver_mode",
+    "interpolation_method",
+)
+_BOOL_SUFFIXES: tuple[str, ...] = ("offer_j_profile",)
 
 
 def calc_param_defaults() -> dict[str, float | int | str | bool]:
@@ -51,12 +55,13 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
         "turn_solver_mode": str(cfg.turn_solver_mode),
         "interpolation_method": str(cfg.interpolation_method),
+        "offer_j_profile": bool(cfg.offer_j_profile),
     }
 
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 11
+_DEFAULTS_SCHEMA_VERSION = 12
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
@@ -101,9 +106,7 @@ class CalcParamBinding:
 
 def _defaults_signature() -> tuple[tuple[str, float | int | str | bool], ...]:
     defaults = calc_param_defaults()
-    return tuple(
-        (key, defaults[key]) for key in sorted(defaults.keys())
-    )
+    return tuple((key, defaults[key]) for key in sorted(defaults.keys()))
 
 
 def _state_key(prefix: str, suffix: str) -> str:
@@ -126,8 +129,13 @@ def _kop_function_payload_key(prefix: str = "") -> str:
 
 
 def kop_min_vertical_mode(prefix: str = "") -> str:
-    mode = str(st.session_state.get(_kop_mode_key(prefix), KOP_MIN_VERTICAL_MODE_CONSTANT)).strip()
-    if mode not in {KOP_MIN_VERTICAL_MODE_CONSTANT, KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION}:
+    mode = str(
+        st.session_state.get(_kop_mode_key(prefix), KOP_MIN_VERTICAL_MODE_CONSTANT)
+    ).strip()
+    if mode not in {
+        KOP_MIN_VERTICAL_MODE_CONSTANT,
+        KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION,
+    }:
         return KOP_MIN_VERTICAL_MODE_CONSTANT
     return mode
 
@@ -164,8 +172,7 @@ def kop_min_vertical_detail_label(prefix: str = "") -> str:
         return ""
     anchors = list(zip(kop_function.anchor_depths_tvd_m, kop_function.anchor_kop_md_m))
     preview = ", ".join(
-        f"{float(depth):.0f}->{float(kop):.0f}"
-        for depth, kop in anchors[:4]
+        f"{float(depth):.0f}->{float(kop):.0f}" for depth, kop in anchors[:4]
     )
     if len(anchors) > 4:
         preview += ", …"
@@ -178,7 +185,9 @@ def set_kop_min_vertical_function(
     kop_function: ActualFundKopDepthFunction,
 ) -> None:
     st.session_state[_kop_mode_key(prefix)] = KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION
-    st.session_state[_kop_function_payload_key(prefix)] = kop_function.model_dump(mode="python")
+    st.session_state[_kop_function_payload_key(prefix)] = kop_function.model_dump(
+        mode="python"
+    )
     if kop_function.anchor_kop_md_m:
         st.session_state[_state_key(prefix, "kop_min_vertical")] = float(
             min(kop_function.anchor_kop_md_m)
@@ -193,7 +202,9 @@ def clear_kop_min_vertical_function(
     st.session_state[_kop_mode_key(prefix)] = KOP_MIN_VERTICAL_MODE_CONSTANT
     st.session_state[_kop_function_payload_key(prefix)] = None
     if kop_min_vertical_m is not None:
-        st.session_state[_state_key(prefix, "kop_min_vertical")] = float(kop_min_vertical_m)
+        st.session_state[_state_key(prefix, "kop_min_vertical")] = float(
+            kop_min_vertical_m
+        )
 
 
 def _setdefault_many(
@@ -245,7 +256,9 @@ def apply_calc_param_defaults(prefix: str = "", *, force: bool = False) -> None:
     schema_changed = int(st.session_state.get(schema_key, 0)) < int(
         _DEFAULTS_SCHEMA_VERSION
     )
-    effective_force = bool(force or signature_changed or schema_changed or legacy_migrated)
+    effective_force = bool(
+        force or signature_changed or schema_changed or legacy_migrated
+    )
     _setdefault_many(prefixes=(prefix,), force=effective_force, defaults=defaults)
     mode_key = _kop_mode_key(prefix)
     payload_key = _kop_function_payload_key(prefix)
@@ -283,7 +296,9 @@ def calc_param_signature(prefix: str = "") -> tuple[object, ...]:
     signature.append(kop_min_vertical_mode(prefix))
     kop_function = kop_min_vertical_function_from_state(prefix)
     if kop_function is not None:
-        signature.append(tuple(float(value) for value in kop_function.anchor_depths_tvd_m))
+        signature.append(
+            tuple(float(value) for value in kop_function.anchor_depths_tvd_m)
+        )
         signature.append(tuple(float(value) for value in kop_function.anchor_kop_md_m))
     return tuple(signature)
 
@@ -298,12 +313,15 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         entry_inc_tolerance_deg=float(_state_value(prefix, "entry_inc_tol")),
         max_inc_deg=float(_state_value(prefix, "max_inc")),
         max_total_md_postcheck_m=float(_state_value(prefix, "max_total_md_postcheck")),
-        dls_build_max_deg_per_30m=pi_to_dls(float(_state_value(prefix, "dls_build_max"))),
+        dls_build_max_deg_per_30m=pi_to_dls(
+            float(_state_value(prefix, "dls_build_max"))
+        ),
         kop_min_vertical_m=float(_state_value(prefix, "kop_min_vertical")),
         optimization_mode=str(_state_value(prefix, "optimization_mode")),
         turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
         turn_solver_mode=str(_state_value(prefix, "turn_solver_mode")),
         interpolation_method=str(_state_value(prefix, "interpolation_method")),
+        offer_j_profile=bool(_state_value(prefix, "offer_j_profile")),
     )
 
 
@@ -380,7 +398,7 @@ def render_calc_params_block(
         **widget_change_kwargs,
     )
 
-    d1, d2, d3 = st.columns(3, gap="small")
+    d1, d2, d3, d4 = st.columns(4, gap="small")
     d1.number_input(
         "Макс ПИ BUILD, deg/10m",
         key=_state_key(prefix, "dls_build_max"),
@@ -422,6 +440,18 @@ def render_calc_params_block(
         help=(
             "Порог итоговой длины ствола по MD для финальной проверки. "
             "На сам поиск решения не влияет."
+        ),
+        **widget_change_kwargs,
+    )
+    d4.checkbox(
+        "Предлагать J-образную траекторию",
+        key=_state_key(prefix, "offer_j_profile"),
+        help=(
+            "Если включено, планнер сначала пробует простую J-модель: "
+            "VERTICAL -> один BUILD -> участок к t3. ПИ по зениту и азимуту "
+            "подбирается без превышения максимального ПИ. В режиме без оптимизации "
+            "допустимый J-профиль принимается сразу; при минимизации MD финальный "
+            "выбор всё равно остаётся за более коротким допустимым профилем."
         ),
         **widget_change_kwargs,
     )

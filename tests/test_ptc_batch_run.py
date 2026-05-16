@@ -146,7 +146,7 @@ def test_batch_selection_status_ignores_blank_problem_markers() -> None:
     assert status.warning_count == 0
 
 
-def test_store_merged_batch_results_clears_recalculated_edit_targets() -> None:
+def test_store_merged_batch_results_preserves_anticollision_cache_for_incremental_rerun() -> None:
     state: dict[str, object] = {
         "wt_summary_rows": [
             {"Скважина": "WELL-A", "Статус": "Не рассчитана", "Проблема": ""},
@@ -179,7 +179,7 @@ def test_store_merged_batch_results_clears_recalculated_edit_targets() -> None:
     ]
     assert state["wt_edit_targets_pending_names"] == []
     assert state["wt_edit_targets_highlight_names"] == []
-    assert state["wt_anticollision_analysis_cache"] == {}
+    assert "cached" in state["wt_anticollision_analysis_cache"]
 
 
 def test_run_batch_syncs_pilot_surface_after_active_pad_layout(
@@ -256,6 +256,122 @@ def test_run_batch_syncs_pilot_surface_after_active_pad_layout(
     )
     assert float(pilot_record.points[0].x) == 10.0
     assert float(pilot_record.points[0].y) == 20.0
+
+
+def test_run_batch_stores_parallel_worker_count_for_anti_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_parallel_workers: list[int] = []
+
+    class FakeBatchPlanner:
+        last_evaluation_metadata = SimpleNamespace(
+            skipped_selected_names=(),
+            cluster_blocked=False,
+            cluster_resolved_early=False,
+            cluster_blocking_reason=None,
+        )
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def evaluate(self, **kwargs: object):
+            captured_parallel_workers.append(int(kwargs["parallel_workers"]))
+            return ([{"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""}], [])
+
+    state: dict[str, object] = {
+        "wt_successes": [],
+        "wt_summary_rows": None,
+    }
+    fake_st = _FakeStreamlit(state)
+    monkeypatch.setattr(ptc_batch_run, "WelltrackBatchPlanner", FakeBatchPlanner)
+
+    ptc_batch_run.run_batch_if_clicked(
+        requests=[
+            ptc_batch_run.BatchRunRequest(
+                selected_names=["WELL-A"],
+                config=TrajectoryConfig(),
+                run_clicked=True,
+                parallel_workers=4,
+            )
+        ],
+        records=_records(),
+        hooks=_batch_run_hooks(),
+        st_module=fake_st,
+    )
+
+    assert captured_parallel_workers == [4]
+    assert state["wt_last_parallel_workers"] == 4
+
+
+def test_run_batch_clears_stale_error_and_recommends_no_followup_after_all_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeBatchPlanner:
+        last_evaluation_metadata = SimpleNamespace(
+            skipped_selected_names=(),
+            cluster_blocked=False,
+            cluster_resolved_early=False,
+            cluster_blocking_reason=None,
+        )
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def evaluate(self, **_kwargs: object):
+            return (
+                [
+                    {"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""},
+                    {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+                ],
+                [_success("WELL-A"), _success("WELL-B")],
+            )
+
+    focus_calls: list[str] = []
+    state: dict[str, object] = {
+        "wt_last_error": "Batch-расчет завершился ошибкой",
+        "wt_successes": [],
+        "wt_summary_rows": None,
+    }
+    hooks = ptc_batch_run.BatchRunHooks(
+        selected_execution_order=lambda names: list(names),
+        pending_edit_target_names=lambda: [],
+        ensure_pad_configs=lambda **_kwargs: [object()],
+        build_pad_plan_map=lambda _pads: {"pad": object()},
+        build_selected_override_configs=lambda **_kwargs: {},
+        build_selected_optimization_contexts=lambda **_kwargs: {},
+        reference_wells_from_state=lambda: (),
+        reference_uncertainty_models_from_state=lambda _reference_wells: {},
+        resolution_snapshot_well_names=lambda _snapshot: (),
+        format_prepared_override_scope=lambda **_kwargs: [],
+        prepared_plan_kind_label=lambda _snapshot: "",
+        build_last_anticollision_resolution=lambda **_kwargs: None,
+        focus_all_wells_anticollision_results=lambda: focus_calls.append(
+            "anticollision"
+        ),
+        focus_all_wells_trajectory_results=lambda: focus_calls.append("trajectory"),
+    )
+    monkeypatch.setattr(ptc_batch_run, "WelltrackBatchPlanner", FakeBatchPlanner)
+
+    ptc_batch_run.run_batch_if_clicked(
+        requests=[
+            ptc_batch_run.BatchRunRequest(
+                selected_names=["WELL-A", "WELL-B"],
+                config=TrajectoryConfig(),
+                run_clicked=True,
+            )
+        ],
+        records=_records(),
+        hooks=hooks,
+        st_module=_FakeStreamlit(state),
+    )
+
+    assert state["wt_last_error"] == ""
+    assert state["wt_pending_selected_names"] == []
+    assert [str(success.name) for success in state["wt_successes"]] == [
+        "WELL-A",
+        "WELL-B",
+    ]
+    assert focus_calls == ["trajectory"]
 
 
 class _FakePlaceholder:

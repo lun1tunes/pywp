@@ -145,6 +145,16 @@ def horizontal_offset_m(*, point: Point3D, reference: Point3D) -> float:
     return float((dx * dx + dy * dy) ** 0.5)
 
 
+def _summary_float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if pd.notna(result) else None
+
+
 def md_postcheck_issue_message(summary: Mapping[str, float | str]) -> str:
     md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
     if md_postcheck_excess_m <= 1e-6:
@@ -511,6 +521,7 @@ def render_result_plots(
         #     f"Пресет: {uncertainty_preset_label(selected_preset)}. "
         #     f"{uncertainty_model_caption(uncertainty_overlay.model)}"
         # )
+    kop_md_m = _summary_float_or_none(view.summary.get("kop_md_m"))
 
     render_trajectory_dls_panel(
         stations=view.stations,
@@ -521,6 +532,7 @@ def render_result_plots(
         target_pairs=view.target_pairs,
         md_t1_m=float(view.md_t1_m),
         dls_limits=view.config.dls_limits_deg_per_30m,
+        kop_md_m=kop_md_m,
         title=title_trajectory,
         border=border,
         trajectory_line_dash=view.trajectory_line_dash,

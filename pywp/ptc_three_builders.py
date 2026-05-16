@@ -75,6 +75,7 @@ def single_well_three_payload(
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
     well_name: str | None = None,
     md_t1_m: float | None = None,
+    kop_md_m: float | None = None,
     trajectory_line_dash: str = "solid",
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
@@ -170,6 +171,17 @@ def single_well_three_payload(
             "role": "marker",
         }
     )
+    for target_label, target_point in zip(target_labels, target_points, strict=False):
+        if str(target_label).strip().upper() == "S":
+            continue
+        payload["labels"].append(
+            _point_payload_label(
+                str(target_label),
+                target_point,
+                TARGET_COLOR_PRIMARY,
+                role="target_label",
+            )
+        )
     if well_name:
         payload["labels"].append(_well_name_label(str(well_name), t3, TARGET_COLOR_PRIMARY))
     _append_pilot_study_markers(
@@ -200,6 +212,37 @@ def single_well_three_payload(
                     ],
                     "role": "marker",
                 }
+            )
+
+    if kop_md_m is not None:
+        kop_point = _station_point_at_md(stations, float(kop_md_m))
+        if kop_point is not None:
+            _append_arrays_for_points(x_arrays, y_arrays, z_arrays, [kop_point])
+            payload["points"].append(
+                {
+                    "name": "KOP",
+                    "points": [kop_point],
+                    "color": "#073B4C",
+                    "opacity": 1.0,
+                    "size": 5.5,
+                    "symbol": "circle",
+                    "hover": [
+                        {
+                            "name": "KOP",
+                            "point": "KOP",
+                            "md": float(kop_md_m),
+                        }
+                    ],
+                    "role": "marker",
+                }
+            )
+            payload["labels"].append(
+                _point_payload_label(
+                    "KOP",
+                    kop_point,
+                    "#073B4C",
+                    role="control_point_label",
+                )
             )
 
     _append_single_well_zero_axes(
@@ -1306,6 +1349,30 @@ def _calculated_t1_t3_points(stations: pd.DataFrame, *, md_t1_m: float) -> list[
     ]
 
 
+def _station_point_at_md(stations: pd.DataFrame, md_m: float) -> list[float] | None:
+    if stations.empty or not {"MD_m", "X_m", "Y_m", "Z_m"}.issubset(stations.columns):
+        return None
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    coords = stations[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float)
+    valid_mask = np.isfinite(md_values) & np.all(np.isfinite(coords), axis=1)
+    if not np.any(valid_mask):
+        return None
+    md_values = md_values[valid_mask]
+    coords = coords[valid_mask]
+    unique_md, unique_indices = np.unique(md_values, return_index=True)
+    coords = coords[unique_indices]
+    if len(unique_md) == 0:
+        return None
+    if len(unique_md) == 1:
+        row = coords[0]
+        return [float(row[0]), float(row[1]), float(row[2])]
+    target_md = float(np.clip(float(md_m), float(unique_md[0]), float(unique_md[-1])))
+    return [
+        float(np.interp(target_md, unique_md, coords[:, axis]))
+        for axis in range(3)
+    ]
+
+
 def _trajectory_interval_points(
     stations: pd.DataFrame,
     *,
@@ -1525,6 +1592,21 @@ def _well_name_label(well_name: str, point: Point3D, color: str) -> dict[str, ob
         "position": [float(point.x), float(point.y), float(point.z)],
         "color": str(color),
         "role": "well_label",
+    }
+
+
+def _point_payload_label(
+    text: str,
+    point: list[float],
+    color: str,
+    *,
+    role: str,
+) -> dict[str, object]:
+    return {
+        "text": str(text),
+        "position": [float(point[0]), float(point[1]), float(point[2])],
+        "color": str(color),
+        "role": str(role),
     }
 
 

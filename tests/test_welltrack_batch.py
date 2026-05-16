@@ -36,7 +36,9 @@ from pywp.eclipse_welltrack import (
 )
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.mcm import compute_positions_min_curv
+from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.pilot_wells import SidetrackWindowOverride
+from pywp.planner_types import PlanningError
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
     parse_reference_trajectory_table,
@@ -239,6 +241,50 @@ def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
 
+def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [-500.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [1000.0, 1000.0],
+                "segment": ["HORIZONTAL", "HORIZONTAL"],
+            }
+        ),
+        summary={"trajectory_type": "base", "md_total_m": 1000.0},
+        azimuth_deg=90.0,
+        md_t1_m=0.0,
+    )
+    target_pairs = (
+        (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
+        (Point3D(800.0, 0.0, 1100.0), Point3D(1300.0, 0.0, 1100.0)),
+    )
+
+    with pytest.raises(PlanningError, match="HORIZONTAL_BUILD1"):
+        extend_plan_with_multi_horizontal_targets(
+            base_result=base_result,
+            target_pairs=target_pairs,
+            config=TrajectoryConfig(dls_build_max_deg_per_30m=1.0),
+        )
+
+    result = extend_plan_with_multi_horizontal_targets(
+        base_result=base_result,
+        target_pairs=target_pairs,
+        config=TrajectoryConfig(dls_build_max_deg_per_30m=3.0),
+    )
+
+    horizontal_build_dls = result.stations.loc[
+        result.stations["segment"] == "HORIZONTAL_BUILD1",
+        "DLS_deg_per_30m",
+    ].dropna()
+    assert not horizontal_build_dls.empty
+    assert float(horizontal_build_dls.max()) <= 3.0 + 1e-6
+    assert float(horizontal_build_dls.max()) > 1.0
+
+
 def test_turn_solver_build_limit_search_is_monotonic_for_debug_geometry() -> None:
     record = WelltrackRecord(
         name="debug_monotonic",
@@ -380,7 +426,7 @@ def test_batch_planner_evaluates_success_and_format_error() -> None:
     rows, successes = WelltrackBatchPlanner().evaluate(
         records=records,
         selected_names={"OK-1", "BAD-2"},
-        config=_fast_batch_config(),
+        config=_fast_batch_config(offer_j_profile=False),
     )
 
     assert len(rows) == 2
@@ -448,6 +494,104 @@ def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike
         .dropna()
     )
     assert float(horizontal_dls.max()) <= float(config.dls_build_max_deg_per_30m) + 1e-5
+
+
+@pytest.mark.integration
+def test_disabling_j_profile_preserves_classic_unified_flow_on_reference_sets() -> None:
+    cases = (
+        (
+            "tests/test_data/WELLTRACKS_DEBUG_1.INC",
+            {"well_01"},
+            {
+                "well_01": (
+                    "VERTICAL",
+                    "BUILD1",
+                    "HOLD",
+                    "BUILD2",
+                    "HORIZONTAL",
+                )
+            },
+        ),
+        (
+            "tests/test_data/WELLTRACKS4.INC",
+            {"well_06", "well_07"},
+            {
+                "well_06": (
+                    "VERTICAL",
+                    "BUILD1",
+                    "HOLD",
+                    "BUILD2",
+                    "HORIZONTAL",
+                ),
+                "well_07": (
+                    "VERTICAL",
+                    "BUILD1",
+                    "HOLD",
+                    "BUILD2",
+                    "HORIZONTAL",
+                ),
+            },
+        ),
+        (
+            "tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC",
+            {"well_08"},
+            {
+                "well_08": (
+                    "VERTICAL",
+                    "BUILD1",
+                    "HOLD",
+                    "BUILD2",
+                    "HORIZONTAL1",
+                    "HORIZONTAL_BUILD1",
+                    "HORIZONTAL2",
+                    "HORIZONTAL_BUILD2",
+                    "HORIZONTAL3",
+                )
+            },
+        ),
+        (
+            "tests/test_data/WELLTRACK_ERD.INC",
+            {"well_ERD_01"},
+            {
+                "well_ERD_01": (
+                    "VERTICAL",
+                    "BUILD1",
+                    "HOLD",
+                    "BUILD2",
+                    "HORIZONTAL",
+                )
+            },
+        ),
+    )
+
+    for path, selected_names, expected_segments_by_name in cases:
+        records = parse_welltrack_text(Path(path).read_text(encoding="utf-8"))
+        config = TrajectoryConfig(
+            md_step_m=10.0,
+            md_step_control_m=2.0,
+            turn_solver_max_restarts=0,
+            offer_j_profile=False,
+            max_total_md_postcheck_m=9000.0 if "ERD" in path else 20000.0,
+        )
+
+        rows, successes = WelltrackBatchPlanner().evaluate(
+            records=records,
+            selected_names=selected_names,
+            config=config,
+        )
+
+        assert {str(row["Скважина"]): str(row["Статус"]) for row in rows} == {
+            name: "OK" for name in selected_names
+        }
+        assert {str(success.name) for success in successes} == selected_names
+        for success in successes:
+            assert str(success.summary["trajectory_profile_family"]) == "unified"
+            assert str(success.summary["trajectory_type"]) != "J-образная траектория"
+            assert tuple(success.stations["segment"].drop_duplicates()) == (
+                expected_segments_by_name[str(success.name)]
+            )
+            md_values = success.stations["MD_m"].to_numpy(dtype=float)
+            assert bool(np.all(np.diff(md_values) > 0.0))
 
 
 @pytest.mark.integration
@@ -2348,7 +2492,11 @@ def test_cluster_rerun_on_welltracks3_keeps_well04_valid_and_disables_repeated_l
     records = parse_welltrack_text(
         Path("tests/test_data/WELLTRACKS3.INC").read_text(encoding="utf-8")
     )
-    base_config = _fast_batch_config(kop_min_vertical_m=550.0, optimization_mode="none")
+    base_config = _fast_batch_config(
+        kop_min_vertical_m=550.0,
+        optimization_mode="none",
+        offer_j_profile=False,
+    )
     planner = WelltrackBatchPlanner()
     rows, successes = planner.evaluate(
         records=records,

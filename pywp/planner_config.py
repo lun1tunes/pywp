@@ -77,6 +77,7 @@ def build_trajectory_config(
     turn_solver_max_restarts: int,
     max_total_md_postcheck_m: float = 6500.0,
     interpolation_method: str = INTERPOLATION_RODRIGUES,
+    offer_j_profile: bool = True,
 ) -> TrajectoryConfig:
     max_build = float(max(dls_build_max_deg_per_30m, 0.0))
     return TrajectoryConfig(
@@ -95,4 +96,5 @@ def build_trajectory_config(
         turn_solver_max_restarts=int(turn_solver_max_restarts),
         max_total_md_postcheck_m=float(max_total_md_postcheck_m),
         interpolation_method=str(interpolation_method),
+        offer_j_profile=bool(offer_j_profile),
     )

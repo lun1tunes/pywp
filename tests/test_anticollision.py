@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 import pywp.anticollision as anticollision_module
+import pywp.anticollision_rerun as anticollision_rerun_module
 from pywp.anticollision import (
     AntiCollisionAnalysis,
     AntiCollisionCorridor,
@@ -17,13 +18,17 @@ from pywp.anticollision import (
     anti_collision_report_events,
     anti_collision_report_rows,
     analyze_anti_collision,
+    analyze_anti_collision_incremental,
     build_anti_collision_well,
     collision_corridor_plan_polygon,
     collision_corridor_tube_mesh,
     collision_zone_plan_polygon,
     collision_zone_sphere_mesh,
 )
-from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
+from pywp.anticollision_rerun import (
+    build_anti_collision_analysis_for_successes,
+    build_anti_collision_wells_for_successes,
+)
 from pywp.anticollision_recommendations import (
     MANEUVER_BUILD2_ENTRY,
     MANEUVER_POSTENTRY_TURN,
@@ -128,6 +133,88 @@ def test_overlap_geometry_uses_dense_scan_samples_not_display_indices() -> None:
 
     assert analysis.corridors
     assert any(len(corridor.overlap_rings_xyz) > 0 for corridor in analysis.corridors)
+
+
+def test_anti_collision_progress_reports_pair_counts() -> None:
+    wells = [
+        build_anti_collision_well(
+            name=name,
+            color="#123456",
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            include_display_geometry=False,
+        )
+        for name, y_offset_m in (
+            ("WELL-A", 0.0),
+            ("WELL-B", 10.0),
+            ("WELL-C", 20.0),
+        )
+    ]
+    events: list[anticollision_module.AntiCollisionProgress] = []
+
+    analyze_anti_collision_incremental(
+        wells,
+        build_overlap_geometry=False,
+        progress_callback=events.append,
+    )
+
+    assert events
+    assert events[0].pair_count == 3
+    assert events[0].completed_pair_count == 0
+    assert events[-1].pair_count == 3
+    assert events[-1].completed_pair_count == 3
+    assert events[-1].recalculated_pair_count == 3
+
+
+def test_parallel_anti_collision_matches_serial_result() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=4)
+    wells = [
+        build_anti_collision_well(
+            name=name,
+            color="#123456",
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            model=model,
+            include_display_geometry=False,
+            analysis_sample_step_m=10.0,
+        )
+        for name, y_offset_m in (
+            ("WELL-A", 0.0),
+            ("WELL-B", 6.0),
+            ("WELL-C", 80.0),
+        )
+    ]
+    parallel_events: list[anticollision_module.AntiCollisionProgress] = []
+
+    serial = analyze_anti_collision(
+        wells,
+        build_overlap_geometry=False,
+        parallel_workers=0,
+    )
+    parallel = analyze_anti_collision(
+        wells,
+        build_overlap_geometry=False,
+        parallel_workers=2,
+        progress_callback=parallel_events.append,
+    )
+
+    assert parallel_events[-1].parallel_workers == 2
+    assert parallel_events[-1].completed_pair_count == serial.pair_count
+    assert parallel.pair_count == serial.pair_count
+    assert parallel.overlapping_pair_count == serial.overlapping_pair_count
+    assert parallel.target_overlap_pair_count == serial.target_overlap_pair_count
+    assert parallel.worst_separation_factor == pytest.approx(
+        serial.worst_separation_factor
+    )
+    assert anti_collision_report_rows(parallel) == anti_collision_report_rows(serial)
 
 
 def test_local_refine_finds_overlap_between_coarse_scan_stations() -> None:
@@ -408,8 +495,7 @@ def test_reference_actual_and_approved_wells_use_station_history_iscwsa_ellipses
         )
         assert float(np.trace(terminal_sample.covariance_xyz)) > 0.0
         assert {
-            source_name
-            for source_name, _ in terminal_sample.global_source_vectors_xyz
+            source_name for source_name, _ in terminal_sample.global_source_vectors_xyz
         } == {"dbhg", "decg", "dstg"}
 
     np.testing.assert_allclose(
@@ -474,8 +560,13 @@ def test_reference_actual_well_can_use_selected_unknown_mwd_model() -> None:
     actual_reference = reference_by_kind[REFERENCE_WELL_ACTUAL]
     approved_reference = reference_by_kind[REFERENCE_WELL_APPROVED]
 
-    assert actual_reference.overlay.model.iscwsa_tool_code == unknown_model.iscwsa_tool_code
-    assert approved_reference.overlay.model.iscwsa_tool_code == poor_model.iscwsa_tool_code
+    assert (
+        actual_reference.overlay.model.iscwsa_tool_code
+        == unknown_model.iscwsa_tool_code
+    )
+    assert (
+        approved_reference.overlay.model.iscwsa_tool_code == poor_model.iscwsa_tool_code
+    )
     assert float(np.trace(actual_reference.samples[-1].covariance_xyz)) > float(
         np.trace(approved_reference.samples[-1].covariance_xyz)
     )
@@ -581,10 +672,12 @@ def test_global_source_vectors_are_correlated_in_relative_clearance() -> None:
         samples_b=(sample_b_same_global,),
         direction=direction,
     )
-    different_sigma2 = anticollision_module._directional_global_relative_sigma2_for_pairs(
-        samples_a=(sample_a,),
-        samples_b=(sample_b_different_global,),
-        direction=direction,
+    different_sigma2 = (
+        anticollision_module._directional_global_relative_sigma2_for_pairs(
+            samples_a=(sample_a,),
+            samples_b=(sample_b_different_global,),
+            direction=direction,
+        )
     )
 
     assert same_sigma2[0] == pytest.approx(0.0)
@@ -886,6 +979,144 @@ def test_analyze_anti_collision_keeps_near_pair_after_xy_prefilter(
 
     assert analysis.pair_count == 1
     assert seen_pairs == [("WELL-A", "WELL-B")]
+
+
+def test_analyze_anti_collision_incremental_reuses_unchanged_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wells = [
+        build_anti_collision_well(
+            name=name,
+            color="#0B6E4F",
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            include_display_geometry=False,
+        )
+        for name, y_offset_m in (
+            ("WELL-A", 0.0),
+            ("WELL-B", 10.0),
+            ("WELL-C", 20.0),
+        )
+    ]
+    scanned_pairs: list[tuple[str, str]] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: AntiCollisionWell,
+        well_b: AntiCollisionWell,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        assert build_overlap_geometry is False
+        scanned_pairs.append((str(well_a.name), str(well_b.name)))
+        return []
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _record_pair_scan,
+    )
+
+    _, pair_cache, first_stats = analyze_anti_collision_incremental(
+        wells,
+        build_overlap_geometry=False,
+        well_signature_by_name={
+            "WELL-A": "a-v1",
+            "WELL-B": "b-v1",
+            "WELL-C": "c-v1",
+        },
+    )
+
+    assert first_stats.reused_pair_count == 0
+    assert first_stats.recalculated_pair_count == 3
+    assert scanned_pairs == [
+        ("WELL-A", "WELL-B"),
+        ("WELL-A", "WELL-C"),
+        ("WELL-B", "WELL-C"),
+    ]
+
+    scanned_pairs.clear()
+    _, _, second_stats = analyze_anti_collision_incremental(
+        wells,
+        build_overlap_geometry=False,
+        well_signature_by_name={
+            "WELL-A": "a-v1",
+            "WELL-B": "b-v2",
+            "WELL-C": "c-v1",
+        },
+        previous_pair_cache=pair_cache,
+    )
+
+    assert second_stats.reused_pair_count == 1
+    assert second_stats.recalculated_pair_count == 2
+    assert scanned_pairs == [("WELL-A", "WELL-B"), ("WELL-B", "WELL-C")]
+
+
+def test_build_anti_collision_wells_for_successes_reuses_unchanged_wells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    successes = [
+        SuccessfulWellPlan(
+            name=name,
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            summary={"kop_md_m": 0.0},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config={"optimization_mode": "none"},
+        )
+        for name, y_offset_m in (("WELL-A", 0.0), ("WELL-B", 20.0))
+    ]
+    built_names: list[str] = []
+    original_builder = anticollision_rerun_module.build_anti_collision_well
+
+    def _counting_builder(**kwargs: object) -> AntiCollisionWell:
+        built_names.append(str(kwargs["name"]))
+        return original_builder(**kwargs)
+
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "build_anti_collision_well",
+        _counting_builder,
+    )
+
+    wells, well_cache, reused_count, rebuilt_count = (
+        build_anti_collision_wells_for_successes(
+            successes,
+            model=PlanningUncertaintyModel(),
+            well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
+            include_display_geometry=False,
+            build_overlap_geometry=False,
+        )
+    )
+
+    assert built_names == ["WELL-A", "WELL-B"]
+    assert reused_count == 0
+    assert rebuilt_count == 2
+
+    built_names.clear()
+    next_wells, next_cache, reused_count, rebuilt_count = (
+        build_anti_collision_wells_for_successes(
+            successes,
+            model=PlanningUncertaintyModel(),
+            well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v2"},
+            previous_well_cache=well_cache,
+            include_display_geometry=False,
+            build_overlap_geometry=False,
+        )
+    )
+
+    assert built_names == ["WELL-B"]
+    assert reused_count == 1
+    assert rebuilt_count == 1
+    assert next_wells[0] is wells[0]
+    assert next_wells[1] is not wells[1]
+    assert set(next_cache) == {"WELL-A", "WELL-B"}
 
 
 def test_analyze_anti_collision_does_not_skip_pair_by_terminal_geometry_only(
@@ -1260,7 +1491,9 @@ def test_overlap_ring_is_not_reduced_to_uniform_circle_for_offset_wells() -> Non
             ring_xyz = np.asarray(ring, dtype=float)
             center = np.mean(ring_xyz, axis=0)
             radial_distances = np.linalg.norm(ring_xyz - center[None, :], axis=1)
-            radial_spreads.append(float(np.max(radial_distances) - np.min(radial_distances)))
+            radial_spreads.append(
+                float(np.max(radial_distances) - np.min(radial_distances))
+            )
 
     assert max(radial_spreads) > 0.25
 

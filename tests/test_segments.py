@@ -10,6 +10,7 @@ from pywp.segments import (
     BuildSegment,
     DEFAULT_INTERPOLATION_METHOD,
     HoldSegment,
+    VerticalSegment,
     INTERPOLATION_RODRIGUES,
     INTERPOLATION_SLERP,
     _direction_vector,
@@ -133,6 +134,28 @@ def test_welltrajectory_preserves_terminal_md_when_final_segment_is_submillimete
     assert "HOLD" not in set(stations["segment"])
     assert float(md_values[-1]) == pytest.approx(expected_terminal_md, abs=1e-12)
     assert np.min(np.diff(md_values)) > MIN_STATION_MD_INTERVAL_M
+
+
+def test_welltrajectory_collapses_near_duplicate_station_inside_segment() -> None:
+    trajectory = WellTrajectory(
+        [
+            VerticalSegment(length_m=400.000000134, azi_deg=0.0),
+            BuildSegment(
+                inc_from_deg=0.0,
+                inc_to_deg=10.0,
+                dls_deg_per_30m=3.0,
+                azi_deg=0.0,
+                name="BUILD1",
+            ),
+        ]
+    )
+
+    stations = trajectory.stations(md_step_m=10.0)
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+
+    assert float(md_values[40]) == pytest.approx(400.000000134, abs=1e-12)
+    assert np.min(np.diff(md_values)) > MIN_STATION_MD_INTERVAL_M
+    compute_positions_min_curv(stations=stations, start=Point3D(0.0, 0.0, 0.0))
 
 
 # ---------------------------------------------------------------------------

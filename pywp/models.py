@@ -112,9 +112,13 @@ class Point3D(FrozenModel):
     def __init__(self, *args: float, **data: float):
         if args:
             if data:
-                raise TypeError("Point3D accepts either positional x/y/z or keyword fields, not both.")
+                raise TypeError(
+                    "Point3D accepts either positional x/y/z or keyword fields, not both."
+                )
             if len(args) != 3:
-                raise TypeError(f"Point3D expected 3 positional arguments, got {len(args)}.")
+                raise TypeError(
+                    f"Point3D expected 3 positional arguments, got {len(args)}."
+                )
             data = {"x": float(args[0]), "y": float(args[1]), "z": float(args[2])}
         super().__init__(**data)
 
@@ -141,6 +145,7 @@ class TrajectoryConfig(FrozenModel):
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_max_restarts: NonNegativeInt = 1
     interpolation_method: InterpolationMethod = INTERPOLATION_RODRIGUES
+    offer_j_profile: bool = True
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: PositiveFiniteScalar = 30.0
 
@@ -163,8 +168,7 @@ class TrajectoryConfig(FrozenModel):
             )
             if unknown_segments:
                 raise ValueError(
-                    "Unsupported DLS segment names: "
-                    + ", ".join(unknown_segments)
+                    "Unsupported DLS segment names: " + ", ".join(unknown_segments)
                 )
         legacy_pos_tolerance = payload.pop("pos_tolerance_m", None)
         if legacy_pos_tolerance is not None:
@@ -207,7 +211,9 @@ class TrajectoryConfig(FrozenModel):
         if self.min_structural_segment_m <= 0.0:
             raise PlanningError("min_structural_segment_m must be positive.")
         if self.min_structural_segment_m < self.md_step_control_m:
-            raise PlanningError("min_structural_segment_m must be >= md_step_control_m.")
+            raise PlanningError(
+                "min_structural_segment_m must be >= md_step_control_m."
+            )
         try:
             turn_solver_max_restarts = float(self.turn_solver_max_restarts)
         except (TypeError, ValueError) as exc:
@@ -220,13 +226,17 @@ class TrajectoryConfig(FrozenModel):
             raise PlanningError("turn_solver_max_restarts must be non-negative.")
         for segment, limit in self.dls_limits_deg_per_30m.items():
             if limit < 0.0:
-                raise PlanningError(f"DLS limit for segment {segment} cannot be negative.")
+                raise PlanningError(
+                    f"DLS limit for segment {segment} cannot be negative."
+                )
 
     @model_validator(mode="after")
     def _validate_and_sync_limits(self) -> "TrajectoryConfig":
         if float(self.entry_inc_target_deg) > float(self.max_inc_deg):
             raise ValueError("entry_inc_target_deg cannot exceed max_inc_deg.")
-        if float(self.dls_build_min_deg_per_30m) > float(self.dls_build_max_deg_per_30m):
+        if float(self.dls_build_min_deg_per_30m) > float(
+            self.dls_build_max_deg_per_30m
+        ):
             raise ValueError(
                 "dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m."
             )

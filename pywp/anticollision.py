@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from typing import Callable
+from time import perf_counter
+from typing import Callable, Mapping
 
 import numpy as np
 import pandas as pd
 
 from pywp.constants import SMALL
 from pywp.models import Point3D
+from pywp.parallel import process_pool_context
 from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     PlanningUncertaintyModel,
@@ -63,6 +66,7 @@ class AntiCollisionWell:
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = ()
     well_kind: str = "project"
     is_reference_only: bool = False
+    normal_support_radii_1sigma_m: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,36 @@ class AntiCollisionAnalysis:
 
 
 @dataclass(frozen=True)
+class AntiCollisionPairCacheEntry:
+    well_a: str
+    well_b: str
+    signature_a: str
+    signature_b: str
+    corridors: tuple[AntiCollisionCorridor, ...]
+    zones: tuple[AntiCollisionZone, ...]
+    build_overlap_geometry: bool = True
+
+
+@dataclass(frozen=True)
+class AntiCollisionIncrementalStats:
+    reused_well_count: int = 0
+    rebuilt_well_count: int = 0
+    reused_pair_count: int = 0
+    recalculated_pair_count: int = 0
+
+
+@dataclass(frozen=True)
+class AntiCollisionProgress:
+    pair_count: int
+    completed_pair_count: int
+    reused_pair_count: int = 0
+    recalculated_pair_count: int = 0
+    prefiltered_pair_count: int = 0
+    elapsed_s: float = 0.0
+    parallel_workers: int = 0
+
+
+@dataclass(frozen=True)
 class _AntiCollisionLateralEnvelope:
     min_x_m: float
     max_x_m: float
@@ -165,6 +199,36 @@ class _AntiCollisionLateralEnvelope:
     terminal_z_m: float
     terminal_lateral_radius_m: float
     terminal_spatial_radius_m: float
+
+
+@dataclass(frozen=True)
+class _AntiCollisionPairJob:
+    job_index: int
+    left_index: int
+    right_index: int
+    build_overlap_geometry: bool
+
+
+@dataclass(frozen=True)
+class _AntiCollisionPairCalculation:
+    job_index: int
+    left_index: int
+    right_index: int
+    corridors: tuple[AntiCollisionCorridor, ...]
+    zones: tuple[AntiCollisionZone, ...]
+
+
+@dataclass(frozen=True)
+class _AntiCollisionPairOutcome:
+    job_index: int
+    pair_key: tuple[str, str]
+    cache_entry: AntiCollisionPairCacheEntry
+    reused: bool = False
+    recalculated: bool = False
+    prefiltered: bool = False
+
+
+_PARALLEL_ANTI_COLLISION_WELLS: tuple[AntiCollisionWell, ...] = ()
 
 
 def anti_collision_method_caption(
@@ -279,6 +343,10 @@ def build_anti_collision_well(
         md_t3_m=None if md_t3_m is None else float(md_t3_m),
         well_kind=str(well_kind),
         is_reference_only=bool(is_reference_only),
+        normal_support_radii_1sigma_m=_max_normal_support_radii_for_samples(
+            samples=samples,
+            confidence_scale=1.0,
+        ),
     )
 
 
@@ -326,39 +394,189 @@ def analyze_anti_collision(
     *,
     build_overlap_geometry: bool = True,
     pair_filter: Callable[[AntiCollisionWell, AntiCollisionWell], bool] | None = None,
+    progress_callback: Callable[[AntiCollisionProgress], None] | None = None,
+    parallel_workers: int = 0,
 ) -> AntiCollisionAnalysis:
+    analysis, _, _ = analyze_anti_collision_incremental(
+        wells,
+        build_overlap_geometry=build_overlap_geometry,
+        pair_filter=pair_filter,
+        progress_callback=progress_callback,
+        parallel_workers=parallel_workers,
+    )
+    return analysis
+
+
+def _pair_cache_key(
+    well_a: AntiCollisionWell,
+    well_b: AntiCollisionWell,
+) -> tuple[str, str]:
+    return tuple(sorted((str(well_a.name), str(well_b.name))))
+
+
+def analyze_anti_collision_incremental(
+    wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
+    *,
+    build_overlap_geometry: bool = True,
+    pair_filter: Callable[[AntiCollisionWell, AntiCollisionWell], bool] | None = None,
+    well_signature_by_name: Mapping[str, str] | None = None,
+    previous_pair_cache: (
+        Mapping[tuple[str, str], AntiCollisionPairCacheEntry] | None
+    ) = None,
+    reused_well_count: int = 0,
+    rebuilt_well_count: int = 0,
+    progress_callback: Callable[[AntiCollisionProgress], None] | None = None,
+    parallel_workers: int = 0,
+) -> tuple[
+    AntiCollisionAnalysis,
+    dict[tuple[str, str], AntiCollisionPairCacheEntry],
+    AntiCollisionIncrementalStats,
+]:
     ordered_wells = tuple(wells)
     lateral_envelopes = tuple(
         _lateral_envelope_for_prefilter(well) for well in ordered_wells
     )
+    previous_pairs = dict(previous_pair_cache or {})
+    signatures = {
+        str(name): str(value) for name, value in (well_signature_by_name or {}).items()
+    }
+    pair_jobs = _anti_collision_pair_jobs(
+        ordered_wells=ordered_wells,
+        build_overlap_geometry=build_overlap_geometry,
+        pair_filter=pair_filter,
+    )
+    pair_count = len(pair_jobs)
+    reused_pair_count = 0
+    recalculated_pair_count = 0
+    prefiltered_pair_count = 0
+    completed_pair_count = 0
+    started_at = perf_counter()
+
+    def notify_progress() -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=int(pair_count),
+                completed_pair_count=int(completed_pair_count),
+                reused_pair_count=int(reused_pair_count),
+                recalculated_pair_count=int(recalculated_pair_count),
+                prefiltered_pair_count=int(prefiltered_pair_count),
+                elapsed_s=float(perf_counter() - started_at),
+                parallel_workers=int(max(parallel_workers, 0)),
+            )
+        )
+
+    notify_progress()
+    outcomes: list[_AntiCollisionPairOutcome] = []
+    recalculation_jobs: list[_AntiCollisionPairJob] = []
+    for job in pair_jobs:
+        well_a = ordered_wells[int(job.left_index)]
+        well_b = ordered_wells[int(job.right_index)]
+        pair_key = _pair_cache_key(well_a, well_b)
+        signature_a = signatures.get(str(well_a.name), "")
+        signature_b = signatures.get(str(well_b.name), "")
+        previous = previous_pairs.get(pair_key)
+        previous_signatures = (
+            {
+                str(previous.well_a): str(previous.signature_a),
+                str(previous.well_b): str(previous.signature_b),
+            }
+            if previous is not None
+            else {}
+        )
+        current_signatures = {
+            str(well_a.name): signature_a,
+            str(well_b.name): signature_b,
+        }
+        if (
+            previous is not None
+            and previous_signatures == current_signatures
+            and bool(getattr(previous, "build_overlap_geometry", True))
+            == bool(build_overlap_geometry)
+        ):
+            outcomes.append(
+                _AntiCollisionPairOutcome(
+                    job_index=int(job.job_index),
+                    pair_key=pair_key,
+                    cache_entry=previous,
+                    reused=True,
+                )
+            )
+            reused_pair_count += 1
+            completed_pair_count += 1
+            notify_progress()
+            continue
+
+        recalculated_pair_count += 1
+        if _pair_prefilter_xy_far_apart(
+            lateral_envelope_a=lateral_envelopes[int(job.left_index)],
+            lateral_envelope_b=lateral_envelopes[int(job.right_index)],
+        ):
+            outcomes.append(
+                _AntiCollisionPairOutcome(
+                    job_index=int(job.job_index),
+                    pair_key=pair_key,
+                    cache_entry=AntiCollisionPairCacheEntry(
+                        well_a=str(well_a.name),
+                        well_b=str(well_b.name),
+                        signature_a=signature_a,
+                        signature_b=signature_b,
+                        corridors=(),
+                        zones=(),
+                        build_overlap_geometry=bool(build_overlap_geometry),
+                    ),
+                    recalculated=True,
+                    prefiltered=True,
+                )
+            )
+            prefiltered_pair_count += 1
+            completed_pair_count += 1
+            notify_progress()
+            continue
+        recalculation_jobs.append(job)
+
+    def notify_recalculated_pair_done() -> None:
+        nonlocal completed_pair_count
+        completed_pair_count += 1
+        notify_progress()
+
+    calculation_results = _calculate_pair_overlap_jobs(
+        ordered_wells=ordered_wells,
+        jobs=recalculation_jobs,
+        parallel_workers=int(parallel_workers),
+        progress_callback=notify_recalculated_pair_done,
+    )
+    for result in calculation_results:
+        well_a = ordered_wells[int(result.left_index)]
+        well_b = ordered_wells[int(result.right_index)]
+        pair_key = _pair_cache_key(well_a, well_b)
+        signature_a = signatures.get(str(well_a.name), "")
+        signature_b = signatures.get(str(well_b.name), "")
+        outcomes.append(
+            _AntiCollisionPairOutcome(
+                job_index=int(result.job_index),
+                pair_key=pair_key,
+                cache_entry=AntiCollisionPairCacheEntry(
+                    well_a=str(well_a.name),
+                    well_b=str(well_b.name),
+                    signature_a=signature_a,
+                    signature_b=signature_b,
+                    corridors=tuple(result.corridors),
+                    zones=tuple(result.zones),
+                    build_overlap_geometry=bool(build_overlap_geometry),
+                ),
+                recalculated=True,
+            )
+        )
+
     corridors: list[AntiCollisionCorridor] = []
     zones: list[AntiCollisionZone] = []
-    pair_count = 0
-    for left_index in range(len(ordered_wells)):
-        for right_index in range(left_index + 1, len(ordered_wells)):
-            well_a = ordered_wells[left_index]
-            well_b = ordered_wells[right_index]
-            if not _should_analyze_pair(
-                well_a=well_a,
-                well_b=well_b,
-                pair_filter=pair_filter,
-            ):
-                continue
-            pair_count += 1
-            if _pair_prefilter_xy_far_apart(
-                lateral_envelope_a=lateral_envelopes[left_index],
-                lateral_envelope_b=lateral_envelopes[right_index],
-            ):
-                continue
-            pair_corridors = _pair_overlap_corridors(
-                well_a=well_a,
-                well_b=well_b,
-                build_overlap_geometry=build_overlap_geometry,
-            )
-            corridors.extend(pair_corridors)
-            zones.extend(
-                _corridor_summary_zone(corridor) for corridor in pair_corridors
-            )
+    pair_cache: dict[tuple[str, str], AntiCollisionPairCacheEntry] = {}
+    for outcome in sorted(outcomes, key=lambda item: int(item.job_index)):
+        corridors.extend(outcome.cache_entry.corridors)
+        zones.extend(outcome.cache_entry.zones)
+        pair_cache[outcome.pair_key] = outcome.cache_entry
 
     zones = sorted(
         zones,
@@ -388,7 +606,7 @@ def analyze_anti_collision(
             )
         )
     )
-    return AntiCollisionAnalysis(
+    analysis = AntiCollisionAnalysis(
         wells=ordered_wells,
         corridors=tuple(corridors),
         well_segments=tuple(_collect_well_overlap_segments(corridors, ordered_wells)),
@@ -397,6 +615,131 @@ def analyze_anti_collision(
         overlapping_pair_count=int(len(pair_keys)),
         target_overlap_pair_count=int(len(target_pair_keys)),
         worst_separation_factor=worst_sf,
+    )
+    return (
+        analysis,
+        pair_cache,
+        AntiCollisionIncrementalStats(
+            reused_well_count=int(reused_well_count),
+            rebuilt_well_count=int(rebuilt_well_count),
+            reused_pair_count=int(reused_pair_count),
+            recalculated_pair_count=int(recalculated_pair_count),
+        ),
+    )
+
+
+def _anti_collision_pair_jobs(
+    *,
+    ordered_wells: tuple[AntiCollisionWell, ...],
+    build_overlap_geometry: bool,
+    pair_filter: Callable[[AntiCollisionWell, AntiCollisionWell], bool] | None,
+) -> list[_AntiCollisionPairJob]:
+    jobs: list[_AntiCollisionPairJob] = []
+    for left_index in range(len(ordered_wells)):
+        for right_index in range(left_index + 1, len(ordered_wells)):
+            well_a = ordered_wells[left_index]
+            well_b = ordered_wells[right_index]
+            if not _should_analyze_pair(
+                well_a=well_a,
+                well_b=well_b,
+                pair_filter=pair_filter,
+            ):
+                continue
+            jobs.append(
+                _AntiCollisionPairJob(
+                    job_index=len(jobs),
+                    left_index=int(left_index),
+                    right_index=int(right_index),
+                    build_overlap_geometry=bool(build_overlap_geometry),
+                )
+            )
+    return jobs
+
+
+def _calculate_pair_overlap_jobs(
+    *,
+    ordered_wells: tuple[AntiCollisionWell, ...],
+    jobs: list[_AntiCollisionPairJob],
+    parallel_workers: int,
+    progress_callback: Callable[[], None] | None,
+) -> list[_AntiCollisionPairCalculation]:
+    if not jobs:
+        return []
+    workers = int(max(parallel_workers, 0))
+    if workers <= 1 or len(jobs) <= 1:
+        results: list[_AntiCollisionPairCalculation] = []
+        for job in jobs:
+            results.append(
+                _calculate_pair_overlap_job_serial(
+                    ordered_wells=ordered_wells,
+                    job=job,
+                )
+            )
+            if progress_callback is not None:
+                progress_callback()
+        return results
+
+    workers = min(workers, len(jobs))
+    results_by_index: dict[int, _AntiCollisionPairCalculation] = {}
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=process_pool_context(allow_stdin_fork=True),
+        initializer=_initialize_parallel_pair_worker,
+        initargs=(ordered_wells,),
+    ) as executor:
+        futures = {
+            executor.submit(_calculate_pair_overlap_job_parallel, job): job
+            for job in jobs
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results_by_index[int(result.job_index)] = result
+            if progress_callback is not None:
+                progress_callback()
+    return [
+        results_by_index[int(job.job_index)]
+        for job in sorted(jobs, key=lambda item: int(item.job_index))
+    ]
+
+def _initialize_parallel_pair_worker(
+    ordered_wells: tuple[AntiCollisionWell, ...],
+) -> None:
+    global _PARALLEL_ANTI_COLLISION_WELLS
+    _PARALLEL_ANTI_COLLISION_WELLS = tuple(ordered_wells)
+
+
+def _calculate_pair_overlap_job_parallel(
+    job: _AntiCollisionPairJob,
+) -> _AntiCollisionPairCalculation:
+    if not _PARALLEL_ANTI_COLLISION_WELLS:
+        raise RuntimeError("Anti-collision worker was not initialized.")
+    return _calculate_pair_overlap_job_serial(
+        ordered_wells=_PARALLEL_ANTI_COLLISION_WELLS,
+        job=job,
+    )
+
+
+def _calculate_pair_overlap_job_serial(
+    *,
+    ordered_wells: tuple[AntiCollisionWell, ...],
+    job: _AntiCollisionPairJob,
+) -> _AntiCollisionPairCalculation:
+    well_a = ordered_wells[int(job.left_index)]
+    well_b = ordered_wells[int(job.right_index)]
+    pair_corridors = tuple(
+        _pair_overlap_corridors(
+            well_a=well_a,
+            well_b=well_b,
+            build_overlap_geometry=bool(job.build_overlap_geometry),
+        )
+    )
+    pair_zones = tuple(_corridor_summary_zone(corridor) for corridor in pair_corridors)
+    return _AntiCollisionPairCalculation(
+        job_index=int(job.job_index),
+        left_index=int(job.left_index),
+        right_index=int(job.right_index),
+        corridors=pair_corridors,
+        zones=pair_zones,
     )
 
 
@@ -1079,20 +1422,22 @@ def _pair_normal_projected_relative_covariance_matrix(
 
 def _pair_distance_combined_radius_matrices(
     *,
-    samples_a: tuple[AntiCollisionSample, ...],
-    samples_b: tuple[AntiCollisionSample, ...],
+    well_a: AntiCollisionWell,
+    well_b: AntiCollisionWell,
     confidence_scale: float,
 ) -> tuple[np.ndarray, np.ndarray]:
+    samples_a = well_a.samples
+    samples_b = well_b.samples
     centers_a = np.asarray([sample.center_xyz for sample in samples_a], dtype=float)
     centers_b = np.asarray([sample.center_xyz for sample in samples_b], dtype=float)
     delta = centers_a[:, None, :] - centers_b[None, :, :]
     distance = np.linalg.norm(delta, axis=2)
-    max_radius_a = _max_normal_support_radii_for_samples(
-        samples=samples_a,
+    max_radius_a = _normal_support_radii_for_well(
+        well=well_a,
         confidence_scale=confidence_scale,
     )
-    max_radius_b = _max_normal_support_radii_for_samples(
-        samples=samples_b,
+    max_radius_b = _normal_support_radii_for_well(
+        well=well_b,
         confidence_scale=confidence_scale,
     )
     conservative_radius = max_radius_a[:, None] + max_radius_b[None, :]
@@ -1120,6 +1465,24 @@ def _pair_distance_combined_radius_matrices(
     return distance, combined_radius
 
 
+def _normal_support_radii_for_well(
+    *,
+    well: AntiCollisionWell,
+    confidence_scale: float,
+) -> np.ndarray:
+    cached = well.normal_support_radii_1sigma_m
+    if cached is not None:
+        cached_array = np.asarray(cached, dtype=float)
+        if cached_array.shape == (len(well.samples),) and np.all(
+            np.isfinite(cached_array)
+        ):
+            return float(max(confidence_scale, SMALL)) * cached_array
+    return _max_normal_support_radii_for_samples(
+        samples=well.samples,
+        confidence_scale=confidence_scale,
+    )
+
+
 def _max_normal_support_radii_for_samples(
     *,
     samples: tuple[AntiCollisionSample, ...],
@@ -1129,7 +1492,9 @@ def _max_normal_support_radii_for_samples(
     scale = float(max(confidence_scale, SMALL))
     for sample in samples:
         projection = _normal_projection_matrix(sample)
-        covariance = projection @ np.asarray(sample.covariance_xyz, dtype=float) @ projection.T
+        covariance = (
+            projection @ np.asarray(sample.covariance_xyz, dtype=float) @ projection.T
+        )
         eigenvalues = np.linalg.eigvalsh(0.5 * (covariance + covariance.T))
         radii.append(scale * float(np.sqrt(max(float(np.max(eigenvalues)), 0.0))))
     return np.asarray(radii, dtype=float)
@@ -1259,9 +1624,8 @@ def _directional_global_relative_sigma2_for_index_arrays(
     for source_name in source_names:
         vectors_a = _source_vector_array(samples_a, source_name)[index_a]
         vectors_b = _source_vector_array(samples_b, source_name)[index_b]
-        projected = (
-            np.einsum("pi,pi->p", direction_a, vectors_a)
-            - np.einsum("pi,pi->p", direction_b, vectors_b)
+        projected = np.einsum("pi,pi->p", direction_a, vectors_a) - np.einsum(
+            "pi,pi->p", direction_b, vectors_b
         )
         sigma2 += projected * projected
     return sigma2
@@ -1323,12 +1687,9 @@ def _representative_refine_pairs_by_cluster(
     current_cluster: list[tuple[int, int]] = []
     previous_pair: tuple[int, int] | None = None
     for pair in sorted_pairs:
-        if (
-            previous_pair is None
-            or (
-                abs(int(pair[0]) - int(previous_pair[0])) <= 2
-                and abs(int(pair[1]) - int(previous_pair[1])) <= 2
-            )
+        if previous_pair is None or (
+            abs(int(pair[0]) - int(previous_pair[0])) <= 2
+            and abs(int(pair[1]) - int(previous_pair[1])) <= 2
         ):
             current_cluster.append(pair)
         else:
@@ -1374,8 +1735,8 @@ def _pair_overlap_corridors(
 
     confidence_scale = float(max(well_a.overlay.model.confidence_scale, SMALL))
     distance, combined_radius = _pair_distance_combined_radius_matrices(
-        samples_a=well_a.samples,
-        samples_b=well_b.samples,
+        well_a=well_a,
+        well_b=well_b,
         confidence_scale=confidence_scale,
     )
     score = _score_matrix(distance, combined_radius)
@@ -1432,16 +1793,19 @@ def _pair_overlap_corridors(
         )
         if not matched_pairs:
             return refined_corridors
-    return _build_pair_corridors(
-        well_a=well_a,
-        well_b=well_b,
-        samples_a=well_a.samples,
-        samples_b=well_b.samples,
-        pairs=sorted(matched_pairs),
-        distance=distance,
-        combined_radius=combined_radius,
-        build_overlap_geometry=build_overlap_geometry,
-    ) + refined_corridors
+    return (
+        _build_pair_corridors(
+            well_a=well_a,
+            well_b=well_b,
+            samples_a=well_a.samples,
+            samples_b=well_b.samples,
+            pairs=sorted(matched_pairs),
+            distance=distance,
+            combined_radius=combined_radius,
+            build_overlap_geometry=build_overlap_geometry,
+        )
+        + refined_corridors
+    )
 
 
 def _pairs_outside_refined_corridors(
@@ -1511,12 +1875,10 @@ def _build_local_refined_pair_corridors(
         return []
 
     index_by_md_a = {
-        round(float(sample.md_m), 6): index
-        for index, sample in enumerate(samples_a)
+        round(float(sample.md_m), 6): index for index, sample in enumerate(samples_a)
     }
     index_by_md_b = {
-        round(float(sample.md_m), 6): index
-        for index, sample in enumerate(samples_b)
+        round(float(sample.md_m), 6): index for index, sample in enumerate(samples_b)
     }
     distance = np.full((len(samples_a), len(samples_b)), np.inf, dtype=float)
     combined_radius = np.zeros((len(samples_a), len(samples_b)), dtype=float)
@@ -1759,7 +2121,9 @@ def _interpolate_collision_sample(
                 np.asarray(right_sample.center_xyz, dtype=float),
             )
         ),
-        covariance_xyz=lerp_array(left_sample.covariance_xyz, right_sample.covariance_xyz),
+        covariance_xyz=lerp_array(
+            left_sample.covariance_xyz, right_sample.covariance_xyz
+        ),
         covariance_xyz_random=lerp_array(
             left_sample.covariance_xyz_random,
             right_sample.covariance_xyz_random,
@@ -1782,7 +2146,10 @@ def _interpolate_collision_sample(
             )
             for source_name in source_names
         ),
-        inc_deg=float(left_sample.inc_deg + fraction * (right_sample.inc_deg - left_sample.inc_deg)),
+        inc_deg=float(
+            left_sample.inc_deg
+            + fraction * (right_sample.inc_deg - left_sample.inc_deg)
+        ),
         azi_deg=_interpolated_azimuth_deg(
             left_sample.azi_deg,
             right_sample.azi_deg,
@@ -1792,7 +2159,9 @@ def _interpolate_collision_sample(
     )
 
 
-def _interpolated_azimuth_deg(left_deg: float, right_deg: float, fraction: float) -> float:
+def _interpolated_azimuth_deg(
+    left_deg: float, right_deg: float, fraction: float
+) -> float:
     left = float(left_deg)
     delta = ((float(right_deg) - left + 180.0) % 360.0) - 180.0
     return float((left + float(fraction) * delta) % 360.0)
@@ -1807,8 +2176,12 @@ def _evaluated_pair_distances_and_radii(
 ) -> tuple[np.ndarray, np.ndarray]:
     pair_samples_a = tuple(samples_a[int(index_a)] for index_a, _ in pairs)
     pair_samples_b = tuple(samples_b[int(index_b)] for _, index_b in pairs)
-    centers_a = np.asarray([sample.center_xyz for sample in pair_samples_a], dtype=float)
-    centers_b = np.asarray([sample.center_xyz for sample in pair_samples_b], dtype=float)
+    centers_a = np.asarray(
+        [sample.center_xyz for sample in pair_samples_a], dtype=float
+    )
+    centers_b = np.asarray(
+        [sample.center_xyz for sample in pair_samples_b], dtype=float
+    )
     delta = centers_a - centers_b
     distance = np.linalg.norm(delta, axis=1)
     direction = np.zeros_like(delta, dtype=float)
@@ -1838,8 +2211,12 @@ def _evaluated_pair_distances_and_radii(
         samples=pair_samples_b,
         direction=direction,
     )
-    directional_sigma2_a = np.einsum("pi,pij,pj->p", direction_a, covariances_a, direction_a)
-    directional_sigma2_b = np.einsum("pi,pij,pj->p", direction_b, covariances_b, direction_b)
+    directional_sigma2_a = np.einsum(
+        "pi,pij,pj->p", direction_a, covariances_a, direction_a
+    )
+    directional_sigma2_b = np.einsum(
+        "pi,pij,pj->p", direction_b, covariances_b, direction_b
+    )
     scale = float(max(confidence_scale, SMALL))
     radius_global = scale * np.sqrt(
         np.clip(
@@ -1903,9 +2280,8 @@ def _directional_global_relative_sigma2_for_pairs(
             ],
             dtype=float,
         )
-        projected = (
-            np.einsum("pi,pi->p", direction_a, vectors_a)
-            - np.einsum("pi,pi->p", direction_b, vectors_b)
+        projected = np.einsum("pi,pi->p", direction_a, vectors_a) - np.einsum(
+            "pi,pi->p", direction_b, vectors_b
         )
         sigma2 += projected * projected
     return sigma2
@@ -2026,7 +2402,9 @@ def _pairs_are_contiguous(
         return False
     if abs(next_md_b - previous_md_b) > 2.1 * max(step_b, SMALL):
         return False
-    return abs(next_md_a - previous_md_a) > SMALL or abs(next_md_b - previous_md_b) > SMALL
+    return (
+        abs(next_md_a - previous_md_a) > SMALL or abs(next_md_b - previous_md_b) > SMALL
+    )
 
 
 def _local_sample_step_near_pair(
@@ -2038,7 +2416,9 @@ def _local_sample_step_near_pair(
         return 1.0
     left = max(min(int(index_a), int(index_b)) - 1, 0)
     right = min(max(int(index_a), int(index_b)) + 2, len(samples) - 1)
-    md_values = np.asarray([sample.md_m for sample in samples[left : right + 1]], dtype=float)
+    md_values = np.asarray(
+        [sample.md_m for sample in samples[left : right + 1]], dtype=float
+    )
     diffs = np.diff(np.sort(md_values))
     diffs = diffs[np.isfinite(diffs) & (diffs > 1e-6)]
     if diffs.size == 0:
@@ -2137,9 +2517,7 @@ def _build_single_corridor(
             point_count=len(overlap_ring_inputs),
             separation_factor_values=sf_values,
         ):
-            sample_a, sample_b, midpoint_xyz = overlap_ring_inputs[
-                int(offset)
-            ]
+            sample_a, sample_b, midpoint_xyz = overlap_ring_inputs[int(offset)]
             overlap_ring = _overlap_ring_between_samples(
                 ring_a_xyz=_sample_uncertainty_ring_xyz(
                     sample_a,

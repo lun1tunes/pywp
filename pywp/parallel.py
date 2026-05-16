@@ -16,9 +16,20 @@ def process_pool_start_method(platform: str | None = None) -> str:
     return "forkserver"
 
 
-def process_pool_context(platform: str | None = None) -> BaseContext:
+def process_pool_context(
+    platform: str | None = None,
+    *,
+    allow_stdin_fork: bool = False,
+) -> BaseContext:
     """Build a multiprocessing context with a spawn fallback."""
 
+    main_file = str(getattr(sys.modules.get("__main__"), "__file__", "") or "")
+    if (
+        allow_stdin_fork
+        and (not main_file or main_file.startswith("<"))
+        and "fork" in multiprocessing.get_all_start_methods()
+    ):
+        return multiprocessing.get_context("fork")
     preferred_method = process_pool_start_method(platform)
     try:
         return multiprocessing.get_context(preferred_method)

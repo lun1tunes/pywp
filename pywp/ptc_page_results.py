@@ -161,6 +161,9 @@ def _render_anticollision_panel(
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
         return
 
+    if _render_full_anticollision_recalc_button():
+        return
+
     preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
     normalized_preset = wt.normalize_uncertainty_preset(
         st.session_state.get(
@@ -183,6 +186,9 @@ def _render_anticollision_panel(
             reference_wells
         )
     )
+    anti_collision_parallel_workers = int(
+        st.session_state.get("wt_last_parallel_workers") or 0
+    )
 
     anti_collision_progress = st.progress(
         8, text="Подготовка anti-collision анализа..."
@@ -199,6 +205,7 @@ def _render_anticollision_panel(
             reference_wells=reference_wells,
             reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
             progress_callback=_anti_collision_progress_update,
+            parallel_workers=anti_collision_parallel_workers,
         )
     except Exception as exc:
         anti_collision_progress.empty()
@@ -402,6 +409,21 @@ def _render_anticollision_panel(
                     100,
                     text="Текущий порядок уже оптимален (или улучшить не удалось).",
                 )
+
+
+def _render_full_anticollision_recalc_button() -> bool:
+    if not st.button(
+        "Полный пересчёт anti-collision",
+        help=(
+            "Сбрасывает кэш скважин и пар anti-collision. Используйте после "
+            "смены набора данных или если нужен гарантированный расчёт с нуля."
+        ),
+        use_container_width=True,
+    ):
+        return False
+    wt._reset_anticollision_view_state(clear_prepared=True)
+    st.rerun()
+    return True
 
 
 def _render_target_edit_overview(

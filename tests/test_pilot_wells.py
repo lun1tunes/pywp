@@ -234,6 +234,38 @@ def test_two_point_welltracks4_pilot_keeps_window_near_first_study_point() -> No
     assert float(result.summary["max_dls_total_deg_per_30m"]) <= 1.1
 
 
+def test_three_point_pilot_window_keeps_sidetrack_near_first_study_point() -> None:
+    config = TrajectoryConfig()
+    pilot = build_pilot_trajectory(
+        WelltrackRecord(
+            name="well_04_PL",
+            points=(
+                WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0),
+                WelltrackPoint(x=457500.0, y=890600.0, z=1200.0, md=2.0),
+                WelltrackPoint(x=457653.0, y=890180.0, z=1821.0, md=3.0),
+                WelltrackPoint(x=457667.0, y=889821.0, z=2554.0, md=4.0),
+            ),
+        ),
+        config=config,
+    )
+
+    window, result = select_sidetrack_window(
+        pilot_name="well_04_PL",
+        parent_name="well_04",
+        pilot_stations=pilot.stations,
+        parent_t1=Point3D(458200.0, 888775.0, 2452.0),
+        parent_t3=Point3D(459130.0, 887003.0, 2554.0),
+        config=config,
+        planner=object(),
+    )
+
+    offset_m = float(pilot.md_first_target_m) - float(window.md_m)
+    assert 50.0 <= offset_m <= 100.0
+    assert 1100.0 <= float(window.point.z) <= 1200.0
+    assert float(result.summary["md_total_m"]) < 4600.0
+    assert float(result.summary["max_dls_total_deg_per_30m"]) <= 1.5
+
+
 def test_manual_sidetrack_window_md_override_interpolates_pilot_pose() -> None:
     config = TrajectoryConfig(
         md_step_m=25.0,

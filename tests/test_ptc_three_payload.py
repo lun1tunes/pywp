@@ -255,6 +255,35 @@ def test_single_well_three_payload_renders_pilot_family_labels() -> None:
     assert len(pilot_marker["points"]) == 2
 
 
+def test_single_well_three_payload_labels_targets_and_kop() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 500.0, 1000.0, 1500.0],
+            "X_m": [0.0, 100.0, 500.0, 1000.0],
+            "Y_m": [0.0, 0.0, 50.0, 100.0],
+            "Z_m": [0.0, 500.0, 900.0, 1000.0],
+        }
+    )
+
+    payload = single_well_three_payload(
+        stations,
+        well_name="well_01",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(500.0, 50.0, 900.0),
+        t3=Point3D(1000.0, 100.0, 1000.0),
+        md_t1_m=1000.0,
+        kop_md_m=500.0,
+    )
+
+    label_by_text = {str(item.get("text")): item for item in payload["labels"]}
+    assert {"well_01", "t1", "t3", "KOP"}.issubset(label_by_text)
+    assert label_by_text["t1"]["role"] == "target_label"
+    assert label_by_text["t3"]["role"] == "target_label"
+    assert label_by_text["KOP"]["role"] == "control_point_label"
+    kop_marker = next(item for item in payload["points"] if item.get("name") == "KOP")
+    assert kop_marker["points"] == [[100.0, 0.0, 500.0]]
+
+
 def test_all_wells_three_payload_renders_pilot_point_labels() -> None:
     stations = pd.DataFrame(
         {

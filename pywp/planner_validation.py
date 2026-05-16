@@ -28,11 +28,16 @@ from pywp.planner_types import (
 from pywp.segments import BuildSegment, HoldSegment, HorizontalSegment, VerticalSegment
 from pywp.constants import SMALL
 from pywp.trajectory import WellTrajectory
+
 DLS_VALIDATION_TOLERANCE_DEG_PER_30M = 0.01
 TRAJECTORY_MODEL_LABEL = "Unified J Profile + Build + Azimuth Turn"
+TRAJECTORY_J_PROFILE_LABEL = "J-образная траектория"
+TRAJECTORY_SPATIAL_TURN_LABEL = "Пространственная траектория с азимутальным поворотом"
 
 
-def _estimate_t1_endpoint_for_profile(profile: ProfileParameters) -> tuple[float, float, float]:
+def _estimate_t1_endpoint_for_profile(
+    profile: ProfileParameters,
+) -> tuple[float, float, float]:
     t1_state = _evaluate_profile_endpoints(params=profile).t1
     return float(t1_state.east_m), float(t1_state.north_m), float(t1_state.tvd_m)
 
@@ -117,12 +122,26 @@ def _evaluate_profile_endpoints(
         inc_to_deg=0.0,
         azi_to_deg=float(params.azimuth_hold_deg),
     )
-    state = _advance_endpoint_state(
-        state,
-        length_m=float(params.build1_length_m),
-        inc_to_deg=float(params.inc_hold_deg),
-        azi_to_deg=float(params.azimuth_hold_deg),
-    )
+    if params.build1_controls:
+        for (
+            length_m,
+            inc_to_deg,
+            azi_to_deg,
+            _dls_deg_per_30m,
+        ) in params.build1_controls:
+            state = _advance_endpoint_state(
+                state,
+                length_m=float(length_m),
+                inc_to_deg=float(inc_to_deg),
+                azi_to_deg=float(azi_to_deg),
+            )
+    else:
+        state = _advance_endpoint_state(
+            state,
+            length_m=float(params.build1_length_m),
+            inc_to_deg=float(params.inc_hold_deg),
+            azi_to_deg=float(params.azimuth_hold_deg),
+        )
     state = _advance_endpoint_state(
         state,
         length_m=float(params.hold_length_m),
@@ -180,7 +199,31 @@ def _build_trajectory(
             name="VERTICAL",
         )
     ]
-    if params.build1_length_m > SMALL:
+    if params.build1_controls:
+        inc_from_deg = 0.0
+        azi_from_deg = params.azimuth_hold_deg
+        for (
+            length_m,
+            inc_to_deg,
+            azi_to_deg,
+            dls_deg_per_30m,
+        ) in params.build1_controls:
+            if float(length_m) <= SMALL:
+                continue
+            segments.append(
+                BuildSegment(
+                    inc_from_deg=float(inc_from_deg),
+                    inc_to_deg=float(inc_to_deg),
+                    dls_deg_per_30m=float(dls_deg_per_30m),
+                    azi_deg=float(azi_from_deg),
+                    azi_to_deg=float(azi_to_deg),
+                    name="BUILD1",
+                    interpolation_method=interpolation_method,
+                )
+            )
+            inc_from_deg = float(inc_to_deg)
+            azi_from_deg = float(azi_to_deg)
+    elif params.build1_length_m > SMALL:
         segments.append(
             BuildSegment(
                 inc_from_deg=0.0,
@@ -328,6 +371,13 @@ def _build_summary(
     md_postcheck_limit_m = float(config.max_total_md_postcheck_m)
     md_postcheck_excess_m = float(max(0.0, md_total_m - md_postcheck_limit_m))
     md_postcheck_exceeded = bool(md_postcheck_excess_m > 1e-6)
+    profile_family = str(getattr(params, "profile_family", "unified") or "unified")
+    if profile_family == "j_profile":
+        trajectory_model_label = TRAJECTORY_J_PROFILE_LABEL
+    elif profile_family == "j_profile_turn":
+        trajectory_model_label = TRAJECTORY_SPATIAL_TURN_LABEL
+    else:
+        trajectory_model_label = TRAJECTORY_MODEL_LABEL
 
     summary: dict[str, float | str] = {
         "distance_t1_m": float(distance_t1),
@@ -386,12 +436,15 @@ def _build_summary(
         "md_postcheck_exceeded": "yes" if md_postcheck_exceeded else "no",
         "t1_horizontal_offset_m": float(horizontal_offset_t1_m),
         "horizontal_length_m": float(params.horizontal_length_m),
-        "trajectory_type": TRAJECTORY_MODEL_LABEL,
+        "trajectory_type": trajectory_model_label,
+        "trajectory_profile_family": profile_family,
         "trajectory_target_direction": trajectory_type_label(
             classification.trajectory_type
         ),
         "well_complexity": complexity_label(classification.complexity),
-        "well_complexity_by_offset": complexity_label(classification.complexity_by_offset),
+        "well_complexity_by_offset": complexity_label(
+            classification.complexity_by_offset
+        ),
         "well_complexity_by_hold": complexity_label(classification.complexity_by_hold),
         "hold_azimuth_deg": float(params.azimuth_hold_deg),
         "entry_azimuth_deg": float(params.azimuth_entry_deg),
@@ -453,14 +506,20 @@ def _build_summary(
         ),
         "class_reverse_offset_min_m": float(classification.limits.reverse_min_m),
         "class_reverse_offset_max_m": float(classification.limits.reverse_max_m),
-        "class_offset_ordinary_max_m": float(classification.limits.ordinary_offset_max_m),
+        "class_offset_ordinary_max_m": float(
+            classification.limits.ordinary_offset_max_m
+        ),
         "class_offset_complex_max_m": float(classification.limits.complex_offset_max_m),
-        "class_hold_ordinary_max_deg": float(classification.limits.hold_ordinary_max_deg),
+        "class_hold_ordinary_max_deg": float(
+            classification.limits.hold_ordinary_max_deg
+        ),
         "class_hold_complex_max_deg": float(classification.limits.hold_complex_max_deg),
     }
 
     for segment, limit in config.dls_limits_deg_per_30m.items():
-        seg_max = float(df.loc[df["segment"] == segment, "DLS_deg_per_30m"].max(skipna=True))
+        seg_max = float(
+            df.loc[df["segment"] == segment, "DLS_deg_per_30m"].max(skipna=True)
+        )
         if np.isnan(seg_max):
             seg_max = 0.0
         summary[f"max_dls_{segment.lower()}_deg_per_30m"] = seg_max
@@ -514,7 +573,10 @@ def _assert_solution_is_valid(
             f"dZ={float(summary['t3_miss_dz_m']):.2f} m. "
             "Increase BUILD/HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
         )
-    if abs(float(summary["entry_inc_deg"]) - config.entry_inc_target_deg) > config.entry_inc_tolerance_deg + 1e-6:
+    if (
+        abs(float(summary["entry_inc_deg"]) - config.entry_inc_target_deg)
+        > config.entry_inc_tolerance_deg + 1e-6
+    ):
         raise PlanningError("Entry inclination at t1 is outside required target range.")
     if float(summary["max_inc_actual_deg"]) > config.max_inc_deg + 1e-6:
         raise PlanningError(
@@ -525,14 +587,21 @@ def _assert_solution_is_valid(
     for segment, limit in config.dls_limits_deg_per_30m.items():
         actual = float(summary.get(f"max_dls_{segment.lower()}_deg_per_30m", 0.0))
         if actual > limit + DLS_VALIDATION_TOLERANCE_DEG_PER_30M:
-            raise PlanningError(f"DLS limit exceeded on segment {segment}: {actual:.2f} > {limit:.2f}")
+            raise PlanningError(
+                f"DLS limit exceeded on segment {segment}: {actual:.2f} > {limit:.2f}"
+            )
 
 
-def _is_candidate_feasible(candidate: ProfileParameters | None, config: TrajectoryConfig) -> bool:
+def _is_candidate_feasible(
+    candidate: ProfileParameters | None, config: TrajectoryConfig
+) -> bool:
     if candidate is None:
         return False
     horizontal_limit = config.dls_limits_deg_per_30m.get("HORIZONTAL")
-    if horizontal_limit is not None and candidate.horizontal_dls_deg_per_30m > float(horizontal_limit) + SMALL:
+    if (
+        horizontal_limit is not None
+        and candidate.horizontal_dls_deg_per_30m > float(horizontal_limit) + SMALL
+    ):
         return False
     if candidate.horizontal_inc_deg > config.max_inc_deg + SMALL:
         return False
@@ -551,7 +620,10 @@ def _build_validated_control_and_summary(
     turn_search_settings: TurnSearchSettings | None,
     turn_restarts_used: int,
 ) -> tuple[WellTrajectory, pd.DataFrame, dict[str, float | str]]:
-    trajectory = _build_trajectory(params=params, interpolation_method=str(getattr(config, "interpolation_method", "rodrigues")))
+    trajectory = _build_trajectory(
+        params=params,
+        interpolation_method=str(getattr(config, "interpolation_method", "rodrigues")),
+    )
     endpoint_eval = _offset_endpoint_evaluation(
         evaluation=_evaluate_profile_endpoints(params=params),
         surface=surface,

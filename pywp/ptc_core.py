@@ -40,6 +40,10 @@ from pywp.actual_fund_analysis import (
 )
 from pywp.anticollision import (
     AntiCollisionAnalysis,
+    AntiCollisionIncrementalStats,
+    AntiCollisionPairCacheEntry,
+    AntiCollisionProgress,
+    AntiCollisionWell,
     collision_corridor_plan_polygon,
 )
 from pywp.anticollision_optimization import (
@@ -57,6 +61,9 @@ from pywp.anticollision_recommendations import (
 )
 from pywp.anticollision_rerun import (
     build_anti_collision_analysis_for_successes as build_anti_collision_analysis_for_successes_shared,
+)
+from pywp.anticollision_rerun import (
+    build_incremental_anti_collision_analysis_for_successes as build_incremental_anti_collision_analysis_for_successes_shared,
 )
 from pywp.anticollision_rerun import (
     build_anticollision_well_contexts as build_anticollision_well_contexts_shared,
@@ -124,7 +131,9 @@ from pywp.reference_trajectories import (
     REFERENCE_WELL_KIND_COLORS,
     REFERENCE_WELL_KIND_LABELS,
     ImportedTrajectoryWell,
+    reference_well_collision_name,
     reference_well_display_label,
+    reference_well_duplicate_name_keys,
 )
 from pywp.three_viewer import render_local_three_scene
 from pywp.ui_calc_params import (
@@ -1136,21 +1145,69 @@ def _build_anti_collision_analysis(
     model: PlanningUncertaintyModel,
     name_to_color: dict[str, str] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
-    reference_uncertainty_models_by_name: Mapping[
-        str, PlanningUncertaintyModel
-    ] | None = None,
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None,
+    progress_callback: Callable[[AntiCollisionProgress], None] | None = None,
+    parallel_workers: int = 0,
 ) -> AntiCollisionAnalysis:
-    color_map = {
-        str(item.name): (name_to_color or {}).get(str(item.name), _well_color(index))
-        for index, item in enumerate(successes)
-    }
+    color_map = _planned_anti_collision_color_map(successes, name_to_color)
     return build_anti_collision_analysis_for_successes_shared(
         successes,
         model=model,
         name_to_color=color_map,
         reference_wells=reference_wells,
         reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        progress_callback=progress_callback,
+        parallel_workers=int(parallel_workers),
     )
+
+
+def _build_incremental_anti_collision_analysis(
+    successes: list[SuccessfulWellPlan],
+    *,
+    model: PlanningUncertaintyModel,
+    name_to_color: dict[str, str] | None = None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None,
+    well_signature_by_name: Mapping[str, str] | None = None,
+    previous_well_cache: Mapping[str, tuple[str, AntiCollisionWell]] | None = None,
+    previous_pair_cache: (
+        Mapping[tuple[str, str], AntiCollisionPairCacheEntry] | None
+    ) = None,
+    progress_callback: Callable[[AntiCollisionProgress], None] | None = None,
+    parallel_workers: int = 0,
+) -> tuple[
+    AntiCollisionAnalysis,
+    dict[str, tuple[str, AntiCollisionWell]],
+    dict[tuple[str, str], AntiCollisionPairCacheEntry],
+    AntiCollisionIncrementalStats,
+]:
+    color_map = _planned_anti_collision_color_map(successes, name_to_color)
+    return build_incremental_anti_collision_analysis_for_successes_shared(
+        successes,
+        model=model,
+        name_to_color=color_map,
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        well_signature_by_name=well_signature_by_name,
+        previous_well_cache=previous_well_cache,
+        previous_pair_cache=previous_pair_cache,
+        progress_callback=progress_callback,
+        parallel_workers=int(parallel_workers),
+    )
+
+
+def _planned_anti_collision_color_map(
+    successes: list[SuccessfulWellPlan],
+    name_to_color: Mapping[str, str] | None,
+) -> dict[str, str]:
+    return {
+        str(item.name): (name_to_color or {}).get(str(item.name), _well_color(index))
+        for index, item in enumerate(successes)
+    }
 
 
 def _reference_uncertainty_models_from_state(
@@ -1167,90 +1224,177 @@ def _anti_collision_cache_key(
     model: PlanningUncertaintyModel,
     name_to_color: dict[str, str] | None,
     reference_wells: tuple[ImportedTrajectoryWell, ...],
-    reference_uncertainty_models_by_name: Mapping[
-        str, PlanningUncertaintyModel
-    ] | None = None,
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None,
 ) -> str:
+    color_map = _planned_anti_collision_color_map(successes, name_to_color)
+    well_signatures = _anti_collision_well_signatures(
+        successes=successes,
+        model=model,
+        name_to_color=color_map,
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
     digest = hashlib.blake2b(digest_size=20)
-    _update_uncertainty_model_cache_digest(digest, model)
-    for well_name, reference_model in sorted(
-        (reference_uncertainty_models_by_name or {}).items()
-    ):
+    for well_name, signature in sorted(well_signatures.items()):
         digest.update(str(well_name).encode("utf-8"))
-        _update_uncertainty_model_cache_digest(digest, reference_model)
-    for well_name, color in sorted((name_to_color or {}).items()):
-        digest.update(str(well_name).encode("utf-8"))
-        digest.update(str(color).encode("utf-8"))
-    ordered_successes = sorted(successes, key=lambda item: str(item.name))
-    for success in ordered_successes:
-        digest.update(str(success.name).encode("utf-8"))
+        digest.update(str(signature).encode("utf-8"))
+    return digest.hexdigest()
+
+
+_ANTI_COLLISION_SIGNATURE_STATION_COLUMNS = (
+    "MD_m",
+    "INC_deg",
+    "AZI_deg",
+    "X_m",
+    "Y_m",
+    "Z_m",
+)
+_ANTI_COLLISION_SIGNATURE_SUMMARY_FIELDS = (
+    "kop_md_m",
+    "build1_dls_selected_deg_per_30m",
+    "build_dls_selected_deg_per_30m",
+    "md_total_m",
+    "optimization_mode",
+    "anti_collision_stage",
+    "anti_collision_attempted_stages",
+)
+_ANTI_COLLISION_SIGNATURE_CONFIG_FIELDS = (
+    "kop_min_vertical_m",
+    "dls_build_max_deg_per_30m",
+    "optimization_mode",
+)
+
+
+def _anti_collision_well_signatures(
+    *,
+    successes: list[SuccessfulWellPlan],
+    model: PlanningUncertaintyModel,
+    name_to_color: Mapping[str, str] | None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None,
+) -> dict[str, str]:
+    signatures: dict[str, str] = {}
+    planned_names = tuple(str(item.name) for item in successes)
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(reference_wells)
+    for index, success in enumerate(successes):
+        name = str(success.name)
+        digest = hashlib.blake2b(digest_size=20)
+        digest.update(b"planned")
+        digest.update(name.encode("utf-8"))
+        digest.update(
+            str((name_to_color or {}).get(name, _well_color(index))).encode("utf-8")
+        )
+        _update_uncertainty_model_cache_digest(digest, model)
+        _update_point_cache_digest(digest, success.surface)
+        _update_point_cache_digest(digest, success.t1)
+        _update_point_cache_digest(digest, success.t3)
+        _update_target_pairs_cache_digest(
+            digest,
+            tuple(getattr(success, "target_pairs", ()) or ()),
+        )
         digest.update(
             np.asarray(
-                [
-                    float(success.surface.x),
-                    float(success.surface.y),
-                    float(success.surface.z),
-                    float(success.t1.x),
-                    float(success.t1.y),
-                    float(success.t1.z),
-                    float(success.t3.x),
-                    float(success.t3.y),
-                    float(success.t3.z),
-                    float(success.azimuth_deg),
-                    float(success.md_t1_m),
-                ],
+                [float(success.azimuth_deg), float(success.md_t1_m)],
                 dtype=np.float64,
             ).tobytes()
         )
-        stations_subset = success.stations.loc[
-            :,
-            [
-                column
-                for column in (
-                    "MD_m",
-                    "INC_deg",
-                    "AZI_deg",
-                    "X_m",
-                    "Y_m",
-                    "Z_m",
-                )
-                if column in success.stations.columns
-            ],
-        ]
-        digest.update(str(tuple(stations_subset.columns)).encode("utf-8"))
-        digest.update(stations_subset.to_numpy(dtype=np.float64, copy=True).tobytes())
-    for reference_well in sorted(
-        reference_wells,
-        key=lambda item: (str(item.name), str(item.kind)),
-    ):
+        _update_station_table_cache_digest(digest, success.stations)
+        _update_success_context_cache_digest(digest, success)
+        signatures[name] = digest.hexdigest()
+    for reference_well in reference_wells:
+        collision_name = reference_well_collision_name(
+            reference_well,
+            planned_names=planned_names,
+            duplicate_name_keys=duplicate_reference_name_keys,
+        )
+        reference_model = (
+            (reference_uncertainty_models_by_name or {}).get(str(collision_name))
+            or (reference_uncertainty_models_by_name or {}).get(
+                str(reference_well.name)
+            )
+            or model
+        )
+        digest = hashlib.blake2b(digest_size=20)
+        digest.update(b"reference")
+        digest.update(str(collision_name).encode("utf-8"))
         digest.update(str(reference_well.name).encode("utf-8"))
         digest.update(str(reference_well.kind).encode("utf-8"))
         digest.update(
             str(
-                REFERENCE_WELL_KIND_COLORS.get(
-                    str(reference_well.kind),
-                    "#A0A0A0",
+                (name_to_color or {}).get(
+                    str(collision_name),
+                    REFERENCE_WELL_KIND_COLORS.get(
+                        str(reference_well.kind),
+                        "#A0A0A0",
+                    ),
                 )
             ).encode("utf-8")
         )
-        stations_subset = reference_well.stations.loc[
-            :,
-            [
-                column
-                for column in (
-                    "MD_m",
-                    "INC_deg",
-                    "AZI_deg",
-                    "X_m",
-                    "Y_m",
-                    "Z_m",
-                )
-                if column in reference_well.stations.columns
-            ],
-        ]
-        digest.update(str(tuple(stations_subset.columns)).encode("utf-8"))
-        digest.update(stations_subset.to_numpy(dtype=np.float64, copy=True).tobytes())
-    return digest.hexdigest()
+        _update_uncertainty_model_cache_digest(digest, reference_model)
+        _update_point_cache_digest(digest, reference_well.surface)
+        digest.update(
+            np.asarray([float(reference_well.azimuth_deg)], dtype=np.float64).tobytes()
+        )
+        _update_station_table_cache_digest(digest, reference_well.stations)
+        signatures[str(collision_name)] = digest.hexdigest()
+    return signatures
+
+
+def _update_point_cache_digest(digest: Any, point: Point3D | None) -> None:
+    if point is None:
+        digest.update(b"none")
+        return
+    digest.update(
+        np.asarray(
+            [float(point.x), float(point.y), float(point.z)],
+            dtype=np.float64,
+        ).tobytes()
+    )
+
+
+def _update_target_pairs_cache_digest(
+    digest: Any,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...],
+) -> None:
+    digest.update(str(len(target_pairs)).encode("utf-8"))
+    for left, right in target_pairs:
+        _update_point_cache_digest(digest, left)
+        _update_point_cache_digest(digest, right)
+
+
+def _update_station_table_cache_digest(
+    digest: Any,
+    stations: pd.DataFrame,
+) -> None:
+    stations_subset = stations.loc[
+        :,
+        [
+            column
+            for column in _ANTI_COLLISION_SIGNATURE_STATION_COLUMNS
+            if column in stations.columns
+        ],
+    ]
+    digest.update(str(tuple(stations_subset.columns)).encode("utf-8"))
+    digest.update(str(len(stations_subset)).encode("utf-8"))
+    digest.update(stations_subset.to_numpy(dtype=np.float64, copy=True).tobytes())
+
+
+def _update_success_context_cache_digest(
+    digest: Any,
+    success: SuccessfulWellPlan,
+) -> None:
+    summary = dict(success.summary)
+    context_values: list[tuple[str, str]] = []
+    for field_name in _ANTI_COLLISION_SIGNATURE_SUMMARY_FIELDS:
+        context_values.append((field_name, repr(summary.get(field_name))))
+    config = success.config
+    for field_name in _ANTI_COLLISION_SIGNATURE_CONFIG_FIELDS:
+        context_values.append((field_name, repr(getattr(config, field_name, None))))
+    digest.update(repr(tuple(context_values)).encode("utf-8"))
 
 
 def _update_uncertainty_model_cache_digest(
@@ -1320,10 +1464,11 @@ def _cached_anti_collision_view_model(
     uncertainty_model: PlanningUncertaintyModel,
     records: list[WelltrackRecord],
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
-    reference_uncertainty_models_by_name: Mapping[
-        str, PlanningUncertaintyModel
-    ] | None = None,
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None,
     progress_callback: Callable[[int, str], None] | None = None,
+    parallel_workers: int = 0,
 ) -> tuple[
     AntiCollisionAnalysis,
     tuple[AntiCollisionRecommendation, ...],
@@ -1337,12 +1482,62 @@ def _cached_anti_collision_view_model(
         if progress_callback is not None:
             progress_callback(int(progress_value), message)
 
+    last_pair_progress_update_s = 0.0
+    last_pair_progress_percent = -1
+
+    def _emit_pair_progress(progress: AntiCollisionProgress) -> None:
+        nonlocal last_pair_progress_update_s, last_pair_progress_percent
+        total = int(progress.pair_count)
+        completed = int(progress.completed_pair_count)
+        if total <= 0:
+            return
+        fraction = min(max(float(completed) / max(float(total), 1.0), 0.0), 1.0)
+        percent = int(round(30.0 + 36.0 * fraction))
+        now = perf_counter()
+        if (
+            completed < total
+            and percent == last_pair_progress_percent
+            and now - last_pair_progress_update_s < 0.75
+        ):
+            return
+        last_pair_progress_percent = percent
+        last_pair_progress_update_s = now
+        elapsed_s = float(max(progress.elapsed_s, 0.0))
+        eta_s = (
+            (elapsed_s / max(float(completed), 1.0)) * float(total - completed)
+            if completed > 0 and completed < total
+            else 0.0
+        )
+        if completed <= 0:
+            eta_text = "оценка времени..."
+        elif completed < total and eta_s > 0.0:
+            eta_text = "осталось оц. " + _format_duration_ru(eta_s)
+        else:
+            eta_text = "завершение"
+        workers = int(progress.parallel_workers)
+        worker_text = f" · {workers} процессов" if workers > 1 else ""
+        progress_text = (
+            f"Anti-collision: пары {completed}/{total} · {eta_text}"
+            f"{worker_text} · кэш {int(progress.reused_pair_count)} · "
+            f"prefilter {int(progress.prefiltered_pair_count)}"
+        )
+        if progress_callback is not None:
+            progress_callback(percent, progress_text)
+
     color_map = _well_color_map(records) if records else {}
     _emit(8, "Подготовка входных данных anti-collision.")
+    planned_color_map = _planned_anti_collision_color_map(successes, color_map)
+    well_signature_by_name = _anti_collision_well_signatures(
+        successes=successes,
+        model=uncertainty_model,
+        name_to_color=planned_color_map,
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
     cache_key = _anti_collision_cache_key(
         successes=successes,
         model=uncertainty_model,
-        name_to_color=color_map,
+        name_to_color=planned_color_map,
         reference_wells=reference_wells,
         reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
     )
@@ -1365,17 +1560,66 @@ def _cached_anti_collision_view_model(
                 "overlap_count": int(analysis.overlapping_pair_count),
                 "recommendation_count": int(len(recommendations)),
                 "cluster_count": int(len(clusters)),
+                "reused_well_count": int(cache.get("last_reused_well_count") or 0),
+                "rebuilt_well_count": int(cache.get("last_rebuilt_well_count") or 0),
+                "reused_pair_count": int(cache.get("last_reused_pair_count") or 0),
+                "recalculated_pair_count": int(
+                    cache.get("last_recalculated_pair_count") or 0
+                ),
+                "parallel_workers": int(cache.get("last_parallel_workers") or 0),
             }
             return analysis, recommendations, clusters
     try:
         _emit(30, "Расчёт anti-collision модели.")
-        analysis = _build_anti_collision_analysis(
-            successes,
-            model=uncertainty_model,
-            name_to_color=color_map,
-            reference_wells=reference_wells,
-            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        previous_well_cache = cache.get("well_cache")
+        previous_pair_cache = cache.get("pair_cache")
+        if not isinstance(previous_well_cache, Mapping):
+            previous_well_cache = None
+        if not isinstance(previous_pair_cache, Mapping):
+            previous_pair_cache = None
+        analysis, well_cache, pair_cache, incremental_stats = (
+            _build_incremental_anti_collision_analysis(
+                successes,
+                model=uncertainty_model,
+                name_to_color=planned_color_map,
+                reference_wells=reference_wells,
+                reference_uncertainty_models_by_name=(
+                    reference_uncertainty_models_by_name
+                ),
+                well_signature_by_name=well_signature_by_name,
+                previous_well_cache=previous_well_cache,
+                previous_pair_cache=previous_pair_cache,
+                progress_callback=_emit_pair_progress,
+                parallel_workers=int(parallel_workers),
+            )
         )
+        if incremental_stats.reused_well_count or incremental_stats.reused_pair_count:
+            _emit(
+                66,
+                (
+                    "Инкрементальный anti-collision: "
+                    f"скважины {incremental_stats.reused_well_count}/"
+                    f"{incremental_stats.reused_well_count + incremental_stats.rebuilt_well_count} "
+                    "из кэша, пары "
+                    f"{incremental_stats.reused_pair_count}/"
+                    f"{incremental_stats.reused_pair_count + incremental_stats.recalculated_pair_count} "
+                    "из кэша."
+                ),
+            )
+        else:
+            _emit(
+                66,
+                (
+                    "Anti-collision рассчитан без переиспользованных пар: "
+                    f"скважин {incremental_stats.rebuilt_well_count}, "
+                    f"пар {incremental_stats.recalculated_pair_count}."
+                    + (
+                        f" Параллельных процессов: {int(parallel_workers)}."
+                        if int(parallel_workers) > 1
+                        else ""
+                    )
+                ),
+            )
         _emit(72, "Построение рекомендаций anti-collision.")
         recommendations = build_anti_collision_recommendations(
             analysis,
@@ -1395,6 +1639,14 @@ def _cached_anti_collision_view_model(
         "analysis": analysis,
         "recommendations": recommendations,
         "clusters": clusters,
+        "well_signature_by_name": dict(well_signature_by_name),
+        "well_cache": well_cache,
+        "pair_cache": pair_cache,
+        "last_reused_well_count": int(incremental_stats.reused_well_count),
+        "last_rebuilt_well_count": int(incremental_stats.rebuilt_well_count),
+        "last_reused_pair_count": int(incremental_stats.reused_pair_count),
+        "last_recalculated_pair_count": int(incremental_stats.recalculated_pair_count),
+        "last_parallel_workers": int(parallel_workers),
     }
     _emit(100, "Расчёт Anti-collision завершён.")
     st.session_state["wt_anticollision_last_run"] = {
@@ -1405,8 +1657,24 @@ def _cached_anti_collision_view_model(
         "overlap_count": int(analysis.overlapping_pair_count),
         "recommendation_count": int(len(recommendations)),
         "cluster_count": int(len(clusters)),
+        "reused_well_count": int(incremental_stats.reused_well_count),
+        "rebuilt_well_count": int(incremental_stats.rebuilt_well_count),
+        "reused_pair_count": int(incremental_stats.reused_pair_count),
+        "recalculated_pair_count": int(incremental_stats.recalculated_pair_count),
+        "parallel_workers": int(parallel_workers),
     }
     return analysis, recommendations, clusters
+
+
+def _format_duration_ru(seconds: float) -> str:
+    total_seconds = int(round(float(max(seconds, 0.0))))
+    if total_seconds < 60:
+        return f"{total_seconds} с"
+    minutes, secs = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes} мин {secs:02d} с"
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours} ч {remaining_minutes:02d} мин"
 
 
 def _render_status_run_log(
@@ -1452,6 +1720,25 @@ def _render_status_run_log(
             extra_cols[1].metric(
                 "Кластеров",
                 f"{int(state_payload.get('cluster_count') or 0)}",
+            )
+        if "reused_pair_count" in state_payload:
+            cache_cols = st.columns(2, gap="small")
+            reused_wells = int(state_payload.get("reused_well_count") or 0)
+            rebuilt_wells = int(state_payload.get("rebuilt_well_count") or 0)
+            reused_pairs = int(state_payload.get("reused_pair_count") or 0)
+            recalculated_pairs = int(state_payload.get("recalculated_pair_count") or 0)
+            cache_cols[0].metric(
+                "Скважины из кэша",
+                f"{reused_wells}/{reused_wells + rebuilt_wells}",
+            )
+            cache_cols[1].metric(
+                "Пары из кэша",
+                f"{reused_pairs}/{reused_pairs + recalculated_pairs}",
+            )
+        if int(state_payload.get("parallel_workers") or 0) > 1:
+            st.caption(
+                "Anti-collision parallel: "
+                f"{int(state_payload.get('parallel_workers') or 0)} процессов."
             )
         if "status" in state_payload:
             st.caption(f"Статус результата: {str(state_payload.get('status'))}")
@@ -3503,7 +3790,9 @@ def _set_import_pilot_fixed_slots(
     }
     if not pilot_parent_keys:
         return False
-    resolved_pads = pads if pads is not None else _ensure_pad_configs(base_records=records)
+    resolved_pads = (
+        pads if pads is not None else _ensure_pad_configs(base_records=records)
+    )
     config_raw = st.session_state.get("wt_pad_configs", {})
     config_map = dict(config_raw if isinstance(config_raw, Mapping) else {})
     changed = False
@@ -4633,12 +4922,9 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                     or point_label.endswith("_t1")
                     or point_label.endswith("_t3")
                 )
-                if (
-                    well_name in highlight_names
-                    and (
-                        (explicit_indices is not None and point_index in explicit_indices)
-                        or (explicit_indices is None and is_legacy_target)
-                    )
+                if well_name in highlight_names and (
+                    (explicit_indices is not None and point_index in explicit_indices)
+                    or (explicit_indices is None and is_legacy_target)
                 ):
                     return [
                         "background-color: rgba(34, 197, 94, 0.14); "
@@ -4938,9 +5224,7 @@ def _pad_anchor_mode_label(mode: object) -> str:
 def _pad_membership(
     records: list[WelltrackRecord],
 ) -> tuple[list[WellPad], dict[str, str], dict[str, tuple[str, ...]]]:
-    return ptc_pad_state.pad_membership(
-        st.session_state, visible_well_records(records)
-    )
+    return ptc_pad_state.pad_membership(st.session_state, visible_well_records(records))
 
 
 def _normalize_focus_pad_id(
