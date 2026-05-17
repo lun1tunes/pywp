@@ -2,16 +2,21 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass
+import hashlib
 from pickle import PicklingError
 from time import perf_counter
-from typing import Callable
+from typing import Callable, Mapping
 
 import numpy as np
+import pandas as pd
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
+    AntiCollisionIncrementalStats,
+    AntiCollisionPairCacheEntry,
     AntiCollisionWell,
-    analyze_anti_collision,
+    analyze_anti_collision_incremental,
     build_anti_collision_well,
 )
 from pywp.eclipse_welltrack import (
@@ -24,6 +29,7 @@ from pywp.parallel import process_pool_context
 from pywp.planner import TrajectoryPlanner
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
+    REFERENCE_WELL_ACTUAL,
     REFERENCE_WELL_KIND_COLORS,
     reference_well_collision_name,
     reference_well_duplicate_name_keys,
@@ -46,6 +52,16 @@ _MAX_ITERATIONS = 8
 # Maximum number of distinct worst-zone pairs to try per iteration when the
 # top-1 worst zone cannot be improved.
 _MAX_WORST_ZONES_PER_ITERATION = 3
+
+
+@dataclass(frozen=True)
+class _PadOptimizationScore:
+    target_zone_count: int
+    overlap_pair_count: int
+    zone_count: int
+    severe_zone_count: int
+    worst_sf: float
+    mean_sf: float
 
 
 def _recalculate_well_from_dicts(
@@ -161,6 +177,94 @@ def score_analysis(
     return float(min(pad_sfs)) + 0.001 * float(np.mean(pad_sfs))
 
 
+def _optimization_score(
+    analysis: AntiCollisionAnalysis | None,
+    pad_well_names: set[str],
+    fixed_well_names: set[str] | None = None,
+) -> _PadOptimizationScore:
+    if analysis is None:
+        return _PadOptimizationScore(
+            target_zone_count=1_000_000,
+            overlap_pair_count=1_000_000,
+            zone_count=1_000_000,
+            severe_zone_count=1_000_000,
+            worst_sf=float("-inf"),
+            mean_sf=float("-inf"),
+        )
+
+    zones = _actionable_pad_zones(
+        analysis,
+        pad_well_names,
+        fixed_well_names=fixed_well_names,
+    )
+    if not zones:
+        return _PadOptimizationScore(
+            target_zone_count=0,
+            overlap_pair_count=0,
+            zone_count=0,
+            severe_zone_count=0,
+            worst_sf=float("inf"),
+            mean_sf=float("inf"),
+        )
+
+    sfs = np.asarray([float(zone.separation_factor) for zone in zones], dtype=float)
+    pair_keys = {
+        tuple(sorted((str(zone.well_a), str(zone.well_b)))) for zone in zones
+    }
+    target_pair_keys = {
+        tuple(sorted((str(zone.well_a), str(zone.well_b))))
+        for zone in zones
+        if int(getattr(zone, "priority_rank", 2)) < 2
+    }
+    return _PadOptimizationScore(
+        target_zone_count=len(target_pair_keys),
+        overlap_pair_count=len(pair_keys),
+        zone_count=len(zones),
+        severe_zone_count=int(np.count_nonzero(sfs < 1.0)),
+        worst_sf=float(np.min(sfs)),
+        mean_sf=float(np.mean(sfs)),
+    )
+
+
+def _score_is_improvement(
+    candidate: _PadOptimizationScore,
+    current: _PadOptimizationScore,
+) -> bool:
+    for field_name in (
+        "target_zone_count",
+        "overlap_pair_count",
+        "zone_count",
+        "severe_zone_count",
+    ):
+        candidate_value = int(getattr(candidate, field_name))
+        current_value = int(getattr(current, field_name))
+        if candidate_value < current_value:
+            return True
+        if candidate_value > current_value:
+            return False
+
+    if float(candidate.worst_sf) > float(current.worst_sf) + _IMPROVEMENT_EPS:
+        return True
+    if (
+        abs(float(candidate.worst_sf) - float(current.worst_sf)) <= _IMPROVEMENT_EPS
+        and float(candidate.mean_sf) > float(current.mean_sf) + _IMPROVEMENT_EPS
+    ):
+        return True
+    return False
+
+
+def _score_text(score: _PadOptimizationScore) -> str:
+    if int(score.zone_count) <= 0:
+        return "конфликтов 0"
+    return (
+        f"target-пар {int(score.target_zone_count)}, "
+        f"пар {int(score.overlap_pair_count)}, "
+        f"зон {int(score.zone_count)}, "
+        f"SF min {float(score.worst_sf):.3f}, "
+        f"SF mean {float(score.mean_sf):.3f}"
+    )
+
+
 # ---------------------------------------------------------------------------
 #  Lightweight AC-well builder (no display geometry — fast).
 # ---------------------------------------------------------------------------
@@ -207,13 +311,164 @@ def _build_ref_ac_well_light(
     )
 
 
-def _analyze_from_ac_wells(
+def _reference_uncertainty_model(
+    *,
+    reference_well: ImportedTrajectoryWell,
+    collision_name: str,
+    default_model: PlanningUncertaintyModel,
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ),
+) -> PlanningUncertaintyModel:
+    if not reference_uncertainty_models_by_name:
+        return default_model
+    if str(getattr(reference_well, "kind", "")) != REFERENCE_WELL_ACTUAL:
+        return default_model
+    return (
+        reference_uncertainty_models_by_name.get(str(collision_name))
+        or reference_uncertainty_models_by_name.get(str(reference_well.name))
+        or default_model
+    )
+
+
+def _analysis_well_signature(
+    name: str,
+    success: object,
+    model: PlanningUncertaintyModel,
+) -> str:
+    digest = hashlib.blake2b(digest_size=20)
+    digest.update(str(name).encode("utf-8"))
+    _update_model_signature(digest, model)
+    for attr_name in ("surface", "t1", "t3"):
+        point = getattr(success, attr_name, None)
+        if point is None:
+            digest.update(b"none")
+            continue
+        digest.update(
+            np.asarray(
+                [
+                    float(getattr(point, "x", 0.0)),
+                    float(getattr(point, "y", 0.0)),
+                    float(getattr(point, "z", 0.0)),
+                ],
+                dtype=np.float64,
+            ).tobytes()
+        )
+    digest.update(
+        np.asarray(
+            [
+                float(getattr(success, "azimuth_deg", 0.0) or 0.0),
+                float(getattr(success, "md_t1_m", 0.0) or 0.0),
+            ],
+            dtype=np.float64,
+        ).tobytes()
+    )
+    stations = getattr(success, "stations", None)
+    if isinstance(stations, pd.DataFrame):
+        columns = [
+            column
+            for column in ("MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m")
+            if column in stations.columns
+        ]
+        digest.update(str(tuple(columns)).encode("utf-8"))
+        digest.update(str(len(stations)).encode("utf-8"))
+        if columns:
+            digest.update(stations.loc[:, columns].to_numpy(dtype=np.float64).tobytes())
+    else:
+        digest.update(repr(id(success)).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _reference_well_signature(
+    collision_name: str,
+    ref: ImportedTrajectoryWell,
+    model: PlanningUncertaintyModel,
+) -> str:
+    digest = hashlib.blake2b(digest_size=20)
+    digest.update(str(collision_name).encode("utf-8"))
+    digest.update(str(ref.name).encode("utf-8"))
+    digest.update(str(ref.kind).encode("utf-8"))
+    _update_model_signature(digest, model)
+    digest.update(
+        np.asarray(
+            [float(ref.surface.x), float(ref.surface.y), float(ref.surface.z)],
+            dtype=np.float64,
+        ).tobytes()
+    )
+    digest.update(np.asarray([float(ref.azimuth_deg)], dtype=np.float64).tobytes())
+    columns = [
+        column
+        for column in ("MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m")
+        if column in ref.stations.columns
+    ]
+    digest.update(str(tuple(columns)).encode("utf-8"))
+    digest.update(str(len(ref.stations)).encode("utf-8"))
+    if columns:
+        digest.update(ref.stations.loc[:, columns].to_numpy(dtype=np.float64).tobytes())
+    return digest.hexdigest()
+
+
+def _update_model_signature(digest: object, model: PlanningUncertaintyModel) -> None:
+    digest.update(str(getattr(model, "iscwsa_tool_code", "") or "").encode("utf-8"))
+    env = getattr(model, "iscwsa_environment", None)
+    values = [
+        float(getattr(model, "sigma_inc_deg", 0.0)),
+        float(getattr(model, "sigma_azi_deg", 0.0)),
+        float(getattr(model, "sigma_lateral_drift_m_per_1000m", 0.0)),
+        float(getattr(model, "confidence_scale", 0.0)),
+        float(getattr(model, "sample_step_m", 0.0)),
+        float(getattr(model, "min_refined_step_m", 0.0)),
+        float(getattr(model, "directional_refine_threshold_deg", 0.0)),
+        float(getattr(env, "gtot_mps2", 0.0)),
+        float(getattr(env, "mtot_nt", 0.0)),
+        float(getattr(env, "dip_deg", 0.0)),
+        float(getattr(env, "declination_deg", 0.0)),
+        float(getattr(env, "lateral_singularity_inc_deg", 0.0)),
+    ]
+    digest.update(np.asarray(values, dtype=np.float64).tobytes())
+
+
+def _cached_or_built_ac_well(
+    *,
+    name: str,
+    signature_by_name: dict[str, str],
+    previous_well_cache: Mapping[str, tuple[str, AntiCollisionWell]] | None,
+    builder: Callable[[], AntiCollisionWell],
+) -> AntiCollisionWell:
+    previous = (previous_well_cache or {}).get(str(name))
+    if previous is not None and len(previous) == 2:
+        previous_signature, previous_well = previous
+        if (
+            str(signature_by_name.get(str(name), "")) == str(previous_signature)
+            and isinstance(previous_well, AntiCollisionWell)
+        ):
+            return previous_well
+    return builder()
+
+
+def _analyze_incremental_from_ac_wells(
     ac_wells: dict[str, AntiCollisionWell],
     ref_ac_wells: tuple[AntiCollisionWell, ...],
-) -> AntiCollisionAnalysis:
+    *,
+    well_signature_by_name: Mapping[str, str] | None = None,
+    previous_pair_cache: (
+        Mapping[tuple[str, str], AntiCollisionPairCacheEntry] | None
+    ) = None,
+    parallel_workers: int = 0,
+) -> tuple[
+    AntiCollisionAnalysis,
+    dict[tuple[str, str], AntiCollisionPairCacheEntry],
+    AntiCollisionIncrementalStats,
+]:
     """Run pairwise analysis from pre-built AC well objects (no geometry)."""
     all_wells = list(ac_wells.values()) + list(ref_ac_wells)
-    return analyze_anti_collision(all_wells, build_overlap_geometry=False)
+    return analyze_anti_collision_incremental(
+        all_wells,
+        build_overlap_geometry=False,
+        well_signature_by_name=well_signature_by_name,
+        previous_pair_cache=previous_pair_cache,
+        parallel_workers=int(parallel_workers),
+    )
 
 
 def _swap_surfaces_and_recalculate(
@@ -309,6 +564,16 @@ def optimize_pad_order(
     config_by_name: dict[str, TrajectoryConfig],
     progress_callback: Callable[[int, str], None],
     fixed_well_names: set[str] | None = None,
+    initial_analysis: AntiCollisionAnalysis | None = None,
+    previous_well_cache: Mapping[str, tuple[str, AntiCollisionWell]] | None = None,
+    previous_pair_cache: (
+        Mapping[tuple[str, str], AntiCollisionPairCacheEntry] | None
+    ) = None,
+    well_signature_by_name: Mapping[str, str] | None = None,
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None,
+    parallel_workers: int = 0,
 ) -> tuple[list[WelltrackRecord], dict[str, SuccessfulWellPlan], bool]:
 
     pad_names = {
@@ -356,26 +621,98 @@ def optimize_pad_order(
 
     # --- Pre-build lightweight AC wells (no display geometry). ---
     # Reused across candidates; only swapped wells are rebuilt.
+    current_signatures = {
+        str(name): str(signature)
+        for name, signature in (well_signature_by_name or {}).items()
+    }
     duplicate_reference_name_keys = reference_well_duplicate_name_keys(ref_wells)
-    ref_ac_wells = tuple(
-        _build_ref_ac_well_light(
-            rw,
-            uncertainty_model,
-            collision_name=reference_well_collision_name(
+    planned_names = tuple(success_dict.keys())
+    reference_collision_items = tuple(
+        (
+            reference_well_collision_name(
                 rw,
-                planned_names=tuple(success_dict.keys()),
+                planned_names=planned_names,
                 duplicate_name_keys=duplicate_reference_name_keys,
             ),
+            rw,
         )
         for rw in ref_wells
     )
-    ac_well_cache: dict[str, AntiCollisionWell] = {
-        name: _build_ac_well_light(success_dict[name], uncertainty_model)
-        for name in success_dict
+    reference_model_by_collision_name = {
+        str(collision_name): _reference_uncertainty_model(
+            reference_well=rw,
+            collision_name=str(collision_name),
+            default_model=uncertainty_model,
+            reference_uncertainty_models_by_name=(
+                reference_uncertainty_models_by_name
+            ),
+        )
+        for collision_name, rw in reference_collision_items
     }
+    for collision_name, rw in reference_collision_items:
+        reference_model = reference_model_by_collision_name[str(collision_name)]
+        current_signatures.setdefault(
+            str(collision_name),
+            _reference_well_signature(str(collision_name), rw, reference_model),
+        )
+    ref_ac_wells = tuple(
+        _cached_or_built_ac_well(
+            name=str(collision_name),
+            signature_by_name=current_signatures,
+            previous_well_cache=previous_well_cache,
+            builder=lambda rw=rw, collision_name=str(
+                collision_name
+            ), reference_model=reference_model_by_collision_name[
+                str(collision_name)
+            ]: _build_ref_ac_well_light(
+                rw,
+                reference_model,
+                collision_name=collision_name,
+            ),
+        )
+        for collision_name, rw in reference_collision_items
+    )
+    ac_well_cache: dict[str, AntiCollisionWell] = {}
+    for name, success in success_dict.items():
+        current_signatures.setdefault(
+            str(name),
+            _analysis_well_signature(str(name), success, uncertainty_model),
+        )
+        ac_well_cache[str(name)] = _cached_or_built_ac_well(
+            name=str(name),
+            signature_by_name=current_signatures,
+            previous_well_cache=previous_well_cache,
+            builder=lambda success=success: _build_ac_well_light(
+                success,
+                uncertainty_model,
+            ),
+        )
 
-    analysis = _analyze_from_ac_wells(ac_well_cache, ref_ac_wells)
-    best_score = score_analysis(
+    if initial_analysis is not None and previous_pair_cache is not None:
+        analysis = initial_analysis
+        current_pair_cache = dict(previous_pair_cache)
+    else:
+        analysis, current_pair_cache, initial_stats = _analyze_incremental_from_ac_wells(
+            ac_well_cache,
+            ref_ac_wells,
+            well_signature_by_name=current_signatures,
+            previous_pair_cache=previous_pair_cache,
+            parallel_workers=int(parallel_workers),
+        )
+        if initial_stats.reused_pair_count:
+            progress_callback(
+                0,
+                (
+                    "Стартовая anti-collision оценка использовала кэш: "
+                    f"{int(initial_stats.reused_pair_count)} пар."
+                ),
+            )
+    best_score = _optimization_score(
+        analysis,
+        pad_names,
+        fixed_well_names=fixed_names,
+    )
+    best_score_value = score_analysis(
         analysis,
         pad_names,
         fixed_well_names=fixed_names,
@@ -384,13 +721,12 @@ def optimize_pad_order(
     best_records = list(records)
     best_successes = dict(success_dict)
     improved = False
-    tried_pairs: set[tuple[str, str]] = set()
+    last_accepted_pair: tuple[str, str] | None = None
 
-    progress_callback(0, f"Начальный score: {best_score:.3f}...")
+    progress_callback(0, f"Начальный score: {_score_text(best_score)}.")
 
     try:
         for iteration in range(1, _MAX_ITERATIONS + 1):
-            analysis = _analyze_from_ac_wells(ac_well_cache, ref_ac_wells)
             actionable = _actionable_pad_zones(
                 analysis,
                 pad_names,
@@ -434,14 +770,18 @@ def optimize_pad_order(
 
                 best_candidate = None
                 best_candidate_score = best_score
+                best_candidate_score_value = best_score_value
                 best_candidate_ac_updates: dict[str, AntiCollisionWell] | None = None
+                best_candidate_signatures: dict[str, str] | None = None
+                best_candidate_pair_cache: (
+                    dict[tuple[str, str], AntiCollisionPairCacheEntry] | None
+                ) = None
+                best_candidate_analysis: AntiCollisionAnalysis | None = None
 
                 for name_1, name_2 in swap_candidates:
-                    ck = tuple(sorted((name_1, name_2)))
-                    if ck in tried_pairs:
+                    candidate_pair_key = tuple(sorted((str(name_1), str(name_2))))
+                    if candidate_pair_key == last_accepted_pair:
                         continue
-                    tried_pairs.add(ck)
-
                     result = _swap_surfaces_and_recalculate(
                         best_records, best_successes, name_1, name_2, config_by_name,
                         pool=pool,
@@ -457,24 +797,61 @@ def optimize_pad_order(
                     cand_ac_wells = dict(ac_well_cache)
                     cand_ac_wells[name_1] = ac_well_1
                     cand_ac_wells[name_2] = ac_well_2
+                    cand_signatures = dict(current_signatures)
+                    cand_signatures[name_1] = _analysis_well_signature(
+                        name_1,
+                        cand_successes[name_1],
+                        uncertainty_model,
+                    )
+                    cand_signatures[name_2] = _analysis_well_signature(
+                        name_2,
+                        cand_successes[name_2],
+                        uncertainty_model,
+                    )
 
-                    cand_analysis = _analyze_from_ac_wells(cand_ac_wells, ref_ac_wells)
-                    cand_score = score_analysis(
+                    cand_analysis, cand_pair_cache, _ = (
+                        _analyze_incremental_from_ac_wells(
+                            cand_ac_wells,
+                            ref_ac_wells,
+                            well_signature_by_name=cand_signatures,
+                            previous_pair_cache=current_pair_cache,
+                            parallel_workers=int(parallel_workers),
+                        )
+                    )
+                    cand_score = _optimization_score(
+                        cand_analysis,
+                        pad_names,
+                        fixed_well_names=fixed_names,
+                    )
+                    cand_score_value = score_analysis(
                         cand_analysis,
                         pad_names,
                         fixed_well_names=fixed_names,
                     )
 
-                    if cand_score > best_candidate_score + _IMPROVEMENT_EPS:
+                    if _score_is_improvement(cand_score, best_candidate_score):
                         best_candidate_score = cand_score
+                        best_candidate_score_value = cand_score_value
                         best_candidate = (cand_records, cand_successes)
-                        best_candidate_ac_updates = {name_1: ac_well_1, name_2: ac_well_2}
+                        best_candidate_ac_updates = {
+                            name_1: ac_well_1,
+                            name_2: ac_well_2,
+                        }
+                        best_candidate_signatures = cand_signatures
+                        best_candidate_pair_cache = cand_pair_cache
+                        best_candidate_analysis = cand_analysis
+                        best_candidate_pair_key = candidate_pair_key
 
                 if best_candidate is not None:
                     best_records, best_successes = best_candidate
                     best_score = best_candidate_score
+                    best_score_value = best_candidate_score_value
+                    current_signatures = dict(best_candidate_signatures or current_signatures)
+                    current_pair_cache = dict(best_candidate_pair_cache or current_pair_cache)
+                    analysis = best_candidate_analysis or analysis
                     # Update the AC well cache with the accepted swap.
                     ac_well_cache.update(best_candidate_ac_updates)
+                    last_accepted_pair = best_candidate_pair_key
                     swap_accepted = True
                     improved = True
                     break  # restart from updated state
@@ -485,5 +862,8 @@ def optimize_pad_order(
         if pool is not None:
             pool.shutdown(wait=True)
 
-    progress_callback(100, f"Готово! Лучший score: {best_score:.3f}")
+    progress_callback(
+        100,
+        f"Готово! Лучший score: {_score_text(best_score)} ({best_score_value:.3f}).",
+    )
     return best_records, best_successes, improved

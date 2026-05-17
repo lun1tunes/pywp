@@ -1,7 +1,7 @@
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
-Default CRS: ГК_13N_42 / Pulkovo 1942 Gauss-Kruger zone 13.
+Default CRS: ГК_13N_42 / Pulkovo 1942 Gauss-Kruger CM 75E.
 """
 
 from __future__ import annotations
@@ -34,20 +34,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Session state keys
-CRS_SELECTED_KEY = "trajectory_crs_selected"
-CRS_SELECTBOX_KEY = "trajectory_crs_selectbox"  # Separate key for widget
+CRS_INPUT_SELECTED_KEY = "trajectory_input_crs_selected"
+CRS_INPUT_SELECTBOX_KEY = "trajectory_input_crs_selectbox"
+CRS_SELECTED_KEY = "trajectory_crs_selected"  # CSV target CRS, kept for compatibility
+CRS_SELECTBOX_KEY = "trajectory_crs_selectbox"
 CRS_AUTO_CONVERT_KEY = "trajectory_crs_auto_convert"
 
 # Default CRS as per user requirement: ГК_13N_42.
-DEFAULT_CRS = CoordinateSystem.PULKOVO_1942_ZONE_13
+DEFAULT_CRS = CoordinateSystem.PULKOVO_1942_GK_13N
 
-# Available CRS options for the UI
-CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
-    ("PNO-16 (Зона)", CoordinateSystem.PNO_16_ZONE),
-    ("PNO-16 (CM)", CoordinateSystem.PNO_16_CM),
-    ("PNO-13 (Зона)", CoordinateSystem.PNO_13_ZONE),
-    ("PNO-13 (CM)", CoordinateSystem.PNO_13_CM),
-    ("СК-42 (Градусные)", CoordinateSystem.PULKOVO_1942),
+# Available input CRS options. Input coordinates are treated as projected
+# orthogonal meter coordinates; the selected value is source CRS metadata for
+# CSV conversion and does not mutate calculation geometry.
+INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 6", CoordinateSystem.PULKOVO_1942_ZONE_6),
     ("СК-42 Зона 7", CoordinateSystem.PULKOVO_1942_ZONE_7),
     ("СК-42 Зона 8", CoordinateSystem.PULKOVO_1942_ZONE_8),
@@ -55,7 +54,8 @@ CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 10", CoordinateSystem.PULKOVO_1942_ZONE_10),
     ("СК-42 Зона 11", CoordinateSystem.PULKOVO_1942_ZONE_11),
     ("СК-42 Зона 12", CoordinateSystem.PULKOVO_1942_ZONE_12),
-    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_ZONE_13),
+    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
+    ("СК-42 Зона 13 (13 млн)", CoordinateSystem.PULKOVO_1942_ZONE_13),
     ("СК-42 Зона 14", CoordinateSystem.PULKOVO_1942_ZONE_14),
     ("СК-42 Зона 15", CoordinateSystem.PULKOVO_1942_ZONE_15),
     ("СК-42 Зона 16", CoordinateSystem.PULKOVO_1942_ZONE_16),
@@ -63,30 +63,54 @@ CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 18", CoordinateSystem.PULKOVO_1942_ZONE_18),
     ("СК-42 Зона 19", CoordinateSystem.PULKOVO_1942_ZONE_19),
     ("СК-42 Зона 20", CoordinateSystem.PULKOVO_1942_ZONE_20),
-    ("Пулково 1995 (Градусные)", CoordinateSystem.PULKOVO_1995),
     ("Пулково 1995 Зона 13", CoordinateSystem.PULKOVO_1995_ZONE_13),
     ("Пулково 1995 Зона 18", CoordinateSystem.PULKOVO_1995_ZONE_18),
-    ("ГСК-2011", CoordinateSystem.GSK_2011),
-    ("WGS84", CoordinateSystem.WGS84),
+    ("Пулково 1995 CM 39E", CoordinateSystem.PULKOVO_1995_CM_39E),
+    ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
 ]
 
+# CSV output CRS options. CSV may be exported either in projected meters or in
+# geographic/cartographic coordinates, where X/Y columns become lon/lat degrees.
+CSV_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
+    *INPUT_CRS_OPTIONS,
+    ("СК-42 (Градусные)", CoordinateSystem.PULKOVO_1942),
+    ("Пулково 1995 (Градусные)", CoordinateSystem.PULKOVO_1995),
+    ("ГСК-2011 (Градусные)", CoordinateSystem.GSK_2011),
+    ("WGS84 (Градусные)", CoordinateSystem.WGS84),
+]
+
+# Backwards-compatible name for code/tests that refer to CSV CRS choices.
+CRS_OPTIONS = CSV_CRS_OPTIONS
+
+INPUT_CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
+    crs: label for label, crs in INPUT_CRS_OPTIONS
+}
 CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
-    crs: label for label, crs in CRS_OPTIONS
+    crs: label for label, crs in CSV_CRS_OPTIONS
 }
 
 # Pre-compute default index to avoid hardcoded magic number
 _DEFAULT_CRS_INDEX = next(
-    (i for i, (_, c) in enumerate(CRS_OPTIONS) if c == DEFAULT_CRS),
+    (i for i, (_, c) in enumerate(CSV_CRS_OPTIONS) if c == DEFAULT_CRS),
+    0,
+)
+_DEFAULT_INPUT_CRS_INDEX = next(
+    (i for i, (_, c) in enumerate(INPUT_CRS_OPTIONS) if c == DEFAULT_CRS),
     0,
 )
 
 
-def _get_crs_index(crs: CoordinateSystem) -> int:
+def _get_crs_index(
+    crs: CoordinateSystem,
+    options: list[tuple[str, CoordinateSystem]] = CRS_OPTIONS,
+    *,
+    default_index: int = _DEFAULT_CRS_INDEX,
+) -> int:
     """Get index of CRS in options list."""
-    for i, (_, c) in enumerate(CRS_OPTIONS):
+    for i, (_, c) in enumerate(options):
         if c == crs:
             return i
-    return _DEFAULT_CRS_INDEX
+    return default_index
 
 
 def render_crs_sidebar() -> CoordinateSystem:
@@ -99,34 +123,67 @@ def render_crs_sidebar() -> CoordinateSystem:
         st.divider()
         st.markdown("### Система координат")
 
-        # Initialize with default if not set
+        # Initialize with defaults if not set.
+        if CRS_INPUT_SELECTED_KEY not in st.session_state:
+            st.session_state[CRS_INPUT_SELECTED_KEY] = DEFAULT_CRS
         if CRS_SELECTED_KEY not in st.session_state:
             st.session_state[CRS_SELECTED_KEY] = DEFAULT_CRS
 
-        current_crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
+        current_input_crs = st.session_state.get(CRS_INPUT_SELECTED_KEY, DEFAULT_CRS)
+        if current_input_crs not in INPUT_CRS_LABEL_BY_VALUE:
+            current_input_crs = DEFAULT_CRS
+            st.session_state[CRS_INPUT_SELECTED_KEY] = DEFAULT_CRS
+        current_csv_crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
+        if current_csv_crs not in CRS_LABEL_BY_VALUE:
+            current_csv_crs = DEFAULT_CRS
+            st.session_state[CRS_SELECTED_KEY] = DEFAULT_CRS
 
-        option_labels = [label for label, _ in CRS_OPTIONS]
-        if st.session_state.get(CRS_SELECTBOX_KEY) not in option_labels:
+        input_option_labels = [label for label, _ in INPUT_CRS_OPTIONS]
+        if st.session_state.get(CRS_INPUT_SELECTBOX_KEY) not in input_option_labels:
+            st.session_state.pop(CRS_INPUT_SELECTBOX_KEY, None)
+        selected_input_label = st.selectbox(
+            "Входная CRS",
+            options=input_option_labels,
+            index=_get_crs_index(
+                current_input_crs,
+                INPUT_CRS_OPTIONS,
+                default_index=_DEFAULT_INPUT_CRS_INDEX,
+            ),
+            key=CRS_INPUT_SELECTBOX_KEY,
+            help=(
+                "CRS исходных X/Y координат. Список ограничен проекционными "
+                "системами в метрах. Расчёт, WELLTRACK, .dev, экранные точки, "
+                "кусты, графики и таблицы остаются в этих координатах."
+            ),
+        )
+        input_crs = next(
+            (crs for label, crs in INPUT_CRS_OPTIONS if label == selected_input_label),
+            DEFAULT_CRS,
+        )
+        st.session_state[CRS_INPUT_SELECTED_KEY] = input_crs
+
+        csv_option_labels = [label for label, _ in CSV_CRS_OPTIONS]
+        if st.session_state.get(CRS_SELECTBOX_KEY) not in csv_option_labels:
             st.session_state.pop(CRS_SELECTBOX_KEY, None)
 
-        selected_label = st.selectbox(
-            "Выберите CRS",
-            options=option_labels,
-            index=_get_crs_index(current_crs),
+        selected_csv_label = st.selectbox(
+            "CRS CSV-выгрузки",
+            options=csv_option_labels,
+            index=_get_crs_index(current_csv_crs, CSV_CRS_OPTIONS),
             key=CRS_SELECTBOX_KEY,
             help=(
-                "Система координат применяется только к CSV-выгрузкам "
-                "инклинометрии. Экранные точки, кусты, графики и таблицы "
-                "остаются в расчётной системе. По умолчанию: ГК_13N_42."
+                "Выбранная здесь CRS применяется только к CSV-выгрузкам "
+                "инклинометрии. Для географических CRS X/Y в CSV будут "
+                "выгружены как долгота/широта в градусах."
             ),
         )
 
-        # Find the CRS enum for selected label and store separately
-        selected_crs = next(
-            (crs for label, crs in CRS_OPTIONS if label == selected_label),
+        # Find the CRS enum for selected CSV label and store separately.
+        selected_csv_crs = next(
+            (crs for label, crs in CSV_CRS_OPTIONS if label == selected_csv_label),
             DEFAULT_CRS,  # Default fallback
         )
-        st.session_state[CRS_SELECTED_KEY] = selected_crs
+        st.session_state[CRS_SELECTED_KEY] = selected_csv_crs
 
         # Auto-convert toggle
         if CRS_AUTO_CONVERT_KEY not in st.session_state:
@@ -135,36 +192,58 @@ def render_crs_sidebar() -> CoordinateSystem:
         auto_convert_enabled = st.toggle(
             "Пересчитывать координаты в CSV",
             key=CRS_AUTO_CONVERT_KEY,
-            help="Автоматически пересчитывать только CSV инклинометрии при смене CRS",
+            help=(
+                "Если включено, X/Y в CSV пересчитываются из входной CRS "
+                "в выбранную CRS CSV-выгрузки."
+            ),
         )
         csv_crs = csv_export_crs(
-            selected_crs,
-            DEFAULT_CRS,
+            selected_csv_crs,
+            input_crs,
             auto_convert=bool(auto_convert_enabled),
         )
         if (
             bool(auto_convert_enabled)
-            and selected_crs != DEFAULT_CRS
-            and csv_crs != selected_crs
+            and selected_csv_crs != input_crs
+            and csv_crs != selected_csv_crs
         ):
             st.caption(
-                "CSV останется в исходной CRS: для PNO нужен проектный набор "
-                "параметров преобразования."
+                "CSV останется во входной CRS: для выбранной CRS нет прямого "
+                "преобразования."
             )
 
-        # Show selected CRS info
-        st.caption(f"**Текущая:** {CRS_LABEL_BY_VALUE.get(selected_crs, selected_label)}")
+        # Show conversion path explicitly.
+        csv_crs_label = CRS_LABEL_BY_VALUE.get(csv_crs, str(csv_crs))
+        if not bool(auto_convert_enabled):
+            csv_crs_label = f"{csv_crs_label} (пересчёт выключен)"
+        st.caption(
+            "**Входная:** "
+            f"{INPUT_CRS_LABEL_BY_VALUE.get(input_crs, str(input_crs))} → "
+            "**CSV:** "
+            f"{csv_crs_label}"
+        )
 
-        return selected_crs
+        return selected_csv_crs
+
+
+def get_input_crs() -> CoordinateSystem:
+    """Get currently selected source/input CRS from session state."""
+    crs = st.session_state.get(CRS_INPUT_SELECTED_KEY, DEFAULT_CRS)
+    if crs not in INPUT_CRS_LABEL_BY_VALUE:
+        return DEFAULT_CRS
+    return crs
 
 
 def get_selected_crs() -> CoordinateSystem:
-    """Get currently selected coordinate system from session state.
+    """Get currently selected CSV output coordinate system from session state.
 
     Returns:
-        Selected coordinate system (defaults to ГК_13N_42)
+        Selected CSV coordinate system (defaults to ГК_13N_42)
     """
-    return st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
+    crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
+    if crs not in CRS_LABEL_BY_VALUE:
+        return DEFAULT_CRS
+    return crs
 
 
 def should_auto_convert() -> bool:
@@ -223,6 +302,7 @@ def _effective_pyproj_crs(crs: CoordinateSystem) -> CoordinateSystem | None:
         CoordinateSystem.PNO_13_CM,
         CoordinateSystem.PNO_16_ZONE,
         CoordinateSystem.PNO_16_CM,
+        CoordinateSystem.GSK_2011_GEOCENTRIC,
     }:
         return None
     return crs
@@ -589,7 +669,8 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         zone_crs = getattr(CoordinateSystem, f"PULKOVO_1942_ZONE_{zone_num}", None)
         if zone_crs:
             suffix_map[zone_crs] = f" (СК-42/З{zone_num})"
-    suffix_map[CoordinateSystem.PULKOVO_1942_ZONE_13] = " (ГК_13N_42)"
+    suffix_map[CoordinateSystem.PULKOVO_1942_GK_13N] = " (ГК_13N_42)"
+    suffix_map[CoordinateSystem.WGS84_UTM_ZONE_43N] = " (WGS84/UTM43N)"
 
     # Add Pulkovo 1995 zone suffixes
     for zone_num in (13, 18):
@@ -602,6 +683,7 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
 
 __all__ = [
     "render_crs_sidebar",
+    "get_input_crs",
     "get_selected_crs",
     "should_auto_convert",
     "transform_point_to_crs",
@@ -612,6 +694,8 @@ __all__ = [
     "apply_crs_to_well_view",
     "get_crs_display_suffix",
     "DEFAULT_CRS",
+    "INPUT_CRS_OPTIONS",
+    "CSV_CRS_OPTIONS",
     "CRS_OPTIONS",
     "_can_transform_directly",
     "_transform_xy",

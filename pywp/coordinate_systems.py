@@ -2,7 +2,7 @@
 
 Supports Russian petroleum industry coordinate systems:
 - Pulkovo 1942 (СК-42) - EPSG:4284 - Legacy Soviet system
-- GSK-2011 (ГСК-2011) - EPSG:7681 - Modern Russian state system
+- GSK-2011 (ГСК-2011) - EPSG:7683 geographic / EPSG:7681 geocentric
 - WGS84 - EPSG:4326 - Global GPS standard
 - Custom local systems (PNO-13, PNO-16, etc.)
 
@@ -40,13 +40,19 @@ class CoordinateSystem(Enum):
     # Global standard
     WGS84 = "EPSG:4326"
     WGS84_UTM = "EPSG:32600"  # Base for UTM zones
+    WGS84_UTM_ZONE_43N = "EPSG:32643"  # WGS 84 / UTM zone 43N
 
     # Russian state systems
     PULKOVO_1942 = "EPSG:4284"  # СК-42, legacy Soviet (accuracy ~3m)
     PULKOVO_1995 = "EPSG:4200"  # Pulkovo 1995, modernized (accuracy ~1m)
-    GSK_2011 = "EPSG:7681"  # ГСК-2011, current state system
+    GSK_2011_GEOCENTRIC = "EPSG:7681"  # GSK-2011 geocentric X/Y/Z, metres
+    GSK_2011 = "EPSG:7683"  # ГСК-2011 geographic 2D, degrees
 
-    # Pulkovo 1942 Gauss-Kruger zones (6-degree, legacy)
+    # Pulkovo 1942 Gauss-Kruger zones (6-degree, legacy).
+    # EPSG:28413 carries zone-prefixed false easting 13,500,000 m.
+    # EPSG:2503 is the non-deprecated truncated CM 75E form equivalent
+    # to the deprecated EPSG:28473 "Gauss-Kruger 13N" definition.
+    PULKOVO_1942_GK_13N = "EPSG:2503"    # CM 75°, false easting 500,000 m
     PULKOVO_1942_ZONE_6 = "EPSG:28406"   # CM 33°
     PULKOVO_1942_ZONE_7 = "EPSG:28407"   # CM 39°
     PULKOVO_1942_ZONE_8 = "EPSG:28408"   # CM 45°
@@ -88,15 +94,23 @@ class CoordinateSystem(Enum):
             CoordinateSystem.GSK_2011,
         }
 
+    def is_geocentric(self) -> bool:
+        """True if system uses earth-centered XYZ coordinates."""
+        return self == CoordinateSystem.GSK_2011_GEOCENTRIC
+
     def is_projected(self) -> bool:
         """True if system uses projected coordinates (meters)."""
-        return not self.is_geographic() and self not in {
-            CoordinateSystem.PNO_13_ZONE,
-            CoordinateSystem.PNO_13_CM,
-            CoordinateSystem.PNO_16_ZONE,
-            CoordinateSystem.PNO_16_CM,
-            CoordinateSystem.LOCAL,
-        }
+        return (
+            not self.is_geographic()
+            and not self.is_geocentric()
+            and self not in {
+                CoordinateSystem.PNO_13_ZONE,
+                CoordinateSystem.PNO_13_CM,
+                CoordinateSystem.PNO_16_ZONE,
+                CoordinateSystem.PNO_16_CM,
+                CoordinateSystem.LOCAL,
+            }
+        )
 
 
 @dataclass(frozen=True)

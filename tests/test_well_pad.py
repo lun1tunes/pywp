@@ -83,7 +83,7 @@ def test_detect_well_pads_groups_by_surface() -> None:
     assert counts == [1, 2]
 
 
-def test_detect_well_pads_uses_all_multi_horizontal_targets_for_midpoint() -> None:
+def test_detect_well_pads_uses_first_multi_horizontal_interval_for_midpoint() -> None:
     records = [
         WelltrackRecord(
             name="MULTI",
@@ -100,9 +100,9 @@ def test_detect_well_pads_uses_all_multi_horizontal_targets_for_midpoint() -> No
     pad = detect_well_pads(records)[0]
     well = pad.wells[0]
 
-    assert well.midpoint_x == 600.0
+    assert well.midpoint_x == 300.0
     assert well.midpoint_y == 0.0
-    assert well.midpoint_z == 1020.0
+    assert well.midpoint_z == 1000.0
 
 
 def test_ordered_pad_wells_uses_projection_along_nds() -> None:

@@ -2096,7 +2096,10 @@
 
         function addSceneLabel(text, position, color, extraClassName, options) {
           const labelRole = String((options && options.role) || "label");
-          const roleClassName = labelRole === "well_label" ? "well-name-label" : "";
+          const roleClassName =
+            labelRole === "well_label" || labelRole === "pilot_point_label"
+              ? "well-name-label"
+              : "";
           const element = document.createElement("div");
           element.className =
             `scene-label ${roleClassName} ${String(extraClassName || "").trim()}`.trim();
@@ -3493,7 +3496,7 @@
           const role = String(item.role || "label");
           const position = displayPoint(item.position || [0, 0, 0]);
           const offsetY =
-            role === "well_label"
+            role === "well_label" || role === "pilot_point_label"
               ? 14
               : role === "reference_pad_label"
               ? 12

@@ -67,7 +67,7 @@ def test_build_batch_survey_csv_labels_transformed_geographic_coordinates() -> N
         source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
         transform_stations_func=fake_transform,
     )
-    result = pd.read_csv(BytesIO(payload))
+    result = pd.read_csv(BytesIO(payload), sep="\t")
 
     assert "X_m" not in result.columns
     assert "Y_m" not in result.columns
@@ -160,9 +160,7 @@ def test_build_batch_survey_welltrack_skips_nonfinite_required_rows() -> None:
     )
 
 
-def test_build_batch_survey_welltrack_applies_selected_crs() -> None:
-    received_row_counts: list[int] = []
-
+def test_build_batch_survey_welltrack_stays_in_source_crs() -> None:
     def fake_transform(
         stations: pd.DataFrame,
         _target_crs: CoordinateSystem,
@@ -170,11 +168,7 @@ def test_build_batch_survey_welltrack_applies_selected_crs() -> None:
         *,
         rename_columns: bool = True,
     ) -> pd.DataFrame:
-        received_row_counts.append(len(stations.index))
-        transformed = stations.copy()
-        transformed["X_m"] = transformed["X_m"].astype(float) + 100.0
-        transformed["Y_m"] = transformed["Y_m"].astype(float) + 200.0
-        return transformed
+        raise AssertionError("WELLTRACK export must stay in source CRS")
 
     payload = ptc_batch_results.build_batch_survey_welltrack(
         [
@@ -198,11 +192,47 @@ def test_build_batch_survey_welltrack_applies_selected_crs() -> None:
 
     records = parse_welltrack_text(payload.decode("utf-8"))
 
-    assert received_row_counts == [2]
-    assert records[0].points[0].x == pytest.approx(110.0)
-    assert records[0].points[0].y == pytest.approx(230.0)
-    assert records[0].points[1].x == pytest.approx(120.0)
-    assert records[0].points[1].y == pytest.approx(245.0)
+    assert records[0].points[0].x == pytest.approx(10.0)
+    assert records[0].points[0].y == pytest.approx(30.0)
+    assert records[0].points[1].x == pytest.approx(20.0)
+    assert records[0].points[1].y == pytest.approx(45.0)
+
+
+def test_build_batch_survey_dev_file_stays_in_source_crs() -> None:
+    def fake_transform(
+        stations: pd.DataFrame,
+        _target_crs: CoordinateSystem,
+        _source_crs: CoordinateSystem,
+        *,
+        rename_columns: bool = True,
+    ) -> pd.DataFrame:
+        raise AssertionError(".dev export must stay in source CRS")
+
+    payload = ptc_batch_results.build_batch_survey_dev_file(
+        [
+            _success(
+                name="WELL-A",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 100.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [30.0, 45.0],
+                        "Z_m": [-5.0, 95.0],
+                        "INC_deg": [0.0, 20.0],
+                        "AZI_deg": [0.0, 45.0],
+                    }
+                ),
+            )
+        ],
+        target_crs=CoordinateSystem.WGS84,
+        auto_convert=True,
+        source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
+        transform_stations_func=fake_transform,
+    )
+
+    text = payload.decode("utf-8")
+
+    assert "100.000000 20.000000 45.000000 -95.000000" in text
 
 
 def test_build_batch_survey_dev_7z_exports_one_dev_file_per_well(tmp_path) -> None:

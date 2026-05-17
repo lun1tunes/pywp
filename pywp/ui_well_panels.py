@@ -268,7 +268,7 @@ def render_survey_table_with_download(
             ),
             xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
         )
-        .to_csv(index=False)
+        .to_csv(index=False, sep="\t")
         .encode("utf-8"),
         file_name=file_name,
         mime="text/csv",

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 from pydantic import BaseModel
 
+from pywp import ptc_pad_state
 from pywp.anticollision_optimization import (
     AntiCollisionClearanceEvaluation,
     AntiCollisionOptimizationContext,
@@ -37,7 +38,7 @@ from pywp.eclipse_welltrack import (
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.mcm import compute_positions_min_curv
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
-from pywp.pilot_wells import SidetrackWindowOverride
+from pywp.pilot_wells import SidetrackWindowOverride, sync_pilot_surfaces_to_parents
 from pywp.planner_types import PlanningError
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -59,6 +60,7 @@ from pywp.welltrack_batch import (
     merge_batch_results,
     recommended_batch_selection,
 )
+from pywp.well_pad import apply_pad_layout
 
 
 def _max_mcm_xyz_mismatch_m(success: SuccessfulWellPlan) -> float:
@@ -84,6 +86,24 @@ def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
     }
     base.update(overrides)
     return TrajectoryConfig(**base)
+
+
+def _records_with_import_auto_pad_layout(
+    records: list[WelltrackRecord],
+) -> list[WelltrackRecord]:
+    session_state: dict[str, object] = {}
+    pads = ptc_pad_state.ensure_pad_configs(
+        session_state,
+        base_records=list(records),
+    )
+    plan_map = ptc_pad_state.build_pad_plan_map(session_state, pads)
+    return sync_pilot_surfaces_to_parents(
+        apply_pad_layout(
+            records=list(records),
+            pads=pads,
+            plan_by_pad_id=plan_map,
+        )
+    )
 
 
 class _StubPlanner:
@@ -644,6 +664,35 @@ def test_welltracks4_well_12_near_tolerance_target_hit_is_reported_as_warning() 
         build_overlap_geometry=False,
     )
     assert analysis.pair_count == 1
+
+
+@pytest.mark.integration
+def test_import_auto_pad_layout_keeps_well_12_drillable_with_multihorizontal_neighbor() -> (
+    None
+):
+    config = TrajectoryConfig(
+        md_step_m=20.0,
+        md_step_control_m=5.0,
+        turn_solver_max_restarts=0,
+        max_total_md_postcheck_m=20000.0,
+        offer_j_profile=False,
+    )
+
+    for path in (
+        "tests/test_data/WELLTRACKS4.INC",
+        "tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC",
+    ):
+        records = parse_welltrack_text(Path(path).read_text(encoding="utf-8"))
+        layout_records = _records_with_import_auto_pad_layout(records)
+
+        rows, successes = WelltrackBatchPlanner().evaluate(
+            records=layout_records,
+            selected_names={"well_12"},
+            config=config,
+        )
+
+        assert rows[0]["Статус"] == "OK"
+        assert {str(success.name) for success in successes} == {"well_12"}
 
 
 def test_batch_planner_reports_progress_callback_for_selected_wells() -> None:

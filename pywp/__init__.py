@@ -34,6 +34,7 @@ try:
         DEFAULT_CRS,
         apply_crs_to_well_view,
         get_crs_display_suffix,
+        get_input_crs,
         get_selected_crs,
         render_crs_sidebar,
         should_auto_convert,
@@ -44,6 +45,7 @@ except ImportError:
     DEFAULT_CRS = None  # type: ignore[assignment,misc]
     apply_crs_to_well_view = None  # type: ignore[assignment,misc]
     get_crs_display_suffix = None  # type: ignore[assignment,misc]
+    get_input_crs = None  # type: ignore[assignment,misc]
     get_selected_crs = None  # type: ignore[assignment,misc]
     render_crs_sidebar = None  # type: ignore[assignment,misc]
     should_auto_convert = None  # type: ignore[assignment,misc]
@@ -68,6 +70,7 @@ __all__ = [
     # Coordinate integration (conditional)
     "DEFAULT_CRS",
     "render_crs_sidebar",
+    "get_input_crs",
     "get_selected_crs",
     "should_auto_convert",
     "apply_crs_to_well_view",

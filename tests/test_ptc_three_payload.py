@@ -253,6 +253,11 @@ def test_single_well_three_payload_renders_pilot_family_labels() -> None:
     assert "well_04_PL" in line_names
     assert "well_04_PL: 1" in label_texts
     assert "well_04_PL: 2" in label_texts
+    assert {
+        str(item.get("role"))
+        for item in payload["labels"]
+        if str(item.get("text")).startswith("well_04_PL: ")
+    } == {"pilot_point_label"}
     assert len(pilot_marker["points"]) == 2
 
 
@@ -356,6 +361,11 @@ def test_all_wells_three_payload_renders_pilot_point_labels() -> None:
     assert "well_04_PL: 1" in label_texts
     assert "well_04_PL: 2" in label_texts
     assert "well_04_PL: 3" in label_texts
+    assert {
+        str(item.get("role"))
+        for item in payload["labels"]
+        if str(item.get("text")).startswith("well_04_PL: ")
+    } == {"pilot_point_label"}
     assert [hover["point"] for hover in pilot_marker["hover"]] == [
         "well_04_PL: 1",
         "well_04_PL: 2",
@@ -419,6 +429,11 @@ def test_anticollision_three_payload_renders_pilot_point_labels() -> None:
     assert "well_04_PL: 1" in label_texts
     assert "well_04_PL: 2" in label_texts
     assert "well_04_PL: 3" in label_texts
+    assert {
+        str(item.get("role"))
+        for item in payload["labels"]
+        if str(item.get("text")).startswith("well_04_PL: ")
+    } == {"pilot_point_label"}
     assert [hover["point"] for hover in pilot_marker["hover"]] == [
         "well_04_PL: 1",
         "well_04_PL: 2",

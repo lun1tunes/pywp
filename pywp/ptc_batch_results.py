@@ -131,7 +131,7 @@ def build_batch_survey_csv(
     if not frames:
         return b""
     combined = pd.concat(frames, ignore_index=True)
-    return combined.to_csv(index=False).encode("utf-8")
+    return combined.to_csv(index=False, sep="\t").encode("utf-8")
 
 
 def build_batch_survey_welltrack(
@@ -146,8 +146,8 @@ def build_batch_survey_welltrack(
     blocks: list[str] = []
     for success, stations in _iter_prepared_success_stations(
         successes,
-        target_crs=target_crs,
-        auto_convert=auto_convert,
+        target_crs=source_crs,
+        auto_convert=False,
         source_crs=source_crs,
         csv_export_crs_func=csv_export_crs_func,
         transform_stations_func=transform_stations_func,
@@ -189,8 +189,8 @@ def build_batch_survey_dev_7z(
             for index, (success, stations) in enumerate(
                 _iter_prepared_success_stations(
                     successes,
-                    target_crs=target_crs,
-                    auto_convert=auto_convert,
+                    target_crs=source_crs,
+                    auto_convert=False,
                     source_crs=source_crs,
                     csv_export_crs_func=csv_export_crs_func,
                     transform_stations_func=transform_stations_func,
@@ -228,8 +228,8 @@ def build_batch_survey_dev_zip(
 ) -> bytes:
     return build_batch_survey_dev_7z(
         successes,
-        target_crs=target_crs,
-        auto_convert=auto_convert,
+        target_crs=source_crs,
+        auto_convert=False,
         source_crs=source_crs,
         csv_export_crs_func=csv_export_crs_func,
         transform_stations_func=transform_stations_func,
@@ -247,8 +247,8 @@ def build_batch_survey_dev_file(
 ) -> bytes:
     prepared = _iter_prepared_success_stations(
         successes,
-        target_crs=target_crs,
-        auto_convert=auto_convert,
+        target_crs=source_crs,
+        auto_convert=False,
         source_crs=source_crs,
         csv_export_crs_func=csv_export_crs_func,
         transform_stations_func=transform_stations_func,

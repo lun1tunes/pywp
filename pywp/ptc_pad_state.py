@@ -213,11 +213,8 @@ def record_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
     if len(points) >= 3:
         try:
             _, target_pairs = welltrack_points_to_target_pairs(points)
-            target_points = [
-                point
-                for pair_t1, pair_t3 in target_pairs
-                for point in (pair_t1, pair_t3)
-            ]
+            pair_t1, pair_t3 = target_pairs[0]
+            target_points = (pair_t1, pair_t3)
             return (
                 float(np.mean([point.x for point in target_points])),
                 float(np.mean([point.y for point in target_points])),

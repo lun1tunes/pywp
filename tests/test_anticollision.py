@@ -1216,6 +1216,58 @@ def test_analyze_anti_collision_incremental_reuses_unchanged_pairs(
     assert scanned_pairs == [("WELL-A", "WELL-B"), ("WELL-B", "WELL-C")]
 
 
+def test_incremental_lightweight_scan_reuses_full_geometry_pair_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wells = [
+        build_anti_collision_well(
+            name=name,
+            color="#0B6E4F",
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            include_display_geometry=False,
+        )
+        for name, y_offset_m in (("WELL-A", 0.0), ("WELL-B", 10.0))
+    ]
+    scanned_flags: list[bool] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: AntiCollisionWell,
+        well_b: AntiCollisionWell,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        scanned_flags.append(bool(build_overlap_geometry))
+        return []
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _record_pair_scan,
+    )
+
+    _, pair_cache, first_stats = analyze_anti_collision_incremental(
+        wells,
+        build_overlap_geometry=True,
+        well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
+    )
+    _, _, second_stats = analyze_anti_collision_incremental(
+        wells,
+        build_overlap_geometry=False,
+        well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
+        previous_pair_cache=pair_cache,
+    )
+
+    assert first_stats.recalculated_pair_count == 1
+    assert second_stats.reused_pair_count == 1
+    assert second_stats.recalculated_pair_count == 0
+    assert scanned_flags == [True]
+
+
 def test_build_anti_collision_wells_for_successes_reuses_unchanged_wells(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

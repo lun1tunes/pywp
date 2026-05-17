@@ -1057,7 +1057,7 @@ def _append_pilot_study_labels(
         return
     labels = _pilot_study_label_texts(str(pilot_name), len(study_points))
     payload["labels"].extend(
-        _well_name_label(label, point, color)
+        _pilot_point_label(label, point, color)
         for label, point in zip(labels, study_points, strict=False)
     )
 
@@ -1665,6 +1665,15 @@ def _well_name_label(well_name: str, point: Point3D, color: str) -> dict[str, ob
         "position": [float(point.x), float(point.y), float(point.z)],
         "color": str(color),
         "role": "well_label",
+    }
+
+
+def _pilot_point_label(text: str, point: Point3D, color: str) -> dict[str, object]:
+    return {
+        "text": str(text),
+        "position": [float(point.x), float(point.y), float(point.z)],
+        "color": str(color),
+        "role": "pilot_point_label",
     }
 
 

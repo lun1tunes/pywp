@@ -23,7 +23,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
-  "pytest-xdist>=3.6"
+  "pytest-xdist>=3.6",
+  "ruff>=0.8,<1",
+  "vulture>=2.14,<3"
 ]
 
 [tool.setuptools.packages.find]

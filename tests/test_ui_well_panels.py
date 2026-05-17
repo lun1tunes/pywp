@@ -96,7 +96,7 @@ def test_survey_download_uses_export_stations_without_changing_display(
     assert column_config["X_m"]["label"] == "X (East), м"
     assert column_config["Y_m"]["label"] == "Y (North), м"
 
-    exported = pd.read_csv(BytesIO(captured["csv"]))
+    exported = pd.read_csv(BytesIO(captured["csv"]), sep="\t")
     assert "X_m" not in exported.columns
     assert exported["X_WGS_deg"].iloc[0] == 110.0
     assert exported["Y_WGS_deg"].iloc[0] == 220.0

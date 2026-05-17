@@ -75,7 +75,7 @@ def test_pad_config_defaults_to_center_anchor_mode() -> None:
     )
 
 
-def test_record_midpoint_xyz_uses_all_multi_horizontal_targets() -> None:
+def test_record_midpoint_xyz_uses_first_multi_horizontal_interval() -> None:
     record = WelltrackRecord(
         name="MULTI",
         points=(
@@ -87,7 +87,7 @@ def test_record_midpoint_xyz_uses_all_multi_horizontal_targets() -> None:
         ),
     )
 
-    assert ptc_pad_state.record_midpoint_xyz(record) == (600.0, 0.0, 1020.0)
+    assert ptc_pad_state.record_midpoint_xyz(record) == (300.0, 0.0, 1000.0)
 
 
 def test_detect_ui_pads_marks_source_defined_surfaces() -> None:

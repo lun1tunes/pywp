@@ -491,11 +491,16 @@ def analyze_anti_collision_incremental(
             str(well_a.name): signature_a,
             str(well_b.name): signature_b,
         }
+        previous_has_overlap_geometry = bool(
+            getattr(previous, "build_overlap_geometry", True)
+        )
+        geometry_cache_compatible = previous_has_overlap_geometry or not bool(
+            build_overlap_geometry
+        )
         if (
             previous is not None
             and previous_signatures == current_signatures
-            and bool(getattr(previous, "build_overlap_geometry", True))
-            == bool(build_overlap_geometry)
+            and geometry_cache_compatible
         ):
             outcomes.append(
                 _AntiCollisionPairOutcome(

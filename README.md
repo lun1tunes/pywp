@@ -35,6 +35,15 @@ python scripts/run_tests.py full
 - `integration`: e2e-потоки с реальным планировщиком/батч-расчетом.
 - `slow`: самые дорогие по времени сценарии (dense/adaptive baseline и сложные TURN-кейсы).
 
+## Code Quality
+
+```bash
+ruff check pywp pages tests
+vulture pywp pages tests --min-confidence 70
+```
+
+`ruff` используется для lint/import hygiene, `vulture` — как список кандидатов на dead code. Вывод `vulture` нужно подтверждать вручную: в Streamlit UI и тестовых helper-ах бывают ложные срабатывания.
+
 ## Notes
 
 - Основные зависимости: `requirements.txt`

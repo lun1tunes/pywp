@@ -8,9 +8,9 @@ from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state as reference_state
 from pywp.anticollision import anti_collision_report_rows
 from pywp.coordinate_integration import (
-    DEFAULT_CRS,
     csv_export_crs,
     get_crs_display_suffix,
+    get_input_crs,
     get_selected_crs,
     should_auto_convert,
     transform_stations_to_crs,
@@ -361,6 +361,8 @@ def _render_anticollision_panel(
                 s.name: s.config for s in successes if s.name in focus_pad_well_names
             }
             success_dict = {s.name: s for s in successes}
+            ac_cache = st.session_state.get("wt_anticollision_analysis_cache")
+            ac_cache = ac_cache if isinstance(ac_cache, dict) else {}
 
             new_records, new_success_dict, improved = optimize_pad_order(
                 records=records,
@@ -371,6 +373,16 @@ def _render_anticollision_panel(
                 config_by_name=config_by_name,
                 progress_callback=opt_callback,
                 fixed_well_names=set(fixed_pad_well_names),
+                initial_analysis=analysis,
+                previous_well_cache=ac_cache.get("well_cache"),
+                previous_pair_cache=ac_cache.get("pair_cache"),
+                well_signature_by_name=ac_cache.get("well_signature_by_name"),
+                reference_uncertainty_models_by_name=(
+                    reference_uncertainty_models_by_name
+                ),
+                parallel_workers=int(
+                    st.session_state.get("wt_last_parallel_workers") or 0
+                ),
             )
 
             if improved:
@@ -541,6 +553,7 @@ def render_success_tabs(
     records: list[object],
     summary_rows: list[dict[str, object]],
 ) -> None:
+    input_crs = get_input_crs()
     selected_crs = get_selected_crs()
     auto_convert = should_auto_convert()
     name_to_color = wt._well_color_map(list(records))
@@ -599,21 +612,21 @@ def render_success_tabs(
         survey_export_xy_unit = "м"
         survey_export_crs = csv_export_crs(
             selected_crs,
-            DEFAULT_CRS,
+            input_crs,
             auto_convert=auto_convert,
         )
         if (
             auto_convert
-            and selected_crs != DEFAULT_CRS
+            and selected_crs != input_crs
             and survey_export_crs == selected_crs
         ):
             survey_export_stations = transform_stations_to_crs(
                 selected.stations,
                 selected_crs,
-                DEFAULT_CRS,
+                input_crs,
                 rename_columns=False,
             )
-        if auto_convert and selected_crs != DEFAULT_CRS:
+        if auto_convert and selected_crs != input_crs:
             survey_export_xy_label_suffix = get_crs_display_suffix(survey_export_crs)
             survey_export_xy_unit = "deg" if survey_export_crs.is_geographic() else "м"
         single_well_name_to_color = {

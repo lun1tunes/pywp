@@ -4,8 +4,10 @@ import pytest
 
 import pywp.coordinate_integration as ci
 from pywp.coordinate_integration import (
+    CSV_CRS_OPTIONS,
     CRS_OPTIONS,
     DEFAULT_CRS,
+    INPUT_CRS_OPTIONS,
     _can_transform_directly,
     csv_export_crs,
     _transform_xy,
@@ -25,19 +27,48 @@ class TestCoordinateIntegration:
 
     def test_default_crs_is_gk_13n_42(self) -> None:
         """Default CRS should be ГК_13N_42 as per user requirements."""
-        assert DEFAULT_CRS == CoordinateSystem.PULKOVO_1942_ZONE_13
+        assert DEFAULT_CRS == CoordinateSystem.PULKOVO_1942_GK_13N
 
-    def test_crs_options_contains_pno16(self) -> None:
-        """CRS options should include PNO-16 variants."""
-        labels = [label for label, _ in CRS_OPTIONS]
-        assert "PNO-16 (Зона)" in labels
-        assert "PNO-16 (CM)" in labels
+    def test_input_crs_options_are_projected_meter_systems_only(self) -> None:
+        """Input CRS options stay to projected meter systems."""
+        labels = [label for label, _ in INPUT_CRS_OPTIONS]
+        assert "PNO-16 (Зона)" not in labels
+        assert "WGS84" not in labels
+        assert "СК-42 (Градусные)" not in labels
+        assert all(crs.is_projected() for _label, crs in INPUT_CRS_OPTIONS)
+        assert not CoordinateSystem.GSK_2011_GEOCENTRIC.is_projected()
+
+    def test_csv_crs_options_include_geographic_outputs(self) -> None:
+        """CSV output CRS options include projected meters and geographic degrees."""
+        labels = [label for label, _ in CSV_CRS_OPTIONS]
+        assert CRS_OPTIONS == CSV_CRS_OPTIONS
+        assert "WGS84 (Градусные)" in labels
+        assert "СК-42 (Градусные)" in labels
+        assert "WGS84 UTM 43N" in labels
+        assert "ГК_13N_42" in labels
+        assert CoordinateSystem.WGS84 in {crs for _label, crs in CSV_CRS_OPTIONS}
+        assert CoordinateSystem.WGS84_UTM_ZONE_43N in {
+            crs for _label, crs in CSV_CRS_OPTIONS
+        }
+
+    def test_geographic_csv_outputs_are_really_geographic_crs(self) -> None:
+        """CRS options labelled as degree outputs must not point to geocentric EPSG."""
+        geographic_labels = {
+            label: crs
+            for label, crs in CSV_CRS_OPTIONS
+            if "Градусные" in label
+        }
+
+        assert geographic_labels
+        assert all(crs.is_geographic() for crs in geographic_labels.values())
+        assert CoordinateSystem.GSK_2011.value == "EPSG:7683"
 
     def test_crs_options_contains_pulkovo_zones(self) -> None:
         """CRS options should include Pulkovo 1942 zones."""
         labels = [label for label, _ in CRS_OPTIONS]
         assert "СК-42 Зона 8" in labels
         assert "ГК_13N_42" in labels
+        assert "СК-42 Зона 13 (13 млн)" in labels
         assert "СК-42 Зона 16" in labels
 
     def test_format_coordinates_projected(self) -> None:
@@ -114,8 +145,13 @@ class TestCoordinateIntegration:
 
     def test_get_crs_display_suffix_gk_13n_42(self) -> None:
         """Display suffix for the default GK_13N_42 CRS."""
-        suffix = get_crs_display_suffix(CoordinateSystem.PULKOVO_1942_ZONE_13)
+        suffix = get_crs_display_suffix(CoordinateSystem.PULKOVO_1942_GK_13N)
         assert "ГК_13N_42" in suffix
+
+    def test_get_crs_display_suffix_wgs84_utm43(self) -> None:
+        """Display suffix for WGS84 UTM zone 43N."""
+        suffix = get_crs_display_suffix(CoordinateSystem.WGS84_UTM_ZONE_43N)
+        assert "UTM43N" in suffix
 
     def test_get_crs_display_suffix_wgs84(self) -> None:
         """Display suffix for WGS84."""
@@ -172,6 +208,32 @@ class TestCoordinateIntegration:
         x, y = _transform_xy(100.0, 200.0, CoordinateSystem.LOCAL, CoordinateSystem.LOCAL)
         assert x == 100.0
         assert y == 200.0
+
+    @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+    def test_transform_gk_13n_42_to_wgs84_utm43_control_point(self) -> None:
+        """ГК_13N_42 (EPSG:2503/28473 equivalent) converts to WGS84 UTM43N."""
+        x, y = _transform_xy(
+            500_053.72885872814,
+            6_097_276.68079257,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            CoordinateSystem.WGS84_UTM_ZONE_43N,
+        )
+
+        assert x == pytest.approx(499_999.999696543, abs=0.001)
+        assert y == pytest.approx(6_094_791.4212895455, abs=0.001)
+
+    @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+    def test_transform_gk_13n_42_to_wgs84_degrees_control_point(self) -> None:
+        """The same control point resolves back to lon/lat near 75E, 55N."""
+        lon, lat = _transform_xy(
+            500_053.72885872814,
+            6_097_276.68079257,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            CoordinateSystem.WGS84,
+        )
+
+        assert lon == pytest.approx(75.0, abs=1e-7)
+        assert lat == pytest.approx(55.0, abs=1e-7)
 
     def test_apply_crs_to_well_view_same_crs(self) -> None:
         """apply_crs_to_well_view with same source/target returns unchanged."""

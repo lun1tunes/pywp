@@ -38,7 +38,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "white-space: normal;" in html
     assert "transform: translate(8px, -50%);" in html
     assert "contain: layout paint;" in html
-    assert 'roleClassName = labelRole === "well_label" ? "well-name-label" : ""' in html
+    assert 'labelRole === "well_label" || labelRole === "pilot_point_label"' in html
     assert 'role === "target_label" || role === "control_point_label"' in html
     assert "font-size: 10px;" in html
     assert ".axes-gizmo-line" in html
@@ -52,7 +52,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "controls.screenSpacePanning = true;" in html
     assert "function updateLabels()" in html
     assert "offsetY: Number((options && options.offsetY) || 0)" in html
-    assert 'role === "well_label"' in html
+    assert 'role === "well_label" || role === "pilot_point_label"' in html
     assert 'role === "reference_pad_label"' in html
     assert "item.offsetY" in html
     assert "renderer.domElement.getBoundingClientRect()" in html

@@ -525,7 +525,9 @@ def test_welltrack_page_initial_crs_selectbox_has_no_session_state_default_warni
     at.run(timeout=120)
 
     assert not any(
-        "trajectory_crs_selectbox" in str(widget.value) for widget in at.warning
+        "trajectory_crs_selectbox" in str(widget.value)
+        or "trajectory_input_crs_selectbox" in str(widget.value)
+        for widget in at.warning
     )
 
 

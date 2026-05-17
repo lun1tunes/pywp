@@ -56,7 +56,7 @@ def test_batch_survey_csv_applies_selected_crs(
         auto_convert=True,
         source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
     )
-    result = pd.read_csv(BytesIO(payload))
+    result = pd.read_csv(BytesIO(payload), sep="\t")
 
     assert "X_m" not in result.columns
     assert "Y_m" not in result.columns

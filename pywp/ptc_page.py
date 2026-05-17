@@ -12,6 +12,7 @@ import streamlit as st
 
 from pywp import ptc_core as wt
 from pywp.coordinate_integration import (
+    get_input_crs,
     get_selected_crs,
     render_crs_sidebar,
     should_auto_convert,
@@ -90,12 +91,14 @@ def run_page() -> None:
             "Результаты расчёта появятся после запуска расчёта траекторий."
         )
         return
+    input_crs = get_input_crs()
     selected_crs = get_selected_crs()
     auto_convert = should_auto_convert()
     wt._render_batch_summary(
         summary_rows=summary_rows,
         target_crs=selected_crs,
         auto_convert=auto_convert,
+        source_crs=input_crs,
     )
     if not successes:
         st.warning("Все выбранные скважины завершились ошибками расчёта.")
