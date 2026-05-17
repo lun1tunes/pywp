@@ -367,7 +367,12 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
     monkeypatch.setattr(
         page.st,
         "columns",
-        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn(), _DummyColumn()),
+        lambda *args, **kwargs: (
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+        ),
     )
     monkeypatch.setattr(page.st, "expander", _fake_expander)
     monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
@@ -379,6 +384,7 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
     assert captured["metrics"] == [
         ("Скважин", "1"),
         ("Пилотов", "0"),
+        ("Боковых стволов", "0"),
         ("Проблем", "0"),
     ]
     assert list(captured["frame"].columns) == [
@@ -426,7 +432,12 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
     monkeypatch.setattr(
         page.st,
         "columns",
-        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn(), _DummyColumn()),
+        lambda *args, **kwargs: (
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+        ),
     )
     monkeypatch.setattr(page.st, "expander", _fake_expander)
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
@@ -473,7 +484,12 @@ def test_records_overview_metrics_count_wells_and_pilots_separately(
     monkeypatch.setattr(
         page.st,
         "columns",
-        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn(), _DummyColumn()),
+        lambda *args, **kwargs: (
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+        ),
     )
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
@@ -483,6 +499,7 @@ def test_records_overview_metrics_count_wells_and_pilots_separately(
     assert captured["metrics"] == [
         ("Скважин", "1"),
         ("Пилотов", "1"),
+        ("Боковых стволов", "0"),
         ("Проблем", "0"),
     ]
 
@@ -4729,6 +4746,49 @@ def test_failed_target_only_wells_include_single_point_pilot_targets() -> None:
     assert marker["points"] == [[0.0, 0.0, 0.0], [100.0, 50.0, 900.0]]
     assert [hover["point"] for hover in marker["hover"]] == ["S", "PL1"]
     assert list(plan_trace.customdata[:, 0]) == ["S", "PL1"]
+
+
+def test_failed_target_only_zbs_uses_two_targets_and_stays_in_focused_3d_bounds() -> None:
+    page = wt_import_module
+    records = [
+        WelltrackRecord(
+            name="9010_ZBS",
+            points=(
+                WelltrackPoint(x=5000.0, y=10.0, z=1500.0, md=1.0),
+                WelltrackPoint(x=6200.0, y=20.0, z=1500.0, md=2.0),
+            ),
+        )
+    ]
+    summary_rows = [
+        {
+            "Скважина": "9010_ZBS",
+            "Статус": "Ошибка расчета",
+            "Проблема": "нет фактической траектории",
+        }
+    ]
+
+    target_only_wells = page._failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+    payload_3d = page._all_wells_three_payload(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        target_only_wells=target_only_wells,
+        name_to_color={"9010_ZBS": "#123456"},
+        focus_well_names=("WELL-A",),
+    )
+
+    assert len(target_only_wells) == 1
+    assert target_only_wells[0].target_labels == ("t1", "t3")
+    assert target_only_wells[0].t1.x == pytest.approx(5000.0)
+    assert target_only_wells[0].t3.x == pytest.approx(6200.0)
+    marker = next(
+        item
+        for item in payload_3d["points"]
+        if str(item.get("name")) == "9010_ZBS: цели (без траектории)"
+    )
+    assert [hover["point"] for hover in marker["hover"]] == ["t1", "t3"]
+    assert payload_3d["bounds"]["max"][0] >= 6200.0
 
 
 def test_all_wells_overview_figures_include_reference_trajectories() -> None:

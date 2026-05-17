@@ -238,10 +238,19 @@ def _score_is_improvement(
     ):
         candidate_value = int(getattr(candidate, field_name))
         current_value = int(getattr(current, field_name))
-        if candidate_value < current_value:
-            return True
         if candidate_value > current_value:
             return False
+
+    for field_name in (
+        "target_zone_count",
+        "overlap_pair_count",
+        "zone_count",
+        "severe_zone_count",
+    ):
+        candidate_value = int(getattr(candidate, field_name))
+        current_value = int(getattr(current, field_name))
+        if candidate_value < current_value:
+            return True
 
     if float(candidate.worst_sf) > float(current.worst_sf) + _IMPROVEMENT_EPS:
         return True

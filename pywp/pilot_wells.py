@@ -30,6 +30,7 @@ from pywp.trajectory import WellTrajectory
 from pywp.ui_utils import dls_to_pi
 
 PILOT_SUFFIX = "_PL"
+ZBS_SUFFIX = "_ZBS"
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M = 50.0
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MAX_M = 100.0
 
@@ -105,11 +106,22 @@ def is_pilot_name(name: object) -> bool:
     return str(name).strip().upper().endswith(PILOT_SUFFIX)
 
 
+def is_zbs_name(name: object) -> bool:
+    return str(name).strip().upper().endswith(ZBS_SUFFIX)
+
+
 def parent_name_for_pilot(name: object) -> str:
     text = str(name).strip()
     if not is_pilot_name(text):
         return text
     return text[: -len(PILOT_SUFFIX)]
+
+
+def parent_name_for_zbs(name: object) -> str:
+    text = str(name).strip()
+    if not is_zbs_name(text):
+        return text
+    return text[: -len(ZBS_SUFFIX)]
 
 
 def pilot_name_for_parent(name: object) -> str:
@@ -128,14 +140,44 @@ def is_pilot_record(record: WelltrackRecord) -> bool:
     return is_pilot_name(record.name)
 
 
+def is_zbs_record(record: WelltrackRecord) -> bool:
+    return is_zbs_name(record.name)
+
+
 def visible_well_records(
     records: Iterable[WelltrackRecord],
+    *,
+    include_zbs: bool = True,
 ) -> list[WelltrackRecord]:
-    return [record for record in records if not is_pilot_record(record)]
+    return [
+        record
+        for record in records
+        if not is_pilot_record(record)
+        and (include_zbs or not is_zbs_record(record))
+    ]
 
 
 def visible_well_names(records: Iterable[WelltrackRecord]) -> list[str]:
     return [str(record.name) for record in visible_well_records(records)]
+
+
+def zbs_target_points_to_pair(
+    points: tuple[WelltrackPoint, ...],
+) -> tuple[Point3D, Point3D]:
+    if len(points) != 2:
+        raise ValueError(
+            "Для бокового ствола от фактической скважины ожидаются ровно "
+            "две точки `t1` и `t3` без `S`."
+        )
+    if not _points_have_finite_xyz(tuple(points)):
+        raise ValueError("Координаты X/Y/Z и MD должны быть конечными числами.")
+    left_md = float(points[0].md)
+    right_md = float(points[1].md)
+    if not left_md + SMALL < right_md:
+        raise ValueError("MD точек ZBS должны строго возрастать: `t1` затем `t3`.")
+    if _has_zero_length_leg(tuple(points)):
+        raise ValueError("Точки `t1` и `t3` бокового ствола совпадают.")
+    return _point_from_welltrack(points[0]), _point_from_welltrack(points[1])
 
 
 def sync_pilot_surfaces_to_parents(

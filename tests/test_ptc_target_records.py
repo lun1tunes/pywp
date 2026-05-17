@@ -204,6 +204,46 @@ def test_multi_horizontal_records_require_complete_t1_t3_pairs() -> None:
     assert "полные пары" in str(overview_df.iloc[0]["Проблема"])
 
 
+def test_zbs_record_is_ready_with_t1_t3_without_surface() -> None:
+    source = _record(
+        "9010_ZBS",
+        points=(
+            WelltrackPoint(x=10.0, y=20.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=110.0, y=220.0, z=1200.0, md=2.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([source])
+    raw_df = target_records.raw_records_dataframe([source])
+
+    assert str(overview_df.iloc[0]["Статус"]) == "✅"
+    assert str(overview_df.iloc[0]["Проблема"]) == "—"
+    assert int(overview_df.iloc[0]["Точек"]) == 2
+    assert overview_df.iloc[0]["Отход t1, м"] is None
+    assert float(overview_df.iloc[0]["Длина ГС, м"]) == pytest.approx(
+        math.hypot(100.0, 200.0)
+    )
+    assert str(overview_df.iloc[0]["Примечание"]) == (
+        "Боковой ствол от факта: нужна скважина 9010"
+    )
+    assert list(raw_df["Точка"]) == ["t1", "t3"]
+
+
+def test_zbs_record_rejects_surface_like_extra_point() -> None:
+    source = _record(
+        "9010_ZBS",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=10.0, y=20.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=110.0, y=220.0, z=1200.0, md=2.0),
+        ),
+    )
+
+    problem = target_records.record_import_problem_text(source)
+
+    assert "две точки `t1` и `t3` без `S`" in problem
+
+
 def test_pilot_records_allow_multiple_study_points() -> None:
     pilot = _record(
         "well_04_pl",

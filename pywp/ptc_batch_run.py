@@ -14,13 +14,16 @@ from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, TrajectoryConfig
 from pywp.pilot_wells import (
     SidetrackWindowOverride,
     is_pilot_name,
+    is_zbs_name,
     parent_name_for_pilot,
+    parent_name_for_zbs,
     pilot_name_key_for_parent,
     sync_pilot_surfaces_to_parents,
     visible_well_names,
     well_name_key,
 )
 from pywp.planner import TrajectoryPlanner
+from pywp.reference_trajectories import REFERENCE_WELL_ACTUAL
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.ui_calc_params import kop_min_vertical_function_from_state
 from pywp.ui_utils import format_run_log_line
@@ -241,6 +244,54 @@ def _has_problem_text(value: object) -> bool:
     return bool(text and text not in {"—", "ОК", "OK", "nan", "NaN", "None", "<NA>"})
 
 
+def _matched_zbs_parent_names(
+    *,
+    records: list[WelltrackRecord],
+    selected_names: set[str],
+    reference_wells: tuple[Any, ...],
+) -> list[tuple[str, str]]:
+    selected_keys = {well_name_key(name) for name in selected_names}
+    actual_by_key = {
+        well_name_key(getattr(well, "name", "")): str(getattr(well, "name", ""))
+        for well in reference_wells
+        if str(getattr(well, "kind", "")) == REFERENCE_WELL_ACTUAL
+    }
+    matches: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for record in records:
+        record_name = str(record.name)
+        if not is_zbs_name(record_name):
+            continue
+        if well_name_key(record_name) not in selected_keys:
+            continue
+        parent_name = parent_name_for_zbs(record_name)
+        actual_name = actual_by_key.get(well_name_key(parent_name))
+        if actual_name is None or record_name in seen:
+            continue
+        matches.append((record_name, actual_name))
+        seen.add(record_name)
+    return matches
+
+
+def _has_selected_pilot_dependencies(
+    *,
+    records: list[WelltrackRecord],
+    selected_names: set[str],
+) -> bool:
+    selected_keys = {well_name_key(name) for name in selected_names}
+    selected_records = [
+        record
+        for record in records
+        if well_name_key(record.name) in selected_keys
+    ]
+    record_keys = {well_name_key(record.name) for record in selected_records}
+    return any(
+        not is_pilot_name(record.name)
+        and pilot_name_key_for_parent(record.name) in record_keys
+        for record in selected_records
+    )
+
+
 def store_merged_batch_results(
     state: MutableMapping[str, object],
     *,
@@ -337,6 +388,7 @@ def run_batch_if_clicked(
     current_success_by_name = {
         str(item.name): item for item in (state.get("wt_successes") or ())
     }
+    reference_wells_for_run = hooks.reference_wells_from_state()
     prepared_snapshot = dict(state.get("wt_prepared_recommendation_snapshot") or {})
     prepared_override_names = {
         str(name) for name in (state.get("wt_prepared_well_overrides") or {}).keys()
@@ -349,7 +401,7 @@ def run_batch_if_clicked(
     }
     dynamic_cluster_context = None
     if str(prepared_snapshot.get("kind", "")).strip() == "cluster":
-        reference_wells = hooks.reference_wells_from_state()
+        reference_wells = reference_wells_for_run
         target_well_names = tuple(
             str(name)
             for name in prepared_snapshot.get("target_well_names", ()) or ()
@@ -449,6 +501,20 @@ def run_batch_if_clicked(
                     )
                     + "."
                 )
+            matched_zbs = _matched_zbs_parent_names(
+                records=records_for_run,
+                selected_names=selected_set,
+                reference_wells=reference_wells_for_run,
+            )
+            if matched_zbs:
+                append_log(
+                    "Для боковых стволов от факта подцеплены фактические скважины: "
+                    + ", ".join(
+                        f"{zbs_name} -> {parent_name}"
+                        for zbs_name, parent_name in matched_zbs
+                    )
+                    + "."
+                )
             active_kop_function = kop_min_vertical_function_from_state(
                 prefix=calc_params_prefix
             )
@@ -473,17 +539,28 @@ def run_batch_if_clicked(
                     + ". Следующие скважины используют обновленные reference paths "
                     "уже пересчитанных шагов."
                 )
-            if int(request.parallel_workers) > 1 and dynamic_cluster_context is None:
+            parallel_requested = int(request.parallel_workers) > 1
+            selected_has_pilot_dependencies = _has_selected_pilot_dependencies(
+                records=records_for_run,
+                selected_names=selected_set,
+            )
+            if (
+                parallel_requested
+                and dynamic_cluster_context is None
+                and not selected_has_pilot_dependencies
+            ):
                 append_log(
                     f"Параллельный расчёт: {int(request.parallel_workers)} процессов."
                 )
-            elif (
-                int(request.parallel_workers) > 1
-                and dynamic_cluster_context is not None
-            ):
+            elif parallel_requested and dynamic_cluster_context is not None:
                 append_log(
                     "Параллельный расчёт отключён: активен iterative cluster-aware "
                     "режим (скважины зависят друг от друга)."
+                )
+            elif parallel_requested and selected_has_pilot_dependencies:
+                append_log(
+                    "Параллельный расчёт отключён: выбран боковой ствол от пилота, "
+                    "который зависит от результата расчёта пилотной скважины."
                 )
             if pad_layout_active:
                 append_log(
@@ -579,6 +656,7 @@ def run_batch_if_clicked(
                 sidetrack_window_overrides_by_name=(
                     request.sidetrack_window_overrides_by_name
                 ),
+                reference_wells=reference_wells_for_run,
                 dynamic_cluster_context=dynamic_cluster_context,
                 progress_callback=on_progress,
                 solver_progress_callback=on_solver_progress,

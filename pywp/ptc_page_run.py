@@ -11,18 +11,24 @@ from pywp import ptc_reference_state
 from pywp.pilot_wells import (
     SidetrackWindowOverride,
     is_pilot_name,
+    is_zbs_name,
     parent_name_for_pilot,
     well_name_key,
 )
 from pywp.ptc_page_state import render_calc_params_panel
+from pywp.ptc_sidetrack_state import (
+    SIDETRACK_AUTO as _SIDETRACK_AUTO,
+    SIDETRACK_MANUAL as _SIDETRACK_MANUAL,
+    SIDETRACK_MODE_OPTIONS as _SIDETRACK_MODE_OPTIONS,
+    SIDETRACK_KIND_OPTIONS as _SIDETRACK_KIND_OPTIONS,
+    SIDETRACK_PARENT_KEY as _SIDETRACK_PARENT_KEY,
+    apply_editor_sidetrack_window_defaults,
+    sidetrack_kind_key,
+    sidetrack_mode_key,
+    sidetrack_value_key,
+)
 
 __all__ = ["render_run_section"]
-
-_SIDETRACK_AUTO = "Авто"
-_SIDETRACK_MANUAL = "Ручной"
-_SIDETRACK_MODE_OPTIONS = (_SIDETRACK_AUTO, _SIDETRACK_MANUAL)
-_SIDETRACK_KIND_OPTIONS = ("MD", "Z")
-_SIDETRACK_PARENT_KEY = "wt_sidetrack_window_parent_name"
 
 
 def render_run_section(*, records: list[object]) -> None:
@@ -218,6 +224,7 @@ def _render_sidetrack_window_params(
         return {}, ""
 
     state = st.session_state
+    apply_editor_sidetrack_window_defaults(state, parent_names=parent_names)
     selected_parent = _selected_sidetrack_parent_name(parent_names, state)
     st.markdown("#### Параметры боковых стволов")
     c1, c2, c3, c4 = st.columns(
@@ -227,7 +234,7 @@ def _render_sidetrack_window_params(
     )
     with c1:
         selected_parent = st.selectbox(
-            "Скважина с пилотом",
+            "Скважина / боковой ствол",
             options=parent_names,
             key=_SIDETRACK_PARENT_KEY,
             disabled=len(parent_names) == 1,
@@ -328,9 +335,19 @@ def _sidetrack_parent_names(records: list[object]) -> list[str]:
         well_name_key(getattr(record, "name", "")): str(getattr(record, "name", ""))
         for record in records
         if not is_pilot_name(getattr(record, "name", ""))
+        and not is_zbs_name(getattr(record, "name", ""))
     }
     parent_names: list[str] = []
     seen: set[str] = set()
+    for record in records:
+        record_name = str(getattr(record, "name", ""))
+        if not is_zbs_name(record_name):
+            continue
+        record_key = well_name_key(record_name)
+        if record_key in seen:
+            continue
+        parent_names.append(record_name)
+        seen.add(record_key)
     for record in records:
         if not is_pilot_name(getattr(record, "name", "")):
             continue
@@ -394,12 +411,12 @@ def _sidetrack_window_overrides_from_state(
 
 
 def _sidetrack_mode_key(parent_name: str) -> str:
-    return f"wt_sidetrack_window_mode::{parent_name}"
+    return sidetrack_mode_key(parent_name)
 
 
 def _sidetrack_kind_key(parent_name: str) -> str:
-    return f"wt_sidetrack_window_kind::{parent_name}"
+    return sidetrack_kind_key(parent_name)
 
 
 def _sidetrack_value_key(parent_name: str) -> str:
-    return f"wt_sidetrack_window_value::{parent_name}"
+    return sidetrack_value_key(parent_name)

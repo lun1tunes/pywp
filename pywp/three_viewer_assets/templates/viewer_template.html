@@ -4082,6 +4082,41 @@
           ];
         }
 
+        function copyParentPathPoint(point) {
+          return [
+            Number((point && point[0]) || 0),
+            Number((point && point[1]) || 0),
+            Number((point && point[2]) || 0),
+            Number((point && point[3]) || 0),
+          ];
+        }
+
+        function copySidetrackWindowData(entry) {
+          const parentPoints = Array.isArray(entry && entry.parent_points)
+            ? entry.parent_points
+            : Array.isArray(entry && entry.parentPoints)
+              ? entry.parentPoints
+              : [];
+          const mdM = Number(
+            (entry && entry.md_m) ||
+            (entry && entry.mdM) ||
+            (entry && entry.value_m) ||
+            0,
+          );
+          return {
+            kind: "md",
+            valueM: mdM,
+            parentName: String(
+              (entry && entry.parent_name) ||
+              (entry && entry.parentName) ||
+              "",
+            ),
+            parentPoints: parentPoints
+              .map(copyParentPathPoint)
+              .filter((point) => point.every((value) => Number.isFinite(value))),
+          };
+        }
+
         function editPointDefinitionsForWell(well) {
           const rawPoints = Array.isArray(well && well.edit_points)
             ? well.edit_points
@@ -4095,6 +4130,10 @@
                 label: String((entry && entry.label) || `P${fallbackIndex + 1}`),
                 pointType: String((entry && entry.point_type) || "point"),
                 position: position,
+                sidetrackWindow:
+                  String((entry && entry.point_type) || "") === "sidetrack_window"
+                    ? copySidetrackWindowData(entry)
+                    : null,
               };
             })
             .filter((entry) =>
@@ -4125,7 +4164,21 @@
             label: String((entry && entry.label) || ""),
             pointType: String((entry && entry.pointType) || "point"),
             position: copyEditPoint(entry && entry.position),
+            sidetrackWindow: entry && entry.sidetrackWindow
+              ? {
+                  kind: "md",
+                  valueM: Number(entry.sidetrackWindow.valueM) || 0,
+                  parentName: String(entry.sidetrackWindow.parentName || ""),
+                  parentPoints: Array.isArray(entry.sidetrackWindow.parentPoints)
+                    ? entry.sidetrackWindow.parentPoints
+                    : [],
+                }
+              : null,
           }));
+        }
+
+        function isSidetrackWindowEntry(entry) {
+          return String(entry && entry.pointType) === "sidetrack_window";
         }
 
         function editPointByRole(points, role, fallbackIndex) {
@@ -4160,6 +4213,34 @@
         function editWellHasExplicitPoints(wellIndex) {
           const well = editWells[wellIndex] || {};
           return Array.isArray(well.edit_points) && well.edit_points.length > 0;
+        }
+
+        function targetEditPointEntries(wellIndex) {
+          return (editCurrentPoints[wellIndex] || [])
+            .filter((entry) => !isSidetrackWindowEntry(entry));
+        }
+
+        function sidetrackWindowEntryForWell(wellIndex) {
+          return (editCurrentPoints[wellIndex] || []).find(isSidetrackWindowEntry);
+        }
+
+        function editWellUsesSidetrackWindowPreview(wellIndex) {
+          if (!sidetrackWindowEntryForWell(wellIndex)) {
+            return false;
+          }
+          const targets = targetEditPointEntries(wellIndex);
+          if (targets.length !== 2) {
+            return false;
+          }
+          const roles = targets.map((entry) => String(entry && entry.pointType));
+          return roles.includes("t1") && roles.includes("t3");
+        }
+
+        function editWellHasComplexExplicitPoints(wellIndex) {
+          if (!editWellHasExplicitPoints(wellIndex)) {
+            return false;
+          }
+          return !editWellUsesSidetrackWindowPreview(wellIndex);
         }
 
         function cloneEditState(wellIndex) {
@@ -4267,7 +4348,7 @@
             editMoveScope === "pair" &&
             editTransformMode === "rotate" &&
             Number.isInteger(selectedEditWellIndex) &&
-            !editWellHasExplicitPoints(selectedEditWellIndex)
+            !editWellHasComplexExplicitPoints(selectedEditWellIndex)
           );
         }
 
@@ -4516,7 +4597,7 @@
           const originalEntry = (editOriginalPoints[wellIndex] || [])[handle.pointIndex];
           const original = originalEntry
             ? originalEntry.position
-            : handle.pointType === "t1"
+            : handle.pointRole === "t1"
             ? editOriginalT1[wellIndex]
             : editOriginalT3[wellIndex];
           const current = handle.dataPos;
@@ -4524,10 +4605,31 @@
           const dy = current[1] - original[1];
           const dz = current[2] - original[2];
           const total = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          const originalSidetrackMd = Number(
+            originalEntry && originalEntry.sidetrackWindow
+              ? originalEntry.sidetrackWindow.valueM
+              : NaN,
+          );
+          const currentSidetrackMd = Number(
+            handle.sidetrackWindow ? handle.sidetrackWindow.valueM : NaN,
+          );
+          const sidetrackMdDelta =
+            handle.pointRole === "sidetrack_window" &&
+            Number.isFinite(originalSidetrackMd) &&
+            Number.isFinite(currentSidetrackMd)
+              ? currentSidetrackMd - originalSidetrackMd
+              : 0.0;
+          const sidetrackMdDeltaRow =
+            handle.pointRole === "sidetrack_window" &&
+            Number.isFinite(originalSidetrackMd) &&
+            Number.isFinite(currentSidetrackMd)
+              ? `<span class="edit-delta-row"><span>ΔMD</span><span>${formatDeltaMeters(sidetrackMdDelta)}</span></span>`
+              : "";
           const selected =
             editModeActive &&
             wellIndex === selectedEditWellIndex &&
-            total > EDIT_DELTA_EPS_M;
+            (total > EDIT_DELTA_EPS_M ||
+              Math.abs(sidetrackMdDelta) > EDIT_DELTA_EPS_M);
           const guide = handle.guide;
           if (!selected) {
             hideEditDeltaGuide(guide);
@@ -4565,6 +4667,7 @@
               `<span class="edit-delta-row"><span>ΔX</span><span>${formatDeltaMeters(dx)}</span></span>` +
               `<span class="edit-delta-row"><span>ΔY</span><span>${formatDeltaMeters(dy)}</span></span>` +
               `<span class="edit-delta-row"><span>ΔZ</span><span>${formatDeltaMeters(dz)}</span></span>` +
+              sidetrackMdDeltaRow +
               `<span class="edit-delta-row edit-delta-total"><span>Итого</span><span>${formatDeltaMeters(total, false)}</span></span>`;
           }
         }
@@ -4620,7 +4723,8 @@
           }
           label.position.copy(displayPoint(t1T3Midpoint(wellIndex)));
           if (editWellHasExplicitPoints(wellIndex)) {
-            const pointCount = (editCurrentPoints[wellIndex] || []).length;
+            const pointCount = (editCurrentPoints[wellIndex] || [])
+              .filter((entry) => !isSidetrackWindowEntry(entry)).length;
             label.element.textContent = `Точек: ${pointCount}`;
           } else {
             label.element.textContent =
@@ -4644,7 +4748,7 @@
             (editOriginalPoints[handle.wellIndex] || [])[handle.pointIndex];
           const original = originalEntry
             ? originalEntry.position
-            : handle.pointType === "t1"
+            : handle.pointRole === "t1"
             ? editOriginalT1[handle.wellIndex]
             : editOriginalT3[handle.wellIndex];
           const current = handle.dataPos;
@@ -4672,6 +4776,10 @@
         function editWellLabelAnchorPoint(wellIndex) {
           const points = editCurrentPoints[wellIndex] || [];
           if (points.length > 0) {
+            const targetPoints = points.filter((entry) => !isSidetrackWindowEntry(entry));
+            if (targetPoints.length > 0) {
+              return targetPoints[targetPoints.length - 1].position;
+            }
             return points[points.length - 1].position;
           }
           return editCurrentT3[wellIndex];
@@ -4708,6 +4816,7 @@
             if (!pointEntry) {
               return;
             }
+            handle.sidetrackWindow = pointEntry.sidetrackWindow || null;
             updateHandlePosition(handle, pointEntry.position);
           });
           syncEditWellNameLabelPosition(wellIndex);
@@ -4739,6 +4848,7 @@
             }
             const pointEntry = editCurrentPoints[wellIndex][handle.pointIndex];
             if (pointEntry) {
+              handle.sidetrackWindow = pointEntry.sidetrackWindow || null;
               updateHandlePosition(handle, pointEntry.position);
             }
           });
@@ -4791,8 +4901,8 @@
             ? selectedEditWellIndex
             : null;
           const hasSelection = selectedIndex !== null;
-          const selectedHasExplicitPoints =
-            hasSelection && editWellHasExplicitPoints(selectedIndex);
+          const selectedHasComplexExplicitPoints =
+            hasSelection && editWellHasComplexExplicitPoints(selectedIndex);
           editUndoBtn.disabled =
             !editModeActive ||
             !hasSelection ||
@@ -4818,7 +4928,7 @@
               !editModeActive ||
               !hasSelection ||
               (btn.dataset.operation === "rotate" &&
-                (editMoveScope !== "pair" || selectedHasExplicitPoints));
+                (editMoveScope !== "pair" || selectedHasComplexExplicitPoints));
           });
         }
 
@@ -4921,7 +5031,8 @@
             }));
 
             currentPointEntries.forEach((pointEntry, pointIndex) => {
-              const pointType = String(pointEntry.label || pointEntry.pointType || `P${pointIndex + 1}`);
+              const pointLabel = String(pointEntry.label || pointEntry.pointType || `P${pointIndex + 1}`);
+              const pointRole = String(pointEntry.pointType || "point");
               const point = copyEditPoint(pointEntry.position);
               const pointMat = new THREE.MeshBasicMaterial({
                 color: color,
@@ -4956,10 +5067,12 @@
                 pickMesh: pickMesh,
                 previewMesh: previewMesh,
                 wellIndex: idx,
-                pointType: pointType,
+                pointType: pointLabel,
+                pointRole: pointRole,
                 pointIndex: pointIndex,
                 dataPos: point.slice(),
-                guide: createEditDeltaGuide(pointType, color),
+                sidetrackWindow: pointEntry.sidetrackWindow || null,
+                guide: createEditDeltaGuide(pointLabel, color),
               });
             });
 
@@ -5099,7 +5212,10 @@
             return;
           }
           selectedEditWellIndex = nextIndex;
-          if (editWellHasExplicitPoints(nextIndex) && editTransformMode === "rotate") {
+          if (
+            editWellHasComplexExplicitPoints(nextIndex) &&
+            editTransformMode === "rotate"
+          ) {
             setEditTransformMode("move");
           }
           syncEditVisibility();
@@ -5178,7 +5294,7 @@
             operation === "rotate" &&
             (editMoveScope !== "pair" ||
               (Number.isInteger(selectedEditWellIndex) &&
-                editWellHasExplicitPoints(selectedEditWellIndex)))
+                editWellHasComplexExplicitPoints(selectedEditWellIndex)))
           ) {
             return;
           }
@@ -5199,17 +5315,27 @@
 
         function rebuildPreviewTrajectory(wellIndex) {
           if (editWellHasExplicitPoints(wellIndex)) {
-            const points = (editCurrentPoints[wellIndex] || [])
-              .map((entry) => copyEditPoint(entry.position))
-              .filter((point) => point.every((value) => Number.isFinite(value)));
-            updateLineGeometry(editLineObjects[wellIndex], points, Z_DISPLAY_SIGN);
-            syncEditVisibility();
-            return;
+            if (editWellHasComplexExplicitPoints(wellIndex)) {
+              const points = targetEditPointEntries(wellIndex)
+                .map((entry) => copyEditPoint(entry.position))
+                .filter((point) => point.every((value) => Number.isFinite(value)));
+              updateLineGeometry(editLineObjects[wellIndex], points, Z_DISPLAY_SIGN);
+              syncEditVisibility();
+              return;
+            }
           }
           const replanner = editReplanners[wellIndex];
           const t1 = editCurrentT1[wellIndex];
           const t3 = editCurrentT3[wellIndex];
           const pts = replanner.compute(t1, t3);
+          const sidetrackWindowEntry = sidetrackWindowEntryForWell(wellIndex);
+          if (
+            sidetrackWindowEntry &&
+            sidetrackWindowEntry.position &&
+            pts.length >= 1
+          ) {
+            pts[0] = copyEditPoint(sidetrackWindowEntry.position);
+          }
           if (pts.length >= 1) {
             pts[pts.length - 1] = t3.slice();
           }
@@ -5342,6 +5468,71 @@
           const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -displayZ);
           const hitPoint = new THREE.Vector3();
           return ray.intersectPlane(plane, hitPoint) ? hitPoint : null;
+        }
+
+        function nearestSidetrackParentPoint(handle, target) {
+          const parentPoints =
+            handle && handle.sidetrackWindow
+              ? handle.sidetrackWindow.parentPoints
+              : [];
+          if (!Array.isArray(parentPoints) || parentPoints.length < 2) {
+            return null;
+          }
+          let best = null;
+          let bestDistance = Number.POSITIVE_INFINITY;
+          for (let index = 0; index < parentPoints.length - 1; index += 1) {
+            const start = parentPoints[index];
+            const end = parentPoints[index + 1];
+            const vx = end[0] - start[0];
+            const vy = end[1] - start[1];
+            const vz = end[2] - start[2];
+            const lengthSq = vx * vx + vy * vy + vz * vz;
+            if (lengthSq <= EDIT_DELTA_EPS_M * EDIT_DELTA_EPS_M) {
+              continue;
+            }
+            const rawT =
+              ((target[0] - start[0]) * vx +
+                (target[1] - start[1]) * vy +
+                (target[2] - start[2]) * vz) /
+              lengthSq;
+            const t = Math.max(0.0, Math.min(1.0, rawT));
+            const point = [
+              start[0] + vx * t,
+              start[1] + vy * t,
+              start[2] + vz * t,
+            ];
+            const distance = dataPointDistance(point, target);
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              best = {
+                position: point,
+                mdM: start[3] + (end[3] - start[3]) * t,
+              };
+            }
+          }
+          return best;
+        }
+
+        function snappedSidetrackWindowEntry(handle, rawPosition) {
+          const snapped = nearestSidetrackParentPoint(handle, rawPosition);
+          if (!snapped) {
+            return {
+              position: rawPosition,
+              sidetrackWindow: handle ? handle.sidetrackWindow : null,
+            };
+          }
+          const nextWindow = {
+            kind: "md",
+            valueM: snapped.mdM,
+            parentName: String((handle.sidetrackWindow || {}).parentName || ""),
+            parentPoints: Array.isArray((handle.sidetrackWindow || {}).parentPoints)
+              ? handle.sidetrackWindow.parentPoints
+              : [],
+          };
+          return {
+            position: snapped.position,
+            sidetrackWindow: nextWindow,
+          };
         }
 
         function pointerAngleAroundCenter(event, centerDisplay, planeZ, fallbackAngle) {
@@ -5532,7 +5723,8 @@
           editDragStartPosition = handle.mesh.position.clone();
           editDragHistoryStartState = cloneEditState(handle.wellIndex);
           editDragPlane = "xy";
-          editDragMoveScope = editMoveScope;
+          editDragMoveScope =
+            handle.pointRole === "sidetrack_window" ? "point" : editMoveScope;
           editDragInputMode = "minimap";
           editDragPlaneZ = editDragStartPosition.z;
           const planeHit = miniMapWorldAtEvent(event);
@@ -5588,7 +5780,7 @@
           );
           if (!handle) return;
           if (editRotationModeEnabled()) {
-            if (handle.pointType !== "t3") {
+            if (handle.pointRole !== "t3") {
               event.preventDefault();
               event.stopPropagation();
               return;
@@ -5608,7 +5800,8 @@
           editDragStartPosition = handle.mesh.position.clone();
           editDragHistoryStartState = cloneEditState(handle.wellIndex);
           editDragPlane = editPlane;
-          editDragMoveScope = editMoveScope;
+          editDragMoveScope =
+            handle.pointRole === "sidetrack_window" ? "point" : editMoveScope;
           editDragInputMode = "scene";
           if (editDragPlane === "xy") {
             const planeHit = pointerPlaneIntersection(event, editDragStartPosition.z);
@@ -5663,10 +5856,20 @@
               .addScaledVector(editDragAxisDirection, axisT - editDragStartAxisT);
           }
           // Convert display coords back to data coords
-          const dataX = newPos.x;
-          const dataY = newPos.y;
-          const dataZ = newPos.z * Z_DISPLAY_SIGN;
+          let dataX = newPos.x;
+          let dataY = newPos.y;
+          let dataZ = newPos.z * Z_DISPLAY_SIGN;
           const wi = editDragHandle.wellIndex;
+          let sidetrackWindowUpdate = null;
+          if (editDragHandle.pointRole === "sidetrack_window") {
+            sidetrackWindowUpdate = snappedSidetrackWindowEntry(
+              editDragHandle,
+              [dataX, dataY, dataZ],
+            );
+            dataX = sidetrackWindowUpdate.position[0];
+            dataY = sidetrackWindowUpdate.position[1];
+            dataZ = sidetrackWindowUpdate.position[2];
+          }
           const currentEntries = copyEditPointEntries(editCurrentPoints[wi]);
           if (editDragMoveScope === "pair" && editDragHistoryStartState) {
             const historyPoints = copyEditPointEntries(editDragHistoryStartState.points);
@@ -5686,11 +5889,14 @@
                 index: entry.index,
                 label: entry.label,
                 pointType: entry.pointType,
-                position: [
-                  entry.position[0] + dx,
-                  entry.position[1] + dy,
-                  entry.position[2] + dz,
-                ],
+                position: isSidetrackWindowEntry(entry)
+                  ? copyEditPoint(entry.position)
+                  : [
+                      entry.position[0] + dx,
+                      entry.position[1] + dy,
+                      entry.position[2] + dz,
+                    ],
+                sidetrackWindow: entry.sidetrackWindow || null,
               }));
               updateWellEditPoints(wi, nextPoints);
             } else {
@@ -5712,11 +5918,14 @@
                 return;
               }
               nextEntry.position = [dataX, dataY, dataZ];
+              if (sidetrackWindowUpdate) {
+                nextEntry.sidetrackWindow = sidetrackWindowUpdate.sidetrackWindow;
+              }
               updateWellEditPoints(wi, nextPoints);
             } else {
               const nextT1 = copyEditPoint(editCurrentT1[wi]);
               const nextT3 = copyEditPoint(editCurrentT3[wi]);
-              if (editDragHandle.pointType === "t1") {
+              if (editDragHandle.pointRole === "t1") {
                 nextT1[0] = dataX;
                 nextT1[1] = dataY;
                 nextT1[2] = dataZ;
@@ -5785,14 +5994,68 @@
           editWells.forEach((well, idx) => {
             if (!editDirtyFlags[idx]) return;
             if (editWellHasExplicitPoints(idx)) {
-              changes.push({
-                name: well.name,
-                points: (editCurrentPoints[idx] || []).map((entry) => ({
-                  index: Number(entry.index),
-                  label: String(entry.label || ""),
-                  position: entry.position.map((v) => Math.round(v * 100) / 100),
-                })),
+              const pointEntries = (editCurrentPoints[idx] || []);
+              const originalEntries = editOriginalPoints[idx] || [];
+              const targetPoints = pointEntries.filter((entry, pointIndex) => {
+                if (isSidetrackWindowEntry(entry)) {
+                  return false;
+                }
+                const originalEntry = originalEntries[pointIndex];
+                return !(
+                  originalEntry &&
+                  pointsNearlyEqual(entry.position, originalEntry.position)
+                );
               });
+              const sidetrackWindowEntry = pointEntries.find(isSidetrackWindowEntry);
+              const change = {
+                name: well.name,
+              };
+              if (targetPoints.length > 0) {
+                change.points = targetPoints.map((entry) => ({
+                    index: Number(entry.index),
+                    label: String(entry.label || ""),
+                    point_type: String(entry.pointType || "point"),
+                    position: entry.position.map((v) => Math.round(v * 100) / 100),
+                  }));
+              }
+              const sidetrackWindowIndex = pointEntries.findIndex(isSidetrackWindowEntry);
+              const sidetrackOriginalEntry =
+                sidetrackWindowIndex >= 0 ? originalEntries[sidetrackWindowIndex] : null;
+              const sidetrackWindowChanged =
+                sidetrackWindowEntry &&
+                sidetrackWindowEntry.sidetrackWindow &&
+                (
+                  !sidetrackOriginalEntry ||
+                  !pointsNearlyEqual(
+                    sidetrackWindowEntry.position,
+                    sidetrackOriginalEntry.position,
+                  ) ||
+                  Math.abs(
+                    Number(sidetrackWindowEntry.sidetrackWindow.valueM || 0) -
+                      Number(
+                        (sidetrackOriginalEntry.sidetrackWindow || {}).valueM || 0,
+                      ),
+                  ) > EDIT_DELTA_EPS_M
+                );
+              if (sidetrackWindowChanged) {
+                change.sidetrack_window = {
+                  kind: "md",
+                  value_m:
+                    Math.round(
+                      Number(sidetrackWindowEntry.sidetrackWindow.valueM || 0) *
+                        100,
+                    ) / 100,
+                  parent_name: String(
+                    sidetrackWindowEntry.sidetrackWindow.parentName || "",
+                  ),
+                  position: sidetrackWindowEntry.position.map(
+                    (v) => Math.round(v * 100) / 100,
+                  ),
+                };
+              }
+              if (change.points || change.sidetrack_window) {
+                changes.push(change);
+              }
             } else {
               changes.push({
                 name: well.name,

@@ -10,11 +10,14 @@ from pywp.eclipse_welltrack import (
     welltrack_points_to_target_pairs,
 )
 from pywp.pilot_wells import (
+    is_zbs_name,
     is_pilot_record,
     parent_name_for_pilot,
+    parent_name_for_zbs,
     pilot_name_key_for_parent,
     pilot_record_problem_text,
     well_name_key,
+    zbs_target_points_to_pair,
 )
 
 __all__ = [
@@ -96,6 +99,7 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
     raw_rows: list[dict[str, object]] = []
     for record in records:
         is_pilot = is_pilot_record(record)
+        is_zbs = is_zbs_name(record.name)
         multi_level_count = welltrack_multi_horizontal_level_count(record.points)
         for index, point in enumerate(record.points, start=1):
             raw_rows.append(
@@ -104,6 +108,7 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
                     "Точка": _point_label(
                         index,
                         is_pilot=is_pilot,
+                        is_zbs=is_zbs,
                         multi_level_count=multi_level_count,
                     ),
                     "X, м": float(point.x),
@@ -115,10 +120,14 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
 
 
 def record_target_point_count(record: WelltrackRecord) -> int:
+    if is_zbs_name(record.name):
+        return int(len(tuple(record.points)))
     return int(max(len(tuple(record.points)) - 1, 0))
 
 
 def _record_t1_offset_m(record: WelltrackRecord) -> float | None:
+    if is_zbs_name(record.name):
+        return None
     points = tuple(record.points)
     if len(points) < 2:
         return None
@@ -135,6 +144,15 @@ def _record_t1_offset_m(record: WelltrackRecord) -> float | None:
 
 def _record_t1_t3_length_m(record: WelltrackRecord) -> float | None:
     points = tuple(record.points)
+    if is_zbs_name(record.name):
+        if len(points) != 2 or not all(_point_has_finite_xyz(point) for point in points):
+            return None
+        return float(
+            math.dist(
+                (float(points[0].x), float(points[0].y), float(points[0].z)),
+                (float(points[1].x), float(points[1].y), float(points[1].z)),
+            )
+        )
     if len(points) < 3:
         return None
     if not all(_point_has_finite_xyz(point) for point in points[1:]):
@@ -165,6 +183,8 @@ def record_has_surface_like_point(
     *,
     wellhead_z_tolerance_m: float = DEFAULT_WELLHEAD_Z_TOLERANCE_M,
 ) -> bool:
+    if is_zbs_name(record.name):
+        return bool(tuple(record.points))
     return any(
         abs(float(point.z)) <= float(wellhead_z_tolerance_m)
         for point in tuple(record.points)
@@ -176,6 +196,8 @@ def record_first_point_is_surface_like(
     *,
     wellhead_z_tolerance_m: float = DEFAULT_WELLHEAD_Z_TOLERANCE_M,
 ) -> bool:
+    if is_zbs_name(record.name):
+        return bool(tuple(record.points))
     points = tuple(record.points)
     if not points:
         return False
@@ -198,6 +220,19 @@ def record_import_problem_text(
     points = tuple(record.points)
     problems: list[str] = []
     target_count = record_target_point_count(record)
+    if is_zbs_name(record.name):
+        if not points:
+            problems.append("Нет точек WELLTRACK.")
+        else:
+            if not record_has_finite_points(record):
+                problems.append("Координаты X/Y/Z и MD должны быть конечными числами.")
+            if not record_has_strictly_increasing_md(record):
+                problems.append("MD точек должны строго возрастать.")
+            try:
+                zbs_target_points_to_pair(points)
+            except ValueError as exc:
+                problems.append(str(exc))
+        return "—" if not problems else " ".join(dict.fromkeys(problems))
     if not points:
         problems.append("Нет точек WELLTRACK.")
     else:
@@ -283,8 +318,15 @@ def _point_label(
     index: int,
     *,
     is_pilot: bool = False,
+    is_zbs: bool = False,
     multi_level_count: int = 0,
 ) -> str:
+    if is_zbs:
+        if int(index) == 1:
+            return "t1"
+        if int(index) == 2:
+            return "t3"
+        return f"p{int(index)}"
     if int(index) == 1:
         return "S"
     if is_pilot:
@@ -303,6 +345,10 @@ def _point_label(
 
 def _record_note(record: WelltrackRecord, *, has_pilot: bool) -> str:
     notes: list[str] = []
+    if is_zbs_name(record.name):
+        notes.append(
+            f"Боковой ствол от факта: нужна скважина {parent_name_for_zbs(record.name)}"
+        )
     if has_pilot:
         notes.append("Есть пилот")
     level_count = welltrack_multi_horizontal_level_count(record.points)

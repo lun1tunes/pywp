@@ -16,6 +16,8 @@ from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.models import Point3D
 from pywp import ptc_pad_state
 from pywp import ptc_three_payload
+from pywp.pilot_wells import is_zbs_name, well_name_key
+from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.well_pad import WellPad
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -79,6 +81,8 @@ def legend_pad_label(pad: WellPad) -> str:
 def _record_surface_by_name(records: Iterable[WelltrackRecord]) -> dict[str, Point3D]:
     surface_by_name: dict[str, Point3D] = {}
     for record in records:
+        if is_zbs_name(record.name):
+            continue
         points = tuple(record.points)
         if not points:
             continue
@@ -89,6 +93,14 @@ def _record_surface_by_name(records: Iterable[WelltrackRecord]) -> dict[str, Poi
             z=float(surface.z),
         )
     return surface_by_name
+
+
+def _pad_payload_records(records: Iterable[WelltrackRecord]) -> list[WelltrackRecord]:
+    return [
+        record
+        for record in records
+        if not is_zbs_name(record.name)
+    ]
 
 
 def three_legend_tree_payload(
@@ -104,7 +116,7 @@ def three_legend_tree_payload(
         return [], {}, set()
     pads, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
         session_state,
-        records,
+        _pad_payload_records(records),
     )
     tree: list[dict[str, object]] = []
     focus_targets: dict[str, dict[str, list[float]]] = {}
@@ -158,7 +170,7 @@ def pad_first_surface_arrow_payloads(
         return []
     pads, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
         session_state,
-        records,
+        _pad_payload_records(records),
     )
     arrows: list[dict[str, object]] = []
     seen_names: set[str] = set()
@@ -344,8 +356,21 @@ def augment_three_payload(
 def build_edit_wells_payload(
     successes: list[SuccessfulWellPlan],
     name_to_color: Mapping[str, str],
+    *,
+    reference_wells: Iterable[ImportedTrajectoryWell] = (),
+    parent_successes: Iterable[SuccessfulWellPlan] | None = None,
 ) -> list[dict[str, object]]:
     edit_wells: list[dict[str, object]] = []
+    parent_success_iterable = (
+        tuple(parent_successes) if parent_successes is not None else successes
+    )
+    parent_success_by_key = {
+        well_name_key(success.name): success
+        for success in parent_success_iterable
+    }
+    reference_well_by_key = {
+        well_name_key(well.name): well for well in tuple(reference_wells)
+    }
     for success in successes:
         target_pairs = tuple(getattr(success, "target_pairs", ()) or ())
         config = success.config
@@ -380,6 +405,30 @@ def build_edit_wells_payload(
                     }
                 )
                 point_index += 1
+        sidetrack_window = _sidetrack_window_edit_point(
+            success,
+            parent_success_by_key=parent_success_by_key,
+            reference_well_by_key=reference_well_by_key,
+        )
+        if sidetrack_window is not None:
+            if not edit_points:
+                edit_points.extend(
+                    [
+                        {
+                            "index": 1,
+                            "label": "t1",
+                            "point_type": "t1",
+                            "position": _point3d_payload(success.t1),
+                        },
+                        {
+                            "index": 2,
+                            "label": "t3",
+                            "point_type": "t3",
+                            "position": _point3d_payload(success.t3),
+                        },
+                    ]
+                )
+            edit_points.append(sidetrack_window)
         edit_wells.append(
             {
                 "name": str(success.name),
@@ -457,6 +506,7 @@ def trajectory_three_payload_overrides(
     successes: list[SuccessfulWellPlan],
     target_only_wells: list[object],
     name_to_color: Mapping[str, str],
+    reference_wells: Iterable[ImportedTrajectoryWell] = (),
 ) -> dict[str, object]:
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
     surface_by_name: dict[str, Point3D] = {}
@@ -482,7 +532,11 @@ def trajectory_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "edit_wells": [
-            *build_edit_wells_payload(successes, name_to_color),
+            *build_edit_wells_payload(
+                successes,
+                name_to_color,
+                reference_wells=reference_wells,
+            ),
             *build_target_only_edit_wells_payload(target_only_wells, name_to_color),
         ],
         "extra_meshes": pad_first_surface_arrow_payloads(
@@ -501,6 +555,9 @@ def anticollision_three_payload_overrides(
     records: list[WelltrackRecord],
     analysis: AntiCollisionAnalysis,
     successes: list[SuccessfulWellPlan] | None = None,
+    target_only_wells: list[object] | None = None,
+    target_only_name_to_color: Mapping[str, str] | None = None,
+    reference_wells: Iterable[ImportedTrajectoryWell] = (),
 ) -> dict[str, object]:
     visible_names: list[str] = []
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
@@ -528,6 +585,24 @@ def anticollision_three_payload_overrides(
         merged_bounds = ptc_three_payload.merge_raw_bounds((bounds, extra_bounds))
         if merged_bounds is not None:
             well_bounds_by_name[str(well.name)] = merged_bounds
+    target_only_color_map = target_only_name_to_color or {}
+    for target_only in target_only_wells or ():
+        well_name = str(getattr(target_only, "name", ""))
+        if not well_name:
+            continue
+        if well_name not in visible_names:
+            visible_names.append(well_name)
+        name_to_color.setdefault(
+            well_name,
+            str(target_only_color_map.get(well_name, "#6B7280")),
+        )
+        current_bounds = target_only_raw_bounds(target_only)
+        well_bounds_by_name[well_name] = ptc_three_payload.merge_raw_bounds(
+            (well_bounds_by_name.get(well_name), current_bounds)
+        ) or current_bounds
+        surface = getattr(target_only, "surface", None)
+        if isinstance(surface, Point3D):
+            surface_by_name[well_name] = surface
     surface_by_name.update(_record_surface_by_name(records))
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
@@ -549,8 +624,18 @@ def anticollision_three_payload_overrides(
         ),
         "component_key": "anticollision-overview",
     }
-    if successes:
-        result["edit_wells"] = build_edit_wells_payload(successes, name_to_color)
+    if successes or target_only_wells:
+        result["edit_wells"] = [
+            *build_edit_wells_payload(
+                successes or [],
+                name_to_color,
+                reference_wells=reference_wells,
+            ),
+            *build_target_only_edit_wells_payload(
+                target_only_wells or [],
+                target_only_name_to_color or name_to_color,
+            ),
+        ]
     return result
 
 
@@ -636,6 +721,8 @@ def _fallback_target_labels(
         for level_index in range(1, len(target_pairs) + 1):
             labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
         return tuple(labels)
+    if point_count == 2:
+        return ("t1", "t3")
     if point_count == 3:
         return ("S", "t1", "t3")
     return ("S", *(f"P{index}" for index in range(1, point_count)))
@@ -676,29 +763,114 @@ def _point3d_payload(point: Point3D) -> list[float]:
 
 
 def _decimated_base_points(success: SuccessfulWellPlan) -> list[list[float]]:
-    station_columns = ("X_m", "Y_m", "Z_m")
-    if not all(column in success.stations.columns for column in station_columns):
+    return [
+        row[:3]
+        for row in _station_path_points(success.stations, include_md=False)
+    ]
+
+
+def _station_path_points(
+    stations: object,
+    *,
+    include_md: bool,
+    extra_point: list[float] | None = None,
+) -> list[list[float]]:
+    columns = ("X_m", "Y_m", "Z_m", "MD_m") if include_md else ("X_m", "Y_m", "Z_m")
+    if not hasattr(stations, "columns") or not all(
+        column in stations.columns for column in columns
+    ):
         return []
-    station_values = (
-        success.stations.loc[:, list(station_columns)].dropna().to_numpy(dtype=float)
-    )
+    station_values = stations.loc[:, list(columns)].dropna().to_numpy(dtype=float)
     if not station_values.size:
         return []
-    if len(station_values) > MAX_EDIT_BASE_POINTS:
-        sample_indices = np.unique(
-            np.linspace(
-                0,
-                len(station_values) - 1,
-                num=MAX_EDIT_BASE_POINTS,
-                dtype=int,
-            )
-        )
-        station_values = station_values[sample_indices]
-    return [
-        [float(row[0]), float(row[1]), float(row[2])]
+    rows = [
+        [float(value) for value in row]
         for row in station_values
         if np.all(np.isfinite(row))
     ]
+    if extra_point is not None and len(extra_point) == len(columns):
+        if all(np.isfinite(float(value)) for value in extra_point):
+            rows.append([float(value) for value in extra_point])
+    if include_md:
+        rows = _unique_station_path_points_by_md(rows)
+    if len(rows) > MAX_EDIT_BASE_POINTS:
+        sample_indices = np.unique(
+            np.linspace(0, len(rows) - 1, num=MAX_EDIT_BASE_POINTS, dtype=int)
+        )
+        rows = [rows[int(index)] for index in sample_indices]
+    return rows
+
+
+def _unique_station_path_points_by_md(rows: list[list[float]]) -> list[list[float]]:
+    rows_by_md: dict[float, list[float]] = {}
+    for row in rows:
+        if len(row) < 4:
+            continue
+        rows_by_md[round(float(row[3]), 6)] = row
+    return [rows_by_md[key] for key in sorted(rows_by_md)]
+
+
+def _sidetrack_window_edit_point(
+    success: SuccessfulWellPlan,
+    *,
+    parent_success_by_key: Mapping[str, SuccessfulWellPlan],
+    reference_well_by_key: Mapping[str, ImportedTrajectoryWell],
+) -> dict[str, object] | None:
+    summary = dict(getattr(success, "summary", {}) or {})
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    if trajectory_type not in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+        return None
+    try:
+        md_m = float(summary.get("sidetrack_window_md_m"))
+        position = [
+            float(summary.get("sidetrack_window_x_m")),
+            float(summary.get("sidetrack_window_y_m")),
+            float(summary.get("sidetrack_window_z_m")),
+        ]
+    except (TypeError, ValueError):
+        return None
+    if not _finite_triplet(position) or not np.isfinite(md_m):
+        return None
+
+    parent_name = str(
+        summary.get("sidetrack_parent_well_name")
+        or summary.get("pilot_well_name")
+        or ""
+    ).strip()
+    if not parent_name:
+        return None
+    parent_key = well_name_key(parent_name)
+    parent_stations = None
+    parent_success = parent_success_by_key.get(parent_key)
+    if parent_success is not None:
+        parent_stations = parent_success.stations
+    parent_reference = reference_well_by_key.get(parent_key)
+    if parent_reference is not None:
+        parent_stations = parent_reference.stations
+    if parent_stations is None:
+        parent_stations = getattr(success.stations, "attrs", {}).get(
+            "uncertainty_reference_stations"
+        )
+    parent_points = _station_path_points(
+        parent_stations,
+        include_md=True,
+        extra_point=[*position, md_m],
+    )
+    if len(parent_points) < 2:
+        return None
+    return {
+        "index": -1,
+        "label": "Окно",
+        "point_type": "sidetrack_window",
+        "position": position,
+        "md_m": md_m,
+        "parent_name": parent_name,
+        "parent_points": parent_points,
+    }
+
+
+def _finite_triplet(point: list[float]) -> bool:
+    return len(point) >= 3 and all(np.isfinite(float(value)) for value in point[:3])
 
 
 def _collision_payloads(

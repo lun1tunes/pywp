@@ -421,6 +421,18 @@ def all_wells_three_payload(
     for target_only in target_only_wells or ():
         well_name = str(getattr(target_only, "name"))
         color = color_map.get(well_name, "#6B7280")
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        target_focus_arrays = (
+            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
+            if _include_target_only_in_focus(
+                well_name=well_name,
+                focus_set=focus_set,
+                target_points=target_points,
+                target_labels=target_labels,
+            )
+            else None
+        )
         _append_target_markers(
             payload,
             name=f"{well_name}: цели (без траектории)",
@@ -428,17 +440,15 @@ def all_wells_three_payload(
             t1=getattr(target_only, "t1"),
             t3=getattr(target_only, "t3"),
             target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
-            target_points=tuple(getattr(target_only, "target_points", ()) or ()),
-            target_labels=tuple(getattr(target_only, "target_labels", ()) or ()),
+            target_points=target_points,
+            target_labels=target_labels,
             color=color,
             size=10.0,
             symbol="cross",
             x_arrays=x_arrays,
             y_arrays=y_arrays,
             z_arrays=z_arrays,
-            focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays)
-            if _include_name_in_focus(well_name, focus_set)
-            else None,
+            focus_arrays=target_focus_arrays,
             hover_extra={
                 "status": str(getattr(target_only, "status", "") or ""),
                 "problem": str(getattr(target_only, "problem", "") or ""),
@@ -459,6 +469,24 @@ def all_wells_three_payload(
         z_arrays=z_focus_arrays or z_arrays,
     )
     return ptc_three_payload.optimize_three_payload(payload)
+
+
+def _include_target_only_in_focus(
+    *,
+    well_name: str,
+    focus_set: set[str],
+    target_points: tuple[Point3D, ...],
+    target_labels: tuple[str, ...],
+) -> bool:
+    if _include_name_in_focus(well_name, focus_set):
+        return True
+    if not focus_set:
+        return True
+    # ZBS has no source wellhead in target records and is intentionally not a
+    # pad member. Keep its two editable targets in camera bounds for focused
+    # views so a failed sidetrack can still be fixed from 3D.
+    labels = tuple(label.lower() for label in target_labels)
+    return len(target_points) == 2 and labels == ("t1", "t3")
 
 
 def anticollision_three_payload(
@@ -1003,6 +1031,8 @@ def _target_labels_for_points(
         for index in range(1, len(target_pairs) + 1):
             labels.extend([f"{index}_t1", f"{index}_t3"])
         return labels
+    if point_count == 2:
+        return ["t1", "t3"]
     if point_count == 3:
         return ["S", "t1", "t3"]
     return ["S", *(f"P{index}" for index in range(1, point_count))]

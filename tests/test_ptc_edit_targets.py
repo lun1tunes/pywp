@@ -250,6 +250,51 @@ def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> 
     assert updated_original.points[4].y == pytest.approx(20.0)
 
 
+def test_apply_edit_targets_changes_queues_sidetrack_window_override() -> None:
+    records = [_record("9010_ZBS"), _record("WELL-B")]
+    session_state: dict[str, object] = {
+        "wt_records": list(records),
+        "wt_records_original": list(records),
+        "wt_successes": [
+            SimpleNamespace(name="9010_ZBS"),
+            SimpleNamespace(name="WELL-B"),
+        ],
+        "wt_summary_rows": [
+            {"Скважина": "9010_ZBS", "Статус": "OK", "Проблема": ""},
+            {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+        ],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "9010_ZBS",
+                "sidetrack_window": {
+                    "kind": "md",
+                    "value_m": 1240.5,
+                    "position": [10.0, 20.0, 1200.0],
+                },
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["9010_ZBS"]
+    assert session_state["wt_records"] == records
+    assert session_state["wt_records_original"] == records
+    assert [item.name for item in session_state["wt_successes"]] == ["WELL-B"]
+    assert session_state["wt_summary_rows"] == [
+        {"Скважина": "9010_ZBS", "Статус": "Не рассчитана", "Проблема": ""},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+    ]
+    assert session_state["wt_sidetrack_window_editor_overrides"] == {
+        "9010_ZBS": {"kind": "MD", "value_m": 1240.5}
+    }
+    assert session_state["wt_edit_targets_pending_names"] == ["9010_ZBS"]
+
+
 def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:
     session_state: dict[str, object] = {}
     applied: list[tuple[object, str]] = []

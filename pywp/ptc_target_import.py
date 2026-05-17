@@ -225,7 +225,9 @@ def build_target_import_operation(
         return TargetImportOperation(
             source_kind=_TARGET_IMPORT_KIND_TABLE,
             status_label="Чтение и преобразование таблицы точек...",
-            progress_message="Проверка строк таблицы и сборка точек S / t1 / t3 / PLn.",
+            progress_message=(
+                "Проверка строк таблицы и сборка точек S / t1 / t3 / PLn / ZBS."
+            ),
             count_message_template="Собрано скважин из таблицы: {record_count}.",
             success_label_template="Импорт таблицы завершен за {elapsed_s:.2f} с",
             error_label="Ошибка разбора табличного WELLTRACK",

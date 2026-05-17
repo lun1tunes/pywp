@@ -6,7 +6,7 @@ import streamlit as st
 from pywp import ptc_core as wt
 from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state as reference_state
-from pywp.anticollision import anti_collision_report_rows
+from pywp.anticollision import AntiCollisionAnalysis, anti_collision_report_rows
 from pywp.coordinate_integration import (
     csv_export_crs,
     get_crs_display_suffix,
@@ -139,6 +139,7 @@ def _render_anticollision_panel(
     *,
     successes: list[object],
     records: list[object],
+    summary_rows: list[dict[str, object]],
     focus_pad_id: str,
     focus_pad_well_names: list[str],
 ) -> None:
@@ -154,6 +155,13 @@ def _render_anticollision_panel(
             + ". Предыдущий anti-collision расчёт сохранён и не будет "
             "перезапускаться по неполному набору."
         )
+        if _render_cached_anticollision_snapshot_for_pending_edits(
+            successes=successes,
+            records=records,
+            summary_rows=summary_rows,
+            focus_pad_well_names=focus_pad_well_names,
+        ):
+            return
         return
 
     reference_wells = reference_state.reference_wells_from_state()
@@ -386,32 +394,10 @@ def _render_anticollision_panel(
             )
 
             if improved:
-                from pywp.welltrack_batch import (
-                    WelltrackBatchPlanner,
-                    merge_batch_results,
+                _apply_pad_order_optimization_result(
+                    new_records=new_records,
+                    new_success_dict=new_success_dict,
                 )
-
-                new_rows = []
-                for r in new_records:
-                    if r.name in new_success_dict:
-                        new_rows.append(
-                            WelltrackBatchPlanner._row_from_success(
-                                record=r, success=new_success_dict[r.name]
-                            )
-                        )
-
-                merged_rows, merged_successes = merge_batch_results(
-                    records=new_records,
-                    existing_rows=st.session_state.get("wt_summary_rows"),
-                    existing_successes=st.session_state.get("wt_successes"),
-                    new_rows=new_rows,
-                    new_successes=list(new_success_dict.values()),
-                )
-
-                st.session_state["wt_records"] = new_records
-                st.session_state["wt_successes"] = merged_successes
-                st.session_state["wt_summary_rows"] = merged_rows
-                wt._reset_anticollision_view_state(clear_prepared=True)
                 opt_progress.progress(
                     100, text="Оптимизация завершена! Применяем изменения..."
                 )
@@ -435,6 +421,142 @@ def _render_full_anticollision_recalc_button() -> bool:
         return False
     wt._reset_anticollision_view_state(clear_prepared=True)
     st.rerun()
+    return True
+
+
+def _apply_pad_order_optimization_result(
+    *,
+    new_records: list[object],
+    new_success_dict: dict[str, object],
+) -> None:
+    from pywp.welltrack_batch import (
+        WelltrackBatchPlanner,
+        merge_batch_results,
+    )
+
+    new_rows = []
+    for record in new_records:
+        name = str(getattr(record, "name", ""))
+        if name in new_success_dict:
+            new_rows.append(
+                WelltrackBatchPlanner._row_from_success(
+                    record=record, success=new_success_dict[name]
+                )
+            )
+
+    merged_rows, merged_successes = merge_batch_results(
+        records=new_records,
+        existing_rows=st.session_state.get("wt_summary_rows"),
+        existing_successes=st.session_state.get("wt_successes"),
+        new_rows=new_rows,
+        new_successes=list(new_success_dict.values()),
+    )
+
+    previous_ac_cache = st.session_state.get("wt_anticollision_analysis_cache")
+    st.session_state["wt_records"] = list(new_records)
+    st.session_state["wt_records_original"] = list(new_records)
+    st.session_state["wt_successes"] = merged_successes
+    st.session_state["wt_summary_rows"] = merged_rows
+    wt._reset_anticollision_view_state(clear_prepared=True)
+    if isinstance(previous_ac_cache, dict) and previous_ac_cache:
+        st.session_state["wt_anticollision_analysis_cache"] = previous_ac_cache
+
+
+def _cached_anticollision_snapshot() -> tuple[
+    AntiCollisionAnalysis,
+    tuple[object, ...],
+    tuple[object, ...],
+] | None:
+    cache = st.session_state.get("wt_anticollision_analysis_cache")
+    if not isinstance(cache, dict):
+        return None
+    analysis = cache.get("analysis")
+    if not isinstance(analysis, AntiCollisionAnalysis):
+        return None
+    recommendations = cache.get("recommendations")
+    clusters = cache.get("clusters")
+    return (
+        analysis,
+        recommendations if isinstance(recommendations, tuple) else (),
+        clusters if isinstance(clusters, tuple) else (),
+    )
+
+
+def _render_cached_anticollision_snapshot_for_pending_edits(
+    *,
+    successes: list[object],
+    records: list[object],
+    summary_rows: list[dict[str, object]],
+    focus_pad_well_names: list[str],
+) -> bool:
+    snapshot = _cached_anticollision_snapshot()
+    if snapshot is None:
+        return False
+    analysis, recommendations, clusters = snapshot
+    st.caption(
+        "Ниже показан последний anti-collision снимок до пересчёта: "
+        "старые конусы, пересечения и фактический/утверждённый фонд остаются "
+        "на экране как ориентир для дальнейшей правки целей."
+    )
+
+    visible_focus_names = tuple(focus_pad_well_names)
+    visible_clusters = wt._clusters_touching_focus_pad(
+        clusters=clusters,
+        focus_pad_well_names=visible_focus_names,
+    )
+    focus_anticollision_well_names = wt._anticollision_focus_well_names(
+        clusters=visible_clusters,
+        focus_pad_well_names=visible_focus_names,
+    )
+    target_only_wells = wt._failed_target_only_wells(
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
+    name_to_color = wt._well_color_map(list(records))
+    chart_col1, chart_col2 = st.columns(2, gap="medium")
+    anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
+        analysis,
+        previous_successes_by_name={},
+        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
+        focus_well_names=focus_anticollision_well_names or visible_focus_names,
+        render_mode=wt.WT_3D_RENDER_DETAIL,
+    )
+    wt._render_three_payload(
+        container=chart_col1,
+        payload=anticollision_3d_payload,
+        height=660,
+        payload_overrides=wt._anticollision_three_payload_overrides(
+            records=list(records),
+            analysis=analysis,
+            successes=list(successes),
+            target_only_wells=target_only_wells,
+            target_only_name_to_color=name_to_color,
+        ),
+    )
+    chart_col2.plotly_chart(
+        wt._all_wells_anticollision_plan_figure(
+            analysis,
+            previous_successes_by_name={},
+            focus_well_names=focus_anticollision_well_names or visible_focus_names,
+        ),
+        width="stretch",
+    )
+
+    visible_recommendations = wt._recommendations_for_clusters(
+        recommendations=recommendations,
+        clusters=visible_clusters,
+    )
+    if visible_recommendations:
+        st.markdown("### Отчет по предыдущему anti-collision")
+        report_rows = wt._report_rows_from_recommendations(
+            visible_recommendations,
+            analysis,
+        )
+        st.dataframe(
+            wt.arrow_safe_text_dataframe(pd.DataFrame(report_rows)),
+            width="stretch",
+            hide_index=True,
+        )
     return True
 
 
@@ -499,9 +621,11 @@ def _render_target_edit_overview(
             records=records,
             focus_pad_id=focus_pad_id,
         )
+    reference_wells = reference_state.reference_wells_from_state()
     payload = wt._all_wells_three_payload(
         list(successes),
         target_only_wells=target_only_wells,
+        reference_wells=reference_wells,
         name_to_color=name_to_color,
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=tuple(focus_pad_well_names),
@@ -523,6 +647,7 @@ def _render_target_edit_overview(
         wt._all_wells_plan_figure(
             list(successes),
             target_only_wells=target_only_wells,
+            reference_wells=reference_wells,
             name_to_color=name_to_color,
             focus_well_names=tuple(focus_pad_well_names),
         ),
@@ -643,6 +768,7 @@ def render_success_tabs(
                     "edit_wells": wt._build_edit_wells_payload(
                         [selected],
                         single_well_name_to_color,
+                        parent_successes=list(successes),
                     ),
                 },
             )
@@ -726,6 +852,7 @@ def render_success_tabs(
     _render_anticollision_panel(
         successes=successes,
         records=records,
+        summary_rows=summary_rows,
         focus_pad_id=focus_pad_id,
         focus_pad_well_names=focus_pad_well_names,
     )

@@ -55,14 +55,17 @@ from pywp.pilot_wells import (
     build_pilot_trajectory,
     combine_pilot_and_sidetrack,
     is_pilot_record,
+    is_zbs_record,
     order_records_with_pilots_first,
+    parent_name_for_zbs,
     pilot_name_key_for_parent,
     select_sidetrack_window,
     well_name_key,
+    zbs_target_points_to_pair,
 )
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
-from pywp.reference_trajectories import ImportedTrajectoryWell
+from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_ACTUAL
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.uncertainty import PlanningUncertaintyModel, fast_proxy_uncertainty_model
 from pywp.ui_utils import dls_to_pi
@@ -473,6 +476,8 @@ def _evaluate_record_from_dicts(
     record_dict: dict,
     config_dict: dict,
     optimization_context_dict: dict | None = None,
+    reference_well_dicts: tuple[dict, ...] | list[dict] | None = None,
+    sidetrack_window_override_dict: dict | None = None,
 ) -> tuple[dict[str, Any], dict | None]:
     """Worker entry-point that accepts/returns plain dicts.
 
@@ -487,6 +492,29 @@ def _evaluate_record_from_dicts(
     opt_ctx: AntiCollisionOptimizationContext | None = None
     if optimization_context_dict is not None:
         opt_ctx = _optimization_context_from_worker_payload(optimization_context_dict)
+    if is_zbs_record(record):
+        reference_wells = tuple(
+            ImportedTrajectoryWell.model_validate(item)
+            for item in tuple(reference_well_dicts or ())
+        )
+        sidetrack_override = None
+        if sidetrack_window_override_dict is not None:
+            sidetrack_override = SidetrackWindowOverride(
+                kind=str(sidetrack_window_override_dict.get("kind", "")),
+                value_m=float(
+                    sidetrack_window_override_dict.get("value_m", float("nan"))
+                ),
+            )
+        row, success = WelltrackBatchPlanner()._evaluate_zbs_record(
+            record=record,
+            config=config,
+            optimization_context=opt_ctx,
+            actual_reference_wells_by_key=_actual_reference_wells_by_key(
+                reference_wells
+            ),
+            sidetrack_window_override=sidetrack_override,
+        )
+        return row, success.model_dump() if success is not None else None
     row, success = _evaluate_record_standalone(record, config, opt_ctx)
     return row, success.model_dump() if success is not None else None
 
@@ -503,6 +531,11 @@ def _evaluate_record_standalone(
     """
     if is_pilot_record(record):
         return _evaluate_pilot_record_standalone(record, config)
+    if is_zbs_record(record):
+        row = WelltrackBatchPlanner._base_row(record=record)
+        row["Статус"] = "Ошибка расчета"
+        row["Проблема"] = _missing_zbs_parent_problem(record)
+        return row, None
 
     base_row = WelltrackBatchPlanner._base_row(record=record)
     try:
@@ -689,6 +722,27 @@ def _summary_float(summary: Mapping[str, object], key: str) -> float:
     return value
 
 
+def _actual_reference_wells_by_key(
+    reference_wells: Iterable[ImportedTrajectoryWell],
+) -> dict[str, ImportedTrajectoryWell]:
+    actual_by_key: dict[str, ImportedTrajectoryWell] = {}
+    for well in reference_wells:
+        if str(getattr(well, "kind", "")) != REFERENCE_WELL_ACTUAL:
+            continue
+        key = well_name_key(getattr(well, "name", ""))
+        if key and key not in actual_by_key:
+            actual_by_key[key] = well
+    return actual_by_key
+
+
+def _missing_zbs_parent_problem(record: WelltrackRecord) -> str:
+    parent_name = parent_name_for_zbs(record.name)
+    return (
+        f'Боковой ствол "{record.name}" не был рассчитан - отсутствует '
+        f'фактическая траектория основной скважины "{parent_name}".'
+    )
+
+
 class WelltrackBatchPlanner:
     def __init__(self, planner: TrajectoryPlanner | None = None):
         self._planner = planner or TrajectoryPlanner()
@@ -711,6 +765,7 @@ class WelltrackBatchPlanner:
         sidetrack_window_overrides_by_name: (
             Mapping[str, SidetrackWindowOverride] | None
         ) = None,
+        reference_wells: Iterable[ImportedTrajectoryWell] = (),
         dynamic_cluster_context: DynamicClusterExecutionContext | None = None,
         progress_callback: ProgressCallback | None = None,
         solver_progress_callback: SolverProgressCallback | None = None,
@@ -726,6 +781,9 @@ class WelltrackBatchPlanner:
             well_name_key(name): override
             for name, override in (sidetrack_window_overrides_by_name or {}).items()
         }
+        actual_reference_wells_by_key = _actual_reference_wells_by_key(
+            reference_wells
+        )
 
         # ------------------------------------------------------------------
         # Parallel fast-path: when workers > 1 and no dynamic cluster
@@ -744,6 +802,8 @@ class WelltrackBatchPlanner:
                     config=config,
                     config_by_name=config_by_name,
                     optimization_context_by_name=optimization_context_by_name,
+                    reference_wells=tuple(reference_wells),
+                    sidetrack_window_overrides_by_key=sidetrack_window_overrides_by_key,
                     progress_callback=progress_callback,
                     record_done_callback=record_done_callback,
                     parallel_workers=int(parallel_workers),
@@ -899,6 +959,7 @@ class WelltrackBatchPlanner:
                     sidetrack_window_override=sidetrack_window_overrides_by_key.get(
                         well_name_key(record.name)
                     ),
+                    actual_reference_wells_by_key=actual_reference_wells_by_key,
                 )
             if success is not None:
                 optimization_context = runtime_override["optimization_context"]
@@ -977,6 +1038,8 @@ class WelltrackBatchPlanner:
         optimization_context_by_name: (
             dict[str, AntiCollisionOptimizationContext] | None
         ),
+        reference_wells: tuple[ImportedTrajectoryWell, ...],
+        sidetrack_window_overrides_by_key: Mapping[str, SidetrackWindowOverride],
         progress_callback: ProgressCallback | None,
         record_done_callback: RecordDoneCallback | None,
         parallel_workers: int,
@@ -992,17 +1055,36 @@ class WelltrackBatchPlanner:
         results_by_name: dict[str, tuple[dict[str, Any], SuccessfulWellPlan | None]] = (
             {}
         )
+        has_zbs_records = any(is_zbs_record(record) for record in selected_records)
+        reference_well_dicts = (
+            tuple(well.model_dump() for well in reference_wells)
+            if has_zbs_records
+            else ()
+        )
 
         pool = ProcessPoolExecutor(max_workers=workers, mp_context=_mp_ctx)
         try:
             for record in selected_records:
                 well_config = (config_by_name or {}).get(str(record.name)) or config
                 opt_ctx = (optimization_context_by_name or {}).get(str(record.name))
+                sidetrack_override = sidetrack_window_overrides_by_key.get(
+                    well_name_key(record.name)
+                )
+                override_payload = (
+                    {
+                        "kind": str(sidetrack_override.kind),
+                        "value_m": float(sidetrack_override.value_m),
+                    }
+                    if sidetrack_override is not None
+                    else None
+                )
                 fut = pool.submit(
                     _evaluate_record_from_dicts,
                     record.model_dump(),
                     well_config.model_dump(),
                     _optimization_context_to_worker_payload(opt_ctx),
+                    reference_well_dicts if is_zbs_record(record) else (),
+                    override_payload,
                 )
                 future_to_name[fut] = str(record.name)
 
@@ -1305,6 +1387,8 @@ class WelltrackBatchPlanner:
         text_lower = text.lower()
         if "пилот" in text_lower:
             return "Пилот"
+        if "боковой ствол" in text_lower or "факт" in text_lower:
+            return "Боковой ствол от факта"
         if "обрат" in text_lower:
             return "В обратном направлении"
         return "В прямом направлении"
@@ -1838,9 +1922,20 @@ class WelltrackBatchPlanner:
         planner_progress_callback: Callable[[str, float], None] | None = None,
         recalculated_success_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
         sidetrack_window_override: SidetrackWindowOverride | None = None,
+        actual_reference_wells_by_key: (
+            Mapping[str, ImportedTrajectoryWell] | None
+        ) = None,
     ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
         if is_pilot_record(record):
             return self._evaluate_pilot_record(record=record, config=config)
+        if is_zbs_record(record):
+            return self._evaluate_zbs_record(
+                record=record,
+                config=config,
+                optimization_context=optimization_context,
+                actual_reference_wells_by_key=actual_reference_wells_by_key or {},
+                sidetrack_window_override=sidetrack_window_override,
+            )
 
         row = self._base_row(record=record)
         try:
@@ -1940,6 +2035,90 @@ class WelltrackBatchPlanner:
             summary=summary,
             azimuth_deg=azimuth_deg,
             md_t1_m=md_t1_m,
+            config=config,
+            runtime_s=runtime_s,
+            md_postcheck_exceeded=postcheck_exceeded,
+            md_postcheck_message=postcheck_message,
+        )
+        row = self._row_from_success(record=record, success=success)
+        return row, success
+
+    def _evaluate_zbs_record(
+        self,
+        *,
+        record: WelltrackRecord,
+        config: TrajectoryConfig,
+        optimization_context: AntiCollisionOptimizationContext | None,
+        actual_reference_wells_by_key: Mapping[str, ImportedTrajectoryWell],
+        sidetrack_window_override: SidetrackWindowOverride | None = None,
+    ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
+        row = self._base_row(record=record)
+        try:
+            t1, t3 = zbs_target_points_to_pair(tuple(record.points))
+        except ValueError as exc:
+            row["Статус"] = "Ошибка формата"
+            row["Проблема"] = summarize_problem_ru(str(exc))
+            return row, None
+
+        parent_name = parent_name_for_zbs(record.name)
+        parent_well = actual_reference_wells_by_key.get(well_name_key(parent_name))
+        if parent_well is None:
+            row["Статус"] = "Ошибка расчета"
+            row["Проблема"] = _missing_zbs_parent_problem(record)
+            return row, None
+
+        try:
+            started = perf_counter()
+            window, sidetrack_result = select_sidetrack_window(
+                pilot_name=str(parent_well.name),
+                parent_name=str(record.name),
+                pilot_stations=parent_well.stations,
+                parent_t1=t1,
+                parent_t3=t3,
+                config=config,
+                planner=self._planner,
+                optimization_context=optimization_context,
+                window_override=sidetrack_window_override,
+            )
+            sidetrack = combine_pilot_and_sidetrack(
+                pilot_stations=parent_well.stations,
+                sidetrack_result=sidetrack_result,
+                window=window,
+                config=config,
+            )
+            runtime_s = float(perf_counter() - started)
+        except (ValueError, PlanningError) as exc:
+            row["Статус"] = "Ошибка расчета"
+            row["Проблема"] = summarize_problem_ru(str(exc))
+            return row, None
+
+        summary = dict(sidetrack.summary)
+        summary.update(
+            {
+                "trajectory_type": "FACT_SIDETRACK",
+                "trajectory_target_direction": "Боковой ствол от факта",
+                "well_complexity": "Боковой ствол от факта",
+                "sidetrack_parent_well_name": str(parent_well.name),
+                "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+                "actual_parent_well_name": str(parent_well.name),
+                "pilot_well_name": str(parent_well.name),
+            }
+        )
+        anti_collision_stage = anti_collision_stage_from_context(optimization_context)
+        if anti_collision_stage is not None:
+            summary["anti_collision_stage"] = anti_collision_stage
+            summary["anti_collision_attempted_stages"] = anti_collision_stage
+        postcheck_exceeded, postcheck_message = _postcheck_state(summary)
+        success = SuccessfulWellPlan(
+            name=record.name,
+            surface=sidetrack.window.point,
+            t1=t1,
+            t3=t3,
+            target_pairs=((t1, t3),),
+            stations=sidetrack.stations,
+            summary=summary,
+            azimuth_deg=float(sidetrack.azimuth_deg),
+            md_t1_m=float(sidetrack.md_t1_m),
             config=config,
             runtime_s=runtime_s,
             md_postcheck_exceeded=postcheck_exceeded,

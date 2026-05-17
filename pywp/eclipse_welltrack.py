@@ -36,6 +36,7 @@ _TABLE_POINT_DISPLAY_LABELS: dict[str, str] = {
     "t1": "t1",
     "t3": "t3",
 }
+_TABLE_ZBS_SUFFIX = "_ZBS"
 
 
 class WelltrackParseError(ValueError):
@@ -216,6 +217,16 @@ def parse_welltrack_points_table(
         points_by_name = grouped_points[well_name]
         if _is_table_pilot_well_name(well_name):
             ordered_names = _ordered_table_pilot_point_names(
+                points_by_name,
+                well_name=well_name,
+            )
+            ordered_points = tuple(points_by_name[name] for name in ordered_names)
+            _validate_record_md(points=list(ordered_points), well_name=well_name)
+            records.append(WelltrackRecord(name=well_name, points=ordered_points))
+            continue
+
+        if _is_table_zbs_well_name(well_name):
+            ordered_names = _ordered_table_zbs_point_names(
                 points_by_name,
                 well_name=well_name,
             )
@@ -419,7 +430,9 @@ def _normalize_table_point_name(
             f"{value!r} в строке {row_no}. "
             "Ожидается S, t1 или t3; для многопластовой скважины используйте "
             "пары 1_t1, 1_t3, 2_t1, 2_t3, ... "
-            "Для пилота используйте имя wellname_PL и точки S, PL1, PL2, ..."
+            "Для пилота используйте имя wellname_PL и точки S, PL1, PL2, ... "
+            "Для бокового ствола от факта используйте имя fact_well_name_ZBS "
+            "и точки t1, t3 без S."
         )
 
 
@@ -447,6 +460,10 @@ def _table_point_md_index(point_name: str) -> float:
 
 def _is_table_pilot_well_name(well_name: object) -> bool:
     return str(well_name).strip().upper().endswith("_PL")
+
+
+def _is_table_zbs_well_name(well_name: object) -> bool:
+    return str(well_name).strip().upper().endswith(_TABLE_ZBS_SUFFIX)
 
 
 def _ordered_table_pilot_point_names(
@@ -478,6 +495,32 @@ def _ordered_table_pilot_point_names(
             f"{', '.join(f'PL{index}' for index in missing)}."
         )
     return ("wellhead", *(f"pl{index}" for index in expected_indices))
+
+
+def _ordered_table_zbs_point_names(
+    points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+) -> tuple[str, ...]:
+    missing = [name for name in ("t1", "t3") if name not in points_by_name]
+    if missing:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для бокового ствола от факта "
+            f"'{well_name}' отсутствуют точки: "
+            f"{', '.join(_table_point_display_name(name) for name in missing)}."
+        )
+    extra = [
+        _table_point_display_name(name)
+        for name in points_by_name
+        if name not in {"t1", "t3"}
+    ]
+    if extra:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для бокового ствола от факта "
+            f"'{well_name}' используйте только точки t1 и t3 без S. "
+            f"Лишние точки: {', '.join(extra)}."
+        )
+    return ("t1", "t3")
 
 
 def _has_multi_horizontal_table_points(

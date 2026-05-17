@@ -12,6 +12,10 @@ from pywp.ptc_page_run import (
     _sidetrack_value_key,
     _sidetrack_window_overrides_from_state,
 )
+from pywp.ptc_sidetrack_state import (
+    SIDETRACK_EDITOR_OVERRIDES_KEY,
+    apply_editor_sidetrack_window_defaults,
+)
 
 
 def _parent_with_pilot_records() -> list[WelltrackRecord]:
@@ -41,6 +45,21 @@ def test_sidetrack_parent_names_detects_visible_parent_wells() -> None:
     assert _sidetrack_parent_names(records) == ["WELL-04"]
 
 
+def test_sidetrack_parent_names_includes_zbs_target_records() -> None:
+    records = [
+        *_parent_with_pilot_records(),
+        WelltrackRecord(
+            name="9010_ZBS",
+            points=(
+                WelltrackPoint(x=10.0, y=0.0, z=1200.0, md=1.0),
+                WelltrackPoint(x=500.0, y=0.0, z=1200.0, md=2.0),
+            ),
+        ),
+    ]
+
+    assert _sidetrack_parent_names(records) == ["9010_ZBS", "WELL-04"]
+
+
 def test_sidetrack_window_overrides_from_state_collects_manual_md() -> None:
     state = {
         _sidetrack_mode_key("WELL-04"): _SIDETRACK_MANUAL,
@@ -67,6 +86,25 @@ def test_sidetrack_window_overrides_from_state_reports_missing_value() -> None:
     assert overrides == {}
     assert "WELL-04" in error
     assert "Z" in error
+
+
+def test_editor_sidetrack_window_defaults_are_applied_before_widgets() -> None:
+    state: dict[str, object] = {
+        SIDETRACK_EDITOR_OVERRIDES_KEY: {
+            "9010_ZBS": {"kind": "MD", "value_m": 1240.5}
+        }
+    }
+
+    apply_editor_sidetrack_window_defaults(
+        state,
+        parent_names=["9010_ZBS", "WELL-04"],
+    )
+
+    assert state[_sidetrack_mode_key("9010_ZBS")] == _SIDETRACK_MANUAL
+    assert state[_sidetrack_kind_key("9010_ZBS")] == "MD"
+    assert state[_sidetrack_value_key("9010_ZBS")] == pytest.approx(1240.5)
+    assert state["wt_sidetrack_window_parent_name"] == "9010_ZBS"
+    assert SIDETRACK_EDITOR_OVERRIDES_KEY not in state
 
 
 def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:

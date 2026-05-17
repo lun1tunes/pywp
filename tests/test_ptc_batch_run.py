@@ -93,6 +93,27 @@ def test_sync_selection_state_hides_pilot_and_maps_old_pilot_selection_to_parent
     assert state["wt_selected_names"] == ["WELL-A"]
 
 
+def test_matched_zbs_parent_names_uses_actual_reference_wells() -> None:
+    zbs = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=10.0, y=0.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1200.0, md=2.0),
+        ),
+    )
+
+    matches = ptc_batch_run._matched_zbs_parent_names(
+        records=[*_records(), zbs],
+        selected_names={"9010_ZBS"},
+        reference_wells=(
+            SimpleNamespace(name="9010", kind="actual"),
+            SimpleNamespace(name="9010", kind="approved"),
+        ),
+    )
+
+    assert matches == [("9010_ZBS", "9010")]
+
+
 def test_batch_selection_status_rolls_pilot_row_into_parent_well() -> None:
     records = [
         *_records(),

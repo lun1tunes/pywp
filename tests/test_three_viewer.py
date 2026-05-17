@@ -132,7 +132,12 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "const editOriginalPoints = []" in html
     assert "function updateWellEditPoints(wellIndex, nextPoints)" in html
     assert "editWellHasExplicitPoints(wellIndex)" in html
-    assert "points: (editCurrentPoints[idx] || []).map" in html
+    assert "editWellHasComplexExplicitPoints(wellIndex)" in html
+    assert "editWellUsesSidetrackWindowPreview(wellIndex)" in html
+    assert "sidetrackWindowEntryForWell(wellIndex)" in html
+    assert "!editWellHasComplexExplicitPoints(selectedEditWellIndex)" in html
+    assert "const targetPoints = pointEntries.filter" in html
+    assert "change.points = targetPoints.map" in html
     assert 'editDragMoveScope === "pair"' in html
     assert "updateWellEditTargets(wi, nextT1, nextT3)" in html
     assert 'id="edit-undo-btn"' in html
@@ -175,6 +180,12 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "basePoints: Array.isArray(well.base_points)" in html
     assert "warpedBaselineReplanPoints" in html
     assert "return endpointExact(warped, surface, t1, t3);" in html
+    assert "sidetrack_window" in html
+    assert "nearestSidetrackParentPoint" in html
+    assert "snappedSidetrackWindowEntry" in html
+    assert "change.sidetrack_window" in html
+    assert "sidetrackMdDeltaRow" in html
+    assert "<span>ΔMD</span>" in html
     assert "Свернуть / развернуть" in html
     assert "legend-node-btn legend-node-pad" in html
     assert "legend-node-btn legend-node-well" in html

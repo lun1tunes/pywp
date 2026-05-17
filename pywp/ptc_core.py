@@ -97,6 +97,8 @@ from pywp.eclipse_welltrack import (
 from pywp.models import Point3D
 from pywp.pilot_wells import (
     is_pilot_name,
+    is_zbs_name,
+    parent_name_for_zbs,
     parent_name_for_pilot,
     pilot_name_key_for_parent,
     sync_pilot_surfaces_to_parents,
@@ -331,7 +333,7 @@ def _well_color_map(records: list[WelltrackRecord]) -> dict[str, str]:
     try:
         _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
             st.session_state,
-            visible_well_records(records),
+            visible_well_records(records, include_zbs=False),
         )
     except Exception:
         well_names_by_pad_id = {}
@@ -387,17 +389,22 @@ def _failed_target_only_wells(
         )
         if not target_points:
             continue
-        try:
-            surface, target_pairs = welltrack_points_to_target_pairs(record.points)
-        except ValueError:
+        if is_zbs_name(record.name) and len(target_points) == 2:
             surface = target_points[0]
-            target_pairs = ()
-        if target_pairs:
-            t1, t3 = target_pairs[0][0], target_pairs[-1][1]
-        elif len(target_points) >= 2:
-            t1, t3 = target_points[1], target_points[-1]
+            target_pairs = ((target_points[0], target_points[1]),)
+            t1, t3 = target_points[0], target_points[1]
         else:
-            t1 = t3 = target_points[0]
+            try:
+                surface, target_pairs = welltrack_points_to_target_pairs(record.points)
+            except ValueError:
+                surface = target_points[0]
+                target_pairs = ()
+            if target_pairs:
+                t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+            elif len(target_points) >= 2:
+                t1, t3 = target_points[1], target_points[-1]
+            else:
+                t1 = t3 = target_points[0]
         target_only_wells.append(
             _TargetOnlyWell(
                 name=str(record.name),
@@ -420,6 +427,10 @@ def _record_target_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
         return ()
     if is_pilot_name(record.name):
         return ("S", *(f"PL{index}" for index in range(1, point_count)))
+    if is_zbs_name(record.name):
+        if point_count == 2:
+            return ("t1", "t3")
+        return tuple(f"P{index + 1}" for index in range(point_count))
     target_count = point_count - 1
     if target_count >= 4 and target_count % 2 == 0:
         labels = ["S"]
@@ -1102,10 +1113,14 @@ def _render_three_payload(
 def _build_edit_wells_payload(
     successes: list[SuccessfulWellPlan],
     name_to_color: Mapping[str, str],
+    *,
+    parent_successes: Iterable[SuccessfulWellPlan] | None = None,
 ) -> list[dict[str, object]]:
     return ptc_three_overrides.build_edit_wells_payload(
         successes,
         name_to_color,
+        reference_wells=_reference_wells_from_state(),
+        parent_successes=parent_successes,
     )
 
 
@@ -1122,6 +1137,7 @@ def _trajectory_three_payload_overrides(
         successes=successes,
         target_only_wells=target_only_wells,
         name_to_color=name_to_color,
+        reference_wells=_reference_wells_from_state(),
     )
 
 
@@ -1130,12 +1146,17 @@ def _anticollision_three_payload_overrides(
     records: list[WelltrackRecord],
     analysis: AntiCollisionAnalysis,
     successes: list[SuccessfulWellPlan] | None = None,
+    target_only_wells: list[_TargetOnlyWell] | None = None,
+    target_only_name_to_color: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     return ptc_three_overrides.anticollision_three_payload_overrides(
         st.session_state,
         records=records,
         analysis=analysis,
         successes=successes,
+        target_only_wells=target_only_wells,
+        target_only_name_to_color=target_only_name_to_color,
+        reference_wells=_reference_wells_from_state(),
     )
 
 
@@ -2433,6 +2454,8 @@ def _target_only_fallback_labels(
         for level_index in range(1, len(target_pairs) + 1):
             labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
         return tuple(labels)
+    if point_count == 2:
+        return ("t1", "t3")
     if point_count == 3:
         return ("S", "t1", "t3")
     return ("S", *(f"P{index}" for index in range(1, point_count)))
@@ -3685,7 +3708,10 @@ def _render_source_input() -> _WelltrackSourcePayload:
                 "`Wellname`: каждый номер — отдельный горизонтальный уровень. "
                 "Для пилота используйте имя "
                 "`wellname_PL`: точки `S`, `PL1`, `PL2`, ...; часть `wellname` "
-                "должна совпадать с основной скважиной."
+                "должна совпадать с основной скважиной. Для бокового ствола "
+                "от фактической скважины используйте имя `fact_well_name_ZBS` "
+                "и точки `t1`, `t3` без `S`; `fact_well_name` должен совпадать "
+                "с именем загруженной фактической скважины."
             )
         with clear_col:
             if st.button(
@@ -3891,12 +3917,37 @@ def _handle_import_actions(
 def _render_records_overview(records: list[WelltrackRecord]) -> None:
     parsed_df = _records_overview_dataframe(records)
     problem_count = int(sum(str(item) != "✅" for item in parsed_df["Статус"].tolist()))
-    well_count = int(sum(not is_pilot_name(record.name) for record in records))
+    well_count = int(
+        sum(
+            not is_pilot_name(record.name) and not is_zbs_name(record.name)
+            for record in records
+        )
+    )
     pilot_count = int(sum(is_pilot_name(record.name) for record in records))
-    x1, x2, x3 = st.columns(3, gap="small")
+    zbs_records = [record for record in records if is_zbs_name(record.name)]
+    zbs_count = int(len(zbs_records))
+    x1, x2, x3, x4 = st.columns(4, gap="small")
     x1.metric("Скважин", f"{well_count}")
     x2.metric("Пилотов", f"{pilot_count}")
-    x3.metric("Проблем", f"{problem_count}")
+    x3.metric("Боковых стволов", f"{zbs_count}")
+    x4.metric("Проблем", f"{problem_count}")
+    if zbs_records:
+        parent_names = sorted(
+            {
+                parent_name_for_zbs(record.name)
+                for record in zbs_records
+                if str(record.name).strip()
+            }
+        )
+        st.info(
+            "В импорте есть боковой ствол - загрузите фактическую скважину "
+            + (
+                f'с именем "{parent_names[0]}"'
+                if len(parent_names) == 1
+                else "с именами " + ", ".join(f'"{name}"' for name in parent_names)
+            )
+            + " для расчёта траектории."
+        )
 
     with st.expander(
         "Статус загрузки целей",
@@ -4947,7 +4998,7 @@ def _render_t1_t3_order_panel(
     *,
     border: bool = True,
 ) -> None:
-    visible_records = visible_well_records(records)
+    visible_records = visible_well_records(records, include_zbs=False)
     panel_context = st.container(border=True) if border else nullcontext()
     with panel_context:
         resolution_message = _t1_t3_order_resolution_message()
@@ -5195,7 +5246,7 @@ def _detect_ui_pads(
 def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
     return ptc_pad_state.ensure_pad_configs(
         st.session_state,
-        base_records=visible_well_records(base_records),
+        base_records=visible_well_records(base_records, include_zbs=False),
     )
 
 
@@ -5205,7 +5256,7 @@ def _build_pad_plan_map(pads: list[WellPad]) -> dict[str, PadLayoutPlan]:
 
 def _project_pads_for_ui(records: list[WelltrackRecord]) -> list[WellPad]:
     return ptc_pad_state.project_pads_for_ui(
-        st.session_state, visible_well_records(records)
+        st.session_state, visible_well_records(records, include_zbs=False)
     )
 
 
@@ -5224,7 +5275,10 @@ def _pad_anchor_mode_label(mode: object) -> str:
 def _pad_membership(
     records: list[WelltrackRecord],
 ) -> tuple[list[WellPad], dict[str, str], dict[str, tuple[str, ...]]]:
-    return ptc_pad_state.pad_membership(st.session_state, visible_well_records(records))
+    return ptc_pad_state.pad_membership(
+        st.session_state,
+        visible_well_records(records, include_zbs=False),
+    )
 
 
 def _normalize_focus_pad_id(
@@ -5234,7 +5288,7 @@ def _normalize_focus_pad_id(
 ) -> str:
     return ptc_pad_state.normalize_focus_pad_id(
         st.session_state,
-        records=visible_well_records(records),
+        records=visible_well_records(records, include_zbs=False),
         requested_pad_id=requested_pad_id,
     )
 
@@ -5246,7 +5300,7 @@ def _focus_pad_well_names(
 ) -> tuple[str, ...]:
     return ptc_pad_state.focus_pad_well_names(
         st.session_state,
-        records=visible_well_records(records),
+        records=visible_well_records(records, include_zbs=False),
         focus_pad_id=focus_pad_id,
     )
 
@@ -5258,7 +5312,7 @@ def _focus_pad_fixed_well_names(
 ) -> tuple[str, ...]:
     return ptc_pad_state.focus_pad_fixed_well_names(
         st.session_state,
-        records=visible_well_records(records),
+        records=visible_well_records(records, include_zbs=False),
         focus_pad_id=focus_pad_id,
     )
 

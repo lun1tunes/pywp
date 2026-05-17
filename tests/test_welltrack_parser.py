@@ -185,6 +185,54 @@ def test_parse_welltrack_points_table_accepts_pilot_rows() -> None:
     assert pilot.points[2].x == pytest.approx(300.0)
 
 
+def test_parse_welltrack_points_table_accepts_zbs_rows_without_surface() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {
+                "Wellname": "9010_ZBS",
+                "Point": "t1",
+                "X": 604606.04,
+                "Y": 7408871.93,
+                "Z": 3791.81,
+            },
+            {
+                "Wellname": "9010_ZBS",
+                "Point": "t3",
+                "X": 603829.49,
+                "Y": 7408056.91,
+                "Z": 3791.0,
+            },
+        ]
+    )
+
+    assert [record.name for record in records] == ["9010_ZBS"]
+    assert [point.md for point in records[0].points] == [1.0, 2.0]
+    assert records[0].points[0].x == pytest.approx(604606.04)
+
+
+def test_parse_welltrack_points_table_rejects_zbs_surface_row() -> None:
+    with pytest.raises(WelltrackParseError, match="только точки t1 и t3 без S"):
+        parse_welltrack_points_table(
+            [
+                {"Wellname": "9010_ZBS", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {
+                    "Wellname": "9010_ZBS",
+                    "Point": "t1",
+                    "X": 604606.04,
+                    "Y": 7408871.93,
+                    "Z": 3791.81,
+                },
+                {
+                    "Wellname": "9010_ZBS",
+                    "Point": "t3",
+                    "X": 603829.49,
+                    "Y": 7408056.91,
+                    "Z": 3791.0,
+                },
+            ]
+        )
+
+
 def test_parse_welltrack_points_table_rejects_pilot_point_gaps() -> None:
     with pytest.raises(WelltrackParseError, match="отсутствуют точки: PL2"):
         parse_welltrack_points_table(

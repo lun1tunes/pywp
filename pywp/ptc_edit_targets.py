@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable, Mapping, MutableMapping
 import math
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.ptc_sidetrack_state import queue_editor_sidetrack_window_override
 
 __all__ = [
     "apply_edit_targets_changes",
@@ -30,6 +31,29 @@ def edit_target_point(value: object) -> list[float] | None:
     if not all(math.isfinite(item) for item in point):
         return None
     return point
+
+
+def _sidetrack_window_change(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    kind = str(value.get("kind", "md")).strip().lower()
+    if kind not in {"md", "z"}:
+        return None
+    raw_value = value.get("value_m", value.get("md_m", value.get("z_m")))
+    try:
+        value_m = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value_m):
+        return None
+    position = edit_target_point(value.get("position"))
+    result: dict[str, object] = {
+        "kind": kind,
+        "value_m": value_m,
+    }
+    if position is not None:
+        result["position"] = position
+    return result
 
 
 def records_with_edit_targets(
@@ -63,6 +87,16 @@ def records_with_edit_targets(
                 ):
                     continue
                 old_point = old_points[point_index]
+                if (
+                    math.isclose(float(old_point.x), float(new_point[0]), abs_tol=1e-9)
+                    and math.isclose(
+                        float(old_point.y), float(new_point[1]), abs_tol=1e-9
+                    )
+                    and math.isclose(
+                        float(old_point.z), float(new_point[2]), abs_tol=1e-9
+                    )
+                ):
+                    continue
                 old_points[point_index] = WelltrackPoint(
                     x=float(new_point[0]),
                     y=float(new_point[1]),
@@ -248,10 +282,14 @@ def apply_edit_targets_changes(
     if not records:
         return []
     change_map: dict[str, dict[str, object]] = {}
+    sidetrack_window_map: dict[str, dict[str, object]] = {}
     for entry in changes:
         if not isinstance(entry, Mapping):
             continue
         name = str(entry.get("name", "")).strip()
+        sidetrack_window = _sidetrack_window_change(entry.get("sidetrack_window"))
+        if name and sidetrack_window is not None:
+            sidetrack_window_map[name] = sidetrack_window
         raw_points = entry.get("points")
         parsed_points: list[dict[str, object]] = []
         if isinstance(raw_points, list):
@@ -278,32 +316,48 @@ def apply_edit_targets_changes(
         t3 = edit_target_point(entry.get("t3"))
         if name and t1 is not None and t3 is not None:
             change_map[name] = {"t1": t1, "t3": t3}
-    if not change_map:
+    if not change_map and not sidetrack_window_map:
         return []
     record_by_name = {
         str(record.name): record
         for record in records  # type: ignore[union-attr]
         if isinstance(record, WelltrackRecord)
     }
-    updated_records, updated_names = records_with_edit_targets(
-        records=records,  # type: ignore[arg-type]
-        change_map=change_map,
+    updated_records = list(records)  # type: ignore[arg-type]
+    updated_target_names: list[str] = []
+    if change_map:
+        updated_records, updated_target_names = records_with_edit_targets(
+            records=records,  # type: ignore[arg-type]
+            change_map=change_map,
+        )
+    sidetrack_window_names: list[str] = []
+    for name, window_change in sidetrack_window_map.items():
+        queue_editor_sidetrack_window_override(
+            session_state,
+            well_name=name,
+            kind=str(window_change["kind"]),
+            value_m=float(window_change["value_m"]),
+        )
+        sidetrack_window_names.append(name)
+    updated_names = unique_well_names(
+        [*updated_target_names, *sidetrack_window_names]
     )
     if not updated_names:
         return []
 
     effective_change_map = {
-        name: change_map[name] for name in updated_names if name in change_map
+        name: change_map[name] for name in updated_target_names if name in change_map
     }
     original_records = session_state.get("wt_records_original")
-    if original_records:
+    if original_records and effective_change_map:
         updated_original_records, _ = records_with_edit_targets(
             records=original_records,  # type: ignore[arg-type]
             change_map=effective_change_map,
         )
         session_state["wt_records_original"] = updated_original_records
 
-    session_state["wt_records"] = updated_records
+    if updated_target_names:
+        session_state["wt_records"] = updated_records
     invalidate_results_for_edited_targets(
         session_state,
         records=updated_records,

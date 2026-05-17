@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from pywp.anticollision import AntiCollisionAnalysis
 from pywp import ptc_core
 from pywp import ptc_page_results
 
@@ -66,6 +69,8 @@ def test_anticollision_panel_pauses_on_pending_target_edits(
     messages: list[tuple[str, str]] = []
 
     class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
         def info(self, message: str) -> None:
             messages.append(("info", str(message)))
 
@@ -89,6 +94,7 @@ def test_anticollision_panel_pauses_on_pending_target_edits(
     ptc_page_results._render_anticollision_panel(
         successes=[object(), object()],
         records=[],
+        summary_rows=[],
         focus_pad_id="",
         focus_pad_well_names=[],
     )
@@ -101,6 +107,184 @@ def test_anticollision_panel_pauses_on_pending_target_edits(
     assert messages[1][0] == "caption"
     assert "WELL-A" in messages[1][1]
     assert "Предыдущий anti-collision расчёт сохранён" in messages[1][1]
+
+
+def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=1,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    target_only = SimpleNamespace(name="WELL-A")
+    calls: dict[str, object] = {}
+
+    class FakeColumn:
+        def plotly_chart(self, figure: object, **kwargs: object) -> None:
+            calls["plotly"] = (figure, kwargs)
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {
+            "wt_anticollision_analysis_cache": {
+                "analysis": analysis,
+                "recommendations": (),
+                "clusters": (),
+            }
+        }
+
+        def info(self, message: str) -> None:
+            calls["info"] = str(message)
+
+        def caption(self, message: str) -> None:
+            calls.setdefault("captions", []).append(str(message))
+
+        def columns(self, *args: object, **kwargs: object) -> list[FakeColumn]:
+            return [FakeColumn(), FakeColumn()]
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: ["WELL-A"],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_cached_anti_collision_view_model",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("anti-collision must not recalculate pending edits")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [target_only],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_well_color_map",
+        lambda _records: {"WELL-A": "#123456"},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_anticollision_three_payload",
+        lambda *args, **kwargs: calls.setdefault("payload_kwargs", kwargs) or {},
+    )
+
+    def fake_overrides(**kwargs: object) -> dict[str, object]:
+        calls["override_kwargs"] = kwargs
+        return {"edit_wells": []}
+
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_anticollision_three_payload_overrides",
+        fake_overrides,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_three_payload",
+        lambda **kwargs: calls.setdefault("render_payload", kwargs),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_anticollision_plan_figure",
+        lambda *args, **kwargs: "plan-figure",
+    )
+
+    ptc_page_results._render_anticollision_panel(
+        successes=[],
+        records=[],
+        summary_rows=[],
+        focus_pad_id="",
+        focus_pad_well_names=[],
+    )
+
+    assert "приостановлен" in str(calls["info"])
+    assert any("последний anti-collision снимок" in item for item in calls["captions"])
+    assert calls["plotly"][0] == "plan-figure"
+    assert calls["override_kwargs"]["target_only_wells"] == [target_only]
+    assert calls["override_kwargs"]["target_only_name_to_color"] == {"WELL-A": "#123456"}
+
+
+def test_target_edit_overview_keeps_reference_wells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_only = SimpleNamespace(name="WELL-A")
+    reference_wells = (object(),)
+    calls: dict[str, object] = {}
+
+    class FakeColumn:
+        def plotly_chart(self, figure: object, **kwargs: object) -> None:
+            calls["plotly"] = (figure, kwargs)
+
+    class FakeStreamlit:
+        def info(self, message: str) -> None:
+            calls["info"] = str(message)
+
+        def markdown(self, message: str) -> None:
+            calls["markdown"] = str(message)
+
+        def caption(self, message: str) -> None:
+            calls["caption"] = str(message)
+
+        def columns(self, *args: object, **kwargs: object) -> list[FakeColumn]:
+            return [FakeColumn(), FakeColumn()]
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [target_only],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_well_color_map",
+        lambda _records: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: reference_wells,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_three_payload",
+        lambda *args, **kwargs: calls.setdefault("three_kwargs", kwargs) or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_trajectory_three_payload_overrides",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_three_payload",
+        lambda **kwargs: calls.setdefault("render_payload", kwargs),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_plan_figure",
+        lambda *args, **kwargs: calls.setdefault("plan_kwargs", kwargs) or "plan",
+    )
+
+    rendered = ptc_page_results._render_target_edit_overview(
+        successes=[],
+        records=[],
+        summary_rows=[],
+        title="### Test",
+        empty_message="empty",
+        focus_pad_well_names=[],
+        show_focus_selector=False,
+    )
+
+    assert rendered is True
+    assert calls["three_kwargs"]["reference_wells"] == reference_wells
+    assert calls["plan_kwargs"]["reference_wells"] == reference_wells
 
 
 def test_format_duration_ru_carries_rounded_seconds() -> None:

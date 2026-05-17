@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
@@ -12,11 +13,22 @@ from pywp.anticollision import (
     anti_collision_report_events,
 )
 from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
-from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord, parse_welltrack_text
+from pywp.eclipse_welltrack import (
+    WelltrackPoint,
+    WelltrackRecord,
+    parse_welltrack_text,
+)
 from pywp.models import Point3D, TrajectoryConfig
 from pywp import ptc_pad_state
 from pywp import ptc_three_overrides
-from pywp.uncertainty import DEFAULT_UNCERTAINTY_PRESET, planning_uncertainty_model_for_preset
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    REFERENCE_WELL_ACTUAL,
+)
+from pywp.uncertainty import (
+    DEFAULT_UNCERTAINTY_PRESET,
+    planning_uncertainty_model_for_preset,
+)
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 
@@ -243,6 +255,46 @@ def test_first_surface_arrow_uses_record_wellhead_for_sidetrack_surface() -> Non
     ]
 
 
+def test_zbs_targets_do_not_render_pad_first_surface_arrow() -> None:
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=604606.04, y=7408871.93, z=3791.81, md=1.0),
+            WelltrackPoint(x=603829.49, y=7408056.91, z=3791.0, md=2.0),
+        ),
+    )
+    zbs_success = _successful_plan_xy(
+        name="9010_ZBS",
+        x_offset_m=604606.04,
+        y_offset_m=7408871.93,
+    ).model_copy(
+        update={
+            "summary": {
+                "trajectory_type": "FACT_SIDETRACK",
+                "sidetrack_parent_well_name": "9010",
+                "sidetrack_window_md_m": 2608.62,
+                "sidetrack_window_x_m": 604800.0,
+                "sidetrack_window_y_m": 7409000.0,
+                "sidetrack_window_z_m": 2600.0,
+            }
+        }
+    )
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        {},
+        records=[zbs_record],
+        successes=[zbs_success],
+        target_only_wells=[],
+        name_to_color={"9010_ZBS": "#22c55e"},
+    )
+
+    assert [
+        item
+        for item in list(overrides["extra_meshes"])
+        if str(item.get("role")) == "pad_first_surface_arrow"
+    ] == []
+
+
 def test_anticollision_arrow_uses_record_wellhead_for_sidetrack_surface() -> None:
     record_surface = WelltrackPoint(x=457091.0, y=891257.0, z=-63.2, md=1.0)
     records = [
@@ -450,6 +502,96 @@ def test_build_edit_wells_payload_includes_multi_horizontal_edit_points() -> Non
     ]
 
 
+def test_build_edit_wells_payload_adds_sidetrack_window_handle() -> None:
+    parent = _successful_plan_xy(
+        name="WELL-A_PL",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    )
+    sidetrack = _successful_plan_xy(
+        name="WELL-A",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    ).model_copy(
+        update={
+            "summary": {
+                "trajectory_type": "PILOT_SIDETRACK",
+                "pilot_well_name": "WELL-A_PL",
+                "sidetrack_window_md_m": 500.0,
+                "sidetrack_window_x_m": 500.0,
+                "sidetrack_window_y_m": 0.0,
+                "sidetrack_window_z_m": 0.0,
+            }
+        }
+    )
+
+    edit_wells = ptc_three_overrides.build_edit_wells_payload(
+        [sidetrack],
+        {"WELL-A": "#123456"},
+        parent_successes=[parent, sidetrack],
+    )
+
+    edit_points = edit_wells[0]["edit_points"]
+    assert [point["point_type"] for point in edit_points] == [
+        "t1",
+        "t3",
+        "sidetrack_window",
+    ]
+    window = edit_points[-1]
+    assert window["label"] == "Окно"
+    assert window["position"] == [500.0, 0.0, 0.0]
+    assert window["md_m"] == pytest.approx(500.0)
+    assert window["parent_name"] == "WELL-A_PL"
+    assert len(window["parent_points"]) >= 5
+    assert all(len(point) == 4 for point in window["parent_points"])
+
+
+def test_build_edit_wells_payload_adds_zbs_window_parent_path_from_reference() -> None:
+    reference_source = _successful_plan_xy(
+        name="9010",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    )
+    reference_well = ImportedTrajectoryWell(
+        name="9010",
+        kind=REFERENCE_WELL_ACTUAL,
+        stations=reference_source.stations,
+        surface=reference_source.surface,
+        azimuth_deg=90.0,
+    )
+    zbs = _successful_plan_xy(
+        name="9010_ZBS",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    ).model_copy(
+        update={
+            "summary": {
+                "trajectory_type": "FACT_SIDETRACK",
+                "sidetrack_parent_well_name": "9010",
+                "sidetrack_window_md_m": 500.0,
+                "sidetrack_window_x_m": 500.0,
+                "sidetrack_window_y_m": 0.0,
+                "sidetrack_window_z_m": 0.0,
+            }
+        }
+    )
+
+    edit_wells = ptc_three_overrides.build_edit_wells_payload(
+        [zbs],
+        {"9010_ZBS": "#123456"},
+        reference_wells=[reference_well],
+    )
+
+    window = edit_wells[0]["edit_points"][-1]
+    assert window["point_type"] == "sidetrack_window"
+    assert window["parent_name"] == "9010"
+    assert len(window["parent_points"]) >= 5
+
+
 def test_build_target_only_edit_wells_payload_preserves_failed_record_points() -> None:
     surface = Point3D(0.0, 0.0, 0.0)
     pilot_point = Point3D(100.0, 5.0, 900.0)
@@ -546,6 +688,50 @@ def test_trajectory_overrides_make_failed_target_only_wells_editable() -> None:
     edit_wells = list(overrides["edit_wells"])
     assert len(edit_wells) == 1
     assert edit_wells[0]["name"] == "WELL-C"
+    assert edit_wells[0]["color"] == "#abcdef"
+    assert [point["label"] for point in edit_wells[0]["edit_points"]] == [
+        "S",
+        "t1",
+        "t3",
+    ]
+
+
+def test_anticollision_overrides_keep_target_only_edit_wells_editable() -> None:
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    target_only = SimpleNamespace(
+        name="WELL-C",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(10.0, 20.0, 100.0),
+        t3=Point3D(20.0, 40.0, 100.0),
+        target_points=(
+            Point3D(0.0, 0.0, 0.0),
+            Point3D(10.0, 20.0, 100.0),
+            Point3D(20.0, 40.0, 100.0),
+        ),
+        target_labels=("S", "t1", "t3"),
+        target_pairs=(),
+    )
+
+    overrides = ptc_three_overrides.anticollision_three_payload_overrides(
+        {},
+        records=[],
+        analysis=analysis,
+        successes=[],
+        target_only_wells=[target_only],
+        target_only_name_to_color={"WELL-C": "#abcdef"},
+    )
+
+    edit_wells = list(overrides["edit_wells"])
+    assert [str(item["name"]) for item in edit_wells] == ["WELL-C"]
     assert edit_wells[0]["color"] == "#abcdef"
     assert [point["label"] for point in edit_wells[0]["edit_points"]] == [
         "S",

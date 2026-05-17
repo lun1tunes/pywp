@@ -36,7 +36,7 @@ from pywp.anticollision_rerun_models import (
     TrajectoryOverrideSpec,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
-from pywp.pilot_wells import paired_pilot_parent_names
+from pywp.pilot_wells import paired_pilot_parent_names, well_name_key
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
     REFERENCE_WELL_ACTUAL,
@@ -95,6 +95,55 @@ def _reference_wells_by_collision_name(
     return result
 
 
+def _excluded_source_parent_pair_keys(
+    *,
+    successes: list[SuccessfulWellPlan],
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> set[tuple[str, str]]:
+    """Pairs that represent the same physical bore and should not be scored."""
+
+    planned_names = tuple(str(item.name) for item in successes)
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(reference_wells)
+    excluded: set[tuple[str, str]] = set()
+    for success in successes:
+        summary = dict(getattr(success, "summary", {}) or {})
+        if str(summary.get("trajectory_type", "")).strip() != "FACT_SIDETRACK":
+            continue
+        parent_name = str(summary.get("actual_parent_well_name", "")).strip()
+        if not parent_name:
+            parent_name = str(summary.get("sidetrack_parent_well_name", "")).strip()
+        if not parent_name:
+            continue
+        parent_kind = str(summary.get("sidetrack_parent_kind", REFERENCE_WELL_ACTUAL))
+        for reference_well in reference_wells:
+            if str(reference_well.kind) != parent_kind:
+                continue
+            if well_name_key(reference_well.name) != well_name_key(parent_name):
+                continue
+            collision_name = reference_well_collision_name(
+                reference_well,
+                planned_names=planned_names,
+                duplicate_name_keys=duplicate_reference_name_keys,
+            )
+            excluded.add(tuple(sorted((str(success.name), str(collision_name)))))
+    return excluded
+
+
+def _should_score_anti_collision_pair(
+    left: AntiCollisionWell,
+    right: AntiCollisionWell,
+    *,
+    excluded_pair_keys: set[tuple[str, str]],
+) -> bool:
+    left_name = str(left.name)
+    right_name = str(right.name)
+    if paired_pilot_parent_names(left_name, right_name):
+        return False
+    if tuple(sorted((left_name, right_name))) in excluded_pair_keys:
+        return False
+    return True
+
+
 def build_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -121,6 +170,10 @@ def build_anti_collision_analysis_for_successes(
     )
     planned_names = tuple(str(item.name) for item in successes)
     duplicate_reference_name_keys = reference_well_duplicate_name_keys(reference_wells)
+    excluded_pair_keys = _excluded_source_parent_pair_keys(
+        successes=successes,
+        reference_wells=reference_wells,
+    )
     wells = [
         build_anti_collision_well(
             name=item.name,
@@ -178,9 +231,10 @@ def build_anti_collision_analysis_for_successes(
         build_overlap_geometry=build_overlap_geometry,
         progress_callback=progress_callback,
         parallel_workers=int(parallel_workers),
-        pair_filter=lambda left, right: not paired_pilot_parent_names(
-            left.name,
-            right.name,
+        pair_filter=lambda left, right: _should_score_anti_collision_pair(
+            left,
+            right,
+            excluded_pair_keys=excluded_pair_keys,
         ),
     )
 
@@ -224,6 +278,10 @@ def build_incremental_anti_collision_analysis_for_successes(
             previous_well_cache=previous_well_cache,
         )
     )
+    excluded_pair_keys = _excluded_source_parent_pair_keys(
+        successes=successes,
+        reference_wells=reference_wells,
+    )
     analysis, pair_cache, stats = analyze_anti_collision_incremental(
         wells,
         build_overlap_geometry=build_overlap_geometry,
@@ -233,9 +291,10 @@ def build_incremental_anti_collision_analysis_for_successes(
         rebuilt_well_count=rebuilt_wells,
         progress_callback=progress_callback,
         parallel_workers=int(parallel_workers),
-        pair_filter=lambda left, right: not paired_pilot_parent_names(
-            left.name,
-            right.name,
+        pair_filter=lambda left, right: _should_score_anti_collision_pair(
+            left,
+            right,
+            excluded_pair_keys=excluded_pair_keys,
         ),
     )
     return analysis, well_cache, pair_cache, stats

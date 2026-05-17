@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import asdict
 from typing import Any
 from pathlib import Path
@@ -42,6 +42,8 @@ from pywp.pilot_wells import SidetrackWindowOverride, sync_pilot_surfaces_to_par
 from pywp.planner_types import PlanningError
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
+    REFERENCE_WELL_ACTUAL,
+    REFERENCE_WELL_APPROVED,
     parse_reference_trajectory_table,
 )
 from pywp.uncertainty import (
@@ -149,6 +151,43 @@ class _StubPlanner:
         return PlannerResult(
             stations=stations, summary=summary, azimuth_deg=0.0, md_t1_m=1000.0
         )
+
+
+def _actual_reference_well(
+    name: str = "9010",
+    *,
+    kind: str = REFERENCE_WELL_ACTUAL,
+) -> ImportedTrajectoryWell:
+    return parse_reference_trajectory_table(
+        [
+            {"Wellname": name, "Type": kind, "X": 0.0, "Y": 0.0, "Z": 0.0, "MD": 0.0},
+            {
+                "Wellname": name,
+                "Type": kind,
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 600.0,
+                "MD": 600.0,
+            },
+            {
+                "Wellname": name,
+                "Type": kind,
+                "X": 180.0,
+                "Y": 0.0,
+                "Z": 1000.0,
+                "MD": 1100.0,
+            },
+            {
+                "Wellname": name,
+                "Type": kind,
+                "X": 420.0,
+                "Y": 0.0,
+                "Z": 1300.0,
+                "MD": 1550.0,
+            },
+        ],
+        default_kind=kind,
+    )[0]
 
 
 def test_multi_horizontal_record_extends_base_plan_with_numbered_segments() -> None:
@@ -421,6 +460,38 @@ def test_paired_parent_pilot_is_excluded_from_anticollision_pair_scoring() -> No
 
     assert analysis.pair_count == 0
     assert analysis.overlapping_pair_count == 0
+
+
+def test_fact_sidetrack_parent_actual_is_excluded_from_anticollision_pair_scoring() -> None:
+    zbs = _straight_success("9010_ZBS", y_offset_m=0.0)
+    zbs = zbs.validated_copy(
+        summary={
+            **dict(zbs.summary),
+            "trajectory_type": "FACT_SIDETRACK",
+            "actual_parent_well_name": "9010",
+            "sidetrack_parent_well_name": "9010",
+            "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+        }
+    )
+    reference_wells = (
+        _actual_reference_well("9010", kind=REFERENCE_WELL_ACTUAL),
+        _actual_reference_well("9010", kind=REFERENCE_WELL_APPROVED),
+    )
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [zbs],
+        model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 1
+    assert all(
+        {corridor.well_a, corridor.well_b}
+        != {"9010_ZBS", "9010 (Фактическая)"}
+        for corridor in analysis.corridors
+    )
 
 
 @pytest.mark.integration
@@ -3145,6 +3216,70 @@ def test_batch_planner_parallel_workers_fall_back_when_pool_breaks(monkeypatch) 
     }
 
 
+def test_batch_planner_parallel_path_keeps_zbs_records(monkeypatch) -> None:
+    import pywp.welltrack_batch as batch_module
+
+    submitted_names: list[str] = []
+    reference_payload_counts: dict[str, int] = {}
+
+    class InlineExecutor:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def submit(
+            self,
+            fn,
+            record_dict,
+            _config_dict,
+            _optimization_context_dict,
+            reference_well_dicts,
+            _override_payload,
+            **kwargs,
+        ) -> Future:
+            record = WelltrackRecord.model_validate(record_dict)
+            submitted_names.append(str(record.name))
+            reference_payload_counts[str(record.name)] = len(
+                tuple(reference_well_dicts or ())
+            )
+            row = WelltrackBatchPlanner._base_row(record)
+            row["Статус"] = "OK"
+            future: Future = Future()
+            future.set_result((row, None))
+            return future
+
+        def shutdown(self, *, wait: bool = True) -> None:
+            pass
+
+    monkeypatch.setattr(batch_module, "ProcessPoolExecutor", InlineExecutor)
+    zbs = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+        ),
+    )
+    regular = WelltrackRecord(
+        name="PAR-ZBS-REG",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1200.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1200.0, md=1600.0),
+        ),
+    )
+
+    rows, _successes = WelltrackBatchPlanner().evaluate(
+        records=[zbs, regular],
+        selected_names={"9010_ZBS", "PAR-ZBS-REG"},
+        config=_fast_batch_config(),
+        reference_wells=(_actual_reference_well("9010"),),
+        parallel_workers=2,
+    )
+
+    assert submitted_names == ["9010_ZBS", "PAR-ZBS-REG"]
+    assert reference_payload_counts == {"9010_ZBS": 1, "PAR-ZBS-REG": 0}
+    assert [row["Статус"] for row in rows] == ["OK", "OK"]
+
+
 def test_parent_selection_calculates_pilot_before_sidetrack() -> None:
     pilot = WelltrackRecord(
         name="WELL-04_PL",
@@ -3214,6 +3349,90 @@ def test_batch_planner_applies_manual_sidetrack_window_override() -> None:
     by_name = {success.name: success for success in successes}
     assert by_name["WELL-04"].summary["trajectory_type"] == "PILOT_SIDETRACK"
     assert by_name["WELL-04"].summary["sidetrack_window_md_m"] == pytest.approx(
+        manual_md
+    )
+
+
+def test_batch_planner_reports_missing_actual_parent_for_zbs() -> None:
+    zbs = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+        ),
+    )
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[zbs],
+        selected_names={"9010_ZBS"},
+        config=_fast_batch_config(kop_min_vertical_m=100.0),
+    )
+
+    assert successes == []
+    assert rows[0]["Статус"] == "Ошибка расчета"
+    assert 'Боковой ствол "9010_ZBS" не был рассчитан' in rows[0]["Проблема"]
+    assert '"9010"' in rows[0]["Проблема"]
+
+
+def test_batch_planner_builds_zbs_from_actual_reference_well() -> None:
+    zbs = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+        ),
+    )
+    actual = _actual_reference_well("9010")
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[zbs],
+        selected_names={"9010_ZBS"},
+        config=_fast_batch_config(
+            kop_min_vertical_m=100.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+        reference_wells=(actual,),
+    )
+
+    assert rows[0]["Статус"] == "OK"
+    assert rows[0]["Классификация целей"] == "Боковой ствол от факта"
+    assert len(successes) == 1
+    success = successes[0]
+    assert success.name == "9010_ZBS"
+    assert success.summary["trajectory_type"] == "FACT_SIDETRACK"
+    assert success.summary["actual_parent_well_name"] == "9010"
+    assert success.summary["sidetrack_parent_kind"] == REFERENCE_WELL_ACTUAL
+    assert success.surface.z < success.t1.z
+    assert success.target_pairs == ((success.t1, success.t3),)
+
+
+def test_batch_planner_applies_manual_window_override_to_zbs() -> None:
+    zbs = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+        ),
+    )
+    actual = _actual_reference_well("9010")
+    manual_md = 1000.0
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[zbs],
+        selected_names={"9010_ZBS"},
+        config=_fast_batch_config(
+            kop_min_vertical_m=100.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+        reference_wells=(actual,),
+        sidetrack_window_overrides_by_name={
+            "9010_ZBS": SidetrackWindowOverride(kind="md", value_m=manual_md),
+        },
+    )
+
+    assert len(successes) == 1
+    assert successes[0].summary["trajectory_type"] == "FACT_SIDETRACK"
+    assert successes[0].summary["sidetrack_window_md_m"] == pytest.approx(
         manual_md
     )
 

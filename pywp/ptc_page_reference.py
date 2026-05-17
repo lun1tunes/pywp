@@ -10,6 +10,7 @@ from pywp.reference_trajectories import (
     parse_reference_trajectory_dev_directories,
     parse_reference_trajectory_welltrack_text,
 )
+from pywp.pilot_wells import is_zbs_name, parent_name_for_zbs, well_name_key
 
 __all__ = ["render_reference_section"]
 
@@ -237,6 +238,7 @@ def render_reference_section() -> None:
         reference_state.reference_kind_wells(wt.REFERENCE_WELL_ACTUAL)
     )
     if actual_wells:
+        _render_zbs_actual_match_info(actual_wells)
         analyses = wt._actual_fund_analyses(actual_wells)
         wt._render_actual_fund_analysis_panel(analyses=analyses)
 
@@ -263,3 +265,46 @@ def render_reference_section() -> None:
                     select_label="Просмотр утвержденной проектной скважины",
                     selected_key="wt_approved_fund_selected_well",
                 )
+
+
+def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
+    records = tuple(st.session_state.get("wt_records") or ())
+    zbs_records = [
+        record
+        for record in records
+        if is_zbs_name(getattr(record, "name", ""))
+    ]
+    if not zbs_records:
+        return
+    actual_name_by_key = {
+        well_name_key(getattr(well, "name", "")): str(getattr(well, "name", ""))
+        for well in actual_wells
+    }
+    matched: list[tuple[str, str]] = []
+    missing: list[tuple[str, str]] = []
+    for record in zbs_records:
+        zbs_name = str(getattr(record, "name", ""))
+        parent_name = parent_name_for_zbs(zbs_name)
+        actual_name = actual_name_by_key.get(well_name_key(parent_name))
+        if actual_name is None:
+            missing.append((zbs_name, parent_name))
+        else:
+            matched.append((zbs_name, actual_name))
+    if matched:
+        st.info(
+            "Подцепили фактическую скважину для бокового ствола: "
+            + ", ".join(
+                f"{zbs_name} -> {actual_name}"
+                for zbs_name, actual_name in matched
+            )
+            + "."
+        )
+    if missing:
+        st.warning(
+            "Для боковых стволов не найдены фактические скважины: "
+            + ", ".join(
+                f'{zbs_name} ждёт "{parent_name}"'
+                for zbs_name, parent_name in missing
+            )
+            + "."
+        )
