@@ -506,6 +506,69 @@ def test_optimize_pad_order_rejects_swap_that_increases_collision_zones(
     assert improved is False
 
 
+def test_score_improvement_does_not_trade_target_pair_for_more_total_pairs() -> None:
+    current = pad_optimization._PadOptimizationScore(
+        target_zone_count=1,
+        overlap_pair_count=1,
+        zone_count=1,
+        severe_zone_count=1,
+        worst_sf=0.25,
+        mean_sf=0.25,
+    )
+    candidate = pad_optimization._PadOptimizationScore(
+        target_zone_count=0,
+        overlap_pair_count=2,
+        zone_count=2,
+        severe_zone_count=1,
+        worst_sf=0.80,
+        mean_sf=0.80,
+    )
+
+    assert pad_optimization._score_is_improvement(candidate, current) is False
+
+
+def test_score_improvement_does_not_trade_fewer_pairs_for_more_zones() -> None:
+    current = pad_optimization._PadOptimizationScore(
+        target_zone_count=0,
+        overlap_pair_count=2,
+        zone_count=2,
+        severe_zone_count=0,
+        worst_sf=0.50,
+        mean_sf=0.60,
+    )
+    candidate = pad_optimization._PadOptimizationScore(
+        target_zone_count=0,
+        overlap_pair_count=1,
+        zone_count=3,
+        severe_zone_count=0,
+        worst_sf=0.90,
+        mean_sf=0.90,
+    )
+
+    assert pad_optimization._score_is_improvement(candidate, current) is False
+
+
+def test_score_improvement_accepts_clean_target_pair_reduction() -> None:
+    current = pad_optimization._PadOptimizationScore(
+        target_zone_count=1,
+        overlap_pair_count=2,
+        zone_count=2,
+        severe_zone_count=1,
+        worst_sf=0.25,
+        mean_sf=0.35,
+    )
+    candidate = pad_optimization._PadOptimizationScore(
+        target_zone_count=0,
+        overlap_pair_count=2,
+        zone_count=2,
+        severe_zone_count=1,
+        worst_sf=0.25,
+        mean_sf=0.35,
+    )
+
+    assert pad_optimization._score_is_improvement(candidate, current) is True
+
+
 def test_optimize_pad_order_reuses_existing_pair_cache_for_candidate_scoring(
     monkeypatch,
 ) -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,6 +11,7 @@ from streamlit.testing.v1 import AppTest
 
 from pywp import ptc_core as wt_import_module
 from pywp import ptc_anticollision_params
+from pywp import ptc_edit_targets
 from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp.anticollision import (
     AntiCollisionAnalysis,
@@ -42,7 +43,7 @@ from pywp.uncertainty import (
     UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC,
     planning_uncertainty_model_for_preset,
 )
-from pywp.welltrack_batch import SuccessfulWellPlan
+from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 pytestmark = pytest.mark.integration
 
@@ -235,6 +236,26 @@ def _click_button(at: AppTest, label: str) -> None:
             widget.click()
             return
     raise AssertionError(f"Button not found: {label}")
+
+
+class _AppTestSessionStateAdapter(MutableMapping[str, object]):
+    def __init__(self, state: object) -> None:
+        self._state = state
+
+    def __getitem__(self, key: str) -> object:
+        return self._state[key]
+
+    def __setitem__(self, key: str, value: object) -> None:
+        self._state[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._state[key]
+
+    def __iter__(self):
+        return iter(dict(self._state.filtered_state))
+
+    def __len__(self) -> int:
+        return len(dict(self._state.filtered_state))
 
 
 def _surface_points(records: list[WelltrackRecord]) -> list[tuple[float, float, float]]:
@@ -2322,6 +2343,96 @@ def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     assert page.st.session_state["wt_edit_targets_highlight_names"] == []
     assert page.st.session_state["wt_edit_targets_highlight_points"] == {}
     assert page.st.session_state["wt_anticollision_analysis_cache"] is cached_analysis
+
+
+def test_multihorizontal_streamlit_flow_recalculates_after_target_edit_with_incremental_ac_cache() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_source_mode"] = "Файл по пути"
+    at.session_state["wt_source_path"] = (
+        "tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC"
+    )
+
+    at.run(timeout=120)
+    _click_button(at, "Импорт целей")
+    at.run(timeout=120)
+
+    assert not at.exception
+    assert "well_08" in {str(record.name) for record in at.session_state["wt_records"]}
+
+    selected_names = ["well_08", "well_09", "well_12"]
+    at.session_state["wt_selected_names"] = selected_names
+    _click_button(at, "Рассчитать траектории")
+    at.run(timeout=240)
+
+    assert not at.exception
+    assert {str(item.name) for item in at.session_state["wt_successes"]} == set(
+        selected_names
+    )
+    first_ac_run = at.session_state["wt_anticollision_last_run"]
+    assert bool(first_ac_run["cached"]) is False
+    assert int(first_ac_run["pair_count"]) == 3
+    assert int(first_ac_run["recalculated_pair_count"]) == 3
+    cached_analysis = at.session_state["wt_anticollision_analysis_cache"]
+    assert cached_analysis["pair_cache"]
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        _AppTestSessionStateAdapter(at.session_state),
+        [
+            {
+                "name": "well_08",
+                "points": [
+                    {
+                        "index": 1,
+                        "position": [456018.0, 889281.0, 2339.0],
+                    }
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=WelltrackBatchPlanner._base_row,
+    )
+    assert updated_names == ["well_08"]
+
+    at.run(timeout=120)
+
+    assert not at.exception
+    assert at.session_state["wt_edit_targets_pending_names"] == ["well_08"]
+    assert {str(item.name) for item in at.session_state["wt_successes"]} == {
+        "well_09",
+        "well_12",
+    }
+    edited_status = {
+        str(row["Скважина"]): str(row["Статус"])
+        for row in at.session_state["wt_summary_rows"]
+        if str(row["Скважина"]) in set(selected_names)
+    }
+    assert edited_status == {
+        "well_08": "Не рассчитана",
+        "well_09": "OK",
+        "well_12": "OK",
+    }
+    assert at.session_state["wt_anticollision_analysis_cache"] is cached_analysis
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+    assert "Пресет неопределенности для anti-collision" not in selectbox_labels
+
+    at.session_state["wt_selected_names"] = ["well_08"]
+    _click_button(at, "Рассчитать траектории")
+    at.run(timeout=240)
+
+    assert not at.exception
+    assert at.session_state["wt_edit_targets_pending_names"] == []
+    assert {str(item.name) for item in at.session_state["wt_successes"]} == set(
+        selected_names
+    )
+    incremental_run = at.session_state["wt_anticollision_last_run"]
+    assert bool(incremental_run["cached"]) is False
+    assert int(incremental_run["reused_well_count"]) == 2
+    assert int(incremental_run["rebuilt_well_count"]) == 1
+    assert int(incremental_run["reused_pair_count"]) == 1
+    assert int(incremental_run["recalculated_pair_count"]) == 2
+    assert "Инкрементальный anti-collision" in "\n".join(
+        incremental_run["log_lines"]
+    )
 
 
 def test_apply_three_edit_targets_defers_result_widget_state_update() -> None:
@@ -5211,6 +5322,29 @@ def test_focus_pad_well_names_return_selected_pad_members_only() -> None:
     focus_names = page._focus_pad_well_names(records=records, focus_pad_id="PAD-02")
 
     assert focus_names == ("PAD2-A", "PAD2-B")
+
+
+def test_focus_pad_well_names_exclude_zbs_sidetracks_from_optimizer_scope() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = [
+        *_records()[:2],
+        WelltrackRecord(
+            name="WELL-A_ZBS",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=500.0, y=200.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=900.0, y=500.0, z=2300.0, md=2900.0),
+            ),
+        ),
+    ]
+
+    focus_names = page._focus_pad_well_names(
+        records=records,
+        focus_pad_id=page.WT_PAD_FOCUS_ALL,
+    )
+
+    assert focus_names == ("WELL-A", "WELL-B")
 
 
 def test_all_wells_figures_focus_camera_on_selected_pad_without_hiding_other_pads() -> (

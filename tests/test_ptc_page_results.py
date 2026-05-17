@@ -4,9 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from pywp.anticollision import AntiCollisionAnalysis
 from pywp import ptc_core
 from pywp import ptc_page_results
+from pywp import welltrack_batch
+from pywp.anticollision import AntiCollisionAnalysis
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 
 
 class _RerunRequested(Exception):
@@ -285,6 +287,85 @@ def test_target_edit_overview_keeps_reference_wells(
     assert rendered is True
     assert calls["three_kwargs"]["reference_wells"] == reference_wells
     assert calls["plan_kwargs"]["reference_wells"] == reference_wells
+
+
+def test_apply_pad_order_optimization_updates_source_records_and_keeps_ac_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1000.0),
+                WelltrackPoint(x=200.0, y=0.0, z=1000.0, md=1200.0),
+            ),
+        )
+    ]
+    new_records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=50.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1000.0),
+                WelltrackPoint(x=200.0, y=0.0, z=1000.0, md=1200.0),
+            ),
+        )
+    ]
+    success = SimpleNamespace(name="WELL-A")
+    ac_cache = {"key": "old", "pair_cache": {("WELL-A", "WELL-B"): object()}}
+    state: dict[str, object] = {
+        "wt_records": old_records,
+        "wt_records_original": old_records,
+        "wt_successes": [SimpleNamespace(name="OLD")],
+        "wt_summary_rows": [{"Скважина": "OLD"}],
+        "wt_anticollision_analysis_cache": ac_cache,
+    }
+    reset_calls: list[bool] = []
+
+    class FakeStreamlit:
+        session_state = state
+
+    def fake_reset(*, clear_prepared: bool) -> None:
+        reset_calls.append(bool(clear_prepared))
+        state["wt_anticollision_analysis_cache"] = {}
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_reset_anticollision_view_state",
+        fake_reset,
+    )
+    monkeypatch.setattr(
+        welltrack_batch.WelltrackBatchPlanner,
+        "_row_from_success",
+        staticmethod(
+            lambda *, record, success: {
+                "Скважина": str(record.name),
+                "Статус": "ok",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        welltrack_batch,
+        "merge_batch_results",
+        lambda **kwargs: (
+            list(kwargs["new_rows"]),
+            list(kwargs["new_successes"]),
+        ),
+    )
+
+    ptc_page_results._apply_pad_order_optimization_result(
+        new_records=new_records,
+        new_success_dict={"WELL-A": success},
+    )
+
+    assert state["wt_records"] == new_records
+    assert state["wt_records_original"] == new_records
+    assert state["wt_successes"] == [success]
+    assert state["wt_summary_rows"] == [{"Скважина": "WELL-A", "Статус": "ok"}]
+    assert state["wt_anticollision_analysis_cache"] is ac_cache
+    assert reset_calls == [True]
 
 
 def test_format_duration_ru_carries_rounded_seconds() -> None:
