@@ -7,7 +7,10 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from pywp.anticollision import AntiCollisionAnalysis
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
+)
 from pywp.constants import SMALL
 from pywp.models import Point3D
 from pywp.pilot_wells import is_pilot_name
@@ -1817,7 +1820,11 @@ def _anticollision_reference_cone_focus_names(
         reference_bounds = _xy_bounds_from_stations(well.stations)
         if reference_bounds is None:
             continue
-        if any(_xy_bounds_gap_m(reference_bounds, item) <= 500.0 for item in calculated_bounds):
+        if any(
+            _xy_bounds_gap_m(reference_bounds, item)
+            <= REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M
+            for item in calculated_bounds
+        ):
             focus_names.add(str(well.name))
     return focus_names
 

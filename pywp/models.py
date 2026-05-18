@@ -10,6 +10,16 @@ from pywp.constants import SMALL
 from pywp.planner_types import PlanningError
 from pywp.pydantic_base import FrozenArbitraryModel, FrozenModel
 
+J_PROFILE_POLICY_OFF = "off"
+J_PROFILE_POLICY_PROPOSE = "propose"
+J_PROFILE_POLICY_PREFER = "prefer"
+ALLOWED_J_PROFILE_POLICIES = (
+    J_PROFILE_POLICY_OFF,
+    J_PROFILE_POLICY_PROPOSE,
+    J_PROFILE_POLICY_PREFER,
+)
+JProfilePolicy = Literal["off", "propose", "prefer"]
+
 OPTIMIZATION_NONE = "none"
 OPTIMIZATION_MINIMIZE_MD = "minimize_md"
 OPTIMIZATION_MINIMIZE_KOP = "minimize_kop"
@@ -55,6 +65,11 @@ __all__ = [
     "ALLOWED_INTERPOLATION_METHODS",
     "InterpolationMethod",
     "DEFAULT_BUILD_DLS_MAX_DEG_PER_30M",
+    "J_PROFILE_POLICY_OFF",
+    "J_PROFILE_POLICY_PROPOSE",
+    "J_PROFILE_POLICY_PREFER",
+    "ALLOWED_J_PROFILE_POLICIES",
+    "JProfilePolicy",
     # Classes
     "Point3D",
     "TrajectoryConfig",
@@ -85,6 +100,12 @@ NonNegativeFiniteScalar = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 EntryIncTargetScalar = Annotated[float, Field(gt=0.0, lt=90.0, allow_inf_nan=False)]
 MaxIncScalar = Annotated[float, Field(gt=0.0, le=120.0, allow_inf_nan=False)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
+
+
+def _coerce_legacy_bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 def build_segment_dls_limits_deg_per_30m(
@@ -145,6 +166,8 @@ class TrajectoryConfig(FrozenModel):
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_max_restarts: NonNegativeInt = 1
     interpolation_method: InterpolationMethod = INTERPOLATION_RODRIGUES
+    j_profile_policy: JProfilePolicy = J_PROFILE_POLICY_OFF
+    # Legacy compatibility: True maps to j_profile_policy="propose".
     offer_j_profile: bool = False
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: PositiveFiniteScalar = 30.0
@@ -155,6 +178,17 @@ class TrajectoryConfig(FrozenModel):
         if not isinstance(value, Mapping):
             return value
         payload = dict(value)
+        raw_policy = payload.get("j_profile_policy")
+        if raw_policy is None:
+            payload["j_profile_policy"] = (
+                J_PROFILE_POLICY_PROPOSE
+                if _coerce_legacy_bool(payload.get("offer_j_profile", False))
+                else J_PROFILE_POLICY_OFF
+            )
+        else:
+            policy = str(raw_policy).strip().lower()
+            payload["j_profile_policy"] = policy
+            payload["offer_j_profile"] = policy != J_PROFILE_POLICY_OFF
         legacy_dls_limits = payload.pop("dls_limits_deg_per_30m", None)
         if legacy_dls_limits is not None:
             try:

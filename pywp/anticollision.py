@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from pickle import PicklingError
@@ -37,6 +37,7 @@ _MAX_OVERLAP_GEOMETRY_RINGS_PER_CORRIDOR = 8
 _MAX_LOCAL_REFINE_SEED_PAIRS_PER_WELL_PAIR = 4
 _SCAN_MAX_SAMPLES = 1_000_000
 _ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION = 240
+REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M = 500.0
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,11 @@ class AntiCollisionProgress:
     prefiltered_pair_count: int = 0
     elapsed_s: float = 0.0
     parallel_workers: int = 0
+    stage: str = "pairs"
+    well_count: int = 0
+    completed_well_count: int = 0
+    reused_well_count: int = 0
+    rebuilt_well_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -543,9 +549,9 @@ def analyze_anti_collision_incremental(
             continue
         recalculation_jobs.append(job)
 
-    def notify_recalculated_pair_done() -> None:
+    def notify_recalculated_pair_done(completed_delta: int = 1) -> None:
         nonlocal completed_pair_count
-        completed_pair_count += 1
+        completed_pair_count += int(max(completed_delta, 0))
         notify_progress()
 
     calculation_results = _calculate_pair_overlap_jobs(
@@ -668,10 +674,15 @@ def _calculate_pair_overlap_jobs(
     ordered_wells: tuple[AntiCollisionWell, ...],
     jobs: list[_AntiCollisionPairJob],
     parallel_workers: int,
-    progress_callback: Callable[[], None] | None,
+    progress_callback: Callable[[int], None] | None,
 ) -> list[_AntiCollisionPairCalculation]:
     if not jobs:
         return []
+
+    def notify_progress(completed_delta: int = 0) -> None:
+        if progress_callback is not None:
+            progress_callback(int(completed_delta))
+
     def calculate_serial(
         *,
         progress_limit: int | None = None,
@@ -679,6 +690,7 @@ def _calculate_pair_overlap_jobs(
         results: list[_AntiCollisionPairCalculation] = []
         progress_count = 0
         for job in jobs:
+            notify_progress(0)
             results.append(
                 _calculate_pair_overlap_job_serial(
                     ordered_wells=ordered_wells,
@@ -689,7 +701,7 @@ def _calculate_pair_overlap_jobs(
                 progress_callback is not None
                 and (progress_limit is None or progress_count < progress_limit)
             ):
-                progress_callback()
+                notify_progress(1)
                 progress_count += 1
         return results
 
@@ -711,12 +723,21 @@ def _calculate_pair_overlap_jobs(
                 executor.submit(_calculate_pair_overlap_job_parallel, job): job
                 for job in jobs
             }
-            for future in as_completed(futures):
-                result = future.result()
-                results_by_index[int(result.job_index)] = result
-                completed_parallel_count += 1
-                if progress_callback is not None:
-                    progress_callback()
+            pending = set(futures)
+            while pending:
+                done, pending = wait(
+                    pending,
+                    timeout=1.0,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    notify_progress(0)
+                    continue
+                for future in done:
+                    result = future.result()
+                    results_by_index[int(result.job_index)] = result
+                    completed_parallel_count += 1
+                    notify_progress(1)
     except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
         return calculate_serial(
             progress_limit=max(len(jobs) - completed_parallel_count, 0)

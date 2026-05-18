@@ -13,6 +13,7 @@ from pywp.anticollision_optimization import (
 )
 from pywp.eclipse_welltrack import parse_welltrack_text, welltrack_points_to_targets
 from pywp.models import (
+    J_PROFILE_POLICY_PREFER,
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
@@ -413,6 +414,35 @@ def test_minimize_md_keeps_shorter_unified_profile_over_feasible_j_profile() -> 
 
     assert str(result.summary["trajectory_profile_family"]) == "unified"
     assert 67.0 <= float(result.summary["hold_inc_deg"]) <= 73.0
+
+
+def test_prefer_j_profile_policy_accepts_classic_j_before_md_optimization() -> None:
+    record = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+    )[0]
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+
+    result = TrajectoryPlanner().plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=_fast_config(
+            kop_min_vertical_m=550.0,
+            dls_build_max_deg_per_30m=3.0,
+            turn_solver_max_restarts=0,
+            j_profile_policy=J_PROFILE_POLICY_PREFER,
+        ),
+    )
+
+    assert str(result.summary["optimization_mode"]) == OPTIMIZATION_MINIMIZE_MD
+    assert str(result.summary["optimization_status"]) == "analytic_j_profile"
+    assert str(result.summary["trajectory_type"]) == "J-образная траектория"
+    assert str(result.summary["trajectory_profile_family"]) == "j_profile"
+    assert list(result.stations["segment"].drop_duplicates()) == [
+        "VERTICAL",
+        "BUILD1",
+        "HORIZONTAL",
+    ]
 
 
 def test_split_build_rescue_can_find_independent_build_candidate() -> None:

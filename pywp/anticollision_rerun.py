@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Callable, Mapping
+
+import numpy as np
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
@@ -10,6 +13,7 @@ from pywp.anticollision import (
     AntiCollisionProgress,
     AntiCollisionWell,
     DEFINITIVE_SCAN_STEP_M,
+    REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
     analyze_anti_collision,
     analyze_anti_collision_incremental,
     build_anti_collision_well,
@@ -144,6 +148,77 @@ def _should_score_anti_collision_pair(
     return True
 
 
+def _xy_bounds_from_stations(
+    stations: Any,
+) -> tuple[float, float, float, float] | None:
+    required_columns = {"X_m", "Y_m"}
+    columns_obj = getattr(stations, "columns", None)
+    columns = set(columns_obj) if columns_obj is not None else set()
+    if not required_columns.issubset(columns) or bool(
+        getattr(stations, "empty", True)
+    ):
+        return None
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    if len(x_values) == 0 or len(y_values) == 0:
+        return None
+    finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if not finite_mask.any():
+        return None
+    x_values = x_values[finite_mask]
+    y_values = y_values[finite_mask]
+    return (
+        float(np.min(x_values)),
+        float(np.max(x_values)),
+        float(np.min(y_values)),
+        float(np.max(y_values)),
+    )
+
+
+def _xy_bounds_gap_m(
+    bounds_a: tuple[float, float, float, float],
+    bounds_b: tuple[float, float, float, float],
+) -> float:
+    min_x_a, max_x_a, min_y_a, max_y_a = bounds_a
+    min_x_b, max_x_b, min_y_b, max_y_b = bounds_b
+    dx = max(min_x_a - max_x_b, min_x_b - max_x_a, 0.0)
+    dy = max(min_y_a - max_y_b, min_y_b - max_y_a, 0.0)
+    return float(np.hypot(dx, dy))
+
+
+def reference_wells_in_anti_collision_scope(
+    successes: list[SuccessfulWellPlan],
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+    *,
+    scope_distance_m: float = REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
+) -> tuple[ImportedTrajectoryWell, ...]:
+    """Select reference wells close enough to planned wells for full AC cones."""
+
+    reference_tuple = tuple(reference_wells)
+    if not reference_tuple:
+        return ()
+    calculated_bounds = tuple(
+        bounds
+        for success in successes
+        for bounds in (_xy_bounds_from_stations(success.stations),)
+        if bounds is not None
+    )
+    if not calculated_bounds:
+        return reference_tuple
+    distance_m = float(max(scope_distance_m, 0.0))
+    scoped: list[ImportedTrajectoryWell] = []
+    for reference_well in reference_tuple:
+        reference_bounds = _xy_bounds_from_stations(reference_well.stations)
+        if reference_bounds is None:
+            continue
+        if any(
+            _xy_bounds_gap_m(reference_bounds, planned_bounds) <= distance_m
+            for planned_bounds in calculated_bounds
+        ):
+            scoped.append(reference_well)
+    return tuple(scoped)
+
+
 def build_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -168,11 +243,17 @@ def build_anti_collision_analysis_for_successes(
             else None
         )
     )
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
+    )
     planned_names = tuple(str(item.name) for item in successes)
-    duplicate_reference_name_keys = reference_well_duplicate_name_keys(reference_wells)
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(
+        scoped_reference_wells
+    )
     excluded_pair_keys = _excluded_source_parent_pair_keys(
         successes=successes,
-        reference_wells=reference_wells,
+        reference_wells=scoped_reference_wells,
     )
     wells = [
         build_anti_collision_well(
@@ -193,7 +274,7 @@ def build_anti_collision_analysis_for_successes(
         )
         for item in successes
     ]
-    for item in reference_wells:
+    for item in scoped_reference_wells:
         collision_name = reference_well_collision_name(
             item,
             planned_names=planned_names,
@@ -264,23 +345,29 @@ def build_incremental_anti_collision_analysis_for_successes(
     dict[tuple[str, str], AntiCollisionPairCacheEntry],
     AntiCollisionIncrementalStats,
 ]:
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
+    )
     wells, well_cache, reused_wells, rebuilt_wells = (
         build_anti_collision_wells_for_successes(
             successes,
             model=model,
             name_to_color=name_to_color,
-            reference_wells=reference_wells,
+            reference_wells=scoped_reference_wells,
             reference_uncertainty_models_by_name=(reference_uncertainty_models_by_name),
             include_display_geometry=include_display_geometry,
             build_overlap_geometry=build_overlap_geometry,
             analysis_sample_step_m=analysis_sample_step_m,
             well_signature_by_name=well_signature_by_name,
             previous_well_cache=previous_well_cache,
+            progress_callback=progress_callback,
+            parallel_workers=int(parallel_workers),
         )
     )
     excluded_pair_keys = _excluded_source_parent_pair_keys(
         successes=successes,
-        reference_wells=reference_wells,
+        reference_wells=scoped_reference_wells,
     )
     analysis, pair_cache, stats = analyze_anti_collision_incremental(
         wells,
@@ -314,6 +401,8 @@ def build_anti_collision_wells_for_successes(
     analysis_sample_step_m: float | None = None,
     well_signature_by_name: Mapping[str, str] | None = None,
     previous_well_cache: Mapping[str, tuple[str, AntiCollisionWell]] | None = None,
+    progress_callback: Callable[[AntiCollisionProgress], None] | None = None,
+    parallel_workers: int = 0,
 ) -> tuple[
     tuple[AntiCollisionWell, ...],
     dict[str, tuple[str, AntiCollisionWell]],
@@ -334,19 +423,47 @@ def build_anti_collision_wells_for_successes(
         for name, signature in (well_signature_by_name or {}).items()
     }
     previous_cache = dict(previous_well_cache or {})
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
+    )
     planned_names = tuple(str(item.name) for item in successes)
-    duplicate_reference_name_keys = reference_well_duplicate_name_keys(reference_wells)
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(
+        scoped_reference_wells
+    )
     wells: list[AntiCollisionWell] = []
     next_cache: dict[str, tuple[str, AntiCollisionWell]] = {}
     reused_count = 0
     rebuilt_count = 0
+    total_well_count = int(len(successes) + len(scoped_reference_wells))
+    completed_well_count = 0
+    started_at = perf_counter()
+
+    def _notify_cone_progress() -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=0,
+                completed_pair_count=0,
+                elapsed_s=float(perf_counter() - started_at),
+                parallel_workers=int(max(parallel_workers, 0)),
+                stage="wells",
+                well_count=int(total_well_count),
+                completed_well_count=int(completed_well_count),
+                reused_well_count=int(reused_count),
+                rebuilt_well_count=int(rebuilt_count),
+            )
+        )
+
+    _notify_cone_progress()
 
     def _reuse_or_build(
         *,
         name: str,
         builder: Callable[[], AntiCollisionWell],
     ) -> AntiCollisionWell:
-        nonlocal reused_count, rebuilt_count
+        nonlocal completed_well_count, reused_count, rebuilt_count
         signature = signatures.get(str(name), "")
         previous = previous_cache.get(str(name))
         if (
@@ -361,6 +478,8 @@ def build_anti_collision_wells_for_successes(
             rebuilt_count += 1
             well = builder()
         next_cache[str(name)] = (signature, well)
+        completed_well_count += 1
+        _notify_cone_progress()
         return well
 
     for item in successes:
@@ -387,7 +506,7 @@ def build_anti_collision_wells_for_successes(
             )
         )
 
-    for item in reference_wells:
+    for item in scoped_reference_wells:
         collision_name = reference_well_collision_name(
             item,
             planned_names=planned_names,

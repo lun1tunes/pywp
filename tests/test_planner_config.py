@@ -7,6 +7,9 @@ from pydantic import ValidationError
 
 from pywp.models import (
     DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
+    J_PROFILE_POLICY_OFF,
+    J_PROFILE_POLICY_PREFER,
+    J_PROFILE_POLICY_PROPOSE,
     OPTIMIZATION_MINIMIZE_MD,
     OPTIMIZATION_NONE,
     Point3D,
@@ -166,4 +169,19 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
     assert config.dls_limits_deg_per_30m["HORIZONTAL"] == 0.8
     assert config.optimization_mode == OPTIMIZATION_NONE
     assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts
+    assert config.j_profile_policy == J_PROFILE_POLICY_OFF
     assert config.offer_j_profile is False
+
+
+def test_legacy_offer_j_profile_maps_to_propose_policy() -> None:
+    config = TrajectoryConfig(offer_j_profile=True)
+
+    assert config.j_profile_policy == J_PROFILE_POLICY_PROPOSE
+    assert config.offer_j_profile is True
+
+
+def test_explicit_j_profile_policy_syncs_legacy_boolean() -> None:
+    config = TrajectoryConfig(j_profile_policy=J_PROFILE_POLICY_PREFER)
+
+    assert config.j_profile_policy == J_PROFILE_POLICY_PREFER
+    assert config.offer_j_profile is True

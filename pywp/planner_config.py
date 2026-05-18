@@ -3,6 +3,9 @@ from __future__ import annotations
 from pywp.models import (
     INTERPOLATION_RODRIGUES,
     INTERPOLATION_SLERP,
+    J_PROFILE_POLICY_OFF,
+    J_PROFILE_POLICY_PREFER,
+    J_PROFILE_POLICY_PROPOSE,
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
@@ -33,6 +36,12 @@ TURN_SOLVER_OPTIONS = {
 INTERPOLATION_METHOD_OPTIONS = {
     INTERPOLATION_RODRIGUES: "Rodrigues (рекомендуется)",
     INTERPOLATION_SLERP: "SLERP (классический)",
+}
+
+J_PROFILE_POLICY_OPTIONS = {
+    J_PROFILE_POLICY_OFF: "Не использовать J-профиль",
+    J_PROFILE_POLICY_PROPOSE: "Предлагать J-профиль",
+    J_PROFILE_POLICY_PREFER: "Предпочитать J-профиль",
 }
 
 
@@ -77,6 +86,7 @@ def build_trajectory_config(
     turn_solver_max_restarts: int,
     max_total_md_postcheck_m: float = 6500.0,
     interpolation_method: str = INTERPOLATION_RODRIGUES,
+    j_profile_policy: str = J_PROFILE_POLICY_OFF,
     offer_j_profile: bool = False,
 ) -> TrajectoryConfig:
     max_build = float(max(dls_build_max_deg_per_30m, 0.0))
@@ -96,5 +106,6 @@ def build_trajectory_config(
         turn_solver_max_restarts=int(turn_solver_max_restarts),
         max_total_md_postcheck_m=float(max_total_md_postcheck_m),
         interpolation_method=str(interpolation_method),
+        j_profile_policy=str(j_profile_policy),
         offer_j_profile=bool(offer_j_profile),
     )

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp import TrajectoryConfig
+from pywp.models import J_PROFILE_POLICY_OFF
 from pywp.ui_calc_params import (
     CalcParamBinding,
     apply_calc_param_defaults,
@@ -42,6 +43,8 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["turn_solver_max_restarts"] == int(cfg.turn_solver_max_restarts)
     assert defaults["turn_solver_mode"] == str(cfg.turn_solver_mode)
     assert defaults["interpolation_method"] == str(cfg.interpolation_method)
+    assert defaults["j_profile_policy"] == str(cfg.j_profile_policy)
+    assert defaults["j_profile_policy"] == J_PROFILE_POLICY_OFF
     assert defaults["offer_j_profile"] == bool(cfg.offer_j_profile)
     assert defaults["offer_j_profile"] is False
 
@@ -90,7 +93,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 12
+        == 13
     )
 
 
@@ -115,7 +118,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 12
+        == 13
     )
 
 
@@ -177,12 +180,12 @@ def test_invalid_kop_depth_function_payload_reverts_to_constant(monkeypatch) -> 
     assert kop_min_vertical_mode(prefix="wt_cfg_") == "constant"
 
 
-def test_offer_j_profile_control_is_rendered_above_solver_expander() -> None:
+def test_j_profile_policy_control_is_rendered_above_solver_expander() -> None:
     source = Path("pywp/ui_calc_params.py").read_text(encoding="utf-8")
 
     assert source.index('"Макс итоговая MD (постпроверка), м"') < source.index(
-        '"Предлагать J-образную траекторию"'
+        '"Режим J-профиля"'
     )
-    assert source.index('"Предлагать J-образную траекторию"') < source.index(
+    assert source.index('"Режим J-профиля"') < source.index(
         'with st.expander("Параметры солвера"'
     )

@@ -587,10 +587,10 @@ def test_reference_actual_and_approved_wells_use_station_history_iscwsa_ellipses
     model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
     success = SuccessfulWellPlan(
         name="WELL-P",
-        surface=Point3D(0.0, -600.0, 0.0),
-        t1=Point3D(200.0, -600.0, 700.0),
-        t3=Point3D(1300.0, -600.0, 900.0),
-        stations=_straight_stations(y_offset_m=-600.0),
+        surface=Point3D(0.0, -400.0, 0.0),
+        t1=Point3D(200.0, -400.0, 700.0),
+        t3=Point3D(1300.0, -400.0, 900.0),
+        stations=_straight_stations(y_offset_m=-400.0),
         summary={"kop_md_m": 700.0},
         azimuth_deg=90.0,
         md_t1_m=1000.0,
@@ -674,10 +674,10 @@ def test_reference_actual_well_can_use_selected_unknown_mwd_model() -> None:
     )
     success = SuccessfulWellPlan(
         name="WELL-P",
-        surface=Point3D(0.0, -600.0, 0.0),
-        t1=Point3D(200.0, -600.0, 700.0),
-        t3=Point3D(1300.0, -600.0, 900.0),
-        stations=_straight_stations(y_offset_m=-600.0),
+        surface=Point3D(0.0, -400.0, 0.0),
+        t1=Point3D(200.0, -400.0, 700.0),
+        t3=Point3D(1300.0, -400.0, 900.0),
+        stations=_straight_stations(y_offset_m=-400.0),
         summary={"kop_md_m": 700.0},
         azimuth_deg=90.0,
         md_t1_m=1000.0,
@@ -742,10 +742,10 @@ def test_reference_mwd_assignment_does_not_leak_to_approved_duplicate_name() -> 
     )
     success = SuccessfulWellPlan(
         name="WELL-P",
-        surface=Point3D(0.0, -600.0, 0.0),
-        t1=Point3D(200.0, -600.0, 700.0),
-        t3=Point3D(1300.0, -600.0, 900.0),
-        stations=_straight_stations(y_offset_m=-600.0),
+        surface=Point3D(0.0, -400.0, 0.0),
+        t1=Point3D(200.0, -400.0, 700.0),
+        t3=Point3D(1300.0, -400.0, 900.0),
+        stations=_straight_stations(y_offset_m=-400.0),
         summary={"kop_md_m": 700.0},
         azimuth_deg=90.0,
         md_t1_m=1000.0,
@@ -795,6 +795,69 @@ def test_reference_mwd_assignment_does_not_leak_to_approved_duplicate_name() -> 
         reference_by_kind[REFERENCE_WELL_APPROVED].overlay.model.iscwsa_tool_code
         == poor_model.iscwsa_tool_code
     )
+
+
+def test_far_reference_wells_are_skipped_before_uncertainty_cone_build() -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "REF-NEAR",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 100.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "REF-NEAR",
+                    "Type": "actual",
+                    "X": 2000.0,
+                    "Y": 100.0,
+                    "Z": 0.0,
+                    "MD": 2000.0,
+                },
+                {
+                    "Wellname": "REF-FAR",
+                    "Type": "approved",
+                    "X": 0.0,
+                    "Y": 2000.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "REF-FAR",
+                    "Type": "approved",
+                    "X": 2000.0,
+                    "Y": 2000.0,
+                    "Z": 0.0,
+                    "MD": 2000.0,
+                },
+            ]
+        )
+    )
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=PlanningUncertaintyModel(),
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert [str(well.name) for well in analysis.wells] == ["WELL-P", "REF-NEAR"]
+    assert analysis.pair_count == 1
 
 
 def test_global_source_vectors_are_correlated_in_relative_clearance() -> None:
@@ -1330,6 +1393,41 @@ def test_build_anti_collision_wells_for_successes_reuses_unchanged_wells(
     assert next_wells[0] is wells[0]
     assert next_wells[1] is not wells[1]
     assert set(next_cache) == {"WELL-A", "WELL-B"}
+
+
+def test_build_anti_collision_wells_for_successes_reports_cone_progress() -> None:
+    successes = [
+        SuccessfulWellPlan(
+            name=name,
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            summary={"kop_md_m": 0.0},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config={"optimization_mode": "none"},
+        )
+        for name, y_offset_m in (("WELL-A", 0.0), ("WELL-B", 20.0))
+    ]
+    events: list[anticollision_module.AntiCollisionProgress] = []
+
+    build_anti_collision_wells_for_successes(
+        successes,
+        model=PlanningUncertaintyModel(),
+        well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        progress_callback=events.append,
+        parallel_workers=3,
+    )
+
+    cone_events = [event for event in events if event.stage == "wells"]
+    assert [event.completed_well_count for event in cone_events] == [0, 1, 2]
+    assert {event.well_count for event in cone_events} == {2}
+    assert cone_events[-1].rebuilt_well_count == 2
+    assert cone_events[-1].reused_well_count == 0
+    assert cone_events[-1].parallel_workers == 3
 
 
 def test_analyze_anti_collision_does_not_skip_pair_by_terminal_geometry_only(

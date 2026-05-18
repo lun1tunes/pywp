@@ -21,6 +21,9 @@ from pywp.mcm import (
 )
 from pywp.models import (
     ALLOWED_TURN_SOLVER_MODES,
+    J_PROFILE_POLICY_OFF,
+    J_PROFILE_POLICY_PREFER,
+    J_PROFILE_POLICY_PROPOSE,
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
@@ -108,6 +111,31 @@ DEEP_LOW_ANGLE_TURN_MAX_CANDIDATES = 8
 J_PROFILE_MD_COMPETITION_FACTOR = 1.005
 J_PROFILE_MD_COMPETITION_SLACK_M = 25.0
 J_PROFILE_COMPETITIVE_AZIMUTH_DELTA_MAX_DEG = 8.0
+
+
+def _j_profile_policy(config: TrajectoryConfig) -> str:
+    policy = str(getattr(config, "j_profile_policy", "") or "").strip().lower()
+    if policy:
+        return policy
+    return (
+        J_PROFILE_POLICY_PROPOSE
+        if bool(getattr(config, "offer_j_profile", False))
+        else J_PROFILE_POLICY_OFF
+    )
+
+
+def _j_profile_enabled(config: TrajectoryConfig) -> bool:
+    return _j_profile_policy(config) != J_PROFILE_POLICY_OFF
+
+
+def _j_profile_preferred_before_optimization(config: TrajectoryConfig) -> bool:
+    policy = _j_profile_policy(config)
+    return policy == J_PROFILE_POLICY_PREFER or (
+        policy == J_PROFILE_POLICY_PROPOSE
+        and str(config.optimization_mode) == OPTIMIZATION_NONE
+    )
+
+
 VARIABLE_J_MAX_STARTS = 10
 VARIABLE_J_MAX_NFEV = 100
 VARIABLE_J_TARGET_MISS_WEIGHT = 10.0
@@ -1047,10 +1075,7 @@ def _solve_turn_profile(
         dtype=float,
     )
     j_candidates_cache: list[ProfileParameters] | None = None
-    if (
-        bool(getattr(config, "offer_j_profile", False))
-        and str(config.optimization_mode) == OPTIMIZATION_NONE
-    ):
+    if _j_profile_preferred_before_optimization(config):
         _emit_progress(
             progress_callback,
             "Солвер: сначала проверяем classic J-профиль как простую модель.",
@@ -1064,7 +1089,7 @@ def _solve_turn_profile(
             build_dls_upper_deg_per_30m=build_dls_upper,
             target_point=target_point,
         )
-        if j_candidates_cache and str(config.optimization_mode) == OPTIMIZATION_NONE:
+        if j_candidates_cache:
             selected = j_candidates_cache[0]
             if not _candidate_within_md_postcheck(candidate=selected, config=config):
                 _emit_progress(
@@ -1319,8 +1344,12 @@ def _solve_turn_profile(
             0.60 + 0.36 * float(index / max(total_starts, 1)),
         )
 
-    if bool(getattr(config, "offer_j_profile", False)) and (
-        not candidates or str(config.optimization_mode) == OPTIMIZATION_NONE
+    j_profile_policy = _j_profile_policy(config)
+    j_profile_preferred = j_profile_policy == J_PROFILE_POLICY_PREFER
+    if _j_profile_enabled(config) and (
+        not candidates
+        or str(config.optimization_mode) == OPTIMIZATION_NONE
+        or j_profile_preferred
     ):
         if j_candidates_cache is None:
             j_candidates = _collect_classic_j_candidates(
@@ -1370,24 +1399,24 @@ def _solve_turn_profile(
                 config=config,
             ):
                 continue
-            if candidates and zero_azimuth_turn:
-                continue
-            if (
-                candidates
-                and abs(
-                    _shortest_azimuth_delta_deg(
-                        float(geometry.azimuth_surface_t1_deg),
-                        float(geometry.azimuth_entry_deg),
+            if candidates and not j_profile_preferred:
+                if zero_azimuth_turn:
+                    continue
+                if (
+                    abs(
+                        _shortest_azimuth_delta_deg(
+                            float(geometry.azimuth_surface_t1_deg),
+                            float(geometry.azimuth_entry_deg),
+                        )
                     )
-                )
-                > J_PROFILE_COMPETITIVE_AZIMUTH_DELTA_MAX_DEG
-            ):
-                continue
-            if not _j_profile_can_compete(
-                j_candidate=j_candidate,
-                regular_best_md_m=regular_best_md,
-            ):
-                continue
+                    > J_PROFILE_COMPETITIVE_AZIMUTH_DELTA_MAX_DEG
+                ):
+                    continue
+                if not _j_profile_can_compete(
+                    j_candidate=j_candidate,
+                    regular_best_md_m=regular_best_md,
+                ):
+                    continue
             _emit_progress(
                 progress_callback,
                 "Солвер: принят classic J-кандидат.",

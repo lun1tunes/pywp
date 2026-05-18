@@ -490,6 +490,7 @@ def _build_summary(
             else 0
         ),
         "optimization_mode": str(optimization_outcome.mode),
+        "j_profile_policy": str(getattr(config, "j_profile_policy", "off")),
         "optimization_status": str(optimization_outcome.status),
         "optimization_objective_value_m": float(optimization_outcome.objective_value),
         "optimization_theoretical_lower_bound_m": float(

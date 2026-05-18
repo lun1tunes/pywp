@@ -9,6 +9,7 @@ from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp import TrajectoryConfig
 from pywp.planner_config import (
     INTERPOLATION_METHOD_OPTIONS,
+    J_PROFILE_POLICY_OPTIONS,
     OPTIMIZATION_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_trajectory_config,
@@ -32,6 +33,7 @@ _STR_SUFFIXES: tuple[str, ...] = (
     "optimization_mode",
     "turn_solver_mode",
     "interpolation_method",
+    "j_profile_policy",
 )
 _BOOL_SUFFIXES: tuple[str, ...] = ("offer_j_profile",)
 
@@ -55,13 +57,14 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
         "turn_solver_mode": str(cfg.turn_solver_mode),
         "interpolation_method": str(cfg.interpolation_method),
+        "j_profile_policy": str(cfg.j_profile_policy),
         "offer_j_profile": bool(cfg.offer_j_profile),
     }
 
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 12
+_DEFAULTS_SCHEMA_VERSION = 13
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
@@ -321,6 +324,7 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
         turn_solver_mode=str(_state_value(prefix, "turn_solver_mode")),
         interpolation_method=str(_state_value(prefix, "interpolation_method")),
+        j_profile_policy=str(_state_value(prefix, "j_profile_policy")),
         offer_j_profile=bool(_state_value(prefix, "offer_j_profile")),
     )
 
@@ -443,15 +447,17 @@ def render_calc_params_block(
         ),
         **widget_change_kwargs,
     )
-    st.checkbox(
-        "Предлагать J-образную траекторию",
-        key=_state_key(prefix, "offer_j_profile"),
+    st.selectbox(
+        "Режим J-профиля",
+        options=list(J_PROFILE_POLICY_OPTIONS.keys()),
+        format_func=lambda value: J_PROFILE_POLICY_OPTIONS.get(str(value), str(value)),
+        key=_state_key(prefix, "j_profile_policy"),
         help=(
-            "Если включено, планнер сначала пробует простую J-модель: "
+            "J-модель: "
             "VERTICAL -> один BUILD -> участок к t3. ПИ по зениту и азимуту "
-            "подбирается без превышения максимального ПИ. В режиме без оптимизации "
-            "допустимый J-профиль принимается сразу; при минимизации MD финальный "
-            "выбор всё равно остаётся за более коротким допустимым профилем."
+            "подбирается без превышения максимального ПИ. "
+            "«Предлагать» добавляет J как кандидата и оставляет выбор оптимизации. "
+            "«Предпочитать» принимает допустимый classic J до сравнения по MD."
         ),
         **widget_change_kwargs,
     )

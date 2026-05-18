@@ -3644,6 +3644,186 @@ def test_cached_anti_collision_view_model_reports_pair_progress_with_eta(
     assert page.st.session_state["wt_anticollision_last_run"]["parallel_workers"] == 4
 
 
+def test_cached_anti_collision_view_model_reports_cone_progress(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        assert progress_callback is not None
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=0,
+                completed_pair_count=0,
+                elapsed_s=12.0,
+                parallel_workers=int(parallel_workers),
+                stage="wells",
+                well_count=2,
+                completed_well_count=1,
+                reused_well_count=1,
+                rebuilt_well_count=0,
+            )
+        )
+        return (
+            analysis,
+            {str(success.name): ("sig", object()) for success in successes},
+            {},
+            AntiCollisionIncrementalStats(
+                reused_well_count=1,
+                rebuilt_well_count=1,
+                reused_pair_count=0,
+                recalculated_pair_count=0,
+            ),
+        )
+
+    monkeypatch.setattr(
+        page,
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+    progress_events: list[tuple[int, str]] = []
+
+    page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
+        records=[],
+        progress_callback=lambda value, text: progress_events.append(
+            (int(value), str(text))
+        ),
+        parallel_workers=4,
+    )
+
+    assert any(
+        "конусы неопределённости 1/2" in text
+        and "кэш скважин 1" in text
+        for _value, text in progress_events
+    )
+
+
+def test_cached_anti_collision_parallel_eta_uses_worker_count_before_first_wave(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=10,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        assert progress_callback is not None
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=10,
+                completed_pair_count=1,
+                elapsed_s=30.0,
+                parallel_workers=int(parallel_workers),
+            )
+        )
+        return (
+            analysis,
+            {str(success.name): ("sig", object()) for success in successes},
+            {},
+            AntiCollisionIncrementalStats(
+                reused_well_count=0,
+                rebuilt_well_count=len(successes) + len(reference_wells),
+                reused_pair_count=0,
+                recalculated_pair_count=10,
+            ),
+        )
+
+    monkeypatch.setattr(
+        page,
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+    progress_events: list[tuple[int, str]] = []
+
+    page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
+        records=[],
+        progress_callback=lambda value, text: progress_events.append(
+            (int(value), str(text))
+        ),
+        parallel_workers=4,
+    )
+
+    assert any(
+        "пары 1/10" in text
+        and "осталось оц. 1 мин 08 с" in text
+        and "4 процессов" in text
+        for _value, text in progress_events
+    )
+
+
 def test_anti_collision_cache_key_includes_reference_mwd_assignment() -> None:
     page = wt_import_module
     reference_wells = _reference_wells()
@@ -5467,7 +5647,7 @@ def test_all_wells_three_payload_aggregates_reference_wells_in_fast_mode() -> No
     assert "APP-1 (Проектная утвержденная)" not in hover_names
 
 
-def test_anticollision_three_payload_aggregates_non_conflicting_reference_wells_in_fast_mode() -> (
+def test_anticollision_three_payload_omits_far_reference_wells_from_ac_scope() -> (
     None
 ):
     page = wt_import_module
@@ -5520,16 +5700,15 @@ def test_anticollision_three_payload_aggregates_non_conflicting_reference_wells_
         render_mode=page.WT_3D_RENDER_FAST,
     )
 
-    line_colors = {str(item["color"]) for item in payload["lines"]}
     hover_names = {
         str(hover.get("name"))
         for item in payload["points"]
         for hover in list(item.get("hover") or [])
     }
-    assert "#6B7280" in line_colors
-    assert "#C62828" in line_colors
-    assert "FACT-FAR" in hover_names
-    assert "APP-FAR" in hover_names
+    analysis_names = {str(well.name) for well in analysis.wells}
+    assert analysis_names == {"WELL-A"}
+    assert "FACT-FAR" not in hover_names
+    assert "APP-FAR" not in hover_names
     assert "FACT-FAR (Фактическая)" not in hover_names
     assert "APP-FAR (Проектная утвержденная)" not in hover_names
 

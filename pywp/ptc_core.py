@@ -44,6 +44,7 @@ from pywp.anticollision import (
     AntiCollisionPairCacheEntry,
     AntiCollisionProgress,
     AntiCollisionWell,
+    REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
     collision_corridor_plan_polygon,
 )
 from pywp.anticollision_optimization import (
@@ -79,6 +80,9 @@ from pywp.anticollision_rerun import (
 )
 from pywp.anticollision_rerun import (
     recommendation_intervals_for_moving_well as recommendation_intervals_for_moving_well_shared,
+)
+from pywp.anticollision_rerun import (
+    reference_wells_in_anti_collision_scope,
 )
 from pywp.constants import SMALL
 from pywp.coordinate_integration import (
@@ -214,7 +218,7 @@ WT_3D_FAST_CALC_WELL_THRESHOLD = 14
 WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
 WT_3D_FAST_CALC_TARGET_POINTS = 180
 WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT = 6
-WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M = 500.0
+WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M = REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M
 WT_THREE_MAX_HOVER_POINTS_PER_TRACE = (
     ptc_three_payload.WT_THREE_MAX_HOVER_POINTS_PER_TRACE
 )
@@ -1503,63 +1507,150 @@ def _cached_anti_collision_view_model(
         if progress_callback is not None:
             progress_callback(int(progress_value), message)
 
-    last_pair_progress_update_s = 0.0
-    last_pair_progress_percent = -1
+    last_progress_update_s_by_stage: dict[str, float] = {}
+    last_progress_percent_by_stage: dict[str, int] = {}
 
-    def _emit_pair_progress(progress: AntiCollisionProgress) -> None:
-        nonlocal last_pair_progress_update_s, last_pair_progress_percent
+    def _remaining_progress_text(
+        *,
+        elapsed_s: float,
+        completed: int,
+        total: int,
+        parallel_workers: int = 1,
+    ) -> str:
+        if completed <= 0:
+            return "оценка времени..."
+        if completed >= total:
+            return "завершение"
+        workers = max(int(parallel_workers), 1)
+        remaining = max(int(total) - int(completed), 0)
+        if workers > 1 and completed < workers:
+            eta_s = (float(elapsed_s) / max(float(completed), 1.0)) * (
+                float(remaining) / float(workers)
+            )
+        else:
+            eta_s = (
+                float(elapsed_s)
+                / max(float(completed), 1.0)
+                * float(remaining)
+            )
+        return "осталось оц. " + _format_duration_ru(eta_s)
+
+    def _stage_progress_should_emit(
+        *,
+        stage: str,
+        percent: int,
+        completed: int,
+        total: int,
+    ) -> bool:
+        now = perf_counter()
+        last_percent = int(last_progress_percent_by_stage.get(stage, -1))
+        last_update_s = float(last_progress_update_s_by_stage.get(stage, 0.0))
+        if (
+            completed < total
+            and percent == last_percent
+            and now - last_update_s < 0.75
+        ):
+            return False
+        last_progress_percent_by_stage[stage] = int(percent)
+        last_progress_update_s_by_stage[stage] = float(now)
+        return True
+
+    def _emit_anti_collision_progress(progress: AntiCollisionProgress) -> None:
+        stage = str(getattr(progress, "stage", "pairs") or "pairs")
+        if stage == "wells":
+            total = int(getattr(progress, "well_count", 0) or 0)
+            completed = int(getattr(progress, "completed_well_count", 0) or 0)
+            if total <= 0:
+                return
+            fraction = min(max(float(completed) / max(float(total), 1.0), 0.0), 1.0)
+            percent = int(round(12.0 + 18.0 * fraction))
+            if not _stage_progress_should_emit(
+                stage=stage,
+                percent=percent,
+                completed=completed,
+                total=total,
+            ):
+                return
+            eta_text = _remaining_progress_text(
+                elapsed_s=float(max(progress.elapsed_s, 0.0)),
+                completed=completed,
+                total=total,
+            )
+            progress_text = (
+                "Anti-collision: конусы неопределённости "
+                f"{completed}/{total} · {eta_text} · "
+                f"кэш скважин {int(progress.reused_well_count)} · "
+                f"построено {int(progress.rebuilt_well_count)}"
+            )
+            if progress_callback is not None:
+                progress_callback(percent, progress_text)
+            return
+
         total = int(progress.pair_count)
         completed = int(progress.completed_pair_count)
         if total <= 0:
             return
         fraction = min(max(float(completed) / max(float(total), 1.0), 0.0), 1.0)
         percent = int(round(30.0 + 36.0 * fraction))
-        now = perf_counter()
-        if (
-            completed < total
-            and percent == last_pair_progress_percent
-            and now - last_pair_progress_update_s < 0.75
+        if not _stage_progress_should_emit(
+            stage=stage,
+            percent=percent,
+            completed=completed,
+            total=total,
         ):
             return
-        last_pair_progress_percent = percent
-        last_pair_progress_update_s = now
         elapsed_s = float(max(progress.elapsed_s, 0.0))
-        eta_s = (
-            (elapsed_s / max(float(completed), 1.0)) * float(total - completed)
-            if completed > 0 and completed < total
-            else 0.0
-        )
-        if completed <= 0:
-            eta_text = "оценка времени..."
-        elif completed < total and eta_s > 0.0:
-            eta_text = "осталось оц. " + _format_duration_ru(eta_s)
-        else:
-            eta_text = "завершение"
         workers = int(progress.parallel_workers)
+        eta_text = _remaining_progress_text(
+            elapsed_s=elapsed_s,
+            completed=completed,
+            total=total,
+            parallel_workers=workers,
+        )
         worker_text = f" · {workers} процессов" if workers > 1 else ""
         progress_text = (
             f"Anti-collision: пары {completed}/{total} · {eta_text}"
             f"{worker_text} · кэш {int(progress.reused_pair_count)} · "
-            f"prefilter {int(progress.prefiltered_pair_count)}"
+            f"prefilter {int(progress.prefiltered_pair_count)} · "
+            f"пересчёт {int(progress.recalculated_pair_count)}"
         )
         if progress_callback is not None:
             progress_callback(percent, progress_text)
 
     color_map = _well_color_map(records) if records else {}
     _emit(8, "Подготовка входных данных anti-collision.")
+    all_reference_wells = tuple(reference_wells)
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        all_reference_wells,
+    )
+    skipped_reference_count = max(
+        len(all_reference_wells) - len(scoped_reference_wells),
+        0,
+    )
+    if skipped_reference_count:
+        _emit(
+            10,
+            (
+                "Anti-collision scope: "
+                f"{len(scoped_reference_wells)}/{len(all_reference_wells)} "
+                "фактических/утверждённых скважин рядом с расчётными; "
+                f"{skipped_reference_count} дальних скважин пропущено."
+            ),
+        )
     planned_color_map = _planned_anti_collision_color_map(successes, color_map)
     well_signature_by_name = _anti_collision_well_signatures(
         successes=successes,
         model=uncertainty_model,
         name_to_color=planned_color_map,
-        reference_wells=reference_wells,
+        reference_wells=scoped_reference_wells,
         reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
     )
     cache_key = _anti_collision_cache_key(
         successes=successes,
         model=uncertainty_model,
         name_to_color=planned_color_map,
-        reference_wells=reference_wells,
+        reference_wells=scoped_reference_wells,
         reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
     )
     cache = dict(st.session_state.get("wt_anticollision_analysis_cache") or {})
@@ -1588,10 +1679,12 @@ def _cached_anti_collision_view_model(
                     cache.get("last_recalculated_pair_count") or 0
                 ),
                 "parallel_workers": int(cache.get("last_parallel_workers") or 0),
+                "scoped_reference_count": int(len(scoped_reference_wells)),
+                "skipped_reference_count": int(skipped_reference_count),
             }
             return analysis, recommendations, clusters
     try:
-        _emit(30, "Расчёт anti-collision модели.")
+        _emit(12, "Подготовка конусов неопределённости anti-collision.")
         previous_well_cache = cache.get("well_cache")
         previous_pair_cache = cache.get("pair_cache")
         if not isinstance(previous_well_cache, Mapping):
@@ -1603,14 +1696,14 @@ def _cached_anti_collision_view_model(
                 successes,
                 model=uncertainty_model,
                 name_to_color=planned_color_map,
-                reference_wells=reference_wells,
+                reference_wells=scoped_reference_wells,
                 reference_uncertainty_models_by_name=(
                     reference_uncertainty_models_by_name
                 ),
                 well_signature_by_name=well_signature_by_name,
                 previous_well_cache=previous_well_cache,
                 previous_pair_cache=previous_pair_cache,
-                progress_callback=_emit_pair_progress,
+                progress_callback=_emit_anti_collision_progress,
                 parallel_workers=int(parallel_workers),
             )
         )
@@ -1668,6 +1761,8 @@ def _cached_anti_collision_view_model(
         "last_reused_pair_count": int(incremental_stats.reused_pair_count),
         "last_recalculated_pair_count": int(incremental_stats.recalculated_pair_count),
         "last_parallel_workers": int(parallel_workers),
+        "last_scoped_reference_count": int(len(scoped_reference_wells)),
+        "last_skipped_reference_count": int(skipped_reference_count),
     }
     _emit(100, "Расчёт Anti-collision завершён.")
     st.session_state["wt_anticollision_last_run"] = {
@@ -1683,6 +1778,8 @@ def _cached_anti_collision_view_model(
         "reused_pair_count": int(incremental_stats.reused_pair_count),
         "recalculated_pair_count": int(incremental_stats.recalculated_pair_count),
         "parallel_workers": int(parallel_workers),
+        "scoped_reference_count": int(len(scoped_reference_wells)),
+        "skipped_reference_count": int(skipped_reference_count),
     }
     return analysis, recommendations, clusters
 
