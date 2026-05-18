@@ -329,15 +329,23 @@ def _smooth_transition_rows(
             md_span = float(candidate["MD_m"].iloc[-1] - candidate["MD_m"].iloc[0])
             if md_span > max(float(gap) * MAX_TRANSITION_MD_MULTIPLIER, float(gap) + 500.0):
                 continue
-            max_dls = _max_finite(candidate["DLS_deg_per_30m"].to_numpy(dtype=float))
+            dls_values = candidate["DLS_deg_per_30m"].to_numpy(dtype=float)
+            finite_dls = _finite_values(dls_values)
+            max_dls = float(np.max(finite_dls)) if len(finite_dls) else 0.0
+            p90_dls = float(np.quantile(finite_dls, 0.90)) if len(finite_dls) else 0.0
+            mean_dls = float(np.mean(finite_dls)) if len(finite_dls) else 0.0
             max_inc = _max_finite(candidate["INC_deg"].to_numpy(dtype=float))
             dls_excess = max(0.0, max_dls - dls_limit)
             inc_excess = max(0.0, max_inc - float(config.max_inc_deg))
+            dls_peak_headroom = max(0.0, dls_limit - max_dls)
+            dls_work_headroom = max(0.0, dls_limit - p90_dls)
             score = float(
-                1000.0 * dls_excess
-                + 1000.0 * inc_excess
-                + max_dls
-                + 0.001 * md_span
+                1_000_000.0 * dls_excess
+                + 1_000_000.0 * inc_excess
+                + 2.0 * dls_work_headroom
+                + 0.25 * dls_peak_headroom
+                - 0.05 * mean_dls
+                + 0.0001 * md_span
             )
             if score < best_score:
                 best = candidate
@@ -369,9 +377,23 @@ def _smooth_transition_rows(
 
 
 def _candidate_control_lengths(*, gap_m: float, min_control_m: float) -> tuple[float, ...]:
+    gap = float(gap_m)
     values = {
         float(min_control_m),
-        *(float(gap_m) * scale for scale in (0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50)),
+        *(
+            gap * scale
+            for scale in (
+                0.08,
+                0.16,
+                0.25,
+                0.30,
+                0.35,
+                0.55,
+                0.70,
+                0.85,
+                1.20,
+            )
+        ),
     }
     return tuple(sorted(value for value in values if value > SMALL))
 
@@ -461,9 +483,13 @@ def _stations_from_xyz_path(
 
 
 def _max_finite(values: np.ndarray) -> float:
-    finite = np.asarray(values, dtype=float)
-    finite = finite[np.isfinite(finite)]
+    finite = _finite_values(values)
     return float(np.max(finite)) if len(finite) else 0.0
+
+
+def _finite_values(values: np.ndarray) -> np.ndarray:
+    finite = np.asarray(values, dtype=float)
+    return finite[np.isfinite(finite)]
 
 
 def _linear_hold_rows(

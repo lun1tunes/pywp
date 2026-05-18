@@ -341,7 +341,8 @@ def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
     ].dropna()
     assert not horizontal_build_dls.empty
     assert float(horizontal_build_dls.max()) <= 3.0 + 1e-6
-    assert float(horizontal_build_dls.max()) > 1.0
+    assert float(horizontal_build_dls.max()) > 2.7
+    assert float(horizontal_build_dls.quantile(0.9)) > 2.4
 
 
 def test_turn_solver_build_limit_search_is_monotonic_for_debug_geometry() -> None:
