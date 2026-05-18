@@ -662,6 +662,133 @@ def test_optimize_pad_order_reuses_existing_pair_cache_for_candidate_scoring(
     assert captured_previous_caches == [previous_pair_cache]
 
 
+def test_candidate_swaps_for_zone_limits_and_prioritizes_hot_wells() -> None:
+    surfaces = {
+        "MOVE-A": (0.0, 0.0, 0.0),
+        "MOVE-B": (20.0, 0.0, 0.0),
+        "MOVE-C": (40.0, 0.0, 0.0),
+        "MOVE-D": (60.0, 0.0, 0.0),
+    }
+    worst_zone = SimpleNamespace(
+        well_a="MOVE-A",
+        well_b="FACT-1",
+        md_a_m=1000.0,
+        md_b_m=1000.0,
+        priority_rank=1,
+        separation_factor=0.20,
+    )
+    actionable = [
+        worst_zone,
+        SimpleNamespace(
+            well_a="MOVE-B",
+            well_b="FACT-2",
+            md_a_m=1000.0,
+            md_b_m=1000.0,
+            priority_rank=1,
+            separation_factor=0.25,
+        ),
+        SimpleNamespace(
+            well_a="MOVE-D",
+            well_b="FACT-3",
+            md_a_m=1000.0,
+            md_b_m=1000.0,
+            priority_rank=2,
+            separation_factor=0.10,
+        ),
+    ]
+
+    candidates = pad_optimization._candidate_swaps_for_zone(
+        zone=worst_zone,
+        actionable_zones=actionable,
+        movable_names={"MOVE-A", "MOVE-B", "MOVE-C", "MOVE-D"},
+        surfaces=surfaces,
+        last_accepted_pair=None,
+        remaining_budget=2,
+    )
+
+    assert candidates == [("MOVE-A", "MOVE-B"), ("MOVE-A", "MOVE-D")]
+
+
+def test_optimize_pad_order_stops_at_candidate_budget(monkeypatch) -> None:
+    records = [
+        WelltrackRecord(
+            name=f"MOVE-{index}",
+            points=(
+                WelltrackPoint(x=float(index * 20), y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=500.0 + index, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1000.0 + index, y=0.0, z=2100.0, md=3000.0),
+            ),
+        )
+        for index in range(5)
+    ]
+    initial_analysis = SimpleNamespace(
+        zones=(
+            SimpleNamespace(
+                well_a="MOVE-0",
+                well_b="MOVE-1",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                priority_rank=1,
+                separation_factor=0.20,
+            ),
+        )
+    )
+    swap_calls: list[tuple[str, str]] = []
+    progress_messages: list[str] = []
+
+    class DummyPool:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def shutdown(self, *, wait: bool = True) -> None:
+            pass
+
+    def fake_swap(records_arg, successes, name_a, name_b, _config_by_name, pool=None):
+        swap_calls.append((str(name_a), str(name_b)))
+        return list(records_arg), dict(successes)
+
+    monkeypatch.setattr(pad_optimization, "_MAX_CANDIDATE_EVALUATIONS", 2)
+    monkeypatch.setattr(pad_optimization, "_MAX_CANDIDATES_PER_ITERATION", 10)
+    monkeypatch.setattr(pad_optimization, "_MAX_CANDIDATES_PER_ZONE", 10)
+    monkeypatch.setattr(pad_optimization, "ProcessPoolExecutor", DummyPool)
+    monkeypatch.setattr(
+        pad_optimization,
+        "_build_ac_well_light",
+        lambda success, _model: success,
+    )
+    monkeypatch.setattr(
+        pad_optimization,
+        "_analyze_incremental_from_ac_wells",
+        lambda _ac_wells, _ref_ac_wells, **_kwargs: _fake_incremental_result(
+            initial_analysis,
+            reused_pair_count=3,
+        ),
+    )
+    monkeypatch.setattr(
+        pad_optimization,
+        "_swap_surfaces_and_recalculate",
+        fake_swap,
+    )
+
+    _, _, improved = optimize_pad_order(
+        records=records,
+        success_dict={record.name: object() for record in records},
+        pad_well_names={record.name for record in records},
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        reference_wells=[],
+        config_by_name={},
+        progress_callback=lambda _pct, msg: progress_messages.append(str(msg)),
+        initial_analysis=initial_analysis,
+        previous_pair_cache={},
+    )
+
+    assert improved is False
+    assert len(swap_calls) == 2
+    assert any("Кандидат 1/2" in message for message in progress_messages)
+    assert any("кэш пар 3 reused" in message for message in progress_messages)
+    assert "Остановлено по лимиту" in progress_messages[-1]
+
+
 def test_cached_or_built_ac_well_does_not_reuse_without_current_signature() -> None:
     previous_well = pad_optimization._build_ref_ac_well_light(
         _straight_reference_well(),

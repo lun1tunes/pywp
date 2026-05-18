@@ -53,6 +53,15 @@ _MAX_ITERATIONS = 8
 # top-1 worst zone cannot be improved.
 _MAX_WORST_ZONES_PER_ITERATION = 3
 
+# Keep pad-order optimization interactive.  A candidate is expensive: it
+# recalculates two trajectories and rescoring anti-collision pairs can still
+# take several seconds even with cache.  The bounded search below aims for a
+# useful local improvement in about two minutes for one pad.
+_MAX_CANDIDATE_EVALUATIONS = 24
+_MAX_CANDIDATES_PER_ITERATION = 12
+_MAX_CANDIDATES_PER_ZONE = 8
+_MAX_RUNTIME_S = 120.0
+
 
 @dataclass(frozen=True)
 class _PadOptimizationScore:
@@ -272,6 +281,120 @@ def _score_text(score: _PadOptimizationScore) -> str:
         f"SF min {float(score.worst_sf):.3f}, "
         f"SF mean {float(score.mean_sf):.3f}"
     )
+
+
+def _format_eta(seconds: float | None) -> str:
+    if seconds is None or not np.isfinite(float(seconds)) or float(seconds) < 1.0:
+        return "оценка уточняется"
+    total_seconds = int(round(float(seconds)))
+    minutes, sec = divmod(total_seconds, 60)
+    if minutes <= 0:
+        return f"~{sec} с"
+    return f"~{minutes} мин {sec:02d} с"
+
+
+def _surface_xyz_by_name(
+    records: list[WelltrackRecord],
+) -> dict[str, tuple[float, float, float]]:
+    surfaces: dict[str, tuple[float, float, float]] = {}
+    for record in records:
+        if not record.points:
+            continue
+        point = record.points[0]
+        surfaces[str(record.name)] = (
+            float(point.x),
+            float(point.y),
+            float(point.z),
+        )
+    return surfaces
+
+
+def _surface_distance(
+    surfaces: Mapping[str, tuple[float, float, float]],
+    left: str,
+    right: str,
+) -> float:
+    left_point = surfaces.get(str(left))
+    right_point = surfaces.get(str(right))
+    if left_point is None or right_point is None:
+        return float("inf")
+    return float(
+        np.linalg.norm(
+            np.asarray(left_point, dtype=float) - np.asarray(right_point, dtype=float)
+        )
+    )
+
+
+def _hot_well_rank_by_name(actionable_zones: list) -> dict[str, tuple[int, float, int]]:
+    ranks: dict[str, list[float]] = {}
+    target_counts: dict[str, int] = {}
+    for zone in actionable_zones:
+        sf = float(getattr(zone, "separation_factor", float("inf")))
+        is_target = int(getattr(zone, "priority_rank", 2)) < 2
+        for name in (str(zone.well_a), str(zone.well_b)):
+            ranks.setdefault(name, []).append(sf)
+            if is_target:
+                target_counts[name] = target_counts.get(name, 0) + 1
+    return {
+        name: (
+            -int(target_counts.get(name, 0)),
+            float(min(values)) if values else float("inf"),
+            -int(len(values)),
+        )
+        for name, values in ranks.items()
+    }
+
+
+def _candidate_swaps_for_zone(
+    *,
+    zone: object,
+    actionable_zones: list,
+    movable_names: set[str],
+    surfaces: Mapping[str, tuple[float, float, float]],
+    last_accepted_pair: tuple[str, str] | None,
+    remaining_budget: int,
+) -> list[tuple[str, str]]:
+    """Build a small, high-value swap list for the current worst zone."""
+    if remaining_budget <= 0:
+        return []
+    wa, wb = str(zone.well_a), str(zone.well_b)
+    active_names = [name for name in (wa, wb) if name in movable_names]
+    if not active_names:
+        return []
+
+    hot_rank = _hot_well_rank_by_name(actionable_zones)
+    candidates: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_candidate(left: str, right: str) -> None:
+        if left == right:
+            return
+        if left not in movable_names or right not in movable_names:
+            return
+        key = tuple(sorted((str(left), str(right))))
+        if key == last_accepted_pair or key in seen:
+            return
+        seen.add(key)
+        candidates.append((str(left), str(right)))
+
+    if wa in movable_names and wb in movable_names:
+        add_candidate(wa, wb)
+
+    for active_name in active_names:
+        ranked_others = sorted(
+            (name for name in movable_names if name != active_name),
+            key=lambda name: (
+                hot_rank.get(str(name), (0, float("inf"), 0)),
+                _surface_distance(surfaces, active_name, str(name)),
+                str(name),
+            ),
+        )
+        for other in ranked_others:
+            add_candidate(active_name, other)
+            if len(candidates) >= min(_MAX_CANDIDATES_PER_ZONE, remaining_budget):
+                return candidates
+
+    return candidates[: min(_MAX_CANDIDATES_PER_ZONE, remaining_budget)]
 
 
 # ---------------------------------------------------------------------------
@@ -731,11 +854,22 @@ def optimize_pad_order(
     best_successes = dict(success_dict)
     improved = False
     last_accepted_pair: tuple[str, str] | None = None
+    optimization_started = perf_counter()
+    evaluated_candidate_count = 0
+    accepted_swap_count = 0
+    stopped_by_budget = False
+    surfaces_by_name = _surface_xyz_by_name(best_records)
 
     progress_callback(0, f"Начальный score: {_score_text(best_score)}.")
 
     try:
         for iteration in range(1, _MAX_ITERATIONS + 1):
+            if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
+                stopped_by_budget = True
+                break
+            if perf_counter() - optimization_started >= _MAX_RUNTIME_S:
+                stopped_by_budget = True
+                break
             actionable = _actionable_pad_zones(
                 analysis,
                 pad_names,
@@ -749,33 +883,51 @@ def optimize_pad_order(
             # Try up to _MAX_WORST_ZONES_PER_ITERATION distinct worst-zone pairs.
             swap_accepted = False
             seen_pairs_this_iter: set[tuple[str, str]] = set()
+            tested_candidates_this_iter = 0
 
             for zone in actionable[:_MAX_WORST_ZONES_PER_ITERATION]:
+                if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
+                    stopped_by_budget = True
+                    break
+                if perf_counter() - optimization_started >= _MAX_RUNTIME_S:
+                    stopped_by_budget = True
+                    break
+                if tested_candidates_this_iter >= _MAX_CANDIDATES_PER_ITERATION:
+                    break
                 wa, wb = str(zone.well_a), str(zone.well_b)
                 pair_key = tuple(sorted((wa, wb)))
                 if pair_key in seen_pairs_this_iter:
                     continue
                 seen_pairs_this_iter.add(pair_key)
 
+                zone_progress_percent = min(
+                    94,
+                    4
+                    + int(
+                        90
+                        * evaluated_candidate_count
+                        / max(_MAX_CANDIDATE_EVALUATIONS, 1)
+                    ),
+                )
                 progress_callback(
-                    int(iteration * 100 / _MAX_ITERATIONS),
+                    zone_progress_percent,
                     f"Итерация {iteration}: анализ {wa} ↔ {wb} (SF={float(zone.separation_factor):.3f})...",
                 )
 
-                # Generate all distinct swaps involving non-fixed wells from the
-                # worst pair. Fixed wells keep their surface slot unchanged.
-                active_names = [
-                    name for name in (wa, wb) if name in movable_names
-                ]
-                swap_candidates: list[tuple[str, str]] = []
-                seen_candidate_keys: set[tuple[str, str]] = set()
-                for active_name in active_names:
-                    for other in sorted(movable_names - {active_name}):
-                        candidate_key = tuple(sorted((active_name, other)))
-                        if candidate_key in seen_candidate_keys:
-                            continue
-                        seen_candidate_keys.add(candidate_key)
-                        swap_candidates.append((active_name, other))
+                remaining_global_budget = (
+                    _MAX_CANDIDATE_EVALUATIONS - evaluated_candidate_count
+                )
+                remaining_iter_budget = (
+                    _MAX_CANDIDATES_PER_ITERATION - tested_candidates_this_iter
+                )
+                swap_candidates = _candidate_swaps_for_zone(
+                    zone=zone,
+                    actionable_zones=actionable,
+                    movable_names=movable_names,
+                    surfaces=surfaces_by_name,
+                    last_accepted_pair=last_accepted_pair,
+                    remaining_budget=min(remaining_global_budget, remaining_iter_budget),
+                )
 
                 best_candidate = None
                 best_candidate_score = best_score
@@ -786,23 +938,70 @@ def optimize_pad_order(
                     dict[tuple[str, str], AntiCollisionPairCacheEntry] | None
                 ) = None
                 best_candidate_analysis: AntiCollisionAnalysis | None = None
+                best_candidate_pair_key: tuple[str, str] | None = None
 
                 for name_1, name_2 in swap_candidates:
+                    if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
+                        stopped_by_budget = True
+                        break
+                    elapsed_before = perf_counter() - optimization_started
+                    if elapsed_before >= _MAX_RUNTIME_S:
+                        stopped_by_budget = True
+                        break
                     candidate_pair_key = tuple(sorted((str(name_1), str(name_2))))
                     if candidate_pair_key == last_accepted_pair:
                         continue
+                    evaluated_candidate_count += 1
+                    tested_candidates_this_iter += 1
+                    avg_candidate_s = elapsed_before / max(evaluated_candidate_count - 1, 1)
+                    remaining_candidates = (
+                        _MAX_CANDIDATE_EVALUATIONS - evaluated_candidate_count + 1
+                    )
+                    eta_text = _format_eta(avg_candidate_s * remaining_candidates)
+                    progress_percent = min(
+                        94,
+                        4
+                        + int(
+                            90
+                            * evaluated_candidate_count
+                            / max(_MAX_CANDIDATE_EVALUATIONS, 1)
+                        ),
+                    )
+                    progress_callback(
+                        progress_percent,
+                        (
+                            f"Кандидат {evaluated_candidate_count}/"
+                            f"{_MAX_CANDIDATE_EVALUATIONS}: перестановка "
+                            f"{name_1} ↔ {name_2}. ETA {eta_text}. "
+                            f"Лучший score: {_score_text(best_score)}."
+                        ),
+                    )
                     result = _swap_surfaces_and_recalculate(
                         best_records, best_successes, name_1, name_2, config_by_name,
                         pool=pool,
                     )
                     if result is None:
+                        progress_callback(
+                            progress_percent,
+                            (
+                                f"Кандидат {evaluated_candidate_count}: "
+                                f"{name_1} ↔ {name_2} пропущен — траектория "
+                                "после перестановки не построилась."
+                            ),
+                        )
                         continue
 
                     cand_records, cand_successes = result
 
                     # Incremental AC well update: only rebuild the 2 changed wells.
-                    ac_well_1 = _build_ac_well_light(cand_successes[name_1], uncertainty_model)
-                    ac_well_2 = _build_ac_well_light(cand_successes[name_2], uncertainty_model)
+                    ac_well_1 = _build_ac_well_light(
+                        cand_successes[name_1],
+                        uncertainty_model,
+                    )
+                    ac_well_2 = _build_ac_well_light(
+                        cand_successes[name_2],
+                        uncertainty_model,
+                    )
                     cand_ac_wells = dict(ac_well_cache)
                     cand_ac_wells[name_1] = ac_well_1
                     cand_ac_wells[name_2] = ac_well_2
@@ -818,7 +1017,7 @@ def optimize_pad_order(
                         uncertainty_model,
                     )
 
-                    cand_analysis, cand_pair_cache, _ = (
+                    cand_analysis, cand_pair_cache, cand_stats = (
                         _analyze_incremental_from_ac_wells(
                             cand_ac_wells,
                             ref_ac_wells,
@@ -836,6 +1035,16 @@ def optimize_pad_order(
                         cand_analysis,
                         pad_names,
                         fixed_well_names=fixed_names,
+                    )
+                    progress_callback(
+                        progress_percent,
+                        (
+                            f"Кандидат {evaluated_candidate_count}: "
+                            f"{name_1} ↔ {name_2} оценен. "
+                            f"{_score_text(cand_score)}; кэш пар "
+                            f"{int(getattr(cand_stats, 'reused_pair_count', 0))} reused / "
+                            f"{int(getattr(cand_stats, 'recalculated_pair_count', 0))} recalculated."
+                        ),
                     )
 
                     if _score_is_improvement(cand_score, best_candidate_score):
@@ -855,24 +1064,63 @@ def optimize_pad_order(
                     best_records, best_successes = best_candidate
                     best_score = best_candidate_score
                     best_score_value = best_candidate_score_value
-                    current_signatures = dict(best_candidate_signatures or current_signatures)
-                    current_pair_cache = dict(best_candidate_pair_cache or current_pair_cache)
+                    current_signatures = dict(
+                        best_candidate_signatures or current_signatures
+                    )
+                    current_pair_cache = dict(
+                        best_candidate_pair_cache or current_pair_cache
+                    )
                     analysis = best_candidate_analysis or analysis
                     # Update the AC well cache with the accepted swap.
-                    ac_well_cache.update(best_candidate_ac_updates)
+                    if best_candidate_ac_updates is not None:
+                        ac_well_cache.update(best_candidate_ac_updates)
                     last_accepted_pair = best_candidate_pair_key
+                    surfaces_by_name = _surface_xyz_by_name(best_records)
                     swap_accepted = True
                     improved = True
+                    accepted_swap_count += 1
+                    progress_callback(
+                        min(
+                            96,
+                            4
+                            + int(
+                                90
+                                * evaluated_candidate_count
+                                / max(_MAX_CANDIDATE_EVALUATIONS, 1)
+                            ),
+                        ),
+                        (
+                            f"Принята перестановка {last_accepted_pair[0]} ↔ "
+                            f"{last_accepted_pair[1]}. Новый score: "
+                            f"{_score_text(best_score)}."
+                        ),
+                    )
                     break  # restart from updated state
 
+            if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
+                stopped_by_budget = True
+                break
+            if perf_counter() - optimization_started >= _MAX_RUNTIME_S:
+                stopped_by_budget = True
+                break
             if not swap_accepted:
                 break
     finally:
         if pool is not None:
             pool.shutdown(wait=True)
 
+    elapsed_total = perf_counter() - optimization_started
+    budget_text = (
+        " Остановлено по лимиту времени/кандидатов."
+        if stopped_by_budget
+        else ""
+    )
     progress_callback(
         100,
-        f"Готово! Лучший score: {_score_text(best_score)} ({best_score_value:.3f}).",
+        (
+            f"Готово за {elapsed_total:.1f} с: принято {accepted_swap_count}, "
+            f"проверено {evaluated_candidate_count} кандидатов. Лучший score: "
+            f"{_score_text(best_score)} ({best_score_value:.3f}).{budget_text}"
+        ),
     )
     return best_records, best_successes, improved
