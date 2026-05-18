@@ -393,6 +393,7 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
             _DummyColumn(),
             _DummyColumn(),
             _DummyColumn(),
+            _DummyColumn(),
         ),
     )
     monkeypatch.setattr(page.st, "expander", _fake_expander)
@@ -406,6 +407,7 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
         ("Скважин", "1"),
         ("Пилотов", "0"),
         ("Боковых стволов", "0"),
+        ("Многопластовых скважин", "0"),
         ("Проблем", "0"),
     ]
     assert list(captured["frame"].columns) == [
@@ -454,6 +456,7 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
         page.st,
         "columns",
         lambda *args, **kwargs: (
+            _DummyColumn(),
             _DummyColumn(),
             _DummyColumn(),
             _DummyColumn(),
@@ -510,6 +513,7 @@ def test_records_overview_metrics_count_wells_and_pilots_separately(
             _DummyColumn(),
             _DummyColumn(),
             _DummyColumn(),
+            _DummyColumn(),
         ),
     )
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
@@ -521,6 +525,61 @@ def test_records_overview_metrics_count_wells_and_pilots_separately(
         ("Скважин", "1"),
         ("Пилотов", "1"),
         ("Боковых стволов", "0"),
+        ("Многопластовых скважин", "0"),
+        ("Проблем", "0"),
+    ]
+
+
+def test_records_overview_metrics_count_multi_horizontal_wells(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {"metrics": []}
+    regular = _records()[0]
+    multi_horizontal = WelltrackRecord(
+        name="well_multi",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+            WelltrackPoint(x=300.0, y=0.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=400.0, y=0.0, z=1100.0, md=3.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1100.0, md=4.0),
+        ),
+    )
+
+    class _DummyColumn:
+        def metric(self, label, value, *args, **kwargs):
+            captured["metrics"].append((label, value))
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+        ),
+    )
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+
+    page._render_records_overview([regular, multi_horizontal])
+
+    assert captured["metrics"] == [
+        ("Скважин", "2"),
+        ("Пилотов", "0"),
+        ("Боковых стволов", "0"),
+        ("Многопластовых скважин", "1"),
         ("Проблем", "0"),
     ]
 

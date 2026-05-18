@@ -31,7 +31,7 @@
  *
  *   // On drag tick:
  *   const pts = replan.compute([t1x, t1y, t1z], [t3x, t3y, t3z]);
- *   updateLineGeometry(trajectoryLine, pts);
+ *   updateLineGeometry(trajectoryLine, pts, -1.0, sceneOrigin);
  *
  * The preview is intentionally lightweight: when Python sends the
  * already solved survey stations, the client warps that baseline path
@@ -506,16 +506,28 @@ function fastReplanPoints(surface, t1, t3, config) {
 // ---------------------------------------------------------------------------
 // Geometry update helper: replace a THREE.LineSegments buffer in-place.
 // ---------------------------------------------------------------------------
-function updateLineGeometry(lineObject, points, zDisplaySign) {
+function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin) {
   const sign = zDisplaySign || -1.0;
+  const origin = displayOrigin || {};
+  const originX = Number.isFinite(Number(origin.x)) ? Number(origin.x) : 0.0;
+  const originY = Number.isFinite(Number(origin.y)) ? Number(origin.y) : 0.0;
+  const originZ = Number.isFinite(Number(origin.z)) ? Number(origin.z) : 0.0;
   if (!lineObject || !lineObject.geometry || points.length < 2) return;
 
   const positions = [];
   for (let i = 1; i < points.length; i++) {
     const prev = points[i - 1];
     const curr = points[i];
-    positions.push(prev[0], prev[1], prev[2] * sign);
-    positions.push(curr[0], curr[1], curr[2] * sign);
+    positions.push(
+      Number(prev[0] || 0) - originX,
+      Number(prev[1] || 0) - originY,
+      (Number(prev[2] || 0) - originZ) * sign,
+    );
+    positions.push(
+      Number(curr[0] || 0) - originX,
+      Number(curr[1] || 0) - originY,
+      (Number(curr[2] || 0) - originZ) * sign,
+    );
   }
 
   const attr = lineObject.geometry.getAttribute("position");

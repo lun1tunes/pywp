@@ -30,6 +30,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="legend-toggle-btn"' in html
     assert 'id="tooltip"' in html
     assert 'id="axes-gizmo"' in html
+    assert "#root canvas" in html
+    assert "width: 100% !important;" in html
+    assert "height: 100% !important;" in html
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
     assert ".scene-label.well-name-label" in html
@@ -84,6 +87,20 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
     assert "function fitCameraToRawBounds(rawBounds)" in html
+    assert "const sceneOrigin = rawBoundsCenter(payload.bounds || {})" in html
+    assert "function displayPoint(value)" in html
+    assert "function displayXYZ(xValue, yValue, zValue)" in html
+    assert "function dataPointFromDisplay(displayPosition)" in html
+    assert "dataNumber(value && value[0], 0) - sceneOrigin.x" in html
+    assert "dataNumber(value && value[1], 0) - sceneOrigin.y" in html
+    assert "(dataNumber(value && value[2], 0) - sceneOrigin.z) * Z_DISPLAY_SIGN" in html
+    assert "dataNumber(displayPosition && displayPosition.x, 0) + sceneOrigin.x" in html
+    assert "dataNumber(displayPosition && displayPosition.y, 0) + sceneOrigin.y" in html
+    assert "dataNumber(displayPosition && displayPosition.z, 0) * Z_DISPLAY_SIGN + sceneOrigin.z" in html
+    assert "function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin)" in html
+    assert "const originX = Number.isFinite(Number(origin.x)) ? Number(origin.x) : 0.0;" in html
+    assert "updateLineGeometry(\n                editLineObjects[wellIndex],\n                points,\n                Z_DISPLAY_SIGN,\n                sceneOrigin," in html
+    assert "updateLineGeometry(\n            editLineObjects[wellIndex],\n            pts,\n            Z_DISPLAY_SIGN,\n            sceneOrigin," in html
     assert "fitMiniMapToRawBounds(rawBounds || payload.bounds || {})" in html
     assert "function focusMiniMapToDisplayPoint(displayCenter, focusSpan)" in html
     assert "focusMiniMapToDisplayPoint(targetCenter, offsetDistance * 2.0)" in html

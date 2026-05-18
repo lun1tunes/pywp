@@ -32,6 +32,12 @@
         background: #ffffff;
       }
 
+      #root canvas {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+      }
+
       #toolbar-left,
       #toolbar-right {
         position: absolute;
@@ -1490,19 +1496,48 @@
           startAnimationLoop();
         }
 
+        function dataNumber(value, fallback) {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : Number(fallback || 0);
+        }
+
+        function rawBoundsCenter(rawBounds) {
+          const rawMin = Array.isArray(rawBounds && rawBounds.min)
+            ? rawBounds.min
+            : [0, 0, 0];
+          const rawMax = Array.isArray(rawBounds && rawBounds.max)
+            ? rawBounds.max
+            : [1000, 1000, 1000];
+          return {
+            x: (dataNumber(rawMin[0], 0) + dataNumber(rawMax[0], 0)) * 0.5,
+            y: (dataNumber(rawMin[1], 0) + dataNumber(rawMax[1], 0)) * 0.5,
+            z: (dataNumber(rawMin[2], 0) + dataNumber(rawMax[2], 0)) * 0.5,
+          };
+        }
+
+        const sceneOrigin = rawBoundsCenter(payload.bounds || {});
+
         function displayPoint(value) {
           return new THREE.Vector3(
-            Number(value[0] || 0),
-            Number(value[1] || 0),
-            Number(value[2] || 0) * Z_DISPLAY_SIGN,
+            dataNumber(value && value[0], 0) - sceneOrigin.x,
+            dataNumber(value && value[1], 0) - sceneOrigin.y,
+            (dataNumber(value && value[2], 0) - sceneOrigin.z) * Z_DISPLAY_SIGN,
           );
         }
 
         function displayXYZ(xValue, yValue, zValue) {
           return [
-            Number(xValue || 0),
-            Number(yValue || 0),
-            Number(zValue || 0) * Z_DISPLAY_SIGN,
+            dataNumber(xValue, 0) - sceneOrigin.x,
+            dataNumber(yValue, 0) - sceneOrigin.y,
+            (dataNumber(zValue, 0) - sceneOrigin.z) * Z_DISPLAY_SIGN,
+          ];
+        }
+
+        function dataPointFromDisplay(displayPosition) {
+          return [
+            dataNumber(displayPosition && displayPosition.x, 0) + sceneOrigin.x,
+            dataNumber(displayPosition && displayPosition.y, 0) + sceneOrigin.y,
+            dataNumber(displayPosition && displayPosition.z, 0) * Z_DISPLAY_SIGN + sceneOrigin.z,
           ];
         }
 
@@ -2716,11 +2751,7 @@
             item.addEventListener("click", () => {
               const hotspot = collision.hotspot;
               if (Array.isArray(hotspot) && hotspot.length >= 3) {
-                const targetCenter = new THREE.Vector3(
-                  Number(hotspot[0] || 0),
-                  Number(hotspot[1] || 0),
-                  Number(hotspot[2] || 0) * Z_DISPLAY_SIGN,
-                );
+                const targetCenter = displayPoint(hotspot);
                 const offsetDistance = Math.max(
                   Number(payload.focus_collision_distance_m || 750),
                   100,
@@ -5319,7 +5350,12 @@
               const points = targetEditPointEntries(wellIndex)
                 .map((entry) => copyEditPoint(entry.position))
                 .filter((point) => point.every((value) => Number.isFinite(value)));
-              updateLineGeometry(editLineObjects[wellIndex], points, Z_DISPLAY_SIGN);
+              updateLineGeometry(
+                editLineObjects[wellIndex],
+                points,
+                Z_DISPLAY_SIGN,
+                sceneOrigin,
+              );
               syncEditVisibility();
               return;
             }
@@ -5339,7 +5375,12 @@
           if (pts.length >= 1) {
             pts[pts.length - 1] = t3.slice();
           }
-          updateLineGeometry(editLineObjects[wellIndex], pts, Z_DISPLAY_SIGN);
+          updateLineGeometry(
+            editLineObjects[wellIndex],
+            pts,
+            Z_DISPLAY_SIGN,
+            sceneOrigin,
+          );
           syncEditVisibility();
         }
 
@@ -5425,6 +5466,7 @@
               editLineObjects[wellIndex],
               rotatedPoints,
               Z_DISPLAY_SIGN,
+              sceneOrigin,
             );
             syncEditVisibility();
             return;
@@ -5855,10 +5897,11 @@
               .clone()
               .addScaledVector(editDragAxisDirection, axisT - editDragStartAxisT);
           }
-          // Convert display coords back to data coords
-          let dataX = newPos.x;
-          let dataY = newPos.y;
-          let dataZ = newPos.z * Z_DISPLAY_SIGN;
+          // Convert local display coords back to original data CRS.
+          const dataPoint = dataPointFromDisplay(newPos);
+          let dataX = dataPoint[0];
+          let dataY = dataPoint[1];
+          let dataZ = dataPoint[2];
           const wi = editDragHandle.wellIndex;
           let sidetrackWindowUpdate = null;
           if (editDragHandle.pointRole === "sidetrack_window") {

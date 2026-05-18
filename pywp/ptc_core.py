@@ -96,6 +96,7 @@ from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackRecord,
     parse_welltrack_text,
+    welltrack_multi_horizontal_level_count,
     welltrack_points_to_target_pairs,
 )
 from pywp.models import Point3D
@@ -4023,11 +4024,20 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     pilot_count = int(sum(is_pilot_name(record.name) for record in records))
     zbs_records = [record for record in records if is_zbs_name(record.name)]
     zbs_count = int(len(zbs_records))
-    x1, x2, x3, x4 = st.columns(4, gap="small")
+    multi_horizontal_count = int(
+        sum(
+            not is_pilot_name(record.name)
+            and not is_zbs_name(record.name)
+            and welltrack_multi_horizontal_level_count(tuple(record.points)) > 1
+            for record in records
+        )
+    )
+    x1, x2, x3, x4, x5 = st.columns(5, gap="small")
     x1.metric("Скважин", f"{well_count}")
     x2.metric("Пилотов", f"{pilot_count}")
     x3.metric("Боковых стволов", f"{zbs_count}")
-    x4.metric("Проблем", f"{problem_count}")
+    x4.metric("Многопластовых скважин", f"{multi_horizontal_count}")
+    x5.metric("Проблем", f"{problem_count}")
     if zbs_records:
         parent_names = sorted(
             {
