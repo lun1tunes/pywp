@@ -794,20 +794,38 @@ class WelltrackBatchPlanner:
             int(parallel_workers) > 1
             and dynamic_cluster_context is None
             and len(selected_records) > 1
-            and not self._has_pilot_dependencies(selected_records)
         ):
             try:
-                return self._evaluate_parallel(
-                    selected_records=selected_records,
-                    config=config,
-                    config_by_name=config_by_name,
-                    optimization_context_by_name=optimization_context_by_name,
-                    reference_wells=tuple(reference_wells),
-                    sidetrack_window_overrides_by_key=sidetrack_window_overrides_by_key,
-                    progress_callback=progress_callback,
-                    record_done_callback=record_done_callback,
-                    parallel_workers=int(parallel_workers),
-                )
+                if self._has_pilot_dependencies(selected_records):
+                    return self._evaluate_parallel_with_pilot_dependencies(
+                        selected_records=selected_records,
+                        config=config,
+                        config_by_name=config_by_name,
+                        optimization_context_by_name=optimization_context_by_name,
+                        reference_wells=tuple(reference_wells),
+                        actual_reference_wells_by_key=actual_reference_wells_by_key,
+                        sidetrack_window_overrides_by_key=(
+                            sidetrack_window_overrides_by_key
+                        ),
+                        progress_callback=progress_callback,
+                        solver_progress_callback=solver_progress_callback,
+                        record_done_callback=record_done_callback,
+                        parallel_workers=int(parallel_workers),
+                    )
+                else:
+                    return self._evaluate_parallel(
+                        selected_records=selected_records,
+                        config=config,
+                        config_by_name=config_by_name,
+                        optimization_context_by_name=optimization_context_by_name,
+                        reference_wells=tuple(reference_wells),
+                        sidetrack_window_overrides_by_key=(
+                            sidetrack_window_overrides_by_key
+                        ),
+                        progress_callback=progress_callback,
+                        record_done_callback=record_done_callback,
+                        parallel_workers=int(parallel_workers),
+                    )
             except (
                 BrokenProcessPool,
                 PicklingError,
@@ -1043,11 +1061,15 @@ class WelltrackBatchPlanner:
         progress_callback: ProgressCallback | None,
         record_done_callback: RecordDoneCallback | None,
         parallel_workers: int,
+        progress_total: int | None = None,
+        completed_offset: int = 0,
     ) -> tuple[list[dict[str, Any]], list[SuccessfulWellPlan]]:
         """Execute selected wells in parallel using a process pool."""
         _mp_ctx = process_pool_context()
         total = len(selected_records)
         workers = min(int(parallel_workers), total)
+        callback_total = int(progress_total or total)
+        callback_offset = int(max(completed_offset, 0))
 
         # Preserve submission order so results come back in the same order.
         ordered_names: list[str] = [str(r.name) for r in selected_records]
@@ -1110,9 +1132,18 @@ class WelltrackBatchPlanner:
                     success = None
                 results_by_name[name] = (row, success)
                 if progress_callback is not None:
-                    progress_callback(completed_count, total, name)
+                    progress_callback(
+                        callback_offset + completed_count,
+                        callback_total,
+                        name,
+                    )
                 if record_done_callback is not None:
-                    record_done_callback(completed_count, total, name, row)
+                    record_done_callback(
+                        callback_offset + completed_count,
+                        callback_total,
+                        name,
+                        row,
+                    )
         finally:
             pool.shutdown(wait=True)
 
@@ -1134,6 +1165,153 @@ class WelltrackBatchPlanner:
             if success is not None:
                 successes.append(success)
             executed_well_names.append(name)
+
+        self._last_evaluation_metadata = BatchEvaluationMetadata(
+            executed_well_names=tuple(executed_well_names),
+            skipped_selected_names=(),
+            cluster_resolved_early=False,
+            cluster_blocked=False,
+            cluster_blocking_reason=None,
+        )
+        return summary_rows, successes
+
+    def _evaluate_parallel_with_pilot_dependencies(
+        self,
+        selected_records: list[WelltrackRecord],
+        config: TrajectoryConfig,
+        config_by_name: dict[str, TrajectoryConfig] | None,
+        optimization_context_by_name: (
+            dict[str, AntiCollisionOptimizationContext] | None
+        ),
+        reference_wells: tuple[ImportedTrajectoryWell, ...],
+        actual_reference_wells_by_key: Mapping[str, ImportedTrajectoryWell],
+        sidetrack_window_overrides_by_key: Mapping[str, SidetrackWindowOverride],
+        progress_callback: ProgressCallback | None,
+        solver_progress_callback: SolverProgressCallback | None,
+        record_done_callback: RecordDoneCallback | None,
+        parallel_workers: int,
+    ) -> tuple[list[dict[str, Any]], list[SuccessfulWellPlan]]:
+        """Parallelize independent wells while preserving pilot -> sidetrack order."""
+        selected_keys = {well_name_key(record.name) for record in selected_records}
+        first_wave_records: list[WelltrackRecord] = []
+        dependent_records: list[WelltrackRecord] = []
+        for record in selected_records:
+            depends_on_pilot = (
+                not is_pilot_record(record)
+                and pilot_name_key_for_parent(record.name) in selected_keys
+            )
+            if depends_on_pilot:
+                dependent_records.append(record)
+            else:
+                first_wave_records.append(record)
+
+        total = len(selected_records)
+        rows_by_name: dict[str, dict[str, Any]] = {}
+        success_by_name: dict[str, SuccessfulWellPlan] = {}
+        executed_well_names: list[str] = []
+
+        first_wave_rows: list[dict[str, Any]] = []
+        first_wave_successes: list[SuccessfulWellPlan] = []
+        if len(first_wave_records) > 1:
+            first_wave_rows, first_wave_successes = self._evaluate_parallel(
+                selected_records=first_wave_records,
+                config=config,
+                config_by_name=config_by_name,
+                optimization_context_by_name=optimization_context_by_name,
+                reference_wells=reference_wells,
+                sidetrack_window_overrides_by_key=sidetrack_window_overrides_by_key,
+                progress_callback=progress_callback,
+                record_done_callback=record_done_callback,
+                parallel_workers=parallel_workers,
+                progress_total=total,
+                completed_offset=0,
+            )
+            executed_well_names.extend(str(record.name) for record in first_wave_records)
+        else:
+            for record in first_wave_records:
+                index = len(executed_well_names) + 1
+                if progress_callback is not None:
+                    progress_callback(index, total, record.name)
+                well_config = (config_by_name or {}).get(str(record.name)) or config
+                opt_ctx = (optimization_context_by_name or {}).get(str(record.name))
+                sidetrack_override = sidetrack_window_overrides_by_key.get(
+                    well_name_key(record.name)
+                )
+                row, success = self._evaluate_record(
+                    record=record,
+                    config=well_config,
+                    optimization_context=opt_ctx,
+                    recalculated_success_by_name=success_by_name,
+                    sidetrack_window_override=sidetrack_override,
+                    actual_reference_wells_by_key=actual_reference_wells_by_key,
+                )
+                first_wave_rows.append(row)
+                if success is not None:
+                    first_wave_successes.append(success)
+                if record_done_callback is not None:
+                    record_done_callback(index, total, record.name, row)
+                executed_well_names.append(str(record.name))
+
+        for row in first_wave_rows:
+            rows_by_name[str(row.get("Скважина", ""))] = row
+        for success in first_wave_successes:
+            success_by_name[str(success.name)] = success
+
+        completed_count = len(first_wave_records)
+        for record in dependent_records:
+            index = completed_count + 1
+            completed_count = index
+            if progress_callback is not None:
+                progress_callback(index, total, record.name)
+
+            planner_progress_callback = None
+            if solver_progress_callback is not None:
+                index_i = int(index)
+                total_i = int(total)
+                name_i = str(record.name)
+
+                def _planner_progress(stage_text: str, stage_fraction: float) -> None:
+                    solver_progress_callback(
+                        index_i,
+                        total_i,
+                        name_i,
+                        stage_text,
+                        stage_fraction,
+                    )
+
+                planner_progress_callback = _planner_progress
+
+            well_config = (config_by_name or {}).get(str(record.name)) or config
+            opt_ctx = (optimization_context_by_name or {}).get(str(record.name))
+            sidetrack_override = sidetrack_window_overrides_by_key.get(
+                well_name_key(record.name)
+            )
+            row, success = self._evaluate_record(
+                record=record,
+                config=well_config,
+                optimization_context=opt_ctx,
+                planner_progress_callback=planner_progress_callback,
+                recalculated_success_by_name=success_by_name,
+                sidetrack_window_override=sidetrack_override,
+                actual_reference_wells_by_key=actual_reference_wells_by_key,
+            )
+            rows_by_name[str(record.name)] = row
+            if success is not None:
+                success_by_name[str(success.name)] = success
+            if record_done_callback is not None:
+                record_done_callback(index, total, record.name, row)
+            executed_well_names.append(str(record.name))
+
+        summary_rows: list[dict[str, Any]] = []
+        successes: list[SuccessfulWellPlan] = []
+        for record in selected_records:
+            name = str(record.name)
+            summary_rows.append(
+                rows_by_name.get(name, self._base_row(record=record))
+            )
+            success = success_by_name.get(name)
+            if success is not None:
+                successes.append(success)
 
         self._last_evaluation_metadata = BatchEvaluationMetadata(
             executed_well_names=tuple(executed_well_names),

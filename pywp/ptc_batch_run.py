@@ -279,16 +279,12 @@ def _has_selected_pilot_dependencies(
     selected_names: set[str],
 ) -> bool:
     selected_keys = {well_name_key(name) for name in selected_names}
-    selected_records = [
-        record
-        for record in records
-        if well_name_key(record.name) in selected_keys
-    ]
-    record_keys = {well_name_key(record.name) for record in selected_records}
+    all_record_keys = {well_name_key(record.name) for record in records}
     return any(
         not is_pilot_name(record.name)
-        and pilot_name_key_for_parent(record.name) in record_keys
-        for record in selected_records
+        and well_name_key(record.name) in selected_keys
+        and pilot_name_key_for_parent(record.name) in all_record_keys
+        for record in records
     )
 
 
@@ -552,15 +548,20 @@ def run_batch_if_clicked(
                 append_log(
                     f"Параллельный расчёт: {int(request.parallel_workers)} процессов."
                 )
+            elif (
+                parallel_requested
+                and dynamic_cluster_context is None
+                and selected_has_pilot_dependencies
+            ):
+                append_log(
+                    "Параллельный расчёт частично: независимые скважины и пилоты "
+                    f"считаются в {int(request.parallel_workers)} процессов; "
+                    "боковые стволы от пилота досчитываются после готовности пилота."
+                )
             elif parallel_requested and dynamic_cluster_context is not None:
                 append_log(
                     "Параллельный расчёт отключён: активен iterative cluster-aware "
                     "режим (скважины зависят друг от друга)."
-                )
-            elif parallel_requested and selected_has_pilot_dependencies:
-                append_log(
-                    "Параллельный расчёт отключён: выбран боковой ствол от пилота, "
-                    "который зависит от результата расчёта пилотной скважины."
                 )
             if pad_layout_active:
                 append_log(

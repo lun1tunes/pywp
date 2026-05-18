@@ -3280,6 +3280,115 @@ def test_batch_planner_parallel_path_keeps_zbs_records(monkeypatch) -> None:
     assert [row["Статус"] for row in rows] == ["OK", "OK"]
 
 
+def test_batch_planner_parallelizes_independent_wells_when_pilot_dependency_exists(
+    monkeypatch,
+) -> None:
+    import pywp.welltrack_batch as batch_module
+
+    submitted_names: list[str] = []
+    dependent_calls: list[tuple[str, tuple[str, ...]]] = []
+
+    class InlineExecutor:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def submit(
+            self,
+            _fn,
+            record_dict,
+            _config_dict,
+            _optimization_context_dict,
+            _reference_well_dicts,
+            _override_payload,
+            **kwargs,
+        ) -> Future:
+            record = WelltrackRecord.model_validate(record_dict)
+            submitted_names.append(str(record.name))
+            row = WelltrackBatchPlanner._base_row(record)
+            row["Статус"] = "OK"
+            success = _straight_success(str(record.name), y_offset_m=0.0)
+            future: Future = Future()
+            future.set_result((row, success.model_dump()))
+            return future
+
+        def shutdown(self, *, wait: bool = True) -> None:
+            pass
+
+    def fake_evaluate_record(
+        self,
+        *,
+        record,
+        config,
+        optimization_context=None,
+        planner_progress_callback=None,
+        recalculated_success_by_name=None,
+        sidetrack_window_override=None,
+        actual_reference_wells_by_key=None,
+    ):
+        dependent_calls.append(
+            (
+                str(record.name),
+                tuple(sorted(str(name) for name in recalculated_success_by_name or {})),
+            )
+        )
+        row = WelltrackBatchPlanner._base_row(record)
+        row["Статус"] = "OK"
+        return row, _straight_success(str(record.name), y_offset_m=10.0)
+
+    monkeypatch.setattr(batch_module, "ProcessPoolExecutor", InlineExecutor)
+    monkeypatch.setattr(WelltrackBatchPlanner, "_evaluate_record", fake_evaluate_record)
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1200.0),
+                WelltrackPoint(x=500.0, y=0.0, z=1200.0, md=1600.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=80.0, y=0.0, z=800.0, md=800.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=30.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=30.0, z=1200.0, md=1200.0),
+                WelltrackPoint(x=500.0, y=30.0, z=1200.0, md=1600.0),
+            ),
+        ),
+    ]
+    progress_events: list[tuple[int, int, str]] = []
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=records,
+        selected_names={"WELL-A", "WELL-B"},
+        config=_fast_batch_config(),
+        progress_callback=lambda index, total, name: progress_events.append(
+            (int(index), int(total), str(name))
+        ),
+        parallel_workers=4,
+    )
+
+    assert submitted_names == ["WELL-A_PL", "WELL-B"]
+    assert dependent_calls == [("WELL-A", ("WELL-A_PL", "WELL-B"))]
+    assert [str(row["Скважина"]) for row in rows] == [
+        "WELL-A_PL",
+        "WELL-A",
+        "WELL-B",
+    ]
+    assert {str(success.name) for success in successes} == {
+        "WELL-A_PL",
+        "WELL-A",
+        "WELL-B",
+    }
+    assert {total for _index, total, _name in progress_events} == {3}
+
+
 def test_parent_selection_calculates_pilot_before_sidetrack() -> None:
     pilot = WelltrackRecord(
         name="WELL-04_PL",

@@ -324,6 +324,87 @@ def test_run_batch_stores_parallel_worker_count_for_anti_collision(
     assert state["wt_last_parallel_workers"] == 4
 
 
+def test_selected_pilot_dependency_detects_auto_injected_hidden_pilot() -> None:
+    parent = _records()[0]
+    pilot = WelltrackRecord(
+        name="WELL-A_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=80.0, y=0.0, z=800.0, md=800.0),
+        ),
+    )
+
+    assert (
+        ptc_batch_run._has_selected_pilot_dependencies(
+            records=[parent, pilot],
+            selected_names={"WELL-A"},
+        )
+        is True
+    )
+
+
+def test_run_batch_logs_partial_parallel_mode_for_pilot_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_parallel_workers: list[int] = []
+
+    class FakeBatchPlanner:
+        last_evaluation_metadata = SimpleNamespace(
+            skipped_selected_names=(),
+            cluster_blocked=False,
+            cluster_resolved_early=False,
+            cluster_blocking_reason=None,
+        )
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def evaluate(self, **kwargs: object):
+            captured_parallel_workers.append(int(kwargs["parallel_workers"]))
+            return (
+                [
+                    {"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""},
+                    {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+                ],
+                [],
+            )
+
+    parent, other = _records()
+    pilot = WelltrackRecord(
+        name="WELL-A_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=80.0, y=0.0, z=800.0, md=800.0),
+        ),
+    )
+    state: dict[str, object] = {
+        "wt_successes": [],
+        "wt_summary_rows": None,
+    }
+    fake_st = _FakeStreamlit(state)
+    monkeypatch.setattr(ptc_batch_run, "WelltrackBatchPlanner", FakeBatchPlanner)
+
+    ptc_batch_run.run_batch_if_clicked(
+        requests=[
+            ptc_batch_run.BatchRunRequest(
+                selected_names=["WELL-A", "WELL-B"],
+                config=TrajectoryConfig(),
+                run_clicked=True,
+                parallel_workers=4,
+            )
+        ],
+        records=[parent, pilot, other],
+        hooks=_batch_run_hooks(),
+        st_module=fake_st,
+    )
+
+    assert captured_parallel_workers == [4]
+    assert any(
+        "Параллельный расчёт частично" in str(line)
+        for line in state["wt_last_run_log_lines"]
+    )
+
+
 def test_run_batch_clears_stale_error_and_recommends_no_followup_after_all_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
