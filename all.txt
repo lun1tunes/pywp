@@ -3293,10 +3293,10 @@ def format_precheck_summary_ru(result: AnalyticalPreCheckResult) -> str:
     return "\n".join(lines)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	119198
+===BEGIN_FILE===	pywp/anticollision.py	119990
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from pickle import PicklingError
@@ -3333,6 +3333,7 @@ _MAX_OVERLAP_GEOMETRY_RINGS_PER_CORRIDOR = 8
 _MAX_LOCAL_REFINE_SEED_PAIRS_PER_WELL_PAIR = 4
 _SCAN_MAX_SAMPLES = 1_000_000
 _ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION = 240
+REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M = 500.0
 
 
 @dataclass(frozen=True)
@@ -3481,6 +3482,13 @@ class AntiCollisionProgress:
     prefiltered_pair_count: int = 0
     elapsed_s: float = 0.0
     parallel_workers: int = 0
+    stage: str = "pairs"
+    well_count: int = 0
+    completed_well_count: int = 0
+    reused_well_count: int = 0
+    rebuilt_well_count: int = 0
+    rebuild_well_count: int = 0
+    completed_rebuild_well_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -3839,9 +3847,9 @@ def analyze_anti_collision_incremental(
             continue
         recalculation_jobs.append(job)
 
-    def notify_recalculated_pair_done() -> None:
+    def notify_recalculated_pair_done(completed_delta: int = 1) -> None:
         nonlocal completed_pair_count
-        completed_pair_count += 1
+        completed_pair_count += int(max(completed_delta, 0))
         notify_progress()
 
     calculation_results = _calculate_pair_overlap_jobs(
@@ -3964,10 +3972,15 @@ def _calculate_pair_overlap_jobs(
     ordered_wells: tuple[AntiCollisionWell, ...],
     jobs: list[_AntiCollisionPairJob],
     parallel_workers: int,
-    progress_callback: Callable[[], None] | None,
+    progress_callback: Callable[[int], None] | None,
 ) -> list[_AntiCollisionPairCalculation]:
     if not jobs:
         return []
+
+    def notify_progress(completed_delta: int = 0) -> None:
+        if progress_callback is not None:
+            progress_callback(int(completed_delta))
+
     def calculate_serial(
         *,
         progress_limit: int | None = None,
@@ -3975,6 +3988,7 @@ def _calculate_pair_overlap_jobs(
         results: list[_AntiCollisionPairCalculation] = []
         progress_count = 0
         for job in jobs:
+            notify_progress(0)
             results.append(
                 _calculate_pair_overlap_job_serial(
                     ordered_wells=ordered_wells,
@@ -3985,7 +3999,7 @@ def _calculate_pair_overlap_jobs(
                 progress_callback is not None
                 and (progress_limit is None or progress_count < progress_limit)
             ):
-                progress_callback()
+                notify_progress(1)
                 progress_count += 1
         return results
 
@@ -4007,12 +4021,21 @@ def _calculate_pair_overlap_jobs(
                 executor.submit(_calculate_pair_overlap_job_parallel, job): job
                 for job in jobs
             }
-            for future in as_completed(futures):
-                result = future.result()
-                results_by_index[int(result.job_index)] = result
-                completed_parallel_count += 1
-                if progress_callback is not None:
-                    progress_callback()
+            pending = set(futures)
+            while pending:
+                done, pending = wait(
+                    pending,
+                    timeout=1.0,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    notify_progress(0)
+                    continue
+                for future in done:
+                    result = future.result()
+                    results_by_index[int(result.job_index)] = result
+                    completed_parallel_count += 1
+                    notify_progress(1)
     except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
         return calculate_serial(
             progress_limit=max(len(jobs) - completed_parallel_count, 0)
@@ -8756,11 +8779,17 @@ def _nullable_float(value: float | None) -> float | str:
     return float(value)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_rerun.py	54089
+===BEGIN_FILE===	pywp/anticollision_rerun.py	60483
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
+from pickle import PicklingError
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Callable, Mapping
+
+import numpy as np
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
@@ -8769,6 +8798,7 @@ from pywp.anticollision import (
     AntiCollisionProgress,
     AntiCollisionWell,
     DEFINITIVE_SCAN_STEP_M,
+    REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
     analyze_anti_collision,
     analyze_anti_collision_incremental,
     build_anti_collision_well,
@@ -8795,6 +8825,7 @@ from pywp.anticollision_rerun_models import (
     TrajectoryOverrideSpec,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
+from pywp.parallel import process_pool_context
 from pywp.pilot_wells import paired_pilot_parent_names, well_name_key
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -8825,6 +8856,63 @@ class DynamicClusterExecutionPlan:
     skipped_wells: tuple[str, ...]
     resolution_state: str = DYNAMIC_CLUSTER_PLAN_ACTIVE
     blocking_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _AntiCollisionWellBuildJob:
+    index: int
+    name: str
+    signature: str
+    color: str
+    stations: Any
+    surface: Any
+    t1: Any
+    t3: Any
+    target_pairs: tuple[Any, ...]
+    azimuth_deg: float
+    md_t1_m: float | None
+    md_t3_m: float | None
+    model: PlanningUncertaintyModel
+    include_display_geometry: bool
+    well_kind: str
+    is_reference_only: bool
+    analysis_sample_step_m: float | None
+
+
+@dataclass(frozen=True)
+class _AntiCollisionWellBuildResult:
+    index: int
+    name: str
+    signature: str
+    well: AntiCollisionWell
+
+
+def _build_anti_collision_well_job(
+    job: _AntiCollisionWellBuildJob,
+) -> _AntiCollisionWellBuildResult:
+    well = build_anti_collision_well(
+        name=str(job.name),
+        color=str(job.color),
+        stations=job.stations,
+        surface=job.surface,
+        t1=job.t1,
+        t3=job.t3,
+        target_pairs=tuple(job.target_pairs),
+        azimuth_deg=float(job.azimuth_deg),
+        md_t1_m=job.md_t1_m,
+        md_t3_m=job.md_t3_m,
+        model=job.model,
+        include_display_geometry=bool(job.include_display_geometry),
+        well_kind=str(job.well_kind),
+        is_reference_only=bool(job.is_reference_only),
+        analysis_sample_step_m=job.analysis_sample_step_m,
+    )
+    return _AntiCollisionWellBuildResult(
+        index=int(job.index),
+        name=str(job.name),
+        signature=str(job.signature),
+        well=well,
+    )
 
 
 def _reference_wells_by_collision_name(
@@ -8903,6 +8991,77 @@ def _should_score_anti_collision_pair(
     return True
 
 
+def _xy_bounds_from_stations(
+    stations: Any,
+) -> tuple[float, float, float, float] | None:
+    required_columns = {"X_m", "Y_m"}
+    columns_obj = getattr(stations, "columns", None)
+    columns = set(columns_obj) if columns_obj is not None else set()
+    if not required_columns.issubset(columns) or bool(
+        getattr(stations, "empty", True)
+    ):
+        return None
+    x_values = stations["X_m"].to_numpy(dtype=float)
+    y_values = stations["Y_m"].to_numpy(dtype=float)
+    if len(x_values) == 0 or len(y_values) == 0:
+        return None
+    finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if not finite_mask.any():
+        return None
+    x_values = x_values[finite_mask]
+    y_values = y_values[finite_mask]
+    return (
+        float(np.min(x_values)),
+        float(np.max(x_values)),
+        float(np.min(y_values)),
+        float(np.max(y_values)),
+    )
+
+
+def _xy_bounds_gap_m(
+    bounds_a: tuple[float, float, float, float],
+    bounds_b: tuple[float, float, float, float],
+) -> float:
+    min_x_a, max_x_a, min_y_a, max_y_a = bounds_a
+    min_x_b, max_x_b, min_y_b, max_y_b = bounds_b
+    dx = max(min_x_a - max_x_b, min_x_b - max_x_a, 0.0)
+    dy = max(min_y_a - max_y_b, min_y_b - max_y_a, 0.0)
+    return float(np.hypot(dx, dy))
+
+
+def reference_wells_in_anti_collision_scope(
+    successes: list[SuccessfulWellPlan],
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+    *,
+    scope_distance_m: float = REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
+) -> tuple[ImportedTrajectoryWell, ...]:
+    """Select reference wells close enough to planned wells for full AC cones."""
+
+    reference_tuple = tuple(reference_wells)
+    if not reference_tuple:
+        return ()
+    calculated_bounds = tuple(
+        bounds
+        for success in successes
+        for bounds in (_xy_bounds_from_stations(success.stations),)
+        if bounds is not None
+    )
+    if not calculated_bounds:
+        return reference_tuple
+    distance_m = float(max(scope_distance_m, 0.0))
+    scoped: list[ImportedTrajectoryWell] = []
+    for reference_well in reference_tuple:
+        reference_bounds = _xy_bounds_from_stations(reference_well.stations)
+        if reference_bounds is None:
+            continue
+        if any(
+            _xy_bounds_gap_m(reference_bounds, planned_bounds) <= distance_m
+            for planned_bounds in calculated_bounds
+        ):
+            scoped.append(reference_well)
+    return tuple(scoped)
+
+
 def build_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -8918,73 +9077,31 @@ def build_anti_collision_analysis_for_successes(
     progress_callback: Callable[[AntiCollisionProgress], None] | None = None,
     parallel_workers: int = 0,
 ) -> AntiCollisionAnalysis:
-    effective_sample_step_m = (
-        float(analysis_sample_step_m)
-        if analysis_sample_step_m is not None
-        else (
-            float(DEFINITIVE_SCAN_STEP_M)
-            if include_display_geometry and build_overlap_geometry
-            else None
-        )
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
     )
     planned_names = tuple(str(item.name) for item in successes)
-    duplicate_reference_name_keys = reference_well_duplicate_name_keys(reference_wells)
     excluded_pair_keys = _excluded_source_parent_pair_keys(
         successes=successes,
-        reference_wells=reference_wells,
+        reference_wells=scoped_reference_wells,
     )
-    wells = [
-        build_anti_collision_well(
-            name=item.name,
-            color=(name_to_color or {}).get(str(item.name), "#A0A0A0"),
-            stations=item.stations,
-            surface=item.surface,
-            t1=item.t1,
-            t3=item.t3,
-            target_pairs=tuple(getattr(item, "target_pairs", ()) or ()),
-            azimuth_deg=float(item.azimuth_deg),
-            md_t1_m=float(item.md_t1_m),
+    wells, _well_cache, _reused_wells, _rebuilt_wells = (
+        build_anti_collision_wells_for_successes(
+            successes,
             model=model,
-            include_display_geometry=include_display_geometry,
-            well_kind="project",
-            is_reference_only=False,
-            analysis_sample_step_m=effective_sample_step_m,
-        )
-        for item in successes
-    ]
-    for item in reference_wells:
-        collision_name = reference_well_collision_name(
-            item,
-            planned_names=planned_names,
-            duplicate_name_keys=duplicate_reference_name_keys,
-        )
-        reference_model = _reference_uncertainty_model(
-            reference_well=item,
-            collision_name=collision_name,
-            default_model=model,
+            name_to_color=name_to_color,
+            reference_wells=scoped_reference_wells,
             reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+            include_display_geometry=include_display_geometry,
+            build_overlap_geometry=build_overlap_geometry,
+            analysis_sample_step_m=analysis_sample_step_m,
+            well_signature_by_name={name: "" for name in planned_names},
+            previous_well_cache=None,
+            progress_callback=progress_callback,
+            parallel_workers=int(parallel_workers),
         )
-        wells.append(
-            build_anti_collision_well(
-                name=collision_name,
-                color=(name_to_color or {}).get(
-                    str(collision_name),
-                    REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
-                ),
-                stations=item.stations,
-                surface=item.surface,
-                t1=None,
-                t3=None,
-                azimuth_deg=float(item.azimuth_deg),
-                md_t1_m=None,
-                md_t3_m=None,
-                model=reference_model,
-                include_display_geometry=include_display_geometry,
-                well_kind=str(item.kind),
-                is_reference_only=True,
-                analysis_sample_step_m=effective_sample_step_m,
-            )
-        )
+    )
     return analyze_anti_collision(
         wells,
         build_overlap_geometry=build_overlap_geometry,
@@ -9023,23 +9140,29 @@ def build_incremental_anti_collision_analysis_for_successes(
     dict[tuple[str, str], AntiCollisionPairCacheEntry],
     AntiCollisionIncrementalStats,
 ]:
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
+    )
     wells, well_cache, reused_wells, rebuilt_wells = (
         build_anti_collision_wells_for_successes(
             successes,
             model=model,
             name_to_color=name_to_color,
-            reference_wells=reference_wells,
+            reference_wells=scoped_reference_wells,
             reference_uncertainty_models_by_name=(reference_uncertainty_models_by_name),
             include_display_geometry=include_display_geometry,
             build_overlap_geometry=build_overlap_geometry,
             analysis_sample_step_m=analysis_sample_step_m,
             well_signature_by_name=well_signature_by_name,
             previous_well_cache=previous_well_cache,
+            progress_callback=progress_callback,
+            parallel_workers=int(parallel_workers),
         )
     )
     excluded_pair_keys = _excluded_source_parent_pair_keys(
         successes=successes,
-        reference_wells=reference_wells,
+        reference_wells=scoped_reference_wells,
     )
     analysis, pair_cache, stats = analyze_anti_collision_incremental(
         wells,
@@ -9073,6 +9196,8 @@ def build_anti_collision_wells_for_successes(
     analysis_sample_step_m: float | None = None,
     well_signature_by_name: Mapping[str, str] | None = None,
     previous_well_cache: Mapping[str, tuple[str, AntiCollisionWell]] | None = None,
+    progress_callback: Callable[[AntiCollisionProgress], None] | None = None,
+    parallel_workers: int = 0,
 ) -> tuple[
     tuple[AntiCollisionWell, ...],
     dict[str, tuple[str, AntiCollisionWell]],
@@ -9093,64 +9218,105 @@ def build_anti_collision_wells_for_successes(
         for name, signature in (well_signature_by_name or {}).items()
     }
     previous_cache = dict(previous_well_cache or {})
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
+    )
     planned_names = tuple(str(item.name) for item in successes)
-    duplicate_reference_name_keys = reference_well_duplicate_name_keys(reference_wells)
-    wells: list[AntiCollisionWell] = []
+    duplicate_reference_name_keys = reference_well_duplicate_name_keys(
+        scoped_reference_wells
+    )
     next_cache: dict[str, tuple[str, AntiCollisionWell]] = {}
     reused_count = 0
     rebuilt_count = 0
+    total_well_count = int(len(successes) + len(scoped_reference_wells))
+    completed_well_count = 0
+    started_at = perf_counter()
+    wells_by_index: list[AntiCollisionWell | None] = [None] * total_well_count
+    build_jobs: list[_AntiCollisionWellBuildJob] = []
 
-    def _reuse_or_build(
-        *,
-        name: str,
-        builder: Callable[[], AntiCollisionWell],
-    ) -> AntiCollisionWell:
-        nonlocal reused_count, rebuilt_count
-        signature = signatures.get(str(name), "")
-        previous = previous_cache.get(str(name))
+    def _active_cone_workers() -> int:
+        requested = int(max(parallel_workers, 0))
+        if requested <= 1 or len(build_jobs) <= 1:
+            return 0
+        return int(min(requested, len(build_jobs)))
+
+    def _notify_cone_progress() -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=0,
+                completed_pair_count=0,
+                elapsed_s=float(perf_counter() - started_at),
+                parallel_workers=_active_cone_workers(),
+                stage="wells",
+                well_count=int(total_well_count),
+                completed_well_count=int(completed_well_count),
+                reused_well_count=int(reused_count),
+                rebuilt_well_count=int(rebuilt_count),
+                rebuild_well_count=int(len(build_jobs)),
+                completed_rebuild_well_count=int(rebuilt_count),
+            )
+        )
+
+    def _reuse_or_schedule(job: _AntiCollisionWellBuildJob) -> None:
+        nonlocal completed_well_count, reused_count
+        previous = previous_cache.get(str(job.name))
         if (
             previous is not None
             and len(previous) == 2
-            and str(previous[0]) == signature
+            and str(previous[0]) == str(job.signature)
             and isinstance(previous[1], AntiCollisionWell)
         ):
             reused_count += 1
             well = previous[1]
+            wells_by_index[int(job.index)] = well
+            next_cache[str(job.name)] = (str(job.signature), well)
+            completed_well_count += 1
         else:
-            rebuilt_count += 1
-            well = builder()
-        next_cache[str(name)] = (signature, well)
-        return well
+            build_jobs.append(job)
 
-    for item in successes:
+    def _store_built_result(result: _AntiCollisionWellBuildResult) -> None:
+        nonlocal completed_well_count, rebuilt_count
+        wells_by_index[int(result.index)] = result.well
+        next_cache[str(result.name)] = (str(result.signature), result.well)
+        rebuilt_count += 1
+        completed_well_count += 1
+        _notify_cone_progress()
+
+    for index, item in enumerate(successes):
         name = str(item.name)
-        wells.append(
-            _reuse_or_build(
-                name=name,
-                builder=lambda item=item, name=name: build_anti_collision_well(
-                    name=name,
-                    color=(name_to_color or {}).get(name, "#A0A0A0"),
-                    stations=item.stations,
-                    surface=item.surface,
-                    t1=item.t1,
-                    t3=item.t3,
-                    target_pairs=tuple(getattr(item, "target_pairs", ()) or ()),
-                    azimuth_deg=float(item.azimuth_deg),
-                    md_t1_m=float(item.md_t1_m),
-                    model=model,
-                    include_display_geometry=include_display_geometry,
-                    well_kind="project",
-                    is_reference_only=False,
-                    analysis_sample_step_m=effective_sample_step_m,
-                ),
-            )
+        job = _AntiCollisionWellBuildJob(
+            index=int(index),
+            name=name,
+            signature=signatures.get(name, ""),
+            color=(name_to_color or {}).get(name, "#A0A0A0"),
+            stations=item.stations,
+            surface=item.surface,
+            t1=item.t1,
+            t3=item.t3,
+            target_pairs=tuple(getattr(item, "target_pairs", ()) or ()),
+            azimuth_deg=float(item.azimuth_deg),
+            md_t1_m=float(item.md_t1_m),
+            md_t3_m=None,
+            model=model,
+            include_display_geometry=bool(include_display_geometry),
+            well_kind="project",
+            is_reference_only=False,
+            analysis_sample_step_m=effective_sample_step_m,
         )
+        _reuse_or_schedule(job)
 
-    for item in reference_wells:
-        collision_name = reference_well_collision_name(
-            item,
-            planned_names=planned_names,
-            duplicate_name_keys=duplicate_reference_name_keys,
+    next_index = len(successes)
+    for reference_offset, item in enumerate(scoped_reference_wells):
+        index = int(next_index + reference_offset)
+        collision_name = str(
+            reference_well_collision_name(
+                item,
+                planned_names=planned_names,
+                duplicate_name_keys=duplicate_reference_name_keys,
+            )
         )
         reference_model = _reference_uncertainty_model(
             reference_well=item,
@@ -9158,39 +9324,85 @@ def build_anti_collision_wells_for_successes(
             default_model=model,
             reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
         )
-        wells.append(
-            _reuse_or_build(
-                name=str(collision_name),
-                builder=(
-                    lambda item=item, collision_name=str(
-                        collision_name
-                    ), reference_model=reference_model: build_anti_collision_well(
-                        name=collision_name,
-                        color=(name_to_color or {}).get(
-                            collision_name,
-                            REFERENCE_WELL_KIND_COLORS.get(
-                                str(item.kind),
-                                "#A0A0A0",
-                            ),
-                        ),
-                        stations=item.stations,
-                        surface=item.surface,
-                        t1=None,
-                        t3=None,
-                        azimuth_deg=float(item.azimuth_deg),
-                        md_t1_m=None,
-                        md_t3_m=None,
-                        model=reference_model,
-                        include_display_geometry=include_display_geometry,
-                        well_kind=str(item.kind),
-                        is_reference_only=True,
-                        analysis_sample_step_m=effective_sample_step_m,
-                    )
-                ),
-            )
+        job = _AntiCollisionWellBuildJob(
+            index=index,
+            name=collision_name,
+            signature=signatures.get(collision_name, ""),
+            color=(name_to_color or {}).get(
+                collision_name,
+                REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
+            ),
+            stations=item.stations,
+            surface=item.surface,
+            t1=None,
+            t3=None,
+            target_pairs=(),
+            azimuth_deg=float(item.azimuth_deg),
+            md_t1_m=None,
+            md_t3_m=None,
+            model=reference_model,
+            include_display_geometry=bool(include_display_geometry),
+            well_kind=str(item.kind),
+            is_reference_only=True,
+            analysis_sample_step_m=effective_sample_step_m,
         )
+        _reuse_or_schedule(job)
 
-    return tuple(wells), next_cache, int(reused_count), int(rebuilt_count)
+    _notify_cone_progress()
+
+    def _build_serial(jobs: list[_AntiCollisionWellBuildJob]) -> None:
+        for job in jobs:
+            _store_built_result(_build_anti_collision_well_job(job))
+
+    workers = min(int(max(parallel_workers, 0)), len(build_jobs))
+    if workers <= 1 or len(build_jobs) <= 1:
+        _build_serial(build_jobs)
+    else:
+        completed_parallel_indices: set[int] = set()
+        try:
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=process_pool_context(allow_stdin_fork=True),
+            ) as executor:
+                futures = {}
+                for job in build_jobs:
+                    futures[executor.submit(_build_anti_collision_well_job, job)] = job
+                pending = set(futures)
+                while pending:
+                    done, pending = wait(
+                        pending,
+                        timeout=1.0,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    if not done:
+                        _notify_cone_progress()
+                        continue
+                    for future in done:
+                        result = future.result()
+                        completed_parallel_indices.add(int(result.index))
+                        _store_built_result(result)
+        except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
+            remaining_jobs = [
+                job
+                for job in build_jobs
+                if int(job.index) not in completed_parallel_indices
+            ]
+            _build_serial(remaining_jobs)
+
+    missing_indices = [
+        index for index, well in enumerate(wells_by_index) if well is None
+    ]
+    if missing_indices:
+        raise RuntimeError(
+            "Anti-collision well build did not produce results for indices "
+            + ", ".join(str(index) for index in missing_indices)
+        )
+    return (
+        tuple(well for well in wells_by_index if well is not None),
+        next_cache,
+        int(reused_count),
+        int(rebuilt_count),
+    )
 
 
 def _reference_uncertainty_model(
@@ -13339,7 +13551,7 @@ def add_dls(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/models.py	10648
+===BEGIN_FILE===	pywp/models.py	11864
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -13351,6 +13563,16 @@ from pydantic import Field, model_validator
 from pywp.constants import SMALL
 from pywp.planner_types import PlanningError
 from pywp.pydantic_base import FrozenArbitraryModel, FrozenModel
+
+J_PROFILE_POLICY_OFF = "off"
+J_PROFILE_POLICY_PROPOSE = "propose"
+J_PROFILE_POLICY_PREFER = "prefer"
+ALLOWED_J_PROFILE_POLICIES = (
+    J_PROFILE_POLICY_OFF,
+    J_PROFILE_POLICY_PROPOSE,
+    J_PROFILE_POLICY_PREFER,
+)
+JProfilePolicy = Literal["off", "propose", "prefer"]
 
 OPTIMIZATION_NONE = "none"
 OPTIMIZATION_MINIMIZE_MD = "minimize_md"
@@ -13397,6 +13619,11 @@ __all__ = [
     "ALLOWED_INTERPOLATION_METHODS",
     "InterpolationMethod",
     "DEFAULT_BUILD_DLS_MAX_DEG_PER_30M",
+    "J_PROFILE_POLICY_OFF",
+    "J_PROFILE_POLICY_PROPOSE",
+    "J_PROFILE_POLICY_PREFER",
+    "ALLOWED_J_PROFILE_POLICIES",
+    "JProfilePolicy",
     # Classes
     "Point3D",
     "TrajectoryConfig",
@@ -13427,6 +13654,12 @@ NonNegativeFiniteScalar = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 EntryIncTargetScalar = Annotated[float, Field(gt=0.0, lt=90.0, allow_inf_nan=False)]
 MaxIncScalar = Annotated[float, Field(gt=0.0, le=120.0, allow_inf_nan=False)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
+
+
+def _coerce_legacy_bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 def build_segment_dls_limits_deg_per_30m(
@@ -13487,6 +13720,8 @@ class TrajectoryConfig(FrozenModel):
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_max_restarts: NonNegativeInt = 1
     interpolation_method: InterpolationMethod = INTERPOLATION_RODRIGUES
+    j_profile_policy: JProfilePolicy = J_PROFILE_POLICY_OFF
+    # Legacy compatibility: True maps to j_profile_policy="propose".
     offer_j_profile: bool = False
     # Minimum MD span for BUILD/HOLD/BUILD sections. 30 m aligns with the common DLS reference interval (deg/30m).
     min_structural_segment_m: PositiveFiniteScalar = 30.0
@@ -13497,6 +13732,17 @@ class TrajectoryConfig(FrozenModel):
         if not isinstance(value, Mapping):
             return value
         payload = dict(value)
+        raw_policy = payload.get("j_profile_policy")
+        if raw_policy is None:
+            payload["j_profile_policy"] = (
+                J_PROFILE_POLICY_PROPOSE
+                if _coerce_legacy_bool(payload.get("offer_j_profile", False))
+                else J_PROFILE_POLICY_OFF
+            )
+        else:
+            policy = str(raw_policy).strip().lower()
+            payload["j_profile_policy"] = policy
+            payload["offer_j_profile"] = policy != J_PROFILE_POLICY_OFF
         legacy_dls_limits = payload.pop("dls_limits_deg_per_30m", None)
         if legacy_dls_limits is not None:
             try:
@@ -13610,7 +13856,7 @@ class PlannerResult(FrozenArbitraryModel):
     md_t1_m: float
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/multi_horizontal.py	24655
+===BEGIN_FILE===	pywp/multi_horizontal.py	25475
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13942,15 +14188,23 @@ def _smooth_transition_rows(
             md_span = float(candidate["MD_m"].iloc[-1] - candidate["MD_m"].iloc[0])
             if md_span > max(float(gap) * MAX_TRANSITION_MD_MULTIPLIER, float(gap) + 500.0):
                 continue
-            max_dls = _max_finite(candidate["DLS_deg_per_30m"].to_numpy(dtype=float))
+            dls_values = candidate["DLS_deg_per_30m"].to_numpy(dtype=float)
+            finite_dls = _finite_values(dls_values)
+            max_dls = float(np.max(finite_dls)) if len(finite_dls) else 0.0
+            p90_dls = float(np.quantile(finite_dls, 0.90)) if len(finite_dls) else 0.0
+            mean_dls = float(np.mean(finite_dls)) if len(finite_dls) else 0.0
             max_inc = _max_finite(candidate["INC_deg"].to_numpy(dtype=float))
             dls_excess = max(0.0, max_dls - dls_limit)
             inc_excess = max(0.0, max_inc - float(config.max_inc_deg))
+            dls_peak_headroom = max(0.0, dls_limit - max_dls)
+            dls_work_headroom = max(0.0, dls_limit - p90_dls)
             score = float(
-                1000.0 * dls_excess
-                + 1000.0 * inc_excess
-                + max_dls
-                + 0.001 * md_span
+                1_000_000.0 * dls_excess
+                + 1_000_000.0 * inc_excess
+                + 2.0 * dls_work_headroom
+                + 0.25 * dls_peak_headroom
+                - 0.05 * mean_dls
+                + 0.0001 * md_span
             )
             if score < best_score:
                 best = candidate
@@ -13982,9 +14236,23 @@ def _smooth_transition_rows(
 
 
 def _candidate_control_lengths(*, gap_m: float, min_control_m: float) -> tuple[float, ...]:
+    gap = float(gap_m)
     values = {
         float(min_control_m),
-        *(float(gap_m) * scale for scale in (0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50)),
+        *(
+            gap * scale
+            for scale in (
+                0.08,
+                0.16,
+                0.25,
+                0.30,
+                0.35,
+                0.55,
+                0.70,
+                0.85,
+                1.20,
+            )
+        ),
     }
     return tuple(sorted(value for value in values if value > SMALL))
 
@@ -14074,9 +14342,13 @@ def _stations_from_xyz_path(
 
 
 def _max_finite(values: np.ndarray) -> float:
-    finite = np.asarray(values, dtype=float)
-    finite = finite[np.isfinite(finite)]
+    finite = _finite_values(values)
     return float(np.max(finite)) if len(finite) else 0.0
+
+
+def _finite_values(values: np.ndarray) -> np.ndarray:
+    finite = np.asarray(values, dtype=float)
+    return finite[np.isfinite(finite)]
 
 
 def _linear_hold_rows(
@@ -14337,7 +14609,7 @@ def _transition_problem_text(transition: MultiHorizontalTransition) -> str:
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/pad_optimization.py	31899
+===BEGIN_FILE===	pywp/pad_optimization.py	41413
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
@@ -14392,6 +14664,15 @@ _MAX_ITERATIONS = 8
 # Maximum number of distinct worst-zone pairs to try per iteration when the
 # top-1 worst zone cannot be improved.
 _MAX_WORST_ZONES_PER_ITERATION = 3
+
+# Keep pad-order optimization interactive.  A candidate is expensive: it
+# recalculates two trajectories and rescoring anti-collision pairs can still
+# take several seconds even with cache.  The bounded search below aims for a
+# useful local improvement in about two minutes for one pad.
+_MAX_CANDIDATE_EVALUATIONS = 24
+_MAX_CANDIDATES_PER_ITERATION = 12
+_MAX_CANDIDATES_PER_ZONE = 8
+_MAX_RUNTIME_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -14612,6 +14893,120 @@ def _score_text(score: _PadOptimizationScore) -> str:
         f"SF min {float(score.worst_sf):.3f}, "
         f"SF mean {float(score.mean_sf):.3f}"
     )
+
+
+def _format_eta(seconds: float | None) -> str:
+    if seconds is None or not np.isfinite(float(seconds)) or float(seconds) < 1.0:
+        return "оценка уточняется"
+    total_seconds = int(round(float(seconds)))
+    minutes, sec = divmod(total_seconds, 60)
+    if minutes <= 0:
+        return f"~{sec} с"
+    return f"~{minutes} мин {sec:02d} с"
+
+
+def _surface_xyz_by_name(
+    records: list[WelltrackRecord],
+) -> dict[str, tuple[float, float, float]]:
+    surfaces: dict[str, tuple[float, float, float]] = {}
+    for record in records:
+        if not record.points:
+            continue
+        point = record.points[0]
+        surfaces[str(record.name)] = (
+            float(point.x),
+            float(point.y),
+            float(point.z),
+        )
+    return surfaces
+
+
+def _surface_distance(
+    surfaces: Mapping[str, tuple[float, float, float]],
+    left: str,
+    right: str,
+) -> float:
+    left_point = surfaces.get(str(left))
+    right_point = surfaces.get(str(right))
+    if left_point is None or right_point is None:
+        return float("inf")
+    return float(
+        np.linalg.norm(
+            np.asarray(left_point, dtype=float) - np.asarray(right_point, dtype=float)
+        )
+    )
+
+
+def _hot_well_rank_by_name(actionable_zones: list) -> dict[str, tuple[int, float, int]]:
+    ranks: dict[str, list[float]] = {}
+    target_counts: dict[str, int] = {}
+    for zone in actionable_zones:
+        sf = float(getattr(zone, "separation_factor", float("inf")))
+        is_target = int(getattr(zone, "priority_rank", 2)) < 2
+        for name in (str(zone.well_a), str(zone.well_b)):
+            ranks.setdefault(name, []).append(sf)
+            if is_target:
+                target_counts[name] = target_counts.get(name, 0) + 1
+    return {
+        name: (
+            -int(target_counts.get(name, 0)),
+            float(min(values)) if values else float("inf"),
+            -int(len(values)),
+        )
+        for name, values in ranks.items()
+    }
+
+
+def _candidate_swaps_for_zone(
+    *,
+    zone: object,
+    actionable_zones: list,
+    movable_names: set[str],
+    surfaces: Mapping[str, tuple[float, float, float]],
+    last_accepted_pair: tuple[str, str] | None,
+    remaining_budget: int,
+) -> list[tuple[str, str]]:
+    """Build a small, high-value swap list for the current worst zone."""
+    if remaining_budget <= 0:
+        return []
+    wa, wb = str(zone.well_a), str(zone.well_b)
+    active_names = [name for name in (wa, wb) if name in movable_names]
+    if not active_names:
+        return []
+
+    hot_rank = _hot_well_rank_by_name(actionable_zones)
+    candidates: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_candidate(left: str, right: str) -> None:
+        if left == right:
+            return
+        if left not in movable_names or right not in movable_names:
+            return
+        key = tuple(sorted((str(left), str(right))))
+        if key == last_accepted_pair or key in seen:
+            return
+        seen.add(key)
+        candidates.append((str(left), str(right)))
+
+    if wa in movable_names and wb in movable_names:
+        add_candidate(wa, wb)
+
+    for active_name in active_names:
+        ranked_others = sorted(
+            (name for name in movable_names if name != active_name),
+            key=lambda name: (
+                hot_rank.get(str(name), (0, float("inf"), 0)),
+                _surface_distance(surfaces, active_name, str(name)),
+                str(name),
+            ),
+        )
+        for other in ranked_others:
+            add_candidate(active_name, other)
+            if len(candidates) >= min(_MAX_CANDIDATES_PER_ZONE, remaining_budget):
+                return candidates
+
+    return candidates[: min(_MAX_CANDIDATES_PER_ZONE, remaining_budget)]
 
 
 # ---------------------------------------------------------------------------
@@ -15071,11 +15466,22 @@ def optimize_pad_order(
     best_successes = dict(success_dict)
     improved = False
     last_accepted_pair: tuple[str, str] | None = None
+    optimization_started = perf_counter()
+    evaluated_candidate_count = 0
+    accepted_swap_count = 0
+    stopped_by_budget = False
+    surfaces_by_name = _surface_xyz_by_name(best_records)
 
     progress_callback(0, f"Начальный score: {_score_text(best_score)}.")
 
     try:
         for iteration in range(1, _MAX_ITERATIONS + 1):
+            if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
+                stopped_by_budget = True
+                break
+            if perf_counter() - optimization_started >= _MAX_RUNTIME_S:
+                stopped_by_budget = True
+                break
             actionable = _actionable_pad_zones(
                 analysis,
                 pad_names,
@@ -15089,33 +15495,51 @@ def optimize_pad_order(
             # Try up to _MAX_WORST_ZONES_PER_ITERATION distinct worst-zone pairs.
             swap_accepted = False
             seen_pairs_this_iter: set[tuple[str, str]] = set()
+            tested_candidates_this_iter = 0
 
             for zone in actionable[:_MAX_WORST_ZONES_PER_ITERATION]:
+                if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
+                    stopped_by_budget = True
+                    break
+                if perf_counter() - optimization_started >= _MAX_RUNTIME_S:
+                    stopped_by_budget = True
+                    break
+                if tested_candidates_this_iter >= _MAX_CANDIDATES_PER_ITERATION:
+                    break
                 wa, wb = str(zone.well_a), str(zone.well_b)
                 pair_key = tuple(sorted((wa, wb)))
                 if pair_key in seen_pairs_this_iter:
                     continue
                 seen_pairs_this_iter.add(pair_key)
 
+                zone_progress_percent = min(
+                    94,
+                    4
+                    + int(
+                        90
+                        * evaluated_candidate_count
+                        / max(_MAX_CANDIDATE_EVALUATIONS, 1)
+                    ),
+                )
                 progress_callback(
-                    int(iteration * 100 / _MAX_ITERATIONS),
+                    zone_progress_percent,
                     f"Итерация {iteration}: анализ {wa} ↔ {wb} (SF={float(zone.separation_factor):.3f})...",
                 )
 
-                # Generate all distinct swaps involving non-fixed wells from the
-                # worst pair. Fixed wells keep their surface slot unchanged.
-                active_names = [
-                    name for name in (wa, wb) if name in movable_names
-                ]
-                swap_candidates: list[tuple[str, str]] = []
-                seen_candidate_keys: set[tuple[str, str]] = set()
-                for active_name in active_names:
-                    for other in sorted(movable_names - {active_name}):
-                        candidate_key = tuple(sorted((active_name, other)))
-                        if candidate_key in seen_candidate_keys:
-                            continue
-                        seen_candidate_keys.add(candidate_key)
-                        swap_candidates.append((active_name, other))
+                remaining_global_budget = (
+                    _MAX_CANDIDATE_EVALUATIONS - evaluated_candidate_count
+                )
+                remaining_iter_budget = (
+                    _MAX_CANDIDATES_PER_ITERATION - tested_candidates_this_iter
+                )
+                swap_candidates = _candidate_swaps_for_zone(
+                    zone=zone,
+                    actionable_zones=actionable,
+                    movable_names=movable_names,
+                    surfaces=surfaces_by_name,
+                    last_accepted_pair=last_accepted_pair,
+                    remaining_budget=min(remaining_global_budget, remaining_iter_budget),
+                )
 
                 best_candidate = None
                 best_candidate_score = best_score
@@ -15126,23 +15550,70 @@ def optimize_pad_order(
                     dict[tuple[str, str], AntiCollisionPairCacheEntry] | None
                 ) = None
                 best_candidate_analysis: AntiCollisionAnalysis | None = None
+                best_candidate_pair_key: tuple[str, str] | None = None
 
                 for name_1, name_2 in swap_candidates:
+                    if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
+                        stopped_by_budget = True
+                        break
+                    elapsed_before = perf_counter() - optimization_started
+                    if elapsed_before >= _MAX_RUNTIME_S:
+                        stopped_by_budget = True
+                        break
                     candidate_pair_key = tuple(sorted((str(name_1), str(name_2))))
                     if candidate_pair_key == last_accepted_pair:
                         continue
+                    evaluated_candidate_count += 1
+                    tested_candidates_this_iter += 1
+                    avg_candidate_s = elapsed_before / max(evaluated_candidate_count - 1, 1)
+                    remaining_candidates = (
+                        _MAX_CANDIDATE_EVALUATIONS - evaluated_candidate_count + 1
+                    )
+                    eta_text = _format_eta(avg_candidate_s * remaining_candidates)
+                    progress_percent = min(
+                        94,
+                        4
+                        + int(
+                            90
+                            * evaluated_candidate_count
+                            / max(_MAX_CANDIDATE_EVALUATIONS, 1)
+                        ),
+                    )
+                    progress_callback(
+                        progress_percent,
+                        (
+                            f"Кандидат {evaluated_candidate_count}/"
+                            f"{_MAX_CANDIDATE_EVALUATIONS}: перестановка "
+                            f"{name_1} ↔ {name_2}. ETA {eta_text}. "
+                            f"Лучший score: {_score_text(best_score)}."
+                        ),
+                    )
                     result = _swap_surfaces_and_recalculate(
                         best_records, best_successes, name_1, name_2, config_by_name,
                         pool=pool,
                     )
                     if result is None:
+                        progress_callback(
+                            progress_percent,
+                            (
+                                f"Кандидат {evaluated_candidate_count}: "
+                                f"{name_1} ↔ {name_2} пропущен — траектория "
+                                "после перестановки не построилась."
+                            ),
+                        )
                         continue
 
                     cand_records, cand_successes = result
 
                     # Incremental AC well update: only rebuild the 2 changed wells.
-                    ac_well_1 = _build_ac_well_light(cand_successes[name_1], uncertainty_model)
-                    ac_well_2 = _build_ac_well_light(cand_successes[name_2], uncertainty_model)
+                    ac_well_1 = _build_ac_well_light(
+                        cand_successes[name_1],
+                        uncertainty_model,
+                    )
+                    ac_well_2 = _build_ac_well_light(
+                        cand_successes[name_2],
+                        uncertainty_model,
+                    )
                     cand_ac_wells = dict(ac_well_cache)
                     cand_ac_wells[name_1] = ac_well_1
                     cand_ac_wells[name_2] = ac_well_2
@@ -15158,7 +15629,7 @@ def optimize_pad_order(
                         uncertainty_model,
                     )
 
-                    cand_analysis, cand_pair_cache, _ = (
+                    cand_analysis, cand_pair_cache, cand_stats = (
                         _analyze_incremental_from_ac_wells(
                             cand_ac_wells,
                             ref_ac_wells,
@@ -15176,6 +15647,16 @@ def optimize_pad_order(
                         cand_analysis,
                         pad_names,
                         fixed_well_names=fixed_names,
+                    )
+                    progress_callback(
+                        progress_percent,
+                        (
+                            f"Кандидат {evaluated_candidate_count}: "
+                            f"{name_1} ↔ {name_2} оценен. "
+                            f"{_score_text(cand_score)}; кэш пар "
+                            f"{int(getattr(cand_stats, 'reused_pair_count', 0))} reused / "
+                            f"{int(getattr(cand_stats, 'recalculated_pair_count', 0))} recalculated."
+                        ),
                     )
 
                     if _score_is_improvement(cand_score, best_candidate_score):
@@ -15195,25 +15676,64 @@ def optimize_pad_order(
                     best_records, best_successes = best_candidate
                     best_score = best_candidate_score
                     best_score_value = best_candidate_score_value
-                    current_signatures = dict(best_candidate_signatures or current_signatures)
-                    current_pair_cache = dict(best_candidate_pair_cache or current_pair_cache)
+                    current_signatures = dict(
+                        best_candidate_signatures or current_signatures
+                    )
+                    current_pair_cache = dict(
+                        best_candidate_pair_cache or current_pair_cache
+                    )
                     analysis = best_candidate_analysis or analysis
                     # Update the AC well cache with the accepted swap.
-                    ac_well_cache.update(best_candidate_ac_updates)
+                    if best_candidate_ac_updates is not None:
+                        ac_well_cache.update(best_candidate_ac_updates)
                     last_accepted_pair = best_candidate_pair_key
+                    surfaces_by_name = _surface_xyz_by_name(best_records)
                     swap_accepted = True
                     improved = True
+                    accepted_swap_count += 1
+                    progress_callback(
+                        min(
+                            96,
+                            4
+                            + int(
+                                90
+                                * evaluated_candidate_count
+                                / max(_MAX_CANDIDATE_EVALUATIONS, 1)
+                            ),
+                        ),
+                        (
+                            f"Принята перестановка {last_accepted_pair[0]} ↔ "
+                            f"{last_accepted_pair[1]}. Новый score: "
+                            f"{_score_text(best_score)}."
+                        ),
+                    )
                     break  # restart from updated state
 
+            if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
+                stopped_by_budget = True
+                break
+            if perf_counter() - optimization_started >= _MAX_RUNTIME_S:
+                stopped_by_budget = True
+                break
             if not swap_accepted:
                 break
     finally:
         if pool is not None:
             pool.shutdown(wait=True)
 
+    elapsed_total = perf_counter() - optimization_started
+    budget_text = (
+        " Остановлено по лимиту времени/кандидатов."
+        if stopped_by_budget
+        else ""
+    )
     progress_callback(
         100,
-        f"Готово! Лучший score: {_score_text(best_score)} ({best_score_value:.3f}).",
+        (
+            f"Готово за {elapsed_total:.1f} с: принято {accepted_swap_count}, "
+            f"проверено {evaluated_candidate_count} кандидатов. Лучший score: "
+            f"{_score_text(best_score)} ({best_score_value:.3f}).{budget_text}"
+        ),
     )
     return best_records, best_successes, improved
 
@@ -16425,7 +16945,7 @@ def _first_valid_azimuth_deg(stations: pd.DataFrame) -> float:
     return float((math.degrees(math.atan2(dx[index], dy[index])) + 360.0) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner.py	185340
+===BEGIN_FILE===	pywp/planner.py	186232
 from __future__ import annotations
 
 from dataclasses import replace
@@ -16449,6 +16969,9 @@ from pywp.mcm import (
 )
 from pywp.models import (
     ALLOWED_TURN_SOLVER_MODES,
+    J_PROFILE_POLICY_OFF,
+    J_PROFILE_POLICY_PREFER,
+    J_PROFILE_POLICY_PROPOSE,
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
@@ -16536,6 +17059,31 @@ DEEP_LOW_ANGLE_TURN_MAX_CANDIDATES = 8
 J_PROFILE_MD_COMPETITION_FACTOR = 1.005
 J_PROFILE_MD_COMPETITION_SLACK_M = 25.0
 J_PROFILE_COMPETITIVE_AZIMUTH_DELTA_MAX_DEG = 8.0
+
+
+def _j_profile_policy(config: TrajectoryConfig) -> str:
+    policy = str(getattr(config, "j_profile_policy", "") or "").strip().lower()
+    if policy:
+        return policy
+    return (
+        J_PROFILE_POLICY_PROPOSE
+        if bool(getattr(config, "offer_j_profile", False))
+        else J_PROFILE_POLICY_OFF
+    )
+
+
+def _j_profile_enabled(config: TrajectoryConfig) -> bool:
+    return _j_profile_policy(config) != J_PROFILE_POLICY_OFF
+
+
+def _j_profile_preferred_before_optimization(config: TrajectoryConfig) -> bool:
+    policy = _j_profile_policy(config)
+    return policy == J_PROFILE_POLICY_PREFER or (
+        policy == J_PROFILE_POLICY_PROPOSE
+        and str(config.optimization_mode) == OPTIMIZATION_NONE
+    )
+
+
 VARIABLE_J_MAX_STARTS = 10
 VARIABLE_J_MAX_NFEV = 100
 VARIABLE_J_TARGET_MISS_WEIGHT = 10.0
@@ -17475,10 +18023,7 @@ def _solve_turn_profile(
         dtype=float,
     )
     j_candidates_cache: list[ProfileParameters] | None = None
-    if (
-        bool(getattr(config, "offer_j_profile", False))
-        and str(config.optimization_mode) == OPTIMIZATION_NONE
-    ):
+    if _j_profile_preferred_before_optimization(config):
         _emit_progress(
             progress_callback,
             "Солвер: сначала проверяем classic J-профиль как простую модель.",
@@ -17492,7 +18037,7 @@ def _solve_turn_profile(
             build_dls_upper_deg_per_30m=build_dls_upper,
             target_point=target_point,
         )
-        if j_candidates_cache and str(config.optimization_mode) == OPTIMIZATION_NONE:
+        if j_candidates_cache:
             selected = j_candidates_cache[0]
             if not _candidate_within_md_postcheck(candidate=selected, config=config):
                 _emit_progress(
@@ -17747,8 +18292,12 @@ def _solve_turn_profile(
             0.60 + 0.36 * float(index / max(total_starts, 1)),
         )
 
-    if bool(getattr(config, "offer_j_profile", False)) and (
-        not candidates or str(config.optimization_mode) == OPTIMIZATION_NONE
+    j_profile_policy = _j_profile_policy(config)
+    j_profile_preferred = j_profile_policy == J_PROFILE_POLICY_PREFER
+    if _j_profile_enabled(config) and (
+        not candidates
+        or str(config.optimization_mode) == OPTIMIZATION_NONE
+        or j_profile_preferred
     ):
         if j_candidates_cache is None:
             j_candidates = _collect_classic_j_candidates(
@@ -17798,24 +18347,24 @@ def _solve_turn_profile(
                 config=config,
             ):
                 continue
-            if candidates and zero_azimuth_turn:
-                continue
-            if (
-                candidates
-                and abs(
-                    _shortest_azimuth_delta_deg(
-                        float(geometry.azimuth_surface_t1_deg),
-                        float(geometry.azimuth_entry_deg),
+            if candidates and not j_profile_preferred:
+                if zero_azimuth_turn:
+                    continue
+                if (
+                    abs(
+                        _shortest_azimuth_delta_deg(
+                            float(geometry.azimuth_surface_t1_deg),
+                            float(geometry.azimuth_entry_deg),
+                        )
                     )
-                )
-                > J_PROFILE_COMPETITIVE_AZIMUTH_DELTA_MAX_DEG
-            ):
-                continue
-            if not _j_profile_can_compete(
-                j_candidate=j_candidate,
-                regular_best_md_m=regular_best_md,
-            ):
-                continue
+                    > J_PROFILE_COMPETITIVE_AZIMUTH_DELTA_MAX_DEG
+                ):
+                    continue
+                if not _j_profile_can_compete(
+                    j_candidate=j_candidate,
+                    regular_best_md_m=regular_best_md,
+                ):
+                    continue
             _emit_progress(
                 progress_callback,
                 "Солвер: принят classic J-кандидат.",
@@ -21531,12 +22080,15 @@ def _clip_to_bounds(
     return clipped
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner_config.py	3255
+===BEGIN_FILE===	pywp/planner_config.py	3634
 from __future__ import annotations
 
 from pywp.models import (
     INTERPOLATION_RODRIGUES,
     INTERPOLATION_SLERP,
+    J_PROFILE_POLICY_OFF,
+    J_PROFILE_POLICY_PREFER,
+    J_PROFILE_POLICY_PROPOSE,
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
@@ -21567,6 +22119,12 @@ TURN_SOLVER_OPTIONS = {
 INTERPOLATION_METHOD_OPTIONS = {
     INTERPOLATION_RODRIGUES: "Rodrigues (рекомендуется)",
     INTERPOLATION_SLERP: "SLERP (классический)",
+}
+
+J_PROFILE_POLICY_OPTIONS = {
+    J_PROFILE_POLICY_OFF: "Не использовать J-профиль",
+    J_PROFILE_POLICY_PROPOSE: "Предлагать J-профиль",
+    J_PROFILE_POLICY_PREFER: "Предпочитать J-профиль",
 }
 
 
@@ -21611,6 +22169,7 @@ def build_trajectory_config(
     turn_solver_max_restarts: int,
     max_total_md_postcheck_m: float = 6500.0,
     interpolation_method: str = INTERPOLATION_RODRIGUES,
+    j_profile_policy: str = J_PROFILE_POLICY_OFF,
     offer_j_profile: bool = False,
 ) -> TrajectoryConfig:
     max_build = float(max(dls_build_max_deg_per_30m, 0.0))
@@ -21630,6 +22189,7 @@ def build_trajectory_config(
         turn_solver_max_restarts=int(turn_solver_max_restarts),
         max_total_md_postcheck_m=float(max_total_md_postcheck_m),
         interpolation_method=str(interpolation_method),
+        j_profile_policy=str(j_profile_policy),
         offer_j_profile=bool(offer_j_profile),
     )
 
@@ -21973,7 +22533,7 @@ def _scaled_progress_callback(
     return wrapped
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner_validation.py	24392
+===BEGIN_FILE===	pywp/planner_validation.py	24469
 from __future__ import annotations
 
 import numpy as np
@@ -22466,6 +23026,7 @@ def _build_summary(
             else 0
         ),
         "optimization_mode": str(optimization_outcome.mode),
+        "j_profile_policy": str(getattr(config, "j_profile_policy", "off")),
         "optimization_status": str(optimization_outcome.status),
         "optimization_objective_value_m": float(optimization_outcome.objective_value),
         "optimization_theoretical_lower_bound_m": float(
@@ -25032,7 +25593,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	217173
+===BEGIN_FILE===	pywp/ptc_core.py	224940
 from __future__ import annotations
 
 import colorsys
@@ -25079,6 +25640,7 @@ from pywp.anticollision import (
     AntiCollisionPairCacheEntry,
     AntiCollisionProgress,
     AntiCollisionWell,
+    REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
     collision_corridor_plan_polygon,
 )
 from pywp.anticollision_optimization import (
@@ -25115,6 +25677,9 @@ from pywp.anticollision_rerun import (
 from pywp.anticollision_rerun import (
     recommendation_intervals_for_moving_well as recommendation_intervals_for_moving_well_shared,
 )
+from pywp.anticollision_rerun import (
+    reference_wells_in_anti_collision_scope,
+)
 from pywp.constants import SMALL
 from pywp.coordinate_integration import (
     DEFAULT_CRS,
@@ -25127,6 +25692,7 @@ from pywp.eclipse_welltrack import (
     WelltrackParseError,
     WelltrackRecord,
     parse_welltrack_text,
+    welltrack_multi_horizontal_level_count,
     welltrack_points_to_target_pairs,
 )
 from pywp.models import Point3D
@@ -25249,7 +25815,7 @@ WT_3D_FAST_CALC_WELL_THRESHOLD = 14
 WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
 WT_3D_FAST_CALC_TARGET_POINTS = 180
 WT_3D_FAST_REFERENCE_CONE_WELL_LIMIT = 6
-WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M = 500.0
+WT_3D_REFERENCE_CONE_FOCUS_DISTANCE_M = REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M
 WT_THREE_MAX_HOVER_POINTS_PER_TRACE = (
     ptc_three_payload.WT_THREE_MAX_HOVER_POINTS_PER_TRACE
 )
@@ -26083,6 +26649,8 @@ def _all_wells_anticollision_three_payload(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    target_only_wells: list[_TargetOnlyWell] | None = None,
+    name_to_color: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
@@ -26100,6 +26668,8 @@ def _all_wells_anticollision_three_payload(
     return ptc_three_builders.anticollision_three_payload(
         analysis,
         previous_successes_by_name=previous_successes_by_name,
+        target_only_wells=target_only_wells,
+        name_to_color=name_to_color,
         pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
         render_mode=resolved_render_mode,
@@ -26538,63 +27108,172 @@ def _cached_anti_collision_view_model(
         if progress_callback is not None:
             progress_callback(int(progress_value), message)
 
-    last_pair_progress_update_s = 0.0
-    last_pair_progress_percent = -1
+    last_progress_update_s_by_stage: dict[str, float] = {}
+    last_progress_percent_by_stage: dict[str, int] = {}
 
-    def _emit_pair_progress(progress: AntiCollisionProgress) -> None:
-        nonlocal last_pair_progress_update_s, last_pair_progress_percent
+    def _remaining_progress_text(
+        *,
+        elapsed_s: float,
+        completed: int,
+        total: int,
+        parallel_workers: int = 1,
+    ) -> str:
+        if completed <= 0:
+            return "оценка времени..."
+        if completed >= total:
+            return "завершение"
+        workers = max(int(parallel_workers), 1)
+        remaining = max(int(total) - int(completed), 0)
+        if workers > 1 and completed < workers:
+            eta_s = (float(elapsed_s) / max(float(completed), 1.0)) * (
+                float(remaining) / float(workers)
+            )
+        else:
+            eta_s = (
+                float(elapsed_s)
+                / max(float(completed), 1.0)
+                * float(remaining)
+            )
+        return "осталось оц. " + _format_duration_ru(eta_s)
+
+    def _stage_progress_should_emit(
+        *,
+        stage: str,
+        percent: int,
+        completed: int,
+        total: int,
+    ) -> bool:
+        now = perf_counter()
+        last_percent = int(last_progress_percent_by_stage.get(stage, -1))
+        last_update_s = float(last_progress_update_s_by_stage.get(stage, 0.0))
+        if (
+            completed < total
+            and percent == last_percent
+            and now - last_update_s < 0.75
+        ):
+            return False
+        last_progress_percent_by_stage[stage] = int(percent)
+        last_progress_update_s_by_stage[stage] = float(now)
+        return True
+
+    def _emit_anti_collision_progress(progress: AntiCollisionProgress) -> None:
+        stage = str(getattr(progress, "stage", "pairs") or "pairs")
+        if stage == "wells":
+            total = int(getattr(progress, "well_count", 0) or 0)
+            completed = int(getattr(progress, "completed_well_count", 0) or 0)
+            if total <= 0:
+                return
+            fraction = min(max(float(completed) / max(float(total), 1.0), 0.0), 1.0)
+            percent = int(round(12.0 + 18.0 * fraction))
+            if not _stage_progress_should_emit(
+                stage=stage,
+                percent=percent,
+                completed=completed,
+                total=total,
+            ):
+                return
+            rebuild_total = int(getattr(progress, "rebuild_well_count", 0) or 0)
+            rebuild_completed = int(
+                getattr(
+                    progress,
+                    "completed_rebuild_well_count",
+                    getattr(progress, "rebuilt_well_count", 0),
+                )
+                or 0
+            )
+            eta_completed = completed
+            eta_total = total
+            if rebuild_total > 0:
+                eta_completed = rebuild_completed
+                eta_total = rebuild_total
+            eta_text = _remaining_progress_text(
+                elapsed_s=float(max(progress.elapsed_s, 0.0)),
+                completed=eta_completed,
+                total=eta_total,
+                parallel_workers=int(getattr(progress, "parallel_workers", 0) or 0),
+            )
+            workers = int(getattr(progress, "parallel_workers", 0) or 0)
+            worker_text = f" · {workers} процессов" if workers > 1 else ""
+            built_text = (
+                f"{rebuild_completed}/{rebuild_total}"
+                if rebuild_total > 0
+                else str(int(progress.rebuilt_well_count))
+            )
+            progress_text = (
+                "Anti-collision: конусы неопределённости "
+                f"{completed}/{total} · {eta_text}{worker_text} · "
+                f"кэш скважин {int(progress.reused_well_count)} · "
+                f"построено {built_text}"
+            )
+            if progress_callback is not None:
+                progress_callback(percent, progress_text)
+            return
+
         total = int(progress.pair_count)
         completed = int(progress.completed_pair_count)
         if total <= 0:
             return
         fraction = min(max(float(completed) / max(float(total), 1.0), 0.0), 1.0)
         percent = int(round(30.0 + 36.0 * fraction))
-        now = perf_counter()
-        if (
-            completed < total
-            and percent == last_pair_progress_percent
-            and now - last_pair_progress_update_s < 0.75
+        if not _stage_progress_should_emit(
+            stage=stage,
+            percent=percent,
+            completed=completed,
+            total=total,
         ):
             return
-        last_pair_progress_percent = percent
-        last_pair_progress_update_s = now
         elapsed_s = float(max(progress.elapsed_s, 0.0))
-        eta_s = (
-            (elapsed_s / max(float(completed), 1.0)) * float(total - completed)
-            if completed > 0 and completed < total
-            else 0.0
-        )
-        if completed <= 0:
-            eta_text = "оценка времени..."
-        elif completed < total and eta_s > 0.0:
-            eta_text = "осталось оц. " + _format_duration_ru(eta_s)
-        else:
-            eta_text = "завершение"
         workers = int(progress.parallel_workers)
+        eta_text = _remaining_progress_text(
+            elapsed_s=elapsed_s,
+            completed=completed,
+            total=total,
+            parallel_workers=workers,
+        )
         worker_text = f" · {workers} процессов" if workers > 1 else ""
         progress_text = (
             f"Anti-collision: пары {completed}/{total} · {eta_text}"
             f"{worker_text} · кэш {int(progress.reused_pair_count)} · "
-            f"prefilter {int(progress.prefiltered_pair_count)}"
+            f"prefilter {int(progress.prefiltered_pair_count)} · "
+            f"пересчёт {int(progress.recalculated_pair_count)}"
         )
         if progress_callback is not None:
             progress_callback(percent, progress_text)
 
     color_map = _well_color_map(records) if records else {}
     _emit(8, "Подготовка входных данных anti-collision.")
+    all_reference_wells = tuple(reference_wells)
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        all_reference_wells,
+    )
+    skipped_reference_count = max(
+        len(all_reference_wells) - len(scoped_reference_wells),
+        0,
+    )
+    if skipped_reference_count:
+        _emit(
+            10,
+            (
+                "Anti-collision scope: "
+                f"{len(scoped_reference_wells)}/{len(all_reference_wells)} "
+                "фактических/утверждённых скважин рядом с расчётными; "
+                f"{skipped_reference_count} дальних скважин пропущено."
+            ),
+        )
     planned_color_map = _planned_anti_collision_color_map(successes, color_map)
     well_signature_by_name = _anti_collision_well_signatures(
         successes=successes,
         model=uncertainty_model,
         name_to_color=planned_color_map,
-        reference_wells=reference_wells,
+        reference_wells=scoped_reference_wells,
         reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
     )
     cache_key = _anti_collision_cache_key(
         successes=successes,
         model=uncertainty_model,
         name_to_color=planned_color_map,
-        reference_wells=reference_wells,
+        reference_wells=scoped_reference_wells,
         reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
     )
     cache = dict(st.session_state.get("wt_anticollision_analysis_cache") or {})
@@ -26623,10 +27302,12 @@ def _cached_anti_collision_view_model(
                     cache.get("last_recalculated_pair_count") or 0
                 ),
                 "parallel_workers": int(cache.get("last_parallel_workers") or 0),
+                "scoped_reference_count": int(len(scoped_reference_wells)),
+                "skipped_reference_count": int(skipped_reference_count),
             }
             return analysis, recommendations, clusters
     try:
-        _emit(30, "Расчёт anti-collision модели.")
+        _emit(12, "Подготовка конусов неопределённости anti-collision.")
         previous_well_cache = cache.get("well_cache")
         previous_pair_cache = cache.get("pair_cache")
         if not isinstance(previous_well_cache, Mapping):
@@ -26638,14 +27319,14 @@ def _cached_anti_collision_view_model(
                 successes,
                 model=uncertainty_model,
                 name_to_color=planned_color_map,
-                reference_wells=reference_wells,
+                reference_wells=scoped_reference_wells,
                 reference_uncertainty_models_by_name=(
                     reference_uncertainty_models_by_name
                 ),
                 well_signature_by_name=well_signature_by_name,
                 previous_well_cache=previous_well_cache,
                 previous_pair_cache=previous_pair_cache,
-                progress_callback=_emit_pair_progress,
+                progress_callback=_emit_anti_collision_progress,
                 parallel_workers=int(parallel_workers),
             )
         )
@@ -26703,6 +27384,8 @@ def _cached_anti_collision_view_model(
         "last_reused_pair_count": int(incremental_stats.reused_pair_count),
         "last_recalculated_pair_count": int(incremental_stats.recalculated_pair_count),
         "last_parallel_workers": int(parallel_workers),
+        "last_scoped_reference_count": int(len(scoped_reference_wells)),
+        "last_skipped_reference_count": int(skipped_reference_count),
     }
     _emit(100, "Расчёт Anti-collision завершён.")
     st.session_state["wt_anticollision_last_run"] = {
@@ -26718,6 +27401,8 @@ def _cached_anti_collision_view_model(
         "reused_pair_count": int(incremental_stats.reused_pair_count),
         "recalculated_pair_count": int(incremental_stats.recalculated_pair_count),
         "parallel_workers": int(parallel_workers),
+        "scoped_reference_count": int(len(scoped_reference_wells)),
+        "skipped_reference_count": int(skipped_reference_count),
     }
     return analysis, recommendations, clusters
 
@@ -27500,6 +28185,8 @@ def _all_wells_anticollision_plan_figure(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    target_only_wells: list[_TargetOnlyWell] | None = None,
+    name_to_color: Mapping[str, str] | None = None,
     focus_well_names: tuple[str, ...] = (),
     height: int = 620,
 ) -> go.Figure:
@@ -27510,6 +28197,7 @@ def _all_wells_anticollision_plan_figure(
     y_focus_arrays: list[np.ndarray] = []
     focus_set = {str(name) for name in focus_well_names if str(name).strip()}
     well_lookup = {str(well.name): well for well in analysis.wells}
+    target_color_map = dict(name_to_color or {})
 
     for well in analysis.wells:
         well_label = (
@@ -27722,6 +28410,64 @@ def _all_wells_anticollision_plan_figure(
     pad_label_trace = _reference_pad_label_trace_2d(analysis_reference_wells)
     if pad_label_trace is not None:
         fig.add_trace(pad_label_trace)
+
+    for target_only in target_only_wells or ():
+        line_color = target_color_map.get(str(target_only.name), "#6B7280")
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        if not target_points:
+            target_points = (target_only.surface, target_only.t1, target_only.t3)
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        if len(target_labels) != len(target_points):
+            target_labels = _target_only_fallback_labels(
+                point_count=len(target_points),
+                target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            )
+        marker_x = np.array([point.x for point in target_points], dtype=float)
+        marker_y = np.array([point.y for point in target_points], dtype=float)
+        x_arrays.append(marker_x)
+        y_arrays.append(marker_y)
+        if not focus_set or str(target_only.name) in focus_set:
+            x_focus_arrays.append(marker_x)
+            y_focus_arrays.append(marker_y)
+        customdata = np.array(
+            [
+                [label, target_only.status, target_only.problem or "—"]
+                for label in target_labels
+            ],
+            dtype=object,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=marker_x,
+                y=marker_y,
+                mode="markers",
+                name=f"{target_only.name}: цели (без траектории)",
+                marker={
+                    "size": 12,
+                    "symbol": "x",
+                    "color": line_color,
+                    "line": {"width": 3, "color": line_color},
+                },
+                customdata=customdata,
+                hovertemplate=(
+                    "Точка: %{customdata[0]}<br>"
+                    "Статус: %{customdata[1]}<br>"
+                    "Проблема: %{customdata[2]}<br>"
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+        label_point = target_points[min(1, len(target_points) - 1)]
+        fig.add_trace(
+            _t1_name_trace_2d(
+                well_name=str(target_only.name),
+                x_value=float(label_point.x),
+                y_value=float(label_point.y),
+                color=line_color,
+            )
+        )
 
     x_values = (
         (np.concatenate(x_focus_arrays) if x_focus_arrays else np.concatenate(x_arrays))
@@ -28961,11 +29707,20 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     pilot_count = int(sum(is_pilot_name(record.name) for record in records))
     zbs_records = [record for record in records if is_zbs_name(record.name)]
     zbs_count = int(len(zbs_records))
-    x1, x2, x3, x4 = st.columns(4, gap="small")
+    multi_horizontal_count = int(
+        sum(
+            not is_pilot_name(record.name)
+            and not is_zbs_name(record.name)
+            and welltrack_multi_horizontal_level_count(tuple(record.points)) > 1
+            for record in records
+        )
+    )
+    x1, x2, x3, x4, x5 = st.columns(5, gap="small")
     x1.metric("Скважин", f"{well_count}")
     x2.metric("Пилотов", f"{pilot_count}")
     x3.metric("Боковых стволов", f"{zbs_count}")
-    x4.metric("Проблем", f"{problem_count}")
+    x4.metric("Многопластовых скважин", f"{multi_horizontal_count}")
+    x5.metric("Проблем", f"{problem_count}")
     if zbs_records:
         parent_names = sorted(
             {
@@ -32552,7 +33307,7 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_results.py	30865
+===BEGIN_FILE===	pywp/ptc_page_results.py	38594
 from __future__ import annotations
 
 import pandas as pd
@@ -32561,7 +33316,11 @@ import streamlit as st
 from pywp import ptc_core as wt
 from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state as reference_state
-from pywp.anticollision import AntiCollisionAnalysis, anti_collision_report_rows
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    AntiCollisionWellSegment,
+    anti_collision_report_rows,
+)
 from pywp.coordinate_integration import (
     csv_export_crs,
     get_crs_display_suffix,
@@ -33037,6 +33796,206 @@ def _cached_anticollision_snapshot() -> tuple[
     )
 
 
+def _filter_cached_anticollision_snapshot_for_pending_edits(
+    *,
+    analysis: AntiCollisionAnalysis,
+    recommendations: tuple[object, ...],
+    clusters: tuple[object, ...],
+    pending_edit_names: list[str],
+) -> tuple[AntiCollisionAnalysis, tuple[object, ...], tuple[object, ...]]:
+    edited_names = {
+        str(name).strip() for name in pending_edit_names if str(name).strip()
+    }
+    if not edited_names:
+        return analysis, recommendations, clusters
+    filtered_wells = tuple(
+        well
+        for well in analysis.wells
+        if str(getattr(well, "name", "")).strip() not in edited_names
+    )
+    filtered_corridors = tuple(
+        corridor
+        for corridor in analysis.corridors
+        if not {
+            str(getattr(corridor, "well_a", "")).strip(),
+            str(getattr(corridor, "well_b", "")).strip(),
+        }.intersection(edited_names)
+    )
+    filtered_zones = tuple(
+        zone
+        for zone in analysis.zones
+        if not {
+            str(getattr(zone, "well_a", "")).strip(),
+            str(getattr(zone, "well_b", "")).strip(),
+        }.intersection(edited_names)
+    )
+    filtered_segments = _cached_snapshot_segments_from_corridors(
+        corridors=filtered_corridors,
+        wells=filtered_wells,
+    )
+    pair_keys = {
+        tuple(
+            sorted(
+                (
+                    str(getattr(corridor, "well_a", "")).strip(),
+                    str(getattr(corridor, "well_b", "")).strip(),
+                )
+            )
+        )
+        for corridor in filtered_corridors
+    }
+    target_pair_keys = {
+        tuple(
+            sorted(
+                (
+                    str(getattr(corridor, "well_a", "")).strip(),
+                    str(getattr(corridor, "well_b", "")).strip(),
+                )
+            )
+        )
+        for corridor in filtered_corridors
+        if int(getattr(corridor, "priority_rank", 99)) < 2
+    }
+    worst_sf_values = [
+        float(getattr(zone, "separation_factor"))
+        for zone in filtered_zones
+        if getattr(zone, "separation_factor", None) is not None
+    ]
+    filtered_analysis = AntiCollisionAnalysis(
+        wells=filtered_wells,
+        corridors=filtered_corridors,
+        well_segments=filtered_segments,
+        zones=filtered_zones,
+        pair_count=_cached_snapshot_pair_count(filtered_wells),
+        overlapping_pair_count=int(len(pair_keys)),
+        target_overlap_pair_count=int(len(target_pair_keys)),
+        worst_separation_factor=(
+            min(worst_sf_values) if worst_sf_values else None
+        ),
+    )
+    filtered_recommendations = tuple(
+        recommendation
+        for recommendation in recommendations
+        if not _recommendation_touches_names(recommendation, edited_names)
+    )
+    filtered_clusters = tuple(
+        cluster
+        for cluster in clusters
+        if not _cluster_touches_names(cluster, edited_names)
+    )
+    return filtered_analysis, filtered_recommendations, filtered_clusters
+
+
+def _cached_snapshot_pair_count(wells: tuple[object, ...]) -> int:
+    return max(len(wells) * (len(wells) - 1) // 2, 0)
+
+
+def _cached_snapshot_segments_from_corridors(
+    *,
+    corridors: tuple[object, ...],
+    wells: tuple[object, ...],
+) -> tuple[AntiCollisionWellSegment, ...]:
+    if not corridors:
+        return ()
+    step_tolerance_m = _cached_snapshot_segment_step_tolerance_m(wells)
+    raw_segments: list[AntiCollisionWellSegment] = []
+    for corridor in corridors:
+        raw_segments.append(
+            AntiCollisionWellSegment(
+                well_name=str(getattr(corridor, "well_a")),
+                md_start_m=float(getattr(corridor, "md_a_start_m")),
+                md_end_m=float(getattr(corridor, "md_a_end_m")),
+                classification=str(getattr(corridor, "classification", "")),
+                priority_rank=int(getattr(corridor, "priority_rank", 99)),
+            )
+        )
+        raw_segments.append(
+            AntiCollisionWellSegment(
+                well_name=str(getattr(corridor, "well_b")),
+                md_start_m=float(getattr(corridor, "md_b_start_m")),
+                md_end_m=float(getattr(corridor, "md_b_end_m")),
+                classification=str(getattr(corridor, "classification", "")),
+                priority_rank=int(getattr(corridor, "priority_rank", 99)),
+            )
+        )
+    merged: list[AntiCollisionWellSegment] = []
+    for well_name in sorted({segment.well_name for segment in raw_segments}):
+        well_segments = sorted(
+            [segment for segment in raw_segments if segment.well_name == well_name],
+            key=lambda segment: (float(segment.md_start_m), float(segment.md_end_m)),
+        )
+        current = well_segments[0]
+        for segment in well_segments[1:]:
+            if float(segment.md_start_m) <= float(current.md_end_m) + step_tolerance_m:
+                current = AntiCollisionWellSegment(
+                    well_name=current.well_name,
+                    md_start_m=float(current.md_start_m),
+                    md_end_m=max(float(current.md_end_m), float(segment.md_end_m)),
+                    classification=(
+                        current.classification
+                        if int(current.priority_rank) <= int(segment.priority_rank)
+                        else segment.classification
+                    ),
+                    priority_rank=min(
+                        int(current.priority_rank), int(segment.priority_rank)
+                    ),
+                )
+                continue
+            merged.append(current)
+            current = segment
+        merged.append(current)
+    return tuple(merged)
+
+
+def _cached_snapshot_segment_step_tolerance_m(wells: tuple[object, ...]) -> float:
+    step_values: list[float] = []
+    for well in wells:
+        samples = tuple(getattr(well, "samples", ()) or ())
+        md_values = [
+            float(getattr(sample, "md_m"))
+            for sample in samples
+            if getattr(sample, "md_m", None) is not None
+        ]
+        if len(md_values) < 2:
+            continue
+        md_values = sorted(set(md_values))
+        diffs = [
+            right - left
+            for left, right in zip(md_values, md_values[1:], strict=False)
+            if right > left
+        ]
+        if diffs:
+            step_values.append(min(diffs))
+    return float(max(step_values, default=100.0) * 1.05)
+
+
+def _recommendation_touches_names(
+    recommendation: object,
+    edited_names: set[str],
+) -> bool:
+    names = {
+        str(getattr(recommendation, "well_a", "")).strip(),
+        str(getattr(recommendation, "well_b", "")).strip(),
+        *(
+            str(name).strip()
+            for name in tuple(getattr(recommendation, "affected_wells", ()) or ())
+        ),
+    }
+    return bool(names.intersection(edited_names))
+
+
+def _cluster_touches_names(cluster: object, edited_names: set[str]) -> bool:
+    names = {
+        str(name).strip()
+        for name in tuple(getattr(cluster, "well_names", ()) or ())
+    }
+    names.update(
+        str(name).strip()
+        for name in tuple(getattr(cluster, "affected_wells", ()) or ())
+    )
+    return bool(names.intersection(edited_names))
+
+
 def _render_cached_anticollision_snapshot_for_pending_edits(
     *,
     successes: list[object],
@@ -33048,10 +34007,19 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
     if snapshot is None:
         return False
     analysis, recommendations, clusters = snapshot
+    analysis, recommendations, clusters = (
+        _filter_cached_anticollision_snapshot_for_pending_edits(
+            analysis=analysis,
+            recommendations=recommendations,
+            clusters=clusters,
+            pending_edit_names=wt._pending_edit_target_names(),
+        )
+    )
     st.caption(
         "Ниже показан последний anti-collision снимок до пересчёта: "
-        "старые конусы, пересечения и фактический/утверждённый фонд остаются "
-        "на экране как ориентир для дальнейшей правки целей."
+        "старые конусы и пересечения скрыты для изменённых скважин, а "
+        "фактический/утверждённый фонд и неизменённые скважины остаются "
+        "на экране как ориентир."
     )
 
     visible_focus_names = tuple(focus_pad_well_names)
@@ -33072,6 +34040,8 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
     anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
         analysis,
         previous_successes_by_name={},
+        target_only_wells=target_only_wells,
+        name_to_color=name_to_color,
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=focus_anticollision_well_names or visible_focus_names,
         render_mode=wt.WT_3D_RENDER_DETAIL,
@@ -33092,6 +34062,8 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         wt._all_wells_anticollision_plan_figure(
             analysis,
             previous_successes_by_name={},
+            target_only_wells=target_only_wells,
+            name_to_color=name_to_color,
             focus_well_names=focus_anticollision_well_names or visible_focus_names,
         ),
         width="stretch",
@@ -33413,7 +34385,7 @@ def render_success_tabs(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_run.py	13954
+===BEGIN_FILE===	pywp/ptc_page_run.py	13950
 from __future__ import annotations
 
 import math
@@ -33536,7 +34508,7 @@ def render_run_section(*, records: list[object]) -> None:
 
         _parallel_options = [
             ("Без Multiprocessing", 0),
-            *((f"{n} процессов", n) for n in (2, 4, 6, 8, 12)),
+            *((f"{n} процессов", n) for n in (2, 4, 6, 8)),
         ]
         _parallel_labels = [label for label, _ in _parallel_options]
         _parallel_values = {label: value for label, value in _parallel_options}
@@ -34921,7 +35893,7 @@ def _value_is_finite(value: object) -> bool:
         return False
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_builders.py	68016
+===BEGIN_FILE===	pywp/ptc_three_builders.py	70106
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
@@ -34931,7 +35903,10 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from pywp.anticollision import AntiCollisionAnalysis
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
+)
 from pywp.constants import SMALL
 from pywp.models import Point3D
 from pywp.pilot_wells import is_pilot_name
@@ -35417,6 +36392,8 @@ def anticollision_three_payload(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    target_only_wells: list[object] | None = None,
+    name_to_color: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
@@ -35429,6 +36406,7 @@ def anticollision_three_payload(
     y_focus_arrays: list[np.ndarray] = []
     z_focus_arrays: list[np.ndarray] = []
     focus_set = _clean_name_set(focus_well_names)
+    color_map = dict(name_to_color or {})
     pilot_points_map = dict(pilot_study_points_by_name or {})
     reference_wells = tuple(well for well in analysis.wells if bool(well.is_reference_only))
     focus_reference_names = (
@@ -35585,6 +36563,53 @@ def anticollision_three_payload(
                     color=str(well.color),
                 )
             payload["labels"].append(_well_name_label(well_name, well.t3, str(well.color)))
+
+    for target_only in target_only_wells or ():
+        well_name = str(getattr(target_only, "name"))
+        color = color_map.get(well_name, "#6B7280")
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        target_focus_arrays = (
+            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
+            if _include_target_only_in_focus(
+                well_name=well_name,
+                focus_set=focus_set,
+                target_points=target_points,
+                target_labels=target_labels,
+            )
+            else None
+        )
+        _append_target_markers(
+            payload,
+            name=f"{well_name}: цели (без траектории)",
+            surface=getattr(target_only, "surface"),
+            t1=getattr(target_only, "t1"),
+            t3=getattr(target_only, "t3"),
+            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            target_points=target_points,
+            target_labels=target_labels,
+            color=color,
+            size=10.0,
+            symbol="cross",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+            focus_arrays=target_focus_arrays,
+            hover_extra={
+                "status": str(getattr(target_only, "status", "") or ""),
+                "problem": str(getattr(target_only, "problem", "") or ""),
+            },
+        )
+        payload["labels"].append(
+            _well_name_label(well_name, getattr(target_only, "t3"), color)
+        )
+        _append_unique_legend_item(
+            payload,
+            label=f"{well_name}: цели (без траектории)",
+            color=color,
+            opacity=1.0,
+            symbol="point",
+        )
 
     if aggregated_reference_wells:
         _append_combined_reference_wells(
@@ -36741,7 +37766,11 @@ def _anticollision_reference_cone_focus_names(
         reference_bounds = _xy_bounds_from_stations(well.stations)
         if reference_bounds is None:
             continue
-        if any(_xy_bounds_gap_m(reference_bounds, item) <= 500.0 for item in calculated_bounds):
+        if any(
+            _xy_bounds_gap_m(reference_bounds, item)
+            <= REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M
+            for item in calculated_bounds
+        ):
             focus_names.add(str(well.name))
     return focus_names
 
@@ -40688,7 +41717,7 @@ def render_local_three_scene(
 </html>
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/fast_replan.js	19030
+===BEGIN_FILE===	pywp/three_viewer_assets/fast_replan.js	19528
 /**
  * fast_replan.js — Client-side analytical trajectory recalculation.
  *
@@ -40722,7 +41751,7 @@ def render_local_three_scene(
  *
  *   // On drag tick:
  *   const pts = replan.compute([t1x, t1y, t1z], [t3x, t3y, t3z]);
- *   updateLineGeometry(trajectoryLine, pts);
+ *   updateLineGeometry(trajectoryLine, pts, -1.0, sceneOrigin);
  *
  * The preview is intentionally lightweight: when Python sends the
  * already solved survey stations, the client warps that baseline path
@@ -41197,16 +42226,28 @@ function fastReplanPoints(surface, t1, t3, config) {
 // ---------------------------------------------------------------------------
 // Geometry update helper: replace a THREE.LineSegments buffer in-place.
 // ---------------------------------------------------------------------------
-function updateLineGeometry(lineObject, points, zDisplaySign) {
+function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin) {
   const sign = zDisplaySign || -1.0;
+  const origin = displayOrigin || {};
+  const originX = Number.isFinite(Number(origin.x)) ? Number(origin.x) : 0.0;
+  const originY = Number.isFinite(Number(origin.y)) ? Number(origin.y) : 0.0;
+  const originZ = Number.isFinite(Number(origin.z)) ? Number(origin.z) : 0.0;
   if (!lineObject || !lineObject.geometry || points.length < 2) return;
 
   const positions = [];
   for (let i = 1; i < points.length; i++) {
     const prev = points[i - 1];
     const curr = points[i];
-    positions.push(prev[0], prev[1], prev[2] * sign);
-    positions.push(curr[0], curr[1], curr[2] * sign);
+    positions.push(
+      Number(prev[0] || 0) - originX,
+      Number(prev[1] || 0) - originY,
+      (Number(prev[2] || 0) - originZ) * sign,
+    );
+    positions.push(
+      Number(curr[0] || 0) - originX,
+      Number(curr[1] || 0) - originY,
+      (Number(curr[2] || 0) - originZ) * sign,
+    );
   }
 
   const attr = lineObject.geometry.getAttribute("position");
@@ -41270,7 +42311,7 @@ class FastReplan {
 // window.updateLineGeometry = updateLineGeometry;
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	221112
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	222637
 <!doctype html>
 <html lang="en">
   <head>
@@ -41303,6 +42344,12 @@ class FastReplan {
         height: 100%;
         overflow: hidden;
         background: #ffffff;
+      }
+
+      #root canvas {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
       }
 
       #toolbar-left,
@@ -42763,19 +43810,48 @@ class FastReplan {
           startAnimationLoop();
         }
 
+        function dataNumber(value, fallback) {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : Number(fallback || 0);
+        }
+
+        function rawBoundsCenter(rawBounds) {
+          const rawMin = Array.isArray(rawBounds && rawBounds.min)
+            ? rawBounds.min
+            : [0, 0, 0];
+          const rawMax = Array.isArray(rawBounds && rawBounds.max)
+            ? rawBounds.max
+            : [1000, 1000, 1000];
+          return {
+            x: (dataNumber(rawMin[0], 0) + dataNumber(rawMax[0], 0)) * 0.5,
+            y: (dataNumber(rawMin[1], 0) + dataNumber(rawMax[1], 0)) * 0.5,
+            z: (dataNumber(rawMin[2], 0) + dataNumber(rawMax[2], 0)) * 0.5,
+          };
+        }
+
+        const sceneOrigin = rawBoundsCenter(payload.bounds || {});
+
         function displayPoint(value) {
           return new THREE.Vector3(
-            Number(value[0] || 0),
-            Number(value[1] || 0),
-            Number(value[2] || 0) * Z_DISPLAY_SIGN,
+            dataNumber(value && value[0], 0) - sceneOrigin.x,
+            dataNumber(value && value[1], 0) - sceneOrigin.y,
+            (dataNumber(value && value[2], 0) - sceneOrigin.z) * Z_DISPLAY_SIGN,
           );
         }
 
         function displayXYZ(xValue, yValue, zValue) {
           return [
-            Number(xValue || 0),
-            Number(yValue || 0),
-            Number(zValue || 0) * Z_DISPLAY_SIGN,
+            dataNumber(xValue, 0) - sceneOrigin.x,
+            dataNumber(yValue, 0) - sceneOrigin.y,
+            (dataNumber(zValue, 0) - sceneOrigin.z) * Z_DISPLAY_SIGN,
+          ];
+        }
+
+        function dataPointFromDisplay(displayPosition) {
+          return [
+            dataNumber(displayPosition && displayPosition.x, 0) + sceneOrigin.x,
+            dataNumber(displayPosition && displayPosition.y, 0) + sceneOrigin.y,
+            dataNumber(displayPosition && displayPosition.z, 0) * Z_DISPLAY_SIGN + sceneOrigin.z,
           ];
         }
 
@@ -43989,11 +45065,7 @@ class FastReplan {
             item.addEventListener("click", () => {
               const hotspot = collision.hotspot;
               if (Array.isArray(hotspot) && hotspot.length >= 3) {
-                const targetCenter = new THREE.Vector3(
-                  Number(hotspot[0] || 0),
-                  Number(hotspot[1] || 0),
-                  Number(hotspot[2] || 0) * Z_DISPLAY_SIGN,
-                );
+                const targetCenter = displayPoint(hotspot);
                 const offsetDistance = Math.max(
                   Number(payload.focus_collision_distance_m || 750),
                   100,
@@ -46592,7 +47664,12 @@ class FastReplan {
               const points = targetEditPointEntries(wellIndex)
                 .map((entry) => copyEditPoint(entry.position))
                 .filter((point) => point.every((value) => Number.isFinite(value)));
-              updateLineGeometry(editLineObjects[wellIndex], points, Z_DISPLAY_SIGN);
+              updateLineGeometry(
+                editLineObjects[wellIndex],
+                points,
+                Z_DISPLAY_SIGN,
+                sceneOrigin,
+              );
               syncEditVisibility();
               return;
             }
@@ -46612,7 +47689,12 @@ class FastReplan {
           if (pts.length >= 1) {
             pts[pts.length - 1] = t3.slice();
           }
-          updateLineGeometry(editLineObjects[wellIndex], pts, Z_DISPLAY_SIGN);
+          updateLineGeometry(
+            editLineObjects[wellIndex],
+            pts,
+            Z_DISPLAY_SIGN,
+            sceneOrigin,
+          );
           syncEditVisibility();
         }
 
@@ -46698,6 +47780,7 @@ class FastReplan {
               editLineObjects[wellIndex],
               rotatedPoints,
               Z_DISPLAY_SIGN,
+              sceneOrigin,
             );
             syncEditVisibility();
             return;
@@ -47128,10 +48211,11 @@ class FastReplan {
               .clone()
               .addScaledVector(editDragAxisDirection, axisT - editDragStartAxisT);
           }
-          // Convert display coords back to data coords
-          let dataX = newPos.x;
-          let dataY = newPos.y;
-          let dataZ = newPos.z * Z_DISPLAY_SIGN;
+          // Convert local display coords back to original data CRS.
+          const dataPoint = dataPointFromDisplay(newPos);
+          let dataX = dataPoint[0];
+          let dataY = dataPoint[1];
+          let dataZ = dataPoint[2];
           const wi = editDragHandle.wellIndex;
           let sidetrackWindowUpdate = null;
           if (editDragHandle.pointRole === "sidetrack_window") {
@@ -49350,7 +50434,7 @@ def _collapse_short_boundary_station(
     return final_md
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_calc_params.py	19494
+===BEGIN_FILE===	pywp/ui_calc_params.py	19734
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -49362,6 +50446,7 @@ from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp import TrajectoryConfig
 from pywp.planner_config import (
     INTERPOLATION_METHOD_OPTIONS,
+    J_PROFILE_POLICY_OPTIONS,
     OPTIMIZATION_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_trajectory_config,
@@ -49385,6 +50470,7 @@ _STR_SUFFIXES: tuple[str, ...] = (
     "optimization_mode",
     "turn_solver_mode",
     "interpolation_method",
+    "j_profile_policy",
 )
 _BOOL_SUFFIXES: tuple[str, ...] = ("offer_j_profile",)
 
@@ -49408,13 +50494,14 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
         "turn_solver_mode": str(cfg.turn_solver_mode),
         "interpolation_method": str(cfg.interpolation_method),
+        "j_profile_policy": str(cfg.j_profile_policy),
         "offer_j_profile": bool(cfg.offer_j_profile),
     }
 
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 12
+_DEFAULTS_SCHEMA_VERSION = 13
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
@@ -49674,6 +50761,7 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
         turn_solver_mode=str(_state_value(prefix, "turn_solver_mode")),
         interpolation_method=str(_state_value(prefix, "interpolation_method")),
+        j_profile_policy=str(_state_value(prefix, "j_profile_policy")),
         offer_j_profile=bool(_state_value(prefix, "offer_j_profile")),
     )
 
@@ -49796,15 +50884,17 @@ def render_calc_params_block(
         ),
         **widget_change_kwargs,
     )
-    st.checkbox(
-        "Предлагать J-образную траекторию",
-        key=_state_key(prefix, "offer_j_profile"),
+    st.selectbox(
+        "Режим J-профиля",
+        options=list(J_PROFILE_POLICY_OPTIONS.keys()),
+        format_func=lambda value: J_PROFILE_POLICY_OPTIONS.get(str(value), str(value)),
+        key=_state_key(prefix, "j_profile_policy"),
         help=(
-            "Если включено, планнер сначала пробует простую J-модель: "
+            "J-модель: "
             "VERTICAL -> один BUILD -> участок к t3. ПИ по зениту и азимуту "
-            "подбирается без превышения максимального ПИ. В режиме без оптимизации "
-            "допустимый J-профиль принимается сразу; при минимизации MD финальный "
-            "выбор всё равно остаётся за более коротким допустимым профилем."
+            "подбирается без превышения максимального ПИ. "
+            "«Предлагать» добавляет J как кандидата и оставляет выбор оптимизации. "
+            "«Предпочитать» принимает допустимый classic J до сравнения по MD."
         ),
         **widget_change_kwargs,
     )
@@ -57678,9 +58768,10 @@ def test_min_kop_calculation() -> None:
     assert min_kop_tight > min_kop_gentle
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_anticollision.py	113334
+===BEGIN_FILE===	tests/test_anticollision.py	119264
 from __future__ import annotations
 
+from concurrent.futures import Future
 import multiprocessing
 from pathlib import Path
 
@@ -58268,10 +59359,10 @@ def test_reference_actual_and_approved_wells_use_station_history_iscwsa_ellipses
     model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
     success = SuccessfulWellPlan(
         name="WELL-P",
-        surface=Point3D(0.0, -600.0, 0.0),
-        t1=Point3D(200.0, -600.0, 700.0),
-        t3=Point3D(1300.0, -600.0, 900.0),
-        stations=_straight_stations(y_offset_m=-600.0),
+        surface=Point3D(0.0, -400.0, 0.0),
+        t1=Point3D(200.0, -400.0, 700.0),
+        t3=Point3D(1300.0, -400.0, 900.0),
+        stations=_straight_stations(y_offset_m=-400.0),
         summary={"kop_md_m": 700.0},
         azimuth_deg=90.0,
         md_t1_m=1000.0,
@@ -58355,10 +59446,10 @@ def test_reference_actual_well_can_use_selected_unknown_mwd_model() -> None:
     )
     success = SuccessfulWellPlan(
         name="WELL-P",
-        surface=Point3D(0.0, -600.0, 0.0),
-        t1=Point3D(200.0, -600.0, 700.0),
-        t3=Point3D(1300.0, -600.0, 900.0),
-        stations=_straight_stations(y_offset_m=-600.0),
+        surface=Point3D(0.0, -400.0, 0.0),
+        t1=Point3D(200.0, -400.0, 700.0),
+        t3=Point3D(1300.0, -400.0, 900.0),
+        stations=_straight_stations(y_offset_m=-400.0),
         summary={"kop_md_m": 700.0},
         azimuth_deg=90.0,
         md_t1_m=1000.0,
@@ -58423,10 +59514,10 @@ def test_reference_mwd_assignment_does_not_leak_to_approved_duplicate_name() -> 
     )
     success = SuccessfulWellPlan(
         name="WELL-P",
-        surface=Point3D(0.0, -600.0, 0.0),
-        t1=Point3D(200.0, -600.0, 700.0),
-        t3=Point3D(1300.0, -600.0, 900.0),
-        stations=_straight_stations(y_offset_m=-600.0),
+        surface=Point3D(0.0, -400.0, 0.0),
+        t1=Point3D(200.0, -400.0, 700.0),
+        t3=Point3D(1300.0, -400.0, 900.0),
+        stations=_straight_stations(y_offset_m=-400.0),
         summary={"kop_md_m": 700.0},
         azimuth_deg=90.0,
         md_t1_m=1000.0,
@@ -58476,6 +59567,69 @@ def test_reference_mwd_assignment_does_not_leak_to_approved_duplicate_name() -> 
         reference_by_kind[REFERENCE_WELL_APPROVED].overlay.model.iscwsa_tool_code
         == poor_model.iscwsa_tool_code
     )
+
+
+def test_far_reference_wells_are_skipped_before_uncertainty_cone_build() -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "REF-NEAR",
+                    "Type": "actual",
+                    "X": 0.0,
+                    "Y": 100.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "REF-NEAR",
+                    "Type": "actual",
+                    "X": 2000.0,
+                    "Y": 100.0,
+                    "Z": 0.0,
+                    "MD": 2000.0,
+                },
+                {
+                    "Wellname": "REF-FAR",
+                    "Type": "approved",
+                    "X": 0.0,
+                    "Y": 2000.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "REF-FAR",
+                    "Type": "approved",
+                    "X": 2000.0,
+                    "Y": 2000.0,
+                    "Z": 0.0,
+                    "MD": 2000.0,
+                },
+            ]
+        )
+    )
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [success],
+        model=PlanningUncertaintyModel(),
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert [str(well.name) for well in analysis.wells] == ["WELL-P", "REF-NEAR"]
+    assert analysis.pair_count == 1
 
 
 def test_global_source_vectors_are_correlated_in_relative_clearance() -> None:
@@ -59011,6 +60165,118 @@ def test_build_anti_collision_wells_for_successes_reuses_unchanged_wells(
     assert next_wells[0] is wells[0]
     assert next_wells[1] is not wells[1]
     assert set(next_cache) == {"WELL-A", "WELL-B"}
+
+
+def test_build_anti_collision_wells_for_successes_reports_cone_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    successes = [
+        SuccessfulWellPlan(
+            name=name,
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            summary={"kop_md_m": 0.0},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config={"optimization_mode": "none"},
+        )
+        for name, y_offset_m in (("WELL-A", 0.0), ("WELL-B", 20.0))
+    ]
+    events: list[anticollision_module.AntiCollisionProgress] = []
+    executor_workers: list[int] = []
+    submitted_names: list[str] = []
+
+    class InlineExecutor:
+        def __init__(self, *, max_workers: int, mp_context: object | None = None):
+            executor_workers.append(int(max_workers))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def submit(self, fn, job):
+            submitted_names.append(str(job.name))
+            future: Future = Future()
+            future.set_result(fn(job))
+            return future
+
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "ProcessPoolExecutor",
+        InlineExecutor,
+    )
+
+    wells, _cache, _reused, _rebuilt = build_anti_collision_wells_for_successes(
+        successes,
+        model=PlanningUncertaintyModel(),
+        well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        progress_callback=events.append,
+        parallel_workers=3,
+    )
+
+    cone_events = [event for event in events if event.stage == "wells"]
+    assert [event.completed_well_count for event in cone_events] == [0, 1, 2]
+    assert {event.well_count for event in cone_events} == {2}
+    assert cone_events[-1].rebuilt_well_count == 2
+    assert cone_events[-1].rebuild_well_count == 2
+    assert cone_events[-1].completed_rebuild_well_count == 2
+    assert cone_events[-1].reused_well_count == 0
+    assert cone_events[-1].parallel_workers == 2
+    assert executor_workers == [2]
+    assert submitted_names == ["WELL-A", "WELL-B"]
+    assert [well.name for well in wells] == ["WELL-A", "WELL-B"]
+
+
+@pytest.mark.integration
+def test_parallel_anti_collision_well_build_runs_under_spawn_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "process_pool_context",
+        lambda **_kwargs: ctx,
+    )
+    successes = [
+        SuccessfulWellPlan(
+            name=name,
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            summary={"kop_md_m": 0.0},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config={"optimization_mode": "none"},
+        )
+        for name, y_offset_m in (("WELL-A", 0.0), ("WELL-B", 20.0))
+    ]
+    events: list[anticollision_module.AntiCollisionProgress] = []
+
+    wells, cache, reused_count, rebuilt_count = (
+        build_anti_collision_wells_for_successes(
+            successes,
+            model=PlanningUncertaintyModel(sample_step_m=250.0),
+            well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
+            include_display_geometry=False,
+            build_overlap_geometry=False,
+            progress_callback=events.append,
+            parallel_workers=2,
+        )
+    )
+
+    assert [well.name for well in wells] == ["WELL-A", "WELL-B"]
+    assert set(cache) == {"WELL-A", "WELL-B"}
+    assert reused_count == 0
+    assert rebuilt_count == 2
+    assert events[-1].parallel_workers == 2
+    assert events[-1].completed_rebuild_well_count == 2
 
 
 def test_analyze_anti_collision_does_not_skip_pair_by_terminal_geometry_only(
@@ -62349,7 +63615,7 @@ def test_minimum_curvature_increment_rejects_near_180_degree_dogleg() -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_pad_optimization.py	29919
+===BEGIN_FILE===	tests/test_pad_optimization.py	33964
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
@@ -63012,6 +64278,133 @@ def test_optimize_pad_order_reuses_existing_pair_cache_for_candidate_scoring(
 
     assert improved is True
     assert captured_previous_caches == [previous_pair_cache]
+
+
+def test_candidate_swaps_for_zone_limits_and_prioritizes_hot_wells() -> None:
+    surfaces = {
+        "MOVE-A": (0.0, 0.0, 0.0),
+        "MOVE-B": (20.0, 0.0, 0.0),
+        "MOVE-C": (40.0, 0.0, 0.0),
+        "MOVE-D": (60.0, 0.0, 0.0),
+    }
+    worst_zone = SimpleNamespace(
+        well_a="MOVE-A",
+        well_b="FACT-1",
+        md_a_m=1000.0,
+        md_b_m=1000.0,
+        priority_rank=1,
+        separation_factor=0.20,
+    )
+    actionable = [
+        worst_zone,
+        SimpleNamespace(
+            well_a="MOVE-B",
+            well_b="FACT-2",
+            md_a_m=1000.0,
+            md_b_m=1000.0,
+            priority_rank=1,
+            separation_factor=0.25,
+        ),
+        SimpleNamespace(
+            well_a="MOVE-D",
+            well_b="FACT-3",
+            md_a_m=1000.0,
+            md_b_m=1000.0,
+            priority_rank=2,
+            separation_factor=0.10,
+        ),
+    ]
+
+    candidates = pad_optimization._candidate_swaps_for_zone(
+        zone=worst_zone,
+        actionable_zones=actionable,
+        movable_names={"MOVE-A", "MOVE-B", "MOVE-C", "MOVE-D"},
+        surfaces=surfaces,
+        last_accepted_pair=None,
+        remaining_budget=2,
+    )
+
+    assert candidates == [("MOVE-A", "MOVE-B"), ("MOVE-A", "MOVE-D")]
+
+
+def test_optimize_pad_order_stops_at_candidate_budget(monkeypatch) -> None:
+    records = [
+        WelltrackRecord(
+            name=f"MOVE-{index}",
+            points=(
+                WelltrackPoint(x=float(index * 20), y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=500.0 + index, y=0.0, z=2000.0, md=2000.0),
+                WelltrackPoint(x=1000.0 + index, y=0.0, z=2100.0, md=3000.0),
+            ),
+        )
+        for index in range(5)
+    ]
+    initial_analysis = SimpleNamespace(
+        zones=(
+            SimpleNamespace(
+                well_a="MOVE-0",
+                well_b="MOVE-1",
+                md_a_m=1000.0,
+                md_b_m=1000.0,
+                priority_rank=1,
+                separation_factor=0.20,
+            ),
+        )
+    )
+    swap_calls: list[tuple[str, str]] = []
+    progress_messages: list[str] = []
+
+    class DummyPool:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def shutdown(self, *, wait: bool = True) -> None:
+            pass
+
+    def fake_swap(records_arg, successes, name_a, name_b, _config_by_name, pool=None):
+        swap_calls.append((str(name_a), str(name_b)))
+        return list(records_arg), dict(successes)
+
+    monkeypatch.setattr(pad_optimization, "_MAX_CANDIDATE_EVALUATIONS", 2)
+    monkeypatch.setattr(pad_optimization, "_MAX_CANDIDATES_PER_ITERATION", 10)
+    monkeypatch.setattr(pad_optimization, "_MAX_CANDIDATES_PER_ZONE", 10)
+    monkeypatch.setattr(pad_optimization, "ProcessPoolExecutor", DummyPool)
+    monkeypatch.setattr(
+        pad_optimization,
+        "_build_ac_well_light",
+        lambda success, _model: success,
+    )
+    monkeypatch.setattr(
+        pad_optimization,
+        "_analyze_incremental_from_ac_wells",
+        lambda _ac_wells, _ref_ac_wells, **_kwargs: _fake_incremental_result(
+            initial_analysis,
+            reused_pair_count=3,
+        ),
+    )
+    monkeypatch.setattr(
+        pad_optimization,
+        "_swap_surfaces_and_recalculate",
+        fake_swap,
+    )
+
+    _, _, improved = optimize_pad_order(
+        records=records,
+        success_dict={record.name: object() for record in records},
+        pad_well_names={record.name for record in records},
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        reference_wells=[],
+        config_by_name={},
+        progress_callback=lambda _pct, msg: progress_messages.append(str(msg)),
+        initial_analysis=initial_analysis,
+        previous_pair_cache={},
+    )
+
+    assert improved is False
+    assert len(swap_calls) == 2
+    assert any("Кандидат 1/2" in message for message in progress_messages)
+    assert any("кэш пар 3 reused" in message for message in progress_messages)
+    assert "Остановлено по лимиту" in progress_messages[-1]
 
 
 def test_cached_or_built_ac_well_does_not_reuse_without_current_signature() -> None:
@@ -63838,7 +65231,7 @@ def test_sidetrack_solver_rejects_over_limit_dls() -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_planner.py	78502
+===BEGIN_FILE===	tests/test_planner.py	79563
 from __future__ import annotations
 
 from pathlib import Path
@@ -63854,6 +65247,7 @@ from pywp.anticollision_optimization import (
 )
 from pywp.eclipse_welltrack import parse_welltrack_text, welltrack_points_to_targets
 from pywp.models import (
+    J_PROFILE_POLICY_PREFER,
     OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
@@ -64254,6 +65648,35 @@ def test_minimize_md_keeps_shorter_unified_profile_over_feasible_j_profile() -> 
 
     assert str(result.summary["trajectory_profile_family"]) == "unified"
     assert 67.0 <= float(result.summary["hold_inc_deg"]) <= 73.0
+
+
+def test_prefer_j_profile_policy_accepts_classic_j_before_md_optimization() -> None:
+    record = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+    )[0]
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+
+    result = TrajectoryPlanner().plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=_fast_config(
+            kop_min_vertical_m=550.0,
+            dls_build_max_deg_per_30m=3.0,
+            turn_solver_max_restarts=0,
+            j_profile_policy=J_PROFILE_POLICY_PREFER,
+        ),
+    )
+
+    assert str(result.summary["optimization_mode"]) == OPTIMIZATION_MINIMIZE_MD
+    assert str(result.summary["optimization_status"]) == "analytic_j_profile"
+    assert str(result.summary["trajectory_type"]) == "J-образная траектория"
+    assert str(result.summary["trajectory_profile_family"]) == "j_profile"
+    assert list(result.stations["segment"].drop_duplicates()) == [
+        "VERTICAL",
+        "BUILD1",
+        "HORIZONTAL",
+    ]
 
 
 def test_split_build_rescue_can_find_independent_build_candidate() -> None:
@@ -66128,7 +67551,7 @@ def test_planner_rejects_unknown_turn_solver_mode() -> None:
         _fast_config(turn_solver_mode="unsupported_turn_solver")  # type: ignore[arg-type]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_planner_config.py	5970
+===BEGIN_FILE===	tests/test_planner_config.py	6586
 from __future__ import annotations
 
 import math
@@ -66138,6 +67561,9 @@ from pydantic import ValidationError
 
 from pywp.models import (
     DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
+    J_PROFILE_POLICY_OFF,
+    J_PROFILE_POLICY_PREFER,
+    J_PROFILE_POLICY_PROPOSE,
     OPTIMIZATION_MINIMIZE_MD,
     OPTIMIZATION_NONE,
     Point3D,
@@ -66297,7 +67723,22 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
     assert config.dls_limits_deg_per_30m["HORIZONTAL"] == 0.8
     assert config.optimization_mode == OPTIMIZATION_NONE
     assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts
+    assert config.j_profile_policy == J_PROFILE_POLICY_OFF
     assert config.offer_j_profile is False
+
+
+def test_legacy_offer_j_profile_maps_to_propose_policy() -> None:
+    config = TrajectoryConfig(offer_j_profile=True)
+
+    assert config.j_profile_policy == J_PROFILE_POLICY_PROPOSE
+    assert config.offer_j_profile is True
+
+
+def test_explicit_j_profile_policy_syncs_legacy_boolean() -> None:
+    config = TrajectoryConfig(j_profile_policy=J_PROFILE_POLICY_PREFER)
+
+    assert config.j_profile_policy == J_PROFILE_POLICY_PREFER
+    assert config.offer_j_profile is True
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_project_pack.py	4320
@@ -68140,7 +69581,7 @@ def test_fixed_slots_editor_normalizes_dataframe_rows() -> None:
     assert any("дубль" in warning for warning in warnings)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_page_results.py	11654
+===BEGIN_FILE===	tests/test_ptc_page_results.py	15355
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -68257,8 +69698,10 @@ def test_anticollision_panel_pauses_on_pending_target_edits(
 def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    old_edited_well = SimpleNamespace(name="WELL-A", is_reference_only=False)
+    kept_well = SimpleNamespace(name="WELL-B", is_reference_only=False)
     analysis = AntiCollisionAnalysis(
-        wells=(),
+        wells=(old_edited_well, kept_well),
         corridors=(),
         well_segments=(),
         zones=(),
@@ -68315,10 +69758,15 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
         "_well_color_map",
         lambda _records: {"WELL-A": "#123456"},
     )
+    def fake_anticollision_payload(analysis: object, *args: object, **kwargs: object):
+        calls["payload_analysis"] = analysis
+        calls["payload_kwargs"] = kwargs
+        return {}
+
     monkeypatch.setattr(
         ptc_page_results.wt,
         "_all_wells_anticollision_three_payload",
-        lambda *args, **kwargs: calls.setdefault("payload_kwargs", kwargs) or {},
+        fake_anticollision_payload,
     )
 
     def fake_overrides(**kwargs: object) -> dict[str, object]:
@@ -68351,9 +69799,105 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
 
     assert "приостановлен" in str(calls["info"])
     assert any("последний anti-collision снимок" in item for item in calls["captions"])
+    rendered_analysis = calls["payload_analysis"]
+    assert [str(well.name) for well in rendered_analysis.wells] == ["WELL-B"]
+    assert calls["payload_kwargs"]["target_only_wells"] == [target_only]
     assert calls["plotly"][0] == "plan-figure"
     assert calls["override_kwargs"]["target_only_wells"] == [target_only]
     assert calls["override_kwargs"]["target_only_name_to_color"] == {"WELL-A": "#123456"}
+
+
+def test_cached_snapshot_filter_removes_pending_well_geometry_and_conflicts() -> None:
+    edited_well = SimpleNamespace(name="well_08", is_reference_only=False, samples=())
+    kept_well = SimpleNamespace(name="well_09", is_reference_only=False, samples=())
+    reference_well = SimpleNamespace(name="fact_01", is_reference_only=True, samples=())
+    stale_corridor = SimpleNamespace(
+        well_a="well_08",
+        well_b="well_09",
+        md_a_start_m=100.0,
+        md_a_end_m=200.0,
+        md_b_start_m=110.0,
+        md_b_end_m=210.0,
+        classification="trajectory",
+        priority_rank=2,
+    )
+    kept_corridor = SimpleNamespace(
+        well_a="well_09",
+        well_b="fact_01",
+        md_a_start_m=300.0,
+        md_a_end_m=360.0,
+        md_b_start_m=310.0,
+        md_b_end_m=370.0,
+        classification="target-trajectory",
+        priority_rank=1,
+    )
+    stale_zone = SimpleNamespace(
+        well_a="well_08",
+        well_b="well_09",
+        separation_factor=0.4,
+    )
+    kept_zone = SimpleNamespace(
+        well_a="well_09",
+        well_b="fact_01",
+        separation_factor=0.8,
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(edited_well, kept_well, reference_well),
+        corridors=(stale_corridor, kept_corridor),
+        well_segments=(
+            SimpleNamespace(well_name="well_08"),
+            SimpleNamespace(well_name="well_09"),
+        ),
+        zones=(stale_zone, kept_zone),
+        pair_count=3,
+        overlapping_pair_count=2,
+        target_overlap_pair_count=1,
+        worst_separation_factor=0.4,
+    )
+    stale_recommendation = SimpleNamespace(
+        well_a="well_08",
+        well_b="well_09",
+        affected_wells=("well_08",),
+    )
+    kept_recommendation = SimpleNamespace(
+        well_a="well_09",
+        well_b="fact_01",
+        affected_wells=("well_09",),
+    )
+    stale_cluster = SimpleNamespace(
+        well_names=("well_08", "well_09"),
+        affected_wells=("well_08",),
+    )
+    kept_cluster = SimpleNamespace(
+        well_names=("well_09", "fact_01"),
+        affected_wells=("well_09",),
+    )
+
+    filtered_analysis, filtered_recommendations, filtered_clusters = (
+        ptc_page_results._filter_cached_anticollision_snapshot_for_pending_edits(
+            analysis=analysis,
+            recommendations=(stale_recommendation, kept_recommendation),
+            clusters=(stale_cluster, kept_cluster),
+            pending_edit_names=["well_08"],
+        )
+    )
+
+    assert [str(well.name) for well in filtered_analysis.wells] == [
+        "well_09",
+        "fact_01",
+    ]
+    assert filtered_analysis.corridors == (kept_corridor,)
+    assert filtered_analysis.zones == (kept_zone,)
+    assert {segment.well_name for segment in filtered_analysis.well_segments} == {
+        "well_09",
+        "fact_01",
+    }
+    assert filtered_analysis.pair_count == 1
+    assert filtered_analysis.overlapping_pair_count == 1
+    assert filtered_analysis.target_overlap_pair_count == 1
+    assert filtered_analysis.worst_separation_factor == pytest.approx(0.8)
+    assert filtered_recommendations == (kept_recommendation,)
+    assert filtered_clusters == (kept_cluster,)
 
 
 def test_target_edit_overview_keeps_reference_wells(
@@ -72230,7 +73774,7 @@ def test_default_three_camera_uses_z_up_eye() -> None:
     assert DEFAULT_THREE_CAMERA["eye"] == {"x": 1.25, "y": 1.25, "z": 1.25}
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	21584
+===BEGIN_FILE===	tests/test_three_viewer.py	23008
 from __future__ import annotations
 
 from pathlib import Path
@@ -72263,6 +73807,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="legend-toggle-btn"' in html
     assert 'id="tooltip"' in html
     assert 'id="axes-gizmo"' in html
+    assert "#root canvas" in html
+    assert "width: 100% !important;" in html
+    assert "height: 100% !important;" in html
     assert 'id="label-layer"' in html
     assert ".scene-label" in html
     assert ".scene-label.well-name-label" in html
@@ -72317,6 +73864,20 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
     assert "function fitCameraToRawBounds(rawBounds)" in html
+    assert "const sceneOrigin = rawBoundsCenter(payload.bounds || {})" in html
+    assert "function displayPoint(value)" in html
+    assert "function displayXYZ(xValue, yValue, zValue)" in html
+    assert "function dataPointFromDisplay(displayPosition)" in html
+    assert "dataNumber(value && value[0], 0) - sceneOrigin.x" in html
+    assert "dataNumber(value && value[1], 0) - sceneOrigin.y" in html
+    assert "(dataNumber(value && value[2], 0) - sceneOrigin.z) * Z_DISPLAY_SIGN" in html
+    assert "dataNumber(displayPosition && displayPosition.x, 0) + sceneOrigin.x" in html
+    assert "dataNumber(displayPosition && displayPosition.y, 0) + sceneOrigin.y" in html
+    assert "dataNumber(displayPosition && displayPosition.z, 0) * Z_DISPLAY_SIGN + sceneOrigin.z" in html
+    assert "function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin)" in html
+    assert "const originX = Number.isFinite(Number(origin.x)) ? Number(origin.x) : 0.0;" in html
+    assert "updateLineGeometry(\n                editLineObjects[wellIndex],\n                points,\n                Z_DISPLAY_SIGN,\n                sceneOrigin," in html
+    assert "updateLineGeometry(\n            editLineObjects[wellIndex],\n            pts,\n            Z_DISPLAY_SIGN,\n            sceneOrigin," in html
     assert "fitMiniMapToRawBounds(rawBounds || payload.bounds || {})" in html
     assert "function focusMiniMapToDisplayPoint(displayCenter, focusSpan)" in html
     assert "focusMiniMapToDisplayPoint(targetCenter, offsetDistance * 2.0)" in html
@@ -72970,7 +74531,7 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
     assert "Просмотр утвержденной проектной скважины" in selectbox_labels
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ui_calc_params.py	7012
+===BEGIN_FILE===	tests/test_ui_calc_params.py	7157
 from __future__ import annotations
 
 from pathlib import Path
@@ -72978,6 +74539,7 @@ from types import SimpleNamespace
 
 from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp import TrajectoryConfig
+from pywp.models import J_PROFILE_POLICY_OFF
 from pywp.ui_calc_params import (
     CalcParamBinding,
     apply_calc_param_defaults,
@@ -73015,6 +74577,8 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["turn_solver_max_restarts"] == int(cfg.turn_solver_max_restarts)
     assert defaults["turn_solver_mode"] == str(cfg.turn_solver_mode)
     assert defaults["interpolation_method"] == str(cfg.interpolation_method)
+    assert defaults["j_profile_policy"] == str(cfg.j_profile_policy)
+    assert defaults["j_profile_policy"] == J_PROFILE_POLICY_OFF
     assert defaults["offer_j_profile"] == bool(cfg.offer_j_profile)
     assert defaults["offer_j_profile"] is False
 
@@ -73063,7 +74627,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 12
+        == 13
     )
 
 
@@ -73088,7 +74652,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 12
+        == 13
     )
 
 
@@ -73150,13 +74714,13 @@ def test_invalid_kop_depth_function_payload_reverts_to_constant(monkeypatch) -> 
     assert kop_min_vertical_mode(prefix="wt_cfg_") == "constant"
 
 
-def test_offer_j_profile_control_is_rendered_above_solver_expander() -> None:
+def test_j_profile_policy_control_is_rendered_above_solver_expander() -> None:
     source = Path("pywp/ui_calc_params.py").read_text(encoding="utf-8")
 
     assert source.index('"Макс итоговая MD (постпроверка), м"') < source.index(
-        '"Предлагать J-образную траекторию"'
+        '"Режим J-профиля"'
     )
-    assert source.index('"Предлагать J-образную траекторию"') < source.index(
+    assert source.index('"Режим J-профиля"') < source.index(
         'with st.expander("Параметры солвера"'
     )
 
@@ -75244,7 +76808,7 @@ def test_welltracks2_pad_detection_and_layout() -> None:
         assert before.points[1:] == after.points[1:]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_batch.py	126744
+===BEGIN_FILE===	tests/test_welltrack_batch.py	126803
 from __future__ import annotations
 
 import multiprocessing
@@ -75588,7 +77152,8 @@ def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
     ].dropna()
     assert not horizontal_build_dls.empty
     assert float(horizontal_build_dls.max()) <= 3.0 + 1e-6
-    assert float(horizontal_build_dls.max()) > 1.0
+    assert float(horizontal_build_dls.max()) > 2.7
+    assert float(horizontal_build_dls.quantile(0.9)) > 2.4
 
 
 def test_turn_solver_build_limit_search_is_monotonic_for_debug_geometry() -> None:
@@ -79060,7 +80625,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	215568
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	227292
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -79456,6 +81021,7 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
             _DummyColumn(),
             _DummyColumn(),
             _DummyColumn(),
+            _DummyColumn(),
         ),
     )
     monkeypatch.setattr(page.st, "expander", _fake_expander)
@@ -79469,6 +81035,7 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
         ("Скважин", "1"),
         ("Пилотов", "0"),
         ("Боковых стволов", "0"),
+        ("Многопластовых скважин", "0"),
         ("Проблем", "0"),
     ]
     assert list(captured["frame"].columns) == [
@@ -79517,6 +81084,7 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
         page.st,
         "columns",
         lambda *args, **kwargs: (
+            _DummyColumn(),
             _DummyColumn(),
             _DummyColumn(),
             _DummyColumn(),
@@ -79573,6 +81141,7 @@ def test_records_overview_metrics_count_wells_and_pilots_separately(
             _DummyColumn(),
             _DummyColumn(),
             _DummyColumn(),
+            _DummyColumn(),
         ),
     )
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
@@ -79584,6 +81153,61 @@ def test_records_overview_metrics_count_wells_and_pilots_separately(
         ("Скважин", "1"),
         ("Пилотов", "1"),
         ("Боковых стволов", "0"),
+        ("Многопластовых скважин", "0"),
+        ("Проблем", "0"),
+    ]
+
+
+def test_records_overview_metrics_count_multi_horizontal_wells(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {"metrics": []}
+    regular = _records()[0]
+    multi_horizontal = WelltrackRecord(
+        name="well_multi",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+            WelltrackPoint(x=300.0, y=0.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=400.0, y=0.0, z=1100.0, md=3.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1100.0, md=4.0),
+        ),
+    )
+
+    class _DummyColumn:
+        def metric(self, label, value, *args, **kwargs):
+            captured["metrics"].append((label, value))
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+        ),
+    )
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+
+    page._render_records_overview([regular, multi_horizontal])
+
+    assert captured["metrics"] == [
+        ("Скважин", "2"),
+        ("Пилотов", "0"),
+        ("Боковых стволов", "0"),
+        ("Многопластовых скважин", "1"),
         ("Проблем", "0"),
     ]
 
@@ -82707,6 +84331,282 @@ def test_cached_anti_collision_view_model_reports_pair_progress_with_eta(
     assert page.st.session_state["wt_anticollision_last_run"]["parallel_workers"] == 4
 
 
+def test_cached_anti_collision_view_model_reports_cone_progress(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        assert progress_callback is not None
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=0,
+                completed_pair_count=0,
+                elapsed_s=12.0,
+                parallel_workers=int(parallel_workers),
+                stage="wells",
+                well_count=2,
+                completed_well_count=1,
+                reused_well_count=1,
+                rebuilt_well_count=0,
+            )
+        )
+        return (
+            analysis,
+            {str(success.name): ("sig", object()) for success in successes},
+            {},
+            AntiCollisionIncrementalStats(
+                reused_well_count=1,
+                rebuilt_well_count=1,
+                reused_pair_count=0,
+                recalculated_pair_count=0,
+            ),
+        )
+
+    monkeypatch.setattr(
+        page,
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+    progress_events: list[tuple[int, str]] = []
+
+    page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
+        records=[],
+        progress_callback=lambda value, text: progress_events.append(
+            (int(value), str(text))
+        ),
+        parallel_workers=4,
+    )
+
+    assert any(
+        "конусы неопределённости 1/2" in text
+        and "кэш скважин 1" in text
+        for _value, text in progress_events
+    )
+
+
+def test_cached_anti_collision_cone_eta_uses_parallel_rebuild_workers(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        assert progress_callback is not None
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=0,
+                completed_pair_count=0,
+                elapsed_s=30.0,
+                parallel_workers=int(parallel_workers),
+                stage="wells",
+                well_count=10,
+                completed_well_count=1,
+                reused_well_count=0,
+                rebuilt_well_count=1,
+                rebuild_well_count=10,
+                completed_rebuild_well_count=1,
+            )
+        )
+        return (
+            analysis,
+            {str(success.name): ("sig", object()) for success in successes},
+            {},
+            AntiCollisionIncrementalStats(
+                reused_well_count=0,
+                rebuilt_well_count=10,
+                reused_pair_count=0,
+                recalculated_pair_count=0,
+            ),
+        )
+
+    monkeypatch.setattr(
+        page,
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+    progress_events: list[tuple[int, str]] = []
+
+    page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
+        records=[],
+        progress_callback=lambda value, text: progress_events.append(
+            (int(value), str(text))
+        ),
+        parallel_workers=4,
+    )
+
+    assert any(
+        "конусы неопределённости 1/10" in text
+        and "осталось оц. 1 мин 08 с" in text
+        and "4 процессов" in text
+        and "построено 1/10" in text
+        for _value, text in progress_events
+    )
+
+
+def test_cached_anti_collision_parallel_eta_uses_worker_count_before_first_wave(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=10,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        assert progress_callback is not None
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=10,
+                completed_pair_count=1,
+                elapsed_s=30.0,
+                parallel_workers=int(parallel_workers),
+            )
+        )
+        return (
+            analysis,
+            {str(success.name): ("sig", object()) for success in successes},
+            {},
+            AntiCollisionIncrementalStats(
+                reused_well_count=0,
+                rebuilt_well_count=len(successes) + len(reference_wells),
+                reused_pair_count=0,
+                recalculated_pair_count=10,
+            ),
+        )
+
+    monkeypatch.setattr(
+        page,
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+    progress_events: list[tuple[int, str]] = []
+
+    page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
+        records=[],
+        progress_callback=lambda value, text: progress_events.append(
+            (int(value), str(text))
+        ),
+        parallel_workers=4,
+    )
+
+    assert any(
+        "пары 1/10" in text
+        and "осталось оц. 1 мин 08 с" in text
+        and "4 процессов" in text
+        for _value, text in progress_events
+    )
+
+
 def test_anti_collision_cache_key_includes_reference_mwd_assignment() -> None:
     page = wt_import_module
     reference_wells = _reference_wells()
@@ -83754,6 +85654,63 @@ def test_anticollision_figures_draw_previous_trajectories_as_dashed_overlay() ->
     assert str(previous_plan[0].line.dash) == "dot"
 
 
+def test_anticollision_figures_show_pending_target_only_points_without_old_trajectory() -> (
+    None
+):
+    page = wt_import_module
+    analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-B", y_offset_m=5.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    target_only = page._TargetOnlyWell(
+        name="WELL-A",
+        surface=Point3D(10.0, 20.0, 0.0),
+        t1=Point3D(100.0, 200.0, 1500.0),
+        t3=Point3D(300.0, 400.0, 1600.0),
+        status="Не рассчитана",
+        problem="Цели изменены в 3D",
+        target_points=(
+            Point3D(10.0, 20.0, 0.0),
+            Point3D(100.0, 200.0, 1500.0),
+            Point3D(300.0, 400.0, 1600.0),
+        ),
+        target_labels=("S", "t1", "t3"),
+    )
+
+    payload_3d = page._all_wells_anticollision_three_payload(
+        analysis,
+        target_only_wells=[target_only],
+        name_to_color={"WELL-A": "#123456", "WELL-B": "#654321"},
+        focus_well_names=("WELL-A", "WELL-B"),
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
+    figure_plan = page._all_wells_anticollision_plan_figure(
+        analysis,
+        target_only_wells=[target_only],
+        name_to_color={"WELL-A": "#123456", "WELL-B": "#654321"},
+        focus_well_names=("WELL-A", "WELL-B"),
+    )
+
+    assert not any(
+        str(item.get("name")) == "WELL-A"
+        for item in list(payload_3d.get("lines") or [])
+    )
+    assert not any(
+        str(item.get("name")).startswith("WELL-A cone")
+        for item in list(payload_3d.get("meshes") or [])
+    )
+    assert any(
+        str(item.get("name")) == "WELL-A: цели (без траектории)"
+        and len(list(item.get("points") or [])) == 3
+        for item in list(payload_3d.get("points") or [])
+    )
+    assert any(
+        str(trace.name) == "WELL-A: цели (без траектории)"
+        and len(trace.x) == 3
+        for trace in figure_plan.data
+    )
+
+
 def test_all_wells_three_payload_uses_default_camera() -> None:
     page = wt_import_module
     payload = page._all_wells_three_payload(
@@ -84530,7 +86487,7 @@ def test_all_wells_three_payload_aggregates_reference_wells_in_fast_mode() -> No
     assert "APP-1 (Проектная утвержденная)" not in hover_names
 
 
-def test_anticollision_three_payload_aggregates_non_conflicting_reference_wells_in_fast_mode() -> (
+def test_anticollision_three_payload_omits_far_reference_wells_from_ac_scope() -> (
     None
 ):
     page = wt_import_module
@@ -84583,16 +86540,15 @@ def test_anticollision_three_payload_aggregates_non_conflicting_reference_wells_
         render_mode=page.WT_3D_RENDER_FAST,
     )
 
-    line_colors = {str(item["color"]) for item in payload["lines"]}
     hover_names = {
         str(hover.get("name"))
         for item in payload["points"]
         for hover in list(item.get("hover") or [])
     }
-    assert "#6B7280" in line_colors
-    assert "#C62828" in line_colors
-    assert "FACT-FAR" in hover_names
-    assert "APP-FAR" in hover_names
+    analysis_names = {str(well.name) for well in analysis.wells}
+    assert analysis_names == {"WELL-A"}
+    assert "FACT-FAR" not in hover_names
+    assert "APP-FAR" not in hover_names
     assert "FACT-FAR (Фактическая)" not in hover_names
     assert "APP-FAR (Проектная утвержденная)" not in hover_names
 
