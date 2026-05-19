@@ -114,8 +114,10 @@ def test_anticollision_panel_pauses_on_pending_target_edits(
 def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    old_edited_well = SimpleNamespace(name="WELL-A", is_reference_only=False)
+    kept_well = SimpleNamespace(name="WELL-B", is_reference_only=False)
     analysis = AntiCollisionAnalysis(
-        wells=(),
+        wells=(old_edited_well, kept_well),
         corridors=(),
         well_segments=(),
         zones=(),
@@ -172,10 +174,15 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
         "_well_color_map",
         lambda _records: {"WELL-A": "#123456"},
     )
+    def fake_anticollision_payload(analysis: object, *args: object, **kwargs: object):
+        calls["payload_analysis"] = analysis
+        calls["payload_kwargs"] = kwargs
+        return {}
+
     monkeypatch.setattr(
         ptc_page_results.wt,
         "_all_wells_anticollision_three_payload",
-        lambda *args, **kwargs: calls.setdefault("payload_kwargs", kwargs) or {},
+        fake_anticollision_payload,
     )
 
     def fake_overrides(**kwargs: object) -> dict[str, object]:
@@ -208,9 +215,105 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
 
     assert "приостановлен" in str(calls["info"])
     assert any("последний anti-collision снимок" in item for item in calls["captions"])
+    rendered_analysis = calls["payload_analysis"]
+    assert [str(well.name) for well in rendered_analysis.wells] == ["WELL-B"]
+    assert calls["payload_kwargs"]["target_only_wells"] == [target_only]
     assert calls["plotly"][0] == "plan-figure"
     assert calls["override_kwargs"]["target_only_wells"] == [target_only]
     assert calls["override_kwargs"]["target_only_name_to_color"] == {"WELL-A": "#123456"}
+
+
+def test_cached_snapshot_filter_removes_pending_well_geometry_and_conflicts() -> None:
+    edited_well = SimpleNamespace(name="well_08", is_reference_only=False, samples=())
+    kept_well = SimpleNamespace(name="well_09", is_reference_only=False, samples=())
+    reference_well = SimpleNamespace(name="fact_01", is_reference_only=True, samples=())
+    stale_corridor = SimpleNamespace(
+        well_a="well_08",
+        well_b="well_09",
+        md_a_start_m=100.0,
+        md_a_end_m=200.0,
+        md_b_start_m=110.0,
+        md_b_end_m=210.0,
+        classification="trajectory",
+        priority_rank=2,
+    )
+    kept_corridor = SimpleNamespace(
+        well_a="well_09",
+        well_b="fact_01",
+        md_a_start_m=300.0,
+        md_a_end_m=360.0,
+        md_b_start_m=310.0,
+        md_b_end_m=370.0,
+        classification="target-trajectory",
+        priority_rank=1,
+    )
+    stale_zone = SimpleNamespace(
+        well_a="well_08",
+        well_b="well_09",
+        separation_factor=0.4,
+    )
+    kept_zone = SimpleNamespace(
+        well_a="well_09",
+        well_b="fact_01",
+        separation_factor=0.8,
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(edited_well, kept_well, reference_well),
+        corridors=(stale_corridor, kept_corridor),
+        well_segments=(
+            SimpleNamespace(well_name="well_08"),
+            SimpleNamespace(well_name="well_09"),
+        ),
+        zones=(stale_zone, kept_zone),
+        pair_count=3,
+        overlapping_pair_count=2,
+        target_overlap_pair_count=1,
+        worst_separation_factor=0.4,
+    )
+    stale_recommendation = SimpleNamespace(
+        well_a="well_08",
+        well_b="well_09",
+        affected_wells=("well_08",),
+    )
+    kept_recommendation = SimpleNamespace(
+        well_a="well_09",
+        well_b="fact_01",
+        affected_wells=("well_09",),
+    )
+    stale_cluster = SimpleNamespace(
+        well_names=("well_08", "well_09"),
+        affected_wells=("well_08",),
+    )
+    kept_cluster = SimpleNamespace(
+        well_names=("well_09", "fact_01"),
+        affected_wells=("well_09",),
+    )
+
+    filtered_analysis, filtered_recommendations, filtered_clusters = (
+        ptc_page_results._filter_cached_anticollision_snapshot_for_pending_edits(
+            analysis=analysis,
+            recommendations=(stale_recommendation, kept_recommendation),
+            clusters=(stale_cluster, kept_cluster),
+            pending_edit_names=["well_08"],
+        )
+    )
+
+    assert [str(well.name) for well in filtered_analysis.wells] == [
+        "well_09",
+        "fact_01",
+    ]
+    assert filtered_analysis.corridors == (kept_corridor,)
+    assert filtered_analysis.zones == (kept_zone,)
+    assert {segment.well_name for segment in filtered_analysis.well_segments} == {
+        "well_09",
+        "fact_01",
+    }
+    assert filtered_analysis.pair_count == 1
+    assert filtered_analysis.overlapping_pair_count == 1
+    assert filtered_analysis.target_overlap_pair_count == 1
+    assert filtered_analysis.worst_separation_factor == pytest.approx(0.8)
+    assert filtered_recommendations == (kept_recommendation,)
+    assert filtered_clusters == (kept_cluster,)
 
 
 def test_target_edit_overview_keeps_reference_wells(

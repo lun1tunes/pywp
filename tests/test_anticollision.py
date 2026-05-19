@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 import multiprocessing
 from pathlib import Path
 
@@ -1395,7 +1396,82 @@ def test_build_anti_collision_wells_for_successes_reuses_unchanged_wells(
     assert set(next_cache) == {"WELL-A", "WELL-B"}
 
 
-def test_build_anti_collision_wells_for_successes_reports_cone_progress() -> None:
+def test_build_anti_collision_wells_for_successes_reports_cone_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    successes = [
+        SuccessfulWellPlan(
+            name=name,
+            surface=Point3D(0.0, y_offset_m, 0.0),
+            t1=Point3D(1000.0, y_offset_m, 0.0),
+            t3=Point3D(2000.0, y_offset_m, 0.0),
+            stations=_straight_stations(y_offset_m=y_offset_m),
+            summary={"kop_md_m": 0.0},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config={"optimization_mode": "none"},
+        )
+        for name, y_offset_m in (("WELL-A", 0.0), ("WELL-B", 20.0))
+    ]
+    events: list[anticollision_module.AntiCollisionProgress] = []
+    executor_workers: list[int] = []
+    submitted_names: list[str] = []
+
+    class InlineExecutor:
+        def __init__(self, *, max_workers: int, mp_context: object | None = None):
+            executor_workers.append(int(max_workers))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def submit(self, fn, job):
+            submitted_names.append(str(job.name))
+            future: Future = Future()
+            future.set_result(fn(job))
+            return future
+
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "ProcessPoolExecutor",
+        InlineExecutor,
+    )
+
+    wells, _cache, _reused, _rebuilt = build_anti_collision_wells_for_successes(
+        successes,
+        model=PlanningUncertaintyModel(),
+        well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        progress_callback=events.append,
+        parallel_workers=3,
+    )
+
+    cone_events = [event for event in events if event.stage == "wells"]
+    assert [event.completed_well_count for event in cone_events] == [0, 1, 2]
+    assert {event.well_count for event in cone_events} == {2}
+    assert cone_events[-1].rebuilt_well_count == 2
+    assert cone_events[-1].rebuild_well_count == 2
+    assert cone_events[-1].completed_rebuild_well_count == 2
+    assert cone_events[-1].reused_well_count == 0
+    assert cone_events[-1].parallel_workers == 2
+    assert executor_workers == [2]
+    assert submitted_names == ["WELL-A", "WELL-B"]
+    assert [well.name for well in wells] == ["WELL-A", "WELL-B"]
+
+
+@pytest.mark.integration
+def test_parallel_anti_collision_well_build_runs_under_spawn_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "process_pool_context",
+        lambda **_kwargs: ctx,
+    )
     successes = [
         SuccessfulWellPlan(
             name=name,
@@ -1412,22 +1488,24 @@ def test_build_anti_collision_wells_for_successes_reports_cone_progress() -> Non
     ]
     events: list[anticollision_module.AntiCollisionProgress] = []
 
-    build_anti_collision_wells_for_successes(
-        successes,
-        model=PlanningUncertaintyModel(),
-        well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
-        include_display_geometry=False,
-        build_overlap_geometry=False,
-        progress_callback=events.append,
-        parallel_workers=3,
+    wells, cache, reused_count, rebuilt_count = (
+        build_anti_collision_wells_for_successes(
+            successes,
+            model=PlanningUncertaintyModel(sample_step_m=250.0),
+            well_signature_by_name={"WELL-A": "a-v1", "WELL-B": "b-v1"},
+            include_display_geometry=False,
+            build_overlap_geometry=False,
+            progress_callback=events.append,
+            parallel_workers=2,
+        )
     )
 
-    cone_events = [event for event in events if event.stage == "wells"]
-    assert [event.completed_well_count for event in cone_events] == [0, 1, 2]
-    assert {event.well_count for event in cone_events} == {2}
-    assert cone_events[-1].rebuilt_well_count == 2
-    assert cone_events[-1].reused_well_count == 0
-    assert cone_events[-1].parallel_workers == 3
+    assert [well.name for well in wells] == ["WELL-A", "WELL-B"]
+    assert set(cache) == {"WELL-A", "WELL-B"}
+    assert reused_count == 0
+    assert rebuilt_count == 2
+    assert events[-1].parallel_workers == 2
+    assert events[-1].completed_rebuild_well_count == 2
 
 
 def test_analyze_anti_collision_does_not_skip_pair_by_terminal_geometry_only(

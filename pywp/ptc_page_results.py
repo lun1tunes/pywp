@@ -6,7 +6,11 @@ import streamlit as st
 from pywp import ptc_core as wt
 from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state as reference_state
-from pywp.anticollision import AntiCollisionAnalysis, anti_collision_report_rows
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    AntiCollisionWellSegment,
+    anti_collision_report_rows,
+)
 from pywp.coordinate_integration import (
     csv_export_crs,
     get_crs_display_suffix,
@@ -482,6 +486,206 @@ def _cached_anticollision_snapshot() -> tuple[
     )
 
 
+def _filter_cached_anticollision_snapshot_for_pending_edits(
+    *,
+    analysis: AntiCollisionAnalysis,
+    recommendations: tuple[object, ...],
+    clusters: tuple[object, ...],
+    pending_edit_names: list[str],
+) -> tuple[AntiCollisionAnalysis, tuple[object, ...], tuple[object, ...]]:
+    edited_names = {
+        str(name).strip() for name in pending_edit_names if str(name).strip()
+    }
+    if not edited_names:
+        return analysis, recommendations, clusters
+    filtered_wells = tuple(
+        well
+        for well in analysis.wells
+        if str(getattr(well, "name", "")).strip() not in edited_names
+    )
+    filtered_corridors = tuple(
+        corridor
+        for corridor in analysis.corridors
+        if not {
+            str(getattr(corridor, "well_a", "")).strip(),
+            str(getattr(corridor, "well_b", "")).strip(),
+        }.intersection(edited_names)
+    )
+    filtered_zones = tuple(
+        zone
+        for zone in analysis.zones
+        if not {
+            str(getattr(zone, "well_a", "")).strip(),
+            str(getattr(zone, "well_b", "")).strip(),
+        }.intersection(edited_names)
+    )
+    filtered_segments = _cached_snapshot_segments_from_corridors(
+        corridors=filtered_corridors,
+        wells=filtered_wells,
+    )
+    pair_keys = {
+        tuple(
+            sorted(
+                (
+                    str(getattr(corridor, "well_a", "")).strip(),
+                    str(getattr(corridor, "well_b", "")).strip(),
+                )
+            )
+        )
+        for corridor in filtered_corridors
+    }
+    target_pair_keys = {
+        tuple(
+            sorted(
+                (
+                    str(getattr(corridor, "well_a", "")).strip(),
+                    str(getattr(corridor, "well_b", "")).strip(),
+                )
+            )
+        )
+        for corridor in filtered_corridors
+        if int(getattr(corridor, "priority_rank", 99)) < 2
+    }
+    worst_sf_values = [
+        float(getattr(zone, "separation_factor"))
+        for zone in filtered_zones
+        if getattr(zone, "separation_factor", None) is not None
+    ]
+    filtered_analysis = AntiCollisionAnalysis(
+        wells=filtered_wells,
+        corridors=filtered_corridors,
+        well_segments=filtered_segments,
+        zones=filtered_zones,
+        pair_count=_cached_snapshot_pair_count(filtered_wells),
+        overlapping_pair_count=int(len(pair_keys)),
+        target_overlap_pair_count=int(len(target_pair_keys)),
+        worst_separation_factor=(
+            min(worst_sf_values) if worst_sf_values else None
+        ),
+    )
+    filtered_recommendations = tuple(
+        recommendation
+        for recommendation in recommendations
+        if not _recommendation_touches_names(recommendation, edited_names)
+    )
+    filtered_clusters = tuple(
+        cluster
+        for cluster in clusters
+        if not _cluster_touches_names(cluster, edited_names)
+    )
+    return filtered_analysis, filtered_recommendations, filtered_clusters
+
+
+def _cached_snapshot_pair_count(wells: tuple[object, ...]) -> int:
+    return max(len(wells) * (len(wells) - 1) // 2, 0)
+
+
+def _cached_snapshot_segments_from_corridors(
+    *,
+    corridors: tuple[object, ...],
+    wells: tuple[object, ...],
+) -> tuple[AntiCollisionWellSegment, ...]:
+    if not corridors:
+        return ()
+    step_tolerance_m = _cached_snapshot_segment_step_tolerance_m(wells)
+    raw_segments: list[AntiCollisionWellSegment] = []
+    for corridor in corridors:
+        raw_segments.append(
+            AntiCollisionWellSegment(
+                well_name=str(getattr(corridor, "well_a")),
+                md_start_m=float(getattr(corridor, "md_a_start_m")),
+                md_end_m=float(getattr(corridor, "md_a_end_m")),
+                classification=str(getattr(corridor, "classification", "")),
+                priority_rank=int(getattr(corridor, "priority_rank", 99)),
+            )
+        )
+        raw_segments.append(
+            AntiCollisionWellSegment(
+                well_name=str(getattr(corridor, "well_b")),
+                md_start_m=float(getattr(corridor, "md_b_start_m")),
+                md_end_m=float(getattr(corridor, "md_b_end_m")),
+                classification=str(getattr(corridor, "classification", "")),
+                priority_rank=int(getattr(corridor, "priority_rank", 99)),
+            )
+        )
+    merged: list[AntiCollisionWellSegment] = []
+    for well_name in sorted({segment.well_name for segment in raw_segments}):
+        well_segments = sorted(
+            [segment for segment in raw_segments if segment.well_name == well_name],
+            key=lambda segment: (float(segment.md_start_m), float(segment.md_end_m)),
+        )
+        current = well_segments[0]
+        for segment in well_segments[1:]:
+            if float(segment.md_start_m) <= float(current.md_end_m) + step_tolerance_m:
+                current = AntiCollisionWellSegment(
+                    well_name=current.well_name,
+                    md_start_m=float(current.md_start_m),
+                    md_end_m=max(float(current.md_end_m), float(segment.md_end_m)),
+                    classification=(
+                        current.classification
+                        if int(current.priority_rank) <= int(segment.priority_rank)
+                        else segment.classification
+                    ),
+                    priority_rank=min(
+                        int(current.priority_rank), int(segment.priority_rank)
+                    ),
+                )
+                continue
+            merged.append(current)
+            current = segment
+        merged.append(current)
+    return tuple(merged)
+
+
+def _cached_snapshot_segment_step_tolerance_m(wells: tuple[object, ...]) -> float:
+    step_values: list[float] = []
+    for well in wells:
+        samples = tuple(getattr(well, "samples", ()) or ())
+        md_values = [
+            float(getattr(sample, "md_m"))
+            for sample in samples
+            if getattr(sample, "md_m", None) is not None
+        ]
+        if len(md_values) < 2:
+            continue
+        md_values = sorted(set(md_values))
+        diffs = [
+            right - left
+            for left, right in zip(md_values, md_values[1:], strict=False)
+            if right > left
+        ]
+        if diffs:
+            step_values.append(min(diffs))
+    return float(max(step_values, default=100.0) * 1.05)
+
+
+def _recommendation_touches_names(
+    recommendation: object,
+    edited_names: set[str],
+) -> bool:
+    names = {
+        str(getattr(recommendation, "well_a", "")).strip(),
+        str(getattr(recommendation, "well_b", "")).strip(),
+        *(
+            str(name).strip()
+            for name in tuple(getattr(recommendation, "affected_wells", ()) or ())
+        ),
+    }
+    return bool(names.intersection(edited_names))
+
+
+def _cluster_touches_names(cluster: object, edited_names: set[str]) -> bool:
+    names = {
+        str(name).strip()
+        for name in tuple(getattr(cluster, "well_names", ()) or ())
+    }
+    names.update(
+        str(name).strip()
+        for name in tuple(getattr(cluster, "affected_wells", ()) or ())
+    )
+    return bool(names.intersection(edited_names))
+
+
 def _render_cached_anticollision_snapshot_for_pending_edits(
     *,
     successes: list[object],
@@ -493,10 +697,19 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
     if snapshot is None:
         return False
     analysis, recommendations, clusters = snapshot
+    analysis, recommendations, clusters = (
+        _filter_cached_anticollision_snapshot_for_pending_edits(
+            analysis=analysis,
+            recommendations=recommendations,
+            clusters=clusters,
+            pending_edit_names=wt._pending_edit_target_names(),
+        )
+    )
     st.caption(
         "Ниже показан последний anti-collision снимок до пересчёта: "
-        "старые конусы, пересечения и фактический/утверждённый фонд остаются "
-        "на экране как ориентир для дальнейшей правки целей."
+        "старые конусы и пересечения скрыты для изменённых скважин, а "
+        "фактический/утверждённый фонд и неизменённые скважины остаются "
+        "на экране как ориентир."
     )
 
     visible_focus_names = tuple(focus_pad_well_names)
@@ -517,6 +730,8 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
     anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
         analysis,
         previous_successes_by_name={},
+        target_only_wells=target_only_wells,
+        name_to_color=name_to_color,
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=focus_anticollision_well_names or visible_focus_names,
         render_mode=wt.WT_3D_RENDER_DETAIL,
@@ -537,6 +752,8 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         wt._all_wells_anticollision_plan_figure(
             analysis,
             previous_successes_by_name={},
+            target_only_wells=target_only_wells,
+            name_to_color=name_to_color,
             focus_well_names=focus_anticollision_well_names or visible_focus_names,
         ),
         width="stretch",

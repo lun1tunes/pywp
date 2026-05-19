@@ -1053,6 +1053,8 @@ def _all_wells_anticollision_three_payload(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    target_only_wells: list[_TargetOnlyWell] | None = None,
+    name_to_color: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
@@ -1070,6 +1072,8 @@ def _all_wells_anticollision_three_payload(
     return ptc_three_builders.anticollision_three_payload(
         analysis,
         previous_successes_by_name=previous_successes_by_name,
+        target_only_wells=target_only_wells,
+        name_to_color=name_to_color,
         pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
         render_mode=resolved_render_mode,
@@ -1572,16 +1576,38 @@ def _cached_anti_collision_view_model(
                 total=total,
             ):
                 return
+            rebuild_total = int(getattr(progress, "rebuild_well_count", 0) or 0)
+            rebuild_completed = int(
+                getattr(
+                    progress,
+                    "completed_rebuild_well_count",
+                    getattr(progress, "rebuilt_well_count", 0),
+                )
+                or 0
+            )
+            eta_completed = completed
+            eta_total = total
+            if rebuild_total > 0:
+                eta_completed = rebuild_completed
+                eta_total = rebuild_total
             eta_text = _remaining_progress_text(
                 elapsed_s=float(max(progress.elapsed_s, 0.0)),
-                completed=completed,
-                total=total,
+                completed=eta_completed,
+                total=eta_total,
+                parallel_workers=int(getattr(progress, "parallel_workers", 0) or 0),
+            )
+            workers = int(getattr(progress, "parallel_workers", 0) or 0)
+            worker_text = f" · {workers} процессов" if workers > 1 else ""
+            built_text = (
+                f"{rebuild_completed}/{rebuild_total}"
+                if rebuild_total > 0
+                else str(int(progress.rebuilt_well_count))
             )
             progress_text = (
                 "Anti-collision: конусы неопределённости "
-                f"{completed}/{total} · {eta_text} · "
+                f"{completed}/{total} · {eta_text}{worker_text} · "
                 f"кэш скважин {int(progress.reused_well_count)} · "
-                f"построено {int(progress.rebuilt_well_count)}"
+                f"построено {built_text}"
             )
             if progress_callback is not None:
                 progress_callback(percent, progress_text)
@@ -2563,6 +2589,8 @@ def _all_wells_anticollision_plan_figure(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    target_only_wells: list[_TargetOnlyWell] | None = None,
+    name_to_color: Mapping[str, str] | None = None,
     focus_well_names: tuple[str, ...] = (),
     height: int = 620,
 ) -> go.Figure:
@@ -2573,6 +2601,7 @@ def _all_wells_anticollision_plan_figure(
     y_focus_arrays: list[np.ndarray] = []
     focus_set = {str(name) for name in focus_well_names if str(name).strip()}
     well_lookup = {str(well.name): well for well in analysis.wells}
+    target_color_map = dict(name_to_color or {})
 
     for well in analysis.wells:
         well_label = (
@@ -2785,6 +2814,64 @@ def _all_wells_anticollision_plan_figure(
     pad_label_trace = _reference_pad_label_trace_2d(analysis_reference_wells)
     if pad_label_trace is not None:
         fig.add_trace(pad_label_trace)
+
+    for target_only in target_only_wells or ():
+        line_color = target_color_map.get(str(target_only.name), "#6B7280")
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        if not target_points:
+            target_points = (target_only.surface, target_only.t1, target_only.t3)
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        if len(target_labels) != len(target_points):
+            target_labels = _target_only_fallback_labels(
+                point_count=len(target_points),
+                target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            )
+        marker_x = np.array([point.x for point in target_points], dtype=float)
+        marker_y = np.array([point.y for point in target_points], dtype=float)
+        x_arrays.append(marker_x)
+        y_arrays.append(marker_y)
+        if not focus_set or str(target_only.name) in focus_set:
+            x_focus_arrays.append(marker_x)
+            y_focus_arrays.append(marker_y)
+        customdata = np.array(
+            [
+                [label, target_only.status, target_only.problem or "—"]
+                for label in target_labels
+            ],
+            dtype=object,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=marker_x,
+                y=marker_y,
+                mode="markers",
+                name=f"{target_only.name}: цели (без траектории)",
+                marker={
+                    "size": 12,
+                    "symbol": "x",
+                    "color": line_color,
+                    "line": {"width": 3, "color": line_color},
+                },
+                customdata=customdata,
+                hovertemplate=(
+                    "Точка: %{customdata[0]}<br>"
+                    "Статус: %{customdata[1]}<br>"
+                    "Проблема: %{customdata[2]}<br>"
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+        label_point = target_points[min(1, len(target_points) - 1)]
+        fig.add_trace(
+            _t1_name_trace_2d(
+                well_name=str(target_only.name),
+                x_value=float(label_point.x),
+                y_value=float(label_point.y),
+                color=line_color,
+            )
+        )
 
     x_values = (
         (np.concatenate(x_focus_arrays) if x_focus_arrays else np.concatenate(x_arrays))

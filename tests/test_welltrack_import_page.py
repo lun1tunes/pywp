@@ -3795,6 +3795,102 @@ def test_cached_anti_collision_view_model_reports_cone_progress(
     )
 
 
+def test_cached_anti_collision_cone_eta_uses_parallel_rebuild_workers(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state["wt_anticollision_analysis_cache"] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    def _fake_incremental_build(
+        successes,
+        *,
+        model,
+        name_to_color=None,
+        reference_wells=(),
+        reference_uncertainty_models_by_name=None,
+        well_signature_by_name=None,
+        previous_well_cache=None,
+        previous_pair_cache=None,
+        progress_callback=None,
+        parallel_workers=0,
+    ):
+        assert progress_callback is not None
+        progress_callback(
+            AntiCollisionProgress(
+                pair_count=0,
+                completed_pair_count=0,
+                elapsed_s=30.0,
+                parallel_workers=int(parallel_workers),
+                stage="wells",
+                well_count=10,
+                completed_well_count=1,
+                reused_well_count=0,
+                rebuilt_well_count=1,
+                rebuild_well_count=10,
+                completed_rebuild_well_count=1,
+            )
+        )
+        return (
+            analysis,
+            {str(success.name): ("sig", object()) for success in successes},
+            {},
+            AntiCollisionIncrementalStats(
+                reused_well_count=0,
+                rebuilt_well_count=10,
+                reused_pair_count=0,
+                recalculated_pair_count=0,
+            ),
+        )
+
+    monkeypatch.setattr(
+        page,
+        "_build_incremental_anti_collision_analysis",
+        _fake_incremental_build,
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendations",
+        lambda analysis, *, well_context_by_name: (),
+    )
+    monkeypatch.setattr(
+        page,
+        "build_anti_collision_recommendation_clusters",
+        lambda recommendations: (),
+    )
+    progress_events: list[tuple[int, str]] = []
+
+    page._cached_anti_collision_view_model(
+        successes=[_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        uncertainty_model=planning_uncertainty_model_for_preset(
+            DEFAULT_UNCERTAINTY_PRESET
+        ),
+        records=[],
+        progress_callback=lambda value, text: progress_events.append(
+            (int(value), str(text))
+        ),
+        parallel_workers=4,
+    )
+
+    assert any(
+        "конусы неопределённости 1/10" in text
+        and "осталось оц. 1 мин 08 с" in text
+        and "4 процессов" in text
+        and "построено 1/10" in text
+        for _value, text in progress_events
+    )
+
+
 def test_cached_anti_collision_parallel_eta_uses_worker_count_before_first_wave(
     monkeypatch,
 ) -> None:
@@ -4928,6 +5024,63 @@ def test_anticollision_figures_draw_previous_trajectories_as_dashed_overlay() ->
     assert len(previous_plan) == 1
     assert str(previous_3d[0]["dash"]) == "dot"
     assert str(previous_plan[0].line.dash) == "dot"
+
+
+def test_anticollision_figures_show_pending_target_only_points_without_old_trajectory() -> (
+    None
+):
+    page = wt_import_module
+    analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-B", y_offset_m=5.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+    target_only = page._TargetOnlyWell(
+        name="WELL-A",
+        surface=Point3D(10.0, 20.0, 0.0),
+        t1=Point3D(100.0, 200.0, 1500.0),
+        t3=Point3D(300.0, 400.0, 1600.0),
+        status="Не рассчитана",
+        problem="Цели изменены в 3D",
+        target_points=(
+            Point3D(10.0, 20.0, 0.0),
+            Point3D(100.0, 200.0, 1500.0),
+            Point3D(300.0, 400.0, 1600.0),
+        ),
+        target_labels=("S", "t1", "t3"),
+    )
+
+    payload_3d = page._all_wells_anticollision_three_payload(
+        analysis,
+        target_only_wells=[target_only],
+        name_to_color={"WELL-A": "#123456", "WELL-B": "#654321"},
+        focus_well_names=("WELL-A", "WELL-B"),
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
+    figure_plan = page._all_wells_anticollision_plan_figure(
+        analysis,
+        target_only_wells=[target_only],
+        name_to_color={"WELL-A": "#123456", "WELL-B": "#654321"},
+        focus_well_names=("WELL-A", "WELL-B"),
+    )
+
+    assert not any(
+        str(item.get("name")) == "WELL-A"
+        for item in list(payload_3d.get("lines") or [])
+    )
+    assert not any(
+        str(item.get("name")).startswith("WELL-A cone")
+        for item in list(payload_3d.get("meshes") or [])
+    )
+    assert any(
+        str(item.get("name")) == "WELL-A: цели (без траектории)"
+        and len(list(item.get("points") or [])) == 3
+        for item in list(payload_3d.get("points") or [])
+    )
+    assert any(
+        str(trace.name) == "WELL-A: цели (без траектории)"
+        and len(trace.x) == 3
+        for trace in figure_plan.data
+    )
 
 
 def test_all_wells_three_payload_uses_default_camera() -> None:

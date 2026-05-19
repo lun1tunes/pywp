@@ -496,6 +496,8 @@ def anticollision_three_payload(
     analysis: AntiCollisionAnalysis,
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    target_only_wells: list[object] | None = None,
+    name_to_color: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
@@ -508,6 +510,7 @@ def anticollision_three_payload(
     y_focus_arrays: list[np.ndarray] = []
     z_focus_arrays: list[np.ndarray] = []
     focus_set = _clean_name_set(focus_well_names)
+    color_map = dict(name_to_color or {})
     pilot_points_map = dict(pilot_study_points_by_name or {})
     reference_wells = tuple(well for well in analysis.wells if bool(well.is_reference_only))
     focus_reference_names = (
@@ -664,6 +667,53 @@ def anticollision_three_payload(
                     color=str(well.color),
                 )
             payload["labels"].append(_well_name_label(well_name, well.t3, str(well.color)))
+
+    for target_only in target_only_wells or ():
+        well_name = str(getattr(target_only, "name"))
+        color = color_map.get(well_name, "#6B7280")
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        target_focus_arrays = (
+            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
+            if _include_target_only_in_focus(
+                well_name=well_name,
+                focus_set=focus_set,
+                target_points=target_points,
+                target_labels=target_labels,
+            )
+            else None
+        )
+        _append_target_markers(
+            payload,
+            name=f"{well_name}: цели (без траектории)",
+            surface=getattr(target_only, "surface"),
+            t1=getattr(target_only, "t1"),
+            t3=getattr(target_only, "t3"),
+            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            target_points=target_points,
+            target_labels=target_labels,
+            color=color,
+            size=10.0,
+            symbol="cross",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+            focus_arrays=target_focus_arrays,
+            hover_extra={
+                "status": str(getattr(target_only, "status", "") or ""),
+                "problem": str(getattr(target_only, "problem", "") or ""),
+            },
+        )
+        payload["labels"].append(
+            _well_name_label(well_name, getattr(target_only, "t3"), color)
+        )
+        _append_unique_legend_item(
+            payload,
+            label=f"{well_name}: цели (без траектории)",
+            color=color,
+            opacity=1.0,
+            symbol="point",
+        )
 
     if aggregated_reference_wells:
         _append_combined_reference_wells(

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
+from pickle import PicklingError
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
@@ -40,6 +43,7 @@ from pywp.anticollision_rerun_models import (
     TrajectoryOverrideSpec,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
+from pywp.parallel import process_pool_context
 from pywp.pilot_wells import paired_pilot_parent_names, well_name_key
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -70,6 +74,63 @@ class DynamicClusterExecutionPlan:
     skipped_wells: tuple[str, ...]
     resolution_state: str = DYNAMIC_CLUSTER_PLAN_ACTIVE
     blocking_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _AntiCollisionWellBuildJob:
+    index: int
+    name: str
+    signature: str
+    color: str
+    stations: Any
+    surface: Any
+    t1: Any
+    t3: Any
+    target_pairs: tuple[Any, ...]
+    azimuth_deg: float
+    md_t1_m: float | None
+    md_t3_m: float | None
+    model: PlanningUncertaintyModel
+    include_display_geometry: bool
+    well_kind: str
+    is_reference_only: bool
+    analysis_sample_step_m: float | None
+
+
+@dataclass(frozen=True)
+class _AntiCollisionWellBuildResult:
+    index: int
+    name: str
+    signature: str
+    well: AntiCollisionWell
+
+
+def _build_anti_collision_well_job(
+    job: _AntiCollisionWellBuildJob,
+) -> _AntiCollisionWellBuildResult:
+    well = build_anti_collision_well(
+        name=str(job.name),
+        color=str(job.color),
+        stations=job.stations,
+        surface=job.surface,
+        t1=job.t1,
+        t3=job.t3,
+        target_pairs=tuple(job.target_pairs),
+        azimuth_deg=float(job.azimuth_deg),
+        md_t1_m=job.md_t1_m,
+        md_t3_m=job.md_t3_m,
+        model=job.model,
+        include_display_geometry=bool(job.include_display_geometry),
+        well_kind=str(job.well_kind),
+        is_reference_only=bool(job.is_reference_only),
+        analysis_sample_step_m=job.analysis_sample_step_m,
+    )
+    return _AntiCollisionWellBuildResult(
+        index=int(job.index),
+        name=str(job.name),
+        signature=str(job.signature),
+        well=well,
+    )
 
 
 def _reference_wells_by_collision_name(
@@ -234,79 +295,31 @@ def build_anti_collision_analysis_for_successes(
     progress_callback: Callable[[AntiCollisionProgress], None] | None = None,
     parallel_workers: int = 0,
 ) -> AntiCollisionAnalysis:
-    effective_sample_step_m = (
-        float(analysis_sample_step_m)
-        if analysis_sample_step_m is not None
-        else (
-            float(DEFINITIVE_SCAN_STEP_M)
-            if include_display_geometry and build_overlap_geometry
-            else None
-        )
-    )
     scoped_reference_wells = reference_wells_in_anti_collision_scope(
         successes,
         tuple(reference_wells),
     )
     planned_names = tuple(str(item.name) for item in successes)
-    duplicate_reference_name_keys = reference_well_duplicate_name_keys(
-        scoped_reference_wells
-    )
     excluded_pair_keys = _excluded_source_parent_pair_keys(
         successes=successes,
         reference_wells=scoped_reference_wells,
     )
-    wells = [
-        build_anti_collision_well(
-            name=item.name,
-            color=(name_to_color or {}).get(str(item.name), "#A0A0A0"),
-            stations=item.stations,
-            surface=item.surface,
-            t1=item.t1,
-            t3=item.t3,
-            target_pairs=tuple(getattr(item, "target_pairs", ()) or ()),
-            azimuth_deg=float(item.azimuth_deg),
-            md_t1_m=float(item.md_t1_m),
+    wells, _well_cache, _reused_wells, _rebuilt_wells = (
+        build_anti_collision_wells_for_successes(
+            successes,
             model=model,
-            include_display_geometry=include_display_geometry,
-            well_kind="project",
-            is_reference_only=False,
-            analysis_sample_step_m=effective_sample_step_m,
-        )
-        for item in successes
-    ]
-    for item in scoped_reference_wells:
-        collision_name = reference_well_collision_name(
-            item,
-            planned_names=planned_names,
-            duplicate_name_keys=duplicate_reference_name_keys,
-        )
-        reference_model = _reference_uncertainty_model(
-            reference_well=item,
-            collision_name=collision_name,
-            default_model=model,
+            name_to_color=name_to_color,
+            reference_wells=scoped_reference_wells,
             reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+            include_display_geometry=include_display_geometry,
+            build_overlap_geometry=build_overlap_geometry,
+            analysis_sample_step_m=analysis_sample_step_m,
+            well_signature_by_name={name: "" for name in planned_names},
+            previous_well_cache=None,
+            progress_callback=progress_callback,
+            parallel_workers=int(parallel_workers),
         )
-        wells.append(
-            build_anti_collision_well(
-                name=collision_name,
-                color=(name_to_color or {}).get(
-                    str(collision_name),
-                    REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
-                ),
-                stations=item.stations,
-                surface=item.surface,
-                t1=None,
-                t3=None,
-                azimuth_deg=float(item.azimuth_deg),
-                md_t1_m=None,
-                md_t3_m=None,
-                model=reference_model,
-                include_display_geometry=include_display_geometry,
-                well_kind=str(item.kind),
-                is_reference_only=True,
-                analysis_sample_step_m=effective_sample_step_m,
-            )
-        )
+    )
     return analyze_anti_collision(
         wells,
         build_overlap_geometry=build_overlap_geometry,
@@ -431,13 +444,20 @@ def build_anti_collision_wells_for_successes(
     duplicate_reference_name_keys = reference_well_duplicate_name_keys(
         scoped_reference_wells
     )
-    wells: list[AntiCollisionWell] = []
     next_cache: dict[str, tuple[str, AntiCollisionWell]] = {}
     reused_count = 0
     rebuilt_count = 0
     total_well_count = int(len(successes) + len(scoped_reference_wells))
     completed_well_count = 0
     started_at = perf_counter()
+    wells_by_index: list[AntiCollisionWell | None] = [None] * total_well_count
+    build_jobs: list[_AntiCollisionWellBuildJob] = []
+
+    def _active_cone_workers() -> int:
+        requested = int(max(parallel_workers, 0))
+        if requested <= 1 or len(build_jobs) <= 1:
+            return 0
+        return int(min(requested, len(build_jobs)))
 
     def _notify_cone_progress() -> None:
         if progress_callback is None:
@@ -447,70 +467,74 @@ def build_anti_collision_wells_for_successes(
                 pair_count=0,
                 completed_pair_count=0,
                 elapsed_s=float(perf_counter() - started_at),
-                parallel_workers=int(max(parallel_workers, 0)),
+                parallel_workers=_active_cone_workers(),
                 stage="wells",
                 well_count=int(total_well_count),
                 completed_well_count=int(completed_well_count),
                 reused_well_count=int(reused_count),
                 rebuilt_well_count=int(rebuilt_count),
+                rebuild_well_count=int(len(build_jobs)),
+                completed_rebuild_well_count=int(rebuilt_count),
             )
         )
 
-    _notify_cone_progress()
-
-    def _reuse_or_build(
-        *,
-        name: str,
-        builder: Callable[[], AntiCollisionWell],
-    ) -> AntiCollisionWell:
-        nonlocal completed_well_count, reused_count, rebuilt_count
-        signature = signatures.get(str(name), "")
-        previous = previous_cache.get(str(name))
+    def _reuse_or_schedule(job: _AntiCollisionWellBuildJob) -> None:
+        nonlocal completed_well_count, reused_count
+        previous = previous_cache.get(str(job.name))
         if (
             previous is not None
             and len(previous) == 2
-            and str(previous[0]) == signature
+            and str(previous[0]) == str(job.signature)
             and isinstance(previous[1], AntiCollisionWell)
         ):
             reused_count += 1
             well = previous[1]
+            wells_by_index[int(job.index)] = well
+            next_cache[str(job.name)] = (str(job.signature), well)
+            completed_well_count += 1
         else:
-            rebuilt_count += 1
-            well = builder()
-        next_cache[str(name)] = (signature, well)
+            build_jobs.append(job)
+
+    def _store_built_result(result: _AntiCollisionWellBuildResult) -> None:
+        nonlocal completed_well_count, rebuilt_count
+        wells_by_index[int(result.index)] = result.well
+        next_cache[str(result.name)] = (str(result.signature), result.well)
+        rebuilt_count += 1
         completed_well_count += 1
         _notify_cone_progress()
-        return well
 
-    for item in successes:
+    for index, item in enumerate(successes):
         name = str(item.name)
-        wells.append(
-            _reuse_or_build(
-                name=name,
-                builder=lambda item=item, name=name: build_anti_collision_well(
-                    name=name,
-                    color=(name_to_color or {}).get(name, "#A0A0A0"),
-                    stations=item.stations,
-                    surface=item.surface,
-                    t1=item.t1,
-                    t3=item.t3,
-                    target_pairs=tuple(getattr(item, "target_pairs", ()) or ()),
-                    azimuth_deg=float(item.azimuth_deg),
-                    md_t1_m=float(item.md_t1_m),
-                    model=model,
-                    include_display_geometry=include_display_geometry,
-                    well_kind="project",
-                    is_reference_only=False,
-                    analysis_sample_step_m=effective_sample_step_m,
-                ),
-            )
+        job = _AntiCollisionWellBuildJob(
+            index=int(index),
+            name=name,
+            signature=signatures.get(name, ""),
+            color=(name_to_color or {}).get(name, "#A0A0A0"),
+            stations=item.stations,
+            surface=item.surface,
+            t1=item.t1,
+            t3=item.t3,
+            target_pairs=tuple(getattr(item, "target_pairs", ()) or ()),
+            azimuth_deg=float(item.azimuth_deg),
+            md_t1_m=float(item.md_t1_m),
+            md_t3_m=None,
+            model=model,
+            include_display_geometry=bool(include_display_geometry),
+            well_kind="project",
+            is_reference_only=False,
+            analysis_sample_step_m=effective_sample_step_m,
         )
+        _reuse_or_schedule(job)
 
-    for item in scoped_reference_wells:
-        collision_name = reference_well_collision_name(
-            item,
-            planned_names=planned_names,
-            duplicate_name_keys=duplicate_reference_name_keys,
+    next_index = len(successes)
+    for reference_offset, item in enumerate(scoped_reference_wells):
+        index = int(next_index + reference_offset)
+        collision_name = str(
+            reference_well_collision_name(
+                item,
+                planned_names=planned_names,
+                duplicate_name_keys=duplicate_reference_name_keys,
+            )
         )
         reference_model = _reference_uncertainty_model(
             reference_well=item,
@@ -518,39 +542,85 @@ def build_anti_collision_wells_for_successes(
             default_model=model,
             reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
         )
-        wells.append(
-            _reuse_or_build(
-                name=str(collision_name),
-                builder=(
-                    lambda item=item, collision_name=str(
-                        collision_name
-                    ), reference_model=reference_model: build_anti_collision_well(
-                        name=collision_name,
-                        color=(name_to_color or {}).get(
-                            collision_name,
-                            REFERENCE_WELL_KIND_COLORS.get(
-                                str(item.kind),
-                                "#A0A0A0",
-                            ),
-                        ),
-                        stations=item.stations,
-                        surface=item.surface,
-                        t1=None,
-                        t3=None,
-                        azimuth_deg=float(item.azimuth_deg),
-                        md_t1_m=None,
-                        md_t3_m=None,
-                        model=reference_model,
-                        include_display_geometry=include_display_geometry,
-                        well_kind=str(item.kind),
-                        is_reference_only=True,
-                        analysis_sample_step_m=effective_sample_step_m,
-                    )
-                ),
-            )
+        job = _AntiCollisionWellBuildJob(
+            index=index,
+            name=collision_name,
+            signature=signatures.get(collision_name, ""),
+            color=(name_to_color or {}).get(
+                collision_name,
+                REFERENCE_WELL_KIND_COLORS.get(str(item.kind), "#A0A0A0"),
+            ),
+            stations=item.stations,
+            surface=item.surface,
+            t1=None,
+            t3=None,
+            target_pairs=(),
+            azimuth_deg=float(item.azimuth_deg),
+            md_t1_m=None,
+            md_t3_m=None,
+            model=reference_model,
+            include_display_geometry=bool(include_display_geometry),
+            well_kind=str(item.kind),
+            is_reference_only=True,
+            analysis_sample_step_m=effective_sample_step_m,
         )
+        _reuse_or_schedule(job)
 
-    return tuple(wells), next_cache, int(reused_count), int(rebuilt_count)
+    _notify_cone_progress()
+
+    def _build_serial(jobs: list[_AntiCollisionWellBuildJob]) -> None:
+        for job in jobs:
+            _store_built_result(_build_anti_collision_well_job(job))
+
+    workers = min(int(max(parallel_workers, 0)), len(build_jobs))
+    if workers <= 1 or len(build_jobs) <= 1:
+        _build_serial(build_jobs)
+    else:
+        completed_parallel_indices: set[int] = set()
+        try:
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=process_pool_context(allow_stdin_fork=True),
+            ) as executor:
+                futures = {}
+                for job in build_jobs:
+                    futures[executor.submit(_build_anti_collision_well_job, job)] = job
+                pending = set(futures)
+                while pending:
+                    done, pending = wait(
+                        pending,
+                        timeout=1.0,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    if not done:
+                        _notify_cone_progress()
+                        continue
+                    for future in done:
+                        result = future.result()
+                        completed_parallel_indices.add(int(result.index))
+                        _store_built_result(result)
+        except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
+            remaining_jobs = [
+                job
+                for job in build_jobs
+                if int(job.index) not in completed_parallel_indices
+            ]
+            _build_serial(remaining_jobs)
+
+    missing_indices = [
+        index for index, well in enumerate(wells_by_index) if well is None
+    ]
+    if missing_indices:
+        raise RuntimeError(
+            "Anti-collision well build did not produce results for indices "
+            + ", ".join(str(index) for index in missing_indices)
+        )
+    return (
+        tuple(well for well in wells_by_index if well is not None),
+        next_cache,
+        int(reused_count),
+        int(rebuilt_count),
+    )
 
 
 def _reference_uncertainty_model(

@@ -191,6 +191,8 @@ class AntiCollisionProgress:
     completed_well_count: int = 0
     reused_well_count: int = 0
     rebuilt_well_count: int = 0
+    rebuild_well_count: int = 0
+    completed_rebuild_well_count: int = 0
 
 
 @dataclass(frozen=True)
