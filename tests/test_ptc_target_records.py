@@ -229,6 +229,31 @@ def test_zbs_record_is_ready_with_t1_t3_without_surface() -> None:
     assert list(raw_df["Точка"]) == ["t1", "t3"]
 
 
+def test_multi_horizontal_zbs_record_is_ready_and_labeled_by_levels() -> None:
+    source = _record(
+        "9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2300.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([source])
+    raw_df = target_records.raw_records_dataframe([source])
+
+    assert str(overview_df.iloc[0]["Статус"]) == "✅"
+    assert str(overview_df.iloc[0]["Проблема"]) == "—"
+    assert int(overview_df.iloc[0]["Точек"]) == 4
+    assert float(overview_df.iloc[0]["Длина ГС, м"]) == pytest.approx(1050.0)
+    assert str(overview_df.iloc[0]["Примечание"]) == (
+        "Боковой ствол от факта: нужна скважина 9010; "
+        "Многопластовая: 2 уровней"
+    )
+    assert list(raw_df["Точка"]) == ["1_t1", "1_t3", "2_t1", "2_t3"]
+
+
 def test_zbs_record_rejects_surface_like_extra_point() -> None:
     source = _record(
         "9010_ZBS",

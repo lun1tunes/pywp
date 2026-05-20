@@ -17,7 +17,8 @@ from pywp.pilot_wells import (
     pilot_name_key_for_parent,
     pilot_record_problem_text,
     well_name_key,
-    zbs_target_points_to_pair,
+    zbs_target_points_to_pairs,
+    zbs_multi_horizontal_level_count,
 )
 
 __all__ = [
@@ -100,7 +101,7 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
     for record in records:
         is_pilot = is_pilot_record(record)
         is_zbs = is_zbs_name(record.name)
-        multi_level_count = welltrack_multi_horizontal_level_count(record.points)
+        multi_level_count = _record_multi_horizontal_level_count(record)
         for index, point in enumerate(record.points, start=1):
             raw_rows.append(
                 {
@@ -145,14 +146,27 @@ def _record_t1_offset_m(record: WelltrackRecord) -> float | None:
 def _record_t1_t3_length_m(record: WelltrackRecord) -> float | None:
     points = tuple(record.points)
     if is_zbs_name(record.name):
-        if len(points) != 2 or not all(_point_has_finite_xyz(point) for point in points):
+        if (
+            len(points) < 2
+            or len(points) % 2 != 0
+            or not all(_point_has_finite_xyz(point) for point in points)
+        ):
             return None
-        return float(
-            math.dist(
-                (float(points[0].x), float(points[0].y), float(points[0].z)),
-                (float(points[1].x), float(points[1].y), float(points[1].z)),
+        length_m = 0.0
+        for index in range(0, len(points), 2):
+            length_m += math.dist(
+                (
+                    float(points[index].x),
+                    float(points[index].y),
+                    float(points[index].z),
+                ),
+                (
+                    float(points[index + 1].x),
+                    float(points[index + 1].y),
+                    float(points[index + 1].z),
+                ),
             )
-        )
+        return float(length_m)
     if len(points) < 3:
         return None
     if not all(_point_has_finite_xyz(point) for point in points[1:]):
@@ -229,7 +243,7 @@ def record_import_problem_text(
             if not record_has_strictly_increasing_md(record):
                 problems.append("MD точек должны строго возрастать.")
             try:
-                zbs_target_points_to_pair(points)
+                zbs_target_points_to_pairs(points)
             except ValueError as exc:
                 problems.append(str(exc))
         return "—" if not problems else " ".join(dict.fromkeys(problems))
@@ -322,6 +336,10 @@ def _point_label(
     multi_level_count: int = 0,
 ) -> str:
     if is_zbs:
+        if int(multi_level_count) > 1:
+            level = int((int(index) - 1) // 2) + 1
+            suffix = "t1" if int(index) % 2 == 1 else "t3"
+            return f"{level}_{suffix}"
         if int(index) == 1:
             return "t1"
         if int(index) == 2:
@@ -351,10 +369,16 @@ def _record_note(record: WelltrackRecord, *, has_pilot: bool) -> str:
         )
     if has_pilot:
         notes.append("Есть пилот")
-    level_count = welltrack_multi_horizontal_level_count(record.points)
+    level_count = _record_multi_horizontal_level_count(record)
     if level_count > 1:
         notes.append(f"Многопластовая: {level_count} уровней")
     return "; ".join(notes)
+
+
+def _record_multi_horizontal_level_count(record: WelltrackRecord) -> int:
+    if is_zbs_name(record.name):
+        return zbs_multi_horizontal_level_count(tuple(record.points))
+    return welltrack_multi_horizontal_level_count(record.points)
 
 
 def _point_has_finite_xyz(point: object) -> bool:

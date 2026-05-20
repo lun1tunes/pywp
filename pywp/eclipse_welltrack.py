@@ -432,7 +432,8 @@ def _normalize_table_point_name(
             "пары 1_t1, 1_t3, 2_t1, 2_t3, ... "
             "Для пилота используйте имя wellname_PL и точки S, PL1, PL2, ... "
             "Для бокового ствола от факта используйте имя fact_well_name_ZBS "
-            "и точки t1, t3 без S."
+            "и точки t1, t3 без S; для многопластового ZBS используйте "
+            "1_t1, 1_t3, 2_t1, 2_t3, ... без S."
         )
 
 
@@ -502,6 +503,12 @@ def _ordered_table_zbs_point_names(
     *,
     well_name: str,
 ) -> tuple[str, ...]:
+    if _has_multi_horizontal_table_points(points_by_name):
+        return _ordered_table_zbs_multi_horizontal_point_names(
+            points_by_name,
+            well_name=well_name,
+        )
+
     missing = [name for name in ("t1", "t3") if name not in points_by_name]
     if missing:
         raise WelltrackParseError(
@@ -517,10 +524,56 @@ def _ordered_table_zbs_point_names(
     if extra:
         raise WelltrackParseError(
             "Табличный WELLTRACK: для бокового ствола от факта "
-            f"'{well_name}' используйте только точки t1 и t3 без S. "
+            f"'{well_name}' используйте только точки t1 и t3 без S либо полные "
+            "многопластовые пары 1_t1/1_t3, 2_t1/2_t3, ... без S. "
             f"Лишние точки: {', '.join(extra)}."
         )
     return ("t1", "t3")
+
+
+def _ordered_table_zbs_multi_horizontal_point_names(
+    points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+) -> tuple[str, ...]:
+    forbidden = sorted(
+        _table_point_display_name(point_name)
+        for point_name in points_by_name
+        if point_name in {"wellhead", "t1", "t3"}
+    )
+    if forbidden:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластового бокового ствола от факта "
+            f"'{well_name}' используйте только пары 1_t1/1_t3, 2_t1/2_t3, ... "
+            f"без S и обычных точек. Лишние точки: {', '.join(forbidden)}."
+        )
+
+    levels = sorted(
+        int(match.group(1))
+        for point_name in points_by_name
+        if (match := _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name))) is not None
+    )
+    if not levels:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластового бокового ствола от факта "
+            f"'{well_name}' отсутствует точка 1_t1."
+        )
+    max_level = int(max(levels))
+    missing: list[str] = []
+    ordered: list[str] = []
+    for level in range(1, max_level + 1):
+        for suffix in ("t1", "t3"):
+            point_name = f"{level}_{suffix}"
+            if point_name not in points_by_name:
+                missing.append(point_name)
+            else:
+                ordered.append(point_name)
+    if missing:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластового бокового ствола от факта "
+            f"'{well_name}' отсутствуют точки: {', '.join(missing)}."
+        )
+    return tuple(ordered)
 
 
 def _has_multi_horizontal_table_points(

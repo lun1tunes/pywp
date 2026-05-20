@@ -146,6 +146,22 @@ def test_parse_welltrack_points_table_accepts_multi_horizontal_rows() -> None:
     assert welltrack_multi_horizontal_level_count(records[0].points) == 2
 
 
+def test_parse_welltrack_points_table_accepts_multi_horizontal_zbs_rows() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "9010_ZBS", "Point": "1_t1", "X": 650.0, "Y": 0.0, "Z": 1500.0},
+            {"Wellname": "9010_ZBS", "Point": "1_t3", "X": 1200.0, "Y": 0.0, "Z": 1500.0},
+            {"Wellname": "9010_ZBS", "Point": "2_t1", "X": 1800.0, "Y": 0.0, "Z": 1520.0},
+            {"Wellname": "9010_ZBS", "Point": "2_t3", "X": 2300.0, "Y": 0.0, "Z": 1520.0},
+        ]
+    )
+
+    assert len(records) == 1
+    assert records[0].name == "9010_ZBS"
+    assert [point.md for point in records[0].points] == [1.0, 2.0, 3.0, 4.0]
+    assert welltrack_multi_horizontal_level_count(records[0].points) == 0
+
+
 def test_parse_welltrack_points_table_accepts_tabular_rows() -> None:
     records = parse_welltrack_points_table(
         [

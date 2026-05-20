@@ -373,19 +373,30 @@ def build_edit_wells_payload(
     }
     for success in successes:
         target_pairs = tuple(getattr(success, "target_pairs", ()) or ())
+        sidetrack_window = _sidetrack_window_edit_point(
+            success,
+            parent_success_by_key=parent_success_by_key,
+            reference_well_by_key=reference_well_by_key,
+        )
+        has_sidetrack_metadata = _has_sidetrack_window_metadata(success)
+        is_zbs = is_zbs_name(success.name)
         config = success.config
         base_points = _decimated_base_points(success)
         edit_points: list[dict[str, object]] = []
         if len(target_pairs) > 1:
-            edit_points.append(
-                {
-                    "index": 0,
-                    "label": "S",
-                    "point_type": "surface",
-                    "position": _point3d_payload(success.surface),
-                }
-            )
-            point_index = 1
+            include_surface = not has_sidetrack_metadata and not is_zbs
+            if include_surface:
+                edit_points.append(
+                    {
+                        "index": 0,
+                        "label": "S",
+                        "point_type": "surface",
+                        "position": _point3d_payload(success.surface),
+                    }
+                )
+            point_index = 1 if include_surface or has_sidetrack_metadata else 0
+            if is_zbs:
+                point_index = 0
             for level_index, (pair_t1, pair_t3) in enumerate(target_pairs, start=1):
                 edit_points.append(
                     {
@@ -405,11 +416,6 @@ def build_edit_wells_payload(
                     }
                 )
                 point_index += 1
-        sidetrack_window = _sidetrack_window_edit_point(
-            success,
-            parent_success_by_key=parent_success_by_key,
-            reference_well_by_key=reference_well_by_key,
-        )
         if sidetrack_window is not None:
             if not edit_points:
                 edit_points.extend(
@@ -453,6 +459,15 @@ def build_edit_wells_payload(
             }
         )
     return edit_wells
+
+
+def _has_sidetrack_window_metadata(success: SuccessfulWellPlan) -> bool:
+    summary = dict(getattr(success, "summary", {}) or {})
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    return bool(
+        trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}
+        or "sidetrack_window_md_m" in summary
+    )
 
 
 def build_target_only_edit_wells_payload(
@@ -818,7 +833,11 @@ def _sidetrack_window_edit_point(
 ) -> dict[str, object] | None:
     summary = dict(getattr(success, "summary", {}) or {})
     trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
-    if trajectory_type not in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+    has_sidetrack_window = "sidetrack_window_md_m" in summary
+    if (
+        trajectory_type not in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}
+        and not has_sidetrack_window
+    ):
         return None
     try:
         md_m = float(summary.get("sidetrack_window_md_m"))

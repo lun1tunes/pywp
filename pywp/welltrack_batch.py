@@ -61,7 +61,7 @@ from pywp.pilot_wells import (
     pilot_name_key_for_parent,
     select_sidetrack_window,
     well_name_key,
-    zbs_target_points_to_pair,
+    zbs_target_points_to_pairs,
 )
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
@@ -2192,6 +2192,20 @@ class WelltrackBatchPlanner:
                 md_t1_m = float(multi_result.md_t1_m)
                 azimuth_deg = float(multi_result.azimuth_deg)
                 t3 = target_pairs[-1][1]
+                if pilot_success is not None:
+                    complexity = str(summary.get("well_complexity", "")).strip()
+                    if "многопласт" not in complexity.casefold():
+                        complexity = (
+                            f"{complexity}; многопластовая"
+                            if complexity
+                            else "Боковой ствол от пилота; многопластовая"
+                        )
+                    summary.update(
+                        {
+                            "trajectory_type": "PILOT_SIDETRACK",
+                            "well_complexity": complexity,
+                        }
+                    )
             runtime_s = float(perf_counter() - started)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
@@ -2232,7 +2246,8 @@ class WelltrackBatchPlanner:
     ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
         row = self._base_row(record=record)
         try:
-            t1, t3 = zbs_target_points_to_pair(tuple(record.points))
+            target_pairs = zbs_target_points_to_pairs(tuple(record.points))
+            t1, t3 = target_pairs[0]
         except ValueError as exc:
             row["Статус"] = "Ошибка формата"
             row["Проблема"] = summarize_problem_ru(str(exc))
@@ -2264,18 +2279,42 @@ class WelltrackBatchPlanner:
                 window=window,
                 config=config,
             )
+            stations = sidetrack.stations
+            summary = dict(sidetrack.summary)
+            md_t1_m = float(sidetrack.md_t1_m)
+            azimuth_deg = float(sidetrack.azimuth_deg)
+            final_t3 = t3
+            if len(target_pairs) > 1:
+                multi_result = extend_plan_with_multi_horizontal_targets(
+                    base_result=PlannerResult(
+                        stations=stations,
+                        summary=summary,
+                        azimuth_deg=azimuth_deg,
+                        md_t1_m=md_t1_m,
+                    ),
+                    target_pairs=target_pairs,
+                    config=config,
+                )
+                stations = multi_result.stations
+                summary = dict(multi_result.summary)
+                md_t1_m = float(multi_result.md_t1_m)
+                azimuth_deg = float(multi_result.azimuth_deg)
+                final_t3 = target_pairs[-1][1]
             runtime_s = float(perf_counter() - started)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
             row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
 
-        summary = dict(sidetrack.summary)
         summary.update(
             {
                 "trajectory_type": "FACT_SIDETRACK",
                 "trajectory_target_direction": "Боковой ствол от факта",
-                "well_complexity": "Боковой ствол от факта",
+                "well_complexity": (
+                    "Боковой ствол от факта; многопластовая"
+                    if len(target_pairs) > 1
+                    else "Боковой ствол от факта"
+                ),
                 "sidetrack_parent_well_name": str(parent_well.name),
                 "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
                 "actual_parent_well_name": str(parent_well.name),
@@ -2291,12 +2330,12 @@ class WelltrackBatchPlanner:
             name=record.name,
             surface=sidetrack.window.point,
             t1=t1,
-            t3=t3,
-            target_pairs=((t1, t3),),
-            stations=sidetrack.stations,
+            t3=final_t3,
+            target_pairs=target_pairs,
+            stations=stations,
             summary=summary,
-            azimuth_deg=float(sidetrack.azimuth_deg),
-            md_t1_m=float(sidetrack.md_t1_m),
+            azimuth_deg=azimuth_deg,
+            md_t1_m=md_t1_m,
             config=config,
             runtime_s=runtime_s,
             md_postcheck_exceeded=postcheck_exceeded,

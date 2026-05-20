@@ -109,6 +109,8 @@ from pywp.pilot_wells import (
     sync_pilot_surfaces_to_parents,
     visible_well_records,
     well_name_key,
+    zbs_multi_horizontal_level_count,
+    zbs_target_points_to_pairs,
 )
 from pywp.planner_config import optimization_display_label
 from pywp.plot_axes import (
@@ -394,10 +396,18 @@ def _failed_target_only_wells(
         )
         if not target_points:
             continue
-        if is_zbs_name(record.name) and len(target_points) == 2:
+        if is_zbs_name(record.name):
             surface = target_points[0]
-            target_pairs = ((target_points[0], target_points[1]),)
-            t1, t3 = target_points[0], target_points[1]
+            try:
+                target_pairs = zbs_target_points_to_pairs(tuple(record.points))
+            except ValueError:
+                target_pairs = ()
+            if target_pairs:
+                t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+            elif len(target_points) >= 2:
+                t1, t3 = target_points[0], target_points[-1]
+            else:
+                t1 = t3 = target_points[0]
         else:
             try:
                 surface, target_pairs = welltrack_points_to_target_pairs(record.points)
@@ -435,6 +445,11 @@ def _record_target_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
     if is_zbs_name(record.name):
         if point_count == 2:
             return ("t1", "t3")
+        if point_count >= 4 and point_count % 2 == 0:
+            labels: list[str] = []
+            for level_index in range(1, point_count // 2 + 1):
+                labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
+            return tuple(labels)
         return tuple(f"P{index + 1}" for index in range(point_count))
     target_count = point_count - 1
     if target_count >= 4 and target_count % 2 == 0:
@@ -4114,8 +4129,13 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     multi_horizontal_count = int(
         sum(
             not is_pilot_name(record.name)
-            and not is_zbs_name(record.name)
-            and welltrack_multi_horizontal_level_count(tuple(record.points)) > 1
+            and (
+                welltrack_multi_horizontal_level_count(tuple(record.points)) > 1
+                or (
+                    is_zbs_name(record.name)
+                    and zbs_multi_horizontal_level_count(tuple(record.points)) > 1
+                )
+            )
             for record in records
         )
     )

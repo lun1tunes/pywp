@@ -164,20 +164,59 @@ def visible_well_names(records: Iterable[WelltrackRecord]) -> list[str]:
 def zbs_target_points_to_pair(
     points: tuple[WelltrackPoint, ...],
 ) -> tuple[Point3D, Point3D]:
-    if len(points) != 2:
+    pairs = zbs_target_points_to_pairs(points)
+    if len(pairs) != 1:
         raise ValueError(
             "Для бокового ствола от фактической скважины ожидаются ровно "
-            "две точки `t1` и `t3` без `S`."
+            "две точки `t1` и `t3` без `S`; для многопластового ZBS "
+            "используйте полные пары `1_t1/1_t3`, `2_t1/2_t3`, ... без `S`."
+        )
+    return pairs[0]
+
+
+def zbs_target_points_to_pairs(
+    points: tuple[WelltrackPoint, ...],
+) -> tuple[tuple[Point3D, Point3D], ...]:
+    if len(points) < 2 or len(points) % 2 != 0:
+        raise ValueError(
+            "Для бокового ствола от фактической скважины ожидаются две точки "
+            "`t1` и `t3` без `S` либо полные пары `1_t1/1_t3`, "
+            "`2_t1/2_t3`, ... без `S` для многопластового ZBS."
         )
     if not _points_have_finite_xyz(tuple(points)):
         raise ValueError("Координаты X/Y/Z и MD должны быть конечными числами.")
-    left_md = float(points[0].md)
-    right_md = float(points[1].md)
-    if not left_md + SMALL < right_md:
-        raise ValueError("MD точек ZBS должны строго возрастать: `t1` затем `t3`.")
-    if _has_zero_length_leg(tuple(points)):
-        raise ValueError("Точки `t1` и `t3` бокового ствола совпадают.")
-    return _point_from_welltrack(points[0]), _point_from_welltrack(points[1])
+    md_values = [float(point.md) for point in points]
+    if not all(
+        left_md + SMALL < right_md
+        for left_md, right_md in zip(md_values, md_values[1:], strict=False)
+    ):
+        raise ValueError(
+            "MD точек ZBS должны строго возрастать: `t1` затем `t3`, "
+            "для многопластового ZBS - `1_t1`, `1_t3`, `2_t1`, `2_t3`, ..."
+        )
+
+    pairs: list[tuple[Point3D, Point3D]] = []
+    for index in range(0, len(points), 2):
+        left = points[index]
+        right = points[index + 1]
+        if (
+            math.dist(
+                (float(left.x), float(left.y), float(left.z)),
+                (float(right.x), float(right.y), float(right.z)),
+            )
+            <= SMALL
+        ):
+            level_label = "" if len(points) == 2 else f" уровня {index // 2 + 1}"
+            raise ValueError(f"Точки `t1` и `t3` ZBS{level_label} совпадают.")
+        pairs.append((_point_from_welltrack(left), _point_from_welltrack(right)))
+    return tuple(pairs)
+
+
+def zbs_multi_horizontal_level_count(points: tuple[WelltrackPoint, ...]) -> int:
+    point_count = int(len(tuple(points)))
+    if point_count < 4 or point_count % 2 != 0:
+        return 0
+    return int(point_count // 2)
 
 
 def sync_pilot_surfaces_to_parents(

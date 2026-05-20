@@ -3463,6 +3463,50 @@ def test_batch_planner_applies_manual_sidetrack_window_override() -> None:
     )
 
 
+def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=2220.0, md=4.0),
+            WelltrackPoint(x=3400.0, y=0.0, z=2220.0, md=5.0),
+        ),
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["multi_horizontal"] == "yes"
+    assert success.summary["multi_horizontal_levels"] == 2
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert len(success.target_pairs) == 2
+    assert success.t3 == success.target_pairs[-1][1]
+    assert {
+        "HORIZONTAL_BUILD1",
+        "HORIZONTAL2",
+    }.issubset(set(success.stations["segment"]))
+
+
 def test_batch_planner_reports_missing_actual_parent_for_zbs() -> None:
     zbs = WelltrackRecord(
         name="9010_ZBS",
@@ -3514,6 +3558,45 @@ def test_batch_planner_builds_zbs_from_actual_reference_well() -> None:
     assert success.summary["sidetrack_parent_kind"] == REFERENCE_WELL_ACTUAL
     assert success.surface.z < success.t1.z
     assert success.target_pairs == ((success.t1, success.t3),)
+
+
+def test_batch_planner_builds_multi_horizontal_zbs_from_actual_reference_well() -> None:
+    zbs = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=2200.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+    actual = _actual_reference_well("9010")
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[zbs],
+        selected_names={"9010_ZBS"},
+        config=_fast_batch_config(
+            kop_min_vertical_m=100.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+        reference_wells=(actual,),
+    )
+
+    assert rows[0]["Статус"] == "OK"
+    assert rows[0]["Классификация целей"] == "Боковой ствол от факта"
+    assert len(successes) == 1
+    success = successes[0]
+    assert success.summary["trajectory_type"] == "FACT_SIDETRACK"
+    assert success.summary["multi_horizontal"] == "yes"
+    assert success.summary["multi_horizontal_levels"] == 2
+    assert success.summary["actual_parent_well_name"] == "9010"
+    assert success.summary["sidetrack_parent_kind"] == REFERENCE_WELL_ACTUAL
+    assert success.t3 == success.target_pairs[-1][1]
+    assert len(success.target_pairs) == 2
+    assert {
+        "HORIZONTAL_BUILD1",
+        "HORIZONTAL2",
+    }.issubset(set(success.stations["segment"]))
 
 
 def test_batch_planner_applies_manual_window_override_to_zbs() -> None:

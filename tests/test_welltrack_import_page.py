@@ -584,6 +584,59 @@ def test_records_overview_metrics_count_multi_horizontal_wells(
     ]
 
 
+def test_records_overview_metrics_count_multi_horizontal_zbs(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {"metrics": []}
+    zbs_multi = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2300.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+
+    class _DummyColumn:
+        def metric(self, label, value, *args, **kwargs):
+            captured["metrics"].append((label, value))
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+        ),
+    )
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+
+    page._render_records_overview([zbs_multi])
+
+    assert captured["metrics"] == [
+        ("Скважин", "0"),
+        ("Пилотов", "0"),
+        ("Боковых стволов", "1"),
+        ("Многопластовых скважин", "1"),
+        ("Проблем", "0"),
+    ]
+
+
 def test_t1_t3_resolution_message_reports_fixed_and_kept_wells() -> None:
     page = wt_import_module
 
@@ -5292,6 +5345,55 @@ def test_failed_target_only_zbs_uses_two_targets_and_stays_in_focused_3d_bounds(
     )
     assert [hover["point"] for hover in marker["hover"]] == ["t1", "t3"]
     assert payload_3d["bounds"]["max"][0] >= 6200.0
+
+
+def test_failed_target_only_multi_horizontal_zbs_uses_level_labels() -> None:
+    page = wt_import_module
+    records = [
+        WelltrackRecord(
+            name="9010_ZBS",
+            points=(
+                WelltrackPoint(x=5000.0, y=10.0, z=1500.0, md=1.0),
+                WelltrackPoint(x=6200.0, y=20.0, z=1500.0, md=2.0),
+                WelltrackPoint(x=7000.0, y=30.0, z=1520.0, md=3.0),
+                WelltrackPoint(x=7600.0, y=40.0, z=1520.0, md=4.0),
+            ),
+        )
+    ]
+    summary_rows = [
+        {
+            "Скважина": "9010_ZBS",
+            "Статус": "Ошибка расчета",
+            "Проблема": "нет фактической траектории",
+        }
+    ]
+
+    target_only_wells = page._failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+    edit_wells = page.ptc_three_overrides.build_target_only_edit_wells_payload(
+        target_only_wells,
+        {"9010_ZBS": "#123456"},
+    )
+
+    assert len(target_only_wells) == 1
+    assert target_only_wells[0].target_labels == (
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+    )
+    assert len(target_only_wells[0].target_pairs) == 2
+    assert target_only_wells[0].t1.x == pytest.approx(5000.0)
+    assert target_only_wells[0].t3.x == pytest.approx(7600.0)
+    assert [point["label"] for point in edit_wells[0]["edit_points"]] == [
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+    ]
+    assert [point["index"] for point in edit_wells[0]["edit_points"]] == [0, 1, 2, 3]
 
 
 def test_all_wells_overview_figures_include_reference_trajectories() -> None:

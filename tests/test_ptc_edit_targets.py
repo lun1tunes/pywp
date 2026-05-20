@@ -250,6 +250,88 @@ def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> 
     assert updated_original.points[4].y == pytest.approx(20.0)
 
 
+def test_apply_edit_targets_changes_accepts_sidetrack_multi_horizontal_indices() -> None:
+    record = _record(
+        "WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=2220.0, md=4.0),
+            WelltrackPoint(x=3400.0, y=0.0, z=2220.0, md=5.0),
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [record],
+        "wt_records_original": [record],
+        "wt_successes": [SimpleNamespace(name="WELL-04")],
+        "wt_summary_rows": [{"Скважина": "WELL-04", "Статус": "OK", "Проблема": ""}],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "WELL-04",
+                "points": [
+                    {"index": 1, "position": [810.0, 5.0, 2201.0]},
+                    {"index": 4, "position": [3410.0, 8.0, 2222.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["WELL-04"]
+    assert session_state["wt_edit_targets_highlight_points"] == {"WELL-04": [1, 4]}
+    updated_record = session_state["wt_records"][0]
+    assert updated_record.points[0] == record.points[0]
+    assert updated_record.points[1].x == pytest.approx(810.0)
+    assert updated_record.points[1].md == pytest.approx(2.0)
+    assert updated_record.points[4].z == pytest.approx(2222.0)
+
+
+def test_apply_edit_targets_changes_accepts_multi_horizontal_zbs_indices() -> None:
+    record = _record(
+        "9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=2200.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [record],
+        "wt_records_original": [record],
+        "wt_successes": [SimpleNamespace(name="9010_ZBS")],
+        "wt_summary_rows": [{"Скважина": "9010_ZBS", "Статус": "OK", "Проблема": ""}],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "9010_ZBS",
+                "points": [
+                    {"index": 0, "position": [660.0, 1.0, 1501.0]},
+                    {"index": 3, "position": [2810.0, 3.0, 1522.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["9010_ZBS"]
+    assert session_state["wt_edit_targets_highlight_points"] == {"9010_ZBS": [0, 3]}
+    updated_record = session_state["wt_records"][0]
+    assert updated_record.points[0].x == pytest.approx(660.0)
+    assert updated_record.points[0].md == pytest.approx(1.0)
+    assert updated_record.points[3].z == pytest.approx(1522.0)
+
+
 def test_apply_edit_targets_changes_queues_sidetrack_window_override() -> None:
     records = [_record("9010_ZBS"), _record("WELL-B")]
     session_state: dict[str, object] = {

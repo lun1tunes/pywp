@@ -548,6 +548,107 @@ def test_build_edit_wells_payload_adds_sidetrack_window_handle() -> None:
     assert all(len(point) == 4 for point in window["parent_points"])
 
 
+def test_build_edit_wells_payload_keeps_sidetrack_window_for_multi_horizontal() -> None:
+    parent = _successful_plan_xy(
+        name="WELL-A_PL",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    )
+    sidetrack = _successful_plan_xy(
+        name="WELL-A",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    ).model_copy(
+        update={
+            "target_pairs": (
+                (Point3D(1000.0, 0.0, 0.0), Point3D(1500.0, 0.0, 0.0)),
+                (Point3D(1700.0, 0.0, 30.0), Point3D(2200.0, 0.0, 30.0)),
+            ),
+            "summary": {
+                "trajectory_type": "Multi-horizontal",
+                "pilot_well_name": "WELL-A_PL",
+                "sidetrack_window_md_m": 500.0,
+                "sidetrack_window_x_m": 500.0,
+                "sidetrack_window_y_m": 0.0,
+                "sidetrack_window_z_m": 0.0,
+            },
+        }
+    )
+
+    edit_wells = ptc_three_overrides.build_edit_wells_payload(
+        [sidetrack],
+        {"WELL-A": "#123456"},
+        parent_successes=[parent, sidetrack],
+    )
+
+    edit_points = edit_wells[0]["edit_points"]
+    assert [point["label"] for point in edit_points] == [
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+        "Окно",
+    ]
+    assert [point["index"] for point in edit_points[:-1]] == [1, 2, 3, 4]
+    assert edit_points[-1]["point_type"] == "sidetrack_window"
+
+
+def test_build_edit_wells_payload_indexes_multi_horizontal_zbs_without_surface() -> None:
+    reference_source = _successful_plan_xy(
+        name="9010",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    )
+    reference_well = ImportedTrajectoryWell(
+        name="9010",
+        kind=REFERENCE_WELL_ACTUAL,
+        stations=reference_source.stations,
+        surface=reference_source.surface,
+        azimuth_deg=90.0,
+    )
+    zbs = _successful_plan_xy(
+        name="9010_ZBS",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    ).model_copy(
+        update={
+            "target_pairs": (
+                (Point3D(1000.0, 0.0, 0.0), Point3D(1500.0, 0.0, 0.0)),
+                (Point3D(1700.0, 0.0, 30.0), Point3D(2200.0, 0.0, 30.0)),
+            ),
+            "summary": {
+                "trajectory_type": "FACT_SIDETRACK",
+                "sidetrack_parent_well_name": "9010",
+                "sidetrack_window_md_m": 500.0,
+                "sidetrack_window_x_m": 500.0,
+                "sidetrack_window_y_m": 0.0,
+                "sidetrack_window_z_m": 0.0,
+            },
+        }
+    )
+
+    edit_wells = ptc_three_overrides.build_edit_wells_payload(
+        [zbs],
+        {"9010_ZBS": "#123456"},
+        reference_wells=[reference_well],
+    )
+
+    edit_points = edit_wells[0]["edit_points"]
+    assert [point["label"] for point in edit_points] == [
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+        "Окно",
+    ]
+    assert [point["index"] for point in edit_points[:-1]] == [0, 1, 2, 3]
+    assert edit_points[-1]["point_type"] == "sidetrack_window"
+
+
 def test_build_edit_wells_payload_adds_zbs_window_parent_path_from_reference() -> None:
     reference_source = _successful_plan_xy(
         name="9010",

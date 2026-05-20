@@ -8,6 +8,7 @@ from pywp.eclipse_welltrack import (
     WelltrackRecord,
     welltrack_multi_horizontal_level_count,
 )
+from pywp.pilot_wells import is_zbs_name
 from pywp.pydantic_base import FrozenModel
 
 
@@ -28,6 +29,8 @@ def detect_t1_t3_order_issues(
 
     for record in records:
         points = tuple(record.points)
+        if is_zbs_name(record.name):
+            continue
         if len(points) < 3:
             continue
         if welltrack_multi_horizontal_level_count(points) > 1:
@@ -64,6 +67,9 @@ def swap_t1_t3_for_wells(
     for record in records:
         points = tuple(record.points)
         name = str(record.name)
+        if is_zbs_name(record.name):
+            updated.append(record)
+            continue
         if len(points) < 3 or name not in well_names:
             updated.append(record)
             continue
