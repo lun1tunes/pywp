@@ -454,6 +454,9 @@ def build_edit_wells_payload(
                     "dls_build_max_deg_per_30m": float(
                         config.dls_build_max_deg_per_30m
                     ),
+                    "dls_horizontal_max_deg_per_30m": float(
+                        config.dls_horizontal_max_deg_per_30m
+                    ),
                     "kop_min_vertical_m": float(config.kop_min_vertical_m),
                 },
             }
@@ -507,6 +510,7 @@ def build_target_only_edit_wells_payload(
                     "entry_inc_target_deg": 86.0,
                     "max_inc_deg": 95.0,
                     "dls_build_max_deg_per_30m": 3.0,
+                    "dls_horizontal_max_deg_per_30m": 3.0,
                     "kop_min_vertical_m": 550.0,
                 },
             }

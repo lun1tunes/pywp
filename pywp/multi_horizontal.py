@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 
 from pywp.constants import RAD2DEG
-from pywp.mcm import add_dls, dogleg_angle_rad
+from pywp.mcm import add_dls, dogleg_angle_rad, minimum_curvature_increment
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.planner_types import PlanningError
+from pywp.segments import BuildSegment, HoldSegment
 from pywp.ui_utils import dls_to_pi
 
 SMALL = 1e-9
@@ -23,6 +24,16 @@ class MultiHorizontalTransition:
     required_build_m: float
     excess_m: float
     max_feasible_delta_z_m: float
+
+
+@dataclass(frozen=True)
+class _ConstantDlsTransitionCandidate:
+    stations: pd.DataFrame
+    dls_deg_per_30m: float
+    endpoint_miss_m: float
+    max_dls_deg_per_30m: float
+    max_inc_deg: float
+    md_span_m: float
 
 
 def extend_plan_with_multi_horizontal_targets(
@@ -112,11 +123,13 @@ def extend_plan_with_multi_horizontal_targets(
         stations=stations,
         final_target=target_pairs[-1][1],
         config=config,
+        post_t1_start_md_m=float(base_result.md_t1_m),
     )
 
     summary = dict(base_result.summary)
     final_target = target_pairs[-1][1]
     max_dls = float(np.nanmax(stations["DLS_deg_per_30m"].to_numpy(dtype=float)))
+    horizontal_limit = _horizontal_dls_limit(config)
     md_total_m = float(stations["MD_m"].iloc[-1])
     md_postcheck_limit_m = float(config.max_total_md_postcheck_m)
     md_postcheck_excess_m = float(max(0.0, md_total_m - md_postcheck_limit_m))
@@ -126,6 +139,7 @@ def extend_plan_with_multi_horizontal_targets(
             "multi_horizontal": "yes",
             "multi_horizontal_levels": int(len(target_pairs)),
             "multi_horizontal_transition_count": int(len(target_pairs) - 1),
+            "dls_limit_horizontal_deg_per_30m": float(horizontal_limit),
             "multi_horizontal_min_transition_gap_m": float(
                 min((item.gap_m for item in transitions), default=0.0)
             ),
@@ -160,6 +174,7 @@ def _validate_extended_stations(
     stations: pd.DataFrame,
     final_target: Point3D,
     config: TrajectoryConfig,
+    post_t1_start_md_m: float,
 ) -> None:
     md_values = stations["MD_m"].to_numpy(dtype=float)
     if len(md_values) < 2 or np.any(~np.isfinite(md_values)):
@@ -177,14 +192,18 @@ def _validate_extended_stations(
             "Увеличьте горизонтальный зазор между уровнями или уменьшите ΔZ."
         )
 
-    dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+    horizontal_limit = _horizontal_dls_limit(config)
+    post_t1_mask = (
+        stations["MD_m"].to_numpy(dtype=float) > float(post_t1_start_md_m) + 1e-6
+    )
+    dls_values = stations.loc[post_t1_mask, "DLS_deg_per_30m"].to_numpy(dtype=float)
     finite_dls = dls_values[np.isfinite(dls_values)]
     max_dls = float(np.max(finite_dls)) if len(finite_dls) else 0.0
-    if max_dls > float(config.dls_build_max_deg_per_30m) + 1e-6:
+    if max_dls > horizontal_limit + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: построенный HORIZONTAL_BUILD превышает "
             f"лимит ПИ ({dls_to_pi(max_dls):.3f} > "
-            f"{dls_to_pi(float(config.dls_build_max_deg_per_30m)):.3f} deg/10m)."
+            f"{dls_to_pi(horizontal_limit):.3f} deg/10m)."
         )
 
     final_row = stations.iloc[-1]
@@ -229,11 +248,11 @@ def _transition_feasibility(
         config=config,
         context=f"переход {level_from}_t3 → {level_to}_t1",
     )
-    dls_limit = float(config.dls_build_max_deg_per_30m)
+    dls_limit = _horizontal_dls_limit(config)
     if dls_limit <= SMALL:
         raise PlanningError(
             "Многопластовая скважина: для HORIZONTAL_BUILD требуется положительный "
-            "максимальный ПИ."
+            "максимальный ПИ HORIZONTAL."
         )
     build_in_m = _dogleg_build_length_m(
         float(current["inc_deg"]),
@@ -286,7 +305,7 @@ def _smooth_transition_rows(
         inc_deg=float(target_inc_deg),
         azi_deg=float(target_azi_deg),
     )
-    dls_limit = float(config.dls_build_max_deg_per_30m)
+    dls_limit = _horizontal_dls_limit(config)
     min_control_m = float(
         max(
             float(config.min_structural_segment_m),
@@ -307,14 +326,14 @@ def _smooth_transition_rows(
         for tail_m in control_lengths:
             p1 = p0 + start_dir * float(lead_m)
             p2 = p3 - end_dir * float(tail_m)
-            xyz = _sample_cubic_bezier(
-                p0=p0,
-                p1=p1,
-                p2=p2,
-                p3=p3,
-                step_m=float(config.md_step_m),
-            )
             try:
+                xyz = _sample_cubic_bezier(
+                    p0=p0,
+                    p1=p1,
+                    p2=p2,
+                    p3=p3,
+                    step_m=float(config.md_step_m),
+                )
                 candidate = _stations_from_xyz_path(
                     xyz=xyz,
                     segment_name=segment_name,
@@ -327,7 +346,11 @@ def _smooth_transition_rows(
             except PlanningError:
                 continue
             md_span = float(candidate["MD_m"].iloc[-1] - candidate["MD_m"].iloc[0])
-            if md_span > max(float(gap) * MAX_TRANSITION_MD_MULTIPLIER, float(gap) + 500.0):
+            max_md_span = max(
+                float(gap) * MAX_TRANSITION_MD_MULTIPLIER,
+                float(gap) + 500.0,
+            )
+            if md_span > max_md_span:
                 continue
             dls_values = candidate["DLS_deg_per_30m"].to_numpy(dtype=float)
             finite_dls = _finite_values(dls_values)
@@ -353,27 +376,456 @@ def _smooth_transition_rows(
                 best_dls = max_dls
                 best_inc = max_inc
 
+    fallback_error: PlanningError | None = None
+    if (
+        best is None
+        or best_dls > dls_limit + 1e-6
+        or best_inc > float(config.max_inc_deg) + 1e-6
+    ):
+        try:
+            constant_dls_candidate = _constant_dls_transition_candidate(
+                current=current,
+                target=target,
+                target_inc_deg=target_inc_deg,
+                target_azi_deg=target_azi_deg,
+                segment_name=segment_name,
+                config=config,
+            )
+        except PlanningError as exc:
+            fallback_error = exc
+        else:
+            return [
+                dict(row)
+                for row in constant_dls_candidate.stations.iloc[1:].to_dict("records")
+            ]
+
     if best is None:
-        raise PlanningError(
+        message = (
             "Многопластовая скважина: не удалось построить плавный "
             f"{segment_name} между уровнями без вырожденной геометрии. "
             "Увеличьте расстояние между горизонтальными участками или уменьшите ΔZ."
         )
+        if fallback_error is not None:
+            message += f" Constant-DLS fallback: {fallback_error}"
+        raise PlanningError(message)
     if best_dls > dls_limit + 1e-6:
-        raise PlanningError(
+        message = (
             "Многопластовая скважина: плавный "
             f"{segment_name} требует ПИ {dls_to_pi(best_dls):.2f} deg/10m, что выше "
             f"лимита {dls_to_pi(dls_limit):.2f}. Увеличьте расстояние между уровнями, "
             "сократите соседние мини-горизонты или уменьшите ΔZ."
         )
+        if fallback_error is not None:
+            message += f" Constant-DLS fallback: {fallback_error}"
+        raise PlanningError(message)
     if best_inc > float(config.max_inc_deg) + 1e-6:
-        raise PlanningError(
+        message = (
             "Многопластовая скважина: плавный "
             f"{segment_name} требует INC {best_inc:.2f}°, что выше "
             f"ограничения {float(config.max_inc_deg):.2f}°. "
             "Увеличьте горизонтальный зазор между уровнями или уменьшите ΔZ."
         )
+        if fallback_error is not None:
+            message += f" Constant-DLS fallback: {fallback_error}"
+        raise PlanningError(message)
     return [dict(row) for row in best.iloc[1:].to_dict("records")]
+
+
+def _constant_dls_transition_candidate(
+    *,
+    current: dict[str, float],
+    target: Point3D,
+    target_inc_deg: float,
+    target_azi_deg: float,
+    segment_name: str,
+    config: TrajectoryConfig,
+) -> _ConstantDlsTransitionCandidate:
+    try:
+        from scipy.optimize import least_squares
+    except ImportError as exc:  # pragma: no cover - scipy is a runtime dependency.
+        raise PlanningError("scipy недоступен для Constant-DLS fallback.") from exc
+
+    dls_limit = _horizontal_dls_limit(config)
+    if dls_limit <= SMALL:
+        raise PlanningError("лимит HORIZONTAL ПИ должен быть положительным.")
+
+    target_delta = np.array(
+        [
+            float(target.x) - float(current["x"]),
+            float(target.y) - float(current["y"]),
+            float(target.z) - float(current["z"]),
+        ],
+        dtype=float,
+    )
+    gap_m = float(np.linalg.norm(target_delta))
+    if gap_m <= SMALL:
+        raise PlanningError("точки перехода совпадают.")
+
+    start_inc = float(current["inc_deg"])
+    start_azi = float(current["azi_deg"]) % 360.0
+    end_inc = float(target_inc_deg)
+    end_azi = float(target_azi_deg) % 360.0
+    max_inc = float(config.max_inc_deg)
+    max_hold_m = float(max(gap_m * MAX_TRANSITION_MD_MULTIPLIER, gap_m + 500.0))
+    dls_lower = float(max(min(dls_limit * 0.02, 0.03), 1e-4))
+    scale_m = float(max(gap_m, 1.0))
+
+    def residual(values: np.ndarray) -> np.ndarray:
+        inc_mid, azi_mid, dls_value, hold_length = [float(item) for item in values]
+        try:
+            delta, _, _ = _constant_dls_transition_delta_xyz(
+                start_inc_deg=start_inc,
+                start_azi_deg=start_azi,
+                mid_inc_deg=inc_mid,
+                mid_azi_deg=azi_mid,
+                end_inc_deg=end_inc,
+                end_azi_deg=end_azi,
+                dls_deg_per_30m=dls_value,
+                hold_length_m=hold_length,
+            )
+        except ValueError:
+            return np.full(3, 1e6, dtype=float)
+        if not np.all(np.isfinite(delta)):
+            return np.full(3, 1e6, dtype=float)
+        return (delta - target_delta) / scale_m
+
+    best: _ConstantDlsTransitionCandidate | None = None
+    best_score = float("inf")
+    for seed in _constant_dls_transition_seeds(
+        current=current,
+        target=target,
+        target_inc_deg=end_inc,
+        target_azi_deg=end_azi,
+        dls_limit_deg_per_30m=dls_limit,
+        max_inc_deg=max_inc,
+        max_hold_m=max_hold_m,
+    ):
+        result = least_squares(
+            residual,
+            np.asarray(seed, dtype=float),
+            bounds=(
+                np.array([0.0, 0.0, dls_lower, 0.0], dtype=float),
+                np.array([max_inc, 360.0, dls_limit, max_hold_m], dtype=float),
+            ),
+            max_nfev=160,
+            xtol=1e-11,
+            ftol=1e-11,
+            gtol=1e-11,
+        )
+        if not result.success and float(result.cost) > 1e-14:
+            continue
+        inc_mid, azi_mid, dls_value, hold_length = [
+            float(item) for item in result.x
+        ]
+        try:
+            stations = _build_constant_dls_transition_stations(
+                current=current,
+                mid_inc_deg=inc_mid,
+                mid_azi_deg=azi_mid,
+                target=target,
+                target_inc_deg=end_inc,
+                target_azi_deg=end_azi,
+                dls_deg_per_30m=dls_value,
+                hold_length_m=hold_length,
+                segment_name=segment_name,
+                config=config,
+            )
+        except ValueError:
+            continue
+        endpoint = stations.iloc[-1]
+        endpoint_miss = float(
+            np.linalg.norm(
+                np.array(
+                    [
+                        float(endpoint["X_m"]) - float(target.x),
+                        float(endpoint["Y_m"]) - float(target.y),
+                        float(endpoint["Z_m"]) - float(target.z),
+                    ],
+                    dtype=float,
+                )
+            )
+        )
+        dls_values = _finite_values(stations["DLS_deg_per_30m"].to_numpy(dtype=float))
+        max_dls = float(np.max(dls_values)) if len(dls_values) else 0.0
+        inc_values = _finite_values(stations["INC_deg"].to_numpy(dtype=float))
+        actual_max_inc = float(np.max(inc_values)) if len(inc_values) else 0.0
+        md_span = float(stations["MD_m"].iloc[-1] - stations["MD_m"].iloc[0])
+        if endpoint_miss > 1e-4:
+            continue
+        if max_dls > dls_limit + 1e-6:
+            continue
+        if actual_max_inc > max_inc + 1e-6:
+            continue
+        candidate = _ConstantDlsTransitionCandidate(
+            stations=stations,
+            dls_deg_per_30m=dls_value,
+            endpoint_miss_m=endpoint_miss,
+            max_dls_deg_per_30m=max_dls,
+            max_inc_deg=actual_max_inc,
+            md_span_m=md_span,
+        )
+        score = float(
+            endpoint_miss * 1_000_000.0
+            + 0.001 * md_span
+            - 0.01 * dls_value
+        )
+        if score < best_score:
+            best = candidate
+            best_score = score
+
+    if best is None:
+        raise PlanningError(
+            "не удалось подобрать Constant-DLS переход с ПИ не выше "
+            f"{dls_to_pi(dls_limit):.2f} deg/10m."
+        )
+    return best
+
+
+def _constant_dls_transition_seeds(
+    *,
+    current: dict[str, float],
+    target: Point3D,
+    target_inc_deg: float,
+    target_azi_deg: float,
+    dls_limit_deg_per_30m: float,
+    max_inc_deg: float,
+    max_hold_m: float,
+) -> tuple[tuple[float, float, float, float], ...]:
+    direct_inc, direct_azi = _direction_angles_from_current(current, target)
+    start_inc = float(current["inc_deg"])
+    start_azi = float(current["azi_deg"]) % 360.0
+    end_inc = float(target_inc_deg)
+    end_azi = float(target_azi_deg) % 360.0
+    avg_inc = float(np.clip((start_inc + end_inc) * 0.5, 0.0, max_inc_deg))
+    inc_candidates = _dedupe_float_candidates(
+        np.clip(
+            np.array(
+                [
+                    direct_inc,
+                    avg_inc,
+                    direct_inc - 5.0,
+                    direct_inc + 5.0,
+                ],
+                dtype=float,
+            ),
+            0.0,
+            max_inc_deg,
+        )
+    )
+    avg_azi = _interpolate_azimuth_deg(start_azi, end_azi, 0.5)
+    azi_candidates = _dedupe_float_candidates(
+        np.mod(
+            np.array(
+                [
+                    direct_azi,
+                    avg_azi,
+                    start_azi,
+                    end_azi,
+                ],
+                dtype=float,
+            ),
+            360.0,
+        )
+    )
+    dls_candidates = _dedupe_float_candidates(
+        np.clip(
+            np.array(
+                [
+                    dls_limit_deg_per_30m,
+                    dls_limit_deg_per_30m * 0.75,
+                    dls_limit_deg_per_30m * 0.50,
+                ],
+                dtype=float,
+            ),
+            1e-4,
+            dls_limit_deg_per_30m,
+        )
+    )
+    seeds: list[tuple[float, float, float, float]] = []
+    gap_m = _distance_from_current(current, target)
+    for inc_mid in inc_candidates:
+        for azi_mid in azi_candidates:
+            for dls_value in dls_candidates:
+                try:
+                    _, build1_m, build2_m = _constant_dls_transition_delta_xyz(
+                        start_inc_deg=start_inc,
+                        start_azi_deg=start_azi,
+                        mid_inc_deg=inc_mid,
+                        mid_azi_deg=azi_mid,
+                        end_inc_deg=end_inc,
+                        end_azi_deg=end_azi,
+                        dls_deg_per_30m=dls_value,
+                        hold_length_m=0.0,
+                    )
+                except ValueError:
+                    continue
+                if not np.isfinite(build1_m) or not np.isfinite(build2_m):
+                    continue
+                hold_seed = float(np.clip(gap_m - build1_m - build2_m, 0.0, max_hold_m))
+                seeds.append((inc_mid, azi_mid, dls_value, hold_seed))
+    return tuple(seeds)
+
+
+def _build_constant_dls_transition_stations(
+    *,
+    current: dict[str, float],
+    mid_inc_deg: float,
+    mid_azi_deg: float,
+    target: Point3D,
+    target_inc_deg: float,
+    target_azi_deg: float,
+    dls_deg_per_30m: float,
+    hold_length_m: float,
+    segment_name: str,
+    config: TrajectoryConfig,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = [
+        pd.DataFrame(
+            [
+                {
+                    "MD_m": float(current["md_m"]),
+                    "INC_deg": float(current["inc_deg"]),
+                    "AZI_deg": float(current["azi_deg"]) % 360.0,
+                    "segment": str(segment_name),
+                }
+            ]
+        )
+    ]
+    md_start = float(current["md_m"])
+    start_inc = float(current["inc_deg"])
+    start_azi = float(current["azi_deg"]) % 360.0
+    for frame in (
+        BuildSegment(
+            inc_from_deg=start_inc,
+            inc_to_deg=float(mid_inc_deg),
+            dls_deg_per_30m=float(dls_deg_per_30m),
+            azi_deg=start_azi,
+            azi_to_deg=float(mid_azi_deg),
+            name=segment_name,
+            interpolation_method=str(config.interpolation_method),
+        ).generate(md_start, float(config.md_step_m)),
+        HoldSegment(
+            length_m=float(hold_length_m),
+            inc_deg=float(mid_inc_deg),
+            azi_deg=float(mid_azi_deg),
+            name=segment_name,
+        ).generate(
+            md_start
+            + _dogleg_build_length_m(
+                start_inc,
+                start_azi,
+                float(mid_inc_deg),
+                float(mid_azi_deg),
+                float(dls_deg_per_30m),
+            ),
+            float(config.md_step_m),
+        ),
+    ):
+        if len(frame) > 1:
+            frames.append(frame.iloc[1:].copy())
+    md_after_hold = float(frames[-1]["MD_m"].iloc[-1])
+    build_out = BuildSegment(
+        inc_from_deg=float(mid_inc_deg),
+        inc_to_deg=float(target_inc_deg),
+        dls_deg_per_30m=float(dls_deg_per_30m),
+        azi_deg=float(mid_azi_deg),
+        azi_to_deg=float(target_azi_deg),
+        name=segment_name,
+        interpolation_method=str(config.interpolation_method),
+    ).generate(md_after_hold, float(config.md_step_m))
+    if len(build_out) > 1:
+        frames.append(build_out.iloc[1:].copy())
+    stations = pd.concat(frames, ignore_index=True)
+    return _attach_min_curve_positions(
+        stations=stations,
+        start_xyz=np.array(
+            [float(current["x"]), float(current["y"]), float(current["z"])],
+            dtype=float,
+        ),
+    )
+
+
+def _attach_min_curve_positions(
+    *,
+    stations: pd.DataFrame,
+    start_xyz: np.ndarray,
+) -> pd.DataFrame:
+    out = stations.copy().reset_index(drop=True)
+    xs = [float(start_xyz[0])]
+    ys = [float(start_xyz[1])]
+    zs = [float(start_xyz[2])]
+    for idx in range(1, len(out)):
+        dn, de, dz = minimum_curvature_increment(
+            md1_m=float(out.loc[idx - 1, "MD_m"]),
+            inc1_deg=float(out.loc[idx - 1, "INC_deg"]),
+            azi1_deg=float(out.loc[idx - 1, "AZI_deg"]),
+            md2_m=float(out.loc[idx, "MD_m"]),
+            inc2_deg=float(out.loc[idx, "INC_deg"]),
+            azi2_deg=float(out.loc[idx, "AZI_deg"]),
+        )
+        xs.append(xs[-1] + float(de))
+        ys.append(ys[-1] + float(dn))
+        zs.append(zs[-1] + float(dz))
+    out["N_m"] = ys
+    out["E_m"] = xs
+    out["TVD_m"] = zs
+    out["X_m"] = xs
+    out["Y_m"] = ys
+    out["Z_m"] = zs
+    return add_dls(out)
+
+
+def _constant_dls_transition_delta_xyz(
+    *,
+    start_inc_deg: float,
+    start_azi_deg: float,
+    mid_inc_deg: float,
+    mid_azi_deg: float,
+    end_inc_deg: float,
+    end_azi_deg: float,
+    dls_deg_per_30m: float,
+    hold_length_m: float,
+) -> tuple[np.ndarray, float, float]:
+    build1_m = _dogleg_build_length_m(
+        start_inc_deg,
+        start_azi_deg,
+        mid_inc_deg,
+        mid_azi_deg,
+        dls_deg_per_30m,
+    )
+    build2_m = _dogleg_build_length_m(
+        mid_inc_deg,
+        mid_azi_deg,
+        end_inc_deg,
+        end_azi_deg,
+        dls_deg_per_30m,
+    )
+    delta = np.zeros(3, dtype=float)
+    if build1_m > SMALL:
+        dn, de, dz = minimum_curvature_increment(
+            0.0,
+            start_inc_deg,
+            start_azi_deg,
+            build1_m,
+            mid_inc_deg,
+            mid_azi_deg,
+        )
+        delta += np.array([de, dn, dz], dtype=float)
+    if float(hold_length_m) > SMALL:
+        delta += _xyz_direction_vector(inc_deg=mid_inc_deg, azi_deg=mid_azi_deg) * float(
+            hold_length_m
+        )
+    if build2_m > SMALL:
+        dn, de, dz = minimum_curvature_increment(
+            0.0,
+            mid_inc_deg,
+            mid_azi_deg,
+            build2_m,
+            end_inc_deg,
+            end_azi_deg,
+        )
+        delta += np.array([de, dn, dz], dtype=float)
+    return delta, float(build1_m), float(build2_m)
 
 
 def _candidate_control_lengths(*, gap_m: float, min_control_m: float) -> tuple[float, ...]:
@@ -490,6 +942,26 @@ def _max_finite(values: np.ndarray) -> float:
 def _finite_values(values: np.ndarray) -> np.ndarray:
     finite = np.asarray(values, dtype=float)
     return finite[np.isfinite(finite)]
+
+
+def _dedupe_float_candidates(values: np.ndarray, *, decimals: int = 8) -> tuple[float, ...]:
+    result: list[float] = []
+    seen: set[float] = set()
+    for value in np.asarray(values, dtype=float):
+        if not np.isfinite(value):
+            continue
+        key = round(float(value), int(decimals))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(float(value))
+    return tuple(result)
+
+
+def _interpolate_azimuth_deg(start_deg: float, end_deg: float, fraction: float) -> float:
+    start = float(start_deg) % 360.0
+    delta = ((float(end_deg) - start + 540.0) % 360.0) - 180.0
+    return float((start + delta * float(fraction)) % 360.0)
 
 
 def _linear_hold_rows(
@@ -732,6 +1204,10 @@ def _max_feasible_delta_z_m(
         else:
             hi = mid
     return float(lo)
+
+
+def _horizontal_dls_limit(config: TrajectoryConfig) -> float:
+    return float(max(float(config.dls_horizontal_max_deg_per_30m), 0.0))
 
 
 def _transition_problem_text(transition: MultiHorizontalTransition) -> str:

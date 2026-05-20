@@ -1308,6 +1308,7 @@ _ANTI_COLLISION_SIGNATURE_SUMMARY_FIELDS = (
 _ANTI_COLLISION_SIGNATURE_CONFIG_FIELDS = (
     "kop_min_vertical_m",
     "dls_build_max_deg_per_30m",
+    "dls_horizontal_max_deg_per_30m",
     "optimization_mode",
 )
 

@@ -315,6 +315,64 @@ def test_classic_j_profile_uses_single_build_without_hold_or_second_build() -> N
     ]
 
 
+def test_post_entry_solver_uses_horizontal_dls_limit_independent_from_build() -> None:
+    import pywp.planner as planner_module
+
+    config = _fast_config(
+        dls_build_max_deg_per_30m=6.0,
+        dls_horizontal_max_deg_per_30m=1.0,
+    )
+    assert planner_module._resolve_horizontal_dls(config) == pytest.approx(1.0)
+
+    constrained = planner_module._solve_post_entry_section(
+        ds_m=400.0,
+        dz_m=100.0,
+        inc_entry_deg=86.0,
+        dls_deg_per_30m=planner_module._resolve_horizontal_dls(config),
+        max_inc_deg=float(config.max_inc_deg),
+    )
+    relaxed = planner_module._solve_post_entry_section(
+        ds_m=400.0,
+        dz_m=100.0,
+        inc_entry_deg=86.0,
+        dls_deg_per_30m=planner_module._resolve_horizontal_dls(
+            config.validated_copy(dls_horizontal_max_deg_per_30m=2.0)
+        ),
+        max_inc_deg=float(config.max_inc_deg),
+    )
+
+    assert constrained is None
+    assert relaxed is not None
+    assert relaxed.transition_dls_deg_per_30m == pytest.approx(2.0)
+
+
+def test_planner_applies_horizontal_dls_limit_to_post_entry_section() -> None:
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(1000.0, 0.0, 2500.0)
+    t3 = Point3D(1400.0, 0.0, 2600.0)
+    constrained = _fast_config(
+        dls_build_max_deg_per_30m=6.0,
+        dls_horizontal_max_deg_per_30m=1.0,
+        kop_min_vertical_m=550.0,
+        turn_solver_max_restarts=0,
+    )
+    relaxed = constrained.validated_copy(dls_horizontal_max_deg_per_30m=2.0)
+
+    with pytest.raises(PlanningError, match="HORIZONTAL DLS limit"):
+        TrajectoryPlanner().plan(surface=surface, t1=t1, t3=t3, config=constrained)
+
+    result = TrajectoryPlanner().plan(surface=surface, t1=t1, t3=t3, config=relaxed)
+
+    assert (
+        float(result.summary["max_dls_horizontal_deg_per_30m"])
+        <= float(relaxed.dls_horizontal_max_deg_per_30m) + 1e-6
+    )
+    assert (
+        float(result.summary["max_dls_total_deg_per_30m"])
+        > float(relaxed.dls_horizontal_max_deg_per_30m) + 1e-6
+    )
+
+
 def test_variable_build_j_profile_handles_non_coplanar_entry_without_hold() -> None:
     surface = Point3D(377899.9, 930000.4, -20.0)
     t1 = Point3D(377309.9, 929820.8, 3701.51)

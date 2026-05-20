@@ -64,9 +64,13 @@ def normalize_build_dls_bounds(
     return min_value, max_value
 
 
-def build_segment_dls_limits(build_dls_max_deg_per_30m: float) -> dict[str, float]:
+def build_segment_dls_limits(
+    build_dls_max_deg_per_30m: float,
+    horizontal_dls_max_deg_per_30m: float | None = None,
+) -> dict[str, float]:
     return build_segment_dls_limits_deg_per_30m(
-        build_dls_max_deg_per_30m=build_dls_max_deg_per_30m
+        build_dls_max_deg_per_30m=build_dls_max_deg_per_30m,
+        horizontal_dls_max_deg_per_30m=horizontal_dls_max_deg_per_30m,
     )
 
 
@@ -80,6 +84,7 @@ def build_trajectory_config(
     entry_inc_tolerance_deg: float,
     max_inc_deg: float,
     dls_build_max_deg_per_30m: float,
+    dls_horizontal_max_deg_per_30m: float | None = None,
     kop_min_vertical_m: float,
     optimization_mode: str,
     turn_solver_mode: str,
@@ -90,6 +95,11 @@ def build_trajectory_config(
     offer_j_profile: bool = False,
 ) -> TrajectoryConfig:
     max_build = float(max(dls_build_max_deg_per_30m, 0.0))
+    max_horizontal = (
+        max_build
+        if dls_horizontal_max_deg_per_30m is None
+        else float(max(dls_horizontal_max_deg_per_30m, 0.0))
+    )
     return TrajectoryConfig(
         md_step_m=float(md_step_m),
         md_step_control_m=float(md_step_control_m),
@@ -100,6 +110,7 @@ def build_trajectory_config(
         max_inc_deg=float(max_inc_deg),
         dls_build_min_deg_per_30m=0.0,
         dls_build_max_deg_per_30m=max_build,
+        dls_horizontal_max_deg_per_30m=max_horizontal,
         kop_min_vertical_m=float(kop_min_vertical_m),
         optimization_mode=str(optimization_mode),
         turn_solver_mode=str(turn_solver_mode),

@@ -90,7 +90,6 @@ _SEGMENT_DLS_FIXED_LIMITS: dict[str, float] = {
 _SEGMENT_DLS_BUILD_CONTROLLED: set[str] = {
     "BUILD1",
     "BUILD2",
-    "HORIZONTAL",
 }
 SummaryValue = float | int | str | bool
 SummaryDict = dict[str, SummaryValue]
@@ -110,14 +109,22 @@ def _coerce_legacy_bool(value: object) -> bool:
 
 def build_segment_dls_limits_deg_per_30m(
     build_dls_max_deg_per_30m: float,
+    horizontal_dls_max_deg_per_30m: float | None = None,
 ) -> dict[str, float]:
-    """Build default segment DLS limits from a single BUILD max value."""
+    """Build default segment DLS limits from BUILD and post-entry max values."""
 
     build_limit = float(max(build_dls_max_deg_per_30m, 0.0))
+    horizontal_limit = (
+        build_limit
+        if horizontal_dls_max_deg_per_30m is None
+        else float(max(horizontal_dls_max_deg_per_30m, 0.0))
+    )
     limits: dict[str, float] = {}
     for segment_name in _SEGMENT_DLS_ORDER:
         if segment_name in _SEGMENT_DLS_BUILD_CONTROLLED:
             limits[segment_name] = build_limit
+        elif segment_name == "HORIZONTAL":
+            limits[segment_name] = horizontal_limit
         else:
             limits[segment_name] = float(_SEGMENT_DLS_FIXED_LIMITS[segment_name])
     return limits
@@ -155,6 +162,9 @@ class TrajectoryConfig(FrozenModel):
 
     dls_build_min_deg_per_30m: NonNegativeFiniteScalar = 0.0
     dls_build_max_deg_per_30m: NonNegativeFiniteScalar = (
+        DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+    )
+    dls_horizontal_max_deg_per_30m: NonNegativeFiniteScalar = (
         DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     )
     kop_min_vertical_m: NonNegativeFiniteScalar = 400.0
@@ -204,6 +214,18 @@ class TrajectoryConfig(FrozenModel):
                 raise ValueError(
                     "Unsupported DLS segment names: " + ", ".join(unknown_segments)
                 )
+            if (
+                "dls_horizontal_max_deg_per_30m" not in payload
+                and "HORIZONTAL" in raw_limits
+            ):
+                payload["dls_horizontal_max_deg_per_30m"] = raw_limits["HORIZONTAL"]
+        if (
+            "dls_horizontal_max_deg_per_30m" not in payload
+            and "dls_build_max_deg_per_30m" in payload
+        ):
+            payload["dls_horizontal_max_deg_per_30m"] = payload[
+                "dls_build_max_deg_per_30m"
+            ]
         legacy_pos_tolerance = payload.pop("pos_tolerance_m", None)
         if legacy_pos_tolerance is not None:
             if "lateral_tolerance_m" not in payload:
@@ -236,6 +258,8 @@ class TrajectoryConfig(FrozenModel):
             raise PlanningError("dls_build_min_deg_per_30m cannot be negative.")
         if self.dls_build_max_deg_per_30m < 0.0:
             raise PlanningError("dls_build_max_deg_per_30m cannot be negative.")
+        if self.dls_horizontal_max_deg_per_30m < 0.0:
+            raise PlanningError("dls_horizontal_max_deg_per_30m cannot be negative.")
         if self.dls_build_min_deg_per_30m > self.dls_build_max_deg_per_30m:
             raise PlanningError(
                 "dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m."
@@ -282,7 +306,10 @@ class TrajectoryConfig(FrozenModel):
     @property
     def dls_limits_deg_per_30m(self) -> dict[str, float]:
         return build_segment_dls_limits_deg_per_30m(
-            float(self.dls_build_max_deg_per_30m)
+            float(self.dls_build_max_deg_per_30m),
+            horizontal_dls_max_deg_per_30m=float(
+                self.dls_horizontal_max_deg_per_30m
+            ),
         )
 
     @property

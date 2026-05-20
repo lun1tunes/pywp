@@ -25,6 +25,7 @@
  *       entryIncTargetDeg: 86,
  *       maxIncDeg: 95,
  *       dlsBuildMaxDegPer30m: 3.0,
+ *       dlsHorizontalMaxDegPer30m: 3.0,
  *       kopMinVerticalM: 550,
  *     },
  *   });
@@ -561,6 +562,7 @@ class FastReplan {
         entryIncTargetDeg: 86,
         maxIncDeg: 95,
         dlsBuildMaxDegPer30m: 3.0,
+        dlsHorizontalMaxDegPer30m: 3.0,
         kopMinVerticalM: 550,
         mdStepM: 30,
         basePoints: [],

@@ -59,6 +59,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         "Допуск INC на t1, deg": "entry_inc_tol",
         "Макс INC по стволу, deg": "max_inc",
         "Макс ПИ BUILD, deg/10m": "dls_build_max",
+        "Макс ПИ HORIZONTAL, deg/10m": "dls_horizontal_max",
         "Мин VERTICAL до KOP, м": "kop_min_vertical",
         "Макс итоговая MD (постпроверка), м": "max_total_md_postcheck",
         "Макс рестартов решателя": "turn_solver_max_restarts",

@@ -427,6 +427,14 @@ def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
         x_offset_m=0.0,
         y_offset_m=0.0,
         station_count=900,
+    ).model_copy(
+        update={
+            "config": TrajectoryConfig(
+                dls_build_max_deg_per_30m=4.2,
+                dls_horizontal_max_deg_per_30m=1.8,
+                optimization_mode="none",
+            )
+        }
     )
 
     edit_wells = ptc_three_overrides.build_edit_wells_payload(
@@ -439,6 +447,8 @@ def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
     assert len(edit_wells[0]["base_points"]) == (
         ptc_three_overrides.MAX_EDIT_BASE_POINTS
     )
+    assert edit_wells[0]["config"]["dls_build_max_deg_per_30m"] == 4.2
+    assert edit_wells[0]["config"]["dls_horizontal_max_deg_per_30m"] == 1.8
 
 
 def test_build_edit_wells_payload_includes_multi_horizontal_edit_points() -> None:
@@ -760,6 +770,7 @@ def test_build_target_only_edit_wells_payload_preserves_failed_record_points() -
         "2_t1",
         "2_t3",
     ]
+    assert edit_wells[2]["config"]["dls_horizontal_max_deg_per_30m"] == 3.0
 
 
 def test_trajectory_overrides_make_failed_target_only_wells_editable() -> None:

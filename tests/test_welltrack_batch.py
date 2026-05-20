@@ -37,6 +37,7 @@ from pywp.eclipse_welltrack import (
 )
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.mcm import compute_positions_min_curv
+from pywp import multi_horizontal as multi_horizontal_module
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.pilot_wells import SidetrackWindowOverride, sync_pilot_surfaces_to_parents
 from pywp.planner_types import PlanningError
@@ -214,7 +215,7 @@ def test_multi_horizontal_record_extends_base_plan_with_numbered_segments() -> N
         "HORIZONTAL2",
     }.issubset(set(success.stations["segment"]))
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
-        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+        float(success.config.dls_horizontal_max_deg_per_30m) + 1e-6
     )
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
@@ -241,7 +242,7 @@ def test_multi_horizontal_record_supports_shallower_next_level_with_enough_gap()
         float(success.config.max_inc_deg) + 1e-6
     )
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
-        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+        float(success.config.dls_horizontal_max_deg_per_30m) + 1e-6
     )
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
@@ -294,13 +295,44 @@ def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
         "HORIZONTAL3",
     }.issubset(set(success.stations["segment"]))
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
-        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+        float(success.config.dls_horizontal_max_deg_per_30m) + 1e-6
     )
     assert float(success.summary["md_total_m"]) < 6500.0
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
 
-def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
+def test_welltracks4_multi_horizontal_fixture_limits_only_post_t1_by_horizontal_pi() -> None:
+    text = Path("tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC").read_text(
+        encoding="utf-8"
+    )
+    record = next(
+        item for item in parse_welltrack_text(text) if str(item.name) == "well_08"
+    )
+    horizontal_limit = 1.0
+
+    row, success = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(
+            dls_build_max_deg_per_30m=6.0,
+            dls_horizontal_max_deg_per_30m=horizontal_limit,
+        ),
+    )
+
+    assert success is not None
+    assert row["Статус"] == "OK"
+    post_t1_dls = success.stations.loc[
+        success.stations["MD_m"] > float(success.md_t1_m) + 1e-6,
+        "DLS_deg_per_30m",
+    ].dropna()
+    assert not post_t1_dls.empty
+    assert float(post_t1_dls.max()) <= horizontal_limit + 1e-5
+    assert float(success.stations["DLS_deg_per_30m"].max()) > horizontal_limit + 1e-5
+    assert success.summary["dls_limit_horizontal_deg_per_30m"] == pytest.approx(
+        horizontal_limit
+    )
+
+
+def test_multi_horizontal_transition_uses_horizontal_dls_limit() -> None:
     base_result = PlannerResult(
         stations=pd.DataFrame(
             {
@@ -326,13 +358,19 @@ def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
         extend_plan_with_multi_horizontal_targets(
             base_result=base_result,
             target_pairs=target_pairs,
-            config=TrajectoryConfig(dls_build_max_deg_per_30m=1.0),
+            config=TrajectoryConfig(
+                dls_build_max_deg_per_30m=6.0,
+                dls_horizontal_max_deg_per_30m=1.0,
+            ),
         )
 
     result = extend_plan_with_multi_horizontal_targets(
         base_result=base_result,
         target_pairs=target_pairs,
-        config=TrajectoryConfig(dls_build_max_deg_per_30m=3.0),
+        config=TrajectoryConfig(
+            dls_build_max_deg_per_30m=6.0,
+            dls_horizontal_max_deg_per_30m=3.0,
+        ),
     )
 
     horizontal_build_dls = result.stations.loc[
@@ -343,6 +381,133 @@ def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
     assert float(horizontal_build_dls.max()) <= 3.0 + 1e-6
     assert float(horizontal_build_dls.max()) > 2.7
     assert float(horizontal_build_dls.quantile(0.9)) > 2.4
+    assert result.summary["dls_limit_horizontal_deg_per_30m"] == pytest.approx(3.0)
+
+
+def test_multi_horizontal_transition_falls_back_to_constant_dls_when_bezier_fails(
+    monkeypatch,
+) -> None:
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [-500.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [1000.0, 1000.0],
+                "segment": ["HORIZONTAL", "HORIZONTAL"],
+            }
+        ),
+        summary={"trajectory_type": "base", "md_total_m": 1000.0},
+        azimuth_deg=90.0,
+        md_t1_m=0.0,
+    )
+    target_pairs = (
+        (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
+        (Point3D(800.0, 0.0, 1100.0), Point3D(1300.0, 0.0, 1100.0)),
+    )
+    monkeypatch.setattr(
+        multi_horizontal_module,
+        "_candidate_control_lengths",
+        lambda **_: (),
+    )
+    config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=6.0,
+        dls_horizontal_max_deg_per_30m=3.0,
+    )
+
+    result = extend_plan_with_multi_horizontal_targets(
+        base_result=base_result,
+        target_pairs=target_pairs,
+        config=config,
+    )
+
+    transition = result.stations.loc[
+        result.stations["segment"] == "HORIZONTAL_BUILD1"
+    ].copy()
+    assert not transition.empty
+    assert (
+        float(transition["DLS_deg_per_30m"].dropna().max())
+        <= float(config.dls_horizontal_max_deg_per_30m) + 1e-6
+    )
+    assert float(transition["DLS_deg_per_30m"].dropna().max()) > 2.5
+    last_transition = transition.iloc[-1]
+    assert float(last_transition["X_m"]) == pytest.approx(800.0, abs=1e-4)
+    assert float(last_transition["Y_m"]) == pytest.approx(0.0, abs=1e-4)
+    assert float(last_transition["Z_m"]) == pytest.approx(1100.0, abs=1e-4)
+    transition_with_start = pd.concat(
+        [
+            result.stations.loc[result.stations["segment"] == "HORIZONTAL1"].iloc[
+                [-1]
+            ],
+            transition,
+        ],
+        ignore_index=True,
+    )
+    rebuilt = compute_positions_min_curv(
+        transition_with_start[["MD_m", "INC_deg", "AZI_deg"]],
+        start=Point3D(0.0, 0.0, 1000.0),
+    )
+    mismatch_m = np.sqrt(
+        (
+            rebuilt["X_m"].to_numpy()
+            - transition_with_start["X_m"].to_numpy()
+        )
+        ** 2
+        + (
+            rebuilt["Y_m"].to_numpy()
+            - transition_with_start["Y_m"].to_numpy()
+        )
+        ** 2
+        + (
+            rebuilt["Z_m"].to_numpy()
+            - transition_with_start["Z_m"].to_numpy()
+        )
+        ** 2
+    )
+    assert float(np.max(mismatch_m)) < 0.25
+
+
+def test_multi_horizontal_constant_dls_fallback_reports_unsupported_reverse_turn(
+    monkeypatch,
+) -> None:
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [-500.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [1000.0, 1000.0],
+                "segment": ["HORIZONTAL", "HORIZONTAL"],
+            }
+        ),
+        summary={"trajectory_type": "base", "md_total_m": 1000.0},
+        azimuth_deg=90.0,
+        md_t1_m=0.0,
+    )
+    target_pairs = (
+        (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
+        (Point3D(800.0, 0.0, 1100.0), Point3D(300.0, 0.0, 1100.0)),
+    )
+    monkeypatch.setattr(
+        multi_horizontal_module,
+        "_candidate_control_lengths",
+        lambda **_: (),
+    )
+
+    with pytest.raises(PlanningError, match="Constant-DLS fallback"):
+        extend_plan_with_multi_horizontal_targets(
+            base_result=base_result,
+            target_pairs=target_pairs,
+            config=TrajectoryConfig(
+                dls_build_max_deg_per_30m=12.0,
+                dls_horizontal_max_deg_per_30m=12.0,
+                max_inc_deg=120.0,
+            ),
+        )
 
 
 def test_turn_solver_build_limit_search_is_monotonic_for_debug_geometry() -> None:
@@ -575,7 +740,7 @@ def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike
     assert rows[0]["Проблема"] == ""
     assert len(successes) == 1
     assert successes[0].config.dls_limits_deg_per_30m["HORIZONTAL"] == pytest.approx(
-        config.dls_build_max_deg_per_30m
+        config.dls_horizontal_max_deg_per_30m
     )
     horizontal_dls = (
         successes[0]
@@ -585,7 +750,10 @@ def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike
         ]
         .dropna()
     )
-    assert float(horizontal_dls.max()) <= float(config.dls_build_max_deg_per_30m) + 1e-5
+    assert (
+        float(horizontal_dls.max())
+        <= float(config.dls_horizontal_max_deg_per_30m) + 1e-5
+    )
 
 
 @pytest.mark.integration

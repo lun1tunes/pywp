@@ -26,6 +26,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "max_inc",
     "max_total_md_postcheck",
     "dls_build_max",
+    "dls_horizontal_max",
     "kop_min_vertical",
 )
 _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
@@ -52,6 +53,9 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "max_inc": float(cfg.max_inc_deg),
         "max_total_md_postcheck": float(cfg.max_total_md_postcheck_m),
         "dls_build_max": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
+        "dls_horizontal_max": float(
+            dls_to_pi(cfg.dls_horizontal_max_deg_per_30m)
+        ),
         "kop_min_vertical": float(cfg.kop_min_vertical_m),
         "optimization_mode": str(cfg.optimization_mode),
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
@@ -64,7 +68,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 13
+_DEFAULTS_SCHEMA_VERSION = 14
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
@@ -319,6 +323,9 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         dls_build_max_deg_per_30m=pi_to_dls(
             float(_state_value(prefix, "dls_build_max"))
         ),
+        dls_horizontal_max_deg_per_30m=pi_to_dls(
+            float(_state_value(prefix, "dls_horizontal_max"))
+        ),
         kop_min_vertical_m=float(_state_value(prefix, "kop_min_vertical")),
         optimization_mode=str(_state_value(prefix, "optimization_mode")),
         turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
@@ -402,20 +409,31 @@ def render_calc_params_block(
         **widget_change_kwargs,
     )
 
-    d1, d2, d3 = st.columns(3, gap="small")
+    d1, d2, d3, d4 = st.columns(4, gap="small")
     d1.number_input(
         "Макс ПИ BUILD, deg/10m",
         key=_state_key(prefix, "dls_build_max"),
         min_value=0.1,
         step=0.1,
         help=(
-            "Верхняя граница поиска ПИ на BUILD-сегментах. "
+            "Верхняя граница поиска ПИ на BUILD-сегментах до входа в t1. "
             "Внутри решателя автоматически переводится во внутренние единицы."
         ),
         **widget_change_kwargs,
     )
+    d2.number_input(
+        "Макс ПИ HORIZONTAL, deg/10m",
+        key=_state_key(prefix, "dls_horizontal_max"),
+        min_value=0.1,
+        step=0.1,
+        help=(
+            "Лимит ПИ для участка после t1: HORIZONTAL-переход к t3 и "
+            "HORIZONTAL_BUILD между уровнями MULTIHORIZONTAL."
+        ),
+        **widget_change_kwargs,
+    )
     (
-        d2.number_input(
+        d3.number_input(
             "Мин VERTICAL до KOP, м",
             key=_state_key(prefix, "kop_min_vertical"),
             min_value=0.0,
@@ -424,7 +442,7 @@ def render_calc_params_block(
             **widget_change_kwargs,
         )
         if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_CONSTANT
-        else d2.text_input(
+        else d3.text_input(
             "Мин VERTICAL до KOP, м",
             value=kop_min_vertical_display_label(prefix),
             disabled=True,
@@ -435,8 +453,8 @@ def render_calc_params_block(
         )
     )
     if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION:
-        d2.caption(kop_min_vertical_detail_label(prefix))
-    d3.number_input(
+        d3.caption(kop_min_vertical_detail_label(prefix))
+    d4.number_input(
         "Макс итоговая MD (постпроверка), м",
         key=_state_key(prefix, "max_total_md_postcheck"),
         min_value=100.0,
