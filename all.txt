@@ -1673,6 +1673,172 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
+===BEGIN_FILE===	pages/04_crs_calculator.py	4698
+from __future__ import annotations
+
+import logging
+
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(
+    logging.ERROR
+)
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
+
+import pandas as pd
+import streamlit as st
+from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
+
+from pywp.coordinate_integration import (
+    CRS_LABEL_BY_VALUE,
+    CSV_CRS_OPTIONS,
+    DEFAULT_CRS,
+    INPUT_CRS_LABEL_BY_VALUE,
+    INPUT_CRS_OPTIONS,
+    can_transform_crs,
+    transform_xy_to_crs,
+)
+from pywp.coordinate_systems import CoordinateSystem
+from pywp.ui_theme import apply_page_style, render_hero
+
+_DEFAULT_OUTPUT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
+_DEFAULT_X = 600_010.6
+_DEFAULT_Y = 7_407_421.0
+
+
+def _labels(options: list[tuple[str, CoordinateSystem]]) -> list[str]:
+    return [label for label, _crs in options]
+
+
+def _crs_by_label(
+    label: str,
+    options: list[tuple[str, CoordinateSystem]],
+    fallback: CoordinateSystem,
+) -> CoordinateSystem:
+    return next((crs for item_label, crs in options if item_label == label), fallback)
+
+
+def _index_for_crs(
+    crs: CoordinateSystem,
+    options: list[tuple[str, CoordinateSystem]],
+) -> int:
+    return next((idx for idx, (_label, item) in enumerate(options) if item == crs), 0)
+
+
+def _format_value(value: float, crs: CoordinateSystem) -> str:
+    decimals = 8 if crs.is_geographic() else 3
+    return f"{float(value):.{decimals}f}"
+
+
+def _result_frame(
+    *,
+    x_in: float,
+    y_in: float,
+    x_out: float,
+    y_out: float,
+    input_crs: CoordinateSystem,
+    output_crs: CoordinateSystem,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "CRS": INPUT_CRS_LABEL_BY_VALUE.get(input_crs, input_crs.name),
+                "X": _format_value(x_in, input_crs),
+                "Y": _format_value(y_in, input_crs),
+                "Роль": "Вход",
+            },
+            {
+                "CRS": CRS_LABEL_BY_VALUE.get(output_crs, output_crs.name),
+                "X": _format_value(x_out, output_crs),
+                "Y": _format_value(y_out, output_crs),
+                "Роль": "Выход",
+            },
+        ]
+    )
+
+
+def run_page() -> None:
+    st.set_page_config(page_title="CRS calculator", layout="wide")
+    apply_page_style(max_width_px=1100)
+    render_hero(
+        title="CRS calculator",
+        subtitle="Быстрая проверка пересчёта X/Y той же функцией, что используется в CSV-выгрузке.",
+    )
+
+    input_labels = _labels(INPUT_CRS_OPTIONS)
+    output_labels = _labels(CSV_CRS_OPTIONS)
+    c1, c2 = st.columns(2, gap="small")
+    input_label = c1.selectbox(
+        "Входная CRS",
+        options=input_labels,
+        index=_index_for_crs(DEFAULT_CRS, INPUT_CRS_OPTIONS),
+        key="crs_calc_input_crs",
+    )
+    output_label = c2.selectbox(
+        "Выходная CRS",
+        options=output_labels,
+        index=_index_for_crs(_DEFAULT_OUTPUT_CRS, CSV_CRS_OPTIONS),
+        key="crs_calc_output_crs",
+    )
+
+    input_crs = _crs_by_label(input_label, INPUT_CRS_OPTIONS, DEFAULT_CRS)
+    output_crs = _crs_by_label(output_label, CSV_CRS_OPTIONS, _DEFAULT_OUTPUT_CRS)
+
+    x_col, y_col = st.columns(2, gap="small")
+    x_in = x_col.number_input(
+        "X",
+        value=float(_DEFAULT_X),
+        step=1.0,
+        format="%.3f",
+        key="crs_calc_x",
+    )
+    y_in = y_col.number_input(
+        "Y",
+        value=float(_DEFAULT_Y),
+        step=1.0,
+        format="%.3f",
+        key="crs_calc_y",
+    )
+
+    can_transform = can_transform_crs(input_crs, output_crs)
+    x_out, y_out = transform_xy_to_crs(
+        float(x_in),
+        float(y_in),
+        input_crs,
+        output_crs,
+    )
+
+    if input_crs != output_crs and not can_transform:
+        st.warning(
+            "Для выбранной пары CRS нет безопасного прямого пересчёта; "
+            "значения оставлены как есть."
+        )
+
+    st.dataframe(
+        _result_frame(
+            x_in=float(x_in),
+            y_in=float(y_in),
+            x_out=float(x_out),
+            y_out=float(y_out),
+            input_crs=input_crs,
+            output_crs=output_crs,
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+
+    out_x_col, out_y_col = st.columns(2, gap="small")
+    out_x_col.metric("X output", _format_value(x_out, output_crs))
+    out_y_col.metric("Y output", _format_value(y_out, output_crs))
+
+
+if __name__ == "__main__":
+    if get_script_run_ctx(suppress_warning=True) is None:
+        raise SystemExit(
+            "Запустите приложение командой `streamlit run pages/04_crs_calculator.py`."
+        )
+    run_page()
+
+===END_FILE===
 ===BEGIN_FILE===	pytest.ini	259
 [pytest]
 testpaths = tests
@@ -10791,7 +10957,7 @@ SMALL: float = 1e-9
 __all__ = ["DEG2RAD", "RAD2DEG", "SMALL"]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_integration.py	24293
+===BEGIN_FILE===	pywp/coordinate_integration.py	25241
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
@@ -11163,7 +11329,9 @@ def _transform_xy(
                 GeodeticCoord(lat_deg=y, lon_deg=x),
                 effective_from, effective_to,
             )
-            if isinstance(result, GeodeticCoord):
+            if isinstance(result, GeodeticCoord) and _is_finite_xy(
+                result.lon_deg, result.lat_deg
+            ):
                 return result.lon_deg, result.lat_deg
         elif not effective_from.is_geographic() and not effective_to.is_geographic():
             # Both projected: easting/northing -> easting/northing
@@ -11171,7 +11339,9 @@ def _transform_xy(
                 ProjectedCoord(easting_m=x, northing_m=y),
                 effective_from, effective_to,
             )
-            if isinstance(result, ProjectedCoord):
+            if isinstance(result, ProjectedCoord) and _is_finite_xy(
+                result.easting_m, result.northing_m
+            ):
                 return result.easting_m, result.northing_m
         elif effective_from.is_geographic() and not effective_to.is_geographic():
             # Geographic -> projected
@@ -11179,7 +11349,9 @@ def _transform_xy(
                 GeodeticCoord(lat_deg=y, lon_deg=x),
                 effective_from, effective_to,
             )
-            if isinstance(result, ProjectedCoord):
+            if isinstance(result, ProjectedCoord) and _is_finite_xy(
+                result.easting_m, result.northing_m
+            ):
                 return result.easting_m, result.northing_m
         else:
             # Projected -> geographic
@@ -11187,14 +11359,36 @@ def _transform_xy(
                 ProjectedCoord(easting_m=x, northing_m=y),
                 effective_from, effective_to,
             )
-            if isinstance(result, GeodeticCoord):
+            if isinstance(result, GeodeticCoord) and _is_finite_xy(
+                result.lon_deg, result.lat_deg
+            ):
                 return result.lon_deg, result.lat_deg
     except Exception as exc:
         logger.warning(
             f"Coordinate transformation failed ({from_crs.name} -> {to_crs.name}): {exc}"
         )
+    else:
+        logger.warning(
+            "Coordinate transformation returned unsupported or non-finite result "
+            f"({from_crs.name} -> {to_crs.name})."
+        )
 
     return x, y
+
+
+def _is_finite_xy(x: float, y: float) -> bool:
+    return bool(np.isfinite(float(x)) and np.isfinite(float(y)))
+
+
+def transform_xy_to_crs(
+    x: float,
+    y: float,
+    from_crs: CoordinateSystem,
+    to_crs: CoordinateSystem,
+) -> tuple[float, float]:
+    """Transform horizontal X/Y coordinates using the CSV export CRS engine."""
+
+    return _transform_xy(float(x), float(y), from_crs, to_crs)
 
 
 def transform_point_to_crs(
@@ -11219,7 +11413,7 @@ def transform_point_to_crs(
     if from_crs == to_crs:
         return point
 
-    tx, ty = _transform_xy(point.x, point.y, from_crs, to_crs)
+    tx, ty = transform_xy_to_crs(point.x, point.y, from_crs, to_crs)
     return Point3D(x=tx, y=ty, z=point.z)
 
 
@@ -11260,7 +11454,7 @@ def transform_stations_to_crs(
         # Transform each station's x,y coordinates
         transformed = np.zeros((len(result), 2), dtype=float)
         for i in range(len(result)):
-            tx, ty = _transform_xy(
+            tx, ty = transform_xy_to_crs(
                 float(result["X_m"].iloc[i]),
                 float(result["Y_m"].iloc[i]),
                 from_crs,
@@ -11480,6 +11674,7 @@ __all__ = [
     "get_input_crs",
     "get_selected_crs",
     "should_auto_convert",
+    "transform_xy_to_crs",
     "transform_point_to_crs",
     "transform_stations_to_crs",
     "can_transform_crs",
@@ -12000,7 +12195,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/eclipse_welltrack.py	23695
+===BEGIN_FILE===	pywp/eclipse_welltrack.py	25664
 from __future__ import annotations
 
 import math
@@ -12435,7 +12630,8 @@ def _normalize_table_point_name(
             "пары 1_t1, 1_t3, 2_t1, 2_t3, ... "
             "Для пилота используйте имя wellname_PL и точки S, PL1, PL2, ... "
             "Для бокового ствола от факта используйте имя fact_well_name_ZBS "
-            "и точки t1, t3 без S."
+            "и точки t1, t3 без S; для многопластового ZBS используйте "
+            "1_t1, 1_t3, 2_t1, 2_t3, ... без S."
         )
 
 
@@ -12505,6 +12701,12 @@ def _ordered_table_zbs_point_names(
     *,
     well_name: str,
 ) -> tuple[str, ...]:
+    if _has_multi_horizontal_table_points(points_by_name):
+        return _ordered_table_zbs_multi_horizontal_point_names(
+            points_by_name,
+            well_name=well_name,
+        )
+
     missing = [name for name in ("t1", "t3") if name not in points_by_name]
     if missing:
         raise WelltrackParseError(
@@ -12520,10 +12722,56 @@ def _ordered_table_zbs_point_names(
     if extra:
         raise WelltrackParseError(
             "Табличный WELLTRACK: для бокового ствола от факта "
-            f"'{well_name}' используйте только точки t1 и t3 без S. "
+            f"'{well_name}' используйте только точки t1 и t3 без S либо полные "
+            "многопластовые пары 1_t1/1_t3, 2_t1/2_t3, ... без S. "
             f"Лишние точки: {', '.join(extra)}."
         )
     return ("t1", "t3")
+
+
+def _ordered_table_zbs_multi_horizontal_point_names(
+    points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+) -> tuple[str, ...]:
+    forbidden = sorted(
+        _table_point_display_name(point_name)
+        for point_name in points_by_name
+        if point_name in {"wellhead", "t1", "t3"}
+    )
+    if forbidden:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластового бокового ствола от факта "
+            f"'{well_name}' используйте только пары 1_t1/1_t3, 2_t1/2_t3, ... "
+            f"без S и обычных точек. Лишние точки: {', '.join(forbidden)}."
+        )
+
+    levels = sorted(
+        int(match.group(1))
+        for point_name in points_by_name
+        if (match := _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name))) is not None
+    )
+    if not levels:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластового бокового ствола от факта "
+            f"'{well_name}' отсутствует точка 1_t1."
+        )
+    max_level = int(max(levels))
+    missing: list[str] = []
+    ordered: list[str] = []
+    for level in range(1, max_level + 1):
+        for suffix in ("t1", "t3"):
+            point_name = f"{level}_{suffix}"
+            if point_name not in points_by_name:
+                missing.append(point_name)
+            else:
+                ordered.append(point_name)
+    if missing:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для многопластового бокового ствола от факта "
+            f"'{well_name}' отсутствуют точки: {', '.join(missing)}."
+        )
+    return tuple(ordered)
 
 
 def _has_multi_horizontal_table_points(
@@ -13551,7 +13799,7 @@ def add_dls(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/models.py	11864
+===BEGIN_FILE===	pywp/models.py	13027
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -13644,7 +13892,6 @@ _SEGMENT_DLS_FIXED_LIMITS: dict[str, float] = {
 _SEGMENT_DLS_BUILD_CONTROLLED: set[str] = {
     "BUILD1",
     "BUILD2",
-    "HORIZONTAL",
 }
 SummaryValue = float | int | str | bool
 SummaryDict = dict[str, SummaryValue]
@@ -13664,14 +13911,22 @@ def _coerce_legacy_bool(value: object) -> bool:
 
 def build_segment_dls_limits_deg_per_30m(
     build_dls_max_deg_per_30m: float,
+    horizontal_dls_max_deg_per_30m: float | None = None,
 ) -> dict[str, float]:
-    """Build default segment DLS limits from a single BUILD max value."""
+    """Build default segment DLS limits from BUILD and post-entry max values."""
 
     build_limit = float(max(build_dls_max_deg_per_30m, 0.0))
+    horizontal_limit = (
+        build_limit
+        if horizontal_dls_max_deg_per_30m is None
+        else float(max(horizontal_dls_max_deg_per_30m, 0.0))
+    )
     limits: dict[str, float] = {}
     for segment_name in _SEGMENT_DLS_ORDER:
         if segment_name in _SEGMENT_DLS_BUILD_CONTROLLED:
             limits[segment_name] = build_limit
+        elif segment_name == "HORIZONTAL":
+            limits[segment_name] = horizontal_limit
         else:
             limits[segment_name] = float(_SEGMENT_DLS_FIXED_LIMITS[segment_name])
     return limits
@@ -13709,6 +13964,9 @@ class TrajectoryConfig(FrozenModel):
 
     dls_build_min_deg_per_30m: NonNegativeFiniteScalar = 0.0
     dls_build_max_deg_per_30m: NonNegativeFiniteScalar = (
+        DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+    )
+    dls_horizontal_max_deg_per_30m: NonNegativeFiniteScalar = (
         DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     )
     kop_min_vertical_m: NonNegativeFiniteScalar = 400.0
@@ -13758,6 +14016,18 @@ class TrajectoryConfig(FrozenModel):
                 raise ValueError(
                     "Unsupported DLS segment names: " + ", ".join(unknown_segments)
                 )
+            if (
+                "dls_horizontal_max_deg_per_30m" not in payload
+                and "HORIZONTAL" in raw_limits
+            ):
+                payload["dls_horizontal_max_deg_per_30m"] = raw_limits["HORIZONTAL"]
+        if (
+            "dls_horizontal_max_deg_per_30m" not in payload
+            and "dls_build_max_deg_per_30m" in payload
+        ):
+            payload["dls_horizontal_max_deg_per_30m"] = payload[
+                "dls_build_max_deg_per_30m"
+            ]
         legacy_pos_tolerance = payload.pop("pos_tolerance_m", None)
         if legacy_pos_tolerance is not None:
             if "lateral_tolerance_m" not in payload:
@@ -13790,6 +14060,8 @@ class TrajectoryConfig(FrozenModel):
             raise PlanningError("dls_build_min_deg_per_30m cannot be negative.")
         if self.dls_build_max_deg_per_30m < 0.0:
             raise PlanningError("dls_build_max_deg_per_30m cannot be negative.")
+        if self.dls_horizontal_max_deg_per_30m < 0.0:
+            raise PlanningError("dls_horizontal_max_deg_per_30m cannot be negative.")
         if self.dls_build_min_deg_per_30m > self.dls_build_max_deg_per_30m:
             raise PlanningError(
                 "dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m."
@@ -13836,7 +14108,10 @@ class TrajectoryConfig(FrozenModel):
     @property
     def dls_limits_deg_per_30m(self) -> dict[str, float]:
         return build_segment_dls_limits_deg_per_30m(
-            float(self.dls_build_max_deg_per_30m)
+            float(self.dls_build_max_deg_per_30m),
+            horizontal_dls_max_deg_per_30m=float(
+                self.dls_horizontal_max_deg_per_30m
+            ),
         )
 
     @property
@@ -13856,7 +14131,7 @@ class PlannerResult(FrozenArbitraryModel):
     md_t1_m: float
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/multi_horizontal.py	25475
+===BEGIN_FILE===	pywp/multi_horizontal.py	41230
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13865,9 +14140,10 @@ import numpy as np
 import pandas as pd
 
 from pywp.constants import RAD2DEG
-from pywp.mcm import add_dls, dogleg_angle_rad
+from pywp.mcm import add_dls, dogleg_angle_rad, minimum_curvature_increment
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.planner_types import PlanningError
+from pywp.segments import BuildSegment, HoldSegment
 from pywp.ui_utils import dls_to_pi
 
 SMALL = 1e-9
@@ -13882,6 +14158,16 @@ class MultiHorizontalTransition:
     required_build_m: float
     excess_m: float
     max_feasible_delta_z_m: float
+
+
+@dataclass(frozen=True)
+class _ConstantDlsTransitionCandidate:
+    stations: pd.DataFrame
+    dls_deg_per_30m: float
+    endpoint_miss_m: float
+    max_dls_deg_per_30m: float
+    max_inc_deg: float
+    md_span_m: float
 
 
 def extend_plan_with_multi_horizontal_targets(
@@ -13971,11 +14257,13 @@ def extend_plan_with_multi_horizontal_targets(
         stations=stations,
         final_target=target_pairs[-1][1],
         config=config,
+        post_t1_start_md_m=float(base_result.md_t1_m),
     )
 
     summary = dict(base_result.summary)
     final_target = target_pairs[-1][1]
     max_dls = float(np.nanmax(stations["DLS_deg_per_30m"].to_numpy(dtype=float)))
+    horizontal_limit = _horizontal_dls_limit(config)
     md_total_m = float(stations["MD_m"].iloc[-1])
     md_postcheck_limit_m = float(config.max_total_md_postcheck_m)
     md_postcheck_excess_m = float(max(0.0, md_total_m - md_postcheck_limit_m))
@@ -13985,6 +14273,7 @@ def extend_plan_with_multi_horizontal_targets(
             "multi_horizontal": "yes",
             "multi_horizontal_levels": int(len(target_pairs)),
             "multi_horizontal_transition_count": int(len(target_pairs) - 1),
+            "dls_limit_horizontal_deg_per_30m": float(horizontal_limit),
             "multi_horizontal_min_transition_gap_m": float(
                 min((item.gap_m for item in transitions), default=0.0)
             ),
@@ -14019,6 +14308,7 @@ def _validate_extended_stations(
     stations: pd.DataFrame,
     final_target: Point3D,
     config: TrajectoryConfig,
+    post_t1_start_md_m: float,
 ) -> None:
     md_values = stations["MD_m"].to_numpy(dtype=float)
     if len(md_values) < 2 or np.any(~np.isfinite(md_values)):
@@ -14036,14 +14326,18 @@ def _validate_extended_stations(
             "Увеличьте горизонтальный зазор между уровнями или уменьшите ΔZ."
         )
 
-    dls_values = stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+    horizontal_limit = _horizontal_dls_limit(config)
+    post_t1_mask = (
+        stations["MD_m"].to_numpy(dtype=float) > float(post_t1_start_md_m) + 1e-6
+    )
+    dls_values = stations.loc[post_t1_mask, "DLS_deg_per_30m"].to_numpy(dtype=float)
     finite_dls = dls_values[np.isfinite(dls_values)]
     max_dls = float(np.max(finite_dls)) if len(finite_dls) else 0.0
-    if max_dls > float(config.dls_build_max_deg_per_30m) + 1e-6:
+    if max_dls > horizontal_limit + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: построенный HORIZONTAL_BUILD превышает "
             f"лимит ПИ ({dls_to_pi(max_dls):.3f} > "
-            f"{dls_to_pi(float(config.dls_build_max_deg_per_30m)):.3f} deg/10m)."
+            f"{dls_to_pi(horizontal_limit):.3f} deg/10m)."
         )
 
     final_row = stations.iloc[-1]
@@ -14088,11 +14382,11 @@ def _transition_feasibility(
         config=config,
         context=f"переход {level_from}_t3 → {level_to}_t1",
     )
-    dls_limit = float(config.dls_build_max_deg_per_30m)
+    dls_limit = _horizontal_dls_limit(config)
     if dls_limit <= SMALL:
         raise PlanningError(
             "Многопластовая скважина: для HORIZONTAL_BUILD требуется положительный "
-            "максимальный ПИ."
+            "максимальный ПИ HORIZONTAL."
         )
     build_in_m = _dogleg_build_length_m(
         float(current["inc_deg"]),
@@ -14145,7 +14439,7 @@ def _smooth_transition_rows(
         inc_deg=float(target_inc_deg),
         azi_deg=float(target_azi_deg),
     )
-    dls_limit = float(config.dls_build_max_deg_per_30m)
+    dls_limit = _horizontal_dls_limit(config)
     min_control_m = float(
         max(
             float(config.min_structural_segment_m),
@@ -14166,14 +14460,14 @@ def _smooth_transition_rows(
         for tail_m in control_lengths:
             p1 = p0 + start_dir * float(lead_m)
             p2 = p3 - end_dir * float(tail_m)
-            xyz = _sample_cubic_bezier(
-                p0=p0,
-                p1=p1,
-                p2=p2,
-                p3=p3,
-                step_m=float(config.md_step_m),
-            )
             try:
+                xyz = _sample_cubic_bezier(
+                    p0=p0,
+                    p1=p1,
+                    p2=p2,
+                    p3=p3,
+                    step_m=float(config.md_step_m),
+                )
                 candidate = _stations_from_xyz_path(
                     xyz=xyz,
                     segment_name=segment_name,
@@ -14186,7 +14480,11 @@ def _smooth_transition_rows(
             except PlanningError:
                 continue
             md_span = float(candidate["MD_m"].iloc[-1] - candidate["MD_m"].iloc[0])
-            if md_span > max(float(gap) * MAX_TRANSITION_MD_MULTIPLIER, float(gap) + 500.0):
+            max_md_span = max(
+                float(gap) * MAX_TRANSITION_MD_MULTIPLIER,
+                float(gap) + 500.0,
+            )
+            if md_span > max_md_span:
                 continue
             dls_values = candidate["DLS_deg_per_30m"].to_numpy(dtype=float)
             finite_dls = _finite_values(dls_values)
@@ -14212,27 +14510,456 @@ def _smooth_transition_rows(
                 best_dls = max_dls
                 best_inc = max_inc
 
+    fallback_error: PlanningError | None = None
+    if (
+        best is None
+        or best_dls > dls_limit + 1e-6
+        or best_inc > float(config.max_inc_deg) + 1e-6
+    ):
+        try:
+            constant_dls_candidate = _constant_dls_transition_candidate(
+                current=current,
+                target=target,
+                target_inc_deg=target_inc_deg,
+                target_azi_deg=target_azi_deg,
+                segment_name=segment_name,
+                config=config,
+            )
+        except PlanningError as exc:
+            fallback_error = exc
+        else:
+            return [
+                dict(row)
+                for row in constant_dls_candidate.stations.iloc[1:].to_dict("records")
+            ]
+
     if best is None:
-        raise PlanningError(
+        message = (
             "Многопластовая скважина: не удалось построить плавный "
             f"{segment_name} между уровнями без вырожденной геометрии. "
             "Увеличьте расстояние между горизонтальными участками или уменьшите ΔZ."
         )
+        if fallback_error is not None:
+            message += f" Constant-DLS fallback: {fallback_error}"
+        raise PlanningError(message)
     if best_dls > dls_limit + 1e-6:
-        raise PlanningError(
+        message = (
             "Многопластовая скважина: плавный "
             f"{segment_name} требует ПИ {dls_to_pi(best_dls):.2f} deg/10m, что выше "
             f"лимита {dls_to_pi(dls_limit):.2f}. Увеличьте расстояние между уровнями, "
             "сократите соседние мини-горизонты или уменьшите ΔZ."
         )
+        if fallback_error is not None:
+            message += f" Constant-DLS fallback: {fallback_error}"
+        raise PlanningError(message)
     if best_inc > float(config.max_inc_deg) + 1e-6:
-        raise PlanningError(
+        message = (
             "Многопластовая скважина: плавный "
             f"{segment_name} требует INC {best_inc:.2f}°, что выше "
             f"ограничения {float(config.max_inc_deg):.2f}°. "
             "Увеличьте горизонтальный зазор между уровнями или уменьшите ΔZ."
         )
+        if fallback_error is not None:
+            message += f" Constant-DLS fallback: {fallback_error}"
+        raise PlanningError(message)
     return [dict(row) for row in best.iloc[1:].to_dict("records")]
+
+
+def _constant_dls_transition_candidate(
+    *,
+    current: dict[str, float],
+    target: Point3D,
+    target_inc_deg: float,
+    target_azi_deg: float,
+    segment_name: str,
+    config: TrajectoryConfig,
+) -> _ConstantDlsTransitionCandidate:
+    try:
+        from scipy.optimize import least_squares
+    except ImportError as exc:  # pragma: no cover - scipy is a runtime dependency.
+        raise PlanningError("scipy недоступен для Constant-DLS fallback.") from exc
+
+    dls_limit = _horizontal_dls_limit(config)
+    if dls_limit <= SMALL:
+        raise PlanningError("лимит HORIZONTAL ПИ должен быть положительным.")
+
+    target_delta = np.array(
+        [
+            float(target.x) - float(current["x"]),
+            float(target.y) - float(current["y"]),
+            float(target.z) - float(current["z"]),
+        ],
+        dtype=float,
+    )
+    gap_m = float(np.linalg.norm(target_delta))
+    if gap_m <= SMALL:
+        raise PlanningError("точки перехода совпадают.")
+
+    start_inc = float(current["inc_deg"])
+    start_azi = float(current["azi_deg"]) % 360.0
+    end_inc = float(target_inc_deg)
+    end_azi = float(target_azi_deg) % 360.0
+    max_inc = float(config.max_inc_deg)
+    max_hold_m = float(max(gap_m * MAX_TRANSITION_MD_MULTIPLIER, gap_m + 500.0))
+    dls_lower = float(max(min(dls_limit * 0.02, 0.03), 1e-4))
+    scale_m = float(max(gap_m, 1.0))
+
+    def residual(values: np.ndarray) -> np.ndarray:
+        inc_mid, azi_mid, dls_value, hold_length = [float(item) for item in values]
+        try:
+            delta, _, _ = _constant_dls_transition_delta_xyz(
+                start_inc_deg=start_inc,
+                start_azi_deg=start_azi,
+                mid_inc_deg=inc_mid,
+                mid_azi_deg=azi_mid,
+                end_inc_deg=end_inc,
+                end_azi_deg=end_azi,
+                dls_deg_per_30m=dls_value,
+                hold_length_m=hold_length,
+            )
+        except ValueError:
+            return np.full(3, 1e6, dtype=float)
+        if not np.all(np.isfinite(delta)):
+            return np.full(3, 1e6, dtype=float)
+        return (delta - target_delta) / scale_m
+
+    best: _ConstantDlsTransitionCandidate | None = None
+    best_score = float("inf")
+    for seed in _constant_dls_transition_seeds(
+        current=current,
+        target=target,
+        target_inc_deg=end_inc,
+        target_azi_deg=end_azi,
+        dls_limit_deg_per_30m=dls_limit,
+        max_inc_deg=max_inc,
+        max_hold_m=max_hold_m,
+    ):
+        result = least_squares(
+            residual,
+            np.asarray(seed, dtype=float),
+            bounds=(
+                np.array([0.0, 0.0, dls_lower, 0.0], dtype=float),
+                np.array([max_inc, 360.0, dls_limit, max_hold_m], dtype=float),
+            ),
+            max_nfev=160,
+            xtol=1e-11,
+            ftol=1e-11,
+            gtol=1e-11,
+        )
+        if not result.success and float(result.cost) > 1e-14:
+            continue
+        inc_mid, azi_mid, dls_value, hold_length = [
+            float(item) for item in result.x
+        ]
+        try:
+            stations = _build_constant_dls_transition_stations(
+                current=current,
+                mid_inc_deg=inc_mid,
+                mid_azi_deg=azi_mid,
+                target=target,
+                target_inc_deg=end_inc,
+                target_azi_deg=end_azi,
+                dls_deg_per_30m=dls_value,
+                hold_length_m=hold_length,
+                segment_name=segment_name,
+                config=config,
+            )
+        except ValueError:
+            continue
+        endpoint = stations.iloc[-1]
+        endpoint_miss = float(
+            np.linalg.norm(
+                np.array(
+                    [
+                        float(endpoint["X_m"]) - float(target.x),
+                        float(endpoint["Y_m"]) - float(target.y),
+                        float(endpoint["Z_m"]) - float(target.z),
+                    ],
+                    dtype=float,
+                )
+            )
+        )
+        dls_values = _finite_values(stations["DLS_deg_per_30m"].to_numpy(dtype=float))
+        max_dls = float(np.max(dls_values)) if len(dls_values) else 0.0
+        inc_values = _finite_values(stations["INC_deg"].to_numpy(dtype=float))
+        actual_max_inc = float(np.max(inc_values)) if len(inc_values) else 0.0
+        md_span = float(stations["MD_m"].iloc[-1] - stations["MD_m"].iloc[0])
+        if endpoint_miss > 1e-4:
+            continue
+        if max_dls > dls_limit + 1e-6:
+            continue
+        if actual_max_inc > max_inc + 1e-6:
+            continue
+        candidate = _ConstantDlsTransitionCandidate(
+            stations=stations,
+            dls_deg_per_30m=dls_value,
+            endpoint_miss_m=endpoint_miss,
+            max_dls_deg_per_30m=max_dls,
+            max_inc_deg=actual_max_inc,
+            md_span_m=md_span,
+        )
+        score = float(
+            endpoint_miss * 1_000_000.0
+            + 0.001 * md_span
+            - 0.01 * dls_value
+        )
+        if score < best_score:
+            best = candidate
+            best_score = score
+
+    if best is None:
+        raise PlanningError(
+            "не удалось подобрать Constant-DLS переход с ПИ не выше "
+            f"{dls_to_pi(dls_limit):.2f} deg/10m."
+        )
+    return best
+
+
+def _constant_dls_transition_seeds(
+    *,
+    current: dict[str, float],
+    target: Point3D,
+    target_inc_deg: float,
+    target_azi_deg: float,
+    dls_limit_deg_per_30m: float,
+    max_inc_deg: float,
+    max_hold_m: float,
+) -> tuple[tuple[float, float, float, float], ...]:
+    direct_inc, direct_azi = _direction_angles_from_current(current, target)
+    start_inc = float(current["inc_deg"])
+    start_azi = float(current["azi_deg"]) % 360.0
+    end_inc = float(target_inc_deg)
+    end_azi = float(target_azi_deg) % 360.0
+    avg_inc = float(np.clip((start_inc + end_inc) * 0.5, 0.0, max_inc_deg))
+    inc_candidates = _dedupe_float_candidates(
+        np.clip(
+            np.array(
+                [
+                    direct_inc,
+                    avg_inc,
+                    direct_inc - 5.0,
+                    direct_inc + 5.0,
+                ],
+                dtype=float,
+            ),
+            0.0,
+            max_inc_deg,
+        )
+    )
+    avg_azi = _interpolate_azimuth_deg(start_azi, end_azi, 0.5)
+    azi_candidates = _dedupe_float_candidates(
+        np.mod(
+            np.array(
+                [
+                    direct_azi,
+                    avg_azi,
+                    start_azi,
+                    end_azi,
+                ],
+                dtype=float,
+            ),
+            360.0,
+        )
+    )
+    dls_candidates = _dedupe_float_candidates(
+        np.clip(
+            np.array(
+                [
+                    dls_limit_deg_per_30m,
+                    dls_limit_deg_per_30m * 0.75,
+                    dls_limit_deg_per_30m * 0.50,
+                ],
+                dtype=float,
+            ),
+            1e-4,
+            dls_limit_deg_per_30m,
+        )
+    )
+    seeds: list[tuple[float, float, float, float]] = []
+    gap_m = _distance_from_current(current, target)
+    for inc_mid in inc_candidates:
+        for azi_mid in azi_candidates:
+            for dls_value in dls_candidates:
+                try:
+                    _, build1_m, build2_m = _constant_dls_transition_delta_xyz(
+                        start_inc_deg=start_inc,
+                        start_azi_deg=start_azi,
+                        mid_inc_deg=inc_mid,
+                        mid_azi_deg=azi_mid,
+                        end_inc_deg=end_inc,
+                        end_azi_deg=end_azi,
+                        dls_deg_per_30m=dls_value,
+                        hold_length_m=0.0,
+                    )
+                except ValueError:
+                    continue
+                if not np.isfinite(build1_m) or not np.isfinite(build2_m):
+                    continue
+                hold_seed = float(np.clip(gap_m - build1_m - build2_m, 0.0, max_hold_m))
+                seeds.append((inc_mid, azi_mid, dls_value, hold_seed))
+    return tuple(seeds)
+
+
+def _build_constant_dls_transition_stations(
+    *,
+    current: dict[str, float],
+    mid_inc_deg: float,
+    mid_azi_deg: float,
+    target: Point3D,
+    target_inc_deg: float,
+    target_azi_deg: float,
+    dls_deg_per_30m: float,
+    hold_length_m: float,
+    segment_name: str,
+    config: TrajectoryConfig,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = [
+        pd.DataFrame(
+            [
+                {
+                    "MD_m": float(current["md_m"]),
+                    "INC_deg": float(current["inc_deg"]),
+                    "AZI_deg": float(current["azi_deg"]) % 360.0,
+                    "segment": str(segment_name),
+                }
+            ]
+        )
+    ]
+    md_start = float(current["md_m"])
+    start_inc = float(current["inc_deg"])
+    start_azi = float(current["azi_deg"]) % 360.0
+    for frame in (
+        BuildSegment(
+            inc_from_deg=start_inc,
+            inc_to_deg=float(mid_inc_deg),
+            dls_deg_per_30m=float(dls_deg_per_30m),
+            azi_deg=start_azi,
+            azi_to_deg=float(mid_azi_deg),
+            name=segment_name,
+            interpolation_method=str(config.interpolation_method),
+        ).generate(md_start, float(config.md_step_m)),
+        HoldSegment(
+            length_m=float(hold_length_m),
+            inc_deg=float(mid_inc_deg),
+            azi_deg=float(mid_azi_deg),
+            name=segment_name,
+        ).generate(
+            md_start
+            + _dogleg_build_length_m(
+                start_inc,
+                start_azi,
+                float(mid_inc_deg),
+                float(mid_azi_deg),
+                float(dls_deg_per_30m),
+            ),
+            float(config.md_step_m),
+        ),
+    ):
+        if len(frame) > 1:
+            frames.append(frame.iloc[1:].copy())
+    md_after_hold = float(frames[-1]["MD_m"].iloc[-1])
+    build_out = BuildSegment(
+        inc_from_deg=float(mid_inc_deg),
+        inc_to_deg=float(target_inc_deg),
+        dls_deg_per_30m=float(dls_deg_per_30m),
+        azi_deg=float(mid_azi_deg),
+        azi_to_deg=float(target_azi_deg),
+        name=segment_name,
+        interpolation_method=str(config.interpolation_method),
+    ).generate(md_after_hold, float(config.md_step_m))
+    if len(build_out) > 1:
+        frames.append(build_out.iloc[1:].copy())
+    stations = pd.concat(frames, ignore_index=True)
+    return _attach_min_curve_positions(
+        stations=stations,
+        start_xyz=np.array(
+            [float(current["x"]), float(current["y"]), float(current["z"])],
+            dtype=float,
+        ),
+    )
+
+
+def _attach_min_curve_positions(
+    *,
+    stations: pd.DataFrame,
+    start_xyz: np.ndarray,
+) -> pd.DataFrame:
+    out = stations.copy().reset_index(drop=True)
+    xs = [float(start_xyz[0])]
+    ys = [float(start_xyz[1])]
+    zs = [float(start_xyz[2])]
+    for idx in range(1, len(out)):
+        dn, de, dz = minimum_curvature_increment(
+            md1_m=float(out.loc[idx - 1, "MD_m"]),
+            inc1_deg=float(out.loc[idx - 1, "INC_deg"]),
+            azi1_deg=float(out.loc[idx - 1, "AZI_deg"]),
+            md2_m=float(out.loc[idx, "MD_m"]),
+            inc2_deg=float(out.loc[idx, "INC_deg"]),
+            azi2_deg=float(out.loc[idx, "AZI_deg"]),
+        )
+        xs.append(xs[-1] + float(de))
+        ys.append(ys[-1] + float(dn))
+        zs.append(zs[-1] + float(dz))
+    out["N_m"] = ys
+    out["E_m"] = xs
+    out["TVD_m"] = zs
+    out["X_m"] = xs
+    out["Y_m"] = ys
+    out["Z_m"] = zs
+    return add_dls(out)
+
+
+def _constant_dls_transition_delta_xyz(
+    *,
+    start_inc_deg: float,
+    start_azi_deg: float,
+    mid_inc_deg: float,
+    mid_azi_deg: float,
+    end_inc_deg: float,
+    end_azi_deg: float,
+    dls_deg_per_30m: float,
+    hold_length_m: float,
+) -> tuple[np.ndarray, float, float]:
+    build1_m = _dogleg_build_length_m(
+        start_inc_deg,
+        start_azi_deg,
+        mid_inc_deg,
+        mid_azi_deg,
+        dls_deg_per_30m,
+    )
+    build2_m = _dogleg_build_length_m(
+        mid_inc_deg,
+        mid_azi_deg,
+        end_inc_deg,
+        end_azi_deg,
+        dls_deg_per_30m,
+    )
+    delta = np.zeros(3, dtype=float)
+    if build1_m > SMALL:
+        dn, de, dz = minimum_curvature_increment(
+            0.0,
+            start_inc_deg,
+            start_azi_deg,
+            build1_m,
+            mid_inc_deg,
+            mid_azi_deg,
+        )
+        delta += np.array([de, dn, dz], dtype=float)
+    if float(hold_length_m) > SMALL:
+        delta += _xyz_direction_vector(inc_deg=mid_inc_deg, azi_deg=mid_azi_deg) * float(
+            hold_length_m
+        )
+    if build2_m > SMALL:
+        dn, de, dz = minimum_curvature_increment(
+            0.0,
+            mid_inc_deg,
+            mid_azi_deg,
+            build2_m,
+            end_inc_deg,
+            end_azi_deg,
+        )
+        delta += np.array([de, dn, dz], dtype=float)
+    return delta, float(build1_m), float(build2_m)
 
 
 def _candidate_control_lengths(*, gap_m: float, min_control_m: float) -> tuple[float, ...]:
@@ -14349,6 +15076,26 @@ def _max_finite(values: np.ndarray) -> float:
 def _finite_values(values: np.ndarray) -> np.ndarray:
     finite = np.asarray(values, dtype=float)
     return finite[np.isfinite(finite)]
+
+
+def _dedupe_float_candidates(values: np.ndarray, *, decimals: int = 8) -> tuple[float, ...]:
+    result: list[float] = []
+    seen: set[float] = set()
+    for value in np.asarray(values, dtype=float):
+        if not np.isfinite(value):
+            continue
+        key = round(float(value), int(decimals))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(float(value))
+    return tuple(result)
+
+
+def _interpolate_azimuth_deg(start_deg: float, end_deg: float, fraction: float) -> float:
+    start = float(start_deg) % 360.0
+    delta = ((float(end_deg) - start + 540.0) % 360.0) - 180.0
+    return float((start + delta * float(fraction)) % 360.0)
 
 
 def _linear_hold_rows(
@@ -14591,6 +15338,10 @@ def _max_feasible_delta_z_m(
         else:
             hi = mid
     return float(lo)
+
+
+def _horizontal_dls_limit(config: TrajectoryConfig) -> float:
+    return float(max(float(config.dls_horizontal_max_deg_per_30m), 0.0))
 
 
 def _transition_problem_text(transition: MultiHorizontalTransition) -> str:
@@ -15778,7 +16529,7 @@ def process_pool_context(
         return multiprocessing.get_context("spawn")
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/pilot_wells.py	38516
+===BEGIN_FILE===	pywp/pilot_wells.py	39931
 from __future__ import annotations
 
 import math
@@ -15945,20 +16696,59 @@ def visible_well_names(records: Iterable[WelltrackRecord]) -> list[str]:
 def zbs_target_points_to_pair(
     points: tuple[WelltrackPoint, ...],
 ) -> tuple[Point3D, Point3D]:
-    if len(points) != 2:
+    pairs = zbs_target_points_to_pairs(points)
+    if len(pairs) != 1:
         raise ValueError(
             "Для бокового ствола от фактической скважины ожидаются ровно "
-            "две точки `t1` и `t3` без `S`."
+            "две точки `t1` и `t3` без `S`; для многопластового ZBS "
+            "используйте полные пары `1_t1/1_t3`, `2_t1/2_t3`, ... без `S`."
+        )
+    return pairs[0]
+
+
+def zbs_target_points_to_pairs(
+    points: tuple[WelltrackPoint, ...],
+) -> tuple[tuple[Point3D, Point3D], ...]:
+    if len(points) < 2 or len(points) % 2 != 0:
+        raise ValueError(
+            "Для бокового ствола от фактической скважины ожидаются две точки "
+            "`t1` и `t3` без `S` либо полные пары `1_t1/1_t3`, "
+            "`2_t1/2_t3`, ... без `S` для многопластового ZBS."
         )
     if not _points_have_finite_xyz(tuple(points)):
         raise ValueError("Координаты X/Y/Z и MD должны быть конечными числами.")
-    left_md = float(points[0].md)
-    right_md = float(points[1].md)
-    if not left_md + SMALL < right_md:
-        raise ValueError("MD точек ZBS должны строго возрастать: `t1` затем `t3`.")
-    if _has_zero_length_leg(tuple(points)):
-        raise ValueError("Точки `t1` и `t3` бокового ствола совпадают.")
-    return _point_from_welltrack(points[0]), _point_from_welltrack(points[1])
+    md_values = [float(point.md) for point in points]
+    if not all(
+        left_md + SMALL < right_md
+        for left_md, right_md in zip(md_values, md_values[1:], strict=False)
+    ):
+        raise ValueError(
+            "MD точек ZBS должны строго возрастать: `t1` затем `t3`, "
+            "для многопластового ZBS - `1_t1`, `1_t3`, `2_t1`, `2_t3`, ..."
+        )
+
+    pairs: list[tuple[Point3D, Point3D]] = []
+    for index in range(0, len(points), 2):
+        left = points[index]
+        right = points[index + 1]
+        if (
+            math.dist(
+                (float(left.x), float(left.y), float(left.z)),
+                (float(right.x), float(right.y), float(right.z)),
+            )
+            <= SMALL
+        ):
+            level_label = "" if len(points) == 2 else f" уровня {index // 2 + 1}"
+            raise ValueError(f"Точки `t1` и `t3` ZBS{level_label} совпадают.")
+        pairs.append((_point_from_welltrack(left), _point_from_welltrack(right)))
+    return tuple(pairs)
+
+
+def zbs_multi_horizontal_level_count(points: tuple[WelltrackPoint, ...]) -> int:
+    point_count = int(len(tuple(points)))
+    if point_count < 4 or point_count % 2 != 0:
+        return 0
+    return int(point_count // 2)
 
 
 def sync_pilot_surfaces_to_parents(
@@ -16945,7 +17735,7 @@ def _first_valid_azimuth_deg(stations: pd.DataFrame) -> float:
     return float((math.degrees(math.atan2(dx[index], dy[index])) + 360.0) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner.py	186232
+===BEGIN_FILE===	pywp/planner.py	186220
 from __future__ import annotations
 
 from dataclasses import replace
@@ -21954,9 +22744,9 @@ def _diagnose_post_entry_constraints(
     )
     if required_dls is not None:
         messages.append(
-            "Post-entry t1->t3 connection is not feasible with BUILD/HORIZONTAL DLS limit "
+            "Post-entry t1->t3 connection is not feasible with HORIZONTAL DLS limit "
             f"{horizontal_dls_deg_per_30m:.2f} deg/30m; requires about {required_dls:.2f} deg/30m. "
-            "Increase BUILD/HORIZONTAL DLS limit or move t3 closer to t1 in section."
+            "Increase HORIZONTAL DLS limit or move t3 closer to t1 in section."
         )
     else:
         messages.append(
@@ -22080,7 +22870,7 @@ def _clip_to_bounds(
     return clipped
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner_config.py	3634
+===BEGIN_FILE===	pywp/planner_config.py	4040
 from __future__ import annotations
 
 from pywp.models import (
@@ -22147,9 +22937,13 @@ def normalize_build_dls_bounds(
     return min_value, max_value
 
 
-def build_segment_dls_limits(build_dls_max_deg_per_30m: float) -> dict[str, float]:
+def build_segment_dls_limits(
+    build_dls_max_deg_per_30m: float,
+    horizontal_dls_max_deg_per_30m: float | None = None,
+) -> dict[str, float]:
     return build_segment_dls_limits_deg_per_30m(
-        build_dls_max_deg_per_30m=build_dls_max_deg_per_30m
+        build_dls_max_deg_per_30m=build_dls_max_deg_per_30m,
+        horizontal_dls_max_deg_per_30m=horizontal_dls_max_deg_per_30m,
     )
 
 
@@ -22163,6 +22957,7 @@ def build_trajectory_config(
     entry_inc_tolerance_deg: float,
     max_inc_deg: float,
     dls_build_max_deg_per_30m: float,
+    dls_horizontal_max_deg_per_30m: float | None = None,
     kop_min_vertical_m: float,
     optimization_mode: str,
     turn_solver_mode: str,
@@ -22173,6 +22968,11 @@ def build_trajectory_config(
     offer_j_profile: bool = False,
 ) -> TrajectoryConfig:
     max_build = float(max(dls_build_max_deg_per_30m, 0.0))
+    max_horizontal = (
+        max_build
+        if dls_horizontal_max_deg_per_30m is None
+        else float(max(dls_horizontal_max_deg_per_30m, 0.0))
+    )
     return TrajectoryConfig(
         md_step_m=float(md_step_m),
         md_step_control_m=float(md_step_control_m),
@@ -22183,6 +22983,7 @@ def build_trajectory_config(
         max_inc_deg=float(max_inc_deg),
         dls_build_min_deg_per_30m=0.0,
         dls_build_max_deg_per_30m=max_build,
+        dls_horizontal_max_deg_per_30m=max_horizontal,
         kop_min_vertical_m=float(kop_min_vertical_m),
         optimization_mode=str(optimization_mode),
         turn_solver_mode=str(turn_solver_mode),
@@ -22533,7 +23334,7 @@ def _scaled_progress_callback(
     return wrapped
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner_validation.py	24469
+===BEGIN_FILE===	pywp/planner_validation.py	24463
 from __future__ import annotations
 
 import numpy as np
@@ -23108,7 +23909,7 @@ def _assert_solution_is_valid(
             f"dX={float(summary['t3_miss_dx_m']):.2f} m, "
             f"dY={float(summary['t3_miss_dy_m']):.2f} m, "
             f"dZ={float(summary['t3_miss_dz_m']):.2f} m. "
-            "Increase BUILD/HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
+            "Increase HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
         )
     if (
         abs(float(summary["entry_inc_deg"]) - config.entry_inc_target_deg)
@@ -25593,7 +26394,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	224940
+===BEGIN_FILE===	pywp/ptc_core.py	225730
 from __future__ import annotations
 
 import colorsys
@@ -25705,6 +26506,8 @@ from pywp.pilot_wells import (
     sync_pilot_surfaces_to_parents,
     visible_well_records,
     well_name_key,
+    zbs_multi_horizontal_level_count,
+    zbs_target_points_to_pairs,
 )
 from pywp.planner_config import optimization_display_label
 from pywp.plot_axes import (
@@ -25990,10 +26793,18 @@ def _failed_target_only_wells(
         )
         if not target_points:
             continue
-        if is_zbs_name(record.name) and len(target_points) == 2:
+        if is_zbs_name(record.name):
             surface = target_points[0]
-            target_pairs = ((target_points[0], target_points[1]),)
-            t1, t3 = target_points[0], target_points[1]
+            try:
+                target_pairs = zbs_target_points_to_pairs(tuple(record.points))
+            except ValueError:
+                target_pairs = ()
+            if target_pairs:
+                t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+            elif len(target_points) >= 2:
+                t1, t3 = target_points[0], target_points[-1]
+            else:
+                t1 = t3 = target_points[0]
         else:
             try:
                 surface, target_pairs = welltrack_points_to_target_pairs(record.points)
@@ -26031,6 +26842,11 @@ def _record_target_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
     if is_zbs_name(record.name):
         if point_count == 2:
             return ("t1", "t3")
+        if point_count >= 4 and point_count % 2 == 0:
+            labels: list[str] = []
+            for level_index in range(1, point_count // 2 + 1):
+                labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
+            return tuple(labels)
         return tuple(f"P{index + 1}" for index in range(point_count))
     target_count = point_count - 1
     if target_count >= 4 and target_count % 2 == 0:
@@ -26889,6 +27705,7 @@ _ANTI_COLLISION_SIGNATURE_SUMMARY_FIELDS = (
 _ANTI_COLLISION_SIGNATURE_CONFIG_FIELDS = (
     "kop_min_vertical_m",
     "dls_build_max_deg_per_30m",
+    "dls_horizontal_max_deg_per_30m",
     "optimization_mode",
 )
 
@@ -29710,8 +30527,13 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     multi_horizontal_count = int(
         sum(
             not is_pilot_name(record.name)
-            and not is_zbs_name(record.name)
-            and welltrack_multi_horizontal_level_count(tuple(record.points)) > 1
+            and (
+                welltrack_multi_horizontal_level_count(tuple(record.points)) > 1
+                or (
+                    is_zbs_name(record.name)
+                    and zbs_multi_horizontal_level_count(tuple(record.points)) > 1
+                )
+            )
             for record in records
         )
     )
@@ -35518,7 +36340,7 @@ def expand_single_column_source_table_df(table_df: pd.DataFrame) -> pd.DataFrame
     return pd.DataFrame(rows, columns=list(_SOURCE_TABLE_COLUMNS))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_target_records.py	11972
+===BEGIN_FILE===	pywp/ptc_target_records.py	12772
 from __future__ import annotations
 
 import math
@@ -35538,7 +36360,8 @@ from pywp.pilot_wells import (
     pilot_name_key_for_parent,
     pilot_record_problem_text,
     well_name_key,
-    zbs_target_points_to_pair,
+    zbs_target_points_to_pairs,
+    zbs_multi_horizontal_level_count,
 )
 
 __all__ = [
@@ -35621,7 +36444,7 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
     for record in records:
         is_pilot = is_pilot_record(record)
         is_zbs = is_zbs_name(record.name)
-        multi_level_count = welltrack_multi_horizontal_level_count(record.points)
+        multi_level_count = _record_multi_horizontal_level_count(record)
         for index, point in enumerate(record.points, start=1):
             raw_rows.append(
                 {
@@ -35666,14 +36489,27 @@ def _record_t1_offset_m(record: WelltrackRecord) -> float | None:
 def _record_t1_t3_length_m(record: WelltrackRecord) -> float | None:
     points = tuple(record.points)
     if is_zbs_name(record.name):
-        if len(points) != 2 or not all(_point_has_finite_xyz(point) for point in points):
+        if (
+            len(points) < 2
+            or len(points) % 2 != 0
+            or not all(_point_has_finite_xyz(point) for point in points)
+        ):
             return None
-        return float(
-            math.dist(
-                (float(points[0].x), float(points[0].y), float(points[0].z)),
-                (float(points[1].x), float(points[1].y), float(points[1].z)),
+        length_m = 0.0
+        for index in range(0, len(points), 2):
+            length_m += math.dist(
+                (
+                    float(points[index].x),
+                    float(points[index].y),
+                    float(points[index].z),
+                ),
+                (
+                    float(points[index + 1].x),
+                    float(points[index + 1].y),
+                    float(points[index + 1].z),
+                ),
             )
-        )
+        return float(length_m)
     if len(points) < 3:
         return None
     if not all(_point_has_finite_xyz(point) for point in points[1:]):
@@ -35750,7 +36586,7 @@ def record_import_problem_text(
             if not record_has_strictly_increasing_md(record):
                 problems.append("MD точек должны строго возрастать.")
             try:
-                zbs_target_points_to_pair(points)
+                zbs_target_points_to_pairs(points)
             except ValueError as exc:
                 problems.append(str(exc))
         return "—" if not problems else " ".join(dict.fromkeys(problems))
@@ -35843,6 +36679,10 @@ def _point_label(
     multi_level_count: int = 0,
 ) -> str:
     if is_zbs:
+        if int(multi_level_count) > 1:
+            level = int((int(index) - 1) // 2) + 1
+            suffix = "t1" if int(index) % 2 == 1 else "t3"
+            return f"{level}_{suffix}"
         if int(index) == 1:
             return "t1"
         if int(index) == 2:
@@ -35872,10 +36712,16 @@ def _record_note(record: WelltrackRecord, *, has_pilot: bool) -> str:
         )
     if has_pilot:
         notes.append("Есть пилот")
-    level_count = welltrack_multi_horizontal_level_count(record.points)
+    level_count = _record_multi_horizontal_level_count(record)
     if level_count > 1:
         notes.append(f"Многопластовая: {level_count} уровней")
     return "; ".join(notes)
+
+
+def _record_multi_horizontal_level_count(record: WelltrackRecord) -> int:
+    if is_zbs_name(record.name):
+        return zbs_multi_horizontal_level_count(tuple(record.points))
+    return welltrack_multi_horizontal_level_count(record.points)
 
 
 def _point_has_finite_xyz(point: object) -> bool:
@@ -37994,7 +38840,7 @@ def _reference_pad_labels(reference_wells: Iterable[object]) -> list[_ReferenceP
     return pad_labels
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_overrides.py	41139
+===BEGIN_FILE===	pywp/ptc_three_overrides.py	42163
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, MutableMapping
@@ -38370,19 +39216,30 @@ def build_edit_wells_payload(
     }
     for success in successes:
         target_pairs = tuple(getattr(success, "target_pairs", ()) or ())
+        sidetrack_window = _sidetrack_window_edit_point(
+            success,
+            parent_success_by_key=parent_success_by_key,
+            reference_well_by_key=reference_well_by_key,
+        )
+        has_sidetrack_metadata = _has_sidetrack_window_metadata(success)
+        is_zbs = is_zbs_name(success.name)
         config = success.config
         base_points = _decimated_base_points(success)
         edit_points: list[dict[str, object]] = []
         if len(target_pairs) > 1:
-            edit_points.append(
-                {
-                    "index": 0,
-                    "label": "S",
-                    "point_type": "surface",
-                    "position": _point3d_payload(success.surface),
-                }
-            )
-            point_index = 1
+            include_surface = not has_sidetrack_metadata and not is_zbs
+            if include_surface:
+                edit_points.append(
+                    {
+                        "index": 0,
+                        "label": "S",
+                        "point_type": "surface",
+                        "position": _point3d_payload(success.surface),
+                    }
+                )
+            point_index = 1 if include_surface or has_sidetrack_metadata else 0
+            if is_zbs:
+                point_index = 0
             for level_index, (pair_t1, pair_t3) in enumerate(target_pairs, start=1):
                 edit_points.append(
                     {
@@ -38402,11 +39259,6 @@ def build_edit_wells_payload(
                     }
                 )
                 point_index += 1
-        sidetrack_window = _sidetrack_window_edit_point(
-            success,
-            parent_success_by_key=parent_success_by_key,
-            reference_well_by_key=reference_well_by_key,
-        )
         if sidetrack_window is not None:
             if not edit_points:
                 edit_points.extend(
@@ -38445,11 +39297,23 @@ def build_edit_wells_payload(
                     "dls_build_max_deg_per_30m": float(
                         config.dls_build_max_deg_per_30m
                     ),
+                    "dls_horizontal_max_deg_per_30m": float(
+                        config.dls_horizontal_max_deg_per_30m
+                    ),
                     "kop_min_vertical_m": float(config.kop_min_vertical_m),
                 },
             }
         )
     return edit_wells
+
+
+def _has_sidetrack_window_metadata(success: SuccessfulWellPlan) -> bool:
+    summary = dict(getattr(success, "summary", {}) or {})
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    return bool(
+        trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}
+        or "sidetrack_window_md_m" in summary
+    )
 
 
 def build_target_only_edit_wells_payload(
@@ -38489,6 +39353,7 @@ def build_target_only_edit_wells_payload(
                     "entry_inc_target_deg": 86.0,
                     "max_inc_deg": 95.0,
                     "dls_build_max_deg_per_30m": 3.0,
+                    "dls_horizontal_max_deg_per_30m": 3.0,
                     "kop_min_vertical_m": 550.0,
                 },
             }
@@ -38815,7 +39680,11 @@ def _sidetrack_window_edit_point(
 ) -> dict[str, object] | None:
     summary = dict(getattr(success, "summary", {}) or {})
     trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
-    if trajectory_type not in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+    has_sidetrack_window = "sidetrack_window_md_m" in summary
+    if (
+        trajectory_type not in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}
+        and not has_sidetrack_window
+    ):
         return None
     try:
         md_m = float(summary.get("sidetrack_window_md_m"))
@@ -41047,7 +41916,7 @@ def _shortest_azimuth_delta_deg(
     return float(delta)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/solver_diagnostics.py	18330
+===BEGIN_FILE===	pywp/solver_diagnostics.py	18318
 from __future__ import annotations
 
 import re
@@ -41344,10 +42213,10 @@ def _item_from_text(line: str) -> DiagnosticItem:
         pi_req = _pi_text_from_dls_text(dls_req)
         return DiagnosticItem(
             reason_ru=(
-                f"Участок после входа в пласт не бурим при лимите BUILD/HORIZONTAL ПИ {pi_lim} deg/10m: "
+                f"Участок после входа в пласт не бурим при лимите HORIZONTAL ПИ {pi_lim} deg/10m: "
                 f"нужно примерно {pi_req} deg/10m."
             ),
-            action_ru="Увеличьте лимит BUILD/HORIZONTAL ПИ или переместите t3 ближе к t1 по разрезу.",
+            action_ru="Увеличьте лимит HORIZONTAL ПИ или переместите t3 ближе к t1 по разрезу.",
         )
 
     if "Post-entry t1->t3 connection is infeasible even with high DLS scan up to 30 deg/30m" in text:
@@ -41717,7 +42586,7 @@ def render_local_three_scene(
 </html>
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/fast_replan.js	19528
+===BEGIN_FILE===	pywp/three_viewer_assets/fast_replan.js	19609
 /**
  * fast_replan.js — Client-side analytical trajectory recalculation.
  *
@@ -41745,6 +42614,7 @@ def render_local_three_scene(
  *       entryIncTargetDeg: 86,
  *       maxIncDeg: 95,
  *       dlsBuildMaxDegPer30m: 3.0,
+ *       dlsHorizontalMaxDegPer30m: 3.0,
  *       kopMinVerticalM: 550,
  *     },
  *   });
@@ -42281,6 +43151,7 @@ class FastReplan {
         entryIncTargetDeg: 86,
         maxIncDeg: 95,
         dlsBuildMaxDegPer30m: 3.0,
+        dlsHorizontalMaxDegPer30m: 3.0,
         kopMinVerticalM: 550,
         mdStepM: 30,
         basePoints: [],
@@ -42311,7 +43182,7 @@ class FastReplan {
 // window.updateLineGeometry = updateLineGeometry;
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	222637
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	222762
 <!doctype html>
 <html lang="en">
   <head>
@@ -47367,6 +48238,7 @@ class FastReplan {
                 entryIncTargetDeg: config.entry_inc_target_deg || 86,
                 maxIncDeg: config.max_inc_deg || 95,
                 dlsBuildMaxDegPer30m: config.dls_build_max_deg_per_30m || 3.0,
+                dlsHorizontalMaxDegPer30m: config.dls_horizontal_max_deg_per_30m || config.dls_build_max_deg_per_30m || 3.0,
                 kopMinVerticalM: config.kop_min_vertical_m || 550,
                 mdStepM: 30,
                 basePoints: Array.isArray(well.base_points) ? well.base_points : [],
@@ -50434,7 +51306,7 @@ def _collapse_short_boundary_station(
     return final_md
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_calc_params.py	19734
+===BEGIN_FILE===	pywp/ui_calc_params.py	20361
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -50463,6 +51335,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "max_inc",
     "max_total_md_postcheck",
     "dls_build_max",
+    "dls_horizontal_max",
     "kop_min_vertical",
 )
 _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
@@ -50489,6 +51362,9 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "max_inc": float(cfg.max_inc_deg),
         "max_total_md_postcheck": float(cfg.max_total_md_postcheck_m),
         "dls_build_max": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
+        "dls_horizontal_max": float(
+            dls_to_pi(cfg.dls_horizontal_max_deg_per_30m)
+        ),
         "kop_min_vertical": float(cfg.kop_min_vertical_m),
         "optimization_mode": str(cfg.optimization_mode),
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
@@ -50501,7 +51377,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 13
+_DEFAULTS_SCHEMA_VERSION = 14
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
@@ -50756,6 +51632,9 @@ def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
         dls_build_max_deg_per_30m=pi_to_dls(
             float(_state_value(prefix, "dls_build_max"))
         ),
+        dls_horizontal_max_deg_per_30m=pi_to_dls(
+            float(_state_value(prefix, "dls_horizontal_max"))
+        ),
         kop_min_vertical_m=float(_state_value(prefix, "kop_min_vertical")),
         optimization_mode=str(_state_value(prefix, "optimization_mode")),
         turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
@@ -50839,20 +51718,31 @@ def render_calc_params_block(
         **widget_change_kwargs,
     )
 
-    d1, d2, d3 = st.columns(3, gap="small")
+    d1, d2, d3, d4 = st.columns(4, gap="small")
     d1.number_input(
         "Макс ПИ BUILD, deg/10m",
         key=_state_key(prefix, "dls_build_max"),
         min_value=0.1,
         step=0.1,
         help=(
-            "Верхняя граница поиска ПИ на BUILD-сегментах. "
+            "Верхняя граница поиска ПИ на BUILD-сегментах до входа в t1. "
             "Внутри решателя автоматически переводится во внутренние единицы."
         ),
         **widget_change_kwargs,
     )
+    d2.number_input(
+        "Макс ПИ HORIZONTAL, deg/10m",
+        key=_state_key(prefix, "dls_horizontal_max"),
+        min_value=0.1,
+        step=0.1,
+        help=(
+            "Лимит ПИ для участка после t1: HORIZONTAL-переход к t3 и "
+            "HORIZONTAL_BUILD между уровнями MULTIHORIZONTAL."
+        ),
+        **widget_change_kwargs,
+    )
     (
-        d2.number_input(
+        d3.number_input(
             "Мин VERTICAL до KOP, м",
             key=_state_key(prefix, "kop_min_vertical"),
             min_value=0.0,
@@ -50861,7 +51751,7 @@ def render_calc_params_block(
             **widget_change_kwargs,
         )
         if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_CONSTANT
-        else d2.text_input(
+        else d3.text_input(
             "Мин VERTICAL до KOP, м",
             value=kop_min_vertical_display_label(prefix),
             disabled=True,
@@ -50872,8 +51762,8 @@ def render_calc_params_block(
         )
     )
     if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION:
-        d2.caption(kop_min_vertical_detail_label(prefix))
-    d3.number_input(
+        d3.caption(kop_min_vertical_detail_label(prefix))
+    d4.number_input(
         "Макс итоговая MD (постпроверка), м",
         key=_state_key(prefix, "max_total_md_postcheck"),
         min_value=100.0,
@@ -54880,7 +55770,7 @@ def _vector_to_azimuth_deg(*, dx: float, dy: float) -> float:
     return float(math.degrees(math.atan2(float(dx), float(dy))) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_batch.py	98749
+===BEGIN_FILE===	pywp/welltrack_batch.py	100473
 from __future__ import annotations
 
 import logging
@@ -54944,7 +55834,7 @@ from pywp.pilot_wells import (
     pilot_name_key_for_parent,
     select_sidetrack_window,
     well_name_key,
-    zbs_target_points_to_pair,
+    zbs_target_points_to_pairs,
 )
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
@@ -57075,6 +57965,20 @@ class WelltrackBatchPlanner:
                 md_t1_m = float(multi_result.md_t1_m)
                 azimuth_deg = float(multi_result.azimuth_deg)
                 t3 = target_pairs[-1][1]
+                if pilot_success is not None:
+                    complexity = str(summary.get("well_complexity", "")).strip()
+                    if "многопласт" not in complexity.casefold():
+                        complexity = (
+                            f"{complexity}; многопластовая"
+                            if complexity
+                            else "Боковой ствол от пилота; многопластовая"
+                        )
+                    summary.update(
+                        {
+                            "trajectory_type": "PILOT_SIDETRACK",
+                            "well_complexity": complexity,
+                        }
+                    )
             runtime_s = float(perf_counter() - started)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
@@ -57115,7 +58019,8 @@ class WelltrackBatchPlanner:
     ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
         row = self._base_row(record=record)
         try:
-            t1, t3 = zbs_target_points_to_pair(tuple(record.points))
+            target_pairs = zbs_target_points_to_pairs(tuple(record.points))
+            t1, t3 = target_pairs[0]
         except ValueError as exc:
             row["Статус"] = "Ошибка формата"
             row["Проблема"] = summarize_problem_ru(str(exc))
@@ -57147,18 +58052,42 @@ class WelltrackBatchPlanner:
                 window=window,
                 config=config,
             )
+            stations = sidetrack.stations
+            summary = dict(sidetrack.summary)
+            md_t1_m = float(sidetrack.md_t1_m)
+            azimuth_deg = float(sidetrack.azimuth_deg)
+            final_t3 = t3
+            if len(target_pairs) > 1:
+                multi_result = extend_plan_with_multi_horizontal_targets(
+                    base_result=PlannerResult(
+                        stations=stations,
+                        summary=summary,
+                        azimuth_deg=azimuth_deg,
+                        md_t1_m=md_t1_m,
+                    ),
+                    target_pairs=target_pairs,
+                    config=config,
+                )
+                stations = multi_result.stations
+                summary = dict(multi_result.summary)
+                md_t1_m = float(multi_result.md_t1_m)
+                azimuth_deg = float(multi_result.azimuth_deg)
+                final_t3 = target_pairs[-1][1]
             runtime_s = float(perf_counter() - started)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
             row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
 
-        summary = dict(sidetrack.summary)
         summary.update(
             {
                 "trajectory_type": "FACT_SIDETRACK",
                 "trajectory_target_direction": "Боковой ствол от факта",
-                "well_complexity": "Боковой ствол от факта",
+                "well_complexity": (
+                    "Боковой ствол от факта; многопластовая"
+                    if len(target_pairs) > 1
+                    else "Боковой ствол от факта"
+                ),
                 "sidetrack_parent_well_name": str(parent_well.name),
                 "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
                 "actual_parent_well_name": str(parent_well.name),
@@ -57174,12 +58103,12 @@ class WelltrackBatchPlanner:
             name=record.name,
             surface=sidetrack.window.point,
             t1=t1,
-            t3=t3,
-            target_pairs=((t1, t3),),
-            stations=sidetrack.stations,
+            t3=final_t3,
+            target_pairs=target_pairs,
+            stations=stations,
             summary=summary,
-            azimuth_deg=float(sidetrack.azimuth_deg),
-            md_t1_m=float(sidetrack.md_t1_m),
+            azimuth_deg=azimuth_deg,
+            md_t1_m=md_t1_m,
             config=config,
             runtime_s=runtime_s,
             md_postcheck_exceeded=postcheck_exceeded,
@@ -57296,7 +58225,7 @@ def recommended_batch_selection(
     return recommended
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_quality.py	2727
+===BEGIN_FILE===	pywp/welltrack_quality.py	2919
 from __future__ import annotations
 
 import math
@@ -57307,6 +58236,7 @@ from pywp.eclipse_welltrack import (
     WelltrackRecord,
     welltrack_multi_horizontal_level_count,
 )
+from pywp.pilot_wells import is_zbs_name
 from pywp.pydantic_base import FrozenModel
 
 
@@ -57327,6 +58257,8 @@ def detect_t1_t3_order_issues(
 
     for record in records:
         points = tuple(record.points)
+        if is_zbs_name(record.name):
+            continue
         if len(points) < 3:
             continue
         if welltrack_multi_horizontal_level_count(points) > 1:
@@ -57363,6 +58295,9 @@ def swap_t1_t3_for_wells(
     for record in records:
         points = tuple(record.points)
         name = str(record.name)
+        if is_zbs_name(record.name):
+            updated.append(record)
+            continue
         if len(points) < 3 or name not in well_names:
             updated.append(record)
             continue
@@ -62606,7 +63541,7 @@ def test_unspecified_thresholds_are_resolved_once_for_interpolation_anchors() ->
     assert anchor_1000.hold_complex_max_deg == float(rule_2000.hold_complex_max_deg)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_coordinate_integration.py	16085
+===BEGIN_FILE===	tests/test_coordinate_integration.py	18002
 """Tests for coordinate system integration with trajectory planning."""
 import pandas as pd
 import pytest
@@ -62625,8 +63560,9 @@ from pywp.coordinate_integration import (
     get_crs_display_suffix,
     transform_point_to_crs,
     transform_stations_to_crs,
+    transform_xy_to_crs,
 )
-from pywp.coordinate_systems import CoordinateSystem
+from pywp.coordinate_systems import CoordinateSystem, ProjectedCoord
 from pywp.models import Point3D
 from pywp.ui_well_result import SingleWellResultView
 
@@ -62818,6 +63754,27 @@ class TestCoordinateIntegration:
         assert x == 100.0
         assert y == 200.0
 
+    def test_transform_xy_falls_back_when_transformer_returns_non_finite(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invalid PROJ output must not leak into CSV/UI coordinates."""
+
+        class FakeTransformer:
+            def transform(self, *_args: object, **_kwargs: object) -> ProjectedCoord:
+                return ProjectedCoord(float("inf"), float("nan"))
+
+        monkeypatch.setattr(ci, "_try_create_transformer", lambda: FakeTransformer())
+        x, y = transform_xy_to_crs(
+            600_010.6,
+            7_407_421.0,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            CoordinateSystem.WGS84_UTM_ZONE_43N,
+        )
+
+        assert x == pytest.approx(600_010.6)
+        assert y == pytest.approx(7_407_421.0)
+
     @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
     def test_transform_gk_13n_42_to_wgs84_utm43_control_point(self) -> None:
         """ГК_13N_42 (EPSG:2503/28473 equivalent) converts to WGS84 UTM43N."""
@@ -62830,6 +63787,35 @@ class TestCoordinateIntegration:
 
         assert x == pytest.approx(499_999.999696543, abs=0.001)
         assert y == pytest.approx(6_094_791.4212895455, abs=0.001)
+
+    @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+    def test_transform_gk_13n_42_to_wgs84_utm43_user_sample(self) -> None:
+        """Lock the GK13N -> WGS84 UTM43 sample against datum fallback regressions."""
+        x, y = transform_xy_to_crs(
+            600_010.6,
+            7_407_421.0,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            CoordinateSystem.WGS84_UTM_ZONE_43N,
+        )
+
+        assert x == pytest.approx(599_911.695515, abs=0.001)
+        assert y == pytest.approx(7_404_416.769352, abs=0.001)
+
+        stations = pd.DataFrame(
+            {
+                "X_m": [600_010.6],
+                "Y_m": [7_407_421.0],
+                "Z_m": [0.0],
+            }
+        )
+        transformed = transform_stations_to_crs(
+            stations,
+            CoordinateSystem.WGS84_UTM_ZONE_43N,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            rename_columns=False,
+        )
+        assert float(transformed["X_m"].iloc[0]) == pytest.approx(x, abs=1e-9)
+        assert float(transformed["Y_m"].iloc[0]) == pytest.approx(y, abs=1e-9)
 
     @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
     def test_transform_gk_13n_42_to_wgs84_degrees_control_point(self) -> None:
@@ -63159,6 +64145,70 @@ class TestPNODisambiguation:
 
         assert zone_def.base_system == CoordinateSystem.PULKOVO_1942_ZONE_13
         assert zone_def.central_meridian_deg == 75.0
+
+===END_FILE===
+===BEGIN_FILE===	tests/test_crs_calculator_page.py	1983
+from __future__ import annotations
+
+import importlib
+
+import pytest
+from streamlit.testing.v1 import AppTest
+
+import pywp.coordinate_integration as ci
+from pywp.coordinate_systems import CoordinateSystem
+
+app = importlib.import_module("pages.04_crs_calculator")
+
+
+def test_crs_calculator_entrypoint_exists() -> None:
+    assert callable(app.run_page)
+
+
+@pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+def test_crs_calculator_defaults_to_gk13n_to_wgs84_utm43() -> None:
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    select_values = {str(widget.label): widget.value for widget in at.selectbox}
+    assert select_values["Входная CRS"] == "ГК_13N_42"
+    assert select_values["Выходная CRS"] == "WGS84 UTM 43N"
+
+    metric_values = {str(widget.label): str(widget.value) for widget in at.metric}
+    assert metric_values["X output"] == "599911.696"
+    assert metric_values["Y output"] == "7404416.769"
+
+
+def test_crs_calculator_uses_shared_transform_function(monkeypatch) -> None:
+    calls: list[tuple[float, float, CoordinateSystem, CoordinateSystem]] = []
+
+    def fake_transform(
+        x: float,
+        y: float,
+        from_crs: CoordinateSystem,
+        to_crs: CoordinateSystem,
+    ) -> tuple[float, float]:
+        calls.append((float(x), float(y), from_crs, to_crs))
+        return 1.25, 2.5
+
+    monkeypatch.setattr(ci, "transform_xy_to_crs", fake_transform)
+    monkeypatch.setattr(ci, "can_transform_crs", lambda *_args: True)
+
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.run(timeout=60)
+
+    assert calls == [
+        (
+            600_010.6,
+            7_407_421.0,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            CoordinateSystem.WGS84_UTM_ZONE_43N,
+        )
+    ]
+    metric_values = {str(widget.label): str(widget.value) for widget in at.metric}
+    assert metric_values["X output"] == "1.250"
+    assert metric_values["Y output"] == "2.500"
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_iscwsa_mwd.py	9819
@@ -65231,7 +66281,7 @@ def test_sidetrack_solver_rejects_over_limit_dls() -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_planner.py	79563
+===BEGIN_FILE===	tests/test_planner.py	81589
 from __future__ import annotations
 
 from pathlib import Path
@@ -65547,6 +66597,64 @@ def test_classic_j_profile_uses_single_build_without_hold_or_second_build() -> N
         "BUILD1",
         "HORIZONTAL",
     ]
+
+
+def test_post_entry_solver_uses_horizontal_dls_limit_independent_from_build() -> None:
+    import pywp.planner as planner_module
+
+    config = _fast_config(
+        dls_build_max_deg_per_30m=6.0,
+        dls_horizontal_max_deg_per_30m=1.0,
+    )
+    assert planner_module._resolve_horizontal_dls(config) == pytest.approx(1.0)
+
+    constrained = planner_module._solve_post_entry_section(
+        ds_m=400.0,
+        dz_m=100.0,
+        inc_entry_deg=86.0,
+        dls_deg_per_30m=planner_module._resolve_horizontal_dls(config),
+        max_inc_deg=float(config.max_inc_deg),
+    )
+    relaxed = planner_module._solve_post_entry_section(
+        ds_m=400.0,
+        dz_m=100.0,
+        inc_entry_deg=86.0,
+        dls_deg_per_30m=planner_module._resolve_horizontal_dls(
+            config.validated_copy(dls_horizontal_max_deg_per_30m=2.0)
+        ),
+        max_inc_deg=float(config.max_inc_deg),
+    )
+
+    assert constrained is None
+    assert relaxed is not None
+    assert relaxed.transition_dls_deg_per_30m == pytest.approx(2.0)
+
+
+def test_planner_applies_horizontal_dls_limit_to_post_entry_section() -> None:
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(1000.0, 0.0, 2500.0)
+    t3 = Point3D(1400.0, 0.0, 2600.0)
+    constrained = _fast_config(
+        dls_build_max_deg_per_30m=6.0,
+        dls_horizontal_max_deg_per_30m=1.0,
+        kop_min_vertical_m=550.0,
+        turn_solver_max_restarts=0,
+    )
+    relaxed = constrained.validated_copy(dls_horizontal_max_deg_per_30m=2.0)
+
+    with pytest.raises(PlanningError, match="HORIZONTAL DLS limit"):
+        TrajectoryPlanner().plan(surface=surface, t1=t1, t3=t3, config=constrained)
+
+    result = TrajectoryPlanner().plan(surface=surface, t1=t1, t3=t3, config=relaxed)
+
+    assert (
+        float(result.summary["max_dls_horizontal_deg_per_30m"])
+        <= float(relaxed.dls_horizontal_max_deg_per_30m) + 1e-6
+    )
+    assert (
+        float(result.summary["max_dls_total_deg_per_30m"])
+        > float(relaxed.dls_horizontal_max_deg_per_30m) + 1e-6
+    )
 
 
 def test_variable_build_j_profile_handles_non_coplanar_entry_without_hold() -> None:
@@ -67551,7 +68659,7 @@ def test_planner_rejects_unknown_turn_solver_mode() -> None:
         _fast_config(turn_solver_mode="unsupported_turn_solver")  # type: ignore[arg-type]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_planner_config.py	6586
+===BEGIN_FILE===	tests/test_planner_config.py	7656
 from __future__ import annotations
 
 import math
@@ -67602,33 +68710,54 @@ def test_build_segment_dls_limits_applies_shared_build_limit() -> None:
     assert limits["HOLD"] == 2.0
 
 
+def test_build_segment_dls_limits_applies_separate_horizontal_limit() -> None:
+    limits = build_segment_dls_limits(2.75, horizontal_dls_max_deg_per_30m=1.4)
+    assert limits["BUILD1"] == 2.75
+    assert limits["BUILD2"] == 2.75
+    assert limits["HORIZONTAL"] == 1.4
+    assert limits["VERTICAL"] == 1.0
+    assert limits["HOLD"] == 2.0
+
+
 def test_trajectory_config_defaults_use_shared_segment_limit_builder() -> None:
     cfg = TrajectoryConfig()
     expected = build_segment_dls_limits_deg_per_30m(DEFAULT_BUILD_DLS_MAX_DEG_PER_30M)
     assert cfg.dls_build_max_deg_per_30m == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+    assert cfg.dls_horizontal_max_deg_per_30m == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     assert cfg.dls_limits_deg_per_30m == expected
 
 
-def test_trajectory_config_auto_syncs_segment_limits_when_build_max_overridden() -> (
-    None
-):
+def test_trajectory_config_keeps_legacy_shared_limit_when_only_build_max_overridden() -> None:
     cfg = TrajectoryConfig(dls_build_max_deg_per_30m=5.5)
     assert cfg.dls_limits_deg_per_30m["BUILD1"] == 5.5
     assert cfg.dls_limits_deg_per_30m["BUILD2"] == 5.5
+    assert cfg.dls_horizontal_max_deg_per_30m == 5.5
     assert cfg.dls_limits_deg_per_30m["HORIZONTAL"] == 5.5
 
 
-def test_trajectory_config_validated_copy_revalidates_and_syncs_limits() -> None:
+def test_trajectory_config_validated_copy_keeps_horizontal_limit_independent() -> None:
     cfg = TrajectoryConfig()
     updated = cfg.validated_copy(dls_build_max_deg_per_30m=4.5)
 
     assert updated.dls_build_max_deg_per_30m == 4.5
+    assert updated.dls_horizontal_max_deg_per_30m == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     assert updated.dls_limits_deg_per_30m["BUILD1"] == 4.5
     assert updated.dls_limits_deg_per_30m["BUILD2"] == 4.5
-    assert updated.dls_limits_deg_per_30m["HORIZONTAL"] == 4.5
+    assert updated.dls_limits_deg_per_30m["HORIZONTAL"] == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
 
     with pytest.raises(ValidationError, match="least_squares|de_hybrid"):
         cfg.validated_copy(turn_solver_mode="unsupported_turn_solver")
+
+
+def test_trajectory_config_accepts_explicit_separate_horizontal_limit() -> None:
+    cfg = TrajectoryConfig(
+        dls_build_max_deg_per_30m=5.5,
+        dls_horizontal_max_deg_per_30m=2.25,
+    )
+
+    assert cfg.dls_limits_deg_per_30m["BUILD1"] == 5.5
+    assert cfg.dls_limits_deg_per_30m["BUILD2"] == 5.5
+    assert cfg.dls_limits_deg_per_30m["HORIZONTAL"] == 2.25
 
 
 def test_trajectory_config_rejects_cross_field_invalid_values_at_model_boundary() -> (
@@ -67662,7 +68791,7 @@ def test_trajectory_config_strips_legacy_dls_map_and_derives_segment_limits() ->
         "BUILD1": 5.5,
         "HOLD": 2.0,
         "BUILD2": 5.5,
-        "HORIZONTAL": 5.5,
+        "HORIZONTAL": 3.5,
     }
     assert "dls_limits_deg_per_30m" not in cfg.model_dump()
 
@@ -67710,6 +68839,7 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
         entry_inc_tolerance_deg=CFG_DEFAULTS.entry_inc_tolerance_deg,
         max_inc_deg=CFG_DEFAULTS.max_inc_deg,
         dls_build_max_deg_per_30m=0.8,
+        dls_horizontal_max_deg_per_30m=1.2,
         kop_min_vertical_m=CFG_DEFAULTS.kop_min_vertical_m,
         optimization_mode=OPTIMIZATION_NONE,
         turn_solver_mode=CFG_DEFAULTS.turn_solver_mode,
@@ -67718,9 +68848,10 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
 
     assert config.dls_build_min_deg_per_30m == 0.0
     assert config.dls_build_max_deg_per_30m == 0.8
+    assert config.dls_horizontal_max_deg_per_30m == 1.2
     assert config.dls_limits_deg_per_30m["BUILD1"] == 0.8
     assert config.dls_limits_deg_per_30m["BUILD2"] == 0.8
-    assert config.dls_limits_deg_per_30m["HORIZONTAL"] == 0.8
+    assert config.dls_limits_deg_per_30m["HORIZONTAL"] == 1.2
     assert config.optimization_mode == OPTIMIZATION_NONE
     assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts
     assert config.j_profile_policy == J_PROFILE_POLICY_OFF
@@ -69068,7 +70199,7 @@ def test_batch_survey_csv_applies_selected_crs(
     assert result["Y_WGS_deg"].iloc[0] == pytest.approx(220.0)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_edit_targets.py	11836
+===BEGIN_FILE===	tests/test_ptc_edit_targets.py	14901
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -69319,6 +70450,88 @@ def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> 
     assert updated_record.points[0].z == pytest.approx(-10.0)
     assert updated_record.points[4].x == pytest.approx(410.0)
     assert updated_original.points[4].y == pytest.approx(20.0)
+
+
+def test_apply_edit_targets_changes_accepts_sidetrack_multi_horizontal_indices() -> None:
+    record = _record(
+        "WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=2220.0, md=4.0),
+            WelltrackPoint(x=3400.0, y=0.0, z=2220.0, md=5.0),
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [record],
+        "wt_records_original": [record],
+        "wt_successes": [SimpleNamespace(name="WELL-04")],
+        "wt_summary_rows": [{"Скважина": "WELL-04", "Статус": "OK", "Проблема": ""}],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "WELL-04",
+                "points": [
+                    {"index": 1, "position": [810.0, 5.0, 2201.0]},
+                    {"index": 4, "position": [3410.0, 8.0, 2222.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["WELL-04"]
+    assert session_state["wt_edit_targets_highlight_points"] == {"WELL-04": [1, 4]}
+    updated_record = session_state["wt_records"][0]
+    assert updated_record.points[0] == record.points[0]
+    assert updated_record.points[1].x == pytest.approx(810.0)
+    assert updated_record.points[1].md == pytest.approx(2.0)
+    assert updated_record.points[4].z == pytest.approx(2222.0)
+
+
+def test_apply_edit_targets_changes_accepts_multi_horizontal_zbs_indices() -> None:
+    record = _record(
+        "9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=2200.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [record],
+        "wt_records_original": [record],
+        "wt_successes": [SimpleNamespace(name="9010_ZBS")],
+        "wt_summary_rows": [{"Скважина": "9010_ZBS", "Статус": "OK", "Проблема": ""}],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "9010_ZBS",
+                "points": [
+                    {"index": 0, "position": [660.0, 1.0, 1501.0]},
+                    {"index": 3, "position": [2810.0, 3.0, 1522.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["9010_ZBS"]
+    assert session_state["wt_edit_targets_highlight_points"] == {"9010_ZBS": [0, 3]}
+    updated_record = session_state["wt_records"][0]
+    assert updated_record.points[0].x == pytest.approx(660.0)
+    assert updated_record.points[0].md == pytest.approx(1.0)
+    assert updated_record.points[3].z == pytest.approx(1522.0)
 
 
 def test_apply_edit_targets_changes_queues_sidetrack_window_override() -> None:
@@ -70660,7 +71873,7 @@ def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:
     assert events[-3:] == ["clear_t1_t3_again", "clear_pad_again", "clear_results"]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_target_records.py	11182
+===BEGIN_FILE===	tests/test_ptc_target_records.py	12180
 from __future__ import annotations
 
 import math
@@ -70892,6 +72105,31 @@ def test_zbs_record_is_ready_with_t1_t3_without_surface() -> None:
     assert list(raw_df["Точка"]) == ["t1", "t3"]
 
 
+def test_multi_horizontal_zbs_record_is_ready_and_labeled_by_levels() -> None:
+    source = _record(
+        "9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2300.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([source])
+    raw_df = target_records.raw_records_dataframe([source])
+
+    assert str(overview_df.iloc[0]["Статус"]) == "✅"
+    assert str(overview_df.iloc[0]["Проблема"]) == "—"
+    assert int(overview_df.iloc[0]["Точек"]) == 4
+    assert float(overview_df.iloc[0]["Длина ГС, м"]) == pytest.approx(1050.0)
+    assert str(overview_df.iloc[0]["Примечание"]) == (
+        "Боковой ствол от факта: нужна скважина 9010; "
+        "Многопластовая: 2 уровней"
+    )
+    assert list(raw_df["Точка"]) == ["1_t1", "1_t3", "2_t1", "2_t3"]
+
+
 def test_zbs_record_rejects_surface_like_extra_point() -> None:
     source = _record(
         "9010_ZBS",
@@ -70990,7 +72228,7 @@ def test_records_overview_hides_pilot_row_but_reports_pilot_problem_on_parent() 
     assert "Пилот:" in str(overview_df.iloc[0]["Проблема"])
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_three_overrides.py	32014
+===BEGIN_FILE===	tests/test_ptc_three_overrides.py	35555
 from __future__ import annotations
 
 from pathlib import Path
@@ -71420,6 +72658,14 @@ def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
         x_offset_m=0.0,
         y_offset_m=0.0,
         station_count=900,
+    ).model_copy(
+        update={
+            "config": TrajectoryConfig(
+                dls_build_max_deg_per_30m=4.2,
+                dls_horizontal_max_deg_per_30m=1.8,
+                optimization_mode="none",
+            )
+        }
     )
 
     edit_wells = ptc_three_overrides.build_edit_wells_payload(
@@ -71432,6 +72678,8 @@ def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
     assert len(edit_wells[0]["base_points"]) == (
         ptc_three_overrides.MAX_EDIT_BASE_POINTS
     )
+    assert edit_wells[0]["config"]["dls_build_max_deg_per_30m"] == 4.2
+    assert edit_wells[0]["config"]["dls_horizontal_max_deg_per_30m"] == 1.8
 
 
 def test_build_edit_wells_payload_includes_multi_horizontal_edit_points() -> None:
@@ -71539,6 +72787,107 @@ def test_build_edit_wells_payload_adds_sidetrack_window_handle() -> None:
     assert window["parent_name"] == "WELL-A_PL"
     assert len(window["parent_points"]) >= 5
     assert all(len(point) == 4 for point in window["parent_points"])
+
+
+def test_build_edit_wells_payload_keeps_sidetrack_window_for_multi_horizontal() -> None:
+    parent = _successful_plan_xy(
+        name="WELL-A_PL",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    )
+    sidetrack = _successful_plan_xy(
+        name="WELL-A",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    ).model_copy(
+        update={
+            "target_pairs": (
+                (Point3D(1000.0, 0.0, 0.0), Point3D(1500.0, 0.0, 0.0)),
+                (Point3D(1700.0, 0.0, 30.0), Point3D(2200.0, 0.0, 30.0)),
+            ),
+            "summary": {
+                "trajectory_type": "Multi-horizontal",
+                "pilot_well_name": "WELL-A_PL",
+                "sidetrack_window_md_m": 500.0,
+                "sidetrack_window_x_m": 500.0,
+                "sidetrack_window_y_m": 0.0,
+                "sidetrack_window_z_m": 0.0,
+            },
+        }
+    )
+
+    edit_wells = ptc_three_overrides.build_edit_wells_payload(
+        [sidetrack],
+        {"WELL-A": "#123456"},
+        parent_successes=[parent, sidetrack],
+    )
+
+    edit_points = edit_wells[0]["edit_points"]
+    assert [point["label"] for point in edit_points] == [
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+        "Окно",
+    ]
+    assert [point["index"] for point in edit_points[:-1]] == [1, 2, 3, 4]
+    assert edit_points[-1]["point_type"] == "sidetrack_window"
+
+
+def test_build_edit_wells_payload_indexes_multi_horizontal_zbs_without_surface() -> None:
+    reference_source = _successful_plan_xy(
+        name="9010",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    )
+    reference_well = ImportedTrajectoryWell(
+        name="9010",
+        kind=REFERENCE_WELL_ACTUAL,
+        stations=reference_source.stations,
+        surface=reference_source.surface,
+        azimuth_deg=90.0,
+    )
+    zbs = _successful_plan_xy(
+        name="9010_ZBS",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+        station_count=5,
+    ).model_copy(
+        update={
+            "target_pairs": (
+                (Point3D(1000.0, 0.0, 0.0), Point3D(1500.0, 0.0, 0.0)),
+                (Point3D(1700.0, 0.0, 30.0), Point3D(2200.0, 0.0, 30.0)),
+            ),
+            "summary": {
+                "trajectory_type": "FACT_SIDETRACK",
+                "sidetrack_parent_well_name": "9010",
+                "sidetrack_window_md_m": 500.0,
+                "sidetrack_window_x_m": 500.0,
+                "sidetrack_window_y_m": 0.0,
+                "sidetrack_window_z_m": 0.0,
+            },
+        }
+    )
+
+    edit_wells = ptc_three_overrides.build_edit_wells_payload(
+        [zbs],
+        {"9010_ZBS": "#123456"},
+        reference_wells=[reference_well],
+    )
+
+    edit_points = edit_wells[0]["edit_points"]
+    assert [point["label"] for point in edit_points] == [
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+        "Окно",
+    ]
+    assert [point["index"] for point in edit_points[:-1]] == [0, 1, 2, 3]
+    assert edit_points[-1]["point_type"] == "sidetrack_window"
 
 
 def test_build_edit_wells_payload_adds_zbs_window_parent_path_from_reference() -> None:
@@ -71652,6 +73001,7 @@ def test_build_target_only_edit_wells_payload_preserves_failed_record_points() -
         "2_t1",
         "2_t3",
     ]
+    assert edit_wells[2]["config"]["dls_horizontal_max_deg_per_30m"] == 3.0
 
 
 def test_trajectory_overrides_make_failed_target_only_wells_editable() -> None:
@@ -73544,7 +74894,7 @@ def test_app_clears_invalid_last_result_payload_instead_of_crashing() -> None:
     assert any("ValueError" in value for value in warning_values)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_solver_diagnostics.py	8793
+===BEGIN_FILE===	tests/test_solver_diagnostics.py	8763
 from __future__ import annotations
 
 from pywp.solver_diagnostics import (
@@ -73735,25 +75085,25 @@ def test_parse_solver_error_build_horizontal_post_entry_limit() -> None:
     text = (
         "No valid trajectory solution found within configured limits.\n"
         "Reasons and actions:\n"
-        "- Post-entry t1->t3 connection is not feasible with BUILD/HORIZONTAL DLS limit "
+        "- Post-entry t1->t3 connection is not feasible with HORIZONTAL DLS limit "
         "3.00 deg/30m; requires about 4.50 deg/30m. "
-        "Increase BUILD/HORIZONTAL DLS limit or move t3 closer to t1 in section.\n"
+        "Increase HORIZONTAL DLS limit or move t3 closer to t1 in section.\n"
     )
 
     rows = diagnostics_rows_ru(text)
 
     assert rows
-    assert "BUILD/HORIZONTAL ПИ" in rows[0]["Причина"]
+    assert "HORIZONTAL ПИ" in rows[0]["Причина"]
     assert "1.00 deg/10m" in rows[0]["Причина"]
     assert "1.50 deg/10m" in rows[0]["Причина"]
-    assert "BUILD/HORIZONTAL ПИ" in rows[0]["Что изменить"]
+    assert "HORIZONTAL ПИ" in rows[0]["Что изменить"]
 
 
 def test_parse_solver_error_formats_exact_target_delta_for_direct_miss() -> None:
     text = (
         "Failed to hit t3 within tolerance. Miss=7.87 m, tolerance=2.00 m. "
         "Analytical delta: dX=3.51 m, dY=7.02 m, dZ=0.57 m. "
-        "Increase BUILD/HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
+        "Increase HORIZONTAL DLS limit and/or max INC, or move t3 closer/deeper relative to t1."
     )
     rows = diagnostics_rows_ru(text)
     assert rows
@@ -74531,7 +75881,7 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
     assert "Просмотр утвержденной проектной скважины" in selectbox_labels
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ui_calc_params.py	7157
+===BEGIN_FILE===	tests/test_ui_calc_params.py	7995
 from __future__ import annotations
 
 from pathlib import Path
@@ -74543,6 +75893,7 @@ from pywp.models import J_PROFILE_POLICY_OFF
 from pywp.ui_calc_params import (
     CalcParamBinding,
     apply_calc_param_defaults,
+    build_config_from_state,
     calc_param_defaults,
     clear_kop_min_vertical_function,
     kop_min_vertical_function_from_state,
@@ -74572,6 +75923,9 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["max_inc"] == float(cfg.max_inc_deg)
     assert defaults["max_total_md_postcheck"] == float(cfg.max_total_md_postcheck_m)
     assert defaults["dls_build_max"] == float(dls_to_pi(cfg.dls_build_max_deg_per_30m))
+    assert defaults["dls_horizontal_max"] == float(
+        dls_to_pi(cfg.dls_horizontal_max_deg_per_30m)
+    )
     assert defaults["kop_min_vertical"] == float(cfg.kop_min_vertical_m)
     assert defaults["optimization_mode"] == str(cfg.optimization_mode)
     assert defaults["turn_solver_max_restarts"] == int(cfg.turn_solver_max_restarts)
@@ -74627,7 +75981,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 13
+        == 14
     )
 
 
@@ -74652,8 +76006,27 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 13
+        == 14
     )
+
+
+def test_build_config_from_state_uses_independent_horizontal_pi(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["dls_build_max"] = 1.4
+    fake_st.session_state["dls_horizontal_max"] = 0.8
+
+    config = build_config_from_state(prefix="")
+
+    assert abs(dls_to_pi(config.dls_build_max_deg_per_30m) - 1.4) < 1e-12
+    assert abs(dls_to_pi(config.dls_horizontal_max_deg_per_30m) - 0.8) < 1e-12
+    assert config.dls_limits_deg_per_30m["BUILD1"] != config.dls_limits_deg_per_30m[
+        "HORIZONTAL"
+    ]
 
 
 def test_calc_param_binding_uses_shared_defaults(monkeypatch) -> None:
@@ -76808,7 +78181,7 @@ def test_welltracks2_pad_detection_and_layout() -> None:
         assert before.points[1:] == after.points[1:]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_batch.py	126803
+===BEGIN_FILE===	tests/test_welltrack_batch.py	135265
 from __future__ import annotations
 
 import multiprocessing
@@ -76848,6 +78221,7 @@ from pywp.eclipse_welltrack import (
 )
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.mcm import compute_positions_min_curv
+from pywp import multi_horizontal as multi_horizontal_module
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.pilot_wells import SidetrackWindowOverride, sync_pilot_surfaces_to_parents
 from pywp.planner_types import PlanningError
@@ -77025,7 +78399,7 @@ def test_multi_horizontal_record_extends_base_plan_with_numbered_segments() -> N
         "HORIZONTAL2",
     }.issubset(set(success.stations["segment"]))
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
-        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+        float(success.config.dls_horizontal_max_deg_per_30m) + 1e-6
     )
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
@@ -77052,7 +78426,7 @@ def test_multi_horizontal_record_supports_shallower_next_level_with_enough_gap()
         float(success.config.max_inc_deg) + 1e-6
     )
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
-        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+        float(success.config.dls_horizontal_max_deg_per_30m) + 1e-6
     )
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
@@ -77105,13 +78479,44 @@ def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
         "HORIZONTAL3",
     }.issubset(set(success.stations["segment"]))
     assert float(success.stations["DLS_deg_per_30m"].max()) <= (
-        float(success.config.dls_build_max_deg_per_30m) + 1e-6
+        float(success.config.dls_horizontal_max_deg_per_30m) + 1e-6
     )
     assert float(success.summary["md_total_m"]) < 6500.0
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
 
-def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
+def test_welltracks4_multi_horizontal_fixture_limits_only_post_t1_by_horizontal_pi() -> None:
+    text = Path("tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC").read_text(
+        encoding="utf-8"
+    )
+    record = next(
+        item for item in parse_welltrack_text(text) if str(item.name) == "well_08"
+    )
+    horizontal_limit = 1.0
+
+    row, success = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(
+            dls_build_max_deg_per_30m=6.0,
+            dls_horizontal_max_deg_per_30m=horizontal_limit,
+        ),
+    )
+
+    assert success is not None
+    assert row["Статус"] == "OK"
+    post_t1_dls = success.stations.loc[
+        success.stations["MD_m"] > float(success.md_t1_m) + 1e-6,
+        "DLS_deg_per_30m",
+    ].dropna()
+    assert not post_t1_dls.empty
+    assert float(post_t1_dls.max()) <= horizontal_limit + 1e-5
+    assert float(success.stations["DLS_deg_per_30m"].max()) > horizontal_limit + 1e-5
+    assert success.summary["dls_limit_horizontal_deg_per_30m"] == pytest.approx(
+        horizontal_limit
+    )
+
+
+def test_multi_horizontal_transition_uses_horizontal_dls_limit() -> None:
     base_result = PlannerResult(
         stations=pd.DataFrame(
             {
@@ -77137,13 +78542,19 @@ def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
         extend_plan_with_multi_horizontal_targets(
             base_result=base_result,
             target_pairs=target_pairs,
-            config=TrajectoryConfig(dls_build_max_deg_per_30m=1.0),
+            config=TrajectoryConfig(
+                dls_build_max_deg_per_30m=6.0,
+                dls_horizontal_max_deg_per_30m=1.0,
+            ),
         )
 
     result = extend_plan_with_multi_horizontal_targets(
         base_result=base_result,
         target_pairs=target_pairs,
-        config=TrajectoryConfig(dls_build_max_deg_per_30m=3.0),
+        config=TrajectoryConfig(
+            dls_build_max_deg_per_30m=6.0,
+            dls_horizontal_max_deg_per_30m=3.0,
+        ),
     )
 
     horizontal_build_dls = result.stations.loc[
@@ -77154,6 +78565,133 @@ def test_multi_horizontal_transition_uses_build_dls_limit() -> None:
     assert float(horizontal_build_dls.max()) <= 3.0 + 1e-6
     assert float(horizontal_build_dls.max()) > 2.7
     assert float(horizontal_build_dls.quantile(0.9)) > 2.4
+    assert result.summary["dls_limit_horizontal_deg_per_30m"] == pytest.approx(3.0)
+
+
+def test_multi_horizontal_transition_falls_back_to_constant_dls_when_bezier_fails(
+    monkeypatch,
+) -> None:
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [-500.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [1000.0, 1000.0],
+                "segment": ["HORIZONTAL", "HORIZONTAL"],
+            }
+        ),
+        summary={"trajectory_type": "base", "md_total_m": 1000.0},
+        azimuth_deg=90.0,
+        md_t1_m=0.0,
+    )
+    target_pairs = (
+        (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
+        (Point3D(800.0, 0.0, 1100.0), Point3D(1300.0, 0.0, 1100.0)),
+    )
+    monkeypatch.setattr(
+        multi_horizontal_module,
+        "_candidate_control_lengths",
+        lambda **_: (),
+    )
+    config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=6.0,
+        dls_horizontal_max_deg_per_30m=3.0,
+    )
+
+    result = extend_plan_with_multi_horizontal_targets(
+        base_result=base_result,
+        target_pairs=target_pairs,
+        config=config,
+    )
+
+    transition = result.stations.loc[
+        result.stations["segment"] == "HORIZONTAL_BUILD1"
+    ].copy()
+    assert not transition.empty
+    assert (
+        float(transition["DLS_deg_per_30m"].dropna().max())
+        <= float(config.dls_horizontal_max_deg_per_30m) + 1e-6
+    )
+    assert float(transition["DLS_deg_per_30m"].dropna().max()) > 2.5
+    last_transition = transition.iloc[-1]
+    assert float(last_transition["X_m"]) == pytest.approx(800.0, abs=1e-4)
+    assert float(last_transition["Y_m"]) == pytest.approx(0.0, abs=1e-4)
+    assert float(last_transition["Z_m"]) == pytest.approx(1100.0, abs=1e-4)
+    transition_with_start = pd.concat(
+        [
+            result.stations.loc[result.stations["segment"] == "HORIZONTAL1"].iloc[
+                [-1]
+            ],
+            transition,
+        ],
+        ignore_index=True,
+    )
+    rebuilt = compute_positions_min_curv(
+        transition_with_start[["MD_m", "INC_deg", "AZI_deg"]],
+        start=Point3D(0.0, 0.0, 1000.0),
+    )
+    mismatch_m = np.sqrt(
+        (
+            rebuilt["X_m"].to_numpy()
+            - transition_with_start["X_m"].to_numpy()
+        )
+        ** 2
+        + (
+            rebuilt["Y_m"].to_numpy()
+            - transition_with_start["Y_m"].to_numpy()
+        )
+        ** 2
+        + (
+            rebuilt["Z_m"].to_numpy()
+            - transition_with_start["Z_m"].to_numpy()
+        )
+        ** 2
+    )
+    assert float(np.max(mismatch_m)) < 0.25
+
+
+def test_multi_horizontal_constant_dls_fallback_reports_unsupported_reverse_turn(
+    monkeypatch,
+) -> None:
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [-500.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [1000.0, 1000.0],
+                "segment": ["HORIZONTAL", "HORIZONTAL"],
+            }
+        ),
+        summary={"trajectory_type": "base", "md_total_m": 1000.0},
+        azimuth_deg=90.0,
+        md_t1_m=0.0,
+    )
+    target_pairs = (
+        (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
+        (Point3D(800.0, 0.0, 1100.0), Point3D(300.0, 0.0, 1100.0)),
+    )
+    monkeypatch.setattr(
+        multi_horizontal_module,
+        "_candidate_control_lengths",
+        lambda **_: (),
+    )
+
+    with pytest.raises(PlanningError, match="Constant-DLS fallback"):
+        extend_plan_with_multi_horizontal_targets(
+            base_result=base_result,
+            target_pairs=target_pairs,
+            config=TrajectoryConfig(
+                dls_build_max_deg_per_30m=12.0,
+                dls_horizontal_max_deg_per_30m=12.0,
+                max_inc_deg=120.0,
+            ),
+        )
 
 
 def test_turn_solver_build_limit_search_is_monotonic_for_debug_geometry() -> None:
@@ -77386,7 +78924,7 @@ def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike
     assert rows[0]["Проблема"] == ""
     assert len(successes) == 1
     assert successes[0].config.dls_limits_deg_per_30m["HORIZONTAL"] == pytest.approx(
-        config.dls_build_max_deg_per_30m
+        config.dls_horizontal_max_deg_per_30m
     )
     horizontal_dls = (
         successes[0]
@@ -77396,7 +78934,10 @@ def test_welltracks4_well_08_default_config_has_no_horizontal_dls_boundary_spike
         ]
         .dropna()
     )
-    assert float(horizontal_dls.max()) <= float(config.dls_build_max_deg_per_30m) + 1e-5
+    assert (
+        float(horizontal_dls.max())
+        <= float(config.dls_horizontal_max_deg_per_30m) + 1e-5
+    )
 
 
 @pytest.mark.integration
@@ -80274,6 +81815,50 @@ def test_batch_planner_applies_manual_sidetrack_window_override() -> None:
     )
 
 
+def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=2220.0, md=4.0),
+            WelltrackPoint(x=3400.0, y=0.0, z=2220.0, md=5.0),
+        ),
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["multi_horizontal"] == "yes"
+    assert success.summary["multi_horizontal_levels"] == 2
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert len(success.target_pairs) == 2
+    assert success.t3 == success.target_pairs[-1][1]
+    assert {
+        "HORIZONTAL_BUILD1",
+        "HORIZONTAL2",
+    }.issubset(set(success.stations["segment"]))
+
+
 def test_batch_planner_reports_missing_actual_parent_for_zbs() -> None:
     zbs = WelltrackRecord(
         name="9010_ZBS",
@@ -80325,6 +81910,45 @@ def test_batch_planner_builds_zbs_from_actual_reference_well() -> None:
     assert success.summary["sidetrack_parent_kind"] == REFERENCE_WELL_ACTUAL
     assert success.surface.z < success.t1.z
     assert success.target_pairs == ((success.t1, success.t3),)
+
+
+def test_batch_planner_builds_multi_horizontal_zbs_from_actual_reference_well() -> None:
+    zbs = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=2200.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+    actual = _actual_reference_well("9010")
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[zbs],
+        selected_names={"9010_ZBS"},
+        config=_fast_batch_config(
+            kop_min_vertical_m=100.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+        reference_wells=(actual,),
+    )
+
+    assert rows[0]["Статус"] == "OK"
+    assert rows[0]["Классификация целей"] == "Боковой ствол от факта"
+    assert len(successes) == 1
+    success = successes[0]
+    assert success.summary["trajectory_type"] == "FACT_SIDETRACK"
+    assert success.summary["multi_horizontal"] == "yes"
+    assert success.summary["multi_horizontal_levels"] == 2
+    assert success.summary["actual_parent_well_name"] == "9010"
+    assert success.summary["sidetrack_parent_kind"] == REFERENCE_WELL_ACTUAL
+    assert success.t3 == success.target_pairs[-1][1]
+    assert len(success.target_pairs) == 2
+    assert {
+        "HORIZONTAL_BUILD1",
+        "HORIZONTAL2",
+    }.issubset(set(success.stations["segment"]))
 
 
 def test_batch_planner_applies_manual_window_override_to_zbs() -> None:
@@ -80520,7 +82144,7 @@ def test_dynamic_cluster_prunes_auto_pilot_when_parent_is_pruned(monkeypatch) ->
     )
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_defaults_sync.py	3818
+===BEGIN_FILE===	tests/test_welltrack_defaults_sync.py	3879
 from __future__ import annotations
 
 import pytest
@@ -80582,6 +82206,7 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         "Допуск INC на t1, deg": "entry_inc_tol",
         "Макс INC по стволу, deg": "max_inc",
         "Макс ПИ BUILD, deg/10m": "dls_build_max",
+        "Макс ПИ HORIZONTAL, deg/10m": "dls_horizontal_max",
         "Мин VERTICAL до KOP, м": "kop_min_vertical",
         "Макс итоговая MD (постпроверка), м": "max_total_md_postcheck",
         "Макс рестартов решателя": "turn_solver_max_restarts",
@@ -80625,7 +82250,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	227292
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	230369
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -81207,6 +82832,59 @@ def test_records_overview_metrics_count_multi_horizontal_wells(
         ("Скважин", "2"),
         ("Пилотов", "0"),
         ("Боковых стволов", "0"),
+        ("Многопластовых скважин", "1"),
+        ("Проблем", "0"),
+    ]
+
+
+def test_records_overview_metrics_count_multi_horizontal_zbs(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {"metrics": []}
+    zbs_multi = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2300.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+
+    class _DummyColumn:
+        def metric(self, label, value, *args, **kwargs):
+            captured["metrics"].append((label, value))
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+        ),
+    )
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+
+    page._render_records_overview([zbs_multi])
+
+    assert captured["metrics"] == [
+        ("Скважин", "0"),
+        ("Пилотов", "0"),
+        ("Боковых стволов", "1"),
         ("Многопластовых скважин", "1"),
         ("Проблем", "0"),
     ]
@@ -85922,6 +87600,55 @@ def test_failed_target_only_zbs_uses_two_targets_and_stays_in_focused_3d_bounds(
     assert payload_3d["bounds"]["max"][0] >= 6200.0
 
 
+def test_failed_target_only_multi_horizontal_zbs_uses_level_labels() -> None:
+    page = wt_import_module
+    records = [
+        WelltrackRecord(
+            name="9010_ZBS",
+            points=(
+                WelltrackPoint(x=5000.0, y=10.0, z=1500.0, md=1.0),
+                WelltrackPoint(x=6200.0, y=20.0, z=1500.0, md=2.0),
+                WelltrackPoint(x=7000.0, y=30.0, z=1520.0, md=3.0),
+                WelltrackPoint(x=7600.0, y=40.0, z=1520.0, md=4.0),
+            ),
+        )
+    ]
+    summary_rows = [
+        {
+            "Скважина": "9010_ZBS",
+            "Статус": "Ошибка расчета",
+            "Проблема": "нет фактической траектории",
+        }
+    ]
+
+    target_only_wells = page._failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+    edit_wells = page.ptc_three_overrides.build_target_only_edit_wells_payload(
+        target_only_wells,
+        {"9010_ZBS": "#123456"},
+    )
+
+    assert len(target_only_wells) == 1
+    assert target_only_wells[0].target_labels == (
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+    )
+    assert len(target_only_wells[0].target_pairs) == 2
+    assert target_only_wells[0].t1.x == pytest.approx(5000.0)
+    assert target_only_wells[0].t3.x == pytest.approx(7600.0)
+    assert [point["label"] for point in edit_wells[0]["edit_points"]] == [
+        "1_t1",
+        "1_t3",
+        "2_t1",
+        "2_t3",
+    ]
+    assert [point["index"] for point in edit_wells[0]["edit_points"]] == [0, 1, 2, 3]
+
+
 def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     page = wt_import_module
     reference_wells = _reference_wells()
@@ -87221,7 +88948,7 @@ def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_con
     assert {"md", "dls", "inc"}.issubset(conflict_hovers[0].keys())
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_parser.py	10705
+===BEGIN_FILE===	tests/test_welltrack_parser.py	11445
 from __future__ import annotations
 
 from pathlib import Path
@@ -87368,6 +89095,22 @@ def test_parse_welltrack_points_table_accepts_multi_horizontal_rows() -> None:
     assert len(records) == 1
     assert [point.md for point in records[0].points] == [0.0, 1.0, 2.0, 3.0, 4.0]
     assert welltrack_multi_horizontal_level_count(records[0].points) == 2
+
+
+def test_parse_welltrack_points_table_accepts_multi_horizontal_zbs_rows() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "9010_ZBS", "Point": "1_t1", "X": 650.0, "Y": 0.0, "Z": 1500.0},
+            {"Wellname": "9010_ZBS", "Point": "1_t3", "X": 1200.0, "Y": 0.0, "Z": 1500.0},
+            {"Wellname": "9010_ZBS", "Point": "2_t1", "X": 1800.0, "Y": 0.0, "Z": 1520.0},
+            {"Wellname": "9010_ZBS", "Point": "2_t3", "X": 2300.0, "Y": 0.0, "Z": 1520.0},
+        ]
+    )
+
+    assert len(records) == 1
+    assert records[0].name == "9010_ZBS"
+    assert [point.md for point in records[0].points] == [1.0, 2.0, 3.0, 4.0]
+    assert welltrack_multi_horizontal_level_count(records[0].points) == 0
 
 
 def test_parse_welltrack_points_table_accepts_tabular_rows() -> None:

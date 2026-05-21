@@ -16,8 +16,9 @@ from pywp.coordinate_integration import (
     get_crs_display_suffix,
     transform_point_to_crs,
     transform_stations_to_crs,
+    transform_xy_to_crs,
 )
-from pywp.coordinate_systems import CoordinateSystem
+from pywp.coordinate_systems import CoordinateSystem, ProjectedCoord
 from pywp.models import Point3D
 from pywp.ui_well_result import SingleWellResultView
 
@@ -209,6 +210,27 @@ class TestCoordinateIntegration:
         assert x == 100.0
         assert y == 200.0
 
+    def test_transform_xy_falls_back_when_transformer_returns_non_finite(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invalid PROJ output must not leak into CSV/UI coordinates."""
+
+        class FakeTransformer:
+            def transform(self, *_args: object, **_kwargs: object) -> ProjectedCoord:
+                return ProjectedCoord(float("inf"), float("nan"))
+
+        monkeypatch.setattr(ci, "_try_create_transformer", lambda: FakeTransformer())
+        x, y = transform_xy_to_crs(
+            600_010.6,
+            7_407_421.0,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            CoordinateSystem.WGS84_UTM_ZONE_43N,
+        )
+
+        assert x == pytest.approx(600_010.6)
+        assert y == pytest.approx(7_407_421.0)
+
     @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
     def test_transform_gk_13n_42_to_wgs84_utm43_control_point(self) -> None:
         """ГК_13N_42 (EPSG:2503/28473 equivalent) converts to WGS84 UTM43N."""
@@ -221,6 +243,35 @@ class TestCoordinateIntegration:
 
         assert x == pytest.approx(499_999.999696543, abs=0.001)
         assert y == pytest.approx(6_094_791.4212895455, abs=0.001)
+
+    @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+    def test_transform_gk_13n_42_to_wgs84_utm43_user_sample(self) -> None:
+        """Lock the GK13N -> WGS84 UTM43 sample against datum fallback regressions."""
+        x, y = transform_xy_to_crs(
+            600_010.6,
+            7_407_421.0,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            CoordinateSystem.WGS84_UTM_ZONE_43N,
+        )
+
+        assert x == pytest.approx(599_911.695515, abs=0.001)
+        assert y == pytest.approx(7_404_416.769352, abs=0.001)
+
+        stations = pd.DataFrame(
+            {
+                "X_m": [600_010.6],
+                "Y_m": [7_407_421.0],
+                "Z_m": [0.0],
+            }
+        )
+        transformed = transform_stations_to_crs(
+            stations,
+            CoordinateSystem.WGS84_UTM_ZONE_43N,
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+            rename_columns=False,
+        )
+        assert float(transformed["X_m"].iloc[0]) == pytest.approx(x, abs=1e-9)
+        assert float(transformed["Y_m"].iloc[0]) == pytest.approx(y, abs=1e-9)
 
     @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
     def test_transform_gk_13n_42_to_wgs84_degrees_control_point(self) -> None:

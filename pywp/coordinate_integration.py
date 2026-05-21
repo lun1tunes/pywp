@@ -369,7 +369,9 @@ def _transform_xy(
                 GeodeticCoord(lat_deg=y, lon_deg=x),
                 effective_from, effective_to,
             )
-            if isinstance(result, GeodeticCoord):
+            if isinstance(result, GeodeticCoord) and _is_finite_xy(
+                result.lon_deg, result.lat_deg
+            ):
                 return result.lon_deg, result.lat_deg
         elif not effective_from.is_geographic() and not effective_to.is_geographic():
             # Both projected: easting/northing -> easting/northing
@@ -377,7 +379,9 @@ def _transform_xy(
                 ProjectedCoord(easting_m=x, northing_m=y),
                 effective_from, effective_to,
             )
-            if isinstance(result, ProjectedCoord):
+            if isinstance(result, ProjectedCoord) and _is_finite_xy(
+                result.easting_m, result.northing_m
+            ):
                 return result.easting_m, result.northing_m
         elif effective_from.is_geographic() and not effective_to.is_geographic():
             # Geographic -> projected
@@ -385,7 +389,9 @@ def _transform_xy(
                 GeodeticCoord(lat_deg=y, lon_deg=x),
                 effective_from, effective_to,
             )
-            if isinstance(result, ProjectedCoord):
+            if isinstance(result, ProjectedCoord) and _is_finite_xy(
+                result.easting_m, result.northing_m
+            ):
                 return result.easting_m, result.northing_m
         else:
             # Projected -> geographic
@@ -393,14 +399,36 @@ def _transform_xy(
                 ProjectedCoord(easting_m=x, northing_m=y),
                 effective_from, effective_to,
             )
-            if isinstance(result, GeodeticCoord):
+            if isinstance(result, GeodeticCoord) and _is_finite_xy(
+                result.lon_deg, result.lat_deg
+            ):
                 return result.lon_deg, result.lat_deg
     except Exception as exc:
         logger.warning(
             f"Coordinate transformation failed ({from_crs.name} -> {to_crs.name}): {exc}"
         )
+    else:
+        logger.warning(
+            "Coordinate transformation returned unsupported or non-finite result "
+            f"({from_crs.name} -> {to_crs.name})."
+        )
 
     return x, y
+
+
+def _is_finite_xy(x: float, y: float) -> bool:
+    return bool(np.isfinite(float(x)) and np.isfinite(float(y)))
+
+
+def transform_xy_to_crs(
+    x: float,
+    y: float,
+    from_crs: CoordinateSystem,
+    to_crs: CoordinateSystem,
+) -> tuple[float, float]:
+    """Transform horizontal X/Y coordinates using the CSV export CRS engine."""
+
+    return _transform_xy(float(x), float(y), from_crs, to_crs)
 
 
 def transform_point_to_crs(
@@ -425,7 +453,7 @@ def transform_point_to_crs(
     if from_crs == to_crs:
         return point
 
-    tx, ty = _transform_xy(point.x, point.y, from_crs, to_crs)
+    tx, ty = transform_xy_to_crs(point.x, point.y, from_crs, to_crs)
     return Point3D(x=tx, y=ty, z=point.z)
 
 
@@ -466,7 +494,7 @@ def transform_stations_to_crs(
         # Transform each station's x,y coordinates
         transformed = np.zeros((len(result), 2), dtype=float)
         for i in range(len(result)):
-            tx, ty = _transform_xy(
+            tx, ty = transform_xy_to_crs(
                 float(result["X_m"].iloc[i]),
                 float(result["Y_m"].iloc[i]),
                 from_crs,
@@ -686,6 +714,7 @@ __all__ = [
     "get_input_crs",
     "get_selected_crs",
     "should_auto_convert",
+    "transform_xy_to_crs",
     "transform_point_to_crs",
     "transform_stations_to_crs",
     "can_transform_crs",
