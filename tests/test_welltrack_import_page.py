@@ -6027,6 +6027,42 @@ def test_anticollision_three_payload_omits_far_reference_wells_from_ac_scope() -
     assert "APP-FAR (Проектная утвержденная)" not in hover_names
 
 
+def test_anticollision_payload_can_show_loaded_reference_wells_outside_ac_scope() -> (
+    None
+):
+    page = wt_import_module
+    far_reference_wells = _far_reference_wells()
+    analysis = page._build_anti_collision_analysis(
+        [_successful_plan(name="WELL-A", y_offset_m=0.0)],
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+        reference_wells=far_reference_wells,
+    )
+
+    assert {str(well.name) for well in analysis.wells} == {"WELL-A"}
+
+    payload = page._all_wells_anticollision_three_payload(
+        analysis,
+        reference_wells=far_reference_wells,
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
+    figure_plan = page._all_wells_anticollision_plan_figure(
+        analysis,
+        reference_wells=far_reference_wells,
+    )
+
+    hover_names = {
+        str(hover.get("name"))
+        for item in payload["points"]
+        for hover in list(item.get("hover") or [])
+    }
+    trace_names = {str(trace.name) for trace in figure_plan.data}
+
+    assert {"FACT-FAR", "APP-FAR"}.issubset(hover_names)
+    assert "FACT-FAR (Фактическая)" in trace_names
+    assert "APP-FAR (Проектная утвержденная)" in trace_names
+    assert float(payload["bounds"]["max"][0]) > 40_000.0
+
+
 def test_clusters_touching_focus_pad_expand_focus_to_neighbor_cluster_wells() -> None:
     page = wt_import_module
     analysis = page._build_anti_collision_analysis(

@@ -270,6 +270,7 @@ def _render_anticollision_panel(
         anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
             analysis,
             previous_successes_by_name={},
+            reference_wells=reference_wells,
             pilot_study_points_by_name=_pilot_study_points_by_name(records),
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
             render_mode=wt.WT_3D_RENDER_DETAIL,
@@ -288,6 +289,7 @@ def _render_anticollision_panel(
             wt._all_wells_anticollision_plan_figure(
                 analysis,
                 previous_successes_by_name={},
+                reference_wells=reference_wells,
                 focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
             ),
             width="stretch",
@@ -726,11 +728,13 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         summary_rows=list(summary_rows),
     )
     name_to_color = wt._well_color_map(list(records))
+    reference_wells = reference_state.reference_wells_from_state()
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
         analysis,
         previous_successes_by_name={},
         target_only_wells=target_only_wells,
+        reference_wells=reference_wells,
         name_to_color=name_to_color,
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=focus_anticollision_well_names or visible_focus_names,
@@ -753,6 +757,7 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
             analysis,
             previous_successes_by_name={},
             target_only_wells=target_only_wells,
+            reference_wells=reference_wells,
             name_to_color=name_to_color,
             focus_well_names=focus_anticollision_well_names or visible_focus_names,
         ),

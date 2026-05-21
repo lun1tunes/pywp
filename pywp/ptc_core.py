@@ -911,6 +911,26 @@ def _analysis_reference_wells(
     ]
 
 
+def _display_only_reference_wells_for_analysis(
+    *,
+    reference_wells: Iterable[ImportedTrajectoryWell],
+    analysis_reference_wells: Iterable[ImportedTrajectoryWell],
+) -> tuple[ImportedTrajectoryWell, ...]:
+    analysis_identities = {
+        (str(well.name).strip(), str(well.kind).strip())
+        for well in analysis_reference_wells
+    }
+    result: list[ImportedTrajectoryWell] = []
+    for reference_well in reference_wells:
+        kind = str(reference_well.kind).strip()
+        raw_identity = (str(reference_well.name).strip(), kind)
+        display_identity = (reference_well_display_label(reference_well).strip(), kind)
+        if raw_identity in analysis_identities or display_identity in analysis_identities:
+            continue
+        result.append(reference_well)
+    return tuple(result)
+
+
 def _reference_name_trace_2d(
     reference_wells: Iterable[ImportedTrajectoryWell],
     *,
@@ -1069,25 +1089,32 @@ def _all_wells_anticollision_three_payload(
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
     target_only_wells: list[_TargetOnlyWell] | None = None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
 ) -> dict[str, object]:
-    reference_wells = tuple(
+    analysis_reference_wells = tuple(
         well for well in analysis.wells if bool(well.is_reference_only)
     )
+    loaded_reference_wells = tuple(reference_wells)
     resolved_render_mode = _resolve_3d_render_mode(
         requested_mode=render_mode,
         calculated_well_count=len(
             [well for well in analysis.wells if not bool(well.is_reference_only)]
         ),
-        reference_wells=reference_wells,
+        reference_wells=(
+            loaded_reference_wells
+            if loaded_reference_wells
+            else analysis_reference_wells
+        ),
     )
     return ptc_three_builders.anticollision_three_payload(
         analysis,
         previous_successes_by_name=previous_successes_by_name,
         target_only_wells=target_only_wells,
+        reference_wells=loaded_reference_wells,
         name_to_color=name_to_color,
         pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
@@ -2606,6 +2633,7 @@ def _all_wells_anticollision_plan_figure(
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
     target_only_wells: list[_TargetOnlyWell] | None = None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: Mapping[str, str] | None = None,
     focus_well_names: tuple[str, ...] = (),
     height: int = 620,
@@ -2749,6 +2777,48 @@ def _all_wells_anticollision_plan_figure(
                     np.array([well.surface.y, well.t1.y, well.t3.y], dtype=float)
                 )
 
+    analysis_reference_wells = _analysis_reference_wells(analysis)
+    display_only_reference_wells = _display_only_reference_wells_for_analysis(
+        reference_wells=reference_wells,
+        analysis_reference_wells=analysis_reference_wells,
+    )
+    for reference_well in display_only_reference_wells:
+        stations = reference_well.stations
+        if stations.empty or not {"X_m", "Y_m", "MD_m"}.issubset(stations.columns):
+            continue
+        x_values = stations["X_m"].to_numpy(dtype=float)
+        y_values = stations["Y_m"].to_numpy(dtype=float)
+        md_values = stations["MD_m"].to_numpy(dtype=float)
+        fig.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=y_values,
+                mode="lines",
+                name=reference_well_display_label(reference_well),
+                legendgroup=str(reference_well.name),
+                showlegend=False,
+                line={
+                    "width": 1.5,
+                    "color": REFERENCE_WELL_KIND_COLORS.get(
+                        str(reference_well.kind),
+                        "#A0A0A0",
+                    ),
+                },
+                customdata=np.column_stack([md_values]),
+                hovertemplate=(
+                    "X: %{x:.2f} m<br>"
+                    "Y: %{y:.2f} m<br>"
+                    "MD: %{customdata[0]:.2f} m"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+        x_arrays.append(x_values)
+        y_arrays.append(y_values)
+        if not focus_set:
+            x_focus_arrays.append(x_values)
+            y_focus_arrays.append(y_values)
+
     overlap_legend_added = False
     for corridor in analysis.corridors:
         polygon = collision_corridor_plan_polygon(corridor)
@@ -2815,19 +2885,20 @@ def _all_wells_anticollision_plan_figure(
             x_focus_arrays.append(x_segment)
             y_focus_arrays.append(y_segment)
         segment_legend_added = True
-    for kind in _reference_kinds_present(
-        [well for well in analysis.wells if bool(well.is_reference_only)]
-    ):
+    visual_reference_wells = (
+        *analysis_reference_wells,
+        *display_only_reference_wells,
+    )
+    for kind in _reference_kinds_present(visual_reference_wells):
         fig.add_trace(_reference_legend_trace_2d(kind))
-    analysis_reference_wells = _analysis_reference_wells(analysis)
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         label_trace = _reference_name_trace_2d(
-            analysis_reference_wells,
+            visual_reference_wells,
             kind=kind,
         )
         if label_trace is not None:
             fig.add_trace(label_trace)
-    pad_label_trace = _reference_pad_label_trace_2d(analysis_reference_wells)
+    pad_label_trace = _reference_pad_label_trace_2d(visual_reference_wells)
     if pad_label_trace is not None:
         fig.add_trace(pad_label_trace)
 

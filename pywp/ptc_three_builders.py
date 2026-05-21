@@ -497,6 +497,7 @@ def anticollision_three_payload(
     *,
     previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
     target_only_wells: list[object] | None = None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
@@ -512,7 +513,10 @@ def anticollision_three_payload(
     focus_set = _clean_name_set(focus_well_names)
     color_map = dict(name_to_color or {})
     pilot_points_map = dict(pilot_study_points_by_name or {})
-    reference_wells = tuple(well for well in analysis.wells if bool(well.is_reference_only))
+    loaded_reference_wells = tuple(reference_wells)
+    analysis_reference_objects = tuple(
+        well for well in analysis.wells if bool(well.is_reference_only)
+    )
     focus_reference_names = (
         _anticollision_reference_cone_focus_names(analysis)
         if str(render_mode).strip() == WT_3D_RENDER_FAST
@@ -723,8 +727,34 @@ def anticollision_three_payload(
             y_arrays=y_arrays,
             z_arrays=z_arrays,
         )
-    _append_reference_legend(payload, reference_wells)
+    _append_reference_legend(payload, analysis_reference_objects)
     analysis_reference_wells = _analysis_reference_wells(analysis)
+    display_only_reference_wells = _display_only_reference_wells(
+        reference_wells=loaded_reference_wells,
+        analysis_reference_wells=analysis_reference_wells,
+    )
+    if display_only_reference_wells:
+        _append_reference_wells(
+            payload,
+            reference_wells=display_only_reference_wells,
+            render_mode=render_mode,
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+        )
+        if not focus_set:
+            for reference_well in display_only_reference_wells:
+                stations = getattr(reference_well, "stations")
+                if stations.empty or not {"X_m", "Y_m", "Z_m"}.issubset(stations.columns):
+                    continue
+                _append_arrays_from_xyz(
+                    x_focus_arrays,
+                    y_focus_arrays,
+                    z_focus_arrays,
+                    stations["X_m"].to_numpy(dtype=float),
+                    stations["Y_m"].to_numpy(dtype=float),
+                    stations["Z_m"].to_numpy(dtype=float),
+                )
     if str(render_mode).strip() != WT_3D_RENDER_FAST:
         _append_reference_name_labels(payload, analysis_reference_wells)
     _append_reference_pad_labels(payload, analysis_reference_wells)
@@ -1849,6 +1879,26 @@ def _analysis_reference_wells(analysis: AntiCollisionAnalysis) -> list[ImportedT
         for well in analysis.wells
         if bool(well.is_reference_only)
     ]
+
+
+def _display_only_reference_wells(
+    *,
+    reference_wells: Iterable[ImportedTrajectoryWell],
+    analysis_reference_wells: Iterable[ImportedTrajectoryWell],
+) -> tuple[ImportedTrajectoryWell, ...]:
+    analysis_identities = {
+        (str(well.name).strip(), str(well.kind).strip())
+        for well in analysis_reference_wells
+    }
+    result: list[ImportedTrajectoryWell] = []
+    for reference_well in reference_wells:
+        kind = str(reference_well.kind).strip()
+        raw_identity = (str(reference_well.name).strip(), kind)
+        display_identity = (reference_well_display_label(reference_well).strip(), kind)
+        if raw_identity in analysis_identities or display_identity in analysis_identities:
+            continue
+        result.append(reference_well)
+    return tuple(result)
 
 
 def _anticollision_reference_cone_focus_names(
