@@ -18,7 +18,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'data-ac-layer="segments"' in html
     assert "function initAntiCollisionControls()" in html
     assert "function registerAntiCollisionVisualObject(object, itemOrRole)" in html
-    assert 'role === "cone" || role === "cone_tip"' in html
+    assert 'role === "sidetrack_relative_cone"' in html
+    assert 'role === "sidetrack_relative_cone_tip"' in html
     assert 'role === "overlap" || role === "overlap_volume"' in html
     assert 'role === "conflict_segment" || role === "conflict_hover"' in html
     assert "function antiCollisionLayerForItem(itemOrRole)" in html
@@ -313,11 +314,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "THREE.WireframeGeometry" in html
     assert "new THREE.LineSegments(wireGeometry, wireMaterial)" in html
     assert 'depthWrite: role === "cone"' not in html
-    assert 'mesh.renderOrder = role === "overlap" ? 4 : role === "cone" ? 1 : 2' in html
+    assert "mesh.renderOrder = role === \"overlap\" ? 4 : isConeSurface ? 1 : 2" in html
     assert "mesh.renderOrder = 4;" in html
-    assert 'depthWrite: role !== "cone_tip"' in html
+    assert "depthWrite: !isConeTip && !isConflictSegment" in html
     assert "wireframe.renderOrder = mesh.renderOrder + 0.05" in html
-    assert 'role === "cone" || role === "overlap" || role === "pad_first_surface_arrow"' in html
+    assert 'role === "cone" || role === "sidetrack_relative_cone"' in html
     assert "Math.min(opacity, 0.10)" in html
     assert "opacity: 0.07" in html
     assert 'x: "#16A34A"' in html

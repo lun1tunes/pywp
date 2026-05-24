@@ -139,6 +139,20 @@ def _pilot_study_points_by_name(records: list[object]) -> dict[str, tuple[Point3
     }
 
 
+def _show_sidetrack_relative_cones_checkbox() -> bool:
+    key = "wt_show_sidetrack_relative_cones"
+    st.session_state.setdefault(key, False)
+    checkbox = getattr(st, "checkbox", None)
+    if not callable(checkbox):
+        return bool(st.session_state.get(key))
+    return bool(
+        checkbox(
+            "Отображать конуса для боковых стволов",
+            key=key,
+        )
+    )
+
+
 def _render_anticollision_panel(
     *,
     successes: list[object],
@@ -249,6 +263,7 @@ def _render_anticollision_panel(
         clusters=visible_clusters,
         focus_pad_well_names=focus_pad_well_names,
     )
+    display_name_by_well_name = wt._well_label_display_names(list(records))
 
     wt._render_status_run_log(
         title="Лог расчёта Anti-collision",
@@ -264,6 +279,7 @@ def _render_anticollision_panel(
     m4.metric("Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}")
     with st.expander("Что такое SF?", expanded=False):
         st.markdown(wt._sf_help_markdown())
+    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
 
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     try:
@@ -272,8 +288,10 @@ def _render_anticollision_panel(
             previous_successes_by_name={},
             reference_wells=reference_wells,
             pilot_study_points_by_name=_pilot_study_points_by_name(records),
+            display_name_by_well_name=display_name_by_well_name,
             focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
             render_mode=wt.WT_3D_RENDER_DETAIL,
+            show_sidetrack_relative_cones=show_sidetrack_relative_cones,
         )
         wt._render_three_payload(
             container=chart_col1,
@@ -728,7 +746,9 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         summary_rows=list(summary_rows),
     )
     name_to_color = wt._well_color_map(list(records))
+    display_name_by_well_name = wt._well_label_display_names(list(records))
     reference_wells = reference_state.reference_wells_from_state()
+    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
         analysis,
@@ -736,9 +756,11 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         target_only_wells=target_only_wells,
         reference_wells=reference_wells,
         name_to_color=name_to_color,
+        display_name_by_well_name=display_name_by_well_name,
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=focus_anticollision_well_names or visible_focus_names,
         render_mode=wt.WT_3D_RENDER_DETAIL,
+        show_sidetrack_relative_cones=show_sidetrack_relative_cones,
     )
     wt._render_three_payload(
         container=chart_col1,
@@ -801,6 +823,7 @@ def _render_target_edit_overview(
         return False
 
     name_to_color = wt._well_color_map(list(records))
+    display_name_by_well_name = wt._well_label_display_names(list(records))
     st.markdown(title)
     if target_only_wells:
         st.caption(
@@ -849,6 +872,7 @@ def _render_target_edit_overview(
         target_only_wells=target_only_wells,
         reference_wells=reference_wells,
         name_to_color=name_to_color,
+        display_name_by_well_name=display_name_by_well_name,
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=tuple(focus_pad_well_names),
         render_mode=wt.WT_3D_RENDER_DETAIL,

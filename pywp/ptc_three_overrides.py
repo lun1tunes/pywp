@@ -418,16 +418,17 @@ def build_edit_wells_payload(
                 point_index += 1
         if sidetrack_window is not None:
             if not edit_points:
+                first_target_index = 0 if is_zbs else 1
                 edit_points.extend(
                     [
                         {
-                            "index": 1,
+                            "index": first_target_index,
                             "label": "t1",
                             "point_type": "t1",
                             "position": _point3d_payload(success.t1),
                         },
                         {
-                            "index": 2,
+                            "index": first_target_index + 1,
                             "label": "t3",
                             "point_type": "t3",
                             "position": _point3d_payload(success.t3),
@@ -749,12 +750,12 @@ def _fallback_target_labels(
 
 def _target_point_type(*, label: str, index: int) -> str:
     normalized = str(label).strip().lower()
-    if index == 0 or normalized in {"s", "surface", "wellhead"}:
-        return "surface"
     if normalized == "t1" or normalized.endswith("_t1"):
         return "t1"
     if normalized == "t3" or normalized.endswith("_t3"):
         return "t3"
+    if index == 0 or normalized in {"s", "surface", "wellhead"}:
+        return "surface"
     if normalized.startswith("pl"):
         return "pilot"
     return "point"
@@ -858,6 +859,7 @@ def _sidetrack_window_edit_point(
     parent_name = str(
         summary.get("sidetrack_parent_well_name")
         or summary.get("pilot_well_name")
+        or summary.get("actual_parent_well_name")
         or ""
     ).strip()
     if not parent_name:

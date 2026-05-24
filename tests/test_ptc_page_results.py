@@ -65,6 +65,42 @@ def test_full_anticollision_recalc_button_does_not_reset_when_not_clicked(
     assert calls == []
 
 
+def test_sidetrack_relative_cones_checkbox_defaults_to_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def checkbox(self, label: str, *, key: str) -> bool:
+            calls.append((str(label), str(key)))
+            return bool(self.session_state.get(str(key)))
+
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(ptc_page_results, "st", fake_st)
+
+    assert ptc_page_results._show_sidetrack_relative_cones_checkbox() is False
+    assert fake_st.session_state["wt_show_sidetrack_relative_cones"] is False
+    assert calls == [
+        ("Отображать конуса для боковых стволов", "wt_show_sidetrack_relative_cones")
+    ]
+
+
+def test_sidetrack_relative_cones_checkbox_reads_session_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStreamlit:
+        session_state: dict[str, object] = {"wt_show_sidetrack_relative_cones": True}
+
+        def checkbox(self, _label: str, *, key: str) -> bool:
+            return bool(self.session_state.get(str(key)))
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+
+    assert ptc_page_results._show_sidetrack_relative_cones_checkbox() is True
+
+
 def test_anticollision_panel_pauses_on_pending_target_edits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -218,6 +254,7 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     rendered_analysis = calls["payload_analysis"]
     assert [str(well.name) for well in rendered_analysis.wells] == ["WELL-B"]
     assert calls["payload_kwargs"]["target_only_wells"] == [target_only]
+    assert calls["payload_kwargs"]["show_sidetrack_relative_cones"] is False
     assert calls["plotly"][0] == "plan-figure"
     assert calls["override_kwargs"]["target_only_wells"] == [target_only]
     assert calls["override_kwargs"]["target_only_name_to_color"] == {"WELL-A": "#123456"}

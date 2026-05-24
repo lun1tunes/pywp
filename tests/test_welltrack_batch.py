@@ -628,7 +628,32 @@ def test_paired_parent_pilot_is_excluded_from_anticollision_pair_scoring() -> No
     assert analysis.overlapping_pair_count == 0
 
 
-def test_fact_sidetrack_parent_actual_is_excluded_from_anticollision_pair_scoring() -> None:
+def test_pilot_sidetrack_parent_pair_is_kept_for_relative_scoring() -> None:
+    sidetrack = _straight_success("WELL-04", y_offset_m=0.0).validated_copy(
+        summary={
+            "trajectory_type": "PILOT_SIDETRACK",
+            "pilot_well_name": "WELL-04_PL",
+            "sidetrack_parent_well_name": "WELL-04_PL",
+            "sidetrack_window_md_m": 600.0,
+        }
+    )
+    pilot = _straight_success("WELL-04_PL", y_offset_m=0.0)
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [sidetrack, pilot],
+        model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert analysis.pair_count == 1
+    assert {
+        frozenset((str(corridor.well_a), str(corridor.well_b)))
+        for corridor in analysis.corridors
+    } <= {frozenset(("WELL-04", "WELL-04_PL"))}
+
+
+def test_fact_sidetrack_parent_actual_is_kept_in_anticollision_pair_scoring() -> None:
     zbs = _straight_success("9010_ZBS", y_offset_m=0.0)
     zbs = zbs.validated_copy(
         summary={
@@ -637,6 +662,7 @@ def test_fact_sidetrack_parent_actual_is_excluded_from_anticollision_pair_scorin
             "actual_parent_well_name": "9010",
             "sidetrack_parent_well_name": "9010",
             "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+            "sidetrack_window_md_m": 600.0,
         }
     )
     reference_wells = (
@@ -652,12 +678,7 @@ def test_fact_sidetrack_parent_actual_is_excluded_from_anticollision_pair_scorin
         build_overlap_geometry=False,
     )
 
-    assert analysis.pair_count == 1
-    assert all(
-        {corridor.well_a, corridor.well_b}
-        != {"9010_ZBS", "9010 (Фактическая)"}
-        for corridor in analysis.corridors
-    )
+    assert analysis.pair_count == 2
 
 
 @pytest.mark.integration

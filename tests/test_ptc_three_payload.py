@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from pywp import ptc_three_payload
+from pywp.anticollision_rerun import build_anti_collision_analysis_for_successes
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.ptc_three_builders import (
     all_wells_three_payload,
@@ -12,7 +13,13 @@ from pywp.ptc_three_builders import (
     single_well_three_payload,
     single_well_target_only_three_payload,
 )
+from pywp.reference_trajectories import (
+    REFERENCE_WELL_ACTUAL,
+    REFERENCE_WELL_APPROVED,
+    parse_reference_trajectory_table,
+)
 from pywp.three_config import DEFAULT_THREE_CAMERA
+from pywp.uncertainty import PlanningUncertaintyModel
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 
@@ -439,6 +446,231 @@ def test_anticollision_three_payload_renders_pilot_point_labels() -> None:
         "well_04_PL: 2",
         "well_04_PL: 3",
     ]
+
+
+def test_anticollision_three_payload_can_show_pad_position_in_well_label() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "X_m": [0.0, 1000.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 1000.0],
+            "DLS_deg_per_30m": [0.0, 0.0],
+        }
+    )
+    analysis = SimpleNamespace(
+        wells=(
+            SimpleNamespace(
+                name="well_01",
+                color="#22C55E",
+                overlay=SimpleNamespace(samples=()),
+                stations=stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(300.0, 0.0, 300.0),
+                t3=Point3D(1000.0, 0.0, 1000.0),
+                md_t1_m=300.0,
+                is_reference_only=False,
+                target_pairs=(),
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+    )
+
+    payload = anticollision_three_payload(
+        analysis,
+        display_name_by_well_name={"well_01": "well_01 (2)"},
+    )
+
+    assert any(
+        str(item.get("text")) == "well_01 (2)" and str(item.get("role")) == "well_label"
+        for item in payload["labels"]
+    )
+
+
+def _sidetrack_parent_payload_analysis():
+    stations = pd.DataFrame(
+        {
+            "MD_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "INC_deg": [90.0, 90.0, 90.0, 90.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0],
+            "X_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    zbs = SuccessfulWellPlan(
+        name="9010_ZBS",
+        surface=Point3D(1000.0, 0.0, 0.0),
+        t1=Point3D(1200.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=stations,
+        summary={
+            "trajectory_type": "FACT_SIDETRACK",
+            "actual_parent_well_name": "9010",
+            "sidetrack_parent_well_name": "9010",
+            "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+            "sidetrack_window_md_m": 1000.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1200.0,
+        config=TrajectoryConfig(),
+    )
+    parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 1000.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 2000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 2000.0,
+            },
+        ],
+        default_kind=REFERENCE_WELL_ACTUAL,
+    )[0]
+    return build_anti_collision_analysis_for_successes(
+        [zbs],
+        model=PlanningUncertaintyModel(sample_step_m=50.0, min_refined_step_m=10.0),
+        reference_wells=(parent,),
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        analysis_sample_step_m=50.0,
+    )
+
+
+def test_anticollision_three_payload_hides_sidetrack_relative_cones_by_default() -> None:
+    payload = anticollision_three_payload(_sidetrack_parent_payload_analysis())
+
+    assert {
+        str(item.get("role")) for item in payload["meshes"]
+    }.isdisjoint({"sidetrack_relative_cone"})
+
+
+def test_anticollision_three_payload_can_show_sidetrack_relative_cones() -> None:
+    payload = anticollision_three_payload(
+        _sidetrack_parent_payload_analysis(),
+        show_sidetrack_relative_cones=True,
+    )
+
+    assert any(
+        str(item.get("role")) == "sidetrack_relative_cone"
+        for item in payload["meshes"]
+    )
+    assert any(
+        str(item.get("role")) == "sidetrack_relative_cone_tip"
+        for item in payload["lines"]
+    )
+    assert any(
+        str(item.get("label")) == "Относительные конуса боковых стволов"
+        for item in payload["legend"]
+    )
+
+
+def test_all_wells_three_payload_places_reference_labels_at_well_end() -> None:
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-1",
+                    "Type": REFERENCE_WELL_ACTUAL,
+                    "X": 0.0,
+                    "Y": 25.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": REFERENCE_WELL_ACTUAL,
+                    "X": 1800.0,
+                    "Y": 25.0,
+                    "Z": 400.0,
+                    "MD": 1900.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": REFERENCE_WELL_APPROVED,
+                    "X": 0.0,
+                    "Y": -35.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": REFERENCE_WELL_APPROVED,
+                    "X": 1700.0,
+                    "Y": -35.0,
+                    "Z": 320.0,
+                    "MD": 1800.0,
+                },
+            ]
+        )
+    )
+
+    payload = all_wells_three_payload(
+        [],
+        reference_wells=reference_wells,
+        render_mode="detail",
+    )
+
+    reference_labels = {
+        str(item.get("text")): list(item.get("position") or [])
+        for item in payload["labels"]
+        if str(item.get("role")) == "reference_label"
+    }
+
+    assert reference_labels["FACT-1"] == [1800.0, 25.0, 400.0]
+    assert reference_labels["APP-1"] == [1700.0, -35.0, 320.0]
+
+
+def test_all_wells_three_payload_can_show_pad_position_in_well_label() -> None:
+    success = SuccessfulWellPlan(
+        name="well_01",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0, 2000.0],
+                "X_m": [0.0, 1000.0, 2000.0],
+                "Y_m": [0.0, 0.0, 0.0],
+                "Z_m": [0.0, 0.0, 0.0],
+                "DLS_deg_per_30m": [0.0, 0.0, 0.0],
+            }
+        ),
+        summary={},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+
+    payload = all_wells_three_payload(
+        [success],
+        display_name_by_well_name={"well_01": "well_01 (2)"},
+    )
+
+    assert any(
+        str(item.get("text")) == "well_01 (2)" and str(item.get("role")) == "well_label"
+        for item in payload["labels"]
+    )
 
 
 def test_all_wells_three_payload_keeps_original_target_markers() -> None:

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -1265,6 +1264,24 @@ def test_trajectory_three_payload_first_surface_arrow_uses_fixed_pad_order() -> 
     assert float(np.linalg.norm(end_xy - start_xy)) >= 50.0
     assert float(arrow["vertices"][4][2]) <= -24.0
     assert float(arrow["vertices"][11][2] - arrow["vertices"][4][2]) >= 5.0
+
+
+def test_well_label_display_names_follow_pad_slot_order() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "WELL-C"),
+        (2, "WELL-A"),
+    )
+
+    display_names = page._well_label_display_names(records)
+
+    assert display_names["WELL-C"] == "WELL-C (1)"
+    assert display_names["WELL-A"] == "WELL-A (2)"
+    assert display_names["WELL-B"] == "WELL-B (3)"
 
 
 def test_well_color_palette_is_large_unique_and_locally_contrasting() -> None:
@@ -5684,7 +5701,7 @@ def test_actual_reference_mwd_models_from_state_accepts_widget_key_fallback() ->
     )
 
 
-def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells() -> (
+def test_reference_well_labels_anchor_at_horizontal_entry_for_horizontal_wells_2d() -> (
     None
 ):
     page = wt_import_module

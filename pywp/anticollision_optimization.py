@@ -614,7 +614,7 @@ def sample_profile_stations_in_md_window(
         inc_deg=0.0,
         azi_deg=float(candidate.azimuth_hold_deg % 360.0),
     )
-    rows: list[dict[str, float | str]] = []
+    rows: list[tuple[float, float, float, float, float, float, str]] = []
     current_state = surface_state
     segment_index = 0
     while (
@@ -661,17 +661,19 @@ def sample_profile_stations_in_md_window(
             delta_start_m=local_current_m,
             delta_end_m=local_target_m,
         )
-        rows.append(
-            {
-                "MD_m": float(current_state.md_m),
-                "INC_deg": float(current_state.inc_deg),
-                "AZI_deg": float(current_state.azi_deg),
-                "X_m": float(current_state.x_m),
-                "Y_m": float(current_state.y_m),
-                "Z_m": float(current_state.z_m),
-                "segment": str(segment["name"]),
-            }
+        row = (
+            float(current_state.md_m),
+            float(current_state.inc_deg),
+            float(current_state.azi_deg),
+            float(current_state.x_m),
+            float(current_state.y_m),
+            float(current_state.z_m),
+            str(segment["name"]),
         )
+        if rows and rows[-1][0] == row[0]:
+            rows[-1] = row
+        else:
+            rows.append(row)
 
     if not rows:
         return pd.DataFrame(
@@ -685,11 +687,9 @@ def sample_profile_stations_in_md_window(
                 "segment": ["VERTICAL"],
             }
         )
-    sampled = pd.DataFrame(rows)
-    sampled = (
-        sampled.drop_duplicates(subset=["MD_m"], keep="last")
-        .sort_values("MD_m", kind="stable")
-        .reset_index(drop=True)
+    sampled = pd.DataFrame.from_records(
+        rows,
+        columns=["MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m", "segment"],
     )
     return sampled
 

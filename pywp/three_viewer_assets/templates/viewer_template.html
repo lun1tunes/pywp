@@ -1621,7 +1621,12 @@
 
         function antiCollisionLayerForRole(roleValue) {
           const role = String(roleValue || "");
-          if (role === "cone" || role === "cone_tip") {
+          if (
+            role === "cone" ||
+            role === "cone_tip" ||
+            role === "sidetrack_relative_cone" ||
+            role === "sidetrack_relative_cone_tip"
+          ) {
             return "cones";
           }
           if (role === "overlap" || role === "overlap_volume") {
@@ -2777,16 +2782,18 @@
           const segments = Array.isArray(item.segments) ? item.segments : [];
           const role = String(item.role || "line");
           const isConflictSegment = role === "conflict_segment";
+          const isConeTip =
+            role === "cone_tip" || role === "sidetrack_relative_cone_tip";
           addMiniMapTrajectoryOverlay(item);
           const materialOptions = {
             color: hexOrDefault(item.color, "#0f172a"),
             transparent: Number(item.opacity || 1.0) < 0.999,
             opacity:
-              role === "cone_tip"
+              isConeTip
                 ? Math.min(Number(item.opacity || 1.0), 0.46)
                 : Number(item.opacity || 1.0),
             depthTest: !isConflictSegment,
-            depthWrite: role !== "cone_tip" && !isConflictSegment,
+            depthWrite: !isConeTip && !isConflictSegment,
           };
           function addPolylineTube() {
             if (
@@ -3148,8 +3155,10 @@
           geometry.computeVertexNormals();
           const baseColor = hexOrDefault(item.color, "#94a3b8");
           const opacity = numberOrDefault(item.opacity, 0.25);
+          const isConeSurface =
+            role === "cone" || role === "sidetrack_relative_cone";
           const isShadedSurface =
-            role === "cone" || role === "overlap" || role === "pad_first_surface_arrow";
+            isConeSurface || role === "overlap" || role === "pad_first_surface_arrow";
           const MaterialClass = isShadedSurface
             ? THREE.MeshLambertMaterial
             : THREE.MeshBasicMaterial;
@@ -3157,26 +3166,26 @@
             color: baseColor,
             transparent: true,
             opacity:
-              role === "cone"
+              isConeSurface
                 ? Math.min(opacity, 0.10)
                 : opacity,
-            side: role === "cone" ? THREE.FrontSide : THREE.DoubleSide,
+            side: isConeSurface ? THREE.FrontSide : THREE.DoubleSide,
             depthWrite: false,
             depthTest: true,
-            polygonOffset: role === "cone",
-            polygonOffsetFactor: role === "cone" ? 1.0 : 0.0,
-            polygonOffsetUnits: role === "cone" ? 1.0 : 0.0,
+            polygonOffset: isConeSurface,
+            polygonOffsetFactor: isConeSurface ? 1.0 : 0.0,
+            polygonOffsetUnits: isConeSurface ? 1.0 : 0.0,
           });
           material.forceSinglePass = true;
           const mesh = new THREE.Mesh(geometry, material);
-          mesh.renderOrder = role === "overlap" ? 4 : role === "cone" ? 1 : 2;
+          mesh.renderOrder = role === "overlap" ? 4 : isConeSurface ? 1 : 2;
           if (role === "overlap") {
             material.opacity = Math.min(opacity, 0.42);
           }
-          if (role === "cone") {
+          if (isConeSurface) {
             addMiniMapConeOverlay(item, geometry);
           }
-          if (role === "cone") {
+          if (isConeSurface) {
             const wireGeometry = new THREE.WireframeGeometry(geometry);
             const wireMaterial = new THREE.LineBasicMaterial({
               color: baseColor,

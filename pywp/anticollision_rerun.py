@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pickle import PicklingError
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Callable, Mapping
@@ -95,6 +95,8 @@ class _AntiCollisionWellBuildJob:
     well_kind: str
     is_reference_only: bool
     analysis_sample_step_m: float | None
+    sidetrack_parent_name: str = ""
+    sidetrack_window_md_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,8 @@ def _build_anti_collision_well_job(
         well_kind=str(job.well_kind),
         is_reference_only=bool(job.is_reference_only),
         analysis_sample_step_m=job.analysis_sample_step_m,
+        sidetrack_parent_name=str(job.sidetrack_parent_name),
+        sidetrack_window_md_m=job.sidetrack_window_md_m,
     )
     return _AntiCollisionWellBuildResult(
         index=int(job.index),
@@ -160,51 +164,68 @@ def _reference_wells_by_collision_name(
     return result
 
 
-def _excluded_source_parent_pair_keys(
+def _sidetrack_parent_collision_metadata(
+    success: "SuccessfulWellPlan",
     *,
-    successes: list[SuccessfulWellPlan],
     reference_wells: tuple[ImportedTrajectoryWell, ...],
-) -> set[tuple[str, str]]:
-    """Pairs that represent the same physical bore and should not be scored."""
-
-    planned_names = tuple(str(item.name) for item in successes)
-    duplicate_reference_name_keys = reference_well_duplicate_name_keys(reference_wells)
-    excluded: set[tuple[str, str]] = set()
-    for success in successes:
-        summary = dict(getattr(success, "summary", {}) or {})
-        if str(summary.get("trajectory_type", "")).strip() != "FACT_SIDETRACK":
+    planned_names: tuple[str, ...],
+    duplicate_reference_name_keys: set[str],
+    planned_name_by_key: Mapping[str, str] | None = None,
+) -> tuple[str, float | None]:
+    summary = dict(getattr(success, "summary", {}) or {})
+    trajectory_type = str(summary.get("trajectory_type", "")).strip()
+    if trajectory_type not in {"FACT_SIDETRACK", "PILOT_SIDETRACK"}:
+        return "", None
+    try:
+        window_md = float(summary.get("sidetrack_window_md_m"))
+    except (TypeError, ValueError):
+        return "", None
+    if not np.isfinite(window_md):
+        return "", None
+    if trajectory_type == "PILOT_SIDETRACK":
+        pilot_name = str(summary.get("pilot_well_name", "")).strip()
+        if not pilot_name:
+            pilot_name = str(summary.get("sidetrack_parent_well_name", "")).strip()
+        if not pilot_name:
+            return "", None
+        planned = dict(planned_name_by_key or {})
+        collision_name = planned.get(well_name_key(pilot_name))
+        if not collision_name:
+            return "", None
+        return str(collision_name), float(window_md)
+    parent_name = str(summary.get("actual_parent_well_name", "")).strip()
+    if not parent_name:
+        parent_name = str(summary.get("sidetrack_parent_well_name", "")).strip()
+    if not parent_name:
+        return "", None
+    parent_kind = str(summary.get("sidetrack_parent_kind", REFERENCE_WELL_ACTUAL))
+    for reference_well in reference_wells:
+        if str(reference_well.kind) != parent_kind:
             continue
-        parent_name = str(summary.get("actual_parent_well_name", "")).strip()
-        if not parent_name:
-            parent_name = str(summary.get("sidetrack_parent_well_name", "")).strip()
-        if not parent_name:
+        if well_name_key(reference_well.name) != well_name_key(parent_name):
             continue
-        parent_kind = str(summary.get("sidetrack_parent_kind", REFERENCE_WELL_ACTUAL))
-        for reference_well in reference_wells:
-            if str(reference_well.kind) != parent_kind:
-                continue
-            if well_name_key(reference_well.name) != well_name_key(parent_name):
-                continue
-            collision_name = reference_well_collision_name(
-                reference_well,
-                planned_names=planned_names,
-                duplicate_name_keys=duplicate_reference_name_keys,
-            )
-            excluded.add(tuple(sorted((str(success.name), str(collision_name)))))
-    return excluded
+        collision_name = reference_well_collision_name(
+            reference_well,
+            planned_names=planned_names,
+            duplicate_name_keys=duplicate_reference_name_keys,
+        )
+        return str(collision_name), float(window_md)
+    return "", None
 
 
 def _should_score_anti_collision_pair(
     left: AntiCollisionWell,
     right: AntiCollisionWell,
-    *,
-    excluded_pair_keys: set[tuple[str, str]],
 ) -> bool:
     left_name = str(left.name)
     right_name = str(right.name)
-    if paired_pilot_parent_names(left_name, right_name):
-        return False
-    if tuple(sorted((left_name, right_name))) in excluded_pair_keys:
+    is_declared_sidetrack_parent = (
+        well_name_key(getattr(left, "sidetrack_parent_name", ""))
+        == well_name_key(right_name)
+        or well_name_key(getattr(right, "sidetrack_parent_name", ""))
+        == well_name_key(left_name)
+    )
+    if paired_pilot_parent_names(left_name, right_name) and not is_declared_sidetrack_parent:
         return False
     return True
 
@@ -300,10 +321,6 @@ def build_anti_collision_analysis_for_successes(
         tuple(reference_wells),
     )
     planned_names = tuple(str(item.name) for item in successes)
-    excluded_pair_keys = _excluded_source_parent_pair_keys(
-        successes=successes,
-        reference_wells=scoped_reference_wells,
-    )
     wells, _well_cache, _reused_wells, _rebuilt_wells = (
         build_anti_collision_wells_for_successes(
             successes,
@@ -325,11 +342,7 @@ def build_anti_collision_analysis_for_successes(
         build_overlap_geometry=build_overlap_geometry,
         progress_callback=progress_callback,
         parallel_workers=int(parallel_workers),
-        pair_filter=lambda left, right: _should_score_anti_collision_pair(
-            left,
-            right,
-            excluded_pair_keys=excluded_pair_keys,
-        ),
+        pair_filter=_should_score_anti_collision_pair,
     )
 
 
@@ -378,10 +391,6 @@ def build_incremental_anti_collision_analysis_for_successes(
             parallel_workers=int(parallel_workers),
         )
     )
-    excluded_pair_keys = _excluded_source_parent_pair_keys(
-        successes=successes,
-        reference_wells=scoped_reference_wells,
-    )
     analysis, pair_cache, stats = analyze_anti_collision_incremental(
         wells,
         build_overlap_geometry=build_overlap_geometry,
@@ -391,11 +400,7 @@ def build_incremental_anti_collision_analysis_for_successes(
         rebuilt_well_count=rebuilt_wells,
         progress_callback=progress_callback,
         parallel_workers=int(parallel_workers),
-        pair_filter=lambda left, right: _should_score_anti_collision_pair(
-            left,
-            right,
-            excluded_pair_keys=excluded_pair_keys,
-        ),
+        pair_filter=_should_score_anti_collision_pair,
     )
     return analysis, well_cache, pair_cache, stats
 
@@ -441,6 +446,7 @@ def build_anti_collision_wells_for_successes(
         tuple(reference_wells),
     )
     planned_names = tuple(str(item.name) for item in successes)
+    planned_name_by_key = {well_name_key(name): str(name) for name in planned_names}
     duplicate_reference_name_keys = reference_well_duplicate_name_keys(
         scoped_reference_wells
     )
@@ -489,6 +495,18 @@ def build_anti_collision_wells_for_successes(
         ):
             reused_count += 1
             well = previous[1]
+            current_parent_name = str(job.sidetrack_parent_name or "")
+            current_window_md = job.sidetrack_window_md_m
+            if (
+                str(getattr(well, "sidetrack_parent_name", "") or "")
+                != current_parent_name
+                or getattr(well, "sidetrack_window_md_m", None) != current_window_md
+            ):
+                well = replace(
+                    well,
+                    sidetrack_parent_name=current_parent_name,
+                    sidetrack_window_md_m=current_window_md,
+                )
             wells_by_index[int(job.index)] = well
             next_cache[str(job.name)] = (str(job.signature), well)
             completed_well_count += 1
@@ -505,6 +523,15 @@ def build_anti_collision_wells_for_successes(
 
     for index, item in enumerate(successes):
         name = str(item.name)
+        sidetrack_parent_name, sidetrack_window_md_m = (
+            _sidetrack_parent_collision_metadata(
+                item,
+                reference_wells=scoped_reference_wells,
+                planned_names=planned_names,
+                duplicate_reference_name_keys=duplicate_reference_name_keys,
+                planned_name_by_key=planned_name_by_key,
+            )
+        )
         job = _AntiCollisionWellBuildJob(
             index=int(index),
             name=name,
@@ -523,6 +550,8 @@ def build_anti_collision_wells_for_successes(
             well_kind="project",
             is_reference_only=False,
             analysis_sample_step_m=effective_sample_step_m,
+            sidetrack_parent_name=sidetrack_parent_name,
+            sidetrack_window_md_m=sidetrack_window_md_m,
         )
         _reuse_or_schedule(job)
 

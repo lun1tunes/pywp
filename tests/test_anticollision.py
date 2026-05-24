@@ -49,6 +49,7 @@ from pywp.models import (
     TrajectoryConfig,
 )
 from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
     REFERENCE_WELL_ACTUAL,
     REFERENCE_WELL_APPROVED,
     parse_reference_trajectory_dev_directories,
@@ -76,6 +77,121 @@ def _straight_stations(*, y_offset_m: float) -> pd.DataFrame:
             "Z_m": [0.0, 0.0, 0.0],
         }
     )
+
+
+def _horizontal_reference_well(
+    name: str = "9010",
+    *,
+    y_offset_m: float = 0.0,
+    kind: str = REFERENCE_WELL_ACTUAL,
+) -> ImportedTrajectoryWell:
+    return parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": name,
+                "Type": kind,
+                "X": 0.0,
+                "Y": y_offset_m,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": name,
+                "Type": kind,
+                "X": 1000.0,
+                "Y": y_offset_m,
+                "Z": 0.0,
+                "MD": 1000.0,
+            },
+            {
+                "Wellname": name,
+                "Type": kind,
+                "X": 2000.0,
+                "Y": y_offset_m,
+                "Z": 0.0,
+                "MD": 2000.0,
+            },
+        ],
+        default_kind=kind,
+    )[0]
+
+
+def _fact_sidetrack_success_on_parent_path() -> SuccessfulWellPlan:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "INC_deg": [90.0, 90.0, 90.0, 90.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0],
+            "X_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0, 0.0],
+            "segment": ["WINDOW", "SIDETRACK", "SIDETRACK", "SIDETRACK"],
+        }
+    )
+    return SuccessfulWellPlan(
+        name="9010_ZBS",
+        surface=Point3D(1000.0, 0.0, 0.0),
+        t1=Point3D(1200.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=stations,
+        summary={
+            "trajectory_type": "FACT_SIDETRACK",
+            "sidetrack_parent_well_name": "9010",
+            "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+            "actual_parent_well_name": "9010",
+            "sidetrack_window_md_m": 1000.0,
+            "sidetrack_window_x_m": 1000.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 0.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1200.0,
+        config=TrajectoryConfig(),
+    )
+
+
+def _pilot_sidetrack_success_pair() -> tuple[SuccessfulWellPlan, SuccessfulWellPlan]:
+    pilot_stations = _straight_stations(y_offset_m=0.0)
+    sidetrack_stations = pd.DataFrame(
+        {
+            "MD_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "INC_deg": [90.0, 90.0, 90.0, 90.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0],
+            "X_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    pilot = SuccessfulWellPlan(
+        name="WELL-04_PL",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=pilot_stations,
+        summary={"trajectory_type": "PILOT"},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+    sidetrack = SuccessfulWellPlan(
+        name="WELL-04",
+        surface=Point3D(1000.0, 0.0, 0.0),
+        t1=Point3D(1200.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=sidetrack_stations,
+        summary={
+            "trajectory_type": "PILOT_SIDETRACK",
+            "pilot_well_name": "WELL-04_PL",
+            "sidetrack_parent_well_name": "WELL-04_PL",
+            "sidetrack_window_md_m": 1000.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1200.0,
+        config=TrajectoryConfig(),
+    )
+    return sidetrack, pilot
 
 
 def test_anti_collision_scan_samples_are_decoupled_from_display_ellipses() -> None:
@@ -734,6 +850,184 @@ def test_reference_actual_well_can_use_selected_unknown_mwd_model() -> None:
     )
 
 
+def test_fact_sidetrack_parent_pair_is_scanned_after_window_skip() -> None:
+    model = PlanningUncertaintyModel(
+        sigma_inc_deg=0.25,
+        sigma_azi_deg=0.25,
+        sigma_lateral_drift_m_per_1000m=2.0,
+        sample_step_m=10.0,
+        min_refined_step_m=10.0,
+    )
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [_fact_sidetrack_success_on_parent_path()],
+        model=model,
+        reference_wells=(_horizontal_reference_well(),),
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+
+    parent_corridors = [
+        corridor
+        for corridor in analysis.corridors
+        if {str(corridor.well_a), str(corridor.well_b)} == {"9010_ZBS", "9010"}
+    ]
+    assert analysis.pair_count == 1
+    assert parent_corridors
+    assert all(
+        float(np.min(corridor.md_a_values_m))
+        > 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
+        for corridor in parent_corridors
+    )
+    assert all(
+        float(np.min(corridor.md_b_values_m))
+        > 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
+        for corridor in parent_corridors
+    )
+
+
+def test_fact_sidetrack_parent_relative_uncertainty_starts_at_window() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=10.0, min_refined_step_m=10.0)
+    wells, _cache, _reused, _rebuilt = build_anti_collision_wells_for_successes(
+        [_fact_sidetrack_success_on_parent_path()],
+        model=model,
+        reference_wells=(_horizontal_reference_well(),),
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+    side = next(well for well in wells if str(well.name) == "9010_ZBS")
+
+    window_sample = anticollision_module._collision_sample_at_md(side, md_m=1000.0)
+    later_sample = anticollision_module._collision_sample_at_md(side, md_m=1100.0)
+    relative_at_window = anticollision_module._relative_sample_from_reference(
+        window_sample,
+        reference_sample=window_sample,
+    )
+    relative_later = anticollision_module._relative_sample_from_reference(
+        later_sample,
+        reference_sample=window_sample,
+    )
+
+    assert float(np.trace(relative_at_window.covariance_xyz)) == pytest.approx(0.0)
+    assert 0.0 < float(np.trace(relative_later.covariance_xyz)) < float(
+        np.trace(later_sample.covariance_xyz)
+    )
+
+
+def test_sidetrack_parent_relative_cone_overlay_starts_at_window() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=25.0, min_refined_step_m=10.0)
+    analysis = build_anti_collision_analysis_for_successes(
+        [_fact_sidetrack_success_on_parent_path()],
+        model=model,
+        reference_wells=(_horizontal_reference_well(),),
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        analysis_sample_step_m=25.0,
+    )
+
+    overlays = anticollision_module.sidetrack_parent_relative_cone_overlays(analysis)
+
+    assert len(overlays) == 1
+    overlay = overlays[0]
+    assert overlay.side_name == "9010_ZBS"
+    assert overlay.parent_name == "9010"
+    assert overlay.window_md_m == pytest.approx(1000.0)
+    for relative_overlay in (overlay.side_overlay, overlay.parent_overlay):
+        samples = tuple(relative_overlay.samples)
+        assert len(samples) >= 2
+        assert samples[0].md_m == pytest.approx(1000.0)
+        assert float(np.trace(samples[0].covariance_xyz)) == pytest.approx(0.0)
+        first_ring_radius = np.max(
+            np.linalg.norm(samples[0].ring_xyz - samples[0].center_xyz, axis=1)
+        )
+        assert first_ring_radius == pytest.approx(0.0)
+        assert float(np.trace(samples[-1].covariance_xyz)) > 0.0
+
+
+def test_sidetrack_parent_relative_cone_overlay_is_display_downsampled() -> None:
+    model = PlanningUncertaintyModel(
+        sample_step_m=10.0,
+        min_refined_step_m=10.0,
+        max_display_ellipses=5,
+    )
+    analysis = build_anti_collision_analysis_for_successes(
+        [_fact_sidetrack_success_on_parent_path()],
+        model=model,
+        reference_wells=(_horizontal_reference_well(),),
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+
+    overlay = anticollision_module.sidetrack_parent_relative_cone_overlays(analysis)[0]
+
+    for relative_overlay in (overlay.side_overlay, overlay.parent_overlay):
+        md_values = [float(sample.md_m) for sample in relative_overlay.samples]
+        assert len(md_values) <= 5
+        assert md_values[0] == pytest.approx(1000.0)
+        assert md_values[-1] == pytest.approx(2000.0)
+
+
+def test_pilot_sidetrack_relative_cone_overlay_uses_pilot_parent() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=25.0, min_refined_step_m=10.0)
+    sidetrack, pilot = _pilot_sidetrack_success_pair()
+    analysis = build_anti_collision_analysis_for_successes(
+        [sidetrack, pilot],
+        model=model,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        analysis_sample_step_m=25.0,
+    )
+
+    overlays = anticollision_module.sidetrack_parent_relative_cone_overlays(analysis)
+
+    assert len(overlays) == 1
+    assert overlays[0].side_name == "WELL-04"
+    assert overlays[0].parent_name == "WELL-04_PL"
+    assert overlays[0].side_overlay.samples[0].md_m == pytest.approx(1000.0)
+    assert overlays[0].parent_overlay.samples[0].md_m == pytest.approx(1000.0)
+
+
+def test_reused_sidetrack_well_refreshes_parent_collision_metadata() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=25.0, min_refined_step_m=10.0)
+    signatures = {"9010_ZBS": "same-zbs-signature", "9010": "same-parent-signature"}
+    zbs = _fact_sidetrack_success_on_parent_path()
+
+    first_wells, first_cache, _first_reused, _first_rebuilt = (
+        build_anti_collision_wells_for_successes(
+            [zbs],
+            model=model,
+            reference_wells=(),
+            include_display_geometry=False,
+            build_overlap_geometry=False,
+            analysis_sample_step_m=25.0,
+            well_signature_by_name=signatures,
+        )
+    )
+    first_side = next(well for well in first_wells if str(well.name) == "9010_ZBS")
+    assert first_side.sidetrack_parent_name == ""
+
+    second_wells, _second_cache, reused, _rebuilt = (
+        build_anti_collision_wells_for_successes(
+            [zbs],
+            model=model,
+            reference_wells=(_horizontal_reference_well(),),
+            include_display_geometry=False,
+            build_overlap_geometry=False,
+            analysis_sample_step_m=25.0,
+            well_signature_by_name=signatures,
+            previous_well_cache=first_cache,
+        )
+    )
+
+    second_side = next(well for well in second_wells if str(well.name) == "9010_ZBS")
+    assert reused == 1
+    assert second_side.sidetrack_parent_name == "9010"
+    assert second_side.sidetrack_window_md_m == pytest.approx(1000.0)
+
+
 def test_reference_mwd_assignment_does_not_leak_to_approved_duplicate_name() -> None:
     poor_model = planning_uncertainty_model_for_preset(
         UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
@@ -1278,6 +1572,79 @@ def test_analyze_anti_collision_incremental_reuses_unchanged_pairs(
     assert second_stats.reused_pair_count == 1
     assert second_stats.recalculated_pair_count == 2
     assert scanned_pairs == [("WELL-A", "WELL-B"), ("WELL-B", "WELL-C")]
+
+
+def test_pair_cache_is_invalidated_when_sidetrack_parent_context_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=10.0),
+        surface=Point3D(0.0, 10.0, 0.0),
+        t1=Point3D(1000.0, 10.0, 0.0),
+        t3=Point3D(2000.0, 10.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    sidetrack_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        sidetrack_parent_name="WELL-B",
+        sidetrack_window_md_m=1000.0,
+    )
+    scanned_pairs: list[tuple[str, str]] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: AntiCollisionWell,
+        well_b: AntiCollisionWell,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        scanned_pairs.append((str(well_a.name), str(well_b.name)))
+        return []
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _record_pair_scan,
+    )
+
+    _, pair_cache, first_stats = analyze_anti_collision_incremental(
+        [well_a, well_b],
+        build_overlap_geometry=False,
+        well_signature_by_name={"WELL-A": "same", "WELL-B": "same"},
+    )
+    _, _, second_stats = analyze_anti_collision_incremental(
+        [sidetrack_a, well_b],
+        build_overlap_geometry=False,
+        well_signature_by_name={"WELL-A": "same", "WELL-B": "same"},
+        previous_pair_cache=pair_cache,
+    )
+
+    assert first_stats.recalculated_pair_count == 1
+    assert second_stats.reused_pair_count == 0
+    assert second_stats.recalculated_pair_count == 1
+    assert scanned_pairs == [("WELL-A", "WELL-B"), ("WELL-A", "WELL-B")]
 
 
 def test_incremental_lightweight_scan_reuses_full_geometry_pair_cache(

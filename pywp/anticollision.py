@@ -38,6 +38,7 @@ _MAX_LOCAL_REFINE_SEED_PAIRS_PER_WELL_PAIR = 4
 _SCAN_MAX_SAMPLES = 1_000_000
 _ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION = 240
 REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M = 500.0
+SIDETRACK_PARENT_SCAN_SKIP_M = 30.0
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,8 @@ class AntiCollisionWell:
     well_kind: str = "project"
     is_reference_only: bool = False
     normal_support_radii_1sigma_m: np.ndarray | None = None
+    sidetrack_parent_name: str = ""
+    sidetrack_window_md_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +199,15 @@ class AntiCollisionProgress:
 
 
 @dataclass(frozen=True)
+class SidetrackParentRelativeConeOverlay:
+    side_name: str
+    parent_name: str
+    side_overlay: WellUncertaintyOverlay
+    parent_overlay: WellUncertaintyOverlay
+    window_md_m: float
+
+
+@dataclass(frozen=True)
 class _AntiCollisionLateralEnvelope:
     min_x_m: float
     max_x_m: float
@@ -300,6 +312,8 @@ def build_anti_collision_well(
     is_reference_only: bool = False,
     analysis_sample_step_m: float | None = None,
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+    sidetrack_parent_name: str = "",
+    sidetrack_window_md_m: float | None = None,
 ) -> AntiCollisionWell:
     md_t3_m = (
         float(md_t3_m)
@@ -357,6 +371,8 @@ def build_anti_collision_well(
             samples=samples,
             confidence_scale=1.0,
         ),
+        sidetrack_parent_name=str(sidetrack_parent_name or ""),
+        sidetrack_window_md_m=_optional_float(sidetrack_window_md_m),
     )
 
 
@@ -424,6 +440,25 @@ def _pair_cache_key(
     return tuple(sorted((str(well_a.name), str(well_b.name))))
 
 
+def _pair_cache_signature(
+    well: AntiCollisionWell,
+    signatures: Mapping[str, str],
+) -> str:
+    base_signature = str(signatures.get(str(well.name), ""))
+    sidetrack_parent_name = str(
+        getattr(well, "sidetrack_parent_name", "") or ""
+    ).strip()
+    sidetrack_window_md = _optional_float(
+        getattr(well, "sidetrack_window_md_m", None)
+    )
+    if not sidetrack_parent_name and sidetrack_window_md is None:
+        return base_signature
+    return (
+        f"{base_signature}|sidetrack_parent={_well_name_key(sidetrack_parent_name)}"
+        f"|sidetrack_window_md={sidetrack_window_md!r}"
+    )
+
+
 def analyze_anti_collision_incremental(
     wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
     *,
@@ -484,8 +519,8 @@ def analyze_anti_collision_incremental(
         well_a = ordered_wells[int(job.left_index)]
         well_b = ordered_wells[int(job.right_index)]
         pair_key = _pair_cache_key(well_a, well_b)
-        signature_a = signatures.get(str(well_a.name), "")
-        signature_b = signatures.get(str(well_b.name), "")
+        signature_a = _pair_cache_signature(well_a, signatures)
+        signature_b = _pair_cache_signature(well_b, signatures)
         previous = previous_pairs.get(pair_key)
         previous_signatures = (
             {
@@ -566,8 +601,8 @@ def analyze_anti_collision_incremental(
         well_a = ordered_wells[int(result.left_index)]
         well_b = ordered_wells[int(result.right_index)]
         pair_key = _pair_cache_key(well_a, well_b)
-        signature_a = signatures.get(str(well_a.name), "")
-        signature_b = signatures.get(str(well_b.name), "")
+        signature_a = _pair_cache_signature(well_a, signatures)
+        signature_b = _pair_cache_signature(well_b, signatures)
         outcomes.append(
             _AntiCollisionPairOutcome(
                 job_index=int(result.job_index),
@@ -1778,6 +1813,25 @@ def _pair_overlap_corridors(
     well_b: AntiCollisionWell,
     build_overlap_geometry: bool,
 ) -> list[AntiCollisionCorridor]:
+    sidetrack_pair = _sidetrack_parent_pair(well_a=well_a, well_b=well_b)
+    if sidetrack_pair is not None:
+        return _sidetrack_parent_pair_overlap_corridors(
+            sidetrack_pair=sidetrack_pair,
+            build_overlap_geometry=build_overlap_geometry,
+        )
+    return _standard_pair_overlap_corridors(
+        well_a=well_a,
+        well_b=well_b,
+        build_overlap_geometry=build_overlap_geometry,
+    )
+
+
+def _standard_pair_overlap_corridors(
+    *,
+    well_a: AntiCollisionWell,
+    well_b: AntiCollisionWell,
+    build_overlap_geometry: bool,
+) -> list[AntiCollisionCorridor]:
     if not well_a.samples or not well_b.samples:
         return []
 
@@ -1853,6 +1907,319 @@ def _pair_overlap_corridors(
             build_overlap_geometry=build_overlap_geometry,
         )
         + refined_corridors
+    )
+
+
+@dataclass(frozen=True)
+class _SidetrackParentPair:
+    side: AntiCollisionWell
+    parent: AntiCollisionWell
+    side_is_a: bool
+    window_md_m: float
+
+
+def _sidetrack_parent_pair(
+    *,
+    well_a: AntiCollisionWell,
+    well_b: AntiCollisionWell,
+) -> _SidetrackParentPair | None:
+    if _well_matches_sidetrack_parent(side=well_a, parent=well_b):
+        window_md = _optional_float(well_a.sidetrack_window_md_m)
+        if window_md is not None:
+            return _SidetrackParentPair(
+                side=well_a,
+                parent=well_b,
+                side_is_a=True,
+                window_md_m=float(window_md),
+            )
+    if _well_matches_sidetrack_parent(side=well_b, parent=well_a):
+        window_md = _optional_float(well_b.sidetrack_window_md_m)
+        if window_md is not None:
+            return _SidetrackParentPair(
+                side=well_b,
+                parent=well_a,
+                side_is_a=False,
+                window_md_m=float(window_md),
+            )
+    return None
+
+
+def _well_matches_sidetrack_parent(
+    *,
+    side: AntiCollisionWell,
+    parent: AntiCollisionWell,
+) -> bool:
+    parent_name = str(getattr(side, "sidetrack_parent_name", "") or "").strip()
+    if not parent_name:
+        return False
+    return _well_name_key(parent_name) == _well_name_key(parent.name)
+
+
+def _well_name_key(name: object) -> str:
+    return str(name).strip().casefold()
+
+
+def _sidetrack_parent_pair_overlap_corridors(
+    *,
+    sidetrack_pair: _SidetrackParentPair,
+    build_overlap_geometry: bool,
+) -> list[AntiCollisionCorridor]:
+    side = sidetrack_pair.side
+    parent = sidetrack_pair.parent
+    window_md = float(sidetrack_pair.window_md_m)
+    scan_start_md = window_md + float(SIDETRACK_PARENT_SCAN_SKIP_M)
+    if not side.samples or not parent.samples:
+        return []
+    side_base = _collision_sample_at_md(side, md_m=window_md)
+    parent_base = _collision_sample_at_md(parent, md_m=window_md)
+    side_samples = _relative_samples_after_md(
+        side.samples,
+        reference_sample=side_base,
+        min_md_m=scan_start_md,
+    )
+    parent_samples = _relative_samples_after_md(
+        parent.samples,
+        reference_sample=parent_base,
+        min_md_m=scan_start_md,
+    )
+    if not side_samples or not parent_samples:
+        return []
+    side_relative = replace(
+        side,
+        samples=side_samples,
+        sidetrack_parent_name="",
+        normal_support_radii_1sigma_m=_max_normal_support_radii_for_samples(
+            samples=side_samples,
+            confidence_scale=1.0,
+        ),
+    )
+    parent_relative = replace(
+        parent,
+        samples=parent_samples,
+        normal_support_radii_1sigma_m=_max_normal_support_radii_for_samples(
+            samples=parent_samples,
+            confidence_scale=1.0,
+        ),
+    )
+    well_a = side_relative if bool(sidetrack_pair.side_is_a) else parent_relative
+    well_b = parent_relative if bool(sidetrack_pair.side_is_a) else side_relative
+    return _standard_pair_overlap_corridors(
+        well_a=well_a,
+        well_b=well_b,
+        build_overlap_geometry=build_overlap_geometry,
+    )
+
+
+def sidetrack_parent_relative_cone_overlays(
+    analysis: AntiCollisionAnalysis,
+) -> tuple[SidetrackParentRelativeConeOverlay, ...]:
+    wells = tuple(getattr(analysis, "wells", ()) or ())
+    overlays: list[SidetrackParentRelativeConeOverlay] = []
+    seen_pairs: set[tuple[str, str, float]] = set()
+    for left_index in range(len(wells)):
+        for right_index in range(left_index + 1, len(wells)):
+            sidetrack_pair = _sidetrack_parent_pair(
+                well_a=wells[left_index],
+                well_b=wells[right_index],
+            )
+            if sidetrack_pair is None:
+                continue
+            side = sidetrack_pair.side
+            parent = sidetrack_pair.parent
+            if not side.samples or not parent.samples:
+                continue
+            window_md = float(sidetrack_pair.window_md_m)
+            pair_key = (str(side.name), str(parent.name), round(window_md, 6))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            side_base = _collision_sample_at_md(side, md_m=window_md)
+            parent_base = _collision_sample_at_md(parent, md_m=window_md)
+            side_overlay = _relative_overlay_from_window(
+                well=side,
+                reference_sample=side_base,
+                window_md_m=window_md,
+            )
+            parent_overlay = _relative_overlay_from_window(
+                well=parent,
+                reference_sample=parent_base,
+                window_md_m=window_md,
+            )
+            if side_overlay is None or parent_overlay is None:
+                continue
+            overlays.append(
+                SidetrackParentRelativeConeOverlay(
+                    side_name=str(side.name),
+                    parent_name=str(parent.name),
+                    side_overlay=side_overlay,
+                    parent_overlay=parent_overlay,
+                    window_md_m=window_md,
+                )
+            )
+    return tuple(overlays)
+
+
+def _relative_overlay_from_window(
+    *,
+    well: AntiCollisionWell,
+    reference_sample: AntiCollisionSample,
+    window_md_m: float,
+) -> WellUncertaintyOverlay | None:
+    samples = (
+        _relative_sample_from_reference(
+            reference_sample,
+            reference_sample=reference_sample,
+        ),
+        *(
+            _relative_sample_from_reference(sample, reference_sample=reference_sample)
+            for sample in well.samples
+            if float(sample.md_m) > float(window_md_m) + 1e-6
+        ),
+    )
+    if len(samples) < 2:
+        return None
+    samples = _downsample_relative_overlay_samples(
+        samples,
+        max_sample_count=int(well.overlay.model.max_display_ellipses),
+    )
+    overlay_samples = tuple(
+        _ellipse_sample_from_collision_sample(
+            sample=sample,
+            model=well.overlay.model,
+            station_index=index,
+        )
+        for index, sample in enumerate(samples)
+    )
+    return WellUncertaintyOverlay(samples=overlay_samples, model=well.overlay.model)
+
+
+def _downsample_relative_overlay_samples(
+    samples: tuple[AntiCollisionSample, ...],
+    *,
+    max_sample_count: int,
+) -> tuple[AntiCollisionSample, ...]:
+    limit = int(max(max_sample_count, 2))
+    if len(samples) <= limit:
+        return samples
+    selected_indices = np.unique(
+        np.linspace(0, len(samples) - 1, limit, dtype=int)
+    )
+    return tuple(samples[int(index)] for index in selected_indices.tolist())
+
+
+def _ellipse_sample_from_collision_sample(
+    *,
+    sample: AntiCollisionSample,
+    model: PlanningUncertaintyModel,
+    station_index: int,
+) -> UncertaintyEllipseSample:
+    center = tuple(float(value) for value in sample.center_xyz)
+    tangent, inc_axis, azi_axis = local_uncertainty_axes_xyz(
+        inc_deg=float(sample.inc_deg),
+        azi_deg=float(sample.azi_deg),
+    )
+    semi_major, semi_minor, _, _ = _normal_plane_ellipse_axes_from_covariance(
+        covariance_xyz=np.asarray(sample.covariance_xyz, dtype=float),
+        tangent=tangent,
+        primary_axis=inc_axis,
+        secondary_axis=azi_axis,
+        confidence_scale=float(model.confidence_scale),
+    )
+    ring_xyz = np.asarray(_sample_uncertainty_ring_xyz(sample, model=model), dtype=float)
+    return UncertaintyEllipseSample(
+        station_index=int(station_index),
+        md_m=float(sample.md_m),
+        center_xyz=center,
+        center_plan_xy=(float(center[0]), float(center[1])),
+        center_section_xz=(float(center[0]), float(center[2])),
+        covariance_xyz=np.asarray(sample.covariance_xyz, dtype=float),
+        covariance_xyz_random=np.asarray(sample.covariance_xyz_random, dtype=float),
+        covariance_xyz_systematic=np.asarray(
+            sample.covariance_xyz_systematic,
+            dtype=float,
+        ),
+        covariance_xyz_global=np.asarray(sample.covariance_xyz_global, dtype=float),
+        global_source_vectors_xyz=tuple(
+            (source_name, np.asarray(vector, dtype=float))
+            for source_name, vector in sample.global_source_vectors_xyz
+        ),
+        ring_xyz=ring_xyz,
+        ring_plan_xy=ring_xyz[:, :2],
+        ring_section_xz=ring_xyz[:, [0, 2]],
+        semi_axis_inc_m=float(semi_major),
+        semi_axis_azi_m=float(semi_minor),
+    )
+
+
+def _relative_samples_after_md(
+    samples: tuple[AntiCollisionSample, ...],
+    *,
+    reference_sample: AntiCollisionSample,
+    min_md_m: float,
+) -> tuple[AntiCollisionSample, ...]:
+    return tuple(
+        _relative_sample_from_reference(sample, reference_sample=reference_sample)
+        for sample in samples
+        if float(sample.md_m) > float(min_md_m) + 1e-6
+    )
+
+
+def _relative_sample_from_reference(
+    sample: AntiCollisionSample,
+    *,
+    reference_sample: AntiCollisionSample,
+) -> AntiCollisionSample:
+    covariance_random = _positive_semidefinite_covariance(
+        np.asarray(sample.covariance_xyz_random, dtype=float)
+        - np.asarray(reference_sample.covariance_xyz_random, dtype=float)
+    )
+    covariance_systematic = _positive_semidefinite_covariance(
+        np.asarray(sample.covariance_xyz_systematic, dtype=float)
+        - np.asarray(reference_sample.covariance_xyz_systematic, dtype=float)
+    )
+    reference_vectors = {
+        str(source_name): np.asarray(vector, dtype=float)
+        for source_name, vector in reference_sample.global_source_vectors_xyz
+    }
+    sample_vectors = {
+        str(source_name): np.asarray(vector, dtype=float)
+        for source_name, vector in sample.global_source_vectors_xyz
+    }
+    global_source_vectors = tuple(
+        (
+            source_name,
+            sample_vectors.get(source_name, np.zeros(3, dtype=float))
+            - reference_vectors.get(source_name, np.zeros(3, dtype=float)),
+        )
+        for source_name in sorted(set(reference_vectors).union(sample_vectors))
+    )
+    covariance_global = np.zeros((3, 3), dtype=float)
+    for _, vector in global_source_vectors:
+        covariance_global += np.outer(vector, vector)
+    covariance_global = 0.5 * (covariance_global + covariance_global.T)
+    covariance_total = _positive_semidefinite_covariance(
+        covariance_random + covariance_systematic + covariance_global
+    )
+    return replace(
+        sample,
+        covariance_xyz=covariance_total,
+        covariance_xyz_random=covariance_random,
+        covariance_xyz_systematic=covariance_systematic,
+        covariance_xyz_global=covariance_global,
+        global_source_vectors_xyz=global_source_vectors,
+    )
+
+
+def _positive_semidefinite_covariance(covariance: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(covariance, dtype=float)
+    if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+        return np.zeros((3, 3), dtype=float)
+    matrix = 0.5 * (matrix + matrix.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(matrix)
+    clipped = np.clip(eigenvalues, 0.0, None)
+    return 0.5 * (
+        eigenvectors @ np.diag(clipped) @ eigenvectors.T
+        + (eigenvectors @ np.diag(clipped) @ eigenvectors.T).T
     )
 
 

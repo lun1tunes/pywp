@@ -203,6 +203,8 @@ def test_sample_profile_stations_in_md_window_matches_full_trajectory_reference(
     )
 
     pd.testing.assert_series_equal(sampled["MD_m"], reference["MD_m"], check_names=False)
+    assert sampled["MD_m"].is_monotonic_increasing
+    assert not bool(sampled["MD_m"].duplicated().any())
     for column in ("INC_deg", "AZI_deg"):
         assert sampled[column].tolist() == pytest.approx(reference[column].tolist(), abs=0.5)
     for column in ("X_m", "Y_m", "Z_m"):

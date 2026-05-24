@@ -114,7 +114,6 @@ from pywp.pilot_wells import (
 )
 from pywp.planner_config import optimization_display_label
 from pywp.plot_axes import (
-    equalized_axis_ranges,
     equalized_xy_ranges,
     linear_tick_values,
     nice_tick_step,
@@ -161,7 +160,6 @@ from pywp.ui_well_panels import survey_export_dataframe
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
     PlanningUncertaintyModel,
-    build_uncertainty_tube_mesh,
     normalize_uncertainty_preset,
     uncertainty_preset_label,
     uncertainty_ribbon_polygon,
@@ -1063,6 +1061,7 @@ def _all_wells_three_payload(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: dict[str, str] | None = None,
+    display_name_by_well_name: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
@@ -1077,6 +1076,7 @@ def _all_wells_three_payload(
         target_only_wells=target_only_wells,
         reference_wells=reference_wells,
         name_to_color=name_to_color,
+        display_name_by_well_name=display_name_by_well_name,
         pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
         render_mode=resolved_render_mode,
@@ -1091,9 +1091,11 @@ def _all_wells_anticollision_three_payload(
     target_only_wells: list[_TargetOnlyWell] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: Mapping[str, str] | None = None,
+    display_name_by_well_name: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
+    show_sidetrack_relative_cones: bool = False,
 ) -> dict[str, object]:
     analysis_reference_wells = tuple(
         well for well in analysis.wells if bool(well.is_reference_only)
@@ -1116,9 +1118,11 @@ def _all_wells_anticollision_three_payload(
         target_only_wells=target_only_wells,
         reference_wells=loaded_reference_wells,
         name_to_color=name_to_color,
+        display_name_by_well_name=display_name_by_well_name,
         pilot_study_points_by_name=pilot_study_points_by_name,
         focus_well_names=focus_well_names,
         render_mode=resolved_render_mode,
+        show_sidetrack_relative_cones=bool(show_sidetrack_relative_cones),
     )
 
 
@@ -1331,6 +1335,17 @@ _ANTI_COLLISION_SIGNATURE_SUMMARY_FIELDS = (
     "optimization_mode",
     "anti_collision_stage",
     "anti_collision_attempted_stages",
+    "trajectory_type",
+    "sidetrack_parent_well_name",
+    "actual_parent_well_name",
+    "sidetrack_parent_kind",
+    "sidetrack_window_md_m",
+    "sidetrack_window_x_m",
+    "sidetrack_window_y_m",
+    "sidetrack_window_z_m",
+    "sidetrack_window_inc_deg",
+    "sidetrack_window_azi_deg",
+    "pilot_well_name",
 )
 _ANTI_COLLISION_SIGNATURE_CONFIG_FIELDS = (
     "kop_min_vertical_m",
@@ -5565,6 +5580,17 @@ def _pad_membership(
         st.session_state,
         visible_well_records(records, include_zbs=False),
     )
+
+
+def _well_label_display_names(
+    records: list[WelltrackRecord],
+) -> dict[str, str]:
+    _, _, well_names_by_pad_id = _pad_membership(records)
+    display_names: dict[str, str] = {}
+    for ordered_names in well_names_by_pad_id.values():
+        for slot_index, well_name in enumerate(ordered_names, start=1):
+            display_names[str(well_name)] = f"{well_name} ({int(slot_index)})"
+    return display_names
 
 
 def _normalize_focus_pad_id(

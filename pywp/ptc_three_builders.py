@@ -10,6 +10,7 @@ import pandas as pd
 from pywp.anticollision import (
     AntiCollisionAnalysis,
     REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
+    sidetrack_parent_relative_cone_overlays,
 )
 from pywp.constants import SMALL
 from pywp.models import Point3D
@@ -48,8 +49,6 @@ UNCERTAINTY_SURFACE_COLOR = "#5A5A5A"
 REFERENCE_LABEL_ACTUAL_COLOR = "#111111"
 REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
 REFERENCE_PAD_LABEL_COLOR = "#334155"
-REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG = 80.0
-REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M = 100.0
 REFERENCE_PAD_GROUP_DISTANCE_M = 300.0
 WT_3D_RENDER_FAST = "Быстро"
 WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
@@ -329,6 +328,7 @@ def all_wells_three_payload(
     target_only_wells: list[object] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: Mapping[str, str] | None = None,
+    display_name_by_well_name: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
@@ -347,6 +347,10 @@ def all_wells_three_payload(
 
     for index, success in enumerate(successes):
         well_name = str(success.name)
+        display_name = _display_well_name(
+            well_name,
+            display_name_by_well_name=display_name_by_well_name,
+        )
         color = color_map.get(well_name, _fallback_color(index, fallback_color))
         is_pilot = is_pilot_name(well_name)
         pilot_study_points = (
@@ -402,7 +406,7 @@ def all_wells_three_payload(
             if _include_name_in_focus(well_name, focus_set)
             else None,
         )
-        payload["labels"].append(_well_name_label(well_name, success.t3, color))
+        payload["labels"].append(_well_name_label(display_name, success.t3, color))
         if pilot_study_points:
             _append_pilot_study_labels(
                 payload,
@@ -499,9 +503,11 @@ def anticollision_three_payload(
     target_only_wells: list[object] | None = None,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     name_to_color: Mapping[str, str] | None = None,
+    display_name_by_well_name: Mapping[str, str] | None = None,
     pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
     focus_well_names: tuple[str, ...] = (),
     render_mode: str = WT_3D_RENDER_FAST,
+    show_sidetrack_relative_cones: bool = False,
 ) -> dict[str, object]:
     payload = _base_payload(title="Anti-collision: 3D конусы неопределенности")
     x_arrays: list[np.ndarray] = []
@@ -527,6 +533,10 @@ def anticollision_three_payload(
 
     for well in analysis.wells:
         well_name = str(well.name)
+        display_name = _display_well_name(
+            well_name,
+            display_name_by_well_name=display_name_by_well_name,
+        )
         is_reference_only = bool(well.is_reference_only)
         is_focus_reference = well_name in focus_reference_names
         if (
@@ -670,7 +680,9 @@ def anticollision_three_payload(
                     study_points=pilot_points,
                     color=str(well.color),
                 )
-            payload["labels"].append(_well_name_label(well_name, well.t3, str(well.color)))
+            payload["labels"].append(
+                _well_name_label(display_name, well.t3, str(well.color))
+            )
 
     for target_only in target_only_wells or ():
         well_name = str(getattr(target_only, "name"))
@@ -758,6 +770,16 @@ def anticollision_three_payload(
     if str(render_mode).strip() != WT_3D_RENDER_FAST:
         _append_reference_name_labels(payload, analysis_reference_wells)
     _append_reference_pad_labels(payload, analysis_reference_wells)
+    if bool(show_sidetrack_relative_cones):
+        _append_sidetrack_relative_cone_overlays(
+            payload,
+            analysis=analysis,
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+            focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays),
+            focus_set=focus_set,
+        )
 
     for corridor in analysis.corridors:
         overlap_rings = _valid_overlap_rings(corridor.overlap_rings_xyz)
@@ -1023,6 +1045,77 @@ def _append_uncertainty_overlay(
             role="cone_tip",
         )
         _append_arrays(x_arrays, y_arrays, z_arrays, terminal_ring)
+
+
+def _append_sidetrack_relative_cone_overlays(
+    payload: dict[str, object],
+    *,
+    analysis: AntiCollisionAnalysis,
+    x_arrays: list[np.ndarray],
+    y_arrays: list[np.ndarray],
+    z_arrays: list[np.ndarray],
+    focus_arrays: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]],
+    focus_set: set[str],
+) -> None:
+    overlays = sidetrack_parent_relative_cone_overlays(analysis)
+    if not overlays:
+        return
+    legend_added = False
+    for item in overlays:
+        pair_focus_arrays = (
+            focus_arrays
+            if (
+                not focus_set
+                or str(item.side_name) in focus_set
+                or str(item.parent_name) in focus_set
+            )
+            else None
+        )
+        for overlay, label, color in (
+            (item.side_overlay, item.side_name, "#0F766E"),
+            (item.parent_overlay, item.parent_name, "#B45309"),
+        ):
+            tube_mesh = build_uncertainty_tube_mesh(overlay)
+            if tube_mesh is None:
+                continue
+            _append_mesh(
+                payload,
+                vertices_xyz=tube_mesh.vertices_xyz,
+                faces_ijk=np.column_stack([tube_mesh.i, tube_mesh.j, tube_mesh.k]),
+                name=(
+                    "Относительный конус "
+                    f"{item.side_name} ↔ {item.parent_name}: {label}"
+                ),
+                color=color,
+                opacity=0.16,
+                role="sidetrack_relative_cone",
+                x_arrays=x_arrays,
+                y_arrays=y_arrays,
+                z_arrays=z_arrays,
+                focus_arrays=pair_focus_arrays,
+            )
+            if overlay.samples:
+                terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
+                _append_line_segments(
+                    payload,
+                    segments=[_points_from_xyz_array(terminal_ring)],
+                    name=f"{label}: граница относительного конуса",
+                    color=_lighten_hex(color, 0.45),
+                    opacity=0.76,
+                    dash="solid",
+                    role="sidetrack_relative_cone_tip",
+                )
+                _append_arrays(x_arrays, y_arrays, z_arrays, terminal_ring)
+                if pair_focus_arrays is not None:
+                    _append_arrays(*pair_focus_arrays, terminal_ring)
+        if not legend_added:
+            _append_unique_legend_item(
+                payload,
+                label="Относительные конуса боковых стволов",
+                color="#0F766E",
+                opacity=0.16,
+            )
+            legend_added = True
 
 
 def _append_target_markers(
@@ -1781,6 +1874,16 @@ def _well_name_label(well_name: str, point: Point3D, color: str) -> dict[str, ob
     }
 
 
+def _display_well_name(
+    well_name: str,
+    *,
+    display_name_by_well_name: Mapping[str, str] | None,
+) -> str:
+    if not display_name_by_well_name:
+        return str(well_name)
+    return str(display_name_by_well_name.get(str(well_name), str(well_name)))
+
+
 def _pilot_point_label(text: str, point: Point3D, color: str) -> dict[str, object]:
     return {
         "text": str(text),
@@ -1973,29 +2076,14 @@ def _xy_bounds_gap_m(
 
 def _reference_label_anchor_point(reference_well: object) -> tuple[float, float, float] | None:
     stations = getattr(reference_well, "stations")
-    required = {"MD_m", "INC_deg", "X_m", "Y_m", "Z_m"}
+    required = {"X_m", "Y_m", "Z_m"}
     if stations.empty or not required.issubset(stations.columns):
         return None
-    md_values = stations["MD_m"].to_numpy(dtype=float)
-    inc_values = stations["INC_deg"].to_numpy(dtype=float)
     x_values = stations["X_m"].to_numpy(dtype=float)
     y_values = stations["Y_m"].to_numpy(dtype=float)
     z_values = stations["Z_m"].to_numpy(dtype=float)
-    if len(md_values) == 0:
+    if len(x_values) == 0:
         return None
-    high_angle_mask = inc_values >= float(REFERENCE_LABEL_HORIZONTAL_INC_THRESHOLD_DEG)
-    if bool(high_angle_mask[-1]):
-        start_index = len(high_angle_mask) - 1
-        while start_index > 0 and bool(high_angle_mask[start_index - 1]):
-            start_index -= 1
-        if float(md_values[-1] - md_values[start_index]) >= float(
-            REFERENCE_LABEL_HORIZONTAL_MIN_INTERVAL_M
-        ):
-            return (
-                float(x_values[start_index]),
-                float(y_values[start_index]),
-                float(z_values[start_index]),
-            )
     return (float(x_values[-1]), float(y_values[-1]), float(z_values[-1]))
 
 
