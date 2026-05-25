@@ -279,6 +279,57 @@ def test_run_batch_syncs_pilot_surface_after_active_pad_layout(
     assert float(pilot_record.points[0].y) == 20.0
 
 
+def test_run_batch_does_not_reapply_import_auto_pad_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_records: list[WelltrackRecord] = []
+
+    def fake_apply_pad_layout(**_kwargs: object) -> list[WelltrackRecord]:
+        raise AssertionError("apply_pad_layout should not be called")
+
+    class FakeBatchPlanner:
+        last_evaluation_metadata = SimpleNamespace(
+            skipped_selected_names=(),
+            cluster_blocked=False,
+            cluster_resolved_early=False,
+            cluster_blocking_reason=None,
+        )
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def evaluate(self, *, records: list[WelltrackRecord], **_kwargs: object):
+            captured_records[:] = list(records)
+            return ([{"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""}], [])
+
+    records = _records()
+    state: dict[str, object] = {
+        "wt_pad_last_applied_at": "2026-01-01 00:00:00",
+        "wt_pad_auto_applied_on_import": True,
+        "wt_records_original": list(records),
+        "wt_successes": [],
+        "wt_summary_rows": None,
+    }
+    fake_st = _FakeStreamlit(state)
+    monkeypatch.setattr(ptc_batch_run, "apply_pad_layout", fake_apply_pad_layout)
+    monkeypatch.setattr(ptc_batch_run, "WelltrackBatchPlanner", FakeBatchPlanner)
+
+    ptc_batch_run.run_batch_if_clicked(
+        requests=[
+            ptc_batch_run.BatchRunRequest(
+                selected_names=["WELL-A"],
+                config=TrajectoryConfig(),
+                run_clicked=True,
+            )
+        ],
+        records=list(records),
+        hooks=_batch_run_hooks(),
+        st_module=fake_st,
+    )
+
+    assert [record.name for record in captured_records] == ["WELL-A", "WELL-B"]
+
+
 def test_run_batch_stores_parallel_worker_count_for_anti_collision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -162,12 +162,12 @@ def test_trajectory_overrides_build_tree_focus_targets_for_multi_pad() -> None:
     legend_tree = list(overrides["legend_tree"])
     focus_targets = dict(overrides["focus_targets"])
     assert [str(item["label"]) for item in legend_tree] == [
-        "Куст PAD-01",
-        "Куст PAD-02",
+        "Куст WELL",
+        "Куст PAD2",
     ]
     assert set(focus_targets) == {
-        "pad::PAD-01",
-        "pad::PAD-02",
+        "pad::WELL",
+        "pad::PAD2",
         "well::WELL-A",
         "well::WELL-B",
         "well::PAD2-A",

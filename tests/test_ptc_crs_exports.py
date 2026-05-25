@@ -6,8 +6,9 @@ import pandas as pd
 import pytest
 
 from pywp.coordinate_systems import CoordinateSystem
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import Point3D, TrajectoryConfig
-from pywp.ptc_core import _build_batch_survey_csv
+from pywp.ptc_core import _build_batch_survey_csv, _build_batch_target_csv
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 
@@ -60,5 +61,42 @@ def test_batch_survey_csv_applies_selected_crs(
 
     assert "X_m" not in result.columns
     assert "Y_m" not in result.columns
+    assert result["X_WGS_deg"].iloc[0] == pytest.approx(110.0)
+    assert result["Y_WGS_deg"].iloc[0] == pytest.approx(220.0)
+
+
+def test_batch_target_csv_applies_selected_crs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_transform_xy(
+        x_value: float,
+        y_value: float,
+        _source_crs: CoordinateSystem,
+        _target_crs: CoordinateSystem,
+    ) -> tuple[float, float]:
+        return x_value + 100.0, y_value + 200.0
+
+    import pywp.ptc_core as ptc_core
+
+    monkeypatch.setattr(ptc_core, "transform_xy_to_crs", fake_transform_xy)
+    record = WelltrackRecord(
+        name="WELL-01",
+        points=(
+            WelltrackPoint(x=10.0, y=20.0, z=0.0, md=1.0),
+            WelltrackPoint(x=110.0, y=220.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=210.0, y=420.0, z=1100.0, md=3.0),
+        ),
+    )
+
+    payload = _build_batch_target_csv(
+        [record],
+        target_crs=CoordinateSystem.WGS84,
+        auto_convert=True,
+        source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
+    )
+    result = pd.read_csv(BytesIO(payload), sep="\t")
+
+    assert result["X_СК_42_З16_m"].iloc[0] == pytest.approx(10.0)
+    assert result["Y_СК_42_З16_m"].iloc[0] == pytest.approx(20.0)
     assert result["X_WGS_deg"].iloc[0] == pytest.approx(110.0)
     assert result["Y_WGS_deg"].iloc[0] == pytest.approx(220.0)

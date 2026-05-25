@@ -7,6 +7,7 @@ from pywp.coordinate_integration import (
     CSV_CRS_OPTIONS,
     CRS_OPTIONS,
     DEFAULT_CRS,
+    DEFAULT_CSV_EXPORT_CRS,
     INPUT_CRS_OPTIONS,
     _can_transform_directly,
     csv_export_crs,
@@ -29,6 +30,10 @@ class TestCoordinateIntegration:
     def test_default_crs_is_gk_13n_42(self) -> None:
         """Default CRS should be ГК_13N_42 as per user requirements."""
         assert DEFAULT_CRS == CoordinateSystem.PULKOVO_1942_GK_13N
+
+    def test_default_csv_crs_is_wgs84_utm43(self) -> None:
+        """Default CSV CRS should target WGS84 UTM 43N."""
+        assert DEFAULT_CSV_EXPORT_CRS == CoordinateSystem.WGS84_UTM_ZONE_43N
 
     def test_input_crs_options_are_projected_meter_systems_only(self) -> None:
         """Input CRS options stay to projected meter systems."""

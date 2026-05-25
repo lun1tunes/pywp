@@ -27,6 +27,9 @@ RenderSmallNoteFunc = Callable[[str], None]
 _SURVEY_DOWNLOAD_FORMAT_DEV = ".dev (7z)"
 _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP = ".dev (ZIP)"
 _SURVEY_DOWNLOAD_FORMATS = ("CSV", "WELLTRACK", _SURVEY_DOWNLOAD_FORMAT_DEV)
+_EXPORT_KIND_TRAJECTORIES = "Траектории"
+_EXPORT_KIND_TARGETS = "Цели"
+_EXPORT_KINDS = (_EXPORT_KIND_TRAJECTORIES, _EXPORT_KIND_TARGETS)
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,18 @@ def render_batch_summary(
     ),
     build_batch_survey_dev_file_func: BuildBatchSurveyPayloadFunc = (
         ptc_batch_results.build_batch_survey_dev_file
+    ),
+    build_batch_target_csv_func: BuildBatchSurveyCsvFunc = (
+        ptc_batch_results.build_batch_target_csv
+    ),
+    build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc = (
+        ptc_batch_results.build_batch_target_welltrack
+    ),
+    build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc = (
+        ptc_batch_results.build_batch_target_dev_7z
+    ),
+    build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc = (
+        ptc_batch_results.build_batch_target_dev_file
     ),
     render_small_note_func: RenderSmallNoteFunc = render_small_note,
 ) -> pd.DataFrame:
@@ -221,6 +236,10 @@ def render_batch_summary(
         build_batch_survey_welltrack_func=build_batch_survey_welltrack_func,
         build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
         build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
+        build_batch_target_csv_func=build_batch_target_csv_func,
+        build_batch_target_welltrack_func=build_batch_target_welltrack_func,
+        build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
+        build_batch_target_dev_file_func=build_batch_target_dev_file_func,
     )
     return summary_df
 
@@ -236,8 +255,37 @@ def _render_survey_downloads(
     build_batch_survey_welltrack_func: BuildBatchSurveyPayloadFunc,
     build_batch_survey_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_survey_dev_file_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
+    build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
 ) -> None:
-    with st_module.expander("Выгрузка траекторий"):
+    with st_module.expander("Выгрузка"):
+        kind_key = "wt_download_kind"
+        if str(state.get(kind_key, "")) not in _EXPORT_KINDS:
+            state[kind_key] = _EXPORT_KIND_TRAJECTORIES
+        export_kind = str(
+            st_module.radio(
+                "Что выгружать",
+                options=list(_EXPORT_KINDS),
+                key=kind_key,
+                horizontal=True,
+            )
+        )
+        if export_kind == _EXPORT_KIND_TARGETS:
+            _render_target_downloads(
+                state=state,
+                st_module=st_module,
+                target_crs=target_crs,
+                auto_convert=auto_convert,
+                source_crs=source_crs,
+                build_batch_target_csv_func=build_batch_target_csv_func,
+                build_batch_target_welltrack_func=build_batch_target_welltrack_func,
+                build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
+                build_batch_target_dev_file_func=build_batch_target_dev_file_func,
+            )
+            return
+
         successes = list(state.get("wt_successes") or [])
         success_names = [
             str(success.name)
@@ -324,6 +372,100 @@ def _render_survey_downloads(
             )
 
 
+def _render_target_downloads(
+    *,
+    state: MutableMapping[str, object],
+    st_module: Any,
+    target_crs: CoordinateSystem,
+    auto_convert: bool,
+    source_crs: CoordinateSystem,
+    build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
+    build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
+) -> None:
+    records = list(state.get("wt_records") or state.get("wt_records_original") or [])
+    record_names = [str(record.name) for record in records if not is_pilot_name(record.name)]
+    record_name_set = set(record_names)
+    selected_key = "wt_target_download_selected_names"
+    raw_selected = _as_selection_list(state.get(selected_key, []))
+    selected_current = [
+        str(name) for name in raw_selected if str(name) in record_name_set
+    ]
+    if selected_current != raw_selected:
+        state[selected_key] = selected_current
+    selected_names = st_module.multiselect(
+        "Скважины для выгрузки",
+        options=record_names,
+        key=selected_key,
+        placeholder="Выберите скважины",
+    )
+    format_key = "wt_target_download_format"
+    if (
+        str(state.get(format_key, "")).strip()
+        == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP
+    ):
+        state[format_key] = _SURVEY_DOWNLOAD_FORMAT_DEV
+    if str(state.get(format_key, "")) not in _SURVEY_DOWNLOAD_FORMATS:
+        state[format_key] = _SURVEY_DOWNLOAD_FORMATS[0]
+    export_format = str(
+        st_module.radio(
+            "Формат выгрузки",
+            options=list(_SURVEY_DOWNLOAD_FORMATS),
+            key=format_key,
+            horizontal=True,
+        )
+    )
+    selected_name_set = {str(name) for name in selected_names}
+    selected_records = _records_for_visible_selection(
+        records=records,
+        selected_names=selected_name_set,
+    )
+    export_config = _target_download_config(
+        export_format=export_format,
+        build_batch_target_csv_func=build_batch_target_csv_func,
+        build_batch_target_welltrack_func=build_batch_target_welltrack_func,
+        build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
+        build_batch_target_dev_file_func=build_batch_target_dev_file_func,
+    )
+    target_data = export_config.builder(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+    )
+    selected_target_data, selected_label, selected_file_name, selected_mime = (
+        _selected_download_payload(
+            export_config=export_config,
+            selected_successes=selected_records,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
+        )
+    )
+    all_col, selected_col = st_module.columns(2, gap="small")
+    with all_col:
+        st_module.download_button(
+            export_config.all_label,
+            data=target_data or b"",
+            file_name=export_config.all_file_name,
+            mime=export_config.mime,
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not target_data,
+        )
+    with selected_col:
+        st_module.download_button(
+            selected_label,
+            data=selected_target_data or b"",
+            file_name=selected_file_name,
+            mime=selected_mime,
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not selected_target_data,
+        )
+
+
 def _successes_for_visible_selection(
     *,
     successes: list[SuccessfulWellPlan],
@@ -340,6 +482,25 @@ def _successes_for_visible_selection(
         )
         if parent_key in selected_parent_keys:
             selected.append(success)
+    return selected
+
+
+def _records_for_visible_selection(
+    *,
+    records: list[object],
+    selected_names: set[str],
+) -> list[object]:
+    selected_parent_keys = {well_name_key(name) for name in selected_names}
+    selected: list[object] = []
+    for record in records:
+        name = str(getattr(record, "name", ""))
+        parent_key = (
+            well_name_key(parent_name_for_pilot(name))
+            if is_pilot_name(name)
+            else well_name_key(name)
+        )
+        if parent_key in selected_parent_keys:
+            selected.append(record)
     return selected
 
 
@@ -379,6 +540,45 @@ def _survey_download_config(
         selected_label="Скачать рассчитанные траектории выбранных скважин",
         all_file_name="welltrack_survey_all.csv",
         selected_file_name="welltrack_survey_selected.csv",
+    )
+
+
+def _target_download_config(
+    *,
+    export_format: str,
+    build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
+    build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
+) -> _SurveyDownloadConfig:
+    if export_format == "WELLTRACK":
+        return _SurveyDownloadConfig(
+            builder=build_batch_target_welltrack_func,
+            mime="text/plain",
+            all_label="Скачать WELLTRACK целей всех скважин",
+            selected_label="Скачать WELLTRACK целей выбранных скважин",
+            all_file_name="welltrack_targets_all.inc",
+            selected_file_name="welltrack_targets_selected.inc",
+        )
+    if export_format == _SURVEY_DOWNLOAD_FORMAT_DEV:
+        return _SurveyDownloadConfig(
+            builder=build_batch_target_dev_7z_func,
+            mime="application/x-7z-compressed",
+            all_label="Скачать .dev архив целей всех скважин",
+            selected_label="Скачать .dev архив целей выбранных скважин",
+            all_file_name="welltrack_targets_all_dev.7z",
+            selected_file_name="welltrack_targets_selected_dev.7z",
+            single_selected_builder=build_batch_target_dev_file_func,
+            single_selected_label="Скачать .dev целей выбранной скважины",
+            single_selected_file_name="welltrack_targets_selected.dev",
+        )
+    return _SurveyDownloadConfig(
+        builder=build_batch_target_csv_func,
+        mime="text/csv",
+        all_label="Скачать цели всех скважин",
+        selected_label="Скачать цели выбранных скважин",
+        all_file_name="welltrack_targets_all.csv",
+        selected_file_name="welltrack_targets_selected.csv",
     )
 
 

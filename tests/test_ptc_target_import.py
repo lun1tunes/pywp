@@ -82,6 +82,29 @@ def test_normalize_source_table_df_accepts_excel_like_single_column_rows() -> No
     assert list(normalized.columns) == ["Wellname", "Point", "X", "Y", "Z"]
 
 
+def test_normalize_source_table_df_resets_non_range_index_for_dynamic_editor() -> (
+    None
+):
+    source = pd.DataFrame(
+        [
+            {"Wellname": "TAB-01", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {
+                "Wellname": "TAB-01",
+                "Point": "t1",
+                "X": 600.0,
+                "Y": 800.0,
+                "Z": 2400.0,
+            },
+        ],
+        index=[0, 2],
+    )
+
+    normalized = target_import.normalize_source_table_df_for_ui(source)
+
+    assert isinstance(normalized.index, pd.RangeIndex)
+    assert list(normalized.index) == [0, 1]
+
+
 def test_target_import_operation_parses_target_table_rows() -> None:
     operation = target_import.build_target_import_operation(
         target_import.WelltrackSourcePayload(

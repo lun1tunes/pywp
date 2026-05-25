@@ -90,6 +90,7 @@ from pywp.coordinate_integration import (
     csv_export_crs,
     get_crs_display_suffix,
     transform_stations_to_crs,
+    transform_xy_to_crs,
 )
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import (
@@ -165,6 +166,7 @@ from pywp.uncertainty import (
     uncertainty_ribbon_polygon,
 )
 from pywp.well_pad import (
+    PAD_WELL_AUTO_ORDER_PROJECTION,
     PAD_SURFACE_ANCHOR_CENTER,
     PAD_SURFACE_ANCHOR_FIRST,
     PadLayoutPlan,
@@ -172,6 +174,7 @@ from pywp.well_pad import (
     apply_pad_layout,
     estimate_pad_nds_azimuth_deg,
     ordered_pad_wells,
+    well_name_natural_sort_key,
 )
 from pywp.welltrack_batch import (
     SuccessfulWellPlan,
@@ -2118,6 +2121,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_pad_selected_id", "")
     st.session_state.setdefault("wt_pad_last_applied_at", "")
     st.session_state.setdefault("wt_pad_auto_applied_on_import", False)
+    st.session_state.setdefault("wt_pad_auto_order_by_target_depth", False)
 
     st.session_state.setdefault("wt_summary_rows", None)
     st.session_state.setdefault("wt_successes", None)
@@ -4071,7 +4075,25 @@ def _auto_apply_pad_layout_if_shared_surface(
     }
     if not auto_layout_pad_ids:
         return False
-    plan_map = _build_pad_plan_map(pads)
+    plan_map: dict[str, PadLayoutPlan] = {}
+    for pad in pads:
+        pad_id = str(pad.pad_id)
+        if pad_id not in auto_layout_pad_ids:
+            continue
+        cfg = _pad_config_for_ui(pad)
+        plan_map[pad_id] = PadLayoutPlan(
+            pad_id=pad_id,
+            first_surface_x=float(cfg["first_surface_x"]),
+            first_surface_y=float(cfg["first_surface_y"]),
+            first_surface_z=float(cfg["first_surface_z"]),
+            spacing_m=float(max(cfg["spacing_m"], 0.0)),
+            nds_azimuth_deg=float(cfg["nds_azimuth_deg"]) % 360.0,
+            surface_anchor_mode=str(
+                cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
+            ),
+            fixed_slots=_pad_fixed_slots_from_config(pad=pad, config=cfg),
+            auto_order_mode=PAD_WELL_AUTO_ORDER_PROJECTION,
+        )
     if not any(str(pad_id) in auto_layout_pad_ids for pad_id in plan_map):
         return False
     updated_records = sync_pilot_surfaces_to_parents(
@@ -5715,6 +5737,22 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             f"Из исходных данных WELLTRACK / точек целей было определено кустов: {len(pads)}. "
             "Их параметры показаны в таблице ниже."
         )
+        st.toggle(
+            "Авто-порядок по глубине целевого пласта",
+            key="wt_pad_auto_order_by_target_depth",
+            help=(
+                "Включено: для всех кустов авто-порядок скважин задаётся от более "
+                "глубоких целей к менее глубоким. Выключено: используется "
+                "естественная сортировка имён скважин A->Z, 1->99. "
+                "Фиксированные позиции ниже всегда имеют приоритет."
+            ),
+        )
+        st.caption(
+            "Базовый авто-порядок внутри каждого куста: "
+            f"{ptc_pad_state.pad_auto_order_mode_label(st.session_state)}. "
+            "Фиксированные позиции переопределяют его, но сами по себе не "
+            "записываются автоматически."
+        )
         pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
         pad_rows = []
         for pad in pads:
@@ -5756,10 +5794,19 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         source_surfaces_defined = bool(
             getattr(selected_pad_meta, "source_surfaces_defined", False)
         )
+        auto_name_notice = str(
+            getattr(selected_pad_meta, "auto_name_notice", "")
+        ).strip()
         config_map = st.session_state.get("wt_pad_configs", {})
         selected_cfg: dict[str, object] = dict(
             config_map.get(selected_id, _pad_config_defaults(selected_pad))
         )
+        resolved_nds_azimuth_deg = ptc_pad_state.resolved_pad_nds_azimuth_deg(
+            st.session_state,
+            pad=selected_pad,
+            nds_azimuth_deg=float(selected_cfg["nds_azimuth_deg"]),
+        )
+        selected_cfg["nds_azimuth_deg"] = resolved_nds_azimuth_deg
         previous_anchor_mode = str(
             selected_cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
         )
@@ -5771,24 +5818,52 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             "first_surface_y": f"wt_pad_cfg_first_surface_y_{selected_id}",
             "first_surface_z": f"wt_pad_cfg_first_surface_z_{selected_id}",
             "surface_anchor_center": f"wt_pad_cfg_surface_anchor_center_{selected_id}",
+            "allow_source_surface_edit": (
+                f"wt_pad_cfg_allow_source_surface_edit_{selected_id}"
+            ),
         }
         for field, widget_key in widget_keys.items():
-            if field == "surface_anchor_center":
+            if field in {"surface_anchor_center", "allow_source_surface_edit"}:
                 if widget_key not in st.session_state:
                     st.session_state[widget_key] = (
                         previous_anchor_mode == PAD_SURFACE_ANCHOR_CENTER
+                        if field == "surface_anchor_center"
+                        else bool(
+                            selected_cfg.get(
+                                ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY,
+                                False,
+                            )
+                        )
                     )
+                continue
+            if field == "nds_azimuth_deg":
+                st.session_state[widget_key] = float(selected_cfg[field])
                 continue
             if widget_key not in st.session_state:
                 st.session_state[widget_key] = float(selected_cfg[field])
 
+        if auto_name_notice:
+            st.info(auto_name_notice)
+        allow_source_surface_edit = False
         if source_surfaces_defined:
             st.info(
                 "Положения устьев были заданы в исходных данных. Для этого куста "
-                "координаты устьев ниже показаны справочно и не редактируются. "
-                "Фиксированный порядок можно задавать отдельно для anti-collision "
-                "оптимизации."
+                "координаты устьев ниже показаны справочно и по умолчанию не "
+                "редактируются. Фиксированный порядок можно задавать отдельно для "
+                "anti-collision оптимизации."
             )
+            allow_source_surface_edit = st.toggle(
+                "Разрешить редактирование позиций куста",
+                key=widget_keys["allow_source_surface_edit"],
+                help=(
+                    "Позволяет вручную переопределить исходно заданные устья этого "
+                    "куста. Изменения применятся после нажатия "
+                    "'Рассчитать устья скважин'."
+                ),
+            )
+        surface_controls_disabled = bool(
+            source_surfaces_defined and not allow_source_surface_edit
+        )
 
         anchor_center = st.toggle(
             "Координата куста = центр расстановки",
@@ -5797,7 +5872,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "Включено: введённые координаты устьев принимаются как центр куста. "
                 "Выключено: координаты устьев задают первую скважину на кусте."
             ),
-            disabled=source_surfaces_defined,
+            disabled=surface_controls_disabled,
         )
         anchor_mode = (
             PAD_SURFACE_ANCHOR_CENTER
@@ -5805,11 +5880,15 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             else PAD_SURFACE_ANCHOR_FIRST
         )
         if anchor_mode != previous_anchor_mode:
-            previous_auto_nds = estimate_pad_nds_azimuth_deg(
-                wells=selected_pad.wells,
-                surface_x=float(selected_pad.surface.x),
-                surface_y=float(selected_pad.surface.y),
-                surface_anchor_mode=previous_anchor_mode,
+            previous_auto_nds = ptc_pad_state.resolved_pad_nds_azimuth_deg(
+                st.session_state,
+                pad=selected_pad,
+                nds_azimuth_deg=estimate_pad_nds_azimuth_deg(
+                    wells=selected_pad.wells,
+                    surface_x=float(selected_pad.surface.x),
+                    surface_y=float(selected_pad.surface.y),
+                    surface_anchor_mode=previous_anchor_mode,
+                ),
             )
             current_nds = float(
                 st.session_state.get(
@@ -5819,11 +5898,15 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             )
             if abs(current_nds - previous_auto_nds) <= 1e-6:
                 st.session_state[widget_keys["nds_azimuth_deg"]] = float(
-                    estimate_pad_nds_azimuth_deg(
-                        wells=selected_pad.wells,
-                        surface_x=float(selected_pad.surface.x),
-                        surface_y=float(selected_pad.surface.y),
-                        surface_anchor_mode=anchor_mode,
+                    ptc_pad_state.resolved_pad_nds_azimuth_deg(
+                        st.session_state,
+                        pad=selected_pad,
+                        nds_azimuth_deg=estimate_pad_nds_azimuth_deg(
+                            wells=selected_pad.wells,
+                            surface_x=float(selected_pad.surface.x),
+                            surface_y=float(selected_pad.surface.y),
+                            surface_anchor_mode=anchor_mode,
+                        ),
                     )
                 )
 
@@ -5834,7 +5917,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             step=5.0,
             key=widget_keys["spacing_m"],
             help="Шаг по кусту между соседними устьями скважин.",
-            disabled=source_surfaces_defined,
+            disabled=surface_controls_disabled,
         )
         nds_azimuth_deg = p2.number_input(
             "НДС (азимут), deg",
@@ -5843,7 +5926,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             step=10.0,
             key=widget_keys["nds_azimuth_deg"],
             help="Направление движения станка по кусту.",
-            disabled=source_surfaces_defined,
+            disabled=surface_controls_disabled,
         )
         first_surface_x = p3.number_input(
             (
@@ -5853,7 +5936,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             ),
             step=10.0,
             key=widget_keys["first_surface_x"],
-            disabled=source_surfaces_defined,
+            disabled=surface_controls_disabled,
         )
         first_surface_y = p4.number_input(
             (
@@ -5863,7 +5946,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             ),
             step=10.0,
             key=widget_keys["first_surface_y"],
-            disabled=source_surfaces_defined,
+            disabled=surface_controls_disabled,
         )
         first_surface_z = p5.number_input(
             (
@@ -5873,7 +5956,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             ),
             step=10.0,
             key=widget_keys["first_surface_z"],
-            disabled=source_surfaces_defined,
+            disabled=surface_controls_disabled,
         )
 
         selected_cfg["spacing_m"] = float(max(spacing_m, 0.0))
@@ -5882,6 +5965,9 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         selected_cfg["first_surface_y"] = float(first_surface_y)
         selected_cfg["first_surface_z"] = float(first_surface_z)
         selected_cfg["surface_anchor_mode"] = anchor_mode
+        selected_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = bool(
+            allow_source_surface_edit
+        )
 
         fixed_slots = _pad_fixed_slots_from_config(
             pad=selected_pad,
@@ -5917,7 +6003,10 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 ),
                 "Скважина": st.column_config.SelectboxColumn(
                     "Скважина",
-                    options=sorted(str(well.name) for well in selected_pad.wells),
+                    options=sorted(
+                        (str(well.name) for well in selected_pad.wells),
+                        key=well_name_natural_sort_key,
+                    ),
                     required=False,
                     help="Скважина, которую нужно закрепить в этой позиции.",
                 ),
@@ -5950,6 +6039,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             pad=selected_pad,
             nds_azimuth_deg=float(selected_cfg["nds_azimuth_deg"]),
             fixed_slots=fixed_slots,
+            auto_order_mode=ptc_pad_state.pad_auto_order_mode(st.session_state),
         )
         angle_rad = np.deg2rad(float(selected_cfg["nds_azimuth_deg"]))
         ux = float(np.sin(angle_rad))
@@ -5970,7 +6060,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "Середина t1-t3 Y, м": float(well.midpoint_y),
                 "Опора S": _pad_anchor_mode_label(anchor_mode),
             }
-            if source_surfaces_defined:
+            if surface_controls_disabled:
                 source_record = next(
                     (item for item in base_records if str(item.name) == str(well.name)),
                     None,
@@ -6024,13 +6114,13 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "Обновляет координаты первой точки S для скважин по выбранным "
                 "параметрам кустов. Последующие расчеты будут использовать новые устья."
             ),
-            disabled=source_surfaces_defined,
+            disabled=surface_controls_disabled,
         )
         reset_clicked = a2.button(
             "Вернуть исходные устья",
             icon=":material/restart_alt:",
             width="stretch",
-            disabled=source_surfaces_defined,
+            disabled=surface_controls_disabled,
         )
 
         if apply_clicked:
@@ -6184,6 +6274,40 @@ def _build_batch_survey_welltrack(
     )
 
 
+def _build_batch_target_csv(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_target_csv(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs,
+        transform_xy_func=transform_xy_to_crs,
+        crs_display_suffix_func=get_crs_display_suffix,
+        survey_export_dataframe_func=survey_export_dataframe,
+    )
+
+
+def _build_batch_target_welltrack(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_target_welltrack(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+    )
+
+
 def _build_batch_survey_dev_7z(
     successes: list[SuccessfulWellPlan],
     *,
@@ -6201,6 +6325,21 @@ def _build_batch_survey_dev_7z(
     )
 
 
+def _build_batch_target_dev_7z(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_target_dev_7z(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+    )
+
+
 def _build_batch_survey_dev_file(
     successes: list[SuccessfulWellPlan],
     *,
@@ -6215,6 +6354,21 @@ def _build_batch_survey_dev_file(
         source_crs=source_crs,
         csv_export_crs_func=csv_export_crs,
         transform_stations_func=transform_stations_to_crs,
+    )
+
+
+def _build_batch_target_dev_file(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_target_dev_file(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
     )
 
 
@@ -6239,6 +6393,10 @@ def _render_batch_summary(
         build_batch_survey_welltrack_func=_build_batch_survey_welltrack,
         build_batch_survey_dev_7z_func=_build_batch_survey_dev_7z,
         build_batch_survey_dev_file_func=_build_batch_survey_dev_file,
+        build_batch_target_csv_func=_build_batch_target_csv,
+        build_batch_target_welltrack_func=_build_batch_target_welltrack,
+        build_batch_target_dev_7z_func=_build_batch_target_dev_7z,
+        build_batch_target_dev_file_func=_build_batch_target_dev_file,
         render_small_note_func=render_small_note,
     )
 

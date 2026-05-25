@@ -40,8 +40,9 @@ CRS_SELECTED_KEY = "trajectory_crs_selected"  # CSV target CRS, kept for compati
 CRS_SELECTBOX_KEY = "trajectory_crs_selectbox"
 CRS_AUTO_CONVERT_KEY = "trajectory_crs_auto_convert"
 
-# Default CRS as per user requirement: ГК_13N_42.
+# Default input CRS as per user requirement: ГК_13N_42.
 DEFAULT_CRS = CoordinateSystem.PULKOVO_1942_GK_13N
+DEFAULT_CSV_EXPORT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
 
 # Available input CRS options. Input coordinates are treated as projected
 # orthogonal meter coordinates; the selected value is source CRS metadata for
@@ -91,7 +92,7 @@ CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
 
 # Pre-compute default index to avoid hardcoded magic number
 _DEFAULT_CRS_INDEX = next(
-    (i for i, (_, c) in enumerate(CSV_CRS_OPTIONS) if c == DEFAULT_CRS),
+    (i for i, (_, c) in enumerate(CSV_CRS_OPTIONS) if c == DEFAULT_CSV_EXPORT_CRS),
     0,
 )
 _DEFAULT_INPUT_CRS_INDEX = next(
@@ -127,16 +128,19 @@ def render_crs_sidebar() -> CoordinateSystem:
         if CRS_INPUT_SELECTED_KEY not in st.session_state:
             st.session_state[CRS_INPUT_SELECTED_KEY] = DEFAULT_CRS
         if CRS_SELECTED_KEY not in st.session_state:
-            st.session_state[CRS_SELECTED_KEY] = DEFAULT_CRS
+            st.session_state[CRS_SELECTED_KEY] = DEFAULT_CSV_EXPORT_CRS
 
         current_input_crs = st.session_state.get(CRS_INPUT_SELECTED_KEY, DEFAULT_CRS)
         if current_input_crs not in INPUT_CRS_LABEL_BY_VALUE:
             current_input_crs = DEFAULT_CRS
             st.session_state[CRS_INPUT_SELECTED_KEY] = DEFAULT_CRS
-        current_csv_crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
+        current_csv_crs = st.session_state.get(
+            CRS_SELECTED_KEY,
+            DEFAULT_CSV_EXPORT_CRS,
+        )
         if current_csv_crs not in CRS_LABEL_BY_VALUE:
-            current_csv_crs = DEFAULT_CRS
-            st.session_state[CRS_SELECTED_KEY] = DEFAULT_CRS
+            current_csv_crs = DEFAULT_CSV_EXPORT_CRS
+            st.session_state[CRS_SELECTED_KEY] = DEFAULT_CSV_EXPORT_CRS
 
         input_option_labels = [label for label, _ in INPUT_CRS_OPTIONS]
         if st.session_state.get(CRS_INPUT_SELECTBOX_KEY) not in input_option_labels:
@@ -181,7 +185,7 @@ def render_crs_sidebar() -> CoordinateSystem:
         # Find the CRS enum for selected CSV label and store separately.
         selected_csv_crs = next(
             (crs for label, crs in CSV_CRS_OPTIONS if label == selected_csv_label),
-            DEFAULT_CRS,  # Default fallback
+            DEFAULT_CSV_EXPORT_CRS,
         )
         st.session_state[CRS_SELECTED_KEY] = selected_csv_crs
 
@@ -238,11 +242,11 @@ def get_selected_crs() -> CoordinateSystem:
     """Get currently selected CSV output coordinate system from session state.
 
     Returns:
-        Selected CSV coordinate system (defaults to ГК_13N_42)
+        Selected CSV coordinate system (defaults to WGS84 UTM 43N)
     """
-    crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CRS)
+    crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CSV_EXPORT_CRS)
     if crs not in CRS_LABEL_BY_VALUE:
-        return DEFAULT_CRS
+        return DEFAULT_CSV_EXPORT_CRS
     return crs
 
 
@@ -723,6 +727,7 @@ __all__ = [
     "apply_crs_to_well_view",
     "get_crs_display_suffix",
     "DEFAULT_CRS",
+    "DEFAULT_CSV_EXPORT_CRS",
     "INPUT_CRS_OPTIONS",
     "CSV_CRS_OPTIONS",
     "CRS_OPTIONS",

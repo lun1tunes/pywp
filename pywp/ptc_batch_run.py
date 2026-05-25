@@ -353,7 +353,9 @@ def run_batch_if_clicked(
     selected_execution_order = hooks.selected_execution_order(selected_names)
     pending_edit_names_before_run = set(hooks.pending_edit_target_names())
     records_for_run = list(records)
-    pad_layout_active = bool(str(state.get("wt_pad_last_applied_at", "")))
+    pad_layout_active = bool(str(state.get("wt_pad_last_applied_at", ""))) and not bool(
+        state.get("wt_pad_auto_applied_on_import", False)
+    )
     if pad_layout_active:
         base_records = state.get("wt_records_original")
         if base_records:

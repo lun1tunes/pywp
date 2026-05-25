@@ -8,7 +8,7 @@ import pytest
 
 from pywp import ptc_batch_results
 from pywp.coordinate_systems import CoordinateSystem
-from pywp.eclipse_welltrack import parse_welltrack_text
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord, parse_welltrack_text
 from pywp.models import Point3D, TrajectoryConfig
 from pywp.reference_trajectories import parse_reference_trajectory_dev_text
 from pywp.welltrack_batch import SuccessfulWellPlan
@@ -44,6 +44,22 @@ def _success(
         azimuth_deg=0.0,
         md_t1_m=0.0,
         config=TrajectoryConfig(),
+    )
+
+
+def _record(
+    name: str = "WELL-01",
+    *,
+    points: tuple[WelltrackPoint, ...] | None = None,
+) -> WelltrackRecord:
+    return WelltrackRecord(
+        name=name,
+        points=points
+        or (
+            WelltrackPoint(x=10.0, y=20.0, z=0.0, md=1.0),
+            WelltrackPoint(x=110.0, y=220.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=210.0, y=420.0, z=1100.0, md=3.0),
+        ),
     )
 
 
@@ -99,6 +115,76 @@ def test_build_batch_survey_csv_returns_empty_payload_without_station_frames() -
     )
     assert ptc_batch_results.build_batch_survey_dev_7z([_success()]) == b""
     assert ptc_batch_results.build_batch_survey_dev_file([_success()]) == b""
+
+
+def test_build_batch_target_csv_includes_input_and_output_coordinate_blocks() -> None:
+    def fake_transform_xy(
+        x_value: float,
+        y_value: float,
+        _source_crs: CoordinateSystem,
+        _target_crs: CoordinateSystem,
+    ) -> tuple[float, float]:
+        return x_value + 1000.0, y_value + 2000.0
+
+    payload = ptc_batch_results.build_batch_target_csv(
+        [_record()],
+        target_crs=CoordinateSystem.WGS84,
+        auto_convert=True,
+        source_crs=CoordinateSystem.PULKOVO_1942_GK_13N,
+        transform_xy_func=fake_transform_xy,
+    )
+    result = pd.read_csv(BytesIO(payload), sep="\t")
+
+    assert list(result.columns[:3]) == ["well_name", "point_name", "point_md_m"]
+    assert "X_ГК_13N_42_m" in result.columns
+    assert "Y_ГК_13N_42_m" in result.columns
+    assert "Z_input_m" in result.columns
+    assert "X_WGS_deg" in result.columns
+    assert "Y_WGS_deg" in result.columns
+    assert "Z_output_m" in result.columns
+    assert result["X_ГК_13N_42_m"].iloc[0] == pytest.approx(10.0)
+    assert result["Y_ГК_13N_42_m"].iloc[0] == pytest.approx(20.0)
+    assert result["X_WGS_deg"].iloc[0] == pytest.approx(1010.0)
+    assert result["Y_WGS_deg"].iloc[0] == pytest.approx(2020.0)
+
+
+def test_build_batch_target_csv_keeps_single_coordinate_block_when_not_converting() -> None:
+    payload = ptc_batch_results.build_batch_target_csv(
+        [_record()],
+        target_crs=CoordinateSystem.PULKOVO_1942_GK_13N,
+        auto_convert=True,
+        source_crs=CoordinateSystem.PULKOVO_1942_GK_13N,
+    )
+    result = pd.read_csv(BytesIO(payload), sep="\t")
+
+    assert list(result.columns) == [
+        "well_name",
+        "point_name",
+        "point_md_m",
+        "X_m",
+        "Y_m",
+        "Z_m",
+    ]
+
+
+def test_build_batch_target_welltrack_exports_original_target_points() -> None:
+    payload = ptc_batch_results.build_batch_target_welltrack([_record(name="WELL-A")])
+    text = payload.decode("utf-8")
+    records = parse_welltrack_text(text)
+
+    assert "WELLTRACK 'WELL-A'" in text
+    assert "10.000000 20.000000 0.000000 1.000000" in text
+    assert len(records) == 1
+    assert records[0].name == "WELL-A"
+    assert [point.md for point in records[0].points] == [1.0, 2.0, 3.0]
+
+
+def test_build_batch_target_dev_file_returns_target_dev_payload() -> None:
+    payload = ptc_batch_results.build_batch_target_dev_file([_record(name="WELL-A")])
+    text = payload.decode("utf-8")
+
+    assert text.startswith("# TARGET POINTS FROM PYWP")
+    assert "# TRAJECTORY TYPE:          TARGET POINTS" in text
 
 
 def test_build_batch_survey_welltrack_exports_calculated_station_rows() -> None:

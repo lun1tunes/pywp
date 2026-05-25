@@ -6,8 +6,11 @@ from pydantic import BaseModel
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.well_pad import (
+    PAD_WELL_AUTO_ORDER_PROJECTION,
+    PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC,
     PAD_SURFACE_ANCHOR_CENTER,
     PadLayoutPlan,
+    aligned_pad_nds_azimuth_deg,
     apply_pad_layout,
     detect_well_pads,
     estimate_pad_nds_azimuth_deg,
@@ -105,7 +108,7 @@ def test_detect_well_pads_uses_first_multi_horizontal_interval_for_midpoint() ->
     assert well.midpoint_z == 1000.0
 
 
-def test_ordered_pad_wells_uses_projection_along_nds() -> None:
+def test_ordered_pad_wells_defaults_to_natural_name_order() -> None:
     records = [
         _record(
             "W1",
@@ -147,10 +150,146 @@ def test_ordered_pad_wells_uses_projection_along_nds() -> None:
     pads = detect_well_pads(records)
     assert len(pads) == 1
     ordered = ordered_pad_wells(pad=pads[0], nds_azimuth_deg=90.0)
+    assert [well.name for well in ordered] == ["W1", "W2", "W3"]
+
+
+def test_ordered_pad_wells_supports_projection_mode() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W3",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=200.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+    assert len(pads) == 1
+    ordered = ordered_pad_wells(
+        pad=pads[0],
+        nds_azimuth_deg=90.0,
+        auto_order_mode=PAD_WELL_AUTO_ORDER_PROJECTION,
+    )
     assert [well.name for well in ordered] == ["W1", "W3", "W2"]
 
 
-def test_ordered_pad_wells_honors_fixed_slots_and_fills_remaining_by_projection() -> None:
+def test_ordered_pad_wells_supports_target_depth_auto_order() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2400.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2500.0,
+        ),
+        _record(
+            "W10",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=200.0,
+            t1y=0.0,
+            t1z=2600.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2700.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+
+    ordered = ordered_pad_wells(
+        pad=pads[0],
+        nds_azimuth_deg=90.0,
+        auto_order_mode=PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC,
+    )
+
+    assert [well.name for well in ordered] == ["W10", "W2", "W1"]
+
+
+def test_aligned_pad_nds_azimuth_deg_flips_axis_to_match_name_order() -> None:
+    records = [
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+
+    aligned = aligned_pad_nds_azimuth_deg(
+        pads[0],
+        nds_azimuth_deg=90.0,
+    )
+
+    assert aligned == 270.0
+
+
+def test_ordered_pad_wells_honors_fixed_slots_and_fills_remaining_by_auto_order() -> None:
     records = [
         _record(
             "W1",

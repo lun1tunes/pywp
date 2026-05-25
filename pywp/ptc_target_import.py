@@ -168,7 +168,7 @@ def normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataFr
     for column in _SOURCE_TABLE_COLUMNS:
         if column not in normalized_df.columns:
             normalized_df[column] = "" if column in {"Wellname", "Point"} else np.nan
-    return normalized_df.loc[:, list(_SOURCE_TABLE_COLUMNS)]
+    return normalized_df.loc[:, list(_SOURCE_TABLE_COLUMNS)].reset_index(drop=True)
 
 
 def _normalize_source_table_point_value(value: object) -> object:

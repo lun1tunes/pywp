@@ -194,7 +194,9 @@ def _pilot_sidetrack_success_pair() -> tuple[SuccessfulWellPlan, SuccessfulWellP
     return sidetrack, pilot
 
 
-def test_anti_collision_scan_samples_are_decoupled_from_display_ellipses() -> None:
+def test_anti_collision_display_geometry_follows_dense_scan_sampling_when_requested() -> (
+    None
+):
     model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=5)
 
     well = build_anti_collision_well(
@@ -212,10 +214,11 @@ def test_anti_collision_scan_samples_are_decoupled_from_display_ellipses() -> No
     )
 
     sample_md = np.asarray([sample.md_m for sample in well.samples], dtype=float)
+    overlay_md = np.asarray([sample.md_m for sample in well.overlay.samples], dtype=float)
 
-    assert len(well.overlay.samples) <= 5
-    assert len(well.samples) > len(well.overlay.samples)
     assert float(np.max(np.diff(sample_md))) <= 10.0 + 1e-6
+    assert len(well.overlay.samples) > 100
+    assert overlay_md[-1] == pytest.approx(2000.0)
 
 
 def test_overlap_geometry_uses_dense_scan_samples_not_display_indices() -> None:
@@ -695,7 +698,7 @@ def test_success_analysis_uses_definitive_scan_step_for_report_geometry() -> Non
     )
 
     assert float(np.max(np.diff(sample_md))) <= 10.0 + 1e-6
-    assert len(analysis.wells[0].overlay.samples) <= 5
+    assert len(analysis.wells[0].overlay.samples) > 100
 
 
 def test_reference_actual_and_approved_wells_use_station_history_iscwsa_ellipses() -> (

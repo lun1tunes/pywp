@@ -65,6 +65,45 @@ def _prepositioned_records() -> list[WelltrackRecord]:
     ]
 
 
+def _named_records(
+    names: list[str],
+    *,
+    cluster_offsets: list[float] | None = None,
+    target_depths: list[tuple[float, float]] | None = None,
+) -> list[WelltrackRecord]:
+    offsets = (
+        list(cluster_offsets)
+        if cluster_offsets is not None
+        else [0.0 for _ in names]
+    )
+    depths = (
+        list(target_depths)
+        if target_depths is not None
+        else [(2400.0, 2500.0) for _ in names]
+    )
+    return [
+        WelltrackRecord(
+            name=name,
+            points=(
+                WelltrackPoint(x=float(offset), y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(
+                    x=float(offset) + 600.0,
+                    y=800.0,
+                    z=float(depth_pair[0]),
+                    md=2400.0,
+                ),
+                WelltrackPoint(
+                    x=float(offset) + 1500.0,
+                    y=2000.0,
+                    z=float(depth_pair[1]),
+                    md=3500.0,
+                ),
+            ),
+        )
+        for name, offset, depth_pair in zip(names, offsets, depths, strict=True)
+    ]
+
+
 def test_pad_config_defaults_to_center_anchor_mode() -> None:
     pads = detect_well_pads(_records())
 
@@ -96,6 +135,45 @@ def test_detect_ui_pads_marks_source_defined_surfaces() -> None:
     assert [len(pad.wells) for pad in pads] == [3]
     assert bool(metadata[str(pads[0].pad_id)].source_surfaces_defined) is True
     assert metadata[str(pads[0].pad_id)].source_surface_count == 3
+
+
+def test_detect_ui_pads_uses_common_numeric_prefix_for_auto_name() -> None:
+    pads, _ = ptc_pad_state.detect_ui_pads(
+        _named_records(["9401", "9402", "9403"])
+    )
+
+    assert [str(pad.pad_id) for pad in pads] == ["Pad 94"]
+
+
+def test_detect_ui_pads_uses_most_common_reduced_component_when_needed() -> None:
+    pads, _ = ptc_pad_state.detect_ui_pads(
+        _named_records(["8001", "8002", "7412"])
+    )
+
+    assert [str(pad.pad_id) for pad in pads] == ["Pad 80"]
+
+
+def test_detect_ui_pads_falls_back_to_template_name_without_shared_component() -> None:
+    pads, metadata = ptc_pad_state.detect_ui_pads(
+        _named_records(["8001", "7412", "9305"])
+    )
+
+    assert [str(pad.pad_id) for pad in pads] == ["PAD-01"]
+    assert metadata["PAD-01"].auto_name_notice == (
+        'Все номера скважин на кусте отличаются, было принято шаблонное '
+        'название куста "PAD-01".'
+    )
+
+
+def test_detect_ui_pads_suffixes_duplicate_auto_names() -> None:
+    pads, _ = ptc_pad_state.detect_ui_pads(
+        _named_records(
+            ["7701", "7702", "7711", "7712"],
+            cluster_offsets=[0.0, 0.0, 5000.0, 5000.0],
+        )
+    )
+
+    assert [str(pad.pad_id) for pad in pads] == ["Pad 77", "Pad 77A"]
 
 
 def test_source_defined_pad_preserves_fixed_slots() -> None:
@@ -136,6 +214,22 @@ def test_build_pad_plan_map_skips_source_defined_surface_pads() -> None:
     assert ptc_pad_state.build_pad_plan_map(session_state, pads) == {}
 
 
+def test_build_pad_plan_map_includes_source_defined_pad_when_editing_enabled() -> None:
+    session_state: dict[str, object] = {}
+    pads = ptc_pad_state.ensure_pad_configs(
+        session_state,
+        base_records=_prepositioned_records(),
+    )
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+
+    plan_map = ptc_pad_state.build_pad_plan_map(session_state, pads)
+
+    assert pad_id in plan_map
+
+
 def test_pad_membership_honors_fixed_slot_order() -> None:
     session_state: dict[str, object] = {}
     records = _records()
@@ -152,6 +246,40 @@ def test_pad_membership_honors_fixed_slot_order() -> None:
     )
 
     assert well_names_by_pad_id[pad_id][:2] == ("WELL-C", "WELL-A")
+
+
+def test_pad_membership_defaults_to_natural_name_auto_order() -> None:
+    session_state: dict[str, object] = {}
+    records = _named_records(["well_10", "well_02", "well_01"])
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(session_state, records)
+
+    assert well_names_by_pad_id[pad_id] == ("well_01", "well_02", "well_10")
+
+
+def test_pad_membership_can_auto_order_all_pads_by_target_depth() -> None:
+    session_state: dict[str, object] = {
+        "wt_pad_auto_order_by_target_depth": True
+    }
+    records = _named_records(
+        ["A1", "A2", "B1", "B2"],
+        cluster_offsets=[0.0, 0.0, 5000.0, 5000.0],
+        target_depths=[
+            (2200.0, 2300.0),
+            (2600.0, 2700.0),
+            (2100.0, 2200.0),
+            (2500.0, 2600.0),
+        ],
+    )
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_ids = [str(pad.pad_id) for pad in pads]
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(session_state, records)
+
+    assert well_names_by_pad_id[pad_ids[0]] == ("A2", "A1")
+    assert well_names_by_pad_id[pad_ids[1]] == ("B2", "B1")
 
 
 def test_fixed_slots_editor_normalizes_dataframe_rows() -> None:

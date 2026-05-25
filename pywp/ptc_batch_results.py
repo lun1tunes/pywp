@@ -11,13 +11,17 @@ from tempfile import TemporaryDirectory
 import pandas as pd
 import py7zr
 
+from pywp import ptc_target_records
 from pywp.coordinate_integration import (
     DEFAULT_CRS,
     csv_export_crs,
     get_crs_display_suffix,
     transform_stations_to_crs,
+    transform_xy_to_crs,
 )
 from pywp.coordinate_systems import CoordinateSystem
+from pywp.eclipse_welltrack import WelltrackRecord
+from pywp.mcm import dogleg_angle_rad
 from pywp.ui_utils import dls_to_pi
 from pywp.ui_well_panels import survey_export_dataframe
 from pywp.welltrack_batch import SuccessfulWellPlan
@@ -32,6 +36,10 @@ __all__ = [
     "build_batch_survey_dev_7z",
     "build_batch_survey_dev_file",
     "build_batch_survey_dev_zip",
+    "build_batch_target_csv",
+    "build_batch_target_dev_7z",
+    "build_batch_target_dev_file",
+    "build_batch_target_welltrack",
     "dev_export_file_name",
     "build_batch_survey_welltrack",
     "find_selected_success",
@@ -66,6 +74,10 @@ BATCH_SUMMARY_DISPLAY_ORDER: tuple[str, ...] = (
 SurveyExportFrameFunc = Callable[..., pd.DataFrame]
 DlsToPiFunc = Callable[[object], object]
 _SURVEY_EXPORT_REQUIRED_COLUMNS = ("MD_m", "X_m", "Y_m", "Z_m")
+TransformXyFunc = Callable[
+    [float, float, CoordinateSystem, CoordinateSystem],
+    tuple[float, float],
+]
 
 
 @dataclass(frozen=True)
@@ -134,6 +146,101 @@ def build_batch_survey_csv(
     return combined.to_csv(index=False, sep="\t").encode("utf-8")
 
 
+def build_batch_target_csv(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+    csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
+    transform_xy_func: TransformXyFunc = transform_xy_to_crs,
+    crs_display_suffix_func: Callable[[CoordinateSystem], str] = get_crs_display_suffix,
+    survey_export_dataframe_func: SurveyExportFrameFunc = survey_export_dataframe,
+) -> bytes:
+    prepared = _iter_prepared_target_rows(records)
+    if not prepared:
+        return b""
+
+    export_context = _survey_export_context(
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+    )
+    frames: list[pd.DataFrame] = []
+    for record, rows in prepared:
+        identity_df = pd.DataFrame(
+            {
+                "well_name": [str(record.name)] * len(rows.index),
+                "point_name": rows["point_name"].astype(str),
+                "point_md_m": rows["point_md_m"].astype(float),
+            }
+        )
+        if export_context.should_transform:
+            source_block = _target_coordinate_block(
+                rows[["X_m", "Y_m", "Z_m"]],
+                xy_label_suffix=crs_display_suffix_func(source_crs),
+                xy_unit="deg" if source_crs.is_geographic() else "м",
+                z_column_name="Z_input_m",
+                survey_export_dataframe_func=survey_export_dataframe_func,
+            )
+            export_rows = rows.copy()
+            transformed_xy = [
+                transform_xy_func(
+                    float(x_value),
+                    float(y_value),
+                    source_crs,
+                    target_crs,
+                )
+                for x_value, y_value in zip(
+                    export_rows["X_m"],
+                    export_rows["Y_m"],
+                    strict=False,
+                )
+            ]
+            export_rows["X_m"] = [point[0] for point in transformed_xy]
+            export_rows["Y_m"] = [point[1] for point in transformed_xy]
+            export_block = _target_coordinate_block(
+                export_rows[["X_m", "Y_m", "Z_m"]],
+                xy_label_suffix=crs_display_suffix_func(export_context.export_crs),
+                xy_unit="deg" if export_context.export_crs.is_geographic() else "м",
+                z_column_name="Z_output_m",
+                survey_export_dataframe_func=survey_export_dataframe_func,
+            )
+            frames.append(
+                pd.concat(
+                    [
+                        identity_df.reset_index(drop=True),
+                        source_block.reset_index(drop=True),
+                        export_block.reset_index(drop=True),
+                    ],
+                    axis=1,
+                )
+            )
+            continue
+
+        source_block = _target_coordinate_block(
+            rows[["X_m", "Y_m", "Z_m"]],
+            xy_label_suffix="",
+            xy_unit="deg" if source_crs.is_geographic() else "м",
+            z_column_name="Z_m",
+            survey_export_dataframe_func=survey_export_dataframe_func,
+        )
+        frames.append(
+            pd.concat(
+                [
+                    identity_df.reset_index(drop=True),
+                    source_block.reset_index(drop=True),
+                ],
+                axis=1,
+            )
+        )
+    if not frames:
+        return b""
+    combined = pd.concat(frames, ignore_index=True)
+    return combined.to_csv(index=False, sep="\t").encode("utf-8")
+
+
 def build_batch_survey_welltrack(
     successes: list[SuccessfulWellPlan],
     *,
@@ -161,6 +268,35 @@ def build_batch_survey_welltrack(
                         _format_export_number(row["Y_m"]),
                         _format_export_number(row["Z_m"]),
                         _format_export_number(row["MD_m"]),
+                    ]
+                )
+            )
+        lines.append("/")
+        blocks.append("\n".join(lines))
+    if not blocks:
+        return b""
+    return ("\n\n".join(blocks) + "\n").encode("utf-8")
+
+
+def build_batch_target_welltrack(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    del target_crs, auto_convert, source_crs
+    blocks: list[str] = []
+    for record, rows in _iter_prepared_target_rows(records):
+        lines = [f"WELLTRACK {_welltrack_name_literal(str(record.name))}"]
+        for _, row in rows.iterrows():
+            lines.append(
+                " ".join(
+                    [
+                        _format_export_number(row["X_m"]),
+                        _format_export_number(row["Y_m"]),
+                        _format_export_number(row["Z_m"]),
+                        _format_export_number(row["point_md_m"]),
                     ]
                 )
             )
@@ -217,6 +353,44 @@ def build_batch_survey_dev_7z(
     return buffer.getvalue()
 
 
+def build_batch_target_dev_7z(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    del target_crs, auto_convert, source_crs
+    buffer = BytesIO()
+    used_names: set[str] = set()
+    file_count = 0
+    with TemporaryDirectory() as temp_dir:
+        temp_root = Path(temp_dir)
+        with py7zr.SevenZipFile(buffer, mode="w") as archive:
+            for index, (record, rows) in enumerate(
+                _iter_prepared_target_rows(records),
+                start=1,
+            ):
+                if rows.empty:
+                    continue
+                file_name = _unique_export_file_name(
+                    str(record.name),
+                    index=index,
+                    extension=".dev",
+                    used_names=used_names,
+                )
+                source_path = temp_root / file_name
+                source_path.write_text(
+                    _target_dev_export_text(record=record, rows=rows),
+                    encoding="utf-8",
+                )
+                archive.write(source_path, file_name)
+                file_count += 1
+    if file_count <= 0:
+        return b""
+    return buffer.getvalue()
+
+
 def build_batch_survey_dev_zip(
     successes: list[SuccessfulWellPlan],
     *,
@@ -259,6 +433,23 @@ def build_batch_survey_dev_file(
     if len(stations.index) < 2:
         return b""
     return _dev_export_text(success=success, stations=stations).encode("utf-8")
+
+
+def build_batch_target_dev_file(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    del target_crs, auto_convert, source_crs
+    prepared = _iter_prepared_target_rows(records)
+    if len(prepared) != 1:
+        return b""
+    record, rows = prepared[0]
+    if rows.empty:
+        return b""
+    return _target_dev_export_text(record=record, rows=rows).encode("utf-8")
 
 
 def dev_export_file_name(name: str, *, fallback_index: int = 1) -> str:
@@ -312,6 +503,34 @@ def _iter_prepared_success_stations(
     return prepared
 
 
+def _iter_prepared_target_rows(
+    records: list[WelltrackRecord],
+) -> list[tuple[WelltrackRecord, pd.DataFrame]]:
+    prepared: list[tuple[WelltrackRecord, pd.DataFrame]] = []
+    for record in records:
+        rows = ptc_target_records.raw_records_dataframe([record]).rename(
+            columns={
+                "Скважина": "well_name",
+                "Точка": "point_name",
+                "X, м": "X_m",
+                "Y, м": "Y_m",
+                "Z, м": "Z_m",
+            }
+        )
+        if rows.empty:
+            continue
+        rows.insert(
+            2,
+            "point_md_m",
+            [float(point.md) for point in tuple(record.points)],
+        )
+        rows = _sanitize_target_rows(rows)
+        if rows.empty:
+            continue
+        prepared.append((record, rows))
+    return prepared
+
+
 def _sanitize_export_stations(stations: pd.DataFrame) -> pd.DataFrame:
     result = stations.copy()
     for column in _SURVEY_EXPORT_REQUIRED_COLUMNS:
@@ -324,6 +543,22 @@ def _sanitize_export_stations(stations: pd.DataFrame) -> pd.DataFrame:
         return result
     result = result.sort_values("MD_m", kind="mergesort")
     result = result.drop_duplicates(subset=["MD_m"], keep="first")
+    return result.reset_index(drop=True)
+
+
+def _sanitize_target_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    result = rows.copy()
+    required_columns = ("point_md_m", "X_m", "Y_m", "Z_m")
+    for column in required_columns:
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+    finite_mask = pd.Series(True, index=result.index)
+    for column in required_columns:
+        finite_mask &= result[column].map(math.isfinite)
+    result = result.loc[finite_mask].copy()
+    if result.empty:
+        return result
+    result["well_name"] = result["well_name"].astype(str)
+    result["point_name"] = result["point_name"].astype(str)
     return result.reset_index(drop=True)
 
 
@@ -347,6 +582,22 @@ def _survey_export_context(
         should_transform=should_transform,
         should_label_export_crs=bool(auto_convert) and target_crs != source_crs,
     )
+
+
+def _target_coordinate_block(
+    rows: pd.DataFrame,
+    *,
+    xy_label_suffix: str,
+    xy_unit: str,
+    z_column_name: str,
+    survey_export_dataframe_func: SurveyExportFrameFunc,
+) -> pd.DataFrame:
+    block = survey_export_dataframe_func(
+        rows.copy(),
+        xy_label_suffix=xy_label_suffix,
+        xy_unit=xy_unit,
+    )
+    return block.rename(columns={"Z_m": z_column_name})
 
 
 def _dev_export_text(
@@ -397,6 +648,101 @@ def _dev_export_text(
                 ]
             )
         )
+    return "\n".join(lines) + "\n"
+
+
+def _target_dev_export_text(
+    *,
+    record: WelltrackRecord,
+    rows: pd.DataFrame,
+) -> str:
+    if rows.empty:
+        return ""
+    surface_x = float(rows["X_m"].iloc[0])
+    surface_y = float(rows["Y_m"].iloc[0])
+    surface_z = float(rows["Z_m"].iloc[0])
+    lines = [
+        "# TARGET POINTS FROM PYWP",
+        f"# WELL NAME:                {record.name}",
+        "# TRAJECTORY TYPE:          TARGET POINTS",
+        "# MD IS GENERATED AS CUMULATIVE STRAIGHT-LINE DISTANCE THROUGH TARGETS",
+        f"# START X-COORDINATE:       {_format_export_number(surface_x)}",
+        f"# START Y-COORDINATE:       {_format_export_number(surface_y)}",
+        "# MD AND TVD ARE REFERENCED (=0) AT THE FIRST TARGET POINT",
+        "# ANGLES ARE GIVEN IN DEGREES",
+        "#==============================================================================================================================================",
+        "    MD            X            Y            Z           TVD           DX           DY         AZIM_TN        INCL        DLS        AZIM_GN",
+        "#==============================================================================================================================================",
+    ]
+
+    cumulative_md = 0.0
+    prev_inc_deg = 0.0
+    prev_azi_deg = 0.0
+    prev_x = surface_x
+    prev_y = surface_y
+    prev_z = surface_z
+    for index, row in rows.iterrows():
+        x_value = _station_float(row, "X_m")
+        y_value = _station_float(row, "Y_m")
+        z_value = _station_float(row, "Z_m")
+        if int(index) == 0:
+            inc_deg = 0.0
+            azi_deg = 0.0
+            dls_deg_per_30m = 0.0
+        else:
+            dx = x_value - prev_x
+            dy = y_value - prev_y
+            dz = z_value - prev_z
+            segment_length_m = math.sqrt(dx * dx + dy * dy + dz * dz)
+            cumulative_md += segment_length_m
+            horizontal_offset_m = math.hypot(dx, dy)
+            inc_deg = (
+                math.degrees(math.atan2(horizontal_offset_m, dz))
+                if segment_length_m > 1e-9
+                else prev_inc_deg
+            )
+            azi_deg = (
+                math.degrees(math.atan2(dx, dy)) % 360.0
+                if horizontal_offset_m > 1e-9
+                else prev_azi_deg
+            )
+            dogleg_deg = math.degrees(
+                float(
+                    dogleg_angle_rad(
+                        prev_inc_deg,
+                        prev_azi_deg,
+                        inc_deg,
+                        azi_deg,
+                    )
+                )
+            )
+            dls_deg_per_30m = (
+                dogleg_deg * 30.0 / segment_length_m
+                if segment_length_m > 1e-9
+                else 0.0
+            )
+        lines.append(
+            " ".join(
+                [
+                    _format_export_number(cumulative_md),
+                    _format_export_number(x_value),
+                    _format_export_number(y_value),
+                    _format_export_number(-z_value),
+                    _format_export_number(z_value - surface_z),
+                    _format_export_number(x_value - surface_x),
+                    _format_export_number(y_value - surface_y),
+                    _format_export_number(azi_deg),
+                    _format_export_number(inc_deg),
+                    _format_export_number(dls_deg_per_30m),
+                    _format_export_number(azi_deg),
+                ]
+            )
+        )
+        prev_x = x_value
+        prev_y = y_value
+        prev_z = z_value
+        prev_inc_deg = inc_deg
+        prev_azi_deg = azi_deg
     return "\n".join(lines) + "\n"
 
 

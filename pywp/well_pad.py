@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Iterable
 
 import numpy as np
@@ -18,6 +19,12 @@ _EPS = SMALL
 _PCA_AXIS_DOMINANCE_RATIO_MIN = 1.05
 PAD_SURFACE_ANCHOR_FIRST = "first"
 PAD_SURFACE_ANCHOR_CENTER = "center"
+PAD_WELL_AUTO_ORDER_NAME = "name"
+PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC = "target_depth_desc"
+PAD_WELL_AUTO_ORDER_PROJECTION = "projection"
+DEFAULT_PAD_WELL_AUTO_ORDER_MODE = PAD_WELL_AUTO_ORDER_NAME
+
+_WELL_NAME_NATURAL_SPLIT_RE = re.compile(r"(\d+)")
 
 
 class PadWell(FrozenModel):
@@ -44,6 +51,7 @@ class PadLayoutPlan(FrozenModel):
     nds_azimuth_deg: float
     surface_anchor_mode: str = PAD_SURFACE_ANCHOR_FIRST
     fixed_slots: tuple[tuple[int, str], ...] = ()
+    auto_order_mode: str = DEFAULT_PAD_WELL_AUTO_ORDER_MODE
 
 
 def detect_well_pads(
@@ -220,14 +228,30 @@ def ordered_pad_wells(
     *,
     nds_azimuth_deg: float,
     fixed_slots: Iterable[tuple[int, str]] | None = None,
+    auto_order_mode: str = DEFAULT_PAD_WELL_AUTO_ORDER_MODE,
 ) -> list[PadWell]:
     ux, uy = _azimuth_to_unit_xy(azimuth_deg=nds_azimuth_deg)
-    sortable: list[tuple[float, str, PadWell]] = []
+    sortable: list[tuple[float, tuple[tuple[int, str | int], ...], str, PadWell]] = []
     for well in pad.wells:
         projection = float(well.midpoint_x * ux + well.midpoint_y * uy)
-        sortable.append((projection, str(well.name), well))
-    sortable.sort(key=lambda item: (item[0], item[1]))
-    base_order = [item[2] for item in sortable]
+        well_name = str(well.name)
+        sortable.append(
+            (
+                projection,
+                well_name_natural_sort_key(well_name),
+                well_name,
+                well,
+            )
+        )
+    if str(auto_order_mode) == PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC:
+        sortable.sort(
+            key=lambda item: (-float(item[3].midpoint_z), item[1], item[2])
+        )
+    elif str(auto_order_mode) == PAD_WELL_AUTO_ORDER_PROJECTION:
+        sortable.sort(key=lambda item: (item[0], item[1], item[2]))
+    else:
+        sortable.sort(key=lambda item: (item[1], item[2]))
+    base_order = [item[3] for item in sortable]
     normalized_fixed_slots = _normalized_fixed_slots(
         wells=pad.wells,
         fixed_slots=fixed_slots,
@@ -247,6 +271,48 @@ def ordered_pad_wells(
         if item is None:
             ordered[index] = next(remaining_iter)
     return [well for well in ordered if well is not None]
+
+
+def aligned_pad_nds_azimuth_deg(
+    pad: WellPad,
+    *,
+    nds_azimuth_deg: float,
+    auto_order_mode: str = DEFAULT_PAD_WELL_AUTO_ORDER_MODE,
+) -> float:
+    normalized_azimuth = float(nds_azimuth_deg) % 360.0
+    if (
+        str(auto_order_mode) == PAD_WELL_AUTO_ORDER_PROJECTION
+        or len(pad.wells) < 2
+    ):
+        return normalized_azimuth
+    ordered = ordered_pad_wells(
+        pad=pad,
+        nds_azimuth_deg=normalized_azimuth,
+        auto_order_mode=auto_order_mode,
+    )
+    ux, uy = _azimuth_to_unit_xy(azimuth_deg=normalized_azimuth)
+    first_projection = float(
+        ordered[0].midpoint_x * ux + ordered[0].midpoint_y * uy
+    )
+    last_projection = float(
+        ordered[-1].midpoint_x * ux + ordered[-1].midpoint_y * uy
+    )
+    if last_projection + _EPS < first_projection:
+        return float((normalized_azimuth + 180.0) % 360.0)
+    return normalized_azimuth
+
+
+def well_name_natural_sort_key(name: str) -> tuple[tuple[int, str | int], ...]:
+    parts = _WELL_NAME_NATURAL_SPLIT_RE.split(str(name).strip().casefold())
+    key: list[tuple[int, str | int]] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit():
+            key.append((1, int(part)))
+        else:
+            key.append((0, part))
+    return tuple(key)
 
 
 def apply_pad_layout(
@@ -271,6 +337,9 @@ def apply_pad_layout(
             pad=pad,
             nds_azimuth_deg=float(plan.nds_azimuth_deg),
             fixed_slots=tuple(plan.fixed_slots),
+            auto_order_mode=str(
+                getattr(plan, "auto_order_mode", DEFAULT_PAD_WELL_AUTO_ORDER_MODE)
+            ),
         )
         anchor_mode = str(
             getattr(plan, "surface_anchor_mode", PAD_SURFACE_ANCHOR_FIRST)

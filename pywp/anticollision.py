@@ -36,7 +36,6 @@ DEFINITIVE_LOCAL_REFINE_TRIGGER_SF = 4.0
 _MAX_OVERLAP_GEOMETRY_RINGS_PER_CORRIDOR = 8
 _MAX_LOCAL_REFINE_SEED_PAIRS_PER_WELL_PAIR = 4
 _SCAN_MAX_SAMPLES = 1_000_000
-_ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION = 240
 REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M = 500.0
 SIDETRACK_PARENT_SCAN_SKIP_M = 30.0
 
@@ -399,7 +398,7 @@ def _display_geometry_sampling_model(
     model: PlanningUncertaintyModel,
     sample_step_m: float | None,
 ) -> PlanningUncertaintyModel:
-    if sample_step_m is None or not bool(model.iscwsa_tool_code):
+    if sample_step_m is None:
         return model
     step_m = float(sample_step_m)
     if step_m <= 0.0:
@@ -407,10 +406,7 @@ def _display_geometry_sampling_model(
     return replace(
         model,
         sample_step_m=step_m,
-        max_display_ellipses=max(
-            int(model.max_display_ellipses),
-            _ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION,
-        ),
+        max_display_ellipses=max(int(model.max_display_ellipses), _SCAN_MAX_SAMPLES),
         min_refined_step_m=min(float(model.min_refined_step_m), step_m),
     )
 

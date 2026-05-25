@@ -201,6 +201,35 @@ def _prepositioned_pad_records() -> list[WelltrackRecord]:
     ]
 
 
+def _template_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="8001",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="7412",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2300.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9305",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=700.0, y=760.0, z=2200.0, md=2300.0),
+                WelltrackPoint(x=1600.0, y=1960.0, z=2350.0, md=3350.0),
+            ),
+        ),
+    ]
+
+
 def _submeter_prepositioned_pad_records() -> list[WelltrackRecord]:
     return [
         WelltrackRecord(
@@ -680,6 +709,16 @@ def test_welltrack_page_initial_crs_selectbox_has_no_session_state_default_warni
     )
 
 
+def test_welltrack_page_defaults_csv_crs_to_wgs84_utm43() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+
+    at.run(timeout=120)
+
+    select_values = {str(widget.label): widget.value for widget in at.selectbox}
+    assert select_values["Входная CRS"] == "ГК_13N_42"
+    assert select_values["CRS CSV-выгрузки"] == "WGS84 UTM 43N"
+
+
 def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
@@ -1109,7 +1148,7 @@ def test_welltrack_general_run_can_replace_selection_with_single_pad() -> None:
     at.run()
 
     pad_select = next(widget for widget in at.selectbox if widget.label == "Куст")
-    pad_select.set_value("PAD-02")
+    pad_select.set_value("PAD2")
     at.run()
 
     _click_button(at, "Только куст")
@@ -1131,7 +1170,7 @@ def test_welltrack_general_run_can_add_pad_to_existing_selection() -> None:
     at.run()
 
     pad_select = next(widget for widget in at.selectbox if widget.label == "Куст")
-    pad_select.set_value("PAD-02")
+    pad_select.set_value("PAD2")
     at.run()
 
     _click_button(at, "Добавить куст")
@@ -1175,8 +1214,8 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
     first_surface_arrows = list(overrides["extra_meshes"])
 
     assert [str(item["label"]) for item in legend_tree] == [
-        "Куст PAD-01",
-        "Куст PAD-02",
+        "Куст PAD1",
+        "Куст PAD2",
     ]
     assert [str(child["label"]) for child in legend_tree[0]["children"]] == [
         "PAD1-A",
@@ -1187,8 +1226,8 @@ def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_p
         "PAD2-B",
     ]
     assert set(focus_targets) == {
-        "pad::PAD-01",
-        "pad::PAD-02",
+        "pad::PAD1",
+        "pad::PAD2",
         "well::PAD1-A",
         "well::PAD1-B",
         "well::PAD2-A",
@@ -1337,6 +1376,51 @@ def test_well_color_map_restarts_palette_for_each_pad() -> None:
             assert color_map[str(name)] == page._well_color(index)
     first_well_names = [str(names[0]) for names in well_names_by_pad_id.values()]
     assert color_map[first_well_names[0]] == color_map[first_well_names[1]]
+
+
+def test_page_pad_membership_can_auto_order_all_pads_by_target_depth() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_pad_auto_order_by_target_depth"] = True
+    records = [
+        WelltrackRecord(
+            name="A1",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2200.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2300.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="A2",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=780.0, z=2600.0, md=2350.0),
+                WelltrackPoint(x=1550.0, y=1980.0, z=2700.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="B1",
+            points=(
+                WelltrackPoint(x=5000.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=5600.0, y=800.0, z=2100.0, md=2400.0),
+                WelltrackPoint(x=6500.0, y=2000.0, z=2200.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="B2",
+            points=(
+                WelltrackPoint(x=5000.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=5650.0, y=780.0, z=2500.0, md=2350.0),
+                WelltrackPoint(x=6550.0, y=1980.0, z=2600.0, md=3400.0),
+            ),
+        ),
+    ]
+
+    _, _, well_names_by_pad_id = page._pad_membership(records)
+    ordered_names = list(well_names_by_pad_id.values())
+
+    assert ordered_names == [("A2", "A1"), ("B2", "B1")]
 
 
 def test_well_color_map_uses_parent_color_for_pilot() -> None:
@@ -2013,6 +2097,163 @@ def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference()
 
     assert any(
         "Положения устьев были заданы в исходных данных" in str(widget.value)
+        for widget in at.info
+    )
+
+
+def test_pad_layout_offers_toggle_to_edit_source_defined_positions(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    captured: dict[str, object] = {"toggle_labels": []}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        captured["toggle_labels"].append(str(label))
+        key = kwargs.get("key")
+        value = False
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    assert "Разрешить редактирование позиций куста" in captured["toggle_labels"]
+
+
+def test_pad_layout_unlocks_source_defined_inputs_when_editing_enabled(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    captured: dict[str, object] = {
+        "number_inputs": [],
+        "buttons": [],
+    }
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, label, *args, **kwargs):
+            captured["number_inputs"].append(
+                (str(label), bool(kwargs.get("disabled", False)))
+            )
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, label, *args, **kwargs):
+            captured["buttons"].append(
+                (str(label), bool(kwargs.get("disabled", False)))
+            )
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        value = str(label) == "Разрешить редактирование позиций куста"
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    disabled_by_label = dict(captured["number_inputs"])
+    assert disabled_by_label["Расстояние между устьями, м"] is False
+    assert disabled_by_label["НДС (азимут), deg"] is False
+    button_disabled = dict(captured["buttons"])
+    assert button_disabled["Рассчитать устья скважин"] is False
+    assert button_disabled["Вернуть исходные устья"] is False
+
+
+def test_welltrack_page_shows_template_pad_name_notice() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _template_pad_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+
+    assert any(
+        'шаблонное название куста "PAD-01"' in str(widget.value)
         for widget in at.info
     )
 
@@ -2765,6 +3006,24 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state["wt_records"] = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=10.0, y=0.0, z=1000.0, md=2.0),
+                WelltrackPoint(x=20.0, y=0.0, z=1100.0, md=3.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=20.0, z=0.0, md=1.0),
+                WelltrackPoint(x=10.0, y=20.0, z=1000.0, md=2.0),
+                WelltrackPoint(x=20.0, y=20.0, z=1100.0, md=3.0),
+            ),
+        ),
+    ]
     page.st.session_state["wt_successes"] = [
         _successful_plan(name="WELL-A", y_offset_m=0.0),
         _successful_plan(name="WELL-B", y_offset_m=25.0),
@@ -2774,7 +3033,7 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
         "download_buttons": [],
         "expanders": [],
         "multiselect": None,
-        "radio": None,
+        "radios": [],
     }
 
     class _DummyContext:
@@ -2803,11 +3062,13 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
         return list(page.st.session_state.get(kwargs.get("key"), []))
 
     def _fake_radio(label, options, *args, **kwargs):
-        captured["radio"] = {
-            "label": str(label),
-            "options": [str(option) for option in options],
-            "key": str(kwargs.get("key")),
-        }
+        captured["radios"].append(
+            {
+                "label": str(label),
+                "options": [str(option) for option in options],
+                "key": str(kwargs.get("key")),
+            }
+        )
         return str(page.st.session_state.get(kwargs.get("key"), options[0]))
 
     def _fake_download_button(label, *args, **kwargs):
@@ -2842,16 +3103,23 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     downloads = list(captured["download_buttons"])
     download_labels = {str(item["label"]) for item in downloads}
     assert "Скачать сводку (CSV)" not in download_labels
-    assert "Выгрузка траекторий" in captured["expanders"]
+    assert "Выгрузка" in captured["expanders"]
     assert captured["multiselect"] == {
         "label": "Скважины для выгрузки",
         "options": ["WELL-A", "WELL-B"],
     }
-    assert captured["radio"] == {
-        "label": "Формат выгрузки",
-        "options": ["CSV", "WELLTRACK", ".dev (7z)"],
-        "key": "wt_survey_download_format",
-    }
+    assert captured["radios"] == [
+        {
+            "label": "Что выгружать",
+            "options": ["Траектории", "Цели"],
+            "key": "wt_download_kind",
+        },
+        {
+            "label": "Формат выгрузки",
+            "options": ["CSV", "WELLTRACK", ".dev (7z)"],
+            "key": "wt_survey_download_format",
+        },
+    ]
     assert download_labels == {
         "Скачать рассчитанные траектории всех скважин",
         "Скачать рассчитанные траектории выбранных скважин",
@@ -2953,6 +3221,106 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
         .decode("utf-8")
         .startswith("# SURVEY FROM PYWP")
     )
+
+
+def test_batch_summary_can_export_target_points(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_download_kind"] = "Цели"
+    page.st.session_state["wt_target_download_selected_names"] = ["WELL-A"]
+    page.st.session_state["wt_records"] = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=10.0, y=0.0, z=1000.0, md=2.0),
+                WelltrackPoint(x=20.0, y=0.0, z=1100.0, md=3.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=0.0, y=20.0, z=0.0, md=1.0),
+                WelltrackPoint(x=10.0, y=20.0, z=1000.0, md=2.0),
+                WelltrackPoint(x=20.0, y=20.0, z=1100.0, md=3.0),
+            ),
+        ),
+    ]
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+    ]
+    captured: dict[str, object] = {"download_buttons": []}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fake_download_button(label, *args, **kwargs):
+        captured["download_buttons"].append(
+            {
+                "label": str(label),
+                "data": kwargs.get("data", b""),
+                "file_name": str(kwargs.get("file_name", "")),
+                "mime": str(kwargs.get("mime", "")),
+            }
+        )
+        return False
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, options, *args, **kwargs: list(
+            page.st.session_state.get(kwargs.get("key"), [])
+        ),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "radio",
+        lambda _label, options, *args, **kwargs: str(
+            page.st.session_state.get(kwargs.get("key"), options[0])
+        ),
+    )
+    monkeypatch.setattr(page.st, "download_button", _fake_download_button)
+
+    page._render_batch_summary(
+        [
+            {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+            {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+        ]
+    )
+
+    downloads = list(captured["download_buttons"])
+    labels = {item["label"] for item in downloads}
+    assert labels == {
+        "Скачать цели всех скважин",
+        "Скачать цели выбранных скважин",
+    }
+    selected_download = next(
+        item for item in downloads if item["label"] == "Скачать цели выбранных скважин"
+    )
+    selected_csv = bytes(selected_download["data"]).decode("utf-8")
+    assert "WELL-A" in selected_csv
+    assert "WELL-B" not in selected_csv
+    assert "point_name" in selected_csv
+    assert selected_download["file_name"] == "welltrack_targets_selected.csv"
+    assert selected_download["mime"] == "text/csv"
 
 
 def test_batch_summary_renders_pilot_sidetrack_details_table(monkeypatch) -> None:
@@ -5830,7 +6198,7 @@ def test_focus_pad_well_names_return_selected_pad_members_only() -> None:
     page = wt_import_module
     records = _multi_pad_records()
 
-    focus_names = page._focus_pad_well_names(records=records, focus_pad_id="PAD-02")
+    focus_names = page._focus_pad_well_names(records=records, focus_pad_id="PAD2")
 
     assert focus_names == ("PAD2-A", "PAD2-B")
 
@@ -6203,8 +6571,8 @@ def test_three_legend_tree_stays_calculated_only_when_reference_pad_labels_exist
     legend_tree = list(overrides["legend_tree"])
 
     assert [str(item["label"]) for item in legend_tree] == [
-        "Куст PAD-01",
-        "Куст PAD-02",
+        "Куст PAD1",
+        "Куст PAD2",
     ]
     flat_child_labels = [
         str(child["label"])
