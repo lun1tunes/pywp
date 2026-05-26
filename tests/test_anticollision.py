@@ -194,9 +194,7 @@ def _pilot_sidetrack_success_pair() -> tuple[SuccessfulWellPlan, SuccessfulWellP
     return sidetrack, pilot
 
 
-def test_anti_collision_display_geometry_follows_dense_scan_sampling_when_requested() -> (
-    None
-):
+def test_anti_collision_scan_samples_are_decoupled_from_display_ellipses() -> None:
     model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=5)
 
     well = build_anti_collision_well(
@@ -214,11 +212,9 @@ def test_anti_collision_display_geometry_follows_dense_scan_sampling_when_reques
     )
 
     sample_md = np.asarray([sample.md_m for sample in well.samples], dtype=float)
-    overlay_md = np.asarray([sample.md_m for sample in well.overlay.samples], dtype=float)
-
+    assert len(well.overlay.samples) <= 5
+    assert len(well.samples) > len(well.overlay.samples)
     assert float(np.max(np.diff(sample_md))) <= 10.0 + 1e-6
-    assert len(well.overlay.samples) > 100
-    assert overlay_md[-1] == pytest.approx(2000.0)
 
 
 def test_overlap_geometry_uses_dense_scan_samples_not_display_indices() -> None:
@@ -698,7 +694,85 @@ def test_success_analysis_uses_definitive_scan_step_for_report_geometry() -> Non
     )
 
     assert float(np.max(np.diff(sample_md))) <= 10.0 + 1e-6
-    assert len(analysis.wells[0].overlay.samples) > 100
+    assert len(analysis.wells[0].overlay.samples) <= 5
+
+
+def test_collision_display_overlays_are_locally_refined_for_conflicting_wells() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=4)
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#123456",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=True,
+        analysis_sample_step_m=10.0,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#654321",
+        stations=_straight_stations(y_offset_m=5.0),
+        surface=Point3D(0.0, 5.0, 0.0),
+        t1=Point3D(1000.0, 5.0, 0.0),
+        t3=Point3D(2000.0, 5.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=True,
+        analysis_sample_step_m=10.0,
+    )
+
+    analysis = analyze_anti_collision([well_a, well_b], build_overlap_geometry=True)
+
+    overlays = anticollision_module.collision_display_overlays_by_well(
+        analysis,
+        max_extra_samples_per_well=16,
+    )
+
+    assert set(overlays) == {"WELL-A", "WELL-B"}
+    for well in analysis.wells:
+        refined = overlays[str(well.name)]
+        assert len(well.overlay.samples) <= 4
+        assert len(refined.samples) > len(well.overlay.samples)
+        assert len(refined.samples) <= len(well.overlay.samples) + 16
+
+
+def test_collision_display_overlays_skip_non_conflicting_wells() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=250.0, max_display_ellipses=4)
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#123456",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=True,
+        analysis_sample_step_m=10.0,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#654321",
+        stations=_straight_stations(y_offset_m=200.0),
+        surface=Point3D(0.0, 200.0, 0.0),
+        t1=Point3D(1000.0, 200.0, 0.0),
+        t3=Point3D(2000.0, 200.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=True,
+        analysis_sample_step_m=10.0,
+    )
+
+    analysis = analyze_anti_collision([well_a, well_b], build_overlap_geometry=True)
+
+    assert anticollision_module.collision_display_overlays_by_well(analysis) == {}
 
 
 def test_reference_actual_and_approved_wells_use_station_history_iscwsa_ellipses() -> (

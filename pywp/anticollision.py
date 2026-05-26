@@ -36,6 +36,7 @@ DEFINITIVE_LOCAL_REFINE_TRIGGER_SF = 4.0
 _MAX_OVERLAP_GEOMETRY_RINGS_PER_CORRIDOR = 8
 _MAX_LOCAL_REFINE_SEED_PAIRS_PER_WELL_PAIR = 4
 _SCAN_MAX_SAMPLES = 1_000_000
+_ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION = 240
 REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M = 500.0
 SIDETRACK_PARENT_SCAN_SKIP_M = 30.0
 
@@ -158,6 +159,32 @@ class AntiCollisionAnalysis:
     overlapping_pair_count: int
     target_overlap_pair_count: int
     worst_separation_factor: float | None
+
+
+def collision_display_overlays_by_well(
+    analysis: AntiCollisionAnalysis,
+    *,
+    max_extra_samples_per_well: int = 48,
+) -> dict[str, WellUncertaintyOverlay]:
+    wells_by_name = {str(well.name): well for well in analysis.wells}
+    corridors_by_well: dict[str, list[tuple[AntiCollisionCorridor, bool]]] = {}
+    for corridor in analysis.corridors:
+        corridors_by_well.setdefault(str(corridor.well_a), []).append((corridor, True))
+        corridors_by_well.setdefault(str(corridor.well_b), []).append((corridor, False))
+
+    overlays: dict[str, WellUncertaintyOverlay] = {}
+    for well_name, corridor_refs in corridors_by_well.items():
+        well = wells_by_name.get(well_name)
+        if well is None:
+            continue
+        overlay = _overlay_with_local_collision_samples(
+            well=well,
+            corridor_refs=tuple(corridor_refs),
+            max_extra_samples_per_well=int(max_extra_samples_per_well),
+        )
+        if overlay is not None:
+            overlays[well_name] = overlay
+    return overlays
 
 
 @dataclass(frozen=True)
@@ -398,7 +425,7 @@ def _display_geometry_sampling_model(
     model: PlanningUncertaintyModel,
     sample_step_m: float | None,
 ) -> PlanningUncertaintyModel:
-    if sample_step_m is None:
+    if sample_step_m is None or not bool(model.iscwsa_tool_code):
         return model
     step_m = float(sample_step_m)
     if step_m <= 0.0:
@@ -406,7 +433,10 @@ def _display_geometry_sampling_model(
     return replace(
         model,
         sample_step_m=step_m,
-        max_display_ellipses=max(int(model.max_display_ellipses), _SCAN_MAX_SAMPLES),
+        max_display_ellipses=max(
+            int(model.max_display_ellipses),
+            _ISCWSA_DISPLAY_MAX_ELLIPSES_FOR_ANTI_COLLISION,
+        ),
         min_refined_step_m=min(float(model.min_refined_step_m), step_m),
     )
 
@@ -2087,6 +2117,123 @@ def _relative_overlay_from_window(
         for index, sample in enumerate(samples)
     )
     return WellUncertaintyOverlay(samples=overlay_samples, model=well.overlay.model)
+
+
+def _overlay_with_local_collision_samples(
+    *,
+    well: AntiCollisionWell,
+    corridor_refs: tuple[tuple[AntiCollisionCorridor, bool], ...],
+    max_extra_samples_per_well: int,
+) -> WellUncertaintyOverlay | None:
+    if not well.overlay.samples or not well.samples or not corridor_refs:
+        return None
+
+    base_md_values = [
+        round(float(sample.md_m), 6) for sample in tuple(well.overlay.samples) if np.isfinite(sample.md_m)
+    ]
+    candidate_md_values: list[float] = []
+    for corridor, use_a_side in corridor_refs:
+        md_values = (
+            np.asarray(corridor.md_a_values_m, dtype=float)
+            if use_a_side
+            else np.asarray(corridor.md_b_values_m, dtype=float)
+        )
+        candidate_md_values.extend(
+            float(value) for value in md_values.tolist() if np.isfinite(value)
+        )
+        candidate_md_values.extend(
+            [
+                float(corridor.md_a_start_m if use_a_side else corridor.md_b_start_m),
+                float(corridor.md_a_end_m if use_a_side else corridor.md_b_end_m),
+            ]
+        )
+
+    extra_md_values = _select_collision_overlay_md_values(
+        base_md_values=base_md_values,
+        candidate_md_values=candidate_md_values,
+        max_extra_samples_per_well=int(max_extra_samples_per_well),
+    )
+    if not extra_md_values:
+        return None
+
+    combined_md_values = sorted(
+        set(base_md_values).union(round(float(value), 6) for value in extra_md_values)
+    )
+    overlay_samples: list[UncertaintyEllipseSample] = []
+    previous_ring_open_xyz: np.ndarray | None = None
+    for station_index, md_m in enumerate(combined_md_values):
+        ellipse_sample = _ellipse_sample_from_collision_sample(
+            sample=_collision_sample_at_md(well, md_m=float(md_m)),
+            model=well.overlay.model,
+            station_index=station_index,
+        )
+        ring_open_xyz = _align_collision_ring_for_continuity(
+            ring_open_xyz=np.asarray(ellipse_sample.ring_xyz, dtype=float),
+            previous_ring_open_xyz=previous_ring_open_xyz,
+        )
+        previous_ring_open_xyz = np.asarray(ring_open_xyz, dtype=float)
+        ring_xyz = np.vstack([ring_open_xyz, ring_open_xyz[0]])
+        overlay_samples.append(
+            replace(
+                ellipse_sample,
+                ring_xyz=np.asarray(ring_xyz, dtype=float),
+                ring_plan_xy=np.asarray(ring_xyz[:, :2], dtype=float),
+                ring_section_xz=np.asarray(ring_xyz[:, [0, 2]], dtype=float),
+            )
+        )
+    return WellUncertaintyOverlay(
+        samples=tuple(overlay_samples),
+        model=well.overlay.model,
+    )
+
+
+def _select_collision_overlay_md_values(
+    *,
+    base_md_values: list[float],
+    candidate_md_values: list[float],
+    max_extra_samples_per_well: int,
+) -> tuple[float, ...]:
+    base_md_set = {round(float(value), 6) for value in base_md_values}
+    candidates = sorted(
+        {
+            round(float(value), 6)
+            for value in candidate_md_values
+            if np.isfinite(value) and round(float(value), 6) not in base_md_set
+        }
+    )
+    limit = int(max(max_extra_samples_per_well, 0))
+    if limit <= 0 or not candidates:
+        return ()
+    if len(candidates) <= limit:
+        return tuple(float(value) for value in candidates)
+    selected_indices = np.unique(
+        np.linspace(0, len(candidates) - 1, num=limit, dtype=int)
+    )
+    return tuple(float(candidates[int(index)]) for index in selected_indices.tolist())
+
+
+def _align_collision_ring_for_continuity(
+    *,
+    ring_open_xyz: np.ndarray,
+    previous_ring_open_xyz: np.ndarray | None,
+) -> np.ndarray:
+    current = np.asarray(ring_open_xyz, dtype=float)
+    if previous_ring_open_xyz is None:
+        return current
+    previous = np.asarray(previous_ring_open_xyz, dtype=float)
+    if current.shape != previous.shape or current.ndim != 2 or current.shape[0] < 3:
+        return current
+
+    best_ring = current
+    best_cost = float(np.mean(np.linalg.norm(current - previous, axis=1)))
+    for candidate_base in (current, current[::-1]):
+        for shift in range(current.shape[0]):
+            candidate = np.roll(candidate_base, shift=shift, axis=0)
+            cost = float(np.mean(np.linalg.norm(candidate - previous, axis=1)))
+            if cost + 1e-9 < best_cost:
+                best_ring = candidate
+                best_cost = cost
+    return np.asarray(best_ring, dtype=float)
 
 
 def _downsample_relative_overlay_samples(

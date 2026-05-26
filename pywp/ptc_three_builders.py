@@ -10,6 +10,7 @@ import pandas as pd
 from pywp.anticollision import (
     AntiCollisionAnalysis,
     REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
+    collision_display_overlays_by_well,
     sidetrack_parent_relative_cone_overlays,
 )
 from pywp.constants import SMALL
@@ -523,6 +524,7 @@ def anticollision_three_payload(
     analysis_reference_objects = tuple(
         well for well in analysis.wells if bool(well.is_reference_only)
     )
+    collision_display_overlays = collision_display_overlays_by_well(analysis)
     focus_reference_names = (
         _anticollision_reference_cone_focus_names(analysis)
         if str(render_mode).strip() == WT_3D_RENDER_FAST
@@ -537,6 +539,7 @@ def anticollision_three_payload(
             well_name,
             display_name_by_well_name=display_name_by_well_name,
         )
+        overlay = collision_display_overlays.get(well_name, well.overlay)
         is_reference_only = bool(well.is_reference_only)
         is_focus_reference = well_name in focus_reference_names
         if (
@@ -556,7 +559,7 @@ def anticollision_three_payload(
             else None
         )
         tube_mesh = (
-            build_uncertainty_tube_mesh(well.overlay)
+            build_uncertainty_tube_mesh(overlay)
             if (
                 str(render_mode).strip() != WT_3D_RENDER_FAST
                 or not is_reference_only
@@ -578,10 +581,10 @@ def anticollision_three_payload(
                 z_arrays=z_arrays,
                 focus_arrays=focus_arrays,
             )
-        if well.overlay.samples and (
+        if overlay.samples and (
             str(render_mode).strip() != WT_3D_RENDER_FAST or not is_reference_only
         ):
-            terminal_ring = np.asarray(well.overlay.samples[-1].ring_xyz, dtype=float)
+            terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
             _append_line_segments(
                 payload,
                 segments=[_points_from_xyz_array(terminal_ring)],
