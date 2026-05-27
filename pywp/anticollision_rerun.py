@@ -95,6 +95,7 @@ class _AntiCollisionWellBuildJob:
     well_kind: str
     is_reference_only: bool
     analysis_sample_step_m: float | None
+    display_sample_step_m: float | None = None
     sidetrack_parent_name: str = ""
     sidetrack_window_md_m: float | None = None
 
@@ -126,6 +127,7 @@ def _build_anti_collision_well_job(
         well_kind=str(job.well_kind),
         is_reference_only=bool(job.is_reference_only),
         analysis_sample_step_m=job.analysis_sample_step_m,
+        display_sample_step_m=job.display_sample_step_m,
         sidetrack_parent_name=str(job.sidetrack_parent_name),
         sidetrack_window_md_m=job.sidetrack_window_md_m,
     )
@@ -427,12 +429,12 @@ def build_anti_collision_wells_for_successes(
     int,
     int,
 ]:
-    effective_sample_step_m = (
+    effective_analysis_sample_step_m = (
         float(analysis_sample_step_m)
         if analysis_sample_step_m is not None
         else (
             float(DEFINITIVE_SCAN_STEP_M)
-            if include_display_geometry and build_overlap_geometry
+            if build_overlap_geometry
             else None
         )
     )
@@ -549,7 +551,8 @@ def build_anti_collision_wells_for_successes(
             include_display_geometry=bool(include_display_geometry),
             well_kind="project",
             is_reference_only=False,
-            analysis_sample_step_m=effective_sample_step_m,
+            analysis_sample_step_m=effective_analysis_sample_step_m,
+            display_sample_step_m=None,
             sidetrack_parent_name=sidetrack_parent_name,
             sidetrack_window_md_m=sidetrack_window_md_m,
         )
@@ -591,7 +594,8 @@ def build_anti_collision_wells_for_successes(
             include_display_geometry=bool(include_display_geometry),
             well_kind=str(item.kind),
             is_reference_only=True,
-            analysis_sample_step_m=effective_sample_step_m,
+            analysis_sample_step_m=effective_analysis_sample_step_m,
+            display_sample_step_m=None,
         )
         _reuse_or_schedule(job)
 

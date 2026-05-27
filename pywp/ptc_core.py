@@ -173,7 +173,6 @@ from pywp.well_pad import (
     WellPad,
     apply_pad_layout,
     estimate_pad_nds_azimuth_deg,
-    ordered_pad_wells,
     well_name_natural_sort_key,
 )
 from pywp.welltrack_batch import (
@@ -1872,6 +1871,46 @@ def _cached_anti_collision_view_model(
     return analysis, recommendations, clusters
 
 
+def _current_anti_collision_cache_snapshot(
+    *,
+    successes: list[SuccessfulWellPlan],
+    uncertainty_model: PlanningUncertaintyModel,
+    records: list[WelltrackRecord],
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None,
+) -> tuple[
+    AntiCollisionAnalysis,
+    tuple[AntiCollisionRecommendation, ...],
+    tuple[AntiCollisionRecommendationCluster, ...],
+] | None:
+    color_map = _well_color_map(records) if records else {}
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
+    )
+    planned_color_map = _planned_anti_collision_color_map(successes, color_map)
+    cache_key = _anti_collision_cache_key(
+        successes=successes,
+        model=uncertainty_model,
+        name_to_color=planned_color_map,
+        reference_wells=scoped_reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
+    cache = st.session_state.get("wt_anticollision_analysis_cache")
+    if not isinstance(cache, Mapping) or str(cache.get("key", "")) != cache_key:
+        return None
+    analysis = cache.get("analysis")
+    recommendations = cache.get("recommendations")
+    clusters = cache.get("clusters")
+    if not isinstance(analysis, AntiCollisionAnalysis):
+        return None
+    if not isinstance(recommendations, tuple) or not isinstance(clusters, tuple):
+        return None
+    return analysis, recommendations, clusters
+
+
 def _format_duration_ru(seconds: float) -> str:
     total_seconds = int(round(float(max(seconds, 0.0))))
     if total_seconds < 60:
@@ -2328,11 +2367,13 @@ def _bump_three_viewer_nonce() -> None:
 def _clear_pad_state() -> None:
     st.session_state["wt_pad_configs"] = {}
     st.session_state["wt_pad_detected_meta"] = {}
-    st.session_state["wt_pad_selected_id"] = ""
     st.session_state["wt_pad_last_applied_at"] = ""
     st.session_state["wt_pad_auto_applied_on_import"] = False
+    st.session_state.pop("wt_pad_selected_id", None)
     for key in list(st.session_state.keys()):
-        if str(key).startswith("wt_pad_cfg_"):
+        if str(key).startswith("wt_pad_cfg_") or str(key).startswith(
+            "wt_pad_fixed_slots_editor_"
+        ):
             del st.session_state[key]
 
 
@@ -4597,14 +4638,33 @@ def _actual_fund_analysis_signature(
 def _actual_fund_analyses(
     actual_wells: tuple[ImportedTrajectoryWell, ...],
 ) -> tuple[ActualFundWellAnalysis, ...]:
-    signature = _actual_fund_analysis_signature(actual_wells)
-    cache_key = "wt_actual_fund_analysis_cache"
+    return _cached_reference_fund_analyses(
+        actual_wells,
+        cache_key="wt_actual_fund_analysis_cache",
+    )
+
+
+def _approved_fund_analyses(
+    approved_wells: tuple[ImportedTrajectoryWell, ...],
+) -> tuple[ActualFundWellAnalysis, ...]:
+    return _cached_reference_fund_analyses(
+        approved_wells,
+        cache_key="wt_approved_fund_analysis_cache",
+    )
+
+
+def _cached_reference_fund_analyses(
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+    *,
+    cache_key: str,
+) -> tuple[ActualFundWellAnalysis, ...]:
+    signature = _actual_fund_analysis_signature(reference_wells)
     cached = st.session_state.get(cache_key)
     if isinstance(cached, dict) and cached.get("signature") == signature:
         analyses = cached.get("analyses")
         if isinstance(analyses, tuple):
             return analyses
-    analyses = build_actual_fund_well_analyses(actual_wells)
+    analyses = build_actual_fund_well_analyses(reference_wells)
     st.session_state[cache_key] = {
         "signature": signature,
         "analyses": analyses,
@@ -5743,15 +5803,19 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             help=(
                 "Включено: для всех кустов авто-порядок скважин задаётся от более "
                 "глубоких целей к менее глубоким. Выключено: используется "
-                "естественная сортировка имён скважин A->Z, 1->99. "
-                "Фиксированные позиции ниже всегда имеют приоритет."
+                "естественная сортировка имён скважин A->Z, 1->99. Для кустов "
+                "с уже заданными устьями этот режим применяется только после "
+                "разрешения редактирования и включения локального тумблера "
+                "'Применить авто-порядок'. Фиксированные позиции ниже всегда "
+                "имеют приоритет."
             ),
         )
         st.caption(
             "Базовый авто-порядок внутри каждого куста: "
             f"{ptc_pad_state.pad_auto_order_mode_label(st.session_state)}. "
-            "Фиксированные позиции переопределяют его, но сами по себе не "
-            "записываются автоматически."
+            "Для кустов с заранее заданными устьями он не переставляет "
+            "скважины, пока не включено редактирование позиций и локальное "
+            "применение авто-порядка."
         )
         pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
         pad_rows = []
@@ -5821,23 +5885,34 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             "allow_source_surface_edit": (
                 f"wt_pad_cfg_allow_source_surface_edit_{selected_id}"
             ),
+            "apply_auto_order": f"wt_pad_cfg_apply_auto_order_{selected_id}",
         }
         for field, widget_key in widget_keys.items():
-            if field in {"surface_anchor_center", "allow_source_surface_edit"}:
+            if field in {
+                "surface_anchor_center",
+                "allow_source_surface_edit",
+                "apply_auto_order",
+            }:
                 if widget_key not in st.session_state:
                     st.session_state[widget_key] = (
                         previous_anchor_mode == PAD_SURFACE_ANCHOR_CENTER
                         if field == "surface_anchor_center"
-                        else bool(
-                            selected_cfg.get(
-                                ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY,
-                                False,
+                        else (
+                            bool(
+                                selected_cfg.get(
+                                    ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY,
+                                    False,
+                                )
+                            )
+                            if field == "allow_source_surface_edit"
+                            else bool(
+                                selected_cfg.get(
+                                    ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY,
+                                    False,
+                                )
                             )
                         )
                     )
-                continue
-            if field == "nds_azimuth_deg":
-                st.session_state[widget_key] = float(selected_cfg[field])
                 continue
             if widget_key not in st.session_state:
                 st.session_state[widget_key] = float(selected_cfg[field])
@@ -5845,12 +5920,14 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         if auto_name_notice:
             st.info(auto_name_notice)
         allow_source_surface_edit = False
+        apply_auto_order = False
         if source_surfaces_defined:
             st.info(
                 "Положения устьев были заданы в исходных данных. Для этого куста "
                 "координаты устьев ниже показаны справочно и по умолчанию не "
-                "редактируются. Фиксированный порядок можно задавать отдельно для "
-                "anti-collision оптимизации."
+                "редактируются. Исходная привязка скважин к позициям куста "
+                "сохраняется, пока вы явно не разрешите редактирование и не "
+                "включите применение авто-порядка."
             )
             allow_source_surface_edit = st.toggle(
                 "Разрешить редактирование позиций куста",
@@ -5861,9 +5938,39 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                     "'Рассчитать устья скважин'."
                 ),
             )
+            apply_auto_order = st.toggle(
+                "Применить авто-порядок",
+                key=widget_keys["apply_auto_order"],
+                help=(
+                    "Переставляет скважины по текущему глобальному правилу "
+                    "авто-порядка поверх сохранённых позиций куста. Когда "
+                    "тумблер выключен, используется исходная привязка скважин "
+                    "к импортированным позициям."
+                ),
+                disabled=not allow_source_surface_edit,
+            )
         surface_controls_disabled = bool(
             source_surfaces_defined and not allow_source_surface_edit
         )
+        if surface_controls_disabled:
+            selected_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = False
+            selected_cfg[ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY] = False
+            config_map[selected_id] = selected_cfg
+            st.session_state["wt_pad_configs"] = config_map
+            selected_cfg = dict(_pad_config_for_ui(selected_pad))
+            st.session_state[widget_keys["apply_auto_order"]] = False
+            st.session_state[widget_keys["surface_anchor_center"]] = (
+                str(selected_cfg.get("surface_anchor_mode"))
+                == PAD_SURFACE_ANCHOR_CENTER
+            )
+            for field in (
+                "spacing_m",
+                "nds_azimuth_deg",
+                "first_surface_x",
+                "first_surface_y",
+                "first_surface_z",
+            ):
+                st.session_state[widget_keys[field]] = float(selected_cfg[field])
 
         anchor_center = st.toggle(
             "Координата куста = центр расстановки",
@@ -5908,6 +6015,53 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                             surface_anchor_mode=anchor_mode,
                         ),
                     )
+                )
+            previous_anchor_xyz = ptc_pad_state.pad_anchor_defaults(
+                st.session_state,
+                pad=selected_pad,
+                anchor_mode=previous_anchor_mode,
+            )
+            next_anchor_xyz = ptc_pad_state.pad_anchor_defaults(
+                st.session_state,
+                pad=selected_pad,
+                anchor_mode=anchor_mode,
+            )
+            current_anchor_xyz = (
+                float(
+                    st.session_state.get(
+                        widget_keys["first_surface_x"],
+                        selected_cfg["first_surface_x"],
+                    )
+                ),
+                float(
+                    st.session_state.get(
+                        widget_keys["first_surface_y"],
+                        selected_cfg["first_surface_y"],
+                    )
+                ),
+                float(
+                    st.session_state.get(
+                        widget_keys["first_surface_z"],
+                        selected_cfg["first_surface_z"],
+                    )
+                ),
+            )
+            if all(
+                abs(float(current_value) - float(previous_value)) <= 1e-6
+                for current_value, previous_value in zip(
+                    current_anchor_xyz,
+                    previous_anchor_xyz,
+                    strict=True,
+                )
+            ):
+                st.session_state[widget_keys["first_surface_x"]] = float(
+                    next_anchor_xyz[0]
+                )
+                st.session_state[widget_keys["first_surface_y"]] = float(
+                    next_anchor_xyz[1]
+                )
+                st.session_state[widget_keys["first_surface_z"]] = float(
+                    next_anchor_xyz[2]
                 )
 
         p1, p2, p3, p4, p5 = st.columns(5, gap="small")
@@ -5967,6 +6121,9 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         selected_cfg["surface_anchor_mode"] = anchor_mode
         selected_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = bool(
             allow_source_surface_edit
+        )
+        selected_cfg[ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY] = bool(
+            allow_source_surface_edit and apply_auto_order
         )
 
         fixed_slots = _pad_fixed_slots_from_config(
@@ -6035,64 +6192,48 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         config_map[selected_id] = selected_cfg
         st.session_state["wt_pad_configs"] = config_map
 
-        ordered_wells = ordered_pad_wells(
+        preview_assignments = ptc_pad_state.pad_surface_assignments(
+            st.session_state,
             pad=selected_pad,
-            nds_azimuth_deg=float(selected_cfg["nds_azimuth_deg"]),
-            fixed_slots=fixed_slots,
-            auto_order_mode=ptc_pad_state.pad_auto_order_mode(st.session_state),
+            config=selected_cfg,
         )
-        angle_rad = np.deg2rad(float(selected_cfg["nds_azimuth_deg"]))
-        ux = float(np.sin(angle_rad))
-        uy = float(np.cos(angle_rad))
-        center_slot_index = 0.5 * float(max(len(ordered_wells) - 1, 0))
+        well_by_name = {
+            str(well.name): well for well in selected_pad.wells
+        }
         fixed_slot_by_name = {str(name): int(slot) for slot, name in fixed_slots}
         preview_rows: list[dict[str, object]] = []
-        for slot_index, well in enumerate(ordered_wells, start=1):
+        for assignment in preview_assignments:
+            well = well_by_name.get(str(assignment.well_name))
+            if well is None:
+                continue
+            slot_index = int(assignment.slot_index)
+            if source_surfaces_defined and not allow_source_surface_edit:
+                fixation_label = "Исх."
+            elif source_surfaces_defined and not bool(apply_auto_order):
+                fixation_label = "Исх."
+            else:
+                fixation_label = (
+                    "Да"
+                    if fixed_slot_by_name.get(str(assignment.well_name))
+                    == int(slot_index)
+                    else "Авто"
+                )
             row = {
                 "Порядок": int(slot_index),
-                "Скважина": str(well.name),
-                "Фиксация": (
-                    "Да"
-                    if fixed_slot_by_name.get(str(well.name)) == int(slot_index)
-                    else "Авто"
-                ),
+                "Скважина": str(assignment.well_name),
+                "Фиксация": fixation_label,
                 "Середина t1-t3 X, м": float(well.midpoint_x),
                 "Середина t1-t3 Y, м": float(well.midpoint_y),
                 "Опора S": _pad_anchor_mode_label(anchor_mode),
             }
             if surface_controls_disabled:
-                source_record = next(
-                    (item for item in base_records if str(item.name) == str(well.name)),
-                    None,
-                )
-                source_surface = (
-                    _source_surface_xyz(source_record)
-                    if source_record is not None
-                    else None
-                )
-                row["Текущее S X, м"] = (
-                    None if source_surface is None else float(source_surface[0])
-                )
-                row["Текущее S Y, м"] = (
-                    None if source_surface is None else float(source_surface[1])
-                )
-                row["Текущее S Z, м"] = (
-                    None if source_surface is None else float(source_surface[2])
-                )
+                row["Текущее S X, м"] = float(assignment.surface_x_m)
+                row["Текущее S Y, м"] = float(assignment.surface_y_m)
+                row["Текущее S Z, м"] = float(assignment.surface_z_m)
             else:
-                if anchor_mode == PAD_SURFACE_ANCHOR_CENTER:
-                    shift_m = (float(slot_index - 1) - center_slot_index) * float(
-                        selected_cfg["spacing_m"]
-                    )
-                else:
-                    shift_m = float(slot_index - 1) * float(selected_cfg["spacing_m"])
-                row["Новое S X, м"] = float(
-                    selected_cfg["first_surface_x"] + shift_m * ux
-                )
-                row["Новое S Y, м"] = float(
-                    selected_cfg["first_surface_y"] + shift_m * uy
-                )
-                row["Новое S Z, м"] = float(selected_cfg["first_surface_z"])
+                row["Новое S X, м"] = float(assignment.surface_x_m)
+                row["Новое S Y, м"] = float(assignment.surface_y_m)
+                row["Новое S Z, м"] = float(assignment.surface_z_m)
             preview_rows.append(row)
         with st.expander(
             "Порядок бурения и координаты устьев на кусте",
@@ -6143,8 +6284,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
 
         if reset_clicked:
             st.session_state["wt_records"] = list(base_records)
-            st.session_state["wt_pad_last_applied_at"] = ""
-            st.session_state["wt_pad_auto_applied_on_import"] = False
+            _clear_pad_state()
             _clear_results()
             st.rerun()
 

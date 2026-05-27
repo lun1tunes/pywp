@@ -153,6 +153,34 @@ def _show_sidetrack_relative_cones_checkbox() -> bool:
     )
 
 
+def _render_anticollision_action_button(*, has_current_analysis: bool) -> bool:
+    return bool(
+        st.button(
+            (
+                "Пересчёт пересечений"
+                if has_current_analysis
+                else "Расчёт пересечений"
+            ),
+            type="primary",
+            use_container_width=True,
+            help=(
+                "Запускает anti-collision анализ для текущего набора рассчитанных "
+                "траекторий. При наличии предыдущего кэша будут переиспользованы "
+                "неизменённые скважины и пары."
+            ),
+        )
+    )
+
+
+def _prepare_anticollision_incremental_rerun() -> None:
+    cache = st.session_state.get("wt_anticollision_analysis_cache")
+    if not isinstance(cache, dict) or not cache:
+        return
+    refreshed_cache = dict(cache)
+    refreshed_cache["key"] = ""
+    st.session_state["wt_anticollision_analysis_cache"] = refreshed_cache
+
+
 def _render_anticollision_panel(
     *,
     successes: list[object],
@@ -187,9 +215,6 @@ def _render_anticollision_panel(
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
         return
 
-    if _render_full_anticollision_recalc_button():
-        return
-
     preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
     normalized_preset = wt.normalize_uncertainty_preset(
         st.session_state.get(
@@ -212,41 +237,96 @@ def _render_anticollision_panel(
             reference_wells
         )
     )
-    anti_collision_parallel_workers = int(
-        st.session_state.get("wt_last_parallel_workers") or 0
+    current_snapshot = wt._current_anti_collision_cache_snapshot(
+        successes=list(successes),
+        uncertainty_model=uncertainty_model,
+        records=list(records),
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
+    has_current_analysis = current_snapshot is not None
+    has_stale_snapshot = (
+        current_snapshot is None and _cached_anticollision_snapshot() is not None
     )
 
-    anti_collision_progress = st.progress(
-        8, text="Подготовка anti-collision анализа..."
+    st.markdown("### Anti-collision и пересечения")
+    run_requested = _render_anticollision_action_button(
+        has_current_analysis=has_current_analysis
     )
+    if (
+        has_current_analysis or has_stale_snapshot
+    ) and _render_full_anticollision_recalc_button():
+        return
 
-    def _anti_collision_progress_update(value: int, text: str) -> None:
-        anti_collision_progress.progress(int(value), text=text)
-
-    try:
-        analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
-            successes=successes,
-            uncertainty_model=uncertainty_model,
-            records=records,
-            reference_wells=reference_wells,
-            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
-            progress_callback=_anti_collision_progress_update,
-            parallel_workers=anti_collision_parallel_workers,
-        )
-    except Exception as exc:
-        anti_collision_progress.empty()
-        wt._store_anticollision_failure_state(exc)
-        st.error(
-            "Не удалось построить anti-collision анализ. Проверьте лог расчёта ниже."
-        )
+    if not has_current_analysis and not run_requested:
+        if has_stale_snapshot:
+            st.info(
+                "Траектории обновились после прошлого anti-collision расчёта. "
+                "Нажмите 'Расчёт пересечений', чтобы пересчитать конуса и "
+                "пересечения для актуального набора."
+            )
+        else:
+            st.info(
+                "Траектории рассчитаны. Запустите anti-collision отдельным "
+                "шагом, когда будете готовы проверить конуса и пересечения."
+            )
         wt._render_status_run_log(
             title="Лог расчёта Anti-collision",
             state_payload=st.session_state.get("wt_anticollision_last_run"),
             empty_message="Anti-collision анализ ещё не запускался.",
         )
-        st.caption(f"{type(exc).__name__}: {exc}")
         return
-    anti_collision_progress.empty()
+
+    if run_requested and has_current_analysis:
+        _prepare_anticollision_incremental_rerun()
+
+    anti_collision_parallel_workers = int(
+        st.session_state.get("wt_last_parallel_workers") or 0
+    )
+
+    anti_collision_progress = (
+        None
+        if has_current_analysis and not run_requested
+        else st.progress(8, text="Подготовка anti-collision анализа...")
+    )
+
+    def _anti_collision_progress_update(value: int, text: str) -> None:
+        if anti_collision_progress is not None:
+            anti_collision_progress.progress(int(value), text=text)
+
+    if current_snapshot is not None and not run_requested:
+        analysis, recommendations, clusters = current_snapshot
+    else:
+        try:
+            analysis, recommendations, clusters = (
+                wt._cached_anti_collision_view_model(
+                    successes=successes,
+                    uncertainty_model=uncertainty_model,
+                    records=records,
+                    reference_wells=reference_wells,
+                    reference_uncertainty_models_by_name=(
+                        reference_uncertainty_models_by_name
+                    ),
+                    progress_callback=_anti_collision_progress_update,
+                    parallel_workers=anti_collision_parallel_workers,
+                )
+            )
+        except Exception as exc:
+            if anti_collision_progress is not None:
+                anti_collision_progress.empty()
+            wt._store_anticollision_failure_state(exc)
+            st.error(
+                "Не удалось построить anti-collision анализ. Проверьте лог расчёта ниже."
+            )
+            wt._render_status_run_log(
+                title="Лог расчёта Anti-collision",
+                state_payload=st.session_state.get("wt_anticollision_last_run"),
+                empty_message="Anti-collision анализ ещё не запускался.",
+            )
+            st.caption(f"{type(exc).__name__}: {exc}")
+            return
+    if anti_collision_progress is not None:
+        anti_collision_progress.empty()
     focus_pad_well_names = wt._focus_pad_well_names(
         records=records,
         focus_pad_id=focus_pad_id,
@@ -875,7 +955,7 @@ def _render_target_edit_overview(
         display_name_by_well_name=display_name_by_well_name,
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=tuple(focus_pad_well_names),
-        render_mode=wt.WT_3D_RENDER_DETAIL,
+        render_mode=wt.WT_3D_RENDER_FAST,
     )
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     wt._render_three_payload(
@@ -1080,17 +1160,36 @@ def render_success_tabs(
         records=records,
         focus_pad_id=focus_pad_id,
     )
+    reference_wells = reference_state.reference_wells_from_state()
+    reference_uncertainty_models_by_name = (
+        ptc_anticollision_params.reference_uncertainty_models_from_state(
+            reference_wells
+        )
+    )
+    selected_preset = wt.normalize_uncertainty_preset(
+        st.session_state.get(
+            "wt_anticollision_uncertainty_preset",
+            wt.DEFAULT_UNCERTAINTY_PRESET,
+        )
+    )
+    current_anticollision_snapshot = wt._current_anti_collision_cache_snapshot(
+        successes=list(successes),
+        uncertainty_model=planning_uncertainty_model_for_preset(selected_preset),
+        records=list(records),
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
     target_only_wells = wt._failed_target_only_wells(
         records=list(records),
         summary_rows=list(summary_rows),
     )
-    if target_only_wells:
+    if target_only_wells or current_anticollision_snapshot is None:
         _render_target_edit_overview(
             successes=list(successes),
             records=records,
             summary_rows=summary_rows,
-            title="### Все скважины и точки без траектории",
-            empty_message="Нет данных для 3D-обзора целей.",
+            title="### Все скважины и точки целей",
+            empty_message="Нет данных для 3D-обзора траекторий и целей.",
             focus_pad_well_names=list(focus_pad_well_names),
             show_focus_selector=False,
         )

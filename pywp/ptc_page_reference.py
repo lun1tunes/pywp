@@ -14,11 +14,32 @@ from pywp.pilot_wells import is_zbs_name, parent_name_for_zbs, well_name_key
 
 __all__ = ["render_reference_section"]
 
+_REFERENCE_ANALYSIS_TOGGLE_KEYS = {
+    wt.REFERENCE_WELL_ACTUAL: "wt_show_actual_fund_analysis",
+    wt.REFERENCE_WELL_APPROVED: "wt_show_approved_fund_analysis",
+}
+
+
+def _reference_analysis_toggle_key(kind: str) -> str:
+    return _REFERENCE_ANALYSIS_TOGGLE_KEYS.get(
+        str(kind),
+        f"wt_show_reference_analysis::{str(kind)}",
+    )
+
+
+def _reset_reference_analysis_visibility(kind: str) -> None:
+    st.session_state[_reference_analysis_toggle_key(kind)] = False
+
+
+def _after_reference_data_change(kind: str) -> None:
+    wt._reset_anticollision_view_state(clear_prepared=True)
+    _reset_reference_analysis_visibility(kind)
+
 
 def _clear_reference_import_state(kind: str) -> None:
     reference_state.clear_reference_import_state(
         kind,
-        on_clear=lambda: wt._reset_anticollision_view_state(clear_prepared=True),
+        on_clear=lambda: _after_reference_data_change(kind),
     )
 
 
@@ -158,7 +179,7 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
                     kind=kind,
                     wells=parsed,
                 )
-                wt._reset_anticollision_view_state(clear_prepared=True)
+                _after_reference_data_change(kind)
                 status.write(f"Загружено скважин: {len(parsed)}.")
                 status.update(
                     label=f"{title} импортированы",
@@ -239,32 +260,61 @@ def render_reference_section() -> None:
     )
     if actual_wells:
         _render_zbs_actual_match_info(actual_wells)
-        analyses = wt._actual_fund_analyses(actual_wells)
-        wt._render_actual_fund_analysis_panel(analyses=analyses)
+        show_actual_analysis = bool(
+            st.toggle(
+                "Показать анализ фактического фонда",
+                key=_reference_analysis_toggle_key(wt.REFERENCE_WELL_ACTUAL),
+                help=(
+                    "Тяжёлый анализ фактического фонда строится по запросу, "
+                    "чтобы не тормозить рендер страницы после расчёта траекторий."
+                ),
+            )
+        )
+        if show_actual_analysis:
+            analyses = wt._actual_fund_analyses(actual_wells)
+            wt._render_actual_fund_analysis_panel(analyses=analyses)
+        else:
+            st.caption(
+                "Анализ фактического фонда скрыт до явного открытия. "
+                "Это ускоряет обновление страницы после расчёта траекторий."
+            )
 
     approved_wells = tuple(
         reference_state.reference_kind_wells(wt.REFERENCE_WELL_APPROVED)
     )
     if approved_wells:
-        with st.expander(
-            "Просмотр загруженных утверждённых проектных скважин",
-            expanded=False,
-        ):
+        show_approved_analysis = bool(
+            st.toggle(
+                "Показать просмотр утверждённого проектного фонда",
+                key=_reference_analysis_toggle_key(wt.REFERENCE_WELL_APPROVED),
+                help=(
+                    "Просмотр утверждённого фонда строится по запросу, "
+                    "чтобы не утяжелять обычный расчётный flow."
+                ),
+            )
+        )
+        if show_approved_analysis:
             try:
-                approved_analyses = wt.build_actual_fund_well_analyses(
-                    approved_wells
-                )
+                approved_analyses = wt._approved_fund_analyses(approved_wells)
             except Exception as exc:
                 st.error(
                     "Не удалось построить просмотр утверждённого проектного фонда."
                 )
                 st.caption(f"{type(exc).__name__}: {exc}")
             else:
-                wt._render_reference_well_detail(
-                    approved_analyses,
-                    select_label="Просмотр утвержденной проектной скважины",
-                    selected_key="wt_approved_fund_selected_well",
-                )
+                with st.expander(
+                    "Просмотр загруженных утверждённых проектных скважин",
+                    expanded=False,
+                ):
+                    wt._render_reference_well_detail(
+                        approved_analyses,
+                        select_label="Просмотр утвержденной проектной скважины",
+                        selected_key="wt_approved_fund_selected_well",
+                    )
+        else:
+            st.caption(
+                "Просмотр утверждённого проектного фонда скрыт до явного открытия."
+            )
 
 
 def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:

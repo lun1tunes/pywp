@@ -52,6 +52,9 @@ class PadLayoutPlan(FrozenModel):
     surface_anchor_mode: str = PAD_SURFACE_ANCHOR_FIRST
     fixed_slots: tuple[tuple[int, str], ...] = ()
     auto_order_mode: str = DEFAULT_PAD_WELL_AUTO_ORDER_MODE
+    surface_positions_by_well_name: tuple[
+        tuple[str, float, float, float], ...
+    ] = ()
 
 
 def detect_well_pads(
@@ -329,6 +332,34 @@ def apply_pad_layout(
     for pad in pads:
         plan = plan_by_pad_id.get(str(pad.pad_id))
         if plan is None:
+            continue
+
+        explicit_surfaces = tuple(
+            getattr(plan, "surface_positions_by_well_name", ())
+        )
+        if explicit_surfaces:
+            explicit_surface_map = {
+                str(name): (float(x), float(y), float(z))
+                for name, x, y, z in explicit_surfaces
+            }
+            for well_name, (surface_x, surface_y, surface_z) in explicit_surface_map.items():
+                record_index = name_to_index.get(str(well_name))
+                if record_index is None:
+                    continue
+                source_record = updated_records[record_index]
+                if not source_record.points:
+                    continue
+                source_surface = source_record.points[0]
+                new_surface = WelltrackPoint(
+                    x=float(surface_x),
+                    y=float(surface_y),
+                    z=float(surface_z),
+                    md=float(source_surface.md),
+                )
+                updated_records[record_index] = WelltrackRecord(
+                    name=str(source_record.name),
+                    points=(new_surface, *source_record.points[1:]),
+                )
             continue
 
         spacing_m = float(max(plan.spacing_m, 0.0))

@@ -201,6 +201,35 @@ def _prepositioned_pad_records() -> list[WelltrackRecord]:
     ]
 
 
+def _prepositioned_depth_order_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="P1-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2100.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2200.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-B",
+            points=(
+                WelltrackPoint(x=25.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=625.0, y=780.0, z=2600.0, md=2350.0),
+                WelltrackPoint(x=1525.0, y=1980.0, z=2700.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-C",
+            points=(
+                WelltrackPoint(x=50.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=760.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=1550.0, y=1960.0, z=2400.0, md=3350.0),
+            ),
+        ),
+    ]
+
+
 def _template_pad_records() -> list[WelltrackRecord]:
     return [
         WelltrackRecord(
@@ -1605,6 +1634,59 @@ def test_reference_trajectory_dev_import_keeps_actual_and_approved_kinds(
     ]
 
 
+def test_reference_analysis_panels_are_lazy_by_default() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    reference_wells = _reference_wells()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [_ok_summary_row("WELL-A")]
+    at.session_state["wt_successes"] = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    at.session_state["wt_reference_wells"] = list(reference_wells)
+    at.session_state["wt_reference_actual_wells"] = [
+        item for item in reference_wells if str(item.kind) == "actual"
+    ]
+    at.session_state["wt_reference_approved_wells"] = [
+        item for item in reference_wells if str(item.kind) == "approved"
+    ]
+
+    at.run(timeout=120)
+
+    toggle_labels = {str(widget.label) for widget in at.toggle}
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+
+    assert "Показать анализ фактического фонда" in toggle_labels
+    assert "Показать просмотр утверждённого проектного фонда" in toggle_labels
+    assert "Просмотр фактической скважины" not in selectbox_labels
+    assert "Просмотр утвержденной проектной скважины" not in selectbox_labels
+
+
+def test_reference_analysis_panels_render_after_explicit_toggle() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    reference_wells = _reference_wells()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [_ok_summary_row("WELL-A")]
+    at.session_state["wt_successes"] = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    at.session_state["wt_reference_wells"] = list(reference_wells)
+    at.session_state["wt_reference_actual_wells"] = [
+        item for item in reference_wells if str(item.kind) == "actual"
+    ]
+    at.session_state["wt_reference_approved_wells"] = [
+        item for item in reference_wells if str(item.kind) == "approved"
+    ]
+    at.session_state["wt_show_actual_fund_analysis"] = True
+    at.session_state["wt_show_approved_fund_analysis"] = True
+
+    at.run(timeout=120)
+
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+
+    assert "Просмотр фактической скважины" in selectbox_labels
+    assert "Просмотр утвержденной проектной скважины" in selectbox_labels
+
+
 def test_reference_dev_clear_button_resets_paths_without_widget_state_error(
     tmp_path,
 ) -> None:
@@ -2164,6 +2246,7 @@ def test_pad_layout_offers_toggle_to_edit_source_defined_positions(
     page._render_pad_layout_panel(records)
 
     assert "Разрешить редактирование позиций куста" in captured["toggle_labels"]
+    assert "Применить авто-порядок" in captured["toggle_labels"]
 
 
 def test_pad_layout_unlocks_source_defined_inputs_when_editing_enabled(
@@ -2242,6 +2325,327 @@ def test_pad_layout_unlocks_source_defined_inputs_when_editing_enabled(
     button_disabled = dict(captured["buttons"])
     assert button_disabled["Рассчитать устья скважин"] is False
     assert button_disabled["Вернуть исходные устья"] is False
+
+
+def test_pad_layout_disables_apply_auto_order_until_source_editing_is_enabled(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    captured: dict[str, object] = {"toggle_state": {}}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        captured["toggle_state"][str(label)] = bool(kwargs.get("disabled", False))
+        key = kwargs.get("key")
+        value = False
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    assert captured["toggle_state"]["Применить авто-порядок"] is True
+
+
+def test_pad_layout_keeps_user_nds_value_for_source_defined_pad(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    pads = page._detect_ui_pads(records)[0]
+    pad_id = str(pads[0].pad_id)
+    nds_widget_key = f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"
+    page.st.session_state["wt_pad_selected_id"] = pad_id
+    page.st.session_state[nds_widget_key] = 123.0
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        value = str(label) == "Разрешить редактирование позиций куста"
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    assert page.st.session_state[nds_widget_key] == 123.0
+
+
+def test_pad_layout_resets_source_defined_widgets_when_editing_is_disabled(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_selected_id"] = pad_id
+    page.st.session_state["wt_pad_configs"][pad_id].update(
+        {
+            "spacing_m": 999.0,
+            "nds_azimuth_deg": 123.0,
+            "first_surface_x": -1.0,
+            "first_surface_y": -2.0,
+            "first_surface_z": -3.0,
+            "surface_anchor_mode": "first",
+            page.ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY: True,
+            page.ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY: True,
+        }
+    )
+    page.st.session_state[f"wt_pad_cfg_spacing_m_{pad_id}"] = 999.0
+    page.st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = 123.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = -1.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = -2.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = -3.0
+    page.st.session_state[f"wt_pad_cfg_surface_anchor_center_{pad_id}"] = False
+    page.st.session_state[f"wt_pad_cfg_apply_auto_order_{pad_id}"] = True
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        if bool(kwargs.get("disabled", False)) and key is not None:
+            return page.st.session_state.get(key, False)
+        value = False
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    cfg = page._pad_config_for_ui(pads[0])
+    assert page.st.session_state[f"wt_pad_cfg_spacing_m_{pad_id}"] == float(
+        cfg["spacing_m"]
+    )
+    assert page.st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] == float(
+        cfg["nds_azimuth_deg"]
+    )
+    assert page.st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] == float(
+        cfg["first_surface_x"]
+    )
+    assert page.st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] == float(
+        cfg["first_surface_y"]
+    )
+    assert page.st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] == float(
+        cfg["first_surface_z"]
+    )
+    assert (
+        page.st.session_state[f"wt_pad_cfg_surface_anchor_center_{pad_id}"] is True
+    )
+    assert page.st.session_state[f"wt_pad_cfg_apply_auto_order_{pad_id}"] is False
+
+
+def test_pad_layout_preview_applies_auto_order_only_after_explicit_toggle(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_depth_order_pad_records())
+    page.st.session_state["wt_pad_auto_order_by_target_depth"] = True
+    captured_frames: list[pd.DataFrame] = []
+    apply_auto_order_enabled = False
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        if str(label) == "Разрешить редактирование позиций куста":
+            value = True
+        elif str(label) == "Применить авто-порядок":
+            value = apply_auto_order_enabled
+        elif bool(kwargs.get("disabled", False)) and key is not None:
+            value = page.st.session_state.get(key, False)
+        else:
+            value = page.st.session_state.get(key, False)
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "dataframe",
+        lambda frame, *args, **kwargs: captured_frames.append(frame.copy()),
+    )
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+    preview_without_auto = list(captured_frames[-1]["Скважина"])
+
+    apply_auto_order_enabled = True
+    captured_frames.clear()
+    page._render_pad_layout_panel(records)
+    preview_with_auto = list(captured_frames[-1]["Скважина"])
+
+    assert preview_without_auto == ["P1-A", "P1-B", "P1-C"]
+    assert preview_with_auto == ["P1-B", "P1-C", "P1-A"]
 
 
 def test_welltrack_page_shows_template_pad_name_notice() -> None:
@@ -2372,7 +2776,7 @@ def test_normalize_source_table_df_for_ui_uses_s_for_surface_point() -> None:
     assert list(normalized["Point"]) == ["S", "S", "t1"]
 
 
-def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> None:
+def test_welltrack_page_prompts_to_run_anticollision_for_successful_batch() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()[:2]
     at.session_state["wt_records"] = records
@@ -2391,8 +2795,10 @@ def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> 
     at.run(timeout=120)
 
     metric_labels = [widget.label for widget in at.metric]
-    assert "Проверено пар" in metric_labels
-    assert "Минимальный SF" in metric_labels
+    assert "Проверено пар" not in metric_labels
+    assert "Минимальный SF" not in metric_labels
+    button_labels = [str(widget.label) for widget in at.button]
+    assert "Расчёт пересечений" in button_labels
     selectbox_labels = [widget.label for widget in at.selectbox]
     assert "Пресет неопределенности для anti-collision" in selectbox_labels
 
@@ -2435,6 +2841,7 @@ def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
     at.session_state["wt_reference_actual_wells"] = list(_horizontal_reference_well())
+    at.session_state["wt_show_actual_fund_analysis"] = True
 
     at.run(timeout=120)
 
@@ -2738,6 +3145,13 @@ def test_multihorizontal_streamlit_flow_recalculates_after_target_edit_with_incr
     assert {str(item.name) for item in at.session_state["wt_successes"]} == set(
         selected_names
     )
+    assert at.session_state["wt_anticollision_last_run"] is None
+    assert at.session_state["wt_anticollision_analysis_cache"] == {}
+
+    _click_button(at, "Расчёт пересечений")
+    at.run(timeout=240)
+
+    assert not at.exception
     first_ac_run = at.session_state["wt_anticollision_last_run"]
     assert bool(first_ac_run["cached"]) is False
     assert int(first_ac_run["pair_count"]) == 3
@@ -2794,6 +3208,13 @@ def test_multihorizontal_streamlit_flow_recalculates_after_target_edit_with_incr
     assert {str(item.name) for item in at.session_state["wt_successes"]} == set(
         selected_names
     )
+    assert at.session_state["wt_anticollision_analysis_cache"] is cached_analysis
+    assert at.session_state["wt_anticollision_last_run"] == first_ac_run
+
+    _click_button(at, "Расчёт пересечений")
+    at.run(timeout=240)
+
+    assert not at.exception
     incremental_run = at.session_state["wt_anticollision_last_run"]
     assert bool(incremental_run["cached"]) is False
     assert int(incremental_run["reused_well_count"]) == 2

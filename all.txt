@@ -3568,7 +3568,7 @@ def format_precheck_summary_ru(result: AnalyticalPreCheckResult) -> str:
     return "\n".join(lines)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	138477
+===BEGIN_FILE===	pywp/anticollision.py	142394
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -3642,8 +3642,17 @@ class AntiCollisionWell:
     well_kind: str = "project"
     is_reference_only: bool = False
     normal_support_radii_1sigma_m: np.ndarray | None = None
+    sample_arrays: "AntiCollisionSampleArrayBundle | None" = None
     sidetrack_parent_name: str = ""
     sidetrack_window_md_m: float | None = None
+
+
+@dataclass(frozen=True)
+class AntiCollisionSampleArrayBundle:
+    centers_xyz: np.ndarray
+    independent_covariances_xyz: np.ndarray
+    tangents_xyz: np.ndarray
+    source_vector_arrays_by_name: dict[str, np.ndarray]
 
 
 @dataclass(frozen=True)
@@ -3908,6 +3917,7 @@ def build_anti_collision_well(
     well_kind: str = "project",
     is_reference_only: bool = False,
     analysis_sample_step_m: float | None = None,
+    display_sample_step_m: float | None = None,
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
     sidetrack_parent_name: str = "",
     sidetrack_window_md_m: float | None = None,
@@ -3923,7 +3933,7 @@ def build_anti_collision_well(
     if include_display_geometry:
         overlay_model = _display_geometry_sampling_model(
             model=model,
-            sample_step_m=analysis_sample_step_m,
+            sample_step_m=display_sample_step_m,
         )
         overlay = build_uncertainty_overlay(
             stations=stations,
@@ -3968,6 +3978,7 @@ def build_anti_collision_well(
             samples=samples,
             confidence_scale=1.0,
         ),
+        sample_arrays=_build_sample_array_bundle(samples),
         sidetrack_parent_name=str(sidetrack_parent_name or ""),
         sidetrack_window_md_m=_optional_float(sidetrack_window_md_m),
     )
@@ -5031,6 +5042,74 @@ def _optional_float(value: float | None) -> float | None:
     return None if value is None else float(value)
 
 
+def _build_sample_array_bundle(
+    samples: tuple[AntiCollisionSample, ...],
+) -> AntiCollisionSampleArrayBundle:
+    if not samples:
+        return AntiCollisionSampleArrayBundle(
+            centers_xyz=np.empty((0, 3), dtype=float),
+            independent_covariances_xyz=np.empty((0, 3, 3), dtype=float),
+            tangents_xyz=np.empty((0, 3), dtype=float),
+            source_vector_arrays_by_name={},
+        )
+
+    centers_xyz = np.asarray([sample.center_xyz for sample in samples], dtype=float)
+    independent_covariances_xyz = np.asarray(
+        [_independent_sample_covariance(sample) for sample in samples],
+        dtype=float,
+    )
+    tangents_xyz = np.asarray(
+        [
+            local_uncertainty_axes_xyz(
+                inc_deg=float(sample.inc_deg),
+                azi_deg=float(sample.azi_deg),
+            )[0]
+            for sample in samples
+        ],
+        dtype=float,
+    )
+    sample_vectors = [
+        {
+            str(source_name): np.asarray(source_vector, dtype=float)
+            for source_name, source_vector in sample.global_source_vectors_xyz
+        }
+        for sample in samples
+    ]
+    source_names = sorted(
+        {
+            source_name
+            for vectors_by_name in sample_vectors
+            for source_name in vectors_by_name
+        }
+    )
+    zero_vector = np.zeros(3, dtype=float)
+    source_vector_arrays_by_name = {
+        source_name: np.asarray(
+            [
+                vectors_by_name.get(source_name, zero_vector)
+                for vectors_by_name in sample_vectors
+            ],
+            dtype=float,
+        )
+        for source_name in source_names
+    }
+    return AntiCollisionSampleArrayBundle(
+        centers_xyz=centers_xyz,
+        independent_covariances_xyz=independent_covariances_xyz,
+        tangents_xyz=tangents_xyz,
+        source_vector_arrays_by_name=source_vector_arrays_by_name,
+    )
+
+
+def _sample_array_bundle_for_well(
+    well: AntiCollisionWell,
+) -> AntiCollisionSampleArrayBundle:
+    bundle = well.sample_arrays
+    if bundle is not None and len(bundle.centers_xyz) == len(well.samples):
+        return bundle
+    return _build_sample_array_bundle(well.samples)
+
+
 def _independent_sample_covariance(sample: AntiCollisionSample) -> np.ndarray:
     return np.asarray(sample.covariance_xyz_random, dtype=float) + np.asarray(
         sample.covariance_xyz_systematic, dtype=float
@@ -5108,8 +5187,10 @@ def _pair_distance_combined_radius_matrices(
 ) -> tuple[np.ndarray, np.ndarray]:
     samples_a = well_a.samples
     samples_b = well_b.samples
-    centers_a = np.asarray([sample.center_xyz for sample in samples_a], dtype=float)
-    centers_b = np.asarray([sample.center_xyz for sample in samples_b], dtype=float)
+    bundle_a = _sample_array_bundle_for_well(well_a)
+    bundle_b = _sample_array_bundle_for_well(well_b)
+    centers_a = bundle_a.centers_xyz
+    centers_b = bundle_b.centers_xyz
     delta = centers_a[:, None, :] - centers_b[None, :, :]
     distance = np.linalg.norm(delta, axis=2)
     max_radius_a = _normal_support_radii_for_well(
@@ -5135,10 +5216,10 @@ def _pair_distance_combined_radius_matrices(
     _, candidate_radii = _evaluated_pair_distances_and_radii_by_indices(
         samples_a=samples_a,
         samples_b=samples_b,
+        sample_bundle_a=bundle_a,
+        sample_bundle_b=bundle_b,
         index_a_values=index_a_values,
         index_b_values=index_b_values,
-        centers_a=centers_a,
-        centers_b=centers_b,
         confidence_scale=confidence_scale,
     )
     combined_radius[index_a_values, index_b_values] = candidate_radii
@@ -5184,16 +5265,16 @@ def _evaluated_pair_distances_and_radii_by_indices(
     *,
     samples_a: tuple[AntiCollisionSample, ...],
     samples_b: tuple[AntiCollisionSample, ...],
+    sample_bundle_a: AntiCollisionSampleArrayBundle,
+    sample_bundle_b: AntiCollisionSampleArrayBundle,
     index_a_values: np.ndarray,
     index_b_values: np.ndarray,
-    centers_a: np.ndarray,
-    centers_b: np.ndarray,
     confidence_scale: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     index_a = np.asarray(index_a_values, dtype=int)
     index_b = np.asarray(index_b_values, dtype=int)
-    pair_centers_a = np.asarray(centers_a, dtype=float)[index_a]
-    pair_centers_b = np.asarray(centers_b, dtype=float)[index_b]
+    pair_centers_a = np.asarray(sample_bundle_a.centers_xyz, dtype=float)[index_a]
+    pair_centers_b = np.asarray(sample_bundle_b.centers_xyz, dtype=float)[index_b]
     delta = pair_centers_a - pair_centers_b
     distance = np.linalg.norm(delta, axis=1)
     direction = np.zeros_like(delta, dtype=float)
@@ -5210,15 +5291,15 @@ def _evaluated_pair_distances_and_radii_by_indices(
             direction[int(offset)] = eigenvectors[:, int(np.argmax(eigenvalues))]
 
     covariances_a = np.asarray(
-        [_independent_sample_covariance(sample) for sample in samples_a],
+        sample_bundle_a.independent_covariances_xyz,
         dtype=float,
     )[index_a]
     covariances_b = np.asarray(
-        [_independent_sample_covariance(sample) for sample in samples_b],
+        sample_bundle_b.independent_covariances_xyz,
         dtype=float,
     )[index_b]
-    tangents_a = _sample_tangent_array(samples_a)[index_a]
-    tangents_b = _sample_tangent_array(samples_b)[index_b]
+    tangents_a = np.asarray(sample_bundle_a.tangents_xyz, dtype=float)[index_a]
+    tangents_b = np.asarray(sample_bundle_b.tangents_xyz, dtype=float)[index_b]
     direction_a = _normal_plane_projected_direction_from_tangents(
         direction=direction,
         tangents=tangents_a,
@@ -5237,8 +5318,8 @@ def _evaluated_pair_distances_and_radii_by_indices(
     radius_global = scale * np.sqrt(
         np.clip(
             _directional_global_relative_sigma2_for_index_arrays(
-                samples_a=samples_a,
-                samples_b=samples_b,
+                sample_bundle_a=sample_bundle_a,
+                sample_bundle_b=sample_bundle_b,
                 index_a=index_a,
                 index_b=index_b,
                 direction_a=direction_a,
@@ -5254,19 +5335,6 @@ def _evaluated_pair_distances_and_radii_by_indices(
         + radius_global
     )
     return distance, combined_radius
-
-
-def _sample_tangent_array(samples: tuple[AntiCollisionSample, ...]) -> np.ndarray:
-    return np.asarray(
-        [
-            local_uncertainty_axes_xyz(
-                inc_deg=float(sample.inc_deg),
-                azi_deg=float(sample.azi_deg),
-            )[0]
-            for sample in samples
-        ],
-        dtype=float,
-    )
 
 
 def _normal_plane_projected_direction_from_tangents(
@@ -5286,43 +5354,38 @@ def _normal_plane_projected_direction_from_tangents(
 
 def _directional_global_relative_sigma2_for_index_arrays(
     *,
-    samples_a: tuple[AntiCollisionSample, ...],
-    samples_b: tuple[AntiCollisionSample, ...],
+    sample_bundle_a: AntiCollisionSampleArrayBundle,
+    sample_bundle_b: AntiCollisionSampleArrayBundle,
     index_a: np.ndarray,
     index_b: np.ndarray,
     direction_a: np.ndarray,
     direction_b: np.ndarray,
 ) -> np.ndarray:
     source_names = sorted(
-        {
-            str(source_name)
-            for sample in (*samples_a, *samples_b)
-            for source_name, _ in sample.global_source_vectors_xyz
-        }
+        set(sample_bundle_a.source_vector_arrays_by_name).union(
+            sample_bundle_b.source_vector_arrays_by_name
+        )
     )
     sigma2 = np.zeros(len(index_a), dtype=float)
+    zero_vectors = np.zeros((len(index_a), 3), dtype=float)
     for source_name in source_names:
-        vectors_a = _source_vector_array(samples_a, source_name)[index_a]
-        vectors_b = _source_vector_array(samples_b, source_name)[index_b]
+        source_vectors_a = sample_bundle_a.source_vector_arrays_by_name.get(source_name)
+        source_vectors_b = sample_bundle_b.source_vector_arrays_by_name.get(source_name)
+        vectors_a = (
+            np.asarray(source_vectors_a, dtype=float)[index_a]
+            if source_vectors_a is not None
+            else zero_vectors
+        )
+        vectors_b = (
+            np.asarray(source_vectors_b, dtype=float)[index_b]
+            if source_vectors_b is not None
+            else zero_vectors
+        )
         projected = np.einsum("pi,pi->p", direction_a, vectors_a) - np.einsum(
             "pi,pi->p", direction_b, vectors_b
         )
         sigma2 += projected * projected
     return sigma2
-
-
-def _source_vector_array(
-    samples: tuple[AntiCollisionSample, ...],
-    source_name: str,
-) -> np.ndarray:
-    vectors: list[np.ndarray] = []
-    for sample in samples:
-        sample_vectors = {
-            str(name): np.asarray(vector, dtype=float)
-            for name, vector in sample.global_source_vectors_xyz
-        }
-        vectors.append(sample_vectors.get(source_name, np.zeros(3, dtype=float)))
-    return np.asarray(vectors, dtype=float)
 
 
 def _score_matrix(distance: np.ndarray, combined_radius: np.ndarray) -> np.ndarray:
@@ -6091,7 +6154,7 @@ def _geometry_confirmed_pairs(
         if ring_b is None:
             ring_b = _sample_uncertainty_ring_xyz(samples_b[index_b], model=model_b)
             ring_cache_b[index_b] = ring_b
-        overlap_ring = _overlap_ring_between_samples(
+        if _rings_overlap_between_samples(
             ring_a_xyz=ring_a,
             ring_b_xyz=ring_b,
             center_xyz=0.5
@@ -6099,8 +6162,7 @@ def _geometry_confirmed_pairs(
                 np.asarray(samples_a[index_a].center_xyz, dtype=float)
                 + np.asarray(samples_b[index_b].center_xyz, dtype=float)
             ),
-        )
-        if len(overlap_ring) >= 3:
+        ):
             confirmed.add((index_a, index_b))
     return confirmed
 
@@ -6303,14 +6365,12 @@ def _evaluated_pair_distances_and_radii(
     pairs: list[tuple[int, int]],
     confidence_scale: float,
 ) -> tuple[np.ndarray, np.ndarray]:
+    sample_bundle_a = _build_sample_array_bundle(samples_a)
+    sample_bundle_b = _build_sample_array_bundle(samples_b)
     pair_samples_a = tuple(samples_a[int(index_a)] for index_a, _ in pairs)
     pair_samples_b = tuple(samples_b[int(index_b)] for _, index_b in pairs)
-    centers_a = np.asarray(
-        [sample.center_xyz for sample in pair_samples_a], dtype=float
-    )
-    centers_b = np.asarray(
-        [sample.center_xyz for sample in pair_samples_b], dtype=float
-    )
+    centers_a = np.asarray([sample.center_xyz for sample in pair_samples_a], dtype=float)
+    centers_b = np.asarray([sample.center_xyz for sample in pair_samples_b], dtype=float)
     delta = centers_a - centers_b
     distance = np.linalg.norm(delta, axis=1)
     direction = np.zeros_like(delta, dtype=float)
@@ -6324,21 +6384,23 @@ def _evaluated_pair_distances_and_radii(
             )
             eigenvalues, eigenvectors = np.linalg.eigh(covariance)
             direction[int(index)] = eigenvectors[:, int(np.argmax(eigenvalues))]
+    pair_index_a = np.asarray([int(index_a) for index_a, _ in pairs], dtype=int)
+    pair_index_b = np.asarray([int(index_b) for _, index_b in pairs], dtype=int)
     covariances_a = np.asarray(
-        [_independent_sample_covariance(sample) for sample in pair_samples_a],
+        sample_bundle_a.independent_covariances_xyz,
         dtype=float,
-    )
+    )[pair_index_a]
     covariances_b = np.asarray(
-        [_independent_sample_covariance(sample) for sample in pair_samples_b],
+        sample_bundle_b.independent_covariances_xyz,
         dtype=float,
-    )
-    direction_a = _normal_plane_projected_direction_for_pairs(
-        samples=pair_samples_a,
+    )[pair_index_b]
+    direction_a = _normal_plane_projected_direction_from_tangents(
         direction=direction,
+        tangents=np.asarray(sample_bundle_a.tangents_xyz, dtype=float)[pair_index_a],
     )
-    direction_b = _normal_plane_projected_direction_for_pairs(
-        samples=pair_samples_b,
+    direction_b = _normal_plane_projected_direction_from_tangents(
         direction=direction,
+        tangents=np.asarray(sample_bundle_b.tangents_xyz, dtype=float)[pair_index_b],
     )
     directional_sigma2_a = np.einsum(
         "pi,pij,pj->p", direction_a, covariances_a, direction_a
@@ -6349,10 +6411,13 @@ def _evaluated_pair_distances_and_radii(
     scale = float(max(confidence_scale, SMALL))
     radius_global = scale * np.sqrt(
         np.clip(
-            _directional_global_relative_sigma2_for_pairs(
-                samples_a=pair_samples_a,
-                samples_b=pair_samples_b,
-                direction=direction,
+            _directional_global_relative_sigma2_for_index_arrays(
+                sample_bundle_a=sample_bundle_a,
+                sample_bundle_b=sample_bundle_b,
+                index_a=pair_index_a,
+                index_b=pair_index_b,
+                direction_a=direction_a,
+                direction_b=direction_b,
             ),
             0.0,
             None,
@@ -6372,48 +6437,25 @@ def _directional_global_relative_sigma2_for_pairs(
     samples_b: tuple[AntiCollisionSample, ...],
     direction: np.ndarray,
 ) -> np.ndarray:
-    direction_a = _normal_plane_projected_direction_for_pairs(
-        samples=samples_a,
-        direction=direction,
+    sample_bundle_a = _build_sample_array_bundle(samples_a)
+    sample_bundle_b = _build_sample_array_bundle(samples_b)
+    direction_a = _normal_plane_projected_direction_from_tangents(
+        direction=np.asarray(direction, dtype=float),
+        tangents=np.asarray(sample_bundle_a.tangents_xyz, dtype=float),
     )
-    direction_b = _normal_plane_projected_direction_for_pairs(
-        samples=samples_b,
-        direction=direction,
+    direction_b = _normal_plane_projected_direction_from_tangents(
+        direction=np.asarray(direction, dtype=float),
+        tangents=np.asarray(sample_bundle_b.tangents_xyz, dtype=float),
     )
-    source_names = sorted(
-        {
-            str(source_name)
-            for sample in (*samples_a, *samples_b)
-            for source_name, _ in sample.global_source_vectors_xyz
-        }
+    indices = np.arange(len(samples_a), dtype=int)
+    return _directional_global_relative_sigma2_for_index_arrays(
+        sample_bundle_a=sample_bundle_a,
+        sample_bundle_b=sample_bundle_b,
+        index_a=indices,
+        index_b=indices,
+        direction_a=direction_a,
+        direction_b=direction_b,
     )
-    sigma2 = np.zeros(len(samples_a), dtype=float)
-    for source_name in source_names:
-        vectors_a = np.asarray(
-            [
-                dict(sample.global_source_vectors_xyz).get(
-                    source_name,
-                    np.zeros(3, dtype=float),
-                )
-                for sample in samples_a
-            ],
-            dtype=float,
-        )
-        vectors_b = np.asarray(
-            [
-                dict(sample.global_source_vectors_xyz).get(
-                    source_name,
-                    np.zeros(3, dtype=float),
-                )
-                for sample in samples_b
-            ],
-            dtype=float,
-        )
-        projected = np.einsum("pi,pi->p", direction_a, vectors_a) - np.einsum(
-            "pi,pi->p", direction_b, vectors_b
-        )
-        sigma2 += projected * projected
-    return sigma2
 
 
 def _normal_plane_projected_direction_for_pairs(
@@ -6421,19 +6463,11 @@ def _normal_plane_projected_direction_for_pairs(
     samples: tuple[AntiCollisionSample, ...],
     direction: np.ndarray,
 ) -> np.ndarray:
-    direction_array = np.asarray(direction, dtype=float)
-    tangents = np.asarray(
-        [
-            local_uncertainty_axes_xyz(
-                inc_deg=float(sample.inc_deg),
-                azi_deg=float(sample.azi_deg),
-            )[0]
-            for sample in samples
-        ],
-        dtype=float,
+    bundle = _build_sample_array_bundle(samples)
+    return _normal_plane_projected_direction_from_tangents(
+        direction=np.asarray(direction, dtype=float),
+        tangents=np.asarray(bundle.tangents_xyz, dtype=float),
     )
-    tangent_component = np.sum(direction_array * tangents, axis=1, keepdims=True)
-    return direction_array - tangent_component * tangents
 
 
 def _build_pair_corridors(
@@ -6896,6 +6930,28 @@ def _overlap_ring_between_samples(
     )
 
 
+def _rings_overlap_between_samples(
+    *,
+    ring_a_xyz: np.ndarray,
+    ring_b_xyz: np.ndarray,
+    center_xyz: np.ndarray,
+) -> bool:
+    ring_a = _open_ring(np.asarray(ring_a_xyz, dtype=float))
+    ring_b = _open_ring(np.asarray(ring_b_xyz, dtype=float))
+    if len(ring_a) < 3 or len(ring_b) < 3:
+        return False
+
+    basis_u, basis_v = _shared_overlap_plane_basis(ring_a=ring_a, ring_b=ring_b)
+    center = np.asarray(center_xyz, dtype=float)
+    polygon_a_2d = _ensure_ccw_convex_polygon(
+        _project_ring_to_plane(ring_a, center, basis_u, basis_v)
+    )
+    polygon_b_2d = _ensure_ccw_convex_polygon(
+        _project_ring_to_plane(ring_b, center, basis_u, basis_v)
+    )
+    return _convex_polygons_overlap(polygon_a_2d, polygon_b_2d)
+
+
 def _open_ring(ring_xyz: np.ndarray) -> np.ndarray:
     ring = np.asarray(ring_xyz, dtype=float)
     if len(ring) >= 2 and np.allclose(ring[0], ring[-1], atol=SMALL):
@@ -7035,6 +7091,37 @@ def _convex_polygon_intersection(
     if len(output) < 3:
         return np.empty((0, 2), dtype=float)
     return _ensure_ccw_convex_polygon(output)
+
+
+def _convex_polygons_overlap(
+    polygon_a: np.ndarray,
+    polygon_b: np.ndarray,
+) -> bool:
+    poly_a = np.asarray(polygon_a, dtype=float)
+    poly_b = np.asarray(polygon_b, dtype=float)
+    if len(poly_a) < 3 or len(poly_b) < 3:
+        return False
+
+    def _axes_for_polygon(polygon: np.ndarray) -> list[np.ndarray]:
+        axes: list[np.ndarray] = []
+        for start, end in zip(polygon, np.roll(polygon, -1, axis=0)):
+            edge = np.asarray(end, dtype=float) - np.asarray(start, dtype=float)
+            axis = np.array([-float(edge[1]), float(edge[0])], dtype=float)
+            axis_norm = float(np.linalg.norm(axis))
+            if axis_norm <= SMALL:
+                continue
+            axes.append(axis / axis_norm)
+        return axes
+
+    for axis in [*_axes_for_polygon(poly_a), *_axes_for_polygon(poly_b)]:
+        proj_a = poly_a @ axis
+        proj_b = poly_b @ axis
+        if (
+            float(np.max(proj_a)) < float(np.min(proj_b)) - SMALL
+            or float(np.max(proj_b)) < float(np.min(proj_a)) - SMALL
+        ):
+            return False
+    return True
 
 
 def _resample_closed_polygon_2d(
@@ -9564,7 +9651,7 @@ def _nullable_float(value: float | None) -> float | str:
     return float(value)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_rerun.py	61962
+===BEGIN_FILE===	pywp/anticollision_rerun.py	62144
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -9662,6 +9749,7 @@ class _AntiCollisionWellBuildJob:
     well_kind: str
     is_reference_only: bool
     analysis_sample_step_m: float | None
+    display_sample_step_m: float | None = None
     sidetrack_parent_name: str = ""
     sidetrack_window_md_m: float | None = None
 
@@ -9693,6 +9781,7 @@ def _build_anti_collision_well_job(
         well_kind=str(job.well_kind),
         is_reference_only=bool(job.is_reference_only),
         analysis_sample_step_m=job.analysis_sample_step_m,
+        display_sample_step_m=job.display_sample_step_m,
         sidetrack_parent_name=str(job.sidetrack_parent_name),
         sidetrack_window_md_m=job.sidetrack_window_md_m,
     )
@@ -9994,12 +10083,12 @@ def build_anti_collision_wells_for_successes(
     int,
     int,
 ]:
-    effective_sample_step_m = (
+    effective_analysis_sample_step_m = (
         float(analysis_sample_step_m)
         if analysis_sample_step_m is not None
         else (
             float(DEFINITIVE_SCAN_STEP_M)
-            if include_display_geometry and build_overlap_geometry
+            if build_overlap_geometry
             else None
         )
     )
@@ -10116,7 +10205,8 @@ def build_anti_collision_wells_for_successes(
             include_display_geometry=bool(include_display_geometry),
             well_kind="project",
             is_reference_only=False,
-            analysis_sample_step_m=effective_sample_step_m,
+            analysis_sample_step_m=effective_analysis_sample_step_m,
+            display_sample_step_m=None,
             sidetrack_parent_name=sidetrack_parent_name,
             sidetrack_window_md_m=sidetrack_window_md_m,
         )
@@ -10158,7 +10248,8 @@ def build_anti_collision_wells_for_successes(
             include_display_geometry=bool(include_display_geometry),
             well_kind=str(item.kind),
             is_reference_only=True,
-            analysis_sample_step_m=effective_sample_step_m,
+            analysis_sample_step_m=effective_analysis_sample_step_m,
+            display_sample_step_m=None,
         )
         _reuse_or_schedule(job)
 
@@ -26170,7 +26261,7 @@ def find_selected_success(
     return next(item for item in successes if str(item.name) == str(selected_name))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_run.py	31345
+===BEGIN_FILE===	pywp/ptc_batch_run.py	30795
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -26524,7 +26615,6 @@ def run_batch_if_clicked(
         return
 
     selected_execution_order = hooks.selected_execution_order(selected_names)
-    pending_edit_names_before_run = set(hooks.pending_edit_target_names())
     records_for_run = list(records)
     pad_layout_active = bool(str(state.get("wt_pad_last_applied_at", ""))) and not bool(
         state.get("wt_pad_auto_applied_on_import", False)
@@ -26878,12 +26968,6 @@ def run_batch_if_clicked(
                 new_successes=successes,
                 pending_edit_target_names=hooks.pending_edit_target_names,
             )
-            pending_edit_names_after_run = set(hooks.pending_edit_target_names())
-            edit_target_recalculation_completed = bool(
-                pending_edit_names_before_run
-                and not pending_edit_names_after_run
-                and pending_edit_names_before_run.issubset(selected_set)
-            )
             applied_affected_wells = {
                 str(name) for name in prepared_snapshot.get("affected_wells", ())
             }
@@ -26909,14 +26993,11 @@ def run_batch_if_clicked(
                 state["wt_last_anticollision_previous_successes"] = (
                     previous_anticollision_successes
                 )
-                hooks.focus_all_wells_anticollision_results()
+                hooks.focus_all_wells_trajectory_results()
             else:
                 state["wt_last_anticollision_resolution"] = None
                 state["wt_last_anticollision_previous_successes"] = {}
-                if edit_target_recalculation_completed:
-                    hooks.focus_all_wells_anticollision_results()
-                else:
-                    hooks.focus_all_wells_trajectory_results()
+                hooks.focus_all_wells_trajectory_results()
             state["wt_last_error"] = ""
             state["wt_last_run_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             state["wt_last_runtime_s"] = float(elapsed_s)
@@ -27595,7 +27676,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	235779
+===BEGIN_FILE===	pywp/ptc_core.py	241264
 from __future__ import annotations
 
 import colorsys
@@ -27771,7 +27852,6 @@ from pywp.well_pad import (
     WellPad,
     apply_pad_layout,
     estimate_pad_nds_azimuth_deg,
-    ordered_pad_wells,
     well_name_natural_sort_key,
 )
 from pywp.welltrack_batch import (
@@ -29470,6 +29550,46 @@ def _cached_anti_collision_view_model(
     return analysis, recommendations, clusters
 
 
+def _current_anti_collision_cache_snapshot(
+    *,
+    successes: list[SuccessfulWellPlan],
+    uncertainty_model: PlanningUncertaintyModel,
+    records: list[WelltrackRecord],
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None,
+) -> tuple[
+    AntiCollisionAnalysis,
+    tuple[AntiCollisionRecommendation, ...],
+    tuple[AntiCollisionRecommendationCluster, ...],
+] | None:
+    color_map = _well_color_map(records) if records else {}
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
+    )
+    planned_color_map = _planned_anti_collision_color_map(successes, color_map)
+    cache_key = _anti_collision_cache_key(
+        successes=successes,
+        model=uncertainty_model,
+        name_to_color=planned_color_map,
+        reference_wells=scoped_reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
+    cache = st.session_state.get("wt_anticollision_analysis_cache")
+    if not isinstance(cache, Mapping) or str(cache.get("key", "")) != cache_key:
+        return None
+    analysis = cache.get("analysis")
+    recommendations = cache.get("recommendations")
+    clusters = cache.get("clusters")
+    if not isinstance(analysis, AntiCollisionAnalysis):
+        return None
+    if not isinstance(recommendations, tuple) or not isinstance(clusters, tuple):
+        return None
+    return analysis, recommendations, clusters
+
+
 def _format_duration_ru(seconds: float) -> str:
     total_seconds = int(round(float(max(seconds, 0.0))))
     if total_seconds < 60:
@@ -29926,11 +30046,13 @@ def _bump_three_viewer_nonce() -> None:
 def _clear_pad_state() -> None:
     st.session_state["wt_pad_configs"] = {}
     st.session_state["wt_pad_detected_meta"] = {}
-    st.session_state["wt_pad_selected_id"] = ""
     st.session_state["wt_pad_last_applied_at"] = ""
     st.session_state["wt_pad_auto_applied_on_import"] = False
+    st.session_state.pop("wt_pad_selected_id", None)
     for key in list(st.session_state.keys()):
-        if str(key).startswith("wt_pad_cfg_"):
+        if str(key).startswith("wt_pad_cfg_") or str(key).startswith(
+            "wt_pad_fixed_slots_editor_"
+        ):
             del st.session_state[key]
 
 
@@ -32195,14 +32317,33 @@ def _actual_fund_analysis_signature(
 def _actual_fund_analyses(
     actual_wells: tuple[ImportedTrajectoryWell, ...],
 ) -> tuple[ActualFundWellAnalysis, ...]:
-    signature = _actual_fund_analysis_signature(actual_wells)
-    cache_key = "wt_actual_fund_analysis_cache"
+    return _cached_reference_fund_analyses(
+        actual_wells,
+        cache_key="wt_actual_fund_analysis_cache",
+    )
+
+
+def _approved_fund_analyses(
+    approved_wells: tuple[ImportedTrajectoryWell, ...],
+) -> tuple[ActualFundWellAnalysis, ...]:
+    return _cached_reference_fund_analyses(
+        approved_wells,
+        cache_key="wt_approved_fund_analysis_cache",
+    )
+
+
+def _cached_reference_fund_analyses(
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+    *,
+    cache_key: str,
+) -> tuple[ActualFundWellAnalysis, ...]:
+    signature = _actual_fund_analysis_signature(reference_wells)
     cached = st.session_state.get(cache_key)
     if isinstance(cached, dict) and cached.get("signature") == signature:
         analyses = cached.get("analyses")
         if isinstance(analyses, tuple):
             return analyses
-    analyses = build_actual_fund_well_analyses(actual_wells)
+    analyses = build_actual_fund_well_analyses(reference_wells)
     st.session_state[cache_key] = {
         "signature": signature,
         "analyses": analyses,
@@ -33341,15 +33482,19 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             help=(
                 "Включено: для всех кустов авто-порядок скважин задаётся от более "
                 "глубоких целей к менее глубоким. Выключено: используется "
-                "естественная сортировка имён скважин A->Z, 1->99. "
-                "Фиксированные позиции ниже всегда имеют приоритет."
+                "естественная сортировка имён скважин A->Z, 1->99. Для кустов "
+                "с уже заданными устьями этот режим применяется только после "
+                "разрешения редактирования и включения локального тумблера "
+                "'Применить авто-порядок'. Фиксированные позиции ниже всегда "
+                "имеют приоритет."
             ),
         )
         st.caption(
             "Базовый авто-порядок внутри каждого куста: "
             f"{ptc_pad_state.pad_auto_order_mode_label(st.session_state)}. "
-            "Фиксированные позиции переопределяют его, но сами по себе не "
-            "записываются автоматически."
+            "Для кустов с заранее заданными устьями он не переставляет "
+            "скважины, пока не включено редактирование позиций и локальное "
+            "применение авто-порядка."
         )
         pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
         pad_rows = []
@@ -33419,23 +33564,34 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             "allow_source_surface_edit": (
                 f"wt_pad_cfg_allow_source_surface_edit_{selected_id}"
             ),
+            "apply_auto_order": f"wt_pad_cfg_apply_auto_order_{selected_id}",
         }
         for field, widget_key in widget_keys.items():
-            if field in {"surface_anchor_center", "allow_source_surface_edit"}:
+            if field in {
+                "surface_anchor_center",
+                "allow_source_surface_edit",
+                "apply_auto_order",
+            }:
                 if widget_key not in st.session_state:
                     st.session_state[widget_key] = (
                         previous_anchor_mode == PAD_SURFACE_ANCHOR_CENTER
                         if field == "surface_anchor_center"
-                        else bool(
-                            selected_cfg.get(
-                                ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY,
-                                False,
+                        else (
+                            bool(
+                                selected_cfg.get(
+                                    ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY,
+                                    False,
+                                )
+                            )
+                            if field == "allow_source_surface_edit"
+                            else bool(
+                                selected_cfg.get(
+                                    ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY,
+                                    False,
+                                )
                             )
                         )
                     )
-                continue
-            if field == "nds_azimuth_deg":
-                st.session_state[widget_key] = float(selected_cfg[field])
                 continue
             if widget_key not in st.session_state:
                 st.session_state[widget_key] = float(selected_cfg[field])
@@ -33443,12 +33599,14 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         if auto_name_notice:
             st.info(auto_name_notice)
         allow_source_surface_edit = False
+        apply_auto_order = False
         if source_surfaces_defined:
             st.info(
                 "Положения устьев были заданы в исходных данных. Для этого куста "
                 "координаты устьев ниже показаны справочно и по умолчанию не "
-                "редактируются. Фиксированный порядок можно задавать отдельно для "
-                "anti-collision оптимизации."
+                "редактируются. Исходная привязка скважин к позициям куста "
+                "сохраняется, пока вы явно не разрешите редактирование и не "
+                "включите применение авто-порядка."
             )
             allow_source_surface_edit = st.toggle(
                 "Разрешить редактирование позиций куста",
@@ -33459,9 +33617,39 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                     "'Рассчитать устья скважин'."
                 ),
             )
+            apply_auto_order = st.toggle(
+                "Применить авто-порядок",
+                key=widget_keys["apply_auto_order"],
+                help=(
+                    "Переставляет скважины по текущему глобальному правилу "
+                    "авто-порядка поверх сохранённых позиций куста. Когда "
+                    "тумблер выключен, используется исходная привязка скважин "
+                    "к импортированным позициям."
+                ),
+                disabled=not allow_source_surface_edit,
+            )
         surface_controls_disabled = bool(
             source_surfaces_defined and not allow_source_surface_edit
         )
+        if surface_controls_disabled:
+            selected_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = False
+            selected_cfg[ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY] = False
+            config_map[selected_id] = selected_cfg
+            st.session_state["wt_pad_configs"] = config_map
+            selected_cfg = dict(_pad_config_for_ui(selected_pad))
+            st.session_state[widget_keys["apply_auto_order"]] = False
+            st.session_state[widget_keys["surface_anchor_center"]] = (
+                str(selected_cfg.get("surface_anchor_mode"))
+                == PAD_SURFACE_ANCHOR_CENTER
+            )
+            for field in (
+                "spacing_m",
+                "nds_azimuth_deg",
+                "first_surface_x",
+                "first_surface_y",
+                "first_surface_z",
+            ):
+                st.session_state[widget_keys[field]] = float(selected_cfg[field])
 
         anchor_center = st.toggle(
             "Координата куста = центр расстановки",
@@ -33506,6 +33694,53 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                             surface_anchor_mode=anchor_mode,
                         ),
                     )
+                )
+            previous_anchor_xyz = ptc_pad_state.pad_anchor_defaults(
+                st.session_state,
+                pad=selected_pad,
+                anchor_mode=previous_anchor_mode,
+            )
+            next_anchor_xyz = ptc_pad_state.pad_anchor_defaults(
+                st.session_state,
+                pad=selected_pad,
+                anchor_mode=anchor_mode,
+            )
+            current_anchor_xyz = (
+                float(
+                    st.session_state.get(
+                        widget_keys["first_surface_x"],
+                        selected_cfg["first_surface_x"],
+                    )
+                ),
+                float(
+                    st.session_state.get(
+                        widget_keys["first_surface_y"],
+                        selected_cfg["first_surface_y"],
+                    )
+                ),
+                float(
+                    st.session_state.get(
+                        widget_keys["first_surface_z"],
+                        selected_cfg["first_surface_z"],
+                    )
+                ),
+            )
+            if all(
+                abs(float(current_value) - float(previous_value)) <= 1e-6
+                for current_value, previous_value in zip(
+                    current_anchor_xyz,
+                    previous_anchor_xyz,
+                    strict=True,
+                )
+            ):
+                st.session_state[widget_keys["first_surface_x"]] = float(
+                    next_anchor_xyz[0]
+                )
+                st.session_state[widget_keys["first_surface_y"]] = float(
+                    next_anchor_xyz[1]
+                )
+                st.session_state[widget_keys["first_surface_z"]] = float(
+                    next_anchor_xyz[2]
                 )
 
         p1, p2, p3, p4, p5 = st.columns(5, gap="small")
@@ -33565,6 +33800,9 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         selected_cfg["surface_anchor_mode"] = anchor_mode
         selected_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = bool(
             allow_source_surface_edit
+        )
+        selected_cfg[ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY] = bool(
+            allow_source_surface_edit and apply_auto_order
         )
 
         fixed_slots = _pad_fixed_slots_from_config(
@@ -33633,64 +33871,48 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         config_map[selected_id] = selected_cfg
         st.session_state["wt_pad_configs"] = config_map
 
-        ordered_wells = ordered_pad_wells(
+        preview_assignments = ptc_pad_state.pad_surface_assignments(
+            st.session_state,
             pad=selected_pad,
-            nds_azimuth_deg=float(selected_cfg["nds_azimuth_deg"]),
-            fixed_slots=fixed_slots,
-            auto_order_mode=ptc_pad_state.pad_auto_order_mode(st.session_state),
+            config=selected_cfg,
         )
-        angle_rad = np.deg2rad(float(selected_cfg["nds_azimuth_deg"]))
-        ux = float(np.sin(angle_rad))
-        uy = float(np.cos(angle_rad))
-        center_slot_index = 0.5 * float(max(len(ordered_wells) - 1, 0))
+        well_by_name = {
+            str(well.name): well for well in selected_pad.wells
+        }
         fixed_slot_by_name = {str(name): int(slot) for slot, name in fixed_slots}
         preview_rows: list[dict[str, object]] = []
-        for slot_index, well in enumerate(ordered_wells, start=1):
+        for assignment in preview_assignments:
+            well = well_by_name.get(str(assignment.well_name))
+            if well is None:
+                continue
+            slot_index = int(assignment.slot_index)
+            if source_surfaces_defined and not allow_source_surface_edit:
+                fixation_label = "Исх."
+            elif source_surfaces_defined and not bool(apply_auto_order):
+                fixation_label = "Исх."
+            else:
+                fixation_label = (
+                    "Да"
+                    if fixed_slot_by_name.get(str(assignment.well_name))
+                    == int(slot_index)
+                    else "Авто"
+                )
             row = {
                 "Порядок": int(slot_index),
-                "Скважина": str(well.name),
-                "Фиксация": (
-                    "Да"
-                    if fixed_slot_by_name.get(str(well.name)) == int(slot_index)
-                    else "Авто"
-                ),
+                "Скважина": str(assignment.well_name),
+                "Фиксация": fixation_label,
                 "Середина t1-t3 X, м": float(well.midpoint_x),
                 "Середина t1-t3 Y, м": float(well.midpoint_y),
                 "Опора S": _pad_anchor_mode_label(anchor_mode),
             }
             if surface_controls_disabled:
-                source_record = next(
-                    (item for item in base_records if str(item.name) == str(well.name)),
-                    None,
-                )
-                source_surface = (
-                    _source_surface_xyz(source_record)
-                    if source_record is not None
-                    else None
-                )
-                row["Текущее S X, м"] = (
-                    None if source_surface is None else float(source_surface[0])
-                )
-                row["Текущее S Y, м"] = (
-                    None if source_surface is None else float(source_surface[1])
-                )
-                row["Текущее S Z, м"] = (
-                    None if source_surface is None else float(source_surface[2])
-                )
+                row["Текущее S X, м"] = float(assignment.surface_x_m)
+                row["Текущее S Y, м"] = float(assignment.surface_y_m)
+                row["Текущее S Z, м"] = float(assignment.surface_z_m)
             else:
-                if anchor_mode == PAD_SURFACE_ANCHOR_CENTER:
-                    shift_m = (float(slot_index - 1) - center_slot_index) * float(
-                        selected_cfg["spacing_m"]
-                    )
-                else:
-                    shift_m = float(slot_index - 1) * float(selected_cfg["spacing_m"])
-                row["Новое S X, м"] = float(
-                    selected_cfg["first_surface_x"] + shift_m * ux
-                )
-                row["Новое S Y, м"] = float(
-                    selected_cfg["first_surface_y"] + shift_m * uy
-                )
-                row["Новое S Z, м"] = float(selected_cfg["first_surface_z"])
+                row["Новое S X, м"] = float(assignment.surface_x_m)
+                row["Новое S Y, м"] = float(assignment.surface_y_m)
+                row["Новое S Z, м"] = float(assignment.surface_z_m)
             preview_rows.append(row)
         with st.expander(
             "Порядок бурения и координаты устьев на кусте",
@@ -33741,8 +33963,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
 
         if reset_clicked:
             st.session_state["wt_records"] = list(base_records)
-            st.session_state["wt_pad_last_applied_at"] = ""
-            st.session_state["wt_pad_auto_applied_on_import"] = False
+            _clear_pad_state()
             _clear_results()
             st.rerun()
 
@@ -34014,13 +34235,14 @@ def _find_selected_success(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_edit_targets.py	15335
+===BEGIN_FILE===	pywp/ptc_edit_targets.py	16380
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 import math
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.pilot_wells import is_pilot_name, parent_name_for_pilot, well_name_key
 from pywp.ptc_sidetrack_state import queue_editor_sidetrack_window_override
 
 __all__ = [
@@ -34170,6 +34392,37 @@ def unique_well_names(names: Iterable[object]) -> list[str]:
             continue
         seen.add(name)
         result.append(name)
+    return result
+
+
+def _expanded_invalidated_names(
+    records: Iterable[WelltrackRecord],
+    edited_names: Iterable[object],
+) -> list[str]:
+    canonical_name_by_key = {
+        well_name_key(record.name): str(record.name)
+        for record in records
+    }
+    result: list[str] = []
+    seen_keys: set[str] = set()
+
+    def _append(name: object) -> None:
+        text = str(name).strip()
+        if not text:
+            return
+        canonical = canonical_name_by_key.get(well_name_key(text), text)
+        canonical_key = well_name_key(canonical)
+        if canonical_key in seen_keys:
+            return
+        seen_keys.add(canonical_key)
+        result.append(canonical)
+
+    for name in edited_names:
+        _append(name)
+    for name in tuple(result):
+        if not is_pilot_name(name):
+            continue
+        _append(parent_name_for_pilot(name))
     return result
 
 
@@ -34361,6 +34614,7 @@ def apply_edit_targets_changes(
     )
     if not updated_names:
         return []
+    invalidated_names = _expanded_invalidated_names(updated_records, updated_names)
 
     effective_change_map = {
         name: change_map[name] for name in updated_target_names if name in change_map
@@ -34378,13 +34632,13 @@ def apply_edit_targets_changes(
     invalidate_results_for_edited_targets(
         session_state,
         records=updated_records,
-        edited_names=updated_names,
+        edited_names=invalidated_names,
         base_row_factory=base_row_factory,
     )
     pending_names = unique_well_names(
         [
             *pending_edit_target_names(session_state),
-            *updated_names,
+            *invalidated_names,
         ]
     )
     session_state["wt_edit_targets_pending_names"] = pending_names
@@ -34454,7 +34708,7 @@ def queue_all_wells_results_focus(
     session_state["wt_pending_all_wells_results_focus"] = True
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_pad_state.py	28860
+===BEGIN_FILE===	pywp/ptc_pad_state.py	46354
 from __future__ import annotations
 
 from collections import Counter
@@ -34471,14 +34725,17 @@ from pywp.models import Point3D
 from pywp.well_pad import (
     DEFAULT_PAD_WELL_AUTO_ORDER_MODE,
     PAD_WELL_AUTO_ORDER_NAME,
+    PAD_WELL_AUTO_ORDER_PROJECTION,
     PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC,
     PAD_SURFACE_ANCHOR_CENTER,
+    PAD_SURFACE_ANCHOR_FIRST,
     PadLayoutPlan,
     PadWell,
     WellPad,
     aligned_pad_nds_azimuth_deg,
     estimate_pad_nds_azimuth_deg,
     ordered_pad_wells,
+    well_name_natural_sort_key,
 )
 
 __all__ = [
@@ -34487,6 +34744,8 @@ __all__ = [
     "WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M",
     "WT_PAD_FOCUS_ALL",
     "DetectedPadUiMeta",
+    "PadSurfaceAssignment",
+    "WT_PAD_APPLY_AUTO_ORDER_KEY",
     "build_pad_plan_map",
     "detect_ui_pads",
     "ensure_pad_configs",
@@ -34495,6 +34754,7 @@ __all__ = [
     "focus_pad_well_names",
     "inferred_surface_spacing_m",
     "normalize_focus_pad_id",
+    "pad_anchor_defaults",
     "pad_auto_order_mode",
     "pad_auto_order_mode_label",
     "pad_anchor_mode_label",
@@ -34505,6 +34765,7 @@ __all__ = [
     "pad_fixed_slots_from_config",
     "pad_fixed_slots_from_editor",
     "pad_membership",
+    "pad_surface_assignments",
     "project_pads_for_ui",
     "record_midpoint_xyz",
     "resolved_pad_nds_azimuth_deg",
@@ -34517,6 +34778,7 @@ WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M = 400.0
 WT_PAD_FOCUS_ALL = "__all_pads__"
 WT_PAD_AUTO_ORDER_BY_TARGET_DEPTH_KEY = "wt_pad_auto_order_by_target_depth"
 WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY = "allow_source_surface_edit"
+WT_PAD_APPLY_AUTO_ORDER_KEY = "apply_auto_order"
 
 
 @dataclass(frozen=True)
@@ -34527,7 +34789,18 @@ class DetectedPadUiMeta:
     source_surface_y_m: float
     source_surface_z_m: float
     source_surface_count: int
+    source_surface_slots: tuple[tuple[str, float, float, float], ...] = ()
     auto_name_notice: str = ""
+
+
+@dataclass(frozen=True)
+class PadSurfaceAssignment:
+    slot_index: int
+    well_name: str
+    surface_x_m: float
+    surface_y_m: float
+    surface_z_m: float
+    source_well_name: str = ""
 
 
 _PAD_COMPONENT_EDGE_RE = re.compile(r"^[\s_\-]+|[\s_\-]+$")
@@ -34550,6 +34823,7 @@ def pad_config_defaults(pad: WellPad) -> dict[str, object]:
         "first_surface_z": float(pad.surface.z),
         "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
         WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY: False,
+        WT_PAD_APPLY_AUTO_ORDER_KEY: False,
         "fixed_slots": (),
     }
 
@@ -34593,6 +34867,38 @@ def pad_fixed_slots_from_config(
         used_names.add(name)
         normalized.append((slot, name))
     return tuple(sorted(normalized, key=lambda value: value[0]))
+
+
+def _apply_fixed_slots_to_ordered_names(
+    ordered_names: list[str],
+    *,
+    fixed_slots: tuple[tuple[int, str], ...],
+) -> list[str]:
+    if not ordered_names or not fixed_slots:
+        return list(ordered_names)
+    normalized_names = [str(name) for name in ordered_names]
+    max_slot = len(normalized_names)
+    fixed_map = {
+        int(slot): str(name)
+        for slot, name in fixed_slots
+        if 1 <= int(slot) <= max_slot and str(name) in normalized_names
+    }
+    if not fixed_map:
+        return normalized_names
+
+    placed_names = set(fixed_map.values())
+    remaining_names = [
+        str(name) for name in normalized_names if str(name) not in placed_names
+    ]
+    remaining_iter = iter(remaining_names)
+    resolved_names: list[str] = []
+    for slot_index in range(1, max_slot + 1):
+        fixed_name = fixed_map.get(int(slot_index))
+        if fixed_name is not None:
+            resolved_names.append(str(fixed_name))
+            continue
+        resolved_names.append(next(remaining_iter))
+    return resolved_names
 
 
 def pad_fixed_slots_editor_rows(
@@ -34829,6 +35135,7 @@ def detect_ui_pads(
     ):
         wells: list[PadWell] = []
         surface_xyzs: list[tuple[float, float, float]] = []
+        surface_slot_rows: list[tuple[str, float, float, float]] = []
         unique_surface_keys: set[tuple[int, int, int]] = set()
         for record_index, record, surface_xyz in cluster:
             midpoint_x, midpoint_y, midpoint_z = record_midpoint_xyz(record)
@@ -34842,6 +35149,14 @@ def detect_ui_pads(
                 )
             )
             surface_xyzs.append(surface_xyz)
+            surface_slot_rows.append(
+                (
+                    str(record.name),
+                    float(surface_xyz[0]),
+                    float(surface_xyz[1]),
+                    float(surface_xyz[2]),
+                )
+            )
             unique_surface_keys.add(
                 (
                     round(float(surface_xyz[0]), 6),
@@ -34879,9 +35194,369 @@ def detect_ui_pads(
             source_surface_y_m=float(center_y),
             source_surface_z_m=float(center_z),
             source_surface_count=len(surface_xyzs),
+            source_surface_slots=tuple(
+                sorted(
+                    surface_slot_rows,
+                    key=lambda item: well_name_natural_sort_key(str(item[0])),
+                )
+            ),
             auto_name_notice=str(auto_name_notice),
         )
     return pads, metadata
+
+
+def _source_defined_surface_map(
+    pad_meta: object,
+) -> dict[str, tuple[float, float, float]]:
+    if not isinstance(pad_meta, DetectedPadUiMeta):
+        return {}
+    return {
+        str(name): (float(x), float(y), float(z))
+        for name, x, y, z in pad_meta.source_surface_slots
+    }
+
+
+def _source_defined_pad_basis(
+    pad: WellPad,
+    pad_meta: object,
+) -> dict[str, object] | None:
+    surfaces_by_name = _source_defined_surface_map(pad_meta)
+    if not surfaces_by_name:
+        return None
+    natural_names = [
+        str(well.name)
+        for well in sorted(
+            pad.wells,
+            key=lambda well: well_name_natural_sort_key(str(well.name)),
+        )
+        if str(well.name) in surfaces_by_name
+    ]
+    if not natural_names:
+        return None
+
+    axis_deg = float(pad.auto_nds_azimuth_deg) % 360.0
+    angle_rad = np.deg2rad(axis_deg)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    first_name = str(natural_names[0])
+    last_name = str(natural_names[-1])
+    first_xyz = surfaces_by_name.get(first_name, next(iter(surfaces_by_name.values())))
+    last_xyz = surfaces_by_name.get(last_name, first_xyz)
+    first_projection = float(first_xyz[0]) * ux + float(first_xyz[1]) * uy
+    last_projection = float(last_xyz[0]) * ux + float(last_xyz[1]) * uy
+    if last_projection + SMALL < first_projection:
+        axis_deg = float((axis_deg + 180.0) % 360.0)
+        angle_rad = np.deg2rad(axis_deg)
+        ux = float(np.sin(angle_rad))
+        uy = float(np.cos(angle_rad))
+        first_projection = float(first_xyz[0]) * ux + float(first_xyz[1]) * uy
+        last_projection = float(last_xyz[0]) * ux + float(last_xyz[1]) * uy
+
+    vx = float(-uy)
+    vy = float(ux)
+    slot_rows: list[tuple[str, float, float, float, float, float]] = []
+    for well_name, (x_value, y_value, z_value) in surfaces_by_name.items():
+        projection = float(x_value) * ux + float(y_value) * uy
+        cross_projection = float(x_value) * vx + float(y_value) * vy
+        slot_rows.append(
+            (
+                str(well_name),
+                float(x_value),
+                float(y_value),
+                float(z_value),
+                float(projection),
+                float(cross_projection),
+            )
+        )
+    slot_rows.sort(
+        key=lambda item: (
+            float(item[4]),
+            well_name_natural_sort_key(str(item[0])),
+            str(item[0]),
+        )
+    )
+    ordered_projections = [float(item[4]) for item in slot_rows]
+    spacing_candidates = [
+        float(right - left)
+        for left, right in zip(ordered_projections, ordered_projections[1:], strict=False)
+        if float(right - left) > 1e-6
+    ]
+    spacing_ref_m = (
+        float(np.median(np.asarray(spacing_candidates, dtype=float)))
+        if spacing_candidates
+        else float(
+            max(
+                getattr(pad_meta, "inferred_spacing_m", 0.0),
+                0.0,
+            )
+        )
+    )
+    center_xyz = (
+        0.5 * (float(first_xyz[0]) + float(last_xyz[0])),
+        0.5 * (float(first_xyz[1]) + float(last_xyz[1])),
+        0.5 * (float(first_xyz[2]) + float(last_xyz[2])),
+    )
+    center_projection = float(center_xyz[0]) * ux + float(center_xyz[1]) * uy
+    first_cross_projection = float(first_xyz[0]) * vx + float(first_xyz[1]) * vy
+    center_cross_projection = float(center_xyz[0]) * vx + float(center_xyz[1]) * vy
+    return {
+        "axis_deg": float(axis_deg),
+        "slots": tuple(slot_rows),
+        "spacing_ref_m": float(max(spacing_ref_m, 0.0)),
+        "first_anchor_xyz": (
+            float(first_xyz[0]),
+            float(first_xyz[1]),
+            float(first_xyz[2]),
+        ),
+        "first_anchor_projection": float(first_projection),
+        "first_anchor_cross_projection": float(first_cross_projection),
+        "center_anchor_xyz": center_xyz,
+        "center_anchor_projection": float(center_projection),
+        "center_anchor_cross_projection": float(center_cross_projection),
+    }
+
+
+def pad_anchor_defaults(
+    session_state: Mapping[str, object],
+    *,
+    pad: WellPad,
+    anchor_mode: str,
+) -> tuple[float, float, float]:
+    metadata_raw = session_state.get("wt_pad_detected_meta", {})
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    pad_meta = metadata.get(str(pad.pad_id))
+    basis = _source_defined_pad_basis(pad, pad_meta)
+    if basis is None:
+        defaults = pad_config_defaults(pad)
+        return (
+            float(defaults["first_surface_x"]),
+            float(defaults["first_surface_y"]),
+            float(defaults["first_surface_z"]),
+        )
+    if str(anchor_mode) == PAD_SURFACE_ANCHOR_CENTER:
+        center_xyz = basis["center_anchor_xyz"]
+        return (
+            float(center_xyz[0]),
+            float(center_xyz[1]),
+            float(center_xyz[2]),
+        )
+    first_xyz = basis["first_anchor_xyz"]
+    return (float(first_xyz[0]), float(first_xyz[1]), float(first_xyz[2]))
+
+
+def _pad_effective_auto_order_mode(
+    session_state: Mapping[str, object],
+    *,
+    pad: WellPad,
+    config: Mapping[str, object],
+    pad_meta: object,
+) -> str:
+    if (
+        isinstance(pad_meta, DetectedPadUiMeta)
+        and bool(pad_meta.source_surfaces_defined)
+        and (
+            not bool(config.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False))
+            or not bool(config.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False))
+        )
+    ):
+        return PAD_WELL_AUTO_ORDER_PROJECTION
+    return pad_auto_order_mode(session_state)
+
+
+def pad_surface_assignments(
+    session_state: Mapping[str, object],
+    *,
+    pad: WellPad,
+    config: Mapping[str, object] | None = None,
+) -> tuple[PadSurfaceAssignment, ...]:
+    metadata_raw = session_state.get("wt_pad_detected_meta", {})
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    config_raw = session_state.get("wt_pad_configs", {})
+    config_map = config_raw if isinstance(config_raw, Mapping) else {}
+    pad_meta = metadata.get(str(pad.pad_id))
+    defaults = _pad_defaults_for_metadata(pad, pad_meta)
+    current = (
+        config
+        if isinstance(config, Mapping)
+        else (
+            config_map.get(str(pad.pad_id), {})
+            if isinstance(config_map.get(str(pad.pad_id), {}), Mapping)
+            else {}
+        )
+    )
+    cfg = _merge_pad_config(
+        current=current,
+        defaults=defaults,
+        fixed_slots=pad_fixed_slots_from_config(pad=pad, config=current),
+    )
+    fixed_slots = pad_fixed_slots_from_config(pad=pad, config=cfg)
+    basis = _source_defined_pad_basis(pad, pad_meta)
+
+    if (
+        basis is not None
+        and isinstance(pad_meta, DetectedPadUiMeta)
+        and bool(pad_meta.source_surfaces_defined)
+    ):
+        slot_rows = tuple(
+            basis.get("slots", ())
+        )
+        base_order_names = [
+            str(slot_name)
+            for slot_name, *_rest in slot_rows
+        ]
+        if not bool(cfg.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False)):
+            ordered_names = _apply_fixed_slots_to_ordered_names(
+                base_order_names,
+                fixed_slots=fixed_slots,
+            )
+            slot_row_by_name = {
+                str(slot_name): (
+                    float(x_value),
+                    float(y_value),
+                    float(z_value),
+                )
+                for slot_name, x_value, y_value, z_value, *_rest in slot_rows
+            }
+            return tuple(
+                PadSurfaceAssignment(
+                    slot_index=int(index),
+                    well_name=str(well_name),
+                    surface_x_m=float(slot_row_by_name[str(source_well_name)][0]),
+                    surface_y_m=float(slot_row_by_name[str(source_well_name)][1]),
+                    surface_z_m=float(slot_row_by_name[str(source_well_name)][2]),
+                    source_well_name=str(source_well_name),
+                )
+                for index, (source_well_name, well_name) in enumerate(
+                    zip(base_order_names, ordered_names, strict=True),
+                    start=1,
+                )
+            )
+
+        anchor_mode = str(
+            cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
+        )
+        if anchor_mode == PAD_SURFACE_ANCHOR_CENTER:
+            source_anchor_xyz = basis["center_anchor_xyz"]
+            source_anchor_projection = float(basis["center_anchor_projection"])
+            source_anchor_cross_projection = float(
+                basis["center_anchor_cross_projection"]
+            )
+        else:
+            source_anchor_xyz = basis["first_anchor_xyz"]
+            source_anchor_projection = float(basis["first_anchor_projection"])
+            source_anchor_cross_projection = float(
+                basis["first_anchor_cross_projection"]
+            )
+        current_anchor_x = float(cfg["first_surface_x"])
+        current_anchor_y = float(cfg["first_surface_y"])
+        current_anchor_z = float(cfg["first_surface_z"])
+        current_angle_rad = np.deg2rad(float(cfg["nds_azimuth_deg"]) % 360.0)
+        current_ux = float(np.sin(current_angle_rad))
+        current_uy = float(np.cos(current_angle_rad))
+        current_vx = float(-current_uy)
+        current_vy = float(current_ux)
+        spacing_ref_m = float(max(basis["spacing_ref_m"], 0.0))
+        spacing_m = float(max(cfg["spacing_m"], 0.0))
+        scale = (
+            float(spacing_m / spacing_ref_m)
+            if spacing_ref_m > SMALL
+            else 0.0
+        )
+        transformed_slots: list[tuple[str, float, float, float]] = []
+        for slot_name, x_value, y_value, z_value, projection, cross_projection in slot_rows:
+            relative_projection = float(projection) - source_anchor_projection
+            relative_cross_projection = (
+                float(cross_projection) - source_anchor_cross_projection
+            )
+            relative_z = float(z_value) - float(source_anchor_xyz[2])
+            transformed_slots.append(
+                (
+                    str(slot_name),
+                    float(
+                        current_anchor_x
+                        + relative_projection * scale * current_ux
+                        + relative_cross_projection * current_vx
+                    ),
+                    float(
+                        current_anchor_y
+                        + relative_projection * scale * current_uy
+                        + relative_cross_projection * current_vy
+                    ),
+                    float(current_anchor_z + relative_z),
+                )
+            )
+
+        if bool(cfg.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False)):
+            ordered_names = [
+                str(well.name)
+                for well in ordered_pad_wells(
+                    pad=pad,
+                    nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+                    fixed_slots=fixed_slots,
+                    auto_order_mode=pad_auto_order_mode(session_state),
+                )
+            ]
+        else:
+            ordered_names = _apply_fixed_slots_to_ordered_names(
+                [str(slot_name) for slot_name, _x, _y, _z in transformed_slots],
+                fixed_slots=fixed_slots,
+            )
+
+        return tuple(
+            PadSurfaceAssignment(
+                slot_index=int(index),
+                well_name=str(well_name),
+                surface_x_m=float(surface_x),
+                surface_y_m=float(surface_y),
+                surface_z_m=float(surface_z),
+                source_well_name=str(source_well_name),
+            )
+            for index, (
+                (source_well_name, surface_x, surface_y, surface_z),
+                well_name,
+            ) in enumerate(
+                zip(transformed_slots, ordered_names, strict=True),
+                start=1,
+            )
+        )
+
+    auto_order_mode = _pad_effective_auto_order_mode(
+        session_state,
+        pad=pad,
+        config=cfg,
+        pad_meta=pad_meta,
+    )
+    ordered_wells = ordered_pad_wells(
+        pad=pad,
+        nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+        fixed_slots=fixed_slots,
+        auto_order_mode=auto_order_mode,
+    )
+    angle_rad = np.deg2rad(float(cfg["nds_azimuth_deg"]) % 360.0)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    center_slot_index = 0.5 * float(max(len(ordered_wells) - 1, 0))
+    assignments: list[PadSurfaceAssignment] = []
+    for slot_index, well in enumerate(ordered_wells, start=1):
+        if str(cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)) == (
+            PAD_SURFACE_ANCHOR_CENTER
+        ):
+            shift_m = (float(slot_index - 1) - center_slot_index) * float(
+                cfg["spacing_m"]
+            )
+        else:
+            shift_m = float(slot_index - 1) * float(cfg["spacing_m"])
+        assignments.append(
+            PadSurfaceAssignment(
+                slot_index=int(slot_index),
+                well_name=str(well.name),
+                surface_x_m=float(cfg["first_surface_x"] + shift_m * ux),
+                surface_y_m=float(cfg["first_surface_y"] + shift_m * uy),
+                surface_z_m=float(cfg["first_surface_z"]),
+                source_well_name=str(well.name),
+            )
+        )
+    return tuple(assignments)
 
 
 def ensure_pad_configs(
@@ -34935,22 +35610,32 @@ def build_pad_plan_map(
     config_map = config_raw if isinstance(config_raw, Mapping) else {}
     metadata_raw = session_state.get("wt_pad_detected_meta", {})
     metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
-    auto_order_mode = pad_auto_order_mode(session_state)
     plan_map: dict[str, PadLayoutPlan] = {}
     for pad in pads:
         pad_id = str(pad.pad_id)
         pad_meta = metadata.get(pad_id)
-        default_cfg = pad_config_defaults(pad)
+        default_cfg = _pad_defaults_for_metadata(pad, pad_meta)
         cfg_raw = config_map.get(pad_id, default_cfg)
         cfg = cfg_raw if isinstance(cfg_raw, Mapping) else default_cfg
         if isinstance(pad_meta, DetectedPadUiMeta) and bool(
             pad_meta.source_surfaces_defined
         ) and not bool(cfg.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False)):
             continue
+        auto_order_mode = _pad_effective_auto_order_mode(
+            session_state,
+            pad=pad,
+            config=cfg,
+            pad_meta=pad_meta,
+        )
         resolved_nds_azimuth_deg = resolved_pad_nds_azimuth_deg(
             session_state,
             pad=pad,
             nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+        )
+        assignments = pad_surface_assignments(
+            session_state,
+            pad=pad,
+            config=cfg,
         )
         plan_map[pad_id] = PadLayoutPlan(
             pad_id=pad_id,
@@ -34967,6 +35652,15 @@ def build_pad_plan_map(
                 config=cfg,
             ),
             auto_order_mode=auto_order_mode,
+            surface_positions_by_well_name=tuple(
+                (
+                    str(item.well_name),
+                    float(item.surface_x_m),
+                    float(item.surface_y_m),
+                    float(item.surface_z_m),
+                )
+                for item in assignments
+            ),
         )
     return plan_map
 
@@ -35152,10 +35846,35 @@ def resolved_pad_nds_azimuth_deg(
     pad: WellPad,
     nds_azimuth_deg: float,
 ) -> float:
+    metadata_raw = session_state.get("wt_pad_detected_meta", {})
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    config_raw = session_state.get("wt_pad_configs", {})
+    config_map = config_raw if isinstance(config_raw, Mapping) else {}
+    pad_id = str(pad.pad_id)
+    pad_meta = metadata.get(pad_id)
+    default_cfg = _pad_defaults_for_metadata(pad, pad_meta)
+    current_raw = config_map.get(pad_id, {})
+    current = current_raw if isinstance(current_raw, Mapping) else {}
+    cfg = _merge_pad_config(
+        current={
+            **dict(current),
+            "nds_azimuth_deg": float(nds_azimuth_deg),
+        },
+        defaults=default_cfg,
+        fixed_slots=pad_fixed_slots_from_config(
+            pad=pad,
+            config=current,
+        ),
+    )
     return aligned_pad_nds_azimuth_deg(
         pad,
         nds_azimuth_deg=float(nds_azimuth_deg),
-        auto_order_mode=pad_auto_order_mode(session_state),
+        auto_order_mode=_pad_effective_auto_order_mode(
+            session_state,
+            pad=pad,
+            config=cfg,
+            pad_meta=pad_meta,
+        ),
     )
 
 
@@ -35164,19 +35883,12 @@ def pad_membership(
     records: list[WelltrackRecord],
 ) -> tuple[list[WellPad], dict[str, str], dict[str, tuple[str, ...]]]:
     pads = project_pads_for_ui(session_state, records)
-    auto_order_mode = pad_auto_order_mode(session_state)
     name_to_pad_id: dict[str, str] = {}
     well_names_by_pad_id: dict[str, tuple[str, ...]] = {}
     for pad in pads:
         pad_id = str(pad.pad_id)
-        cfg = pad_config_for_ui(session_state, pad)
-        ordered = ordered_pad_wells(
-            pad=pad,
-            nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
-            fixed_slots=pad_fixed_slots_from_config(pad=pad, config=cfg),
-            auto_order_mode=auto_order_mode,
-        )
-        ordered_names = tuple(str(item.name) for item in ordered)
+        assignments = pad_surface_assignments(session_state, pad=pad)
+        ordered_names = tuple(str(item.well_name) for item in assignments)
         well_names_by_pad_id[pad_id] = ordered_names
         for well_name in ordered_names:
             name_to_pad_id[well_name] = pad_id
@@ -35252,14 +35964,35 @@ def _pad_defaults_for_metadata(
     if isinstance(pad_meta, DetectedPadUiMeta) and bool(
         pad_meta.source_surfaces_defined
     ):
+        basis = _source_defined_pad_basis(pad, pad_meta)
+        center_xyz = (
+            basis["center_anchor_xyz"]
+            if basis is not None
+            else (
+                float(pad_meta.source_surface_x_m),
+                float(pad_meta.source_surface_y_m),
+                float(pad_meta.source_surface_z_m),
+            )
+        )
         return {
-            "spacing_m": float(max(pad_meta.inferred_spacing_m, 0.0)),
-            "nds_azimuth_deg": float(pad.auto_nds_azimuth_deg) % 360.0,
-            "first_surface_x": float(pad_meta.source_surface_x_m),
-            "first_surface_y": float(pad_meta.source_surface_y_m),
-            "first_surface_z": float(pad_meta.source_surface_z_m),
+            "spacing_m": float(
+                max(
+                    basis["spacing_ref_m"]
+                    if basis is not None
+                    else pad_meta.inferred_spacing_m,
+                    0.0,
+                )
+            ),
+            "nds_azimuth_deg": float(
+                basis["axis_deg"] if basis is not None else pad.auto_nds_azimuth_deg
+            )
+            % 360.0,
+            "first_surface_x": float(center_xyz[0]),
+            "first_surface_y": float(center_xyz[1]),
+            "first_surface_z": float(center_xyz[2]),
             "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
             WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY: False,
+            WT_PAD_APPLY_AUTO_ORDER_KEY: False,
             "fixed_slots": (),
         }
     return pad_config_defaults(pad)
@@ -35293,6 +36026,12 @@ def _merge_pad_config(
             current.get(
                 WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY,
                 defaults.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False),
+            )
+        ),
+        WT_PAD_APPLY_AUTO_ORDER_KEY: bool(
+            current.get(
+                WT_PAD_APPLY_AUTO_ORDER_KEY,
+                defaults.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False),
             )
         ),
         "fixed_slots": fixed_slots,
@@ -35444,7 +36183,7 @@ def render_target_import_section() -> None:
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_reference.py	11464
+===BEGIN_FILE===	pywp/ptc_page_reference.py	13313
 from __future__ import annotations
 
 import pandas as pd
@@ -35461,11 +36200,32 @@ from pywp.pilot_wells import is_zbs_name, parent_name_for_zbs, well_name_key
 
 __all__ = ["render_reference_section"]
 
+_REFERENCE_ANALYSIS_TOGGLE_KEYS = {
+    wt.REFERENCE_WELL_ACTUAL: "wt_show_actual_fund_analysis",
+    wt.REFERENCE_WELL_APPROVED: "wt_show_approved_fund_analysis",
+}
+
+
+def _reference_analysis_toggle_key(kind: str) -> str:
+    return _REFERENCE_ANALYSIS_TOGGLE_KEYS.get(
+        str(kind),
+        f"wt_show_reference_analysis::{str(kind)}",
+    )
+
+
+def _reset_reference_analysis_visibility(kind: str) -> None:
+    st.session_state[_reference_analysis_toggle_key(kind)] = False
+
+
+def _after_reference_data_change(kind: str) -> None:
+    wt._reset_anticollision_view_state(clear_prepared=True)
+    _reset_reference_analysis_visibility(kind)
+
 
 def _clear_reference_import_state(kind: str) -> None:
     reference_state.clear_reference_import_state(
         kind,
-        on_clear=lambda: wt._reset_anticollision_view_state(clear_prepared=True),
+        on_clear=lambda: _after_reference_data_change(kind),
     )
 
 
@@ -35605,7 +36365,7 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
                     kind=kind,
                     wells=parsed,
                 )
-                wt._reset_anticollision_view_state(clear_prepared=True)
+                _after_reference_data_change(kind)
                 status.write(f"Загружено скважин: {len(parsed)}.")
                 status.update(
                     label=f"{title} импортированы",
@@ -35686,32 +36446,61 @@ def render_reference_section() -> None:
     )
     if actual_wells:
         _render_zbs_actual_match_info(actual_wells)
-        analyses = wt._actual_fund_analyses(actual_wells)
-        wt._render_actual_fund_analysis_panel(analyses=analyses)
+        show_actual_analysis = bool(
+            st.toggle(
+                "Показать анализ фактического фонда",
+                key=_reference_analysis_toggle_key(wt.REFERENCE_WELL_ACTUAL),
+                help=(
+                    "Тяжёлый анализ фактического фонда строится по запросу, "
+                    "чтобы не тормозить рендер страницы после расчёта траекторий."
+                ),
+            )
+        )
+        if show_actual_analysis:
+            analyses = wt._actual_fund_analyses(actual_wells)
+            wt._render_actual_fund_analysis_panel(analyses=analyses)
+        else:
+            st.caption(
+                "Анализ фактического фонда скрыт до явного открытия. "
+                "Это ускоряет обновление страницы после расчёта траекторий."
+            )
 
     approved_wells = tuple(
         reference_state.reference_kind_wells(wt.REFERENCE_WELL_APPROVED)
     )
     if approved_wells:
-        with st.expander(
-            "Просмотр загруженных утверждённых проектных скважин",
-            expanded=False,
-        ):
+        show_approved_analysis = bool(
+            st.toggle(
+                "Показать просмотр утверждённого проектного фонда",
+                key=_reference_analysis_toggle_key(wt.REFERENCE_WELL_APPROVED),
+                help=(
+                    "Просмотр утверждённого фонда строится по запросу, "
+                    "чтобы не утяжелять обычный расчётный flow."
+                ),
+            )
+        )
+        if show_approved_analysis:
             try:
-                approved_analyses = wt.build_actual_fund_well_analyses(
-                    approved_wells
-                )
+                approved_analyses = wt._approved_fund_analyses(approved_wells)
             except Exception as exc:
                 st.error(
                     "Не удалось построить просмотр утверждённого проектного фонда."
                 )
                 st.caption(f"{type(exc).__name__}: {exc}")
             else:
-                wt._render_reference_well_detail(
-                    approved_analyses,
-                    select_label="Просмотр утвержденной проектной скважины",
-                    selected_key="wt_approved_fund_selected_well",
-                )
+                with st.expander(
+                    "Просмотр загруженных утверждённых проектных скважин",
+                    expanded=False,
+                ):
+                    wt._render_reference_well_detail(
+                        approved_analyses,
+                        select_label="Просмотр утвержденной проектной скважины",
+                        selected_key="wt_approved_fund_selected_well",
+                    )
+        else:
+            st.caption(
+                "Просмотр утверждённого проектного фонда скрыт до явного открытия."
+            )
 
 
 def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
@@ -35757,7 +36546,7 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_results.py	39948
+===BEGIN_FILE===	pywp/ptc_page_results.py	43866
 from __future__ import annotations
 
 import pandas as pd
@@ -35913,6 +36702,34 @@ def _show_sidetrack_relative_cones_checkbox() -> bool:
     )
 
 
+def _render_anticollision_action_button(*, has_current_analysis: bool) -> bool:
+    return bool(
+        st.button(
+            (
+                "Пересчёт пересечений"
+                if has_current_analysis
+                else "Расчёт пересечений"
+            ),
+            type="primary",
+            use_container_width=True,
+            help=(
+                "Запускает anti-collision анализ для текущего набора рассчитанных "
+                "траекторий. При наличии предыдущего кэша будут переиспользованы "
+                "неизменённые скважины и пары."
+            ),
+        )
+    )
+
+
+def _prepare_anticollision_incremental_rerun() -> None:
+    cache = st.session_state.get("wt_anticollision_analysis_cache")
+    if not isinstance(cache, dict) or not cache:
+        return
+    refreshed_cache = dict(cache)
+    refreshed_cache["key"] = ""
+    st.session_state["wt_anticollision_analysis_cache"] = refreshed_cache
+
+
 def _render_anticollision_panel(
     *,
     successes: list[object],
@@ -35947,9 +36764,6 @@ def _render_anticollision_panel(
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
         return
 
-    if _render_full_anticollision_recalc_button():
-        return
-
     preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
     normalized_preset = wt.normalize_uncertainty_preset(
         st.session_state.get(
@@ -35972,41 +36786,96 @@ def _render_anticollision_panel(
             reference_wells
         )
     )
-    anti_collision_parallel_workers = int(
-        st.session_state.get("wt_last_parallel_workers") or 0
+    current_snapshot = wt._current_anti_collision_cache_snapshot(
+        successes=list(successes),
+        uncertainty_model=uncertainty_model,
+        records=list(records),
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
+    has_current_analysis = current_snapshot is not None
+    has_stale_snapshot = (
+        current_snapshot is None and _cached_anticollision_snapshot() is not None
     )
 
-    anti_collision_progress = st.progress(
-        8, text="Подготовка anti-collision анализа..."
+    st.markdown("### Anti-collision и пересечения")
+    run_requested = _render_anticollision_action_button(
+        has_current_analysis=has_current_analysis
     )
+    if (
+        has_current_analysis or has_stale_snapshot
+    ) and _render_full_anticollision_recalc_button():
+        return
 
-    def _anti_collision_progress_update(value: int, text: str) -> None:
-        anti_collision_progress.progress(int(value), text=text)
-
-    try:
-        analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
-            successes=successes,
-            uncertainty_model=uncertainty_model,
-            records=records,
-            reference_wells=reference_wells,
-            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
-            progress_callback=_anti_collision_progress_update,
-            parallel_workers=anti_collision_parallel_workers,
-        )
-    except Exception as exc:
-        anti_collision_progress.empty()
-        wt._store_anticollision_failure_state(exc)
-        st.error(
-            "Не удалось построить anti-collision анализ. Проверьте лог расчёта ниже."
-        )
+    if not has_current_analysis and not run_requested:
+        if has_stale_snapshot:
+            st.info(
+                "Траектории обновились после прошлого anti-collision расчёта. "
+                "Нажмите 'Расчёт пересечений', чтобы пересчитать конуса и "
+                "пересечения для актуального набора."
+            )
+        else:
+            st.info(
+                "Траектории рассчитаны. Запустите anti-collision отдельным "
+                "шагом, когда будете готовы проверить конуса и пересечения."
+            )
         wt._render_status_run_log(
             title="Лог расчёта Anti-collision",
             state_payload=st.session_state.get("wt_anticollision_last_run"),
             empty_message="Anti-collision анализ ещё не запускался.",
         )
-        st.caption(f"{type(exc).__name__}: {exc}")
         return
-    anti_collision_progress.empty()
+
+    if run_requested and has_current_analysis:
+        _prepare_anticollision_incremental_rerun()
+
+    anti_collision_parallel_workers = int(
+        st.session_state.get("wt_last_parallel_workers") or 0
+    )
+
+    anti_collision_progress = (
+        None
+        if has_current_analysis and not run_requested
+        else st.progress(8, text="Подготовка anti-collision анализа...")
+    )
+
+    def _anti_collision_progress_update(value: int, text: str) -> None:
+        if anti_collision_progress is not None:
+            anti_collision_progress.progress(int(value), text=text)
+
+    if current_snapshot is not None and not run_requested:
+        analysis, recommendations, clusters = current_snapshot
+    else:
+        try:
+            analysis, recommendations, clusters = (
+                wt._cached_anti_collision_view_model(
+                    successes=successes,
+                    uncertainty_model=uncertainty_model,
+                    records=records,
+                    reference_wells=reference_wells,
+                    reference_uncertainty_models_by_name=(
+                        reference_uncertainty_models_by_name
+                    ),
+                    progress_callback=_anti_collision_progress_update,
+                    parallel_workers=anti_collision_parallel_workers,
+                )
+            )
+        except Exception as exc:
+            if anti_collision_progress is not None:
+                anti_collision_progress.empty()
+            wt._store_anticollision_failure_state(exc)
+            st.error(
+                "Не удалось построить anti-collision анализ. Проверьте лог расчёта ниже."
+            )
+            wt._render_status_run_log(
+                title="Лог расчёта Anti-collision",
+                state_payload=st.session_state.get("wt_anticollision_last_run"),
+                empty_message="Anti-collision анализ ещё не запускался.",
+            )
+            st.caption(f"{type(exc).__name__}: {exc}")
+            return
+    if anti_collision_progress is not None:
+        anti_collision_progress.empty()
     focus_pad_well_names = wt._focus_pad_well_names(
         records=records,
         focus_pad_id=focus_pad_id,
@@ -36635,7 +37504,7 @@ def _render_target_edit_overview(
         display_name_by_well_name=display_name_by_well_name,
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=tuple(focus_pad_well_names),
-        render_mode=wt.WT_3D_RENDER_DETAIL,
+        render_mode=wt.WT_3D_RENDER_FAST,
     )
     chart_col1, chart_col2 = st.columns(2, gap="medium")
     wt._render_three_payload(
@@ -36840,17 +37709,36 @@ def render_success_tabs(
         records=records,
         focus_pad_id=focus_pad_id,
     )
+    reference_wells = reference_state.reference_wells_from_state()
+    reference_uncertainty_models_by_name = (
+        ptc_anticollision_params.reference_uncertainty_models_from_state(
+            reference_wells
+        )
+    )
+    selected_preset = wt.normalize_uncertainty_preset(
+        st.session_state.get(
+            "wt_anticollision_uncertainty_preset",
+            wt.DEFAULT_UNCERTAINTY_PRESET,
+        )
+    )
+    current_anticollision_snapshot = wt._current_anti_collision_cache_snapshot(
+        successes=list(successes),
+        uncertainty_model=planning_uncertainty_model_for_preset(selected_preset),
+        records=list(records),
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
     target_only_wells = wt._failed_target_only_wells(
         records=list(records),
         summary_rows=list(summary_rows),
     )
-    if target_only_wells:
+    if target_only_wells or current_anticollision_snapshot is None:
         _render_target_edit_overview(
             successes=list(successes),
             records=records,
             summary_rows=summary_rows,
-            title="### Все скважины и точки без траектории",
-            empty_message="Нет данных для 3D-обзора целей.",
+            title="### Все скважины и точки целей",
+            empty_message="Нет данных для 3D-обзора траекторий и целей.",
             focus_pad_well_names=list(focus_pad_well_names),
             show_focus_selector=False,
         )
@@ -57233,7 +58121,7 @@ def dls_figure(
     return fig
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/well_pad.py	13989
+===BEGIN_FILE===	pywp/well_pad.py	15270
 from __future__ import annotations
 
 import math
@@ -57288,6 +58176,9 @@ class PadLayoutPlan(FrozenModel):
     surface_anchor_mode: str = PAD_SURFACE_ANCHOR_FIRST
     fixed_slots: tuple[tuple[int, str], ...] = ()
     auto_order_mode: str = DEFAULT_PAD_WELL_AUTO_ORDER_MODE
+    surface_positions_by_well_name: tuple[
+        tuple[str, float, float, float], ...
+    ] = ()
 
 
 def detect_well_pads(
@@ -57565,6 +58456,34 @@ def apply_pad_layout(
     for pad in pads:
         plan = plan_by_pad_id.get(str(pad.pad_id))
         if plan is None:
+            continue
+
+        explicit_surfaces = tuple(
+            getattr(plan, "surface_positions_by_well_name", ())
+        )
+        if explicit_surfaces:
+            explicit_surface_map = {
+                str(name): (float(x), float(y), float(z))
+                for name, x, y, z in explicit_surfaces
+            }
+            for well_name, (surface_x, surface_y, surface_z) in explicit_surface_map.items():
+                record_index = name_to_index.get(str(well_name))
+                if record_index is None:
+                    continue
+                source_record = updated_records[record_index]
+                if not source_record.points:
+                    continue
+                source_surface = source_record.points[0]
+                new_surface = WelltrackPoint(
+                    x=float(surface_x),
+                    y=float(surface_y),
+                    z=float(surface_z),
+                    md=float(source_surface.md),
+                )
+                updated_records[record_index] = WelltrackRecord(
+                    name=str(source_record.name),
+                    points=(new_surface, *source_record.points[1:]),
+                )
             continue
 
         spacing_m = float(max(plan.spacing_m, 0.0))
@@ -61581,7 +62500,7 @@ def test_min_kop_calculation() -> None:
     assert min_kop_tight > min_kop_gentle
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_anticollision.py	134890
+===BEGIN_FILE===	tests/test_anticollision.py	142553
 from __future__ import annotations
 
 from concurrent.futures import Future
@@ -61834,6 +62753,100 @@ def test_overlap_geometry_uses_dense_scan_samples_not_display_indices() -> None:
 
     assert analysis.corridors
     assert any(len(corridor.overlap_rings_xyz) > 0 for corridor in analysis.corridors)
+
+
+def test_build_overlap_geometry_false_skips_overlap_ring_polygon_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#123456",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#654321",
+        stations=_straight_stations(y_offset_m=5.0),
+        surface=Point3D(0.0, 5.0, 0.0),
+        t1=Point3D(1000.0, 5.0, 0.0),
+        t3=Point3D(2000.0, 5.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+
+    overlap_ring_calls = 0
+    original = anticollision_module._overlap_ring_between_samples
+
+    def counting_overlap_ring(**kwargs: object) -> np.ndarray:
+        nonlocal overlap_ring_calls
+        overlap_ring_calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_overlap_ring_between_samples",
+        counting_overlap_ring,
+    )
+
+    analysis = analyze_anti_collision([well_a, well_b], build_overlap_geometry=False)
+
+    assert analysis.corridors
+    assert overlap_ring_calls == 0
+
+
+def test_pair_distance_combined_radius_matrices_reuses_precomputed_well_arrays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#123456",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#654321",
+        stations=_straight_stations(y_offset_m=25.0),
+        surface=Point3D(0.0, 25.0, 0.0),
+        t1=Point3D(1000.0, 25.0, 0.0),
+        t3=Point3D(2000.0, 25.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_independent_sample_covariance",
+        lambda _sample: (_ for _ in ()).throw(
+            AssertionError("pair distance path should use precomputed covariances")
+        ),
+    )
+
+    distance, combined_radius = anticollision_module._pair_distance_combined_radius_matrices(
+        well_a=well_a,
+        well_b=well_b,
+        confidence_scale=2.0,
+    )
+
+    assert distance.shape == combined_radius.shape
+    assert distance.size > 0
 
 
 def test_anti_collision_progress_reports_pair_counts() -> None:
@@ -63235,6 +64248,113 @@ def test_analyze_anti_collision_incremental_reuses_unchanged_pairs(
     assert scanned_pairs == [("WELL-A", "WELL-B"), ("WELL-B", "WELL-C")]
 
 
+def test_analyze_anti_collision_incremental_reuses_unrelated_pairs_for_sidetrack_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sidetrack_v1 = build_anti_collision_well(
+        name="WELL-SIDE",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        sidetrack_parent_name="WELL-PARENT",
+        sidetrack_window_md_m=1000.0,
+    )
+    sidetrack_v2 = build_anti_collision_well(
+        name="WELL-SIDE",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=2.0),
+        surface=Point3D(0.0, 2.0, 0.0),
+        t1=Point3D(1000.0, 2.0, 0.0),
+        t3=Point3D(2000.0, 2.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        sidetrack_parent_name="WELL-PARENT",
+        sidetrack_window_md_m=1000.0,
+    )
+    parent = build_anti_collision_well(
+        name="WELL-PARENT",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=10.0),
+        surface=Point3D(0.0, 10.0, 0.0),
+        t1=Point3D(1000.0, 10.0, 0.0),
+        t3=Point3D(2000.0, 10.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    other = build_anti_collision_well(
+        name="WELL-OTHER",
+        color="#1D4ED8",
+        stations=_straight_stations(y_offset_m=20.0),
+        surface=Point3D(0.0, 20.0, 0.0),
+        t1=Point3D(1000.0, 20.0, 0.0),
+        t3=Point3D(2000.0, 20.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    scanned_pairs: list[tuple[str, str]] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: AntiCollisionWell,
+        well_b: AntiCollisionWell,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        assert build_overlap_geometry is False
+        scanned_pairs.append((str(well_a.name), str(well_b.name)))
+        return []
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _record_pair_scan,
+    )
+
+    _, pair_cache, first_stats = analyze_anti_collision_incremental(
+        [sidetrack_v1, parent, other],
+        build_overlap_geometry=False,
+        well_signature_by_name={
+            "WELL-SIDE": "side-v1",
+            "WELL-PARENT": "parent-v1",
+            "WELL-OTHER": "other-v1",
+        },
+    )
+
+    assert first_stats.reused_pair_count == 0
+    assert first_stats.recalculated_pair_count == 3
+    assert scanned_pairs == [
+        ("WELL-SIDE", "WELL-PARENT"),
+        ("WELL-SIDE", "WELL-OTHER"),
+        ("WELL-PARENT", "WELL-OTHER"),
+    ]
+
+    scanned_pairs.clear()
+    _, _, second_stats = analyze_anti_collision_incremental(
+        [sidetrack_v2, parent, other],
+        build_overlap_geometry=False,
+        well_signature_by_name={
+            "WELL-SIDE": "side-v2",
+            "WELL-PARENT": "parent-v1",
+            "WELL-OTHER": "other-v1",
+        },
+        previous_pair_cache=pair_cache,
+    )
+
+    assert second_stats.reused_pair_count == 1
+    assert second_stats.recalculated_pair_count == 2
+    assert scanned_pairs == [
+        ("WELL-SIDE", "WELL-PARENT"),
+        ("WELL-SIDE", "WELL-OTHER"),
+    ]
+
+
 def test_pair_cache_is_invalidated_when_sidetrack_parent_context_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -63488,6 +64608,38 @@ def test_build_anti_collision_wells_for_successes_reports_cone_progress(
     assert executor_workers == [2]
     assert submitted_names == ["WELL-A", "WELL-B"]
     assert [well.name for well in wells] == ["WELL-A", "WELL-B"]
+
+
+def test_build_anti_collision_wells_for_successes_keeps_iscwsa_display_sampling_capped() -> (
+    None
+):
+    model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
+    successes = [
+        SuccessfulWellPlan(
+            name="WELL-A",
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(1000.0, 0.0, 0.0),
+            t3=Point3D(2000.0, 0.0, 0.0),
+            stations=_straight_stations(y_offset_m=0.0),
+            summary={"kop_md_m": 0.0},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config={"optimization_mode": "none"},
+        )
+    ]
+
+    wells, _cache, _reused, _rebuilt = build_anti_collision_wells_for_successes(
+        successes,
+        model=model,
+        include_display_geometry=True,
+        build_overlap_geometry=True,
+    )
+
+    assert len(wells) == 1
+    well = wells[0]
+    assert len(well.overlay.samples) <= int(model.max_display_ellipses)
+    assert len(well.samples) > len(well.overlay.samples)
+    assert len(well.samples) >= 150
 
 
 @pytest.mark.integration
@@ -63837,7 +64989,9 @@ def test_welltracks4_well_03_well_09_shared_surface_overlap_is_reported() -> Non
     )
 
 
-def test_welltracks4_well_06_well_07_visual_cones_use_dense_iscwsa_samples() -> None:
+def test_welltracks4_well_06_well_07_visual_cones_keep_base_sampling_capped() -> (
+    None
+):
     records = [
         record
         for record in parse_welltrack_text(
@@ -63861,6 +65015,7 @@ def test_welltracks4_well_06_well_07_visual_cones_use_dense_iscwsa_samples() -> 
         include_display_geometry=True,
         build_overlap_geometry=True,
     )
+    model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
     wells_by_name = {str(well.name): well for well in analysis.wells}
     pair_events = [
         event
@@ -63875,8 +65030,18 @@ def test_welltracks4_well_06_well_07_visual_cones_use_dense_iscwsa_samples() -> 
 
     assert pair_events
     assert late_pair_events == []
-    assert len(wells_by_name["well_06"].overlay.samples) >= 150
-    assert len(wells_by_name["well_07"].overlay.samples) >= 150
+    assert len(wells_by_name["well_06"].overlay.samples) <= int(
+        model.max_display_ellipses
+    )
+    assert len(wells_by_name["well_07"].overlay.samples) <= int(
+        model.max_display_ellipses
+    )
+    assert len(wells_by_name["well_06"].samples) > len(
+        wells_by_name["well_06"].overlay.samples
+    )
+    assert len(wells_by_name["well_07"].samples) > len(
+        wells_by_name["well_07"].overlay.samples
+    )
 
 
 def test_overlap_ring_is_not_reduced_to_uniform_circle_for_offset_wells() -> None:
@@ -72765,7 +73930,7 @@ def test_batch_target_csv_applies_selected_crs(
     assert result["Y_WGS_deg"].iloc[0] == pytest.approx(220.0)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_edit_targets.py	16305
+===BEGIN_FILE===	tests/test_ptc_edit_targets.py	18683
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -72970,6 +74135,73 @@ def test_apply_edit_targets_changes_invalidates_only_changed_wells() -> None:
     assert changed_record.points[1].x == pytest.approx(610.25)
     assert changed_record.points[2].z == pytest.approx(2502.0)
     assert changed_original.points[1].x == pytest.approx(610.25)
+
+
+def test_apply_edit_targets_changes_invalidates_pilot_and_parent_together() -> None:
+    records = [
+        _record("WELL-A"),
+        _record(
+            "WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=1800.0),
+                WelltrackPoint(x=300.0, y=500.0, z=2400.0, md=2600.0),
+            ),
+        ),
+        _record("WELL-B"),
+    ]
+    cached_analysis = {"pair_cache": {("WELL-A", "WELL-B"): object()}}
+    session_state: dict[str, object] = {
+        "wt_records": list(records),
+        "wt_records_original": list(records),
+        "wt_successes": [
+            SimpleNamespace(name="WELL-A"),
+            SimpleNamespace(name="WELL-A_PL"),
+            SimpleNamespace(name="WELL-B"),
+        ],
+        "wt_summary_rows": [
+            {"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""},
+            {"Скважина": "WELL-A_PL", "Статус": "OK", "Проблема": ""},
+            {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+        ],
+        "wt_anticollision_analysis_cache": cached_analysis,
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "WELL-A_PL",
+                "points": [
+                    {"index": 1, "position": [120.0, 220.0, 1810.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["WELL-A_PL"]
+    assert [item.name for item in session_state["wt_successes"]] == ["WELL-B"]
+    assert session_state["wt_summary_rows"] == [
+        {"Скважина": "WELL-A", "Статус": "Не рассчитана", "Проблема": ""},
+        {"Скважина": "WELL-A_PL", "Статус": "Не рассчитана", "Проблема": ""},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+    ]
+    assert session_state["wt_edit_targets_pending_names"] == [
+        "WELL-A_PL",
+        "WELL-A",
+    ]
+    assert session_state["wt_edit_targets_highlight_names"] == [
+        "WELL-A_PL",
+        "WELL-A",
+    ]
+    assert session_state["wt_pending_selected_names"] == [
+        "WELL-A_PL",
+        "WELL-A",
+    ]
+    assert session_state["wt_edit_targets_highlight_points"] == {"WELL-A_PL": [1]}
+    assert session_state["wt_anticollision_analysis_cache"] is cached_analysis
 
 
 def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> None:
@@ -73223,8 +74455,10 @@ def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:
     assert bumped == 1
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_pad_state.py	9649
+===BEGIN_FILE===	tests/test_ptc_pad_state.py	17879
 from __future__ import annotations
+
+import math
 
 import pandas as pd
 
@@ -73286,6 +74520,64 @@ def _prepositioned_records() -> list[WelltrackRecord]:
                 WelltrackPoint(x=50.0, y=0.0, z=0.0, md=0.0),
                 WelltrackPoint(x=650.0, y=760.0, z=2200.0, md=2300.0),
                 WelltrackPoint(x=1550.0, y=1960.0, z=2350.0, md=3350.0),
+            ),
+        ),
+    ]
+
+
+def _uneven_prepositioned_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="P1-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2100.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2200.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-B",
+            points=(
+                WelltrackPoint(x=40.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=640.0, y=780.0, z=2600.0, md=2350.0),
+                WelltrackPoint(x=1540.0, y=1980.0, z=2700.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-C",
+            points=(
+                WelltrackPoint(x=100.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=700.0, y=760.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=1600.0, y=1960.0, z=2400.0, md=3350.0),
+            ),
+        ),
+    ]
+
+
+def _skewed_prepositioned_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="P1-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2100.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2200.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-B",
+            points=(
+                WelltrackPoint(x=40.0, y=5.0, z=0.0, md=0.0),
+                WelltrackPoint(x=640.0, y=780.0, z=2600.0, md=2350.0),
+                WelltrackPoint(x=1540.0, y=1980.0, z=2700.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-C",
+            points=(
+                WelltrackPoint(x=100.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=700.0, y=760.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=1600.0, y=1960.0, z=2400.0, md=3350.0),
             ),
         ),
     ]
@@ -73456,6 +74748,44 @@ def test_build_pad_plan_map_includes_source_defined_pad_when_editing_enabled() -
     assert pad_id in plan_map
 
 
+def test_build_pad_plan_map_preserves_source_positions_until_auto_order_is_applied() -> (
+    None
+):
+    session_state: dict[str, object] = {}
+    records = _uneven_prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+
+    plan_map = ptc_pad_state.build_pad_plan_map(session_state, pads)
+    plan = plan_map[pad_id]
+    explicit_positions = {
+        str(name): (float(x), float(y), float(z))
+        for name, x, y, z in plan.surface_positions_by_well_name
+    }
+
+    assert math.isclose(
+        explicit_positions["P1-A"][0], 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-A"][1], 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-B"][0], 40.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-B"][1], 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-C"][0], 100.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-C"][1], 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+
+
 def test_pad_membership_honors_fixed_slot_order() -> None:
     session_state: dict[str, object] = {}
     records = _records()
@@ -73508,6 +74838,157 @@ def test_pad_membership_can_auto_order_all_pads_by_target_depth() -> None:
     assert well_names_by_pad_id[pad_ids[1]] == ("B2", "B1")
 
 
+def test_source_defined_pad_ignores_global_auto_order_until_explicitly_enabled() -> (
+    None
+):
+    session_state: dict[str, object] = {
+        "wt_pad_auto_order_by_target_depth": True
+    }
+    records = _uneven_prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+
+    assert well_names_by_pad_id[pad_id] == ("P1-A", "P1-B", "P1-C")
+
+
+def test_source_defined_pad_preserves_fixed_slots_without_auto_order() -> None:
+    session_state: dict[str, object] = {}
+    records = _prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "P1-C"),
+        (2, "P1-A"),
+    )
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+
+    assert well_names_by_pad_id[pad_id] == ("P1-C", "P1-A", "P1-B")
+
+
+def test_source_defined_pad_preserves_fixed_slots_when_editing_without_auto_order() -> (
+    None
+):
+    session_state: dict[str, object] = {}
+    records = _prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+    session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "P1-C"),
+        (2, "P1-A"),
+    )
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+
+    assert well_names_by_pad_id[pad_id] == ("P1-C", "P1-A", "P1-B")
+
+
+def test_source_defined_pad_can_apply_global_auto_order_after_editing_is_enabled() -> (
+    None
+):
+    session_state: dict[str, object] = {
+        "wt_pad_auto_order_by_target_depth": True
+    }
+    records = _uneven_prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY
+    ] = True
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+
+    assert well_names_by_pad_id[pad_id] == ("P1-B", "P1-C", "P1-A")
+
+
+def test_source_defined_pad_anchor_defaults_use_first_and_last_named_positions() -> (
+    None
+):
+    session_state: dict[str, object] = {}
+    pads = ptc_pad_state.ensure_pad_configs(
+        session_state,
+        base_records=_uneven_prepositioned_records(),
+    )
+
+    first_anchor = ptc_pad_state.pad_anchor_defaults(
+        session_state,
+        pad=pads[0],
+        anchor_mode=ptc_pad_state.PAD_SURFACE_ANCHOR_FIRST,
+    )
+    center_anchor = ptc_pad_state.pad_anchor_defaults(
+        session_state,
+        pad=pads[0],
+        anchor_mode=ptc_pad_state.PAD_SURFACE_ANCHOR_CENTER,
+    )
+
+    assert first_anchor == (0.0, 0.0, 0.0)
+    assert center_anchor == (50.0, 0.0, 0.0)
+
+
+def test_source_defined_pad_rotation_preserves_cross_axis_offsets() -> None:
+    session_state: dict[str, object] = {}
+    records = _skewed_prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pads[0] = pads[0].validated_copy(auto_nds_azimuth_deg=90.0)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+    session_state["wt_pad_configs"][pad_id]["surface_anchor_mode"] = (
+        ptc_pad_state.PAD_SURFACE_ANCHOR_FIRST
+    )
+    session_state["wt_pad_configs"][pad_id]["first_surface_x"] = 0.0
+    session_state["wt_pad_configs"][pad_id]["first_surface_y"] = 0.0
+    session_state["wt_pad_configs"][pad_id]["first_surface_z"] = 0.0
+    session_state["wt_pad_configs"][pad_id]["nds_azimuth_deg"] = 0.0
+    session_state["wt_pad_configs"][pad_id]["spacing_m"] = 40.0
+
+    assignments = ptc_pad_state.pad_surface_assignments(
+        session_state,
+        pad=pads[0],
+    )
+    by_name = {item.well_name: item for item in assignments}
+
+    assert math.isclose(
+        by_name["P1-A"].surface_x_m, 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-A"].surface_y_m, 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-B"].surface_x_m, -5.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-B"].surface_y_m, 32.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-C"].surface_x_m, 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-C"].surface_y_m, 80.0, rel_tol=0.0, abs_tol=1e-9
+    )
+
+
 def test_fixed_slots_editor_normalizes_dataframe_rows() -> None:
     pads = detect_well_pads(_records())
     editor_df = pd.DataFrame(
@@ -73527,7 +75008,7 @@ def test_fixed_slots_editor_normalizes_dataframe_rows() -> None:
     assert any("дубль" in warning for warning in warnings)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_page_results.py	16677
+===BEGIN_FILE===	tests/test_ptc_page_results.py	26222
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -73629,6 +75110,77 @@ def test_sidetrack_relative_cones_checkbox_reads_session_state(
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
 
     assert ptc_page_results._show_sidetrack_relative_cones_checkbox() is True
+
+
+def test_anticollision_panel_requires_explicit_run_before_first_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {"buttons": []}
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def info(self, message: str) -> None:
+            calls["info"] = str(message)
+
+        def button(self, label: str, **_kwargs: object) -> bool:
+            calls["buttons"].append(str(label))
+            return False
+
+        def selectbox(
+            self,
+            _label: str,
+            *,
+            options: list[str],
+            format_func=None,
+            key: str,
+        ) -> str:
+            value = str(options[0])
+            self.session_state[key] = value
+            return value
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_cached_anti_collision_view_model",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("anti-collision must wait for explicit launch")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_status_run_log",
+        lambda **kwargs: calls.setdefault("log_kwargs", kwargs),
+    )
+
+    ptc_page_results._render_anticollision_panel(
+        successes=[object(), object()],
+        records=[],
+        summary_rows=[],
+        focus_pad_id="",
+        focus_pad_well_names=[],
+    )
+
+    assert calls["buttons"] == ["Расчёт пересечений"]
+    assert "Запустите anti-collision отдельным шагом" in str(calls["info"])
 
 
 def test_anticollision_panel_pauses_on_pending_target_edits(
@@ -73957,6 +75509,258 @@ def test_target_edit_overview_keeps_reference_wells(
     assert rendered is True
     assert calls["three_kwargs"]["reference_wells"] == reference_wells
     assert calls["plan_kwargs"]["reference_wells"] == reference_wells
+
+
+def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"overview": 0, "anticollision": 0}
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_results_view_mode": "Все скважины",
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+        }
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Все скважины"
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(ptc_page_results.wt, "_pad_membership", lambda _records: ([], {}, {}))
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_normalize_focus_pad_id",
+        lambda **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_focus_pad_well_names",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_target_edit_overview",
+        lambda **_kwargs: calls.__setitem__("overview", calls["overview"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_panel",
+        lambda **_kwargs: calls.__setitem__(
+            "anticollision", calls["anticollision"] + 1
+        ),
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[SimpleNamespace(name="WELL-A")],
+        records=[],
+        summary_rows=[],
+    )
+
+    assert calls == {"overview": 1, "anticollision": 1}
+
+
+def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"overview": 0, "anticollision": 0}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_results_view_mode": "Все скважины",
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+        }
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Все скважины"
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(ptc_page_results.wt, "_pad_membership", lambda _records: ([], {}, {}))
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_normalize_focus_pad_id",
+        lambda **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_focus_pad_well_names",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: (analysis, (), ()),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_target_edit_overview",
+        lambda **_kwargs: calls.__setitem__("overview", calls["overview"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_panel",
+        lambda **_kwargs: calls.__setitem__(
+            "anticollision", calls["anticollision"] + 1
+        ),
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[SimpleNamespace(name="WELL-A")],
+        records=[],
+        summary_rows=[],
+    )
+
+    assert calls == {"overview": 0, "anticollision": 1}
+
+
+def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def plotly_chart(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def markdown(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def caption(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def info(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def selectbox(self, *_args: object, **_kwargs: object) -> str:
+            return ""
+
+        def columns(self, spec, **_kwargs: object):
+            count = int(spec) if isinstance(spec, int) else len(spec)
+            return tuple(_DummyContext() for _ in range(count))
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_well_color_map",
+        lambda _records: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_well_label_display_names",
+        lambda _records: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_pilot_study_points_by_name",
+        lambda _records: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_three_payload",
+        lambda _successes, **kwargs: (
+            captured.__setitem__("render_mode", kwargs["render_mode"]),
+            {
+                "lines": [],
+                "points": [],
+                "labels": [],
+                "legend": [],
+                "bounds": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]},
+            },
+        )[1],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_three_payload",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_trajectory_three_payload_overrides",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_plan_figure",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    rendered = ptc_page_results._render_target_edit_overview(
+        successes=[SimpleNamespace(name="WELL-A")],
+        records=[],
+        summary_rows=[],
+        title="### Overview",
+        empty_message="empty",
+        focus_pad_well_names=[],
+        show_focus_selector=False,
+    )
+
+    assert rendered is True
+    assert captured["render_mode"] == ptc_core.WT_3D_RENDER_FAST
 
 
 def test_apply_pad_order_optimization_updates_source_records_and_keeps_ac_cache(
@@ -80771,7 +82575,7 @@ def test_uncertainty_ellipses_are_rendered_on_plan_and_section_views() -> None:
     assert float(ribbons_section[0].line.width) == 0.0
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_well_pad.py	15505
+===BEGIN_FILE===	tests/test_well_pad.py	17241
 from __future__ import annotations
 
 import math
@@ -81308,6 +83112,80 @@ def test_apply_pad_layout_can_center_surfaces_about_anchor() -> None:
     assert math.isclose(float(center_surface.y), 500.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(left_surface.x), 980.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(float(right_surface.x), 1020.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_apply_pad_layout_uses_explicit_surface_positions_when_provided() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=200.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=20.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+    plan = PadLayoutPlan(
+        pad_id=str(pads[0].pad_id),
+        first_surface_x=999.0,
+        first_surface_y=999.0,
+        first_surface_z=9.0,
+        spacing_m=20.0,
+        nds_azimuth_deg=90.0,
+        surface_positions_by_well_name=(
+            ("W2", 2050.0, 510.0, 15.0),
+            ("W1", 2000.0, 500.0, 10.0),
+        ),
+    )
+
+    updated = apply_pad_layout(
+        records=records,
+        pads=pads,
+        plan_by_pad_id={str(pads[0].pad_id): plan},
+    )
+    updated_by_name = {record.name: record for record in updated}
+
+    assert math.isclose(
+        float(updated_by_name["W1"].points[0].x),
+        2000.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert math.isclose(
+        float(updated_by_name["W1"].points[0].y),
+        500.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert math.isclose(
+        float(updated_by_name["W2"].points[0].x),
+        2050.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert math.isclose(
+        float(updated_by_name["W2"].points[0].y),
+        510.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
 
 
 def test_apply_pad_layout_accepts_model_like_points_from_stale_session_state() -> None:
@@ -85581,7 +87459,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	245564
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	262430
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -85780,6 +87658,35 @@ def _prepositioned_pad_records() -> list[WelltrackRecord]:
                 WelltrackPoint(x=2025.0, y=0.0, z=0.0, md=0.0),
                 WelltrackPoint(x=2625.0, y=780.0, z=2300.0, md=2350.0),
                 WelltrackPoint(x=3525.0, y=1980.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
+def _prepositioned_depth_order_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="P1-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2100.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2200.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-B",
+            points=(
+                WelltrackPoint(x=25.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=625.0, y=780.0, z=2600.0, md=2350.0),
+                WelltrackPoint(x=1525.0, y=1980.0, z=2700.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-C",
+            points=(
+                WelltrackPoint(x=50.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=650.0, y=760.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=1550.0, y=1960.0, z=2400.0, md=3350.0),
             ),
         ),
     ]
@@ -87189,6 +89096,59 @@ def test_reference_trajectory_dev_import_keeps_actual_and_approved_kinds(
     ]
 
 
+def test_reference_analysis_panels_are_lazy_by_default() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    reference_wells = _reference_wells()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [_ok_summary_row("WELL-A")]
+    at.session_state["wt_successes"] = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    at.session_state["wt_reference_wells"] = list(reference_wells)
+    at.session_state["wt_reference_actual_wells"] = [
+        item for item in reference_wells if str(item.kind) == "actual"
+    ]
+    at.session_state["wt_reference_approved_wells"] = [
+        item for item in reference_wells if str(item.kind) == "approved"
+    ]
+
+    at.run(timeout=120)
+
+    toggle_labels = {str(widget.label) for widget in at.toggle}
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+
+    assert "Показать анализ фактического фонда" in toggle_labels
+    assert "Показать просмотр утверждённого проектного фонда" in toggle_labels
+    assert "Просмотр фактической скважины" not in selectbox_labels
+    assert "Просмотр утвержденной проектной скважины" not in selectbox_labels
+
+
+def test_reference_analysis_panels_render_after_explicit_toggle() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    reference_wells = _reference_wells()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [_ok_summary_row("WELL-A")]
+    at.session_state["wt_successes"] = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    at.session_state["wt_reference_wells"] = list(reference_wells)
+    at.session_state["wt_reference_actual_wells"] = [
+        item for item in reference_wells if str(item.kind) == "actual"
+    ]
+    at.session_state["wt_reference_approved_wells"] = [
+        item for item in reference_wells if str(item.kind) == "approved"
+    ]
+    at.session_state["wt_show_actual_fund_analysis"] = True
+    at.session_state["wt_show_approved_fund_analysis"] = True
+
+    at.run(timeout=120)
+
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+
+    assert "Просмотр фактической скважины" in selectbox_labels
+    assert "Просмотр утвержденной проектной скважины" in selectbox_labels
+
+
 def test_reference_dev_clear_button_resets_paths_without_widget_state_error(
     tmp_path,
 ) -> None:
@@ -87748,6 +89708,7 @@ def test_pad_layout_offers_toggle_to_edit_source_defined_positions(
     page._render_pad_layout_panel(records)
 
     assert "Разрешить редактирование позиций куста" in captured["toggle_labels"]
+    assert "Применить авто-порядок" in captured["toggle_labels"]
 
 
 def test_pad_layout_unlocks_source_defined_inputs_when_editing_enabled(
@@ -87826,6 +89787,327 @@ def test_pad_layout_unlocks_source_defined_inputs_when_editing_enabled(
     button_disabled = dict(captured["buttons"])
     assert button_disabled["Рассчитать устья скважин"] is False
     assert button_disabled["Вернуть исходные устья"] is False
+
+
+def test_pad_layout_disables_apply_auto_order_until_source_editing_is_enabled(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    captured: dict[str, object] = {"toggle_state": {}}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        captured["toggle_state"][str(label)] = bool(kwargs.get("disabled", False))
+        key = kwargs.get("key")
+        value = False
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    assert captured["toggle_state"]["Применить авто-порядок"] is True
+
+
+def test_pad_layout_keeps_user_nds_value_for_source_defined_pad(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    pads = page._detect_ui_pads(records)[0]
+    pad_id = str(pads[0].pad_id)
+    nds_widget_key = f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"
+    page.st.session_state["wt_pad_selected_id"] = pad_id
+    page.st.session_state[nds_widget_key] = 123.0
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        value = str(label) == "Разрешить редактирование позиций куста"
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    assert page.st.session_state[nds_widget_key] == 123.0
+
+
+def test_pad_layout_resets_source_defined_widgets_when_editing_is_disabled(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_pad_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_selected_id"] = pad_id
+    page.st.session_state["wt_pad_configs"][pad_id].update(
+        {
+            "spacing_m": 999.0,
+            "nds_azimuth_deg": 123.0,
+            "first_surface_x": -1.0,
+            "first_surface_y": -2.0,
+            "first_surface_z": -3.0,
+            "surface_anchor_mode": "first",
+            page.ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY: True,
+            page.ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY: True,
+        }
+    )
+    page.st.session_state[f"wt_pad_cfg_spacing_m_{pad_id}"] = 999.0
+    page.st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = 123.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = -1.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = -2.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = -3.0
+    page.st.session_state[f"wt_pad_cfg_surface_anchor_center_{pad_id}"] = False
+    page.st.session_state[f"wt_pad_cfg_apply_auto_order_{pad_id}"] = True
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        if bool(kwargs.get("disabled", False)) and key is not None:
+            return page.st.session_state.get(key, False)
+        value = False
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    cfg = page._pad_config_for_ui(pads[0])
+    assert page.st.session_state[f"wt_pad_cfg_spacing_m_{pad_id}"] == float(
+        cfg["spacing_m"]
+    )
+    assert page.st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] == float(
+        cfg["nds_azimuth_deg"]
+    )
+    assert page.st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] == float(
+        cfg["first_surface_x"]
+    )
+    assert page.st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] == float(
+        cfg["first_surface_y"]
+    )
+    assert page.st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] == float(
+        cfg["first_surface_z"]
+    )
+    assert (
+        page.st.session_state[f"wt_pad_cfg_surface_anchor_center_{pad_id}"] is True
+    )
+    assert page.st.session_state[f"wt_pad_cfg_apply_auto_order_{pad_id}"] is False
+
+
+def test_pad_layout_preview_applies_auto_order_only_after_explicit_toggle(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_prepositioned_depth_order_pad_records())
+    page.st.session_state["wt_pad_auto_order_by_target_depth"] = True
+    captured_frames: list[pd.DataFrame] = []
+    apply_auto_order_enabled = False
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        if str(label) == "Разрешить редактирование позиций куста":
+            value = True
+        elif str(label) == "Применить авто-порядок":
+            value = apply_auto_order_enabled
+        elif bool(kwargs.get("disabled", False)) and key is not None:
+            value = page.st.session_state.get(key, False)
+        else:
+            value = page.st.session_state.get(key, False)
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "dataframe",
+        lambda frame, *args, **kwargs: captured_frames.append(frame.copy()),
+    )
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+    preview_without_auto = list(captured_frames[-1]["Скважина"])
+
+    apply_auto_order_enabled = True
+    captured_frames.clear()
+    page._render_pad_layout_panel(records)
+    preview_with_auto = list(captured_frames[-1]["Скважина"])
+
+    assert preview_without_auto == ["P1-A", "P1-B", "P1-C"]
+    assert preview_with_auto == ["P1-B", "P1-C", "P1-A"]
 
 
 def test_welltrack_page_shows_template_pad_name_notice() -> None:
@@ -87956,7 +90238,7 @@ def test_normalize_source_table_df_for_ui_uses_s_for_surface_point() -> None:
     assert list(normalized["Point"]) == ["S", "S", "t1"]
 
 
-def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> None:
+def test_welltrack_page_prompts_to_run_anticollision_for_successful_batch() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()[:2]
     at.session_state["wt_records"] = records
@@ -87975,8 +90257,10 @@ def test_welltrack_page_renders_anticollision_metrics_for_successful_batch() -> 
     at.run(timeout=120)
 
     metric_labels = [widget.label for widget in at.metric]
-    assert "Проверено пар" in metric_labels
-    assert "Минимальный SF" in metric_labels
+    assert "Проверено пар" not in metric_labels
+    assert "Минимальный SF" not in metric_labels
+    button_labels = [str(widget.label) for widget in at.button]
+    assert "Расчёт пересечений" in button_labels
     selectbox_labels = [widget.label for widget in at.selectbox]
     assert "Пресет неопределенности для anti-collision" in selectbox_labels
 
@@ -88019,6 +90303,7 @@ def test_welltrack_page_renders_actual_fund_well_detail_viewer() -> None:
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
     at.session_state["wt_reference_actual_wells"] = list(_horizontal_reference_well())
+    at.session_state["wt_show_actual_fund_analysis"] = True
 
     at.run(timeout=120)
 
@@ -88322,6 +90607,13 @@ def test_multihorizontal_streamlit_flow_recalculates_after_target_edit_with_incr
     assert {str(item.name) for item in at.session_state["wt_successes"]} == set(
         selected_names
     )
+    assert at.session_state["wt_anticollision_last_run"] is None
+    assert at.session_state["wt_anticollision_analysis_cache"] == {}
+
+    _click_button(at, "Расчёт пересечений")
+    at.run(timeout=240)
+
+    assert not at.exception
     first_ac_run = at.session_state["wt_anticollision_last_run"]
     assert bool(first_ac_run["cached"]) is False
     assert int(first_ac_run["pair_count"]) == 3
@@ -88378,6 +90670,13 @@ def test_multihorizontal_streamlit_flow_recalculates_after_target_edit_with_incr
     assert {str(item.name) for item in at.session_state["wt_successes"]} == set(
         selected_names
     )
+    assert at.session_state["wt_anticollision_analysis_cache"] is cached_analysis
+    assert at.session_state["wt_anticollision_last_run"] == first_ac_run
+
+    _click_button(at, "Расчёт пересечений")
+    at.run(timeout=240)
+
+    assert not at.exception
     incremental_run = at.session_state["wt_anticollision_last_run"]
     assert bool(incremental_run["cached"]) is False
     assert int(incremental_run["reused_well_count"]) == 2

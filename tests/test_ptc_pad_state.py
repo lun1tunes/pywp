@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
@@ -60,6 +62,64 @@ def _prepositioned_records() -> list[WelltrackRecord]:
                 WelltrackPoint(x=50.0, y=0.0, z=0.0, md=0.0),
                 WelltrackPoint(x=650.0, y=760.0, z=2200.0, md=2300.0),
                 WelltrackPoint(x=1550.0, y=1960.0, z=2350.0, md=3350.0),
+            ),
+        ),
+    ]
+
+
+def _uneven_prepositioned_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="P1-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2100.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2200.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-B",
+            points=(
+                WelltrackPoint(x=40.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=640.0, y=780.0, z=2600.0, md=2350.0),
+                WelltrackPoint(x=1540.0, y=1980.0, z=2700.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-C",
+            points=(
+                WelltrackPoint(x=100.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=700.0, y=760.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=1600.0, y=1960.0, z=2400.0, md=3350.0),
+            ),
+        ),
+    ]
+
+
+def _skewed_prepositioned_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="P1-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2100.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2200.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-B",
+            points=(
+                WelltrackPoint(x=40.0, y=5.0, z=0.0, md=0.0),
+                WelltrackPoint(x=640.0, y=780.0, z=2600.0, md=2350.0),
+                WelltrackPoint(x=1540.0, y=1980.0, z=2700.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="P1-C",
+            points=(
+                WelltrackPoint(x=100.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=700.0, y=760.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=1600.0, y=1960.0, z=2400.0, md=3350.0),
             ),
         ),
     ]
@@ -230,6 +290,44 @@ def test_build_pad_plan_map_includes_source_defined_pad_when_editing_enabled() -
     assert pad_id in plan_map
 
 
+def test_build_pad_plan_map_preserves_source_positions_until_auto_order_is_applied() -> (
+    None
+):
+    session_state: dict[str, object] = {}
+    records = _uneven_prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+
+    plan_map = ptc_pad_state.build_pad_plan_map(session_state, pads)
+    plan = plan_map[pad_id]
+    explicit_positions = {
+        str(name): (float(x), float(y), float(z))
+        for name, x, y, z in plan.surface_positions_by_well_name
+    }
+
+    assert math.isclose(
+        explicit_positions["P1-A"][0], 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-A"][1], 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-B"][0], 40.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-B"][1], 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-C"][0], 100.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        explicit_positions["P1-C"][1], 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+
+
 def test_pad_membership_honors_fixed_slot_order() -> None:
     session_state: dict[str, object] = {}
     records = _records()
@@ -280,6 +378,157 @@ def test_pad_membership_can_auto_order_all_pads_by_target_depth() -> None:
 
     assert well_names_by_pad_id[pad_ids[0]] == ("A2", "A1")
     assert well_names_by_pad_id[pad_ids[1]] == ("B2", "B1")
+
+
+def test_source_defined_pad_ignores_global_auto_order_until_explicitly_enabled() -> (
+    None
+):
+    session_state: dict[str, object] = {
+        "wt_pad_auto_order_by_target_depth": True
+    }
+    records = _uneven_prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+
+    assert well_names_by_pad_id[pad_id] == ("P1-A", "P1-B", "P1-C")
+
+
+def test_source_defined_pad_preserves_fixed_slots_without_auto_order() -> None:
+    session_state: dict[str, object] = {}
+    records = _prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "P1-C"),
+        (2, "P1-A"),
+    )
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+
+    assert well_names_by_pad_id[pad_id] == ("P1-C", "P1-A", "P1-B")
+
+
+def test_source_defined_pad_preserves_fixed_slots_when_editing_without_auto_order() -> (
+    None
+):
+    session_state: dict[str, object] = {}
+    records = _prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+    session_state["wt_pad_configs"][pad_id]["fixed_slots"] = (
+        (1, "P1-C"),
+        (2, "P1-A"),
+    )
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+
+    assert well_names_by_pad_id[pad_id] == ("P1-C", "P1-A", "P1-B")
+
+
+def test_source_defined_pad_can_apply_global_auto_order_after_editing_is_enabled() -> (
+    None
+):
+    session_state: dict[str, object] = {
+        "wt_pad_auto_order_by_target_depth": True
+    }
+    records = _uneven_prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_APPLY_AUTO_ORDER_KEY
+    ] = True
+
+    _, _, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+
+    assert well_names_by_pad_id[pad_id] == ("P1-B", "P1-C", "P1-A")
+
+
+def test_source_defined_pad_anchor_defaults_use_first_and_last_named_positions() -> (
+    None
+):
+    session_state: dict[str, object] = {}
+    pads = ptc_pad_state.ensure_pad_configs(
+        session_state,
+        base_records=_uneven_prepositioned_records(),
+    )
+
+    first_anchor = ptc_pad_state.pad_anchor_defaults(
+        session_state,
+        pad=pads[0],
+        anchor_mode=ptc_pad_state.PAD_SURFACE_ANCHOR_FIRST,
+    )
+    center_anchor = ptc_pad_state.pad_anchor_defaults(
+        session_state,
+        pad=pads[0],
+        anchor_mode=ptc_pad_state.PAD_SURFACE_ANCHOR_CENTER,
+    )
+
+    assert first_anchor == (0.0, 0.0, 0.0)
+    assert center_anchor == (50.0, 0.0, 0.0)
+
+
+def test_source_defined_pad_rotation_preserves_cross_axis_offsets() -> None:
+    session_state: dict[str, object] = {}
+    records = _skewed_prepositioned_records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+    pads[0] = pads[0].validated_copy(auto_nds_azimuth_deg=90.0)
+    pad_id = str(pads[0].pad_id)
+    session_state["wt_pad_configs"][pad_id][
+        ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+    ] = True
+    session_state["wt_pad_configs"][pad_id]["surface_anchor_mode"] = (
+        ptc_pad_state.PAD_SURFACE_ANCHOR_FIRST
+    )
+    session_state["wt_pad_configs"][pad_id]["first_surface_x"] = 0.0
+    session_state["wt_pad_configs"][pad_id]["first_surface_y"] = 0.0
+    session_state["wt_pad_configs"][pad_id]["first_surface_z"] = 0.0
+    session_state["wt_pad_configs"][pad_id]["nds_azimuth_deg"] = 0.0
+    session_state["wt_pad_configs"][pad_id]["spacing_m"] = 40.0
+
+    assignments = ptc_pad_state.pad_surface_assignments(
+        session_state,
+        pad=pads[0],
+    )
+    by_name = {item.well_name: item for item in assignments}
+
+    assert math.isclose(
+        by_name["P1-A"].surface_x_m, 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-A"].surface_y_m, 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-B"].surface_x_m, -5.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-B"].surface_y_m, 32.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-C"].surface_x_m, 0.0, rel_tol=0.0, abs_tol=1e-9
+    )
+    assert math.isclose(
+        by_name["P1-C"].surface_y_m, 80.0, rel_tol=0.0, abs_tol=1e-9
+    )
 
 
 def test_fixed_slots_editor_normalizes_dataframe_rows() -> None:

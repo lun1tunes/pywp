@@ -14,14 +14,17 @@ from pywp.models import Point3D
 from pywp.well_pad import (
     DEFAULT_PAD_WELL_AUTO_ORDER_MODE,
     PAD_WELL_AUTO_ORDER_NAME,
+    PAD_WELL_AUTO_ORDER_PROJECTION,
     PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC,
     PAD_SURFACE_ANCHOR_CENTER,
+    PAD_SURFACE_ANCHOR_FIRST,
     PadLayoutPlan,
     PadWell,
     WellPad,
     aligned_pad_nds_azimuth_deg,
     estimate_pad_nds_azimuth_deg,
     ordered_pad_wells,
+    well_name_natural_sort_key,
 )
 
 __all__ = [
@@ -30,6 +33,8 @@ __all__ = [
     "WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M",
     "WT_PAD_FOCUS_ALL",
     "DetectedPadUiMeta",
+    "PadSurfaceAssignment",
+    "WT_PAD_APPLY_AUTO_ORDER_KEY",
     "build_pad_plan_map",
     "detect_ui_pads",
     "ensure_pad_configs",
@@ -38,6 +43,7 @@ __all__ = [
     "focus_pad_well_names",
     "inferred_surface_spacing_m",
     "normalize_focus_pad_id",
+    "pad_anchor_defaults",
     "pad_auto_order_mode",
     "pad_auto_order_mode_label",
     "pad_anchor_mode_label",
@@ -48,6 +54,7 @@ __all__ = [
     "pad_fixed_slots_from_config",
     "pad_fixed_slots_from_editor",
     "pad_membership",
+    "pad_surface_assignments",
     "project_pads_for_ui",
     "record_midpoint_xyz",
     "resolved_pad_nds_azimuth_deg",
@@ -60,6 +67,7 @@ WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M = 400.0
 WT_PAD_FOCUS_ALL = "__all_pads__"
 WT_PAD_AUTO_ORDER_BY_TARGET_DEPTH_KEY = "wt_pad_auto_order_by_target_depth"
 WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY = "allow_source_surface_edit"
+WT_PAD_APPLY_AUTO_ORDER_KEY = "apply_auto_order"
 
 
 @dataclass(frozen=True)
@@ -70,7 +78,18 @@ class DetectedPadUiMeta:
     source_surface_y_m: float
     source_surface_z_m: float
     source_surface_count: int
+    source_surface_slots: tuple[tuple[str, float, float, float], ...] = ()
     auto_name_notice: str = ""
+
+
+@dataclass(frozen=True)
+class PadSurfaceAssignment:
+    slot_index: int
+    well_name: str
+    surface_x_m: float
+    surface_y_m: float
+    surface_z_m: float
+    source_well_name: str = ""
 
 
 _PAD_COMPONENT_EDGE_RE = re.compile(r"^[\s_\-]+|[\s_\-]+$")
@@ -93,6 +112,7 @@ def pad_config_defaults(pad: WellPad) -> dict[str, object]:
         "first_surface_z": float(pad.surface.z),
         "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
         WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY: False,
+        WT_PAD_APPLY_AUTO_ORDER_KEY: False,
         "fixed_slots": (),
     }
 
@@ -136,6 +156,38 @@ def pad_fixed_slots_from_config(
         used_names.add(name)
         normalized.append((slot, name))
     return tuple(sorted(normalized, key=lambda value: value[0]))
+
+
+def _apply_fixed_slots_to_ordered_names(
+    ordered_names: list[str],
+    *,
+    fixed_slots: tuple[tuple[int, str], ...],
+) -> list[str]:
+    if not ordered_names or not fixed_slots:
+        return list(ordered_names)
+    normalized_names = [str(name) for name in ordered_names]
+    max_slot = len(normalized_names)
+    fixed_map = {
+        int(slot): str(name)
+        for slot, name in fixed_slots
+        if 1 <= int(slot) <= max_slot and str(name) in normalized_names
+    }
+    if not fixed_map:
+        return normalized_names
+
+    placed_names = set(fixed_map.values())
+    remaining_names = [
+        str(name) for name in normalized_names if str(name) not in placed_names
+    ]
+    remaining_iter = iter(remaining_names)
+    resolved_names: list[str] = []
+    for slot_index in range(1, max_slot + 1):
+        fixed_name = fixed_map.get(int(slot_index))
+        if fixed_name is not None:
+            resolved_names.append(str(fixed_name))
+            continue
+        resolved_names.append(next(remaining_iter))
+    return resolved_names
 
 
 def pad_fixed_slots_editor_rows(
@@ -372,6 +424,7 @@ def detect_ui_pads(
     ):
         wells: list[PadWell] = []
         surface_xyzs: list[tuple[float, float, float]] = []
+        surface_slot_rows: list[tuple[str, float, float, float]] = []
         unique_surface_keys: set[tuple[int, int, int]] = set()
         for record_index, record, surface_xyz in cluster:
             midpoint_x, midpoint_y, midpoint_z = record_midpoint_xyz(record)
@@ -385,6 +438,14 @@ def detect_ui_pads(
                 )
             )
             surface_xyzs.append(surface_xyz)
+            surface_slot_rows.append(
+                (
+                    str(record.name),
+                    float(surface_xyz[0]),
+                    float(surface_xyz[1]),
+                    float(surface_xyz[2]),
+                )
+            )
             unique_surface_keys.add(
                 (
                     round(float(surface_xyz[0]), 6),
@@ -422,9 +483,369 @@ def detect_ui_pads(
             source_surface_y_m=float(center_y),
             source_surface_z_m=float(center_z),
             source_surface_count=len(surface_xyzs),
+            source_surface_slots=tuple(
+                sorted(
+                    surface_slot_rows,
+                    key=lambda item: well_name_natural_sort_key(str(item[0])),
+                )
+            ),
             auto_name_notice=str(auto_name_notice),
         )
     return pads, metadata
+
+
+def _source_defined_surface_map(
+    pad_meta: object,
+) -> dict[str, tuple[float, float, float]]:
+    if not isinstance(pad_meta, DetectedPadUiMeta):
+        return {}
+    return {
+        str(name): (float(x), float(y), float(z))
+        for name, x, y, z in pad_meta.source_surface_slots
+    }
+
+
+def _source_defined_pad_basis(
+    pad: WellPad,
+    pad_meta: object,
+) -> dict[str, object] | None:
+    surfaces_by_name = _source_defined_surface_map(pad_meta)
+    if not surfaces_by_name:
+        return None
+    natural_names = [
+        str(well.name)
+        for well in sorted(
+            pad.wells,
+            key=lambda well: well_name_natural_sort_key(str(well.name)),
+        )
+        if str(well.name) in surfaces_by_name
+    ]
+    if not natural_names:
+        return None
+
+    axis_deg = float(pad.auto_nds_azimuth_deg) % 360.0
+    angle_rad = np.deg2rad(axis_deg)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    first_name = str(natural_names[0])
+    last_name = str(natural_names[-1])
+    first_xyz = surfaces_by_name.get(first_name, next(iter(surfaces_by_name.values())))
+    last_xyz = surfaces_by_name.get(last_name, first_xyz)
+    first_projection = float(first_xyz[0]) * ux + float(first_xyz[1]) * uy
+    last_projection = float(last_xyz[0]) * ux + float(last_xyz[1]) * uy
+    if last_projection + SMALL < first_projection:
+        axis_deg = float((axis_deg + 180.0) % 360.0)
+        angle_rad = np.deg2rad(axis_deg)
+        ux = float(np.sin(angle_rad))
+        uy = float(np.cos(angle_rad))
+        first_projection = float(first_xyz[0]) * ux + float(first_xyz[1]) * uy
+        last_projection = float(last_xyz[0]) * ux + float(last_xyz[1]) * uy
+
+    vx = float(-uy)
+    vy = float(ux)
+    slot_rows: list[tuple[str, float, float, float, float, float]] = []
+    for well_name, (x_value, y_value, z_value) in surfaces_by_name.items():
+        projection = float(x_value) * ux + float(y_value) * uy
+        cross_projection = float(x_value) * vx + float(y_value) * vy
+        slot_rows.append(
+            (
+                str(well_name),
+                float(x_value),
+                float(y_value),
+                float(z_value),
+                float(projection),
+                float(cross_projection),
+            )
+        )
+    slot_rows.sort(
+        key=lambda item: (
+            float(item[4]),
+            well_name_natural_sort_key(str(item[0])),
+            str(item[0]),
+        )
+    )
+    ordered_projections = [float(item[4]) for item in slot_rows]
+    spacing_candidates = [
+        float(right - left)
+        for left, right in zip(ordered_projections, ordered_projections[1:], strict=False)
+        if float(right - left) > 1e-6
+    ]
+    spacing_ref_m = (
+        float(np.median(np.asarray(spacing_candidates, dtype=float)))
+        if spacing_candidates
+        else float(
+            max(
+                getattr(pad_meta, "inferred_spacing_m", 0.0),
+                0.0,
+            )
+        )
+    )
+    center_xyz = (
+        0.5 * (float(first_xyz[0]) + float(last_xyz[0])),
+        0.5 * (float(first_xyz[1]) + float(last_xyz[1])),
+        0.5 * (float(first_xyz[2]) + float(last_xyz[2])),
+    )
+    center_projection = float(center_xyz[0]) * ux + float(center_xyz[1]) * uy
+    first_cross_projection = float(first_xyz[0]) * vx + float(first_xyz[1]) * vy
+    center_cross_projection = float(center_xyz[0]) * vx + float(center_xyz[1]) * vy
+    return {
+        "axis_deg": float(axis_deg),
+        "slots": tuple(slot_rows),
+        "spacing_ref_m": float(max(spacing_ref_m, 0.0)),
+        "first_anchor_xyz": (
+            float(first_xyz[0]),
+            float(first_xyz[1]),
+            float(first_xyz[2]),
+        ),
+        "first_anchor_projection": float(first_projection),
+        "first_anchor_cross_projection": float(first_cross_projection),
+        "center_anchor_xyz": center_xyz,
+        "center_anchor_projection": float(center_projection),
+        "center_anchor_cross_projection": float(center_cross_projection),
+    }
+
+
+def pad_anchor_defaults(
+    session_state: Mapping[str, object],
+    *,
+    pad: WellPad,
+    anchor_mode: str,
+) -> tuple[float, float, float]:
+    metadata_raw = session_state.get("wt_pad_detected_meta", {})
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    pad_meta = metadata.get(str(pad.pad_id))
+    basis = _source_defined_pad_basis(pad, pad_meta)
+    if basis is None:
+        defaults = pad_config_defaults(pad)
+        return (
+            float(defaults["first_surface_x"]),
+            float(defaults["first_surface_y"]),
+            float(defaults["first_surface_z"]),
+        )
+    if str(anchor_mode) == PAD_SURFACE_ANCHOR_CENTER:
+        center_xyz = basis["center_anchor_xyz"]
+        return (
+            float(center_xyz[0]),
+            float(center_xyz[1]),
+            float(center_xyz[2]),
+        )
+    first_xyz = basis["first_anchor_xyz"]
+    return (float(first_xyz[0]), float(first_xyz[1]), float(first_xyz[2]))
+
+
+def _pad_effective_auto_order_mode(
+    session_state: Mapping[str, object],
+    *,
+    pad: WellPad,
+    config: Mapping[str, object],
+    pad_meta: object,
+) -> str:
+    if (
+        isinstance(pad_meta, DetectedPadUiMeta)
+        and bool(pad_meta.source_surfaces_defined)
+        and (
+            not bool(config.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False))
+            or not bool(config.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False))
+        )
+    ):
+        return PAD_WELL_AUTO_ORDER_PROJECTION
+    return pad_auto_order_mode(session_state)
+
+
+def pad_surface_assignments(
+    session_state: Mapping[str, object],
+    *,
+    pad: WellPad,
+    config: Mapping[str, object] | None = None,
+) -> tuple[PadSurfaceAssignment, ...]:
+    metadata_raw = session_state.get("wt_pad_detected_meta", {})
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    config_raw = session_state.get("wt_pad_configs", {})
+    config_map = config_raw if isinstance(config_raw, Mapping) else {}
+    pad_meta = metadata.get(str(pad.pad_id))
+    defaults = _pad_defaults_for_metadata(pad, pad_meta)
+    current = (
+        config
+        if isinstance(config, Mapping)
+        else (
+            config_map.get(str(pad.pad_id), {})
+            if isinstance(config_map.get(str(pad.pad_id), {}), Mapping)
+            else {}
+        )
+    )
+    cfg = _merge_pad_config(
+        current=current,
+        defaults=defaults,
+        fixed_slots=pad_fixed_slots_from_config(pad=pad, config=current),
+    )
+    fixed_slots = pad_fixed_slots_from_config(pad=pad, config=cfg)
+    basis = _source_defined_pad_basis(pad, pad_meta)
+
+    if (
+        basis is not None
+        and isinstance(pad_meta, DetectedPadUiMeta)
+        and bool(pad_meta.source_surfaces_defined)
+    ):
+        slot_rows = tuple(
+            basis.get("slots", ())
+        )
+        base_order_names = [
+            str(slot_name)
+            for slot_name, *_rest in slot_rows
+        ]
+        if not bool(cfg.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False)):
+            ordered_names = _apply_fixed_slots_to_ordered_names(
+                base_order_names,
+                fixed_slots=fixed_slots,
+            )
+            slot_row_by_name = {
+                str(slot_name): (
+                    float(x_value),
+                    float(y_value),
+                    float(z_value),
+                )
+                for slot_name, x_value, y_value, z_value, *_rest in slot_rows
+            }
+            return tuple(
+                PadSurfaceAssignment(
+                    slot_index=int(index),
+                    well_name=str(well_name),
+                    surface_x_m=float(slot_row_by_name[str(source_well_name)][0]),
+                    surface_y_m=float(slot_row_by_name[str(source_well_name)][1]),
+                    surface_z_m=float(slot_row_by_name[str(source_well_name)][2]),
+                    source_well_name=str(source_well_name),
+                )
+                for index, (source_well_name, well_name) in enumerate(
+                    zip(base_order_names, ordered_names, strict=True),
+                    start=1,
+                )
+            )
+
+        anchor_mode = str(
+            cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
+        )
+        if anchor_mode == PAD_SURFACE_ANCHOR_CENTER:
+            source_anchor_xyz = basis["center_anchor_xyz"]
+            source_anchor_projection = float(basis["center_anchor_projection"])
+            source_anchor_cross_projection = float(
+                basis["center_anchor_cross_projection"]
+            )
+        else:
+            source_anchor_xyz = basis["first_anchor_xyz"]
+            source_anchor_projection = float(basis["first_anchor_projection"])
+            source_anchor_cross_projection = float(
+                basis["first_anchor_cross_projection"]
+            )
+        current_anchor_x = float(cfg["first_surface_x"])
+        current_anchor_y = float(cfg["first_surface_y"])
+        current_anchor_z = float(cfg["first_surface_z"])
+        current_angle_rad = np.deg2rad(float(cfg["nds_azimuth_deg"]) % 360.0)
+        current_ux = float(np.sin(current_angle_rad))
+        current_uy = float(np.cos(current_angle_rad))
+        current_vx = float(-current_uy)
+        current_vy = float(current_ux)
+        spacing_ref_m = float(max(basis["spacing_ref_m"], 0.0))
+        spacing_m = float(max(cfg["spacing_m"], 0.0))
+        scale = (
+            float(spacing_m / spacing_ref_m)
+            if spacing_ref_m > SMALL
+            else 0.0
+        )
+        transformed_slots: list[tuple[str, float, float, float]] = []
+        for slot_name, x_value, y_value, z_value, projection, cross_projection in slot_rows:
+            relative_projection = float(projection) - source_anchor_projection
+            relative_cross_projection = (
+                float(cross_projection) - source_anchor_cross_projection
+            )
+            relative_z = float(z_value) - float(source_anchor_xyz[2])
+            transformed_slots.append(
+                (
+                    str(slot_name),
+                    float(
+                        current_anchor_x
+                        + relative_projection * scale * current_ux
+                        + relative_cross_projection * current_vx
+                    ),
+                    float(
+                        current_anchor_y
+                        + relative_projection * scale * current_uy
+                        + relative_cross_projection * current_vy
+                    ),
+                    float(current_anchor_z + relative_z),
+                )
+            )
+
+        if bool(cfg.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False)):
+            ordered_names = [
+                str(well.name)
+                for well in ordered_pad_wells(
+                    pad=pad,
+                    nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+                    fixed_slots=fixed_slots,
+                    auto_order_mode=pad_auto_order_mode(session_state),
+                )
+            ]
+        else:
+            ordered_names = _apply_fixed_slots_to_ordered_names(
+                [str(slot_name) for slot_name, _x, _y, _z in transformed_slots],
+                fixed_slots=fixed_slots,
+            )
+
+        return tuple(
+            PadSurfaceAssignment(
+                slot_index=int(index),
+                well_name=str(well_name),
+                surface_x_m=float(surface_x),
+                surface_y_m=float(surface_y),
+                surface_z_m=float(surface_z),
+                source_well_name=str(source_well_name),
+            )
+            for index, (
+                (source_well_name, surface_x, surface_y, surface_z),
+                well_name,
+            ) in enumerate(
+                zip(transformed_slots, ordered_names, strict=True),
+                start=1,
+            )
+        )
+
+    auto_order_mode = _pad_effective_auto_order_mode(
+        session_state,
+        pad=pad,
+        config=cfg,
+        pad_meta=pad_meta,
+    )
+    ordered_wells = ordered_pad_wells(
+        pad=pad,
+        nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+        fixed_slots=fixed_slots,
+        auto_order_mode=auto_order_mode,
+    )
+    angle_rad = np.deg2rad(float(cfg["nds_azimuth_deg"]) % 360.0)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    center_slot_index = 0.5 * float(max(len(ordered_wells) - 1, 0))
+    assignments: list[PadSurfaceAssignment] = []
+    for slot_index, well in enumerate(ordered_wells, start=1):
+        if str(cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)) == (
+            PAD_SURFACE_ANCHOR_CENTER
+        ):
+            shift_m = (float(slot_index - 1) - center_slot_index) * float(
+                cfg["spacing_m"]
+            )
+        else:
+            shift_m = float(slot_index - 1) * float(cfg["spacing_m"])
+        assignments.append(
+            PadSurfaceAssignment(
+                slot_index=int(slot_index),
+                well_name=str(well.name),
+                surface_x_m=float(cfg["first_surface_x"] + shift_m * ux),
+                surface_y_m=float(cfg["first_surface_y"] + shift_m * uy),
+                surface_z_m=float(cfg["first_surface_z"]),
+                source_well_name=str(well.name),
+            )
+        )
+    return tuple(assignments)
 
 
 def ensure_pad_configs(
@@ -478,22 +899,32 @@ def build_pad_plan_map(
     config_map = config_raw if isinstance(config_raw, Mapping) else {}
     metadata_raw = session_state.get("wt_pad_detected_meta", {})
     metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
-    auto_order_mode = pad_auto_order_mode(session_state)
     plan_map: dict[str, PadLayoutPlan] = {}
     for pad in pads:
         pad_id = str(pad.pad_id)
         pad_meta = metadata.get(pad_id)
-        default_cfg = pad_config_defaults(pad)
+        default_cfg = _pad_defaults_for_metadata(pad, pad_meta)
         cfg_raw = config_map.get(pad_id, default_cfg)
         cfg = cfg_raw if isinstance(cfg_raw, Mapping) else default_cfg
         if isinstance(pad_meta, DetectedPadUiMeta) and bool(
             pad_meta.source_surfaces_defined
         ) and not bool(cfg.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False)):
             continue
+        auto_order_mode = _pad_effective_auto_order_mode(
+            session_state,
+            pad=pad,
+            config=cfg,
+            pad_meta=pad_meta,
+        )
         resolved_nds_azimuth_deg = resolved_pad_nds_azimuth_deg(
             session_state,
             pad=pad,
             nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+        )
+        assignments = pad_surface_assignments(
+            session_state,
+            pad=pad,
+            config=cfg,
         )
         plan_map[pad_id] = PadLayoutPlan(
             pad_id=pad_id,
@@ -510,6 +941,15 @@ def build_pad_plan_map(
                 config=cfg,
             ),
             auto_order_mode=auto_order_mode,
+            surface_positions_by_well_name=tuple(
+                (
+                    str(item.well_name),
+                    float(item.surface_x_m),
+                    float(item.surface_y_m),
+                    float(item.surface_z_m),
+                )
+                for item in assignments
+            ),
         )
     return plan_map
 
@@ -695,10 +1135,35 @@ def resolved_pad_nds_azimuth_deg(
     pad: WellPad,
     nds_azimuth_deg: float,
 ) -> float:
+    metadata_raw = session_state.get("wt_pad_detected_meta", {})
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    config_raw = session_state.get("wt_pad_configs", {})
+    config_map = config_raw if isinstance(config_raw, Mapping) else {}
+    pad_id = str(pad.pad_id)
+    pad_meta = metadata.get(pad_id)
+    default_cfg = _pad_defaults_for_metadata(pad, pad_meta)
+    current_raw = config_map.get(pad_id, {})
+    current = current_raw if isinstance(current_raw, Mapping) else {}
+    cfg = _merge_pad_config(
+        current={
+            **dict(current),
+            "nds_azimuth_deg": float(nds_azimuth_deg),
+        },
+        defaults=default_cfg,
+        fixed_slots=pad_fixed_slots_from_config(
+            pad=pad,
+            config=current,
+        ),
+    )
     return aligned_pad_nds_azimuth_deg(
         pad,
         nds_azimuth_deg=float(nds_azimuth_deg),
-        auto_order_mode=pad_auto_order_mode(session_state),
+        auto_order_mode=_pad_effective_auto_order_mode(
+            session_state,
+            pad=pad,
+            config=cfg,
+            pad_meta=pad_meta,
+        ),
     )
 
 
@@ -707,19 +1172,12 @@ def pad_membership(
     records: list[WelltrackRecord],
 ) -> tuple[list[WellPad], dict[str, str], dict[str, tuple[str, ...]]]:
     pads = project_pads_for_ui(session_state, records)
-    auto_order_mode = pad_auto_order_mode(session_state)
     name_to_pad_id: dict[str, str] = {}
     well_names_by_pad_id: dict[str, tuple[str, ...]] = {}
     for pad in pads:
         pad_id = str(pad.pad_id)
-        cfg = pad_config_for_ui(session_state, pad)
-        ordered = ordered_pad_wells(
-            pad=pad,
-            nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
-            fixed_slots=pad_fixed_slots_from_config(pad=pad, config=cfg),
-            auto_order_mode=auto_order_mode,
-        )
-        ordered_names = tuple(str(item.name) for item in ordered)
+        assignments = pad_surface_assignments(session_state, pad=pad)
+        ordered_names = tuple(str(item.well_name) for item in assignments)
         well_names_by_pad_id[pad_id] = ordered_names
         for well_name in ordered_names:
             name_to_pad_id[well_name] = pad_id
@@ -795,14 +1253,35 @@ def _pad_defaults_for_metadata(
     if isinstance(pad_meta, DetectedPadUiMeta) and bool(
         pad_meta.source_surfaces_defined
     ):
+        basis = _source_defined_pad_basis(pad, pad_meta)
+        center_xyz = (
+            basis["center_anchor_xyz"]
+            if basis is not None
+            else (
+                float(pad_meta.source_surface_x_m),
+                float(pad_meta.source_surface_y_m),
+                float(pad_meta.source_surface_z_m),
+            )
+        )
         return {
-            "spacing_m": float(max(pad_meta.inferred_spacing_m, 0.0)),
-            "nds_azimuth_deg": float(pad.auto_nds_azimuth_deg) % 360.0,
-            "first_surface_x": float(pad_meta.source_surface_x_m),
-            "first_surface_y": float(pad_meta.source_surface_y_m),
-            "first_surface_z": float(pad_meta.source_surface_z_m),
+            "spacing_m": float(
+                max(
+                    basis["spacing_ref_m"]
+                    if basis is not None
+                    else pad_meta.inferred_spacing_m,
+                    0.0,
+                )
+            ),
+            "nds_azimuth_deg": float(
+                basis["axis_deg"] if basis is not None else pad.auto_nds_azimuth_deg
+            )
+            % 360.0,
+            "first_surface_x": float(center_xyz[0]),
+            "first_surface_y": float(center_xyz[1]),
+            "first_surface_z": float(center_xyz[2]),
             "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
             WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY: False,
+            WT_PAD_APPLY_AUTO_ORDER_KEY: False,
             "fixed_slots": (),
         }
     return pad_config_defaults(pad)
@@ -836,6 +1315,12 @@ def _merge_pad_config(
             current.get(
                 WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY,
                 defaults.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False),
+            )
+        ),
+        WT_PAD_APPLY_AUTO_ORDER_KEY: bool(
+            current.get(
+                WT_PAD_APPLY_AUTO_ORDER_KEY,
+                defaults.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False),
             )
         ),
         "fixed_slots": fixed_slots,

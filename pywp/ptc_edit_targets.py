@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable, Mapping, MutableMapping
 import math
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.pilot_wells import is_pilot_name, parent_name_for_pilot, well_name_key
 from pywp.ptc_sidetrack_state import queue_editor_sidetrack_window_override
 
 __all__ = [
@@ -153,6 +154,37 @@ def unique_well_names(names: Iterable[object]) -> list[str]:
             continue
         seen.add(name)
         result.append(name)
+    return result
+
+
+def _expanded_invalidated_names(
+    records: Iterable[WelltrackRecord],
+    edited_names: Iterable[object],
+) -> list[str]:
+    canonical_name_by_key = {
+        well_name_key(record.name): str(record.name)
+        for record in records
+    }
+    result: list[str] = []
+    seen_keys: set[str] = set()
+
+    def _append(name: object) -> None:
+        text = str(name).strip()
+        if not text:
+            return
+        canonical = canonical_name_by_key.get(well_name_key(text), text)
+        canonical_key = well_name_key(canonical)
+        if canonical_key in seen_keys:
+            return
+        seen_keys.add(canonical_key)
+        result.append(canonical)
+
+    for name in edited_names:
+        _append(name)
+    for name in tuple(result):
+        if not is_pilot_name(name):
+            continue
+        _append(parent_name_for_pilot(name))
     return result
 
 
@@ -344,6 +376,7 @@ def apply_edit_targets_changes(
     )
     if not updated_names:
         return []
+    invalidated_names = _expanded_invalidated_names(updated_records, updated_names)
 
     effective_change_map = {
         name: change_map[name] for name in updated_target_names if name in change_map
@@ -361,13 +394,13 @@ def apply_edit_targets_changes(
     invalidate_results_for_edited_targets(
         session_state,
         records=updated_records,
-        edited_names=updated_names,
+        edited_names=invalidated_names,
         base_row_factory=base_row_factory,
     )
     pending_names = unique_well_names(
         [
             *pending_edit_target_names(session_state),
-            *updated_names,
+            *invalidated_names,
         ]
     )
     session_state["wt_edit_targets_pending_names"] = pending_names

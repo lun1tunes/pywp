@@ -351,7 +351,6 @@ def run_batch_if_clicked(
         return
 
     selected_execution_order = hooks.selected_execution_order(selected_names)
-    pending_edit_names_before_run = set(hooks.pending_edit_target_names())
     records_for_run = list(records)
     pad_layout_active = bool(str(state.get("wt_pad_last_applied_at", ""))) and not bool(
         state.get("wt_pad_auto_applied_on_import", False)
@@ -705,12 +704,6 @@ def run_batch_if_clicked(
                 new_successes=successes,
                 pending_edit_target_names=hooks.pending_edit_target_names,
             )
-            pending_edit_names_after_run = set(hooks.pending_edit_target_names())
-            edit_target_recalculation_completed = bool(
-                pending_edit_names_before_run
-                and not pending_edit_names_after_run
-                and pending_edit_names_before_run.issubset(selected_set)
-            )
             applied_affected_wells = {
                 str(name) for name in prepared_snapshot.get("affected_wells", ())
             }
@@ -736,14 +729,11 @@ def run_batch_if_clicked(
                 state["wt_last_anticollision_previous_successes"] = (
                     previous_anticollision_successes
                 )
-                hooks.focus_all_wells_anticollision_results()
+                hooks.focus_all_wells_trajectory_results()
             else:
                 state["wt_last_anticollision_resolution"] = None
                 state["wt_last_anticollision_previous_successes"] = {}
-                if edit_target_recalculation_completed:
-                    hooks.focus_all_wells_anticollision_results()
-                else:
-                    hooks.focus_all_wells_trajectory_results()
+                hooks.focus_all_wells_trajectory_results()
             state["wt_last_error"] = ""
             state["wt_last_run_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             state["wt_last_runtime_s"] = float(elapsed_s)

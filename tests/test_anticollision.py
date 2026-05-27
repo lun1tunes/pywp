@@ -252,6 +252,100 @@ def test_overlap_geometry_uses_dense_scan_samples_not_display_indices() -> None:
     assert any(len(corridor.overlap_rings_xyz) > 0 for corridor in analysis.corridors)
 
 
+def test_build_overlap_geometry_false_skips_overlap_ring_polygon_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#123456",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#654321",
+        stations=_straight_stations(y_offset_m=5.0),
+        surface=Point3D(0.0, 5.0, 0.0),
+        t1=Point3D(1000.0, 5.0, 0.0),
+        t3=Point3D(2000.0, 5.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+
+    overlap_ring_calls = 0
+    original = anticollision_module._overlap_ring_between_samples
+
+    def counting_overlap_ring(**kwargs: object) -> np.ndarray:
+        nonlocal overlap_ring_calls
+        overlap_ring_calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_overlap_ring_between_samples",
+        counting_overlap_ring,
+    )
+
+    analysis = analyze_anti_collision([well_a, well_b], build_overlap_geometry=False)
+
+    assert analysis.corridors
+    assert overlap_ring_calls == 0
+
+
+def test_pair_distance_combined_radius_matrices_reuses_precomputed_well_arrays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    well_a = build_anti_collision_well(
+        name="WELL-A",
+        color="#123456",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+    well_b = build_anti_collision_well(
+        name="WELL-B",
+        color="#654321",
+        stations=_straight_stations(y_offset_m=25.0),
+        surface=Point3D(0.0, 25.0, 0.0),
+        t1=Point3D(1000.0, 25.0, 0.0),
+        t3=Point3D(2000.0, 25.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_independent_sample_covariance",
+        lambda _sample: (_ for _ in ()).throw(
+            AssertionError("pair distance path should use precomputed covariances")
+        ),
+    )
+
+    distance, combined_radius = anticollision_module._pair_distance_combined_radius_matrices(
+        well_a=well_a,
+        well_b=well_b,
+        confidence_scale=2.0,
+    )
+
+    assert distance.shape == combined_radius.shape
+    assert distance.size > 0
+
+
 def test_anti_collision_progress_reports_pair_counts() -> None:
     wells = [
         build_anti_collision_well(
@@ -1651,6 +1745,113 @@ def test_analyze_anti_collision_incremental_reuses_unchanged_pairs(
     assert scanned_pairs == [("WELL-A", "WELL-B"), ("WELL-B", "WELL-C")]
 
 
+def test_analyze_anti_collision_incremental_reuses_unrelated_pairs_for_sidetrack_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sidetrack_v1 = build_anti_collision_well(
+        name="WELL-SIDE",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        sidetrack_parent_name="WELL-PARENT",
+        sidetrack_window_md_m=1000.0,
+    )
+    sidetrack_v2 = build_anti_collision_well(
+        name="WELL-SIDE",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=2.0),
+        surface=Point3D(0.0, 2.0, 0.0),
+        t1=Point3D(1000.0, 2.0, 0.0),
+        t3=Point3D(2000.0, 2.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+        sidetrack_parent_name="WELL-PARENT",
+        sidetrack_window_md_m=1000.0,
+    )
+    parent = build_anti_collision_well(
+        name="WELL-PARENT",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=10.0),
+        surface=Point3D(0.0, 10.0, 0.0),
+        t1=Point3D(1000.0, 10.0, 0.0),
+        t3=Point3D(2000.0, 10.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    other = build_anti_collision_well(
+        name="WELL-OTHER",
+        color="#1D4ED8",
+        stations=_straight_stations(y_offset_m=20.0),
+        surface=Point3D(0.0, 20.0, 0.0),
+        t1=Point3D(1000.0, 20.0, 0.0),
+        t3=Point3D(2000.0, 20.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    scanned_pairs: list[tuple[str, str]] = []
+
+    def _record_pair_scan(
+        *,
+        well_a: AntiCollisionWell,
+        well_b: AntiCollisionWell,
+        build_overlap_geometry: bool,
+    ) -> list[AntiCollisionCorridor]:
+        assert build_overlap_geometry is False
+        scanned_pairs.append((str(well_a.name), str(well_b.name)))
+        return []
+
+    monkeypatch.setattr(
+        anticollision_module,
+        "_pair_overlap_corridors",
+        _record_pair_scan,
+    )
+
+    _, pair_cache, first_stats = analyze_anti_collision_incremental(
+        [sidetrack_v1, parent, other],
+        build_overlap_geometry=False,
+        well_signature_by_name={
+            "WELL-SIDE": "side-v1",
+            "WELL-PARENT": "parent-v1",
+            "WELL-OTHER": "other-v1",
+        },
+    )
+
+    assert first_stats.reused_pair_count == 0
+    assert first_stats.recalculated_pair_count == 3
+    assert scanned_pairs == [
+        ("WELL-SIDE", "WELL-PARENT"),
+        ("WELL-SIDE", "WELL-OTHER"),
+        ("WELL-PARENT", "WELL-OTHER"),
+    ]
+
+    scanned_pairs.clear()
+    _, _, second_stats = analyze_anti_collision_incremental(
+        [sidetrack_v2, parent, other],
+        build_overlap_geometry=False,
+        well_signature_by_name={
+            "WELL-SIDE": "side-v2",
+            "WELL-PARENT": "parent-v1",
+            "WELL-OTHER": "other-v1",
+        },
+        previous_pair_cache=pair_cache,
+    )
+
+    assert second_stats.reused_pair_count == 1
+    assert second_stats.recalculated_pair_count == 2
+    assert scanned_pairs == [
+        ("WELL-SIDE", "WELL-PARENT"),
+        ("WELL-SIDE", "WELL-OTHER"),
+    ]
+
+
 def test_pair_cache_is_invalidated_when_sidetrack_parent_context_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1904,6 +2105,38 @@ def test_build_anti_collision_wells_for_successes_reports_cone_progress(
     assert executor_workers == [2]
     assert submitted_names == ["WELL-A", "WELL-B"]
     assert [well.name for well in wells] == ["WELL-A", "WELL-B"]
+
+
+def test_build_anti_collision_wells_for_successes_keeps_iscwsa_display_sampling_capped() -> (
+    None
+):
+    model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
+    successes = [
+        SuccessfulWellPlan(
+            name="WELL-A",
+            surface=Point3D(0.0, 0.0, 0.0),
+            t1=Point3D(1000.0, 0.0, 0.0),
+            t3=Point3D(2000.0, 0.0, 0.0),
+            stations=_straight_stations(y_offset_m=0.0),
+            summary={"kop_md_m": 0.0},
+            azimuth_deg=90.0,
+            md_t1_m=1000.0,
+            config={"optimization_mode": "none"},
+        )
+    ]
+
+    wells, _cache, _reused, _rebuilt = build_anti_collision_wells_for_successes(
+        successes,
+        model=model,
+        include_display_geometry=True,
+        build_overlap_geometry=True,
+    )
+
+    assert len(wells) == 1
+    well = wells[0]
+    assert len(well.overlay.samples) <= int(model.max_display_ellipses)
+    assert len(well.samples) > len(well.overlay.samples)
+    assert len(well.samples) >= 150
 
 
 @pytest.mark.integration
@@ -2253,7 +2486,9 @@ def test_welltracks4_well_03_well_09_shared_surface_overlap_is_reported() -> Non
     )
 
 
-def test_welltracks4_well_06_well_07_visual_cones_use_dense_iscwsa_samples() -> None:
+def test_welltracks4_well_06_well_07_visual_cones_keep_base_sampling_capped() -> (
+    None
+):
     records = [
         record
         for record in parse_welltrack_text(
@@ -2277,6 +2512,7 @@ def test_welltracks4_well_06_well_07_visual_cones_use_dense_iscwsa_samples() -> 
         include_display_geometry=True,
         build_overlap_geometry=True,
     )
+    model = planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET)
     wells_by_name = {str(well.name): well for well in analysis.wells}
     pair_events = [
         event
@@ -2291,8 +2527,18 @@ def test_welltracks4_well_06_well_07_visual_cones_use_dense_iscwsa_samples() -> 
 
     assert pair_events
     assert late_pair_events == []
-    assert len(wells_by_name["well_06"].overlay.samples) >= 150
-    assert len(wells_by_name["well_07"].overlay.samples) >= 150
+    assert len(wells_by_name["well_06"].overlay.samples) <= int(
+        model.max_display_ellipses
+    )
+    assert len(wells_by_name["well_07"].overlay.samples) <= int(
+        model.max_display_ellipses
+    )
+    assert len(wells_by_name["well_06"].samples) > len(
+        wells_by_name["well_06"].overlay.samples
+    )
+    assert len(wells_by_name["well_07"].samples) > len(
+        wells_by_name["well_07"].overlay.samples
+    )
 
 
 def test_overlap_ring_is_not_reduced_to_uniform_circle_for_offset_wells() -> None:

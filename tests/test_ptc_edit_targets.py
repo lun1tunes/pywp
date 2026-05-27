@@ -204,6 +204,73 @@ def test_apply_edit_targets_changes_invalidates_only_changed_wells() -> None:
     assert changed_original.points[1].x == pytest.approx(610.25)
 
 
+def test_apply_edit_targets_changes_invalidates_pilot_and_parent_together() -> None:
+    records = [
+        _record("WELL-A"),
+        _record(
+            "WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=1800.0),
+                WelltrackPoint(x=300.0, y=500.0, z=2400.0, md=2600.0),
+            ),
+        ),
+        _record("WELL-B"),
+    ]
+    cached_analysis = {"pair_cache": {("WELL-A", "WELL-B"): object()}}
+    session_state: dict[str, object] = {
+        "wt_records": list(records),
+        "wt_records_original": list(records),
+        "wt_successes": [
+            SimpleNamespace(name="WELL-A"),
+            SimpleNamespace(name="WELL-A_PL"),
+            SimpleNamespace(name="WELL-B"),
+        ],
+        "wt_summary_rows": [
+            {"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""},
+            {"Скважина": "WELL-A_PL", "Статус": "OK", "Проблема": ""},
+            {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+        ],
+        "wt_anticollision_analysis_cache": cached_analysis,
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "WELL-A_PL",
+                "points": [
+                    {"index": 1, "position": [120.0, 220.0, 1810.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["WELL-A_PL"]
+    assert [item.name for item in session_state["wt_successes"]] == ["WELL-B"]
+    assert session_state["wt_summary_rows"] == [
+        {"Скважина": "WELL-A", "Статус": "Не рассчитана", "Проблема": ""},
+        {"Скважина": "WELL-A_PL", "Статус": "Не рассчитана", "Проблема": ""},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+    ]
+    assert session_state["wt_edit_targets_pending_names"] == [
+        "WELL-A_PL",
+        "WELL-A",
+    ]
+    assert session_state["wt_edit_targets_highlight_names"] == [
+        "WELL-A_PL",
+        "WELL-A",
+    ]
+    assert session_state["wt_pending_selected_names"] == [
+        "WELL-A_PL",
+        "WELL-A",
+    ]
+    assert session_state["wt_edit_targets_highlight_points"] == {"WELL-A_PL": [1]}
+    assert session_state["wt_anticollision_analysis_cache"] is cached_analysis
+
+
 def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> None:
     record = _record(
         "MULTI",
