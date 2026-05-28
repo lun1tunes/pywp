@@ -2246,6 +2246,7 @@
           camera.aspect = width / height;
           camera.updateProjectionMatrix();
           renderer.setSize(width, height, false);
+          updateHandleScales();
           updateMiniMapOverlay();
           requestRender();
         }
@@ -3663,6 +3664,7 @@
         function render() {
           const canvasWidth = Math.max(renderer.domElement.clientWidth || 1, 1);
           const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
+          updateHandleScales();
           renderer.setViewport(0, 0, canvasWidth, canvasHeight);
           renderer.setScissorTest(false);
           renderer.clear(true, true, true);
@@ -5135,15 +5137,46 @@
           });
         }
 
+        function worldUnitsPerPixelAt(displayPosition) {
+          const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
+          if (camera && camera.isOrthographicCamera) {
+            const zoom = Math.max(Number(camera.zoom) || 1.0, 1e-6);
+            return Math.max(
+              (Math.abs(Number(camera.top) - Number(camera.bottom)) / zoom) / canvasHeight,
+              1e-6,
+            );
+          }
+          const worldPosition =
+            displayPosition instanceof THREE.Vector3
+              ? displayPosition
+              : displayPoint(displayPosition);
+          const distance = Math.max(
+            camera.position.distanceTo(worldPosition),
+            Number(camera.near) || 0.1,
+          );
+          const fovRad = (Number(camera.fov) || 45) * Math.PI / 180.0;
+          return Math.max(
+            (2.0 * Math.tan(fovRad * 0.5) * distance) / canvasHeight,
+            1e-6,
+          );
+        }
+
+        function editHandleScale(displayPosition, pixelDiameter) {
+          const worldDiameter =
+            worldUnitsPerPixelAt(displayPosition) *
+            Math.max(Number(pixelDiameter) || 1.0, 1.0);
+          return Math.max(worldDiameter * 0.5, 0.25);
+        }
+
         function updateHandleScales() {
-          const handleScale = Math.max(maxSpan * 0.012, 12.0);
           editHandles.forEach((h) => {
-            h.mesh.scale.setScalar(handleScale / 2.5);
+            const displayPosition = h.mesh ? h.mesh.position : displayPoint(h.dataPos);
+            h.mesh.scale.setScalar(editHandleScale(displayPosition, 16.0));
             if (h.pickMesh) {
-              h.pickMesh.scale.setScalar(handleScale);
+              h.pickMesh.scale.setScalar(editHandleScale(displayPosition, 30.0));
             }
             if (h.previewMesh) {
-              h.previewMesh.scale.setScalar(handleScale / 5.0);
+              h.previewMesh.scale.setScalar(editHandleScale(displayPosition, 10.0));
             }
           });
         }

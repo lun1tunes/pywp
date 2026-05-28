@@ -184,7 +184,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "Math.hypot(t3[0] - t1[0], t3[1] - t1[1], t3[2] - t1[2])" in html
     assert "`Длина ГС ${formatLengthMeters(t1T3Length(wellIndex))}`" in html
     assert "syncEditLateralLabels" in html
-    assert "handleScale / 2.5" in html
+    assert "function worldUnitsPerPixelAt(displayPosition)" in html
+    assert "function editHandleScale(displayPosition, pixelDiameter)" in html
+    assert "camera.position.distanceTo(worldPosition)" in html
+    assert "h.mesh.scale.setScalar(editHandleScale(displayPosition, 16.0))" in html
     assert "pickMesh" in html
     assert "previewMesh" in html
     assert "function handleDeltaLength(handle)" in html
