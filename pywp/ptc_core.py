@@ -231,6 +231,7 @@ WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = (
 WT_THREE_MAX_LABELS = ptc_three_payload.WT_THREE_MAX_LABELS
 WT_THREE_MAX_REFERENCE_LABELS = ptc_three_payload.WT_THREE_MAX_REFERENCE_LABELS
 WT_PAD_FOCUS_ALL = ptc_pad_state.WT_PAD_FOCUS_ALL
+WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT = 2000
 WT_IMPORT_WELLHEAD_Z_TOLERANCE_M = 100.0
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
@@ -5331,10 +5332,35 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                     indices.add(index)
             if indices:
                 highlight_points[str(raw_name)] = indices
+
+    point_count = sum(len(getattr(record, "points", ()) or ()) for record in records)
+    needs_explicit_open = (
+        point_count > WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT and not highlight_names
+    )
     with st.expander(
         "Текущие точки скважин (используются в расчете, включая обновленные устья S)",
         expanded=bool(highlight_names),
     ):
+        if needs_explicit_open:
+            table_key = "wt_show_raw_records_table"
+            st.session_state.setdefault(table_key, False)
+            show_raw_table = bool(
+                st.toggle(
+                    "Показать полную таблицу точек",
+                    key=table_key,
+                    help=(
+                        "Большие WELLTRACK-файлы могут содержать десятки тысяч "
+                        "точек. Таблица строится только по запросу, чтобы обычный "
+                        "rerun после расчёта не блокировал результаты."
+                    ),
+                )
+            )
+            if not show_raw_table:
+                st.caption(
+                    f"Таблица скрыта для ускорения страницы: {point_count} точек. "
+                    "Расчёт использует полный импортированный набор данных."
+                )
+                return
         if highlight_names:
             st.success(
                 "Изменённые в 3D-редакторе точки подсвечены. "
@@ -5938,6 +5964,8 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                     "'Рассчитать устья скважин'."
                 ),
             )
+            if not allow_source_surface_edit:
+                st.session_state[widget_keys["apply_auto_order"]] = False
             apply_auto_order = st.toggle(
                 "Применить авто-порядок",
                 key=widget_keys["apply_auto_order"],
@@ -5958,7 +5986,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             config_map[selected_id] = selected_cfg
             st.session_state["wt_pad_configs"] = config_map
             selected_cfg = dict(_pad_config_for_ui(selected_pad))
-            st.session_state[widget_keys["apply_auto_order"]] = False
             st.session_state[widget_keys["surface_anchor_center"]] = (
                 str(selected_cfg.get("surface_anchor_mode"))
                 == PAD_SURFACE_ANCHOR_CENTER

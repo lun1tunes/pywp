@@ -11696,7 +11696,7 @@ SMALL: float = 1e-9
 __all__ = ["DEG2RAD", "RAD2DEG", "SMALL"]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_integration.py	25445
+===BEGIN_FILE===	pywp/coordinate_integration.py	27063
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
@@ -11706,6 +11706,7 @@ Default CRS: ГК_13N_42 / Pulkovo 1942 Gauss-Kruger CM 75E.
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11718,12 +11719,7 @@ from pywp.coordinate_systems import (
     CoordinateTransformer,
     GeodeticCoord,
     HAS_PYPROJ,
-    LocalCoordinateSystem,
-    LocalCoordinateTransformer,
     ProjectedCoord,
-    disambiguate_pno16,
-    define_pno_16_system,
-    define_pno_13_system,
 )
 from pywp.models import Point3D
 
@@ -11954,6 +11950,7 @@ def should_auto_convert() -> bool:
     return st.session_state.get(CRS_AUTO_CONVERT_KEY, True)
 
 
+@lru_cache(maxsize=1)
 def _try_create_transformer() -> CoordinateTransformer | None:
     """Create CoordinateTransformer if pyproj is available.
 
@@ -12194,17 +12191,11 @@ def transform_stations_to_crs(
     can_transform = can_transform_crs(from_crs, to_crs)
 
     if "X_m" in result.columns and "Y_m" in result.columns and can_transform:
-        # Transform each station's x,y coordinates
-        transformed = np.zeros((len(result), 2), dtype=float)
-        for i in range(len(result)):
-            tx, ty = transform_xy_to_crs(
-                float(result["X_m"].iloc[i]),
-                float(result["Y_m"].iloc[i]),
-                from_crs,
-                to_crs,
-            )
-            transformed[i, 0] = tx
-            transformed[i, 1] = ty
+        transformed = _transform_station_xy_values(
+            result[["X_m", "Y_m"]].to_numpy(dtype=float, copy=True),
+            from_crs,
+            to_crs,
+        )
         result["X_m"] = transformed[:, 0]
         result["Y_m"] = transformed[:, 1]
 
@@ -12224,6 +12215,59 @@ def transform_stations_to_crs(
         if "Z_m" in result.columns:
             result = result.rename(columns={"Z_m": "Z_TVD_m"})
 
+    return result
+
+
+def _transform_station_xy_values(
+    coords: np.ndarray,
+    from_crs: CoordinateSystem,
+    to_crs: CoordinateSystem,
+) -> np.ndarray:
+    if coords.size <= 0 or from_crs == to_crs:
+        return coords.copy()
+    transformer = _try_create_transformer()
+    effective_from = _effective_pyproj_crs(from_crs)
+    effective_to = _effective_pyproj_crs(to_crs)
+    if transformer is None or effective_from is None or effective_to is None:
+        return coords.copy()
+    if effective_from == effective_to or not _can_transform_directly(from_crs, to_crs):
+        return coords.copy()
+    try:
+        if hasattr(transformer, "transform_array"):
+            transformed = transformer.transform_array(
+                coords,
+                effective_from,
+                effective_to,
+            )
+        else:
+            transformed = np.asarray(
+                [
+                    transform_xy_to_crs(float(x_value), float(y_value), from_crs, to_crs)
+                    for x_value, y_value in coords
+                ],
+                dtype=float,
+            )
+    except Exception as exc:
+        logger.warning(
+            f"Coordinate station transformation failed ({from_crs.name} -> {to_crs.name}): {exc}"
+        )
+        return coords.copy()
+    transformed = np.asarray(transformed, dtype=float)
+    if transformed.shape != coords.shape:
+        logger.warning(
+            "Coordinate station transformation returned unexpected shape "
+            f"({from_crs.name} -> {to_crs.name})."
+        )
+        return coords.copy()
+    finite_mask = np.isfinite(transformed[:, 0]) & np.isfinite(transformed[:, 1])
+    if bool(np.all(finite_mask)):
+        return transformed
+    result = coords.copy()
+    result[finite_mask, :] = transformed[finite_mask, :]
+    logger.warning(
+        "Coordinate station transformation returned non-finite rows; "
+        "kept original coordinates for those rows."
+    )
     return result
 
 
@@ -27041,7 +27085,7 @@ def run_batch_if_clicked(
         live_log_placeholder.empty()
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	24754
+===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	33240
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
@@ -27074,6 +27118,7 @@ _SURVEY_DOWNLOAD_FORMATS = ("CSV", "WELLTRACK", _SURVEY_DOWNLOAD_FORMAT_DEV)
 _EXPORT_KIND_TRAJECTORIES = "Траектории"
 _EXPORT_KIND_TARGETS = "Цели"
 _EXPORT_KINDS = (_EXPORT_KIND_TRAJECTORIES, _EXPORT_KIND_TARGETS)
+_DOWNLOAD_AUTO_BUILD_ROW_LIMIT = 5000
 
 
 @dataclass(frozen=True)
@@ -27378,21 +27423,75 @@ def _render_survey_downloads(
             build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
             build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
         )
-        survey_data = export_config.builder(
-            successes,
+        station_count = _success_station_row_count(successes)
+        if station_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
+            prepare_key = "wt_prepare_survey_download_payloads"
+            state.setdefault(prepare_key, False)
+            prepare_payloads = bool(
+                st_module.toggle(
+                    "Подготовить файлы выгрузки траекторий",
+                    key=prepare_key,
+                    help=(
+                        "Для больших наборов файлы выгрузки формируются только "
+                        "по запросу, чтобы каждый rerun Streamlit не блокировал "
+                        "отображение результатов."
+                    ),
+                )
+            )
+            if not prepare_payloads:
+                st_module.caption(
+                    f"Выгрузка не сформирована автоматически: {station_count} строк survey. "
+                    "Расчётные данные уже доступны в результатах; включите подготовку файлов "
+                    "только перед скачиванием."
+                )
+                return
+        all_signature = _download_signature(
+            export_kind=export_kind,
+            export_format=export_format,
             target_crs=target_crs,
-            auto_convert=auto_convert,
             source_crs=source_crs,
+            auto_convert=auto_convert,
+            item_signature=_successes_signature(successes),
         )
-        selected_survey_data, selected_label, selected_file_name, selected_mime = (
-            _selected_download_payload(
-                export_config=export_config,
-                selected_successes=selected_successes,
+        survey_data = _download_payload_from_state_cache(
+            state=state,
+            cache_key="wt_survey_download_all_payload_cache",
+            signature=all_signature,
+            build_payload=lambda: export_config.builder(
+                successes,
                 target_crs=target_crs,
                 auto_convert=auto_convert,
                 source_crs=source_crs,
-            )
+            ),
         )
+        selected_survey_data: bytes = b""
+        selected_label = export_config.selected_label
+        selected_file_name = export_config.selected_file_name
+        selected_mime = export_config.mime
+        if selected_successes:
+            selected_signature = _download_signature(
+                export_kind=export_kind,
+                export_format=export_format,
+                target_crs=target_crs,
+                source_crs=source_crs,
+                auto_convert=auto_convert,
+                selected_names=tuple(selected_names),
+                item_signature=_successes_signature(selected_successes),
+            )
+            selected_survey_data, selected_label, selected_file_name, selected_mime = (
+                _download_payload_from_state_cache(
+                    state=state,
+                    cache_key="wt_survey_download_selected_payload_cache",
+                    signature=selected_signature,
+                    build_payload=lambda: _selected_download_payload(
+                        export_config=export_config,
+                        selected_successes=selected_successes,
+                        target_crs=target_crs,
+                        auto_convert=auto_convert,
+                        source_crs=source_crs,
+                    ),
+                )
+            )
         all_col, selected_col = st_module.columns(2, gap="small")
         with all_col:
             st_module.download_button(
@@ -27472,21 +27571,74 @@ def _render_target_downloads(
         build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
         build_batch_target_dev_file_func=build_batch_target_dev_file_func,
     )
-    target_data = export_config.builder(
-        records,
+    target_point_count = _record_point_count(records)
+    if target_point_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
+        prepare_key = "wt_prepare_target_download_payloads"
+        state.setdefault(prepare_key, False)
+        prepare_payloads = bool(
+            st_module.toggle(
+                "Подготовить файлы выгрузки целей",
+                key=prepare_key,
+                help=(
+                    "Для больших наборов файлы выгрузки формируются только "
+                    "по запросу, чтобы каждый rerun Streamlit не блокировал "
+                    "отображение результатов."
+                ),
+            )
+        )
+        if not prepare_payloads:
+            st_module.caption(
+                f"Выгрузка целей не сформирована автоматически: {target_point_count} точек. "
+                "Включите подготовку файлов только перед скачиванием."
+            )
+            return
+    all_signature = _download_signature(
+        export_kind=_EXPORT_KIND_TARGETS,
+        export_format=export_format,
         target_crs=target_crs,
-        auto_convert=auto_convert,
         source_crs=source_crs,
+        auto_convert=auto_convert,
+        item_signature=_records_signature(records),
     )
-    selected_target_data, selected_label, selected_file_name, selected_mime = (
-        _selected_download_payload(
-            export_config=export_config,
-            selected_successes=selected_records,
+    target_data = _download_payload_from_state_cache(
+        state=state,
+        cache_key="wt_target_download_all_payload_cache",
+        signature=all_signature,
+        build_payload=lambda: export_config.builder(
+            records,
             target_crs=target_crs,
             auto_convert=auto_convert,
             source_crs=source_crs,
-        )
+        ),
     )
+    selected_target_data: bytes = b""
+    selected_label = export_config.selected_label
+    selected_file_name = export_config.selected_file_name
+    selected_mime = export_config.mime
+    if selected_records:
+        selected_signature = _download_signature(
+            export_kind=_EXPORT_KIND_TARGETS,
+            export_format=export_format,
+            target_crs=target_crs,
+            source_crs=source_crs,
+            auto_convert=auto_convert,
+            selected_names=tuple(selected_names),
+            item_signature=_records_signature(selected_records),
+        )
+        selected_target_data, selected_label, selected_file_name, selected_mime = (
+            _download_payload_from_state_cache(
+                state=state,
+                cache_key="wt_target_download_selected_payload_cache",
+                signature=selected_signature,
+                build_payload=lambda: _selected_download_payload(
+                    export_config=export_config,
+                    selected_successes=selected_records,
+                    target_crs=target_crs,
+                    auto_convert=auto_convert,
+                    source_crs=source_crs,
+                ),
+            )
+        )
     all_col, selected_col = st_module.columns(2, gap="small")
     with all_col:
         st_module.download_button(
@@ -27508,6 +27660,131 @@ def _render_target_downloads(
             use_container_width=True,
             disabled=not selected_target_data,
         )
+
+
+def _download_payload_from_state_cache(
+    *,
+    state: MutableMapping[str, object],
+    cache_key: str,
+    signature: tuple[object, ...],
+    build_payload: Callable[[], Any],
+) -> Any:
+    cached = state.get(cache_key)
+    if isinstance(cached, dict) and cached.get("signature") == signature:
+        return cached.get("payload")
+    payload = build_payload()
+    state[cache_key] = {"signature": signature, "payload": payload}
+    return payload
+
+
+def _download_signature(
+    *,
+    export_kind: str,
+    export_format: str,
+    target_crs: CoordinateSystem,
+    source_crs: CoordinateSystem,
+    auto_convert: bool,
+    item_signature: tuple[object, ...],
+    selected_names: tuple[object, ...] = (),
+) -> tuple[object, ...]:
+    return (
+        str(export_kind),
+        str(export_format),
+        _crs_signature(target_crs),
+        _crs_signature(source_crs),
+        bool(auto_convert),
+        tuple(str(name) for name in selected_names),
+        item_signature,
+    )
+
+
+def _crs_signature(crs: CoordinateSystem) -> str:
+    return str(getattr(crs, "value", crs))
+
+
+def _successes_signature(successes: list[SuccessfulWellPlan]) -> tuple[object, ...]:
+    return tuple(_success_signature(success) for success in successes)
+
+
+def _success_signature(success: SuccessfulWellPlan) -> tuple[object, ...]:
+    stations = getattr(success, "stations", None)
+    return (
+        str(getattr(success, "name", "")),
+        id(success),
+        _frame_signature(stations),
+        str(getattr(success, "md_postcheck_message", "")),
+    )
+
+
+def _records_signature(records: list[object]) -> tuple[object, ...]:
+    return tuple(_record_signature(record) for record in records)
+
+
+def _record_signature(record: object) -> tuple[object, ...]:
+    points = tuple(getattr(record, "points", ()) or ())
+    return (
+        str(getattr(record, "name", "")),
+        id(record),
+        len(points),
+        _point_signature(points[0]) if points else None,
+        _point_signature(points[-1]) if points else None,
+    )
+
+
+def _frame_signature(frame: object) -> tuple[object, ...]:
+    try:
+        row_count = int(len(frame))
+    except TypeError:
+        return (0, None, None)
+    if row_count <= 0 or not isinstance(frame, pd.DataFrame):
+        return (row_count, None, None)
+    return (
+        row_count,
+        tuple(str(column) for column in frame.columns),
+        _frame_row_signature(frame.iloc[0]),
+        _frame_row_signature(frame.iloc[-1]),
+    )
+
+
+def _frame_row_signature(row: pd.Series) -> tuple[object, ...]:
+    values: list[object] = []
+    for value in row.tolist():
+        if isinstance(value, (int, float)):
+            values.append(round(float(value), 9))
+        else:
+            values.append(str(value))
+    return tuple(values)
+
+
+def _point_signature(point: object) -> tuple[float, float, float, float | None]:
+    md = getattr(point, "md", None)
+    return (
+        round(float(getattr(point, "x", 0.0)), 9),
+        round(float(getattr(point, "y", 0.0)), 9),
+        round(float(getattr(point, "z", 0.0)), 9),
+        None if md is None else round(float(md), 9),
+    )
+
+
+def _success_station_row_count(successes: list[SuccessfulWellPlan]) -> int:
+    total = 0
+    for success in successes:
+        stations = getattr(success, "stations", None)
+        try:
+            total += int(len(stations)) if stations is not None else 0
+        except TypeError:
+            continue
+    return total
+
+
+def _record_point_count(records: list[object]) -> int:
+    total = 0
+    for record in records:
+        try:
+            total += int(len(getattr(record, "points", ()) or ()))
+        except TypeError:
+            continue
+    return total
 
 
 def _successes_for_visible_selection(
@@ -27676,7 +27953,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	241264
+===BEGIN_FILE===	pywp/ptc_core.py	242442
 from __future__ import annotations
 
 import colorsys
@@ -27910,6 +28187,7 @@ WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = (
 WT_THREE_MAX_LABELS = ptc_three_payload.WT_THREE_MAX_LABELS
 WT_THREE_MAX_REFERENCE_LABELS = ptc_three_payload.WT_THREE_MAX_REFERENCE_LABELS
 WT_PAD_FOCUS_ALL = ptc_pad_state.WT_PAD_FOCUS_ALL
+WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT = 2000
 WT_IMPORT_WELLHEAD_Z_TOLERANCE_M = 100.0
 _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_md_step_m": "wt_cfg_md_step",
@@ -33010,10 +33288,35 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                     indices.add(index)
             if indices:
                 highlight_points[str(raw_name)] = indices
+
+    point_count = sum(len(getattr(record, "points", ()) or ()) for record in records)
+    needs_explicit_open = (
+        point_count > WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT and not highlight_names
+    )
     with st.expander(
         "Текущие точки скважин (используются в расчете, включая обновленные устья S)",
         expanded=bool(highlight_names),
     ):
+        if needs_explicit_open:
+            table_key = "wt_show_raw_records_table"
+            st.session_state.setdefault(table_key, False)
+            show_raw_table = bool(
+                st.toggle(
+                    "Показать полную таблицу точек",
+                    key=table_key,
+                    help=(
+                        "Большие WELLTRACK-файлы могут содержать десятки тысяч "
+                        "точек. Таблица строится только по запросу, чтобы обычный "
+                        "rerun после расчёта не блокировал результаты."
+                    ),
+                )
+            )
+            if not show_raw_table:
+                st.caption(
+                    f"Таблица скрыта для ускорения страницы: {point_count} точек. "
+                    "Расчёт использует полный импортированный набор данных."
+                )
+                return
         if highlight_names:
             st.success(
                 "Изменённые в 3D-редакторе точки подсвечены. "
@@ -33617,6 +33920,8 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                     "'Рассчитать устья скважин'."
                 ),
             )
+            if not allow_source_surface_edit:
+                st.session_state[widget_keys["apply_auto_order"]] = False
             apply_auto_order = st.toggle(
                 "Применить авто-порядок",
                 key=widget_keys["apply_auto_order"],
@@ -33637,7 +33942,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             config_map[selected_id] = selected_cfg
             st.session_state["wt_pad_configs"] = config_map
             selected_cfg = dict(_pad_config_for_ui(selected_pad))
-            st.session_state[widget_keys["apply_auto_order"]] = False
             st.session_state[widget_keys["surface_anchor_center"]] = (
                 str(selected_cfg.get("surface_anchor_mode"))
                 == PAD_SURFACE_ANCHOR_CENTER
@@ -34708,7 +35012,7 @@ def queue_all_wells_results_focus(
     session_state["wt_pending_all_wells_results_focus"] = True
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_pad_state.py	46354
+===BEGIN_FILE===	pywp/ptc_pad_state.py	47276
 from __future__ import annotations
 
 from collections import Counter
@@ -34728,7 +35032,6 @@ from pywp.well_pad import (
     PAD_WELL_AUTO_ORDER_PROJECTION,
     PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC,
     PAD_SURFACE_ANCHOR_CENTER,
-    PAD_SURFACE_ANCHOR_FIRST,
     PadLayoutPlan,
     PadWell,
     WellPad,
@@ -35006,6 +35309,22 @@ def record_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
     return surface_xyz or (0.0, 0.0, 0.0)
 
 
+def record_target_axis_xy(record: WelltrackRecord) -> tuple[float, float]:
+    points = tuple(record.points)
+    if len(points) >= 3:
+        try:
+            _, target_pairs = welltrack_points_to_target_pairs(points)
+            pair_t1, pair_t3 = target_pairs[0]
+            dx = float(pair_t3.x) - float(pair_t1.x)
+            dy = float(pair_t3.y) - float(pair_t1.y)
+            norm = float(np.hypot(dx, dy))
+            if norm > SMALL:
+                return float(dx / norm), float(dy / norm)
+        except (TypeError, ValueError):
+            pass
+    return 0.0, 0.0
+
+
 def estimate_surface_pad_axis_deg(
     surface_xyzs: list[tuple[float, float, float]],
 ) -> float:
@@ -35139,6 +35458,7 @@ def detect_ui_pads(
         unique_surface_keys: set[tuple[int, int, int]] = set()
         for record_index, record, surface_xyz in cluster:
             midpoint_x, midpoint_y, midpoint_z = record_midpoint_xyz(record)
+            target_axis_x, target_axis_y = record_target_axis_xy(record)
             wells.append(
                 PadWell(
                     name=str(record.name),
@@ -35146,6 +35466,8 @@ def detect_ui_pads(
                     midpoint_x=float(midpoint_x),
                     midpoint_y=float(midpoint_y),
                     midpoint_z=float(midpoint_z),
+                    target_axis_x=float(target_axis_x),
+                    target_axis_y=float(target_axis_y),
                 )
             )
             surface_xyzs.append(surface_xyz)
@@ -35632,24 +35954,28 @@ def build_pad_plan_map(
             pad=pad,
             nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
         )
+        resolved_cfg = {
+            **dict(cfg),
+            "nds_azimuth_deg": float(resolved_nds_azimuth_deg),
+        }
         assignments = pad_surface_assignments(
             session_state,
             pad=pad,
-            config=cfg,
+            config=resolved_cfg,
         )
         plan_map[pad_id] = PadLayoutPlan(
             pad_id=pad_id,
-            first_surface_x=float(cfg["first_surface_x"]),
-            first_surface_y=float(cfg["first_surface_y"]),
-            first_surface_z=float(cfg["first_surface_z"]),
-            spacing_m=float(max(cfg["spacing_m"], 0.0)),
+            first_surface_x=float(resolved_cfg["first_surface_x"]),
+            first_surface_y=float(resolved_cfg["first_surface_y"]),
+            first_surface_z=float(resolved_cfg["first_surface_z"]),
+            spacing_m=float(max(resolved_cfg["spacing_m"], 0.0)),
             nds_azimuth_deg=resolved_nds_azimuth_deg,
             surface_anchor_mode=str(
-                cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
+                resolved_cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
             ),
             fixed_slots=pad_fixed_slots_from_config(
                 pad=pad,
-                config=cfg,
+                config=resolved_cfg,
             ),
             auto_order_mode=auto_order_mode,
             surface_positions_by_well_name=tuple(
@@ -36546,7 +36872,7 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_results.py	43866
+===BEGIN_FILE===	pywp/ptc_page_results.py	46790
 from __future__ import annotations
 
 import pandas as pd
@@ -36737,6 +37063,7 @@ def _render_anticollision_panel(
     summary_rows: list[dict[str, object]],
     focus_pad_id: str,
     focus_pad_well_names: list[str],
+    show_visualization: bool = True,
 ) -> None:
     pending_edit_names = wt._pending_edit_target_names()
     if pending_edit_names:
@@ -36755,6 +37082,7 @@ def _render_anticollision_panel(
             records=records,
             summary_rows=summary_rows,
             focus_pad_well_names=focus_pad_well_names,
+            show_visualization=show_visualization,
         ):
             return
         return
@@ -36876,6 +37204,8 @@ def _render_anticollision_panel(
             return
     if anti_collision_progress is not None:
         anti_collision_progress.empty()
+    if run_requested and not show_visualization:
+        st.rerun()
     focus_pad_well_names = wt._focus_pad_well_names(
         records=records,
         focus_pad_id=focus_pad_id,
@@ -36892,8 +37222,6 @@ def _render_anticollision_panel(
         clusters=visible_clusters,
         focus_pad_well_names=focus_pad_well_names,
     )
-    display_name_by_well_name = wt._well_label_display_names(list(records))
-
     wt._render_status_run_log(
         title="Лог расчёта Anti-collision",
         state_payload=st.session_state.get("wt_anticollision_last_run"),
@@ -36908,51 +37236,30 @@ def _render_anticollision_panel(
     m4.metric("Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}")
     with st.expander("Что такое SF?", expanded=False):
         st.markdown(wt._sf_help_markdown())
-    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
-
-    chart_col1, chart_col2 = st.columns(2, gap="medium")
-    try:
-        anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
-            analysis,
-            previous_successes_by_name={},
-            reference_wells=reference_wells,
-            pilot_study_points_by_name=_pilot_study_points_by_name(records),
-            display_name_by_well_name=display_name_by_well_name,
-            focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-            render_mode=wt.WT_3D_RENDER_DETAIL,
-            show_sidetrack_relative_cones=show_sidetrack_relative_cones,
-        )
-        wt._render_three_payload(
-            container=chart_col1,
-            payload=anticollision_3d_payload,
-            height=660,
-            payload_overrides=wt._anticollision_three_payload_overrides(
-                records=records,
+    if show_visualization:
+        try:
+            _render_anticollision_visual_overview(
                 analysis=analysis,
                 successes=successes,
-            ),
-        )
-        chart_col2.plotly_chart(
-            wt._all_wells_anticollision_plan_figure(
-                analysis,
-                previous_successes_by_name={},
-                reference_wells=reference_wells,
-                focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-            ),
-            width="stretch",
-        )
-    except Exception as exc:
-        wt._store_anticollision_failure_state(exc)
-        st.error(
-            "Не удалось отрисовать anti-collision визуализацию. Проверьте лог расчёта ниже."
-        )
-        wt._render_status_run_log(
-            title="Лог расчёта Anti-collision",
-            state_payload=st.session_state.get("wt_anticollision_last_run"),
-            empty_message="Anti-collision анализ ещё не запускался.",
-        )
-        st.caption(f"{type(exc).__name__}: {exc}")
-        return
+                records=records,
+                summary_rows=summary_rows,
+                focus_pad_well_names=focus_pad_well_names,
+                focus_anticollision_well_names=focus_anticollision_well_names,
+                title=None,
+                caption=None,
+            )
+        except Exception as exc:
+            wt._store_anticollision_failure_state(exc)
+            st.error(
+                "Не удалось отрисовать anti-collision визуализацию. Проверьте лог расчёта ниже."
+            )
+            wt._render_status_run_log(
+                title="Лог расчёта Anti-collision",
+                state_payload=st.session_state.get("wt_anticollision_last_run"),
+                empty_message="Anti-collision анализ ещё не запускался.",
+            )
+            st.caption(f"{type(exc).__name__}: {exc}")
+            return
 
     if not analysis.zones:
         st.success(
@@ -37341,6 +37648,8 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
     records: list[object],
     summary_rows: list[dict[str, object]],
     focus_pad_well_names: list[str],
+    show_visualization: bool = True,
+    show_report: bool = True,
 ) -> bool:
     snapshot = _cached_anticollision_snapshot()
     if snapshot is None:
@@ -37354,13 +37663,6 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
             pending_edit_names=wt._pending_edit_target_names(),
         )
     )
-    st.caption(
-        "Ниже показан последний anti-collision снимок до пересчёта: "
-        "старые конусы и пересечения скрыты для изменённых скважин, а "
-        "фактический/утверждённый фонд и неизменённые скважины остаются "
-        "на экране как ориентир."
-    )
-
     visible_focus_names = tuple(focus_pad_well_names)
     visible_clusters = wt._clusters_touching_focus_pad(
         clusters=clusters,
@@ -37374,52 +37676,29 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         records=list(records),
         summary_rows=list(summary_rows),
     )
-    name_to_color = wt._well_color_map(list(records))
-    display_name_by_well_name = wt._well_label_display_names(list(records))
-    reference_wells = reference_state.reference_wells_from_state()
-    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
-    chart_col1, chart_col2 = st.columns(2, gap="medium")
-    anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
-        analysis,
-        previous_successes_by_name={},
-        target_only_wells=target_only_wells,
-        reference_wells=reference_wells,
-        name_to_color=name_to_color,
-        display_name_by_well_name=display_name_by_well_name,
-        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
-        focus_well_names=focus_anticollision_well_names or visible_focus_names,
-        render_mode=wt.WT_3D_RENDER_DETAIL,
-        show_sidetrack_relative_cones=show_sidetrack_relative_cones,
-    )
-    wt._render_three_payload(
-        container=chart_col1,
-        payload=anticollision_3d_payload,
-        height=660,
-        payload_overrides=wt._anticollision_three_payload_overrides(
-            records=list(records),
+    if show_visualization:
+        _render_anticollision_visual_overview(
             analysis=analysis,
-            successes=list(successes),
+            successes=successes,
+            records=records,
+            summary_rows=summary_rows,
+            focus_pad_well_names=visible_focus_names,
+            focus_anticollision_well_names=focus_anticollision_well_names,
+            title="### Все скважины, конуса и пересечения",
+            caption=(
+                "Ниже показан последний anti-collision снимок до пересчёта: "
+                "старые конусы и пересечения скрыты для изменённых скважин, а "
+                "фактический/утверждённый фонд и неизменённые скважины остаются "
+                "на экране как ориентир."
+            ),
             target_only_wells=target_only_wells,
-            target_only_name_to_color=name_to_color,
-        ),
-    )
-    chart_col2.plotly_chart(
-        wt._all_wells_anticollision_plan_figure(
-            analysis,
-            previous_successes_by_name={},
-            target_only_wells=target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            focus_well_names=focus_anticollision_well_names or visible_focus_names,
-        ),
-        width="stretch",
-    )
+        )
 
     visible_recommendations = wt._recommendations_for_clusters(
         recommendations=recommendations,
         clusters=visible_clusters,
     )
-    if visible_recommendations:
+    if show_report and visible_recommendations:
         st.markdown("### Отчет по предыдущему anti-collision")
         report_rows = wt._report_rows_from_recommendations(
             visible_recommendations,
@@ -37431,6 +37710,76 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
             hide_index=True,
         )
     return True
+
+
+def _render_anticollision_visual_overview(
+    *,
+    analysis: AntiCollisionAnalysis,
+    successes: list[object],
+    records: list[object],
+    summary_rows: list[dict[str, object]],
+    focus_pad_well_names: list[str] | tuple[str, ...],
+    focus_anticollision_well_names: list[str] | tuple[str, ...],
+    title: str | None,
+    caption: str | None,
+    target_only_wells: list[object] | None = None,
+) -> None:
+    visible_focus_names = tuple(str(name) for name in focus_pad_well_names)
+    focus_names = tuple(str(name) for name in focus_anticollision_well_names)
+    resolved_target_only_wells = (
+        list(target_only_wells)
+        if target_only_wells is not None
+        else wt._failed_target_only_wells(
+            records=list(records),
+            summary_rows=list(summary_rows),
+        )
+    )
+    name_to_color = wt._well_color_map(list(records))
+    display_name_by_well_name = wt._well_label_display_names(list(records))
+    reference_wells = reference_state.reference_wells_from_state()
+    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
+
+    if title:
+        st.markdown(title)
+    if caption:
+        st.caption(caption)
+
+    chart_col1, chart_col2 = st.columns(2, gap="medium")
+    anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
+        analysis,
+        previous_successes_by_name={},
+        target_only_wells=resolved_target_only_wells,
+        reference_wells=reference_wells,
+        name_to_color=name_to_color,
+        display_name_by_well_name=display_name_by_well_name,
+        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
+        focus_well_names=focus_names or visible_focus_names,
+        render_mode=wt.WT_3D_RENDER_DETAIL,
+        show_sidetrack_relative_cones=show_sidetrack_relative_cones,
+    )
+    wt._render_three_payload(
+        container=chart_col1,
+        payload=anticollision_3d_payload,
+        height=660,
+        payload_overrides=wt._anticollision_three_payload_overrides(
+            records=list(records),
+            analysis=analysis,
+            successes=list(successes),
+            target_only_wells=resolved_target_only_wells,
+            target_only_name_to_color=name_to_color,
+        ),
+    )
+    chart_col2.plotly_chart(
+        wt._all_wells_anticollision_plan_figure(
+            analysis,
+            previous_successes_by_name={},
+            target_only_wells=resolved_target_only_wells,
+            reference_wells=reference_wells,
+            name_to_color=name_to_color,
+            focus_well_names=focus_names or visible_focus_names,
+        ),
+        width="stretch",
+    )
 
 
 def _render_target_edit_overview(
@@ -37732,7 +38081,58 @@ def render_success_tabs(
         records=list(records),
         summary_rows=list(summary_rows),
     )
-    if target_only_wells or current_anticollision_snapshot is None:
+    has_pending_target_edits = bool(wt._pending_edit_target_names())
+    rendered_cached_snapshot = False
+    if has_pending_target_edits:
+        try:
+            rendered_cached_snapshot = _render_cached_anticollision_snapshot_for_pending_edits(
+                successes=list(successes),
+                records=list(records),
+                summary_rows=list(summary_rows),
+                focus_pad_well_names=list(focus_pad_well_names),
+                show_visualization=True,
+                show_report=False,
+            )
+        except Exception as exc:
+            wt._store_anticollision_failure_state(exc)
+            st.error(
+                "Не удалось отрисовать сохранённую anti-collision визуализацию. "
+                "Отчёт и данные кэша ниже остаются доступными."
+            )
+            st.caption(f"{type(exc).__name__}: {exc}")
+            rendered_cached_snapshot = False
+    if rendered_cached_snapshot:
+        pass
+    elif current_anticollision_snapshot is not None:
+        analysis, _recommendations, clusters = current_anticollision_snapshot
+        visible_clusters = wt._clusters_touching_focus_pad(
+            clusters=clusters,
+            focus_pad_well_names=focus_pad_well_names,
+        )
+        focus_anticollision_well_names = wt._anticollision_focus_well_names(
+            clusters=visible_clusters,
+            focus_pad_well_names=focus_pad_well_names,
+        )
+        try:
+            _render_anticollision_visual_overview(
+                analysis=analysis,
+                successes=list(successes),
+                records=list(records),
+                summary_rows=list(summary_rows),
+                focus_pad_well_names=list(focus_pad_well_names),
+                focus_anticollision_well_names=list(focus_anticollision_well_names),
+                title="### Все скважины, конуса и пересечения",
+                caption=None,
+                target_only_wells=target_only_wells,
+            )
+        except Exception as exc:
+            wt._store_anticollision_failure_state(exc)
+            st.error(
+                "Не удалось отрисовать anti-collision визуализацию. "
+                "Расчётные данные и отчёт ниже остаются доступными."
+            )
+            st.caption(f"{type(exc).__name__}: {exc}")
+    else:
         _render_target_edit_overview(
             successes=list(successes),
             records=records,
@@ -37749,6 +38149,7 @@ def render_success_tabs(
         summary_rows=summary_rows,
         focus_pad_id=focus_pad_id,
         focus_pad_well_names=focus_pad_well_names,
+        show_visualization=False,
     )
 
 ===END_FILE===
@@ -45870,7 +46271,7 @@ class FastReplan {
 // window.updateLineGeometry = updateLineGeometry;
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	223067
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	224449
 <!doctype html>
 <html lang="en">
   <head>
@@ -48119,6 +48520,7 @@ class FastReplan {
           camera.aspect = width / height;
           camera.updateProjectionMatrix();
           renderer.setSize(width, height, false);
+          updateHandleScales();
           updateMiniMapOverlay();
           requestRender();
         }
@@ -49536,6 +49938,7 @@ class FastReplan {
         function render() {
           const canvasWidth = Math.max(renderer.domElement.clientWidth || 1, 1);
           const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
+          updateHandleScales();
           renderer.setViewport(0, 0, canvasWidth, canvasHeight);
           renderer.setScissorTest(false);
           renderer.clear(true, true, true);
@@ -51008,15 +51411,46 @@ class FastReplan {
           });
         }
 
+        function worldUnitsPerPixelAt(displayPosition) {
+          const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
+          if (camera && camera.isOrthographicCamera) {
+            const zoom = Math.max(Number(camera.zoom) || 1.0, 1e-6);
+            return Math.max(
+              (Math.abs(Number(camera.top) - Number(camera.bottom)) / zoom) / canvasHeight,
+              1e-6,
+            );
+          }
+          const worldPosition =
+            displayPosition instanceof THREE.Vector3
+              ? displayPosition
+              : displayPoint(displayPosition);
+          const distance = Math.max(
+            camera.position.distanceTo(worldPosition),
+            Number(camera.near) || 0.1,
+          );
+          const fovRad = (Number(camera.fov) || 45) * Math.PI / 180.0;
+          return Math.max(
+            (2.0 * Math.tan(fovRad * 0.5) * distance) / canvasHeight,
+            1e-6,
+          );
+        }
+
+        function editHandleScale(displayPosition, pixelDiameter) {
+          const worldDiameter =
+            worldUnitsPerPixelAt(displayPosition) *
+            Math.max(Number(pixelDiameter) || 1.0, 1.0);
+          return Math.max(worldDiameter * 0.5, 0.25);
+        }
+
         function updateHandleScales() {
-          const handleScale = Math.max(maxSpan * 0.012, 12.0);
           editHandles.forEach((h) => {
-            h.mesh.scale.setScalar(handleScale / 2.5);
+            const displayPosition = h.mesh ? h.mesh.position : displayPoint(h.dataPos);
+            h.mesh.scale.setScalar(editHandleScale(displayPosition, 16.0));
             if (h.pickMesh) {
-              h.pickMesh.scale.setScalar(handleScale);
+              h.pickMesh.scale.setScalar(editHandleScale(displayPosition, 30.0));
             }
             if (h.previewMesh) {
-              h.previewMesh.scale.setScalar(handleScale / 5.0);
+              h.previewMesh.scale.setScalar(editHandleScale(displayPosition, 10.0));
             }
           });
         }
@@ -58121,7 +58555,7 @@ def dls_figure(
     return fig
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/well_pad.py	15270
+===BEGIN_FILE===	pywp/well_pad.py	17174
 from __future__ import annotations
 
 import math
@@ -58157,6 +58591,8 @@ class PadWell(FrozenModel):
     midpoint_x: float
     midpoint_y: float
     midpoint_z: float
+    target_axis_x: float = 0.0
+    target_axis_y: float = 0.0
 
 
 class WellPad(FrozenModel):
@@ -58211,6 +58647,7 @@ def detect_well_pads(
             ordered_keys.append(key)
 
         midpoint_x, midpoint_y, midpoint_z = _well_midpoint_xyz(record=record)
+        target_axis_x, target_axis_y = _well_target_axis_xy(record=record)
         grouped[key].append(
             PadWell(
                 name=str(record.name),
@@ -58218,6 +58655,8 @@ def detect_well_pads(
                 midpoint_x=float(midpoint_x),
                 midpoint_y=float(midpoint_y),
                 midpoint_z=float(midpoint_z),
+                target_axis_x=float(target_axis_x),
+                target_axis_y=float(target_axis_y),
             )
         )
 
@@ -58412,12 +58851,13 @@ def aligned_pad_nds_azimuth_deg(
         or len(pad.wells) < 2
     ):
         return normalized_azimuth
+    aligned_azimuth = normalized_azimuth
     ordered = ordered_pad_wells(
         pad=pad,
-        nds_azimuth_deg=normalized_azimuth,
+        nds_azimuth_deg=aligned_azimuth,
         auto_order_mode=auto_order_mode,
     )
-    ux, uy = _azimuth_to_unit_xy(azimuth_deg=normalized_azimuth)
+    ux, uy = _azimuth_to_unit_xy(azimuth_deg=aligned_azimuth)
     first_projection = float(
         ordered[0].midpoint_x * ux + ordered[0].midpoint_y * uy
     )
@@ -58425,8 +58865,14 @@ def aligned_pad_nds_azimuth_deg(
         ordered[-1].midpoint_x * ux + ordered[-1].midpoint_y * uy
     )
     if last_projection + _EPS < first_projection:
-        return float((normalized_azimuth + 180.0) % 360.0)
-    return normalized_azimuth
+        aligned_azimuth = float((aligned_azimuth + 180.0) % 360.0)
+
+    target_axis = _dominant_target_axis_xy(ordered)
+    if target_axis is not None:
+        ux, uy = _azimuth_to_unit_xy(azimuth_deg=aligned_azimuth)
+        if float(ux * target_axis[0] + uy * target_axis[1]) > _EPS:
+            aligned_azimuth = float((aligned_azimuth + 180.0) % 360.0)
+    return aligned_azimuth
 
 
 def well_name_natural_sort_key(name: str) -> tuple[tuple[int, str | int], ...]:
@@ -58554,6 +59000,39 @@ def _well_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
             pass
     first = record.points[0]
     return float(first.x), float(first.y), float(first.z)
+
+
+def _well_target_axis_xy(record: WelltrackRecord) -> tuple[float, float]:
+    if len(record.points) >= 3:
+        try:
+            _, target_pairs = welltrack_points_to_target_pairs(tuple(record.points))
+            pair_t1, pair_t3 = target_pairs[0]
+            dx = float(pair_t3.x) - float(pair_t1.x)
+            dy = float(pair_t3.y) - float(pair_t1.y)
+            norm = float(math.hypot(dx, dy))
+            if norm > _EPS:
+                return float(dx / norm), float(dy / norm)
+        except (TypeError, ValueError):
+            pass
+    return 0.0, 0.0
+
+
+def _dominant_target_axis_xy(wells: Iterable[PadWell]) -> tuple[float, float] | None:
+    axes: list[tuple[float, float]] = []
+    for well in wells:
+        x_value = float(getattr(well, "target_axis_x", 0.0))
+        y_value = float(getattr(well, "target_axis_y", 0.0))
+        norm = float(math.hypot(x_value, y_value))
+        if norm > _EPS:
+            axes.append((float(x_value / norm), float(y_value / norm)))
+    if not axes:
+        return None
+    summed_x = float(sum(item[0] for item in axes))
+    summed_y = float(sum(item[1] for item in axes))
+    summed_norm = float(math.hypot(summed_x, summed_y))
+    if summed_norm / max(float(len(axes)), 1.0) < 0.25:
+        return None
+    return float(summed_x / summed_norm), float(summed_y / summed_norm)
 
 
 def _azimuth_to_unit_xy(*, azimuth_deg: float) -> tuple[float, float]:
@@ -67030,7 +67509,7 @@ def test_unspecified_thresholds_are_resolved_once_for_interpolation_anchors() ->
     assert anchor_1000.hold_complex_max_deg == float(rule_2000.hold_complex_max_deg)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_coordinate_integration.py	18226
+===BEGIN_FILE===	tests/test_coordinate_integration.py	19250
 """Tests for coordinate system integration with trajectory planning."""
 import pandas as pd
 import pytest
@@ -67425,6 +67904,15 @@ class TestCoordinateIntegration:
             lambda x, y, _from_crs, _to_crs: (float(x) + 1.0, float(y) + 2.0),
         )
 
+        class FakeTransformer:
+            def transform_array(self, coords, _from_crs, _to_crs):
+                values = pd.DataFrame(coords, columns=["X_m", "Y_m"])
+                values["X_m"] = values["X_m"] + 1.0
+                values["Y_m"] = values["Y_m"] + 2.0
+                return values[["X_m", "Y_m"]].to_numpy(dtype=float)
+
+        monkeypatch.setattr(ci, "_try_create_transformer", lambda: FakeTransformer())
+
         result = apply_crs_to_well_view(
             view,
             CoordinateSystem.WGS84,
@@ -67485,17 +67973,28 @@ class TestCoordinateIntegration:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        calls = {"array": 0}
+
+        class FakeTransformer:
+            def transform_array(
+                self,
+                coords: object,
+                _from_crs: CoordinateSystem,
+                _to_crs: CoordinateSystem,
+            ) -> object:
+                calls["array"] += 1
+                frame = pd.DataFrame(coords, columns=["X_m", "Y_m"])
+                frame["X_m"] = frame["X_m"] + 1.0
+                frame["Y_m"] = frame["Y_m"] + 2.0
+                return frame[["X_m", "Y_m"]].to_numpy(dtype=float)
+
         stations = pd.DataFrame({
-            "X_m": [1000.0],
-            "Y_m": [2000.0],
-            "Z_m": [100.0],
+            "X_m": [1000.0, 1100.0],
+            "Y_m": [2000.0, 2100.0],
+            "Z_m": [100.0, 200.0],
         })
         monkeypatch.setattr(ci, "HAS_PYPROJ", True)
-        monkeypatch.setattr(
-            ci,
-            "_transform_xy",
-            lambda x, y, _from_crs, _to_crs: (float(x) + 1.0, float(y) + 2.0),
-        )
+        monkeypatch.setattr(ci, "_try_create_transformer", lambda: FakeTransformer())
 
         result = transform_stations_to_crs(
             stations,
@@ -67505,7 +68004,9 @@ class TestCoordinateIntegration:
         )
 
         assert list(result.columns) == ["X_m", "Y_m", "Z_m"]
-        assert result["X_m"].tolist() == pytest.approx([1001.0])
+        assert result["X_m"].tolist() == pytest.approx([1001.0, 1101.0])
+        assert result["Y_m"].tolist() == pytest.approx([2002.0, 2102.0])
+        assert calls["array"] == 1
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_coordinate_systems.py	5068
@@ -75008,7 +75509,7 @@ def test_fixed_slots_editor_normalizes_dataframe_rows() -> None:
     assert any("дубль" in warning for warning in warnings)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_page_results.py	26222
+===BEGIN_FILE===	tests/test_ptc_page_results.py	32591
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -75183,6 +75684,99 @@ def test_anticollision_panel_requires_explicit_run_before_first_analysis(
     assert "Запустите anti-collision отдельным шагом" in str(calls["info"])
 
 
+def test_anticollision_panel_reruns_after_fresh_analysis_when_visual_is_external(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    calls: dict[str, object] = {}
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def button(self, label: str, **_kwargs: object) -> bool:
+            calls.setdefault("buttons", []).append(str(label))
+            return str(label) == "Расчёт пересечений"
+
+        def selectbox(
+            self,
+            _label: str,
+            *,
+            options: list[str],
+            format_func=None,
+            key: str,
+        ) -> str:
+            value = str(options[0])
+            self.session_state[key] = value
+            return value
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def progress(self, _value: int, *, text: str):
+            calls["progress_text"] = str(text)
+
+            class _Progress:
+                def progress(self, value: int, *, text: str) -> None:
+                    calls["progress_update"] = (int(value), str(text))
+
+                def empty(self) -> None:
+                    calls["progress_emptied"] = True
+
+            return _Progress()
+
+        def rerun(self) -> None:
+            raise _RerunRequested
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_cached_anti_collision_view_model",
+        lambda **_kwargs: (analysis, (), ()),
+    )
+
+    with pytest.raises(_RerunRequested):
+        ptc_page_results._render_anticollision_panel(
+            successes=[object(), object()],
+            records=[],
+            summary_rows=[],
+            focus_pad_id="",
+            focus_pad_well_names=[],
+            show_visualization=False,
+        )
+
+    assert calls["buttons"] == ["Расчёт пересечений"]
+    assert calls["progress_emptied"] is True
+
+
 def test_anticollision_panel_pauses_on_pending_target_edits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -75265,6 +75859,9 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
 
         def caption(self, message: str) -> None:
             calls.setdefault("captions", []).append(str(message))
+
+        def markdown(self, message: str) -> None:
+            calls.setdefault("markdown", []).append(str(message))
 
         def columns(self, *args: object, **kwargs: object) -> list[FakeColumn]:
             return [FakeColumn(), FakeColumn()]
@@ -75583,7 +76180,7 @@ def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
 def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = {"overview": 0, "anticollision": 0}
+    calls = {"overview": 0, "anticollision": 0, "visual": 0}
     analysis = AntiCollisionAnalysis(
         wells=(),
         corridors=(),
@@ -75638,9 +76235,19 @@ def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
         ptc_page_results,
         "_render_target_edit_overview",
         lambda **_kwargs: calls.__setitem__("overview", calls["overview"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_visual_overview",
+        lambda **_kwargs: calls.__setitem__("visual", calls["visual"] + 1),
     )
     monkeypatch.setattr(
         ptc_page_results,
@@ -75656,7 +76263,112 @@ def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
         summary_rows=[],
     )
 
-    assert calls == {"overview": 0, "anticollision": 1}
+    assert calls == {"overview": 0, "anticollision": 1, "visual": 1}
+
+
+def test_render_success_tabs_keeps_report_panel_when_ac_visual_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"panel": 0, "failures": 0, "errors": []}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_results_view_mode": "Все скважины",
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+        }
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Все скважины"
+
+        def error(self, message: str) -> None:
+            calls["errors"].append(str(message))
+
+        def caption(self, _message: str) -> None:
+            return None
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(ptc_page_results.wt, "_pad_membership", lambda _records: ([], {}, {}))
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_normalize_focus_pad_id",
+        lambda **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_focus_pad_well_names",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: (analysis, (), ()),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_clusters_touching_focus_pad",
+        lambda **kwargs: kwargs["clusters"],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_anticollision_focus_well_names",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_store_anticollision_failure_state",
+        lambda _exc: calls.__setitem__("failures", calls["failures"] + 1),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_visual_overview",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("visual boom")),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_panel",
+        lambda **_kwargs: calls.__setitem__("panel", calls["panel"] + 1),
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[SimpleNamespace(name="WELL-A")],
+        records=[],
+        summary_rows=[],
+    )
+
+    assert calls["failures"] == 1
+    assert calls["panel"] == 1
+    assert any("Не удалось отрисовать anti-collision визуализацию" in item for item in calls["errors"])
 
 
 def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
@@ -80098,7 +80810,7 @@ def test_default_three_camera_uses_z_up_eye() -> None:
     assert DEFAULT_THREE_CAMERA["eye"] == {"x": 1.25, "y": 1.25, "z": 1.25}
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	23055
+===BEGIN_FILE===	tests/test_three_viewer.py	23309
 from __future__ import annotations
 
 from pathlib import Path
@@ -80285,7 +80997,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "Math.hypot(t3[0] - t1[0], t3[1] - t1[1], t3[2] - t1[2])" in html
     assert "`Длина ГС ${formatLengthMeters(t1T3Length(wellIndex))}`" in html
     assert "syncEditLateralLabels" in html
-    assert "handleScale / 2.5" in html
+    assert "function worldUnitsPerPixelAt(displayPosition)" in html
+    assert "function editHandleScale(displayPosition, pixelDiameter)" in html
+    assert "camera.position.distanceTo(worldPosition)" in html
+    assert "h.mesh.scale.setScalar(editHandleScale(displayPosition, 16.0))" in html
     assert "pickMesh" in html
     assert "previewMesh" in html
     assert "function handleDeltaLength(handle)" in html
@@ -80569,7 +81284,7 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     assert " B " in second
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	10275
+===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	10388
 from __future__ import annotations
 
 import pandas as pd
@@ -80577,7 +81292,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.models import TrajectoryConfig, Point3D
+from pywp.models import TrajectoryConfig
 from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -80845,6 +81560,8 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
     at.session_state["wt_reference_approved_wells"] = [
         well for well in reference_wells if well.kind == "approved"
     ]
+    at.session_state["wt_show_actual_fund_analysis"] = True
+    at.session_state["wt_show_approved_fund_analysis"] = True
 
     at.run(timeout=120)
 
@@ -82575,7 +83292,7 @@ def test_uncertainty_ellipses_are_rendered_on_plan_and_section_views() -> None:
     assert float(ribbons_section[0].line.width) == 0.0
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_well_pad.py	17241
+===BEGIN_FILE===	tests/test_well_pad.py	17994
 from __future__ import annotations
 
 import math
@@ -82853,6 +83570,43 @@ def test_aligned_pad_nds_azimuth_deg_flips_axis_to_match_name_order() -> None:
             t1y=0.0,
             t1z=2000.0,
             t3x=400.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+
+    aligned = aligned_pad_nds_azimuth_deg(
+        pads[0],
+        nds_azimuth_deg=90.0,
+    )
+
+    assert aligned == 270.0
+
+
+def test_aligned_pad_nds_azimuth_deg_keeps_surfaces_behind_target_axis() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=500.0,
             t3y=0.0,
             t3z=2100.0,
         ),
@@ -87459,7 +88213,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	262430
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	268685
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -90362,6 +91116,61 @@ def test_actual_fund_profile_prefers_horizontal_azimuth_over_hold_azimuth() -> N
     assert float(np.max(horizontal_x) - np.min(horizontal_x)) > 300.0
 
 
+def test_render_raw_records_table_skips_large_collapsed_table(monkeypatch) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {"dataframe": 0}
+    page.st.session_state.pop("wt_show_raw_records_table", None)
+    page.st.session_state.pop("wt_edit_targets_highlight_names", None)
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(*args, **kwargs):
+        captured["expanded"] = bool(kwargs.get("expanded"))
+        return _DummyExpander()
+
+    def _fail_raw_dataframe(_records):
+        raise AssertionError("large raw point table must wait for explicit user toggle")
+
+    large_record = WelltrackRecord(
+        name="WELL-LARGE",
+        points=tuple(
+            WelltrackPoint(x=float(index), y=0.0, z=float(index), md=float(index))
+            for index in range(page.WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT + 1)
+        ),
+    )
+
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        page.st,
+        "caption",
+        lambda message, *args, **kwargs: captured.setdefault("caption", str(message)),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "dataframe",
+        lambda *args, **kwargs: captured.__setitem__(
+            "dataframe", int(captured["dataframe"]) + 1
+        ),
+    )
+    monkeypatch.setattr(
+        page.ptc_target_records,
+        "raw_records_dataframe",
+        _fail_raw_dataframe,
+    )
+
+    page._render_raw_records_table([large_record])
+
+    assert captured["expanded"] is False
+    assert captured["dataframe"] == 0
+    assert "Таблица скрыта для ускорения страницы" in str(captured["caption"])
+
+
 def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None:
     page = wt_import_module
     captured: dict[str, object] = {}
@@ -91018,6 +91827,118 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     assert selected_download["file_name"] == "welltrack_survey_selected.csv"
     assert selected_download["mime"] == "text/csv"
     assert selected_download["disabled"] is False
+
+
+def test_batch_summary_reuses_prepared_download_payload_cache(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0)
+    ]
+    build_calls = {"count": 0}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fake_builder(*args, **kwargs):
+        build_calls["count"] += 1
+        return b"payload"
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "multiselect", lambda *args, **kwargs: [])
+    monkeypatch.setattr(page.st, "radio", lambda _label, options, **kwargs: options[0])
+    monkeypatch.setattr(page.st, "download_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page, "_build_batch_survey_csv", _fake_builder)
+
+    rows = [{"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3}]
+    page._render_batch_summary(rows)
+    page._render_batch_summary(rows)
+
+    assert build_calls["count"] == 1
+
+
+def test_batch_summary_skips_large_download_payloads_until_requested(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    row_count = 5001
+    stations = pd.DataFrame(
+        {
+            "MD_m": np.arange(row_count, dtype=float),
+            "INC_deg": np.zeros(row_count, dtype=float),
+            "AZI_deg": np.zeros(row_count, dtype=float),
+            "X_m": np.arange(row_count, dtype=float),
+            "Y_m": np.zeros(row_count, dtype=float),
+            "Z_m": np.arange(row_count, dtype=float),
+            "DLS_deg_per_30m": np.zeros(row_count, dtype=float),
+            "segment": ["HORIZONTAL"] * row_count,
+        }
+    )
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-LARGE", y_offset_m=0.0, stations=stations)
+    ]
+    captured: dict[str, object] = {"download_buttons": 0, "captions": []}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fail_builder(*args, **kwargs):
+        raise AssertionError("large download payload must wait for explicit toggle")
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(
+        page.st,
+        "caption",
+        lambda value, *args, **kwargs: captured["captions"].append(str(value)),
+    )
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "multiselect", lambda *args, **kwargs: [])
+    monkeypatch.setattr(page.st, "radio", lambda _label, options, **kwargs: options[0])
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        page.st,
+        "download_button",
+        lambda *args, **kwargs: captured.__setitem__(
+            "download_buttons", int(captured["download_buttons"]) + 1
+        ),
+    )
+    monkeypatch.setattr(page, "_build_batch_survey_csv", _fail_builder)
+
+    page._render_batch_summary(
+        [{"Скважина": "WELL-LARGE", "Статус": "OK", "Проблема": "", "Точек": 3}]
+    )
+
+    assert captured["download_buttons"] == 0
+    assert any("Выгрузка не сформирована автоматически" in item for item in captured["captions"])
 
 
 def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> None:

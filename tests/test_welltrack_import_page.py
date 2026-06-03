@@ -2900,6 +2900,61 @@ def test_actual_fund_profile_prefers_horizontal_azimuth_over_hold_azimuth() -> N
     assert float(np.max(horizontal_x) - np.min(horizontal_x)) > 300.0
 
 
+def test_render_raw_records_table_skips_large_collapsed_table(monkeypatch) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {"dataframe": 0}
+    page.st.session_state.pop("wt_show_raw_records_table", None)
+    page.st.session_state.pop("wt_edit_targets_highlight_names", None)
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(*args, **kwargs):
+        captured["expanded"] = bool(kwargs.get("expanded"))
+        return _DummyExpander()
+
+    def _fail_raw_dataframe(_records):
+        raise AssertionError("large raw point table must wait for explicit user toggle")
+
+    large_record = WelltrackRecord(
+        name="WELL-LARGE",
+        points=tuple(
+            WelltrackPoint(x=float(index), y=0.0, z=float(index), md=float(index))
+            for index in range(page.WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT + 1)
+        ),
+    )
+
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        page.st,
+        "caption",
+        lambda message, *args, **kwargs: captured.setdefault("caption", str(message)),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "dataframe",
+        lambda *args, **kwargs: captured.__setitem__(
+            "dataframe", int(captured["dataframe"]) + 1
+        ),
+    )
+    monkeypatch.setattr(
+        page.ptc_target_records,
+        "raw_records_dataframe",
+        _fail_raw_dataframe,
+    )
+
+    page._render_raw_records_table([large_record])
+
+    assert captured["expanded"] is False
+    assert captured["dataframe"] == 0
+    assert "Таблица скрыта для ускорения страницы" in str(captured["caption"])
+
+
 def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None:
     page = wt_import_module
     captured: dict[str, object] = {}
@@ -3556,6 +3611,118 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     assert selected_download["file_name"] == "welltrack_survey_selected.csv"
     assert selected_download["mime"] == "text/csv"
     assert selected_download["disabled"] is False
+
+
+def test_batch_summary_reuses_prepared_download_payload_cache(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0)
+    ]
+    build_calls = {"count": 0}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fake_builder(*args, **kwargs):
+        build_calls["count"] += 1
+        return b"payload"
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "multiselect", lambda *args, **kwargs: [])
+    monkeypatch.setattr(page.st, "radio", lambda _label, options, **kwargs: options[0])
+    monkeypatch.setattr(page.st, "download_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page, "_build_batch_survey_csv", _fake_builder)
+
+    rows = [{"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3}]
+    page._render_batch_summary(rows)
+    page._render_batch_summary(rows)
+
+    assert build_calls["count"] == 1
+
+
+def test_batch_summary_skips_large_download_payloads_until_requested(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    row_count = 5001
+    stations = pd.DataFrame(
+        {
+            "MD_m": np.arange(row_count, dtype=float),
+            "INC_deg": np.zeros(row_count, dtype=float),
+            "AZI_deg": np.zeros(row_count, dtype=float),
+            "X_m": np.arange(row_count, dtype=float),
+            "Y_m": np.zeros(row_count, dtype=float),
+            "Z_m": np.arange(row_count, dtype=float),
+            "DLS_deg_per_30m": np.zeros(row_count, dtype=float),
+            "segment": ["HORIZONTAL"] * row_count,
+        }
+    )
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-LARGE", y_offset_m=0.0, stations=stations)
+    ]
+    captured: dict[str, object] = {"download_buttons": 0, "captions": []}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fail_builder(*args, **kwargs):
+        raise AssertionError("large download payload must wait for explicit toggle")
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(
+        page.st,
+        "caption",
+        lambda value, *args, **kwargs: captured["captions"].append(str(value)),
+    )
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "multiselect", lambda *args, **kwargs: [])
+    monkeypatch.setattr(page.st, "radio", lambda _label, options, **kwargs: options[0])
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        page.st,
+        "download_button",
+        lambda *args, **kwargs: captured.__setitem__(
+            "download_buttons", int(captured["download_buttons"]) + 1
+        ),
+    )
+    monkeypatch.setattr(page, "_build_batch_survey_csv", _fail_builder)
+
+    page._render_batch_summary(
+        [{"Скважина": "WELL-LARGE", "Статус": "OK", "Проблема": "", "Точек": 3}]
+    )
+
+    assert captured["download_buttons"] == 0
+    assert any("Выгрузка не сформирована автоматически" in item for item in captured["captions"])
 
 
 def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> None:

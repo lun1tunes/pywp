@@ -30,6 +30,7 @@ _SURVEY_DOWNLOAD_FORMATS = ("CSV", "WELLTRACK", _SURVEY_DOWNLOAD_FORMAT_DEV)
 _EXPORT_KIND_TRAJECTORIES = "Траектории"
 _EXPORT_KIND_TARGETS = "Цели"
 _EXPORT_KINDS = (_EXPORT_KIND_TRAJECTORIES, _EXPORT_KIND_TARGETS)
+_DOWNLOAD_AUTO_BUILD_ROW_LIMIT = 5000
 
 
 @dataclass(frozen=True)
@@ -334,21 +335,75 @@ def _render_survey_downloads(
             build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
             build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
         )
-        survey_data = export_config.builder(
-            successes,
+        station_count = _success_station_row_count(successes)
+        if station_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
+            prepare_key = "wt_prepare_survey_download_payloads"
+            state.setdefault(prepare_key, False)
+            prepare_payloads = bool(
+                st_module.toggle(
+                    "Подготовить файлы выгрузки траекторий",
+                    key=prepare_key,
+                    help=(
+                        "Для больших наборов файлы выгрузки формируются только "
+                        "по запросу, чтобы каждый rerun Streamlit не блокировал "
+                        "отображение результатов."
+                    ),
+                )
+            )
+            if not prepare_payloads:
+                st_module.caption(
+                    f"Выгрузка не сформирована автоматически: {station_count} строк survey. "
+                    "Расчётные данные уже доступны в результатах; включите подготовку файлов "
+                    "только перед скачиванием."
+                )
+                return
+        all_signature = _download_signature(
+            export_kind=export_kind,
+            export_format=export_format,
             target_crs=target_crs,
-            auto_convert=auto_convert,
             source_crs=source_crs,
+            auto_convert=auto_convert,
+            item_signature=_successes_signature(successes),
         )
-        selected_survey_data, selected_label, selected_file_name, selected_mime = (
-            _selected_download_payload(
-                export_config=export_config,
-                selected_successes=selected_successes,
+        survey_data = _download_payload_from_state_cache(
+            state=state,
+            cache_key="wt_survey_download_all_payload_cache",
+            signature=all_signature,
+            build_payload=lambda: export_config.builder(
+                successes,
                 target_crs=target_crs,
                 auto_convert=auto_convert,
                 source_crs=source_crs,
-            )
+            ),
         )
+        selected_survey_data: bytes = b""
+        selected_label = export_config.selected_label
+        selected_file_name = export_config.selected_file_name
+        selected_mime = export_config.mime
+        if selected_successes:
+            selected_signature = _download_signature(
+                export_kind=export_kind,
+                export_format=export_format,
+                target_crs=target_crs,
+                source_crs=source_crs,
+                auto_convert=auto_convert,
+                selected_names=tuple(selected_names),
+                item_signature=_successes_signature(selected_successes),
+            )
+            selected_survey_data, selected_label, selected_file_name, selected_mime = (
+                _download_payload_from_state_cache(
+                    state=state,
+                    cache_key="wt_survey_download_selected_payload_cache",
+                    signature=selected_signature,
+                    build_payload=lambda: _selected_download_payload(
+                        export_config=export_config,
+                        selected_successes=selected_successes,
+                        target_crs=target_crs,
+                        auto_convert=auto_convert,
+                        source_crs=source_crs,
+                    ),
+                )
+            )
         all_col, selected_col = st_module.columns(2, gap="small")
         with all_col:
             st_module.download_button(
@@ -428,21 +483,74 @@ def _render_target_downloads(
         build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
         build_batch_target_dev_file_func=build_batch_target_dev_file_func,
     )
-    target_data = export_config.builder(
-        records,
+    target_point_count = _record_point_count(records)
+    if target_point_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
+        prepare_key = "wt_prepare_target_download_payloads"
+        state.setdefault(prepare_key, False)
+        prepare_payloads = bool(
+            st_module.toggle(
+                "Подготовить файлы выгрузки целей",
+                key=prepare_key,
+                help=(
+                    "Для больших наборов файлы выгрузки формируются только "
+                    "по запросу, чтобы каждый rerun Streamlit не блокировал "
+                    "отображение результатов."
+                ),
+            )
+        )
+        if not prepare_payloads:
+            st_module.caption(
+                f"Выгрузка целей не сформирована автоматически: {target_point_count} точек. "
+                "Включите подготовку файлов только перед скачиванием."
+            )
+            return
+    all_signature = _download_signature(
+        export_kind=_EXPORT_KIND_TARGETS,
+        export_format=export_format,
         target_crs=target_crs,
-        auto_convert=auto_convert,
         source_crs=source_crs,
+        auto_convert=auto_convert,
+        item_signature=_records_signature(records),
     )
-    selected_target_data, selected_label, selected_file_name, selected_mime = (
-        _selected_download_payload(
-            export_config=export_config,
-            selected_successes=selected_records,
+    target_data = _download_payload_from_state_cache(
+        state=state,
+        cache_key="wt_target_download_all_payload_cache",
+        signature=all_signature,
+        build_payload=lambda: export_config.builder(
+            records,
             target_crs=target_crs,
             auto_convert=auto_convert,
             source_crs=source_crs,
-        )
+        ),
     )
+    selected_target_data: bytes = b""
+    selected_label = export_config.selected_label
+    selected_file_name = export_config.selected_file_name
+    selected_mime = export_config.mime
+    if selected_records:
+        selected_signature = _download_signature(
+            export_kind=_EXPORT_KIND_TARGETS,
+            export_format=export_format,
+            target_crs=target_crs,
+            source_crs=source_crs,
+            auto_convert=auto_convert,
+            selected_names=tuple(selected_names),
+            item_signature=_records_signature(selected_records),
+        )
+        selected_target_data, selected_label, selected_file_name, selected_mime = (
+            _download_payload_from_state_cache(
+                state=state,
+                cache_key="wt_target_download_selected_payload_cache",
+                signature=selected_signature,
+                build_payload=lambda: _selected_download_payload(
+                    export_config=export_config,
+                    selected_successes=selected_records,
+                    target_crs=target_crs,
+                    auto_convert=auto_convert,
+                    source_crs=source_crs,
+                ),
+            )
+        )
     all_col, selected_col = st_module.columns(2, gap="small")
     with all_col:
         st_module.download_button(
@@ -464,6 +572,131 @@ def _render_target_downloads(
             use_container_width=True,
             disabled=not selected_target_data,
         )
+
+
+def _download_payload_from_state_cache(
+    *,
+    state: MutableMapping[str, object],
+    cache_key: str,
+    signature: tuple[object, ...],
+    build_payload: Callable[[], Any],
+) -> Any:
+    cached = state.get(cache_key)
+    if isinstance(cached, dict) and cached.get("signature") == signature:
+        return cached.get("payload")
+    payload = build_payload()
+    state[cache_key] = {"signature": signature, "payload": payload}
+    return payload
+
+
+def _download_signature(
+    *,
+    export_kind: str,
+    export_format: str,
+    target_crs: CoordinateSystem,
+    source_crs: CoordinateSystem,
+    auto_convert: bool,
+    item_signature: tuple[object, ...],
+    selected_names: tuple[object, ...] = (),
+) -> tuple[object, ...]:
+    return (
+        str(export_kind),
+        str(export_format),
+        _crs_signature(target_crs),
+        _crs_signature(source_crs),
+        bool(auto_convert),
+        tuple(str(name) for name in selected_names),
+        item_signature,
+    )
+
+
+def _crs_signature(crs: CoordinateSystem) -> str:
+    return str(getattr(crs, "value", crs))
+
+
+def _successes_signature(successes: list[SuccessfulWellPlan]) -> tuple[object, ...]:
+    return tuple(_success_signature(success) for success in successes)
+
+
+def _success_signature(success: SuccessfulWellPlan) -> tuple[object, ...]:
+    stations = getattr(success, "stations", None)
+    return (
+        str(getattr(success, "name", "")),
+        id(success),
+        _frame_signature(stations),
+        str(getattr(success, "md_postcheck_message", "")),
+    )
+
+
+def _records_signature(records: list[object]) -> tuple[object, ...]:
+    return tuple(_record_signature(record) for record in records)
+
+
+def _record_signature(record: object) -> tuple[object, ...]:
+    points = tuple(getattr(record, "points", ()) or ())
+    return (
+        str(getattr(record, "name", "")),
+        id(record),
+        len(points),
+        _point_signature(points[0]) if points else None,
+        _point_signature(points[-1]) if points else None,
+    )
+
+
+def _frame_signature(frame: object) -> tuple[object, ...]:
+    try:
+        row_count = int(len(frame))
+    except TypeError:
+        return (0, None, None)
+    if row_count <= 0 or not isinstance(frame, pd.DataFrame):
+        return (row_count, None, None)
+    return (
+        row_count,
+        tuple(str(column) for column in frame.columns),
+        _frame_row_signature(frame.iloc[0]),
+        _frame_row_signature(frame.iloc[-1]),
+    )
+
+
+def _frame_row_signature(row: pd.Series) -> tuple[object, ...]:
+    values: list[object] = []
+    for value in row.tolist():
+        if isinstance(value, (int, float)):
+            values.append(round(float(value), 9))
+        else:
+            values.append(str(value))
+    return tuple(values)
+
+
+def _point_signature(point: object) -> tuple[float, float, float, float | None]:
+    md = getattr(point, "md", None)
+    return (
+        round(float(getattr(point, "x", 0.0)), 9),
+        round(float(getattr(point, "y", 0.0)), 9),
+        round(float(getattr(point, "z", 0.0)), 9),
+        None if md is None else round(float(md), 9),
+    )
+
+
+def _success_station_row_count(successes: list[SuccessfulWellPlan]) -> int:
+    total = 0
+    for success in successes:
+        stations = getattr(success, "stations", None)
+        try:
+            total += int(len(stations)) if stations is not None else 0
+        except TypeError:
+            continue
+    return total
+
+
+def _record_point_count(records: list[object]) -> int:
+    total = 0
+    for record in records:
+        try:
+            total += int(len(getattr(record, "points", ()) or ()))
+        except TypeError:
+            continue
+    return total
 
 
 def _successes_for_visible_selection(

@@ -289,6 +289,43 @@ def test_aligned_pad_nds_azimuth_deg_flips_axis_to_match_name_order() -> None:
     assert aligned == 270.0
 
 
+def test_aligned_pad_nds_azimuth_deg_keeps_surfaces_behind_target_axis() -> None:
+    records = [
+        _record(
+            "W1",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=100.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=300.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+        _record(
+            "W2",
+            sx=0.0,
+            sy=0.0,
+            sz=0.0,
+            t1x=300.0,
+            t1y=0.0,
+            t1z=2000.0,
+            t3x=500.0,
+            t3y=0.0,
+            t3z=2100.0,
+        ),
+    ]
+    pads = detect_well_pads(records)
+
+    aligned = aligned_pad_nds_azimuth_deg(
+        pads[0],
+        nds_azimuth_deg=90.0,
+    )
+
+    assert aligned == 270.0
+
+
 def test_ordered_pad_wells_honors_fixed_slots_and_fills_remaining_by_auto_order() -> None:
     records = [
         _record(

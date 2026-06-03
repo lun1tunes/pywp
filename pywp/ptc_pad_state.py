@@ -17,7 +17,6 @@ from pywp.well_pad import (
     PAD_WELL_AUTO_ORDER_PROJECTION,
     PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC,
     PAD_SURFACE_ANCHOR_CENTER,
-    PAD_SURFACE_ANCHOR_FIRST,
     PadLayoutPlan,
     PadWell,
     WellPad,
@@ -295,6 +294,22 @@ def record_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
     return surface_xyz or (0.0, 0.0, 0.0)
 
 
+def record_target_axis_xy(record: WelltrackRecord) -> tuple[float, float]:
+    points = tuple(record.points)
+    if len(points) >= 3:
+        try:
+            _, target_pairs = welltrack_points_to_target_pairs(points)
+            pair_t1, pair_t3 = target_pairs[0]
+            dx = float(pair_t3.x) - float(pair_t1.x)
+            dy = float(pair_t3.y) - float(pair_t1.y)
+            norm = float(np.hypot(dx, dy))
+            if norm > SMALL:
+                return float(dx / norm), float(dy / norm)
+        except (TypeError, ValueError):
+            pass
+    return 0.0, 0.0
+
+
 def estimate_surface_pad_axis_deg(
     surface_xyzs: list[tuple[float, float, float]],
 ) -> float:
@@ -428,6 +443,7 @@ def detect_ui_pads(
         unique_surface_keys: set[tuple[int, int, int]] = set()
         for record_index, record, surface_xyz in cluster:
             midpoint_x, midpoint_y, midpoint_z = record_midpoint_xyz(record)
+            target_axis_x, target_axis_y = record_target_axis_xy(record)
             wells.append(
                 PadWell(
                     name=str(record.name),
@@ -435,6 +451,8 @@ def detect_ui_pads(
                     midpoint_x=float(midpoint_x),
                     midpoint_y=float(midpoint_y),
                     midpoint_z=float(midpoint_z),
+                    target_axis_x=float(target_axis_x),
+                    target_axis_y=float(target_axis_y),
                 )
             )
             surface_xyzs.append(surface_xyz)
@@ -921,24 +939,28 @@ def build_pad_plan_map(
             pad=pad,
             nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
         )
+        resolved_cfg = {
+            **dict(cfg),
+            "nds_azimuth_deg": float(resolved_nds_azimuth_deg),
+        }
         assignments = pad_surface_assignments(
             session_state,
             pad=pad,
-            config=cfg,
+            config=resolved_cfg,
         )
         plan_map[pad_id] = PadLayoutPlan(
             pad_id=pad_id,
-            first_surface_x=float(cfg["first_surface_x"]),
-            first_surface_y=float(cfg["first_surface_y"]),
-            first_surface_z=float(cfg["first_surface_z"]),
-            spacing_m=float(max(cfg["spacing_m"], 0.0)),
+            first_surface_x=float(resolved_cfg["first_surface_x"]),
+            first_surface_y=float(resolved_cfg["first_surface_y"]),
+            first_surface_z=float(resolved_cfg["first_surface_z"]),
+            spacing_m=float(max(resolved_cfg["spacing_m"], 0.0)),
             nds_azimuth_deg=resolved_nds_azimuth_deg,
             surface_anchor_mode=str(
-                cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
+                resolved_cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
             ),
             fixed_slots=pad_fixed_slots_from_config(
                 pad=pad,
-                config=cfg,
+                config=resolved_cfg,
             ),
             auto_order_mode=auto_order_mode,
             surface_positions_by_well_name=tuple(

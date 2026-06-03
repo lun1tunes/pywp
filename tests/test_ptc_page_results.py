@@ -172,6 +172,99 @@ def test_anticollision_panel_requires_explicit_run_before_first_analysis(
     assert "Запустите anti-collision отдельным шагом" in str(calls["info"])
 
 
+def test_anticollision_panel_reruns_after_fresh_analysis_when_visual_is_external(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    calls: dict[str, object] = {}
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def button(self, label: str, **_kwargs: object) -> bool:
+            calls.setdefault("buttons", []).append(str(label))
+            return str(label) == "Расчёт пересечений"
+
+        def selectbox(
+            self,
+            _label: str,
+            *,
+            options: list[str],
+            format_func=None,
+            key: str,
+        ) -> str:
+            value = str(options[0])
+            self.session_state[key] = value
+            return value
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def progress(self, _value: int, *, text: str):
+            calls["progress_text"] = str(text)
+
+            class _Progress:
+                def progress(self, value: int, *, text: str) -> None:
+                    calls["progress_update"] = (int(value), str(text))
+
+                def empty(self) -> None:
+                    calls["progress_emptied"] = True
+
+            return _Progress()
+
+        def rerun(self) -> None:
+            raise _RerunRequested
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_cached_anti_collision_view_model",
+        lambda **_kwargs: (analysis, (), ()),
+    )
+
+    with pytest.raises(_RerunRequested):
+        ptc_page_results._render_anticollision_panel(
+            successes=[object(), object()],
+            records=[],
+            summary_rows=[],
+            focus_pad_id="",
+            focus_pad_well_names=[],
+            show_visualization=False,
+        )
+
+    assert calls["buttons"] == ["Расчёт пересечений"]
+    assert calls["progress_emptied"] is True
+
+
 def test_anticollision_panel_pauses_on_pending_target_edits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -254,6 +347,9 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
 
         def caption(self, message: str) -> None:
             calls.setdefault("captions", []).append(str(message))
+
+        def markdown(self, message: str) -> None:
+            calls.setdefault("markdown", []).append(str(message))
 
         def columns(self, *args: object, **kwargs: object) -> list[FakeColumn]:
             return [FakeColumn(), FakeColumn()]
@@ -572,7 +668,7 @@ def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
 def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = {"overview": 0, "anticollision": 0}
+    calls = {"overview": 0, "anticollision": 0, "visual": 0}
     analysis = AntiCollisionAnalysis(
         wells=(),
         corridors=(),
@@ -627,9 +723,19 @@ def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
         ptc_page_results,
         "_render_target_edit_overview",
         lambda **_kwargs: calls.__setitem__("overview", calls["overview"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_visual_overview",
+        lambda **_kwargs: calls.__setitem__("visual", calls["visual"] + 1),
     )
     monkeypatch.setattr(
         ptc_page_results,
@@ -645,7 +751,112 @@ def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
         summary_rows=[],
     )
 
-    assert calls == {"overview": 0, "anticollision": 1}
+    assert calls == {"overview": 0, "anticollision": 1, "visual": 1}
+
+
+def test_render_success_tabs_keeps_report_panel_when_ac_visual_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"panel": 0, "failures": 0, "errors": []}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_results_view_mode": "Все скважины",
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+        }
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Все скважины"
+
+        def error(self, message: str) -> None:
+            calls["errors"].append(str(message))
+
+        def caption(self, _message: str) -> None:
+            return None
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(ptc_page_results.wt, "_pad_membership", lambda _records: ([], {}, {}))
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_normalize_focus_pad_id",
+        lambda **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_focus_pad_well_names",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: (analysis, (), ()),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_clusters_touching_focus_pad",
+        lambda **kwargs: kwargs["clusters"],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_anticollision_focus_well_names",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_store_anticollision_failure_state",
+        lambda _exc: calls.__setitem__("failures", calls["failures"] + 1),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_visual_overview",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("visual boom")),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_panel",
+        lambda **_kwargs: calls.__setitem__("panel", calls["panel"] + 1),
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[SimpleNamespace(name="WELL-A")],
+        records=[],
+        summary_rows=[],
+    )
+
+    assert calls["failures"] == 1
+    assert calls["panel"] == 1
+    assert any("Не удалось отрисовать anti-collision визуализацию" in item for item in calls["errors"])
 
 
 def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(

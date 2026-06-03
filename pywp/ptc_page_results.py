@@ -188,6 +188,7 @@ def _render_anticollision_panel(
     summary_rows: list[dict[str, object]],
     focus_pad_id: str,
     focus_pad_well_names: list[str],
+    show_visualization: bool = True,
 ) -> None:
     pending_edit_names = wt._pending_edit_target_names()
     if pending_edit_names:
@@ -206,6 +207,7 @@ def _render_anticollision_panel(
             records=records,
             summary_rows=summary_rows,
             focus_pad_well_names=focus_pad_well_names,
+            show_visualization=show_visualization,
         ):
             return
         return
@@ -327,6 +329,8 @@ def _render_anticollision_panel(
             return
     if anti_collision_progress is not None:
         anti_collision_progress.empty()
+    if run_requested and not show_visualization:
+        st.rerun()
     focus_pad_well_names = wt._focus_pad_well_names(
         records=records,
         focus_pad_id=focus_pad_id,
@@ -343,8 +347,6 @@ def _render_anticollision_panel(
         clusters=visible_clusters,
         focus_pad_well_names=focus_pad_well_names,
     )
-    display_name_by_well_name = wt._well_label_display_names(list(records))
-
     wt._render_status_run_log(
         title="Лог расчёта Anti-collision",
         state_payload=st.session_state.get("wt_anticollision_last_run"),
@@ -359,51 +361,30 @@ def _render_anticollision_panel(
     m4.metric("Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}")
     with st.expander("Что такое SF?", expanded=False):
         st.markdown(wt._sf_help_markdown())
-    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
-
-    chart_col1, chart_col2 = st.columns(2, gap="medium")
-    try:
-        anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
-            analysis,
-            previous_successes_by_name={},
-            reference_wells=reference_wells,
-            pilot_study_points_by_name=_pilot_study_points_by_name(records),
-            display_name_by_well_name=display_name_by_well_name,
-            focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-            render_mode=wt.WT_3D_RENDER_DETAIL,
-            show_sidetrack_relative_cones=show_sidetrack_relative_cones,
-        )
-        wt._render_three_payload(
-            container=chart_col1,
-            payload=anticollision_3d_payload,
-            height=660,
-            payload_overrides=wt._anticollision_three_payload_overrides(
-                records=records,
+    if show_visualization:
+        try:
+            _render_anticollision_visual_overview(
                 analysis=analysis,
                 successes=successes,
-            ),
-        )
-        chart_col2.plotly_chart(
-            wt._all_wells_anticollision_plan_figure(
-                analysis,
-                previous_successes_by_name={},
-                reference_wells=reference_wells,
-                focus_well_names=focus_anticollision_well_names or focus_pad_well_names,
-            ),
-            width="stretch",
-        )
-    except Exception as exc:
-        wt._store_anticollision_failure_state(exc)
-        st.error(
-            "Не удалось отрисовать anti-collision визуализацию. Проверьте лог расчёта ниже."
-        )
-        wt._render_status_run_log(
-            title="Лог расчёта Anti-collision",
-            state_payload=st.session_state.get("wt_anticollision_last_run"),
-            empty_message="Anti-collision анализ ещё не запускался.",
-        )
-        st.caption(f"{type(exc).__name__}: {exc}")
-        return
+                records=records,
+                summary_rows=summary_rows,
+                focus_pad_well_names=focus_pad_well_names,
+                focus_anticollision_well_names=focus_anticollision_well_names,
+                title=None,
+                caption=None,
+            )
+        except Exception as exc:
+            wt._store_anticollision_failure_state(exc)
+            st.error(
+                "Не удалось отрисовать anti-collision визуализацию. Проверьте лог расчёта ниже."
+            )
+            wt._render_status_run_log(
+                title="Лог расчёта Anti-collision",
+                state_payload=st.session_state.get("wt_anticollision_last_run"),
+                empty_message="Anti-collision анализ ещё не запускался.",
+            )
+            st.caption(f"{type(exc).__name__}: {exc}")
+            return
 
     if not analysis.zones:
         st.success(
@@ -792,6 +773,8 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
     records: list[object],
     summary_rows: list[dict[str, object]],
     focus_pad_well_names: list[str],
+    show_visualization: bool = True,
+    show_report: bool = True,
 ) -> bool:
     snapshot = _cached_anticollision_snapshot()
     if snapshot is None:
@@ -805,13 +788,6 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
             pending_edit_names=wt._pending_edit_target_names(),
         )
     )
-    st.caption(
-        "Ниже показан последний anti-collision снимок до пересчёта: "
-        "старые конусы и пересечения скрыты для изменённых скважин, а "
-        "фактический/утверждённый фонд и неизменённые скважины остаются "
-        "на экране как ориентир."
-    )
-
     visible_focus_names = tuple(focus_pad_well_names)
     visible_clusters = wt._clusters_touching_focus_pad(
         clusters=clusters,
@@ -825,52 +801,29 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         records=list(records),
         summary_rows=list(summary_rows),
     )
-    name_to_color = wt._well_color_map(list(records))
-    display_name_by_well_name = wt._well_label_display_names(list(records))
-    reference_wells = reference_state.reference_wells_from_state()
-    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
-    chart_col1, chart_col2 = st.columns(2, gap="medium")
-    anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
-        analysis,
-        previous_successes_by_name={},
-        target_only_wells=target_only_wells,
-        reference_wells=reference_wells,
-        name_to_color=name_to_color,
-        display_name_by_well_name=display_name_by_well_name,
-        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
-        focus_well_names=focus_anticollision_well_names or visible_focus_names,
-        render_mode=wt.WT_3D_RENDER_DETAIL,
-        show_sidetrack_relative_cones=show_sidetrack_relative_cones,
-    )
-    wt._render_three_payload(
-        container=chart_col1,
-        payload=anticollision_3d_payload,
-        height=660,
-        payload_overrides=wt._anticollision_three_payload_overrides(
-            records=list(records),
+    if show_visualization:
+        _render_anticollision_visual_overview(
             analysis=analysis,
-            successes=list(successes),
+            successes=successes,
+            records=records,
+            summary_rows=summary_rows,
+            focus_pad_well_names=visible_focus_names,
+            focus_anticollision_well_names=focus_anticollision_well_names,
+            title="### Все скважины, конуса и пересечения",
+            caption=(
+                "Ниже показан последний anti-collision снимок до пересчёта: "
+                "старые конусы и пересечения скрыты для изменённых скважин, а "
+                "фактический/утверждённый фонд и неизменённые скважины остаются "
+                "на экране как ориентир."
+            ),
             target_only_wells=target_only_wells,
-            target_only_name_to_color=name_to_color,
-        ),
-    )
-    chart_col2.plotly_chart(
-        wt._all_wells_anticollision_plan_figure(
-            analysis,
-            previous_successes_by_name={},
-            target_only_wells=target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            focus_well_names=focus_anticollision_well_names or visible_focus_names,
-        ),
-        width="stretch",
-    )
+        )
 
     visible_recommendations = wt._recommendations_for_clusters(
         recommendations=recommendations,
         clusters=visible_clusters,
     )
-    if visible_recommendations:
+    if show_report and visible_recommendations:
         st.markdown("### Отчет по предыдущему anti-collision")
         report_rows = wt._report_rows_from_recommendations(
             visible_recommendations,
@@ -882,6 +835,76 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
             hide_index=True,
         )
     return True
+
+
+def _render_anticollision_visual_overview(
+    *,
+    analysis: AntiCollisionAnalysis,
+    successes: list[object],
+    records: list[object],
+    summary_rows: list[dict[str, object]],
+    focus_pad_well_names: list[str] | tuple[str, ...],
+    focus_anticollision_well_names: list[str] | tuple[str, ...],
+    title: str | None,
+    caption: str | None,
+    target_only_wells: list[object] | None = None,
+) -> None:
+    visible_focus_names = tuple(str(name) for name in focus_pad_well_names)
+    focus_names = tuple(str(name) for name in focus_anticollision_well_names)
+    resolved_target_only_wells = (
+        list(target_only_wells)
+        if target_only_wells is not None
+        else wt._failed_target_only_wells(
+            records=list(records),
+            summary_rows=list(summary_rows),
+        )
+    )
+    name_to_color = wt._well_color_map(list(records))
+    display_name_by_well_name = wt._well_label_display_names(list(records))
+    reference_wells = reference_state.reference_wells_from_state()
+    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
+
+    if title:
+        st.markdown(title)
+    if caption:
+        st.caption(caption)
+
+    chart_col1, chart_col2 = st.columns(2, gap="medium")
+    anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
+        analysis,
+        previous_successes_by_name={},
+        target_only_wells=resolved_target_only_wells,
+        reference_wells=reference_wells,
+        name_to_color=name_to_color,
+        display_name_by_well_name=display_name_by_well_name,
+        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
+        focus_well_names=focus_names or visible_focus_names,
+        render_mode=wt.WT_3D_RENDER_DETAIL,
+        show_sidetrack_relative_cones=show_sidetrack_relative_cones,
+    )
+    wt._render_three_payload(
+        container=chart_col1,
+        payload=anticollision_3d_payload,
+        height=660,
+        payload_overrides=wt._anticollision_three_payload_overrides(
+            records=list(records),
+            analysis=analysis,
+            successes=list(successes),
+            target_only_wells=resolved_target_only_wells,
+            target_only_name_to_color=name_to_color,
+        ),
+    )
+    chart_col2.plotly_chart(
+        wt._all_wells_anticollision_plan_figure(
+            analysis,
+            previous_successes_by_name={},
+            target_only_wells=resolved_target_only_wells,
+            reference_wells=reference_wells,
+            name_to_color=name_to_color,
+            focus_well_names=focus_names or visible_focus_names,
+        ),
+        width="stretch",
+    )
 
 
 def _render_target_edit_overview(
@@ -1183,7 +1206,58 @@ def render_success_tabs(
         records=list(records),
         summary_rows=list(summary_rows),
     )
-    if target_only_wells or current_anticollision_snapshot is None:
+    has_pending_target_edits = bool(wt._pending_edit_target_names())
+    rendered_cached_snapshot = False
+    if has_pending_target_edits:
+        try:
+            rendered_cached_snapshot = _render_cached_anticollision_snapshot_for_pending_edits(
+                successes=list(successes),
+                records=list(records),
+                summary_rows=list(summary_rows),
+                focus_pad_well_names=list(focus_pad_well_names),
+                show_visualization=True,
+                show_report=False,
+            )
+        except Exception as exc:
+            wt._store_anticollision_failure_state(exc)
+            st.error(
+                "Не удалось отрисовать сохранённую anti-collision визуализацию. "
+                "Отчёт и данные кэша ниже остаются доступными."
+            )
+            st.caption(f"{type(exc).__name__}: {exc}")
+            rendered_cached_snapshot = False
+    if rendered_cached_snapshot:
+        pass
+    elif current_anticollision_snapshot is not None:
+        analysis, _recommendations, clusters = current_anticollision_snapshot
+        visible_clusters = wt._clusters_touching_focus_pad(
+            clusters=clusters,
+            focus_pad_well_names=focus_pad_well_names,
+        )
+        focus_anticollision_well_names = wt._anticollision_focus_well_names(
+            clusters=visible_clusters,
+            focus_pad_well_names=focus_pad_well_names,
+        )
+        try:
+            _render_anticollision_visual_overview(
+                analysis=analysis,
+                successes=list(successes),
+                records=list(records),
+                summary_rows=list(summary_rows),
+                focus_pad_well_names=list(focus_pad_well_names),
+                focus_anticollision_well_names=list(focus_anticollision_well_names),
+                title="### Все скважины, конуса и пересечения",
+                caption=None,
+                target_only_wells=target_only_wells,
+            )
+        except Exception as exc:
+            wt._store_anticollision_failure_state(exc)
+            st.error(
+                "Не удалось отрисовать anti-collision визуализацию. "
+                "Расчётные данные и отчёт ниже остаются доступными."
+            )
+            st.caption(f"{type(exc).__name__}: {exc}")
+    else:
         _render_target_edit_overview(
             successes=list(successes),
             records=records,
@@ -1200,4 +1274,5 @@ def render_success_tabs(
         summary_rows=summary_rows,
         focus_pad_id=focus_pad_id,
         focus_pad_well_names=focus_pad_well_names,
+        show_visualization=False,
     )

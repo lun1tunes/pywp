@@ -33,6 +33,8 @@ class PadWell(FrozenModel):
     midpoint_x: float
     midpoint_y: float
     midpoint_z: float
+    target_axis_x: float = 0.0
+    target_axis_y: float = 0.0
 
 
 class WellPad(FrozenModel):
@@ -87,6 +89,7 @@ def detect_well_pads(
             ordered_keys.append(key)
 
         midpoint_x, midpoint_y, midpoint_z = _well_midpoint_xyz(record=record)
+        target_axis_x, target_axis_y = _well_target_axis_xy(record=record)
         grouped[key].append(
             PadWell(
                 name=str(record.name),
@@ -94,6 +97,8 @@ def detect_well_pads(
                 midpoint_x=float(midpoint_x),
                 midpoint_y=float(midpoint_y),
                 midpoint_z=float(midpoint_z),
+                target_axis_x=float(target_axis_x),
+                target_axis_y=float(target_axis_y),
             )
         )
 
@@ -288,12 +293,13 @@ def aligned_pad_nds_azimuth_deg(
         or len(pad.wells) < 2
     ):
         return normalized_azimuth
+    aligned_azimuth = normalized_azimuth
     ordered = ordered_pad_wells(
         pad=pad,
-        nds_azimuth_deg=normalized_azimuth,
+        nds_azimuth_deg=aligned_azimuth,
         auto_order_mode=auto_order_mode,
     )
-    ux, uy = _azimuth_to_unit_xy(azimuth_deg=normalized_azimuth)
+    ux, uy = _azimuth_to_unit_xy(azimuth_deg=aligned_azimuth)
     first_projection = float(
         ordered[0].midpoint_x * ux + ordered[0].midpoint_y * uy
     )
@@ -301,8 +307,14 @@ def aligned_pad_nds_azimuth_deg(
         ordered[-1].midpoint_x * ux + ordered[-1].midpoint_y * uy
     )
     if last_projection + _EPS < first_projection:
-        return float((normalized_azimuth + 180.0) % 360.0)
-    return normalized_azimuth
+        aligned_azimuth = float((aligned_azimuth + 180.0) % 360.0)
+
+    target_axis = _dominant_target_axis_xy(ordered)
+    if target_axis is not None:
+        ux, uy = _azimuth_to_unit_xy(azimuth_deg=aligned_azimuth)
+        if float(ux * target_axis[0] + uy * target_axis[1]) > _EPS:
+            aligned_azimuth = float((aligned_azimuth + 180.0) % 360.0)
+    return aligned_azimuth
 
 
 def well_name_natural_sort_key(name: str) -> tuple[tuple[int, str | int], ...]:
@@ -430,6 +442,39 @@ def _well_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
             pass
     first = record.points[0]
     return float(first.x), float(first.y), float(first.z)
+
+
+def _well_target_axis_xy(record: WelltrackRecord) -> tuple[float, float]:
+    if len(record.points) >= 3:
+        try:
+            _, target_pairs = welltrack_points_to_target_pairs(tuple(record.points))
+            pair_t1, pair_t3 = target_pairs[0]
+            dx = float(pair_t3.x) - float(pair_t1.x)
+            dy = float(pair_t3.y) - float(pair_t1.y)
+            norm = float(math.hypot(dx, dy))
+            if norm > _EPS:
+                return float(dx / norm), float(dy / norm)
+        except (TypeError, ValueError):
+            pass
+    return 0.0, 0.0
+
+
+def _dominant_target_axis_xy(wells: Iterable[PadWell]) -> tuple[float, float] | None:
+    axes: list[tuple[float, float]] = []
+    for well in wells:
+        x_value = float(getattr(well, "target_axis_x", 0.0))
+        y_value = float(getattr(well, "target_axis_y", 0.0))
+        norm = float(math.hypot(x_value, y_value))
+        if norm > _EPS:
+            axes.append((float(x_value / norm), float(y_value / norm)))
+    if not axes:
+        return None
+    summed_x = float(sum(item[0] for item in axes))
+    summed_y = float(sum(item[1] for item in axes))
+    summed_norm = float(math.hypot(summed_x, summed_y))
+    if summed_norm / max(float(len(axes)), 1.0) < 0.25:
+        return None
+    return float(summed_x / summed_norm), float(summed_y / summed_norm)
 
 
 def _azimuth_to_unit_xy(*, azimuth_deg: float) -> tuple[float, float]:

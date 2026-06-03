@@ -7,6 +7,7 @@ Default CRS: ГК_13N_42 / Pulkovo 1942 Gauss-Kruger CM 75E.
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,12 +20,7 @@ from pywp.coordinate_systems import (
     CoordinateTransformer,
     GeodeticCoord,
     HAS_PYPROJ,
-    LocalCoordinateSystem,
-    LocalCoordinateTransformer,
     ProjectedCoord,
-    disambiguate_pno16,
-    define_pno_16_system,
-    define_pno_13_system,
 )
 from pywp.models import Point3D
 
@@ -255,6 +251,7 @@ def should_auto_convert() -> bool:
     return st.session_state.get(CRS_AUTO_CONVERT_KEY, True)
 
 
+@lru_cache(maxsize=1)
 def _try_create_transformer() -> CoordinateTransformer | None:
     """Create CoordinateTransformer if pyproj is available.
 
@@ -495,17 +492,11 @@ def transform_stations_to_crs(
     can_transform = can_transform_crs(from_crs, to_crs)
 
     if "X_m" in result.columns and "Y_m" in result.columns and can_transform:
-        # Transform each station's x,y coordinates
-        transformed = np.zeros((len(result), 2), dtype=float)
-        for i in range(len(result)):
-            tx, ty = transform_xy_to_crs(
-                float(result["X_m"].iloc[i]),
-                float(result["Y_m"].iloc[i]),
-                from_crs,
-                to_crs,
-            )
-            transformed[i, 0] = tx
-            transformed[i, 1] = ty
+        transformed = _transform_station_xy_values(
+            result[["X_m", "Y_m"]].to_numpy(dtype=float, copy=True),
+            from_crs,
+            to_crs,
+        )
         result["X_m"] = transformed[:, 0]
         result["Y_m"] = transformed[:, 1]
 
@@ -525,6 +516,59 @@ def transform_stations_to_crs(
         if "Z_m" in result.columns:
             result = result.rename(columns={"Z_m": "Z_TVD_m"})
 
+    return result
+
+
+def _transform_station_xy_values(
+    coords: np.ndarray,
+    from_crs: CoordinateSystem,
+    to_crs: CoordinateSystem,
+) -> np.ndarray:
+    if coords.size <= 0 or from_crs == to_crs:
+        return coords.copy()
+    transformer = _try_create_transformer()
+    effective_from = _effective_pyproj_crs(from_crs)
+    effective_to = _effective_pyproj_crs(to_crs)
+    if transformer is None or effective_from is None or effective_to is None:
+        return coords.copy()
+    if effective_from == effective_to or not _can_transform_directly(from_crs, to_crs):
+        return coords.copy()
+    try:
+        if hasattr(transformer, "transform_array"):
+            transformed = transformer.transform_array(
+                coords,
+                effective_from,
+                effective_to,
+            )
+        else:
+            transformed = np.asarray(
+                [
+                    transform_xy_to_crs(float(x_value), float(y_value), from_crs, to_crs)
+                    for x_value, y_value in coords
+                ],
+                dtype=float,
+            )
+    except Exception as exc:
+        logger.warning(
+            f"Coordinate station transformation failed ({from_crs.name} -> {to_crs.name}): {exc}"
+        )
+        return coords.copy()
+    transformed = np.asarray(transformed, dtype=float)
+    if transformed.shape != coords.shape:
+        logger.warning(
+            "Coordinate station transformation returned unexpected shape "
+            f"({from_crs.name} -> {to_crs.name})."
+        )
+        return coords.copy()
+    finite_mask = np.isfinite(transformed[:, 0]) & np.isfinite(transformed[:, 1])
+    if bool(np.all(finite_mask)):
+        return transformed
+    result = coords.copy()
+    result[finite_mask, :] = transformed[finite_mask, :]
+    logger.warning(
+        "Coordinate station transformation returned non-finite rows; "
+        "kept original coordinates for those rows."
+    )
     return result
 
 

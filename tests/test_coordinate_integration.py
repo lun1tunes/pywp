@@ -392,6 +392,15 @@ class TestCoordinateIntegration:
             lambda x, y, _from_crs, _to_crs: (float(x) + 1.0, float(y) + 2.0),
         )
 
+        class FakeTransformer:
+            def transform_array(self, coords, _from_crs, _to_crs):
+                values = pd.DataFrame(coords, columns=["X_m", "Y_m"])
+                values["X_m"] = values["X_m"] + 1.0
+                values["Y_m"] = values["Y_m"] + 2.0
+                return values[["X_m", "Y_m"]].to_numpy(dtype=float)
+
+        monkeypatch.setattr(ci, "_try_create_transformer", lambda: FakeTransformer())
+
         result = apply_crs_to_well_view(
             view,
             CoordinateSystem.WGS84,
@@ -452,17 +461,28 @@ class TestCoordinateIntegration:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        calls = {"array": 0}
+
+        class FakeTransformer:
+            def transform_array(
+                self,
+                coords: object,
+                _from_crs: CoordinateSystem,
+                _to_crs: CoordinateSystem,
+            ) -> object:
+                calls["array"] += 1
+                frame = pd.DataFrame(coords, columns=["X_m", "Y_m"])
+                frame["X_m"] = frame["X_m"] + 1.0
+                frame["Y_m"] = frame["Y_m"] + 2.0
+                return frame[["X_m", "Y_m"]].to_numpy(dtype=float)
+
         stations = pd.DataFrame({
-            "X_m": [1000.0],
-            "Y_m": [2000.0],
-            "Z_m": [100.0],
+            "X_m": [1000.0, 1100.0],
+            "Y_m": [2000.0, 2100.0],
+            "Z_m": [100.0, 200.0],
         })
         monkeypatch.setattr(ci, "HAS_PYPROJ", True)
-        monkeypatch.setattr(
-            ci,
-            "_transform_xy",
-            lambda x, y, _from_crs, _to_crs: (float(x) + 1.0, float(y) + 2.0),
-        )
+        monkeypatch.setattr(ci, "_try_create_transformer", lambda: FakeTransformer())
 
         result = transform_stations_to_crs(
             stations,
@@ -472,4 +492,6 @@ class TestCoordinateIntegration:
         )
 
         assert list(result.columns) == ["X_m", "Y_m", "Z_m"]
-        assert result["X_m"].tolist() == pytest.approx([1001.0])
+        assert result["X_m"].tolist() == pytest.approx([1001.0, 1101.0])
+        assert result["Y_m"].tolist() == pytest.approx([2002.0, 2102.0])
+        assert calls["array"] == 1

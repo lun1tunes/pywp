@@ -5,7 +5,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.models import TrajectoryConfig, Point3D
+from pywp.models import TrajectoryConfig
 from pywp.reference_trajectories import parse_reference_trajectory_table
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -273,6 +273,8 @@ def test_ptc_page_renders_approved_reference_well_detail_viewer() -> None:
     at.session_state["wt_reference_approved_wells"] = [
         well for well in reference_wells if well.kind == "approved"
     ]
+    at.session_state["wt_show_actual_fund_analysis"] = True
+    at.session_state["wt_show_approved_fund_analysis"] = True
 
     at.run(timeout=120)
 
