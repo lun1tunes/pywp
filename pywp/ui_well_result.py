@@ -469,13 +469,19 @@ def render_result_plots(
     title_plan: str | None,
     border: bool = True,
     render_3d_override: Callable[[object, dict[str, object]], None] | None = None,
+    show_plotly_panels: bool = True,
 ) -> None:
     show_uncertainty = st.checkbox(
         "Показать конус неопределенности",
         key=uncertainty_toggle_key(well_name=view.well_name),
         help=(
-            "Включает planning-level 2σ конус неопределенности для 3D, плана и "
-            "вертикального разреза. Он строится по последовательности эллиптических "
+            "Включает planning-level 2σ конус неопределенности для 3D"
+            + (
+                ", плана и вертикального разреза. "
+                if show_plotly_panels
+                else ". "
+            )
+            + "Он строится по последовательности эллиптических "
             "сечений вдоль ствола. Это базовая визуализация по first-order "
             "ошибкам INC/AZI, без полной ISCWSA tool model."
         ),
@@ -543,24 +549,26 @@ def render_result_plots(
         pilot_stations=view.pilot_stations,
         pilot_study_points=view.pilot_study_points,
         render_3d_override=render_3d_override,
+        show_plotly_chart=show_plotly_panels,
     )
-    render_plan_section_panel(
-        stations=view.stations,
-        well_name=view.well_name,
-        surface=view.surface,
-        t1=view.t1,
-        t3=view.t3,
-        azimuth_deg=float(view.azimuth_deg),
-        title=title_plan,
-        border=border,
-        trajectory_line_dash=view.trajectory_line_dash,
-        plan_csb_stations=view.plan_csb_stations,
-        actual_stations=view.actual_stations,
-        uncertainty_overlay=uncertainty_overlay,
-        pilot_name=view.pilot_name,
-        pilot_stations=view.pilot_stations,
-        pilot_study_points=view.pilot_study_points,
-    )
+    if show_plotly_panels:
+        render_plan_section_panel(
+            stations=view.stations,
+            well_name=view.well_name,
+            surface=view.surface,
+            t1=view.t1,
+            t3=view.t3,
+            azimuth_deg=float(view.azimuth_deg),
+            title=title_plan,
+            border=border,
+            trajectory_line_dash=view.trajectory_line_dash,
+            plan_csb_stations=view.plan_csb_stations,
+            actual_stations=view.actual_stations,
+            uncertainty_overlay=uncertainty_overlay,
+            pilot_name=view.pilot_name,
+            pilot_stations=view.pilot_stations,
+            pilot_study_points=view.pilot_study_points,
+        )
 
 
 def render_result_tables(

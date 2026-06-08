@@ -66,14 +66,13 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
 ]
 
-# CSV output CRS options. CSV may be exported either in projected meters or in
-# geographic/cartographic coordinates, where X/Y columns become lon/lat degrees.
+# CSV output CRS options. CSV export is intentionally restricted to the small
+# set used in the product flow: one default input GK option, one projected UTM
+# target in meters, and WGS84 geographic degrees.
 CSV_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
-    *INPUT_CRS_OPTIONS,
-    ("СК-42 (Градусные)", CoordinateSystem.PULKOVO_1942),
-    ("Пулково 1995 (Градусные)", CoordinateSystem.PULKOVO_1995),
-    ("ГСК-2011 (Градусные)", CoordinateSystem.GSK_2011),
-    ("WGS84 (Градусные)", CoordinateSystem.WGS84),
+    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
+    ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
+    ("WGS84 (градусы)", CoordinateSystem.WGS84),
 ]
 
 # Backwards-compatible name for code/tests that refer to CSV CRS choices.

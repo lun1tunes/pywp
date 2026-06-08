@@ -3568,7 +3568,7 @@ def format_precheck_summary_ru(result: AnalyticalPreCheckResult) -> str:
     return "\n".join(lines)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	142394
+===BEGIN_FILE===	pywp/anticollision.py	142604
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -5725,15 +5725,16 @@ def _relative_overlay_from_window(
     reference_sample: AntiCollisionSample,
     window_md_m: float,
 ) -> WellUncertaintyOverlay | None:
+    scan_start_md_m = float(window_md_m) + float(SIDETRACK_PARENT_SCAN_SKIP_M)
+    if not well.samples or scan_start_md_m > float(well.samples[-1].md_m) - 1e-6:
+        return None
+    start_sample = _collision_sample_at_md(well, md_m=scan_start_md_m)
     samples = (
-        _relative_sample_from_reference(
-            reference_sample,
-            reference_sample=reference_sample,
-        ),
+        _relative_sample_from_reference(start_sample, reference_sample=reference_sample),
         *(
             _relative_sample_from_reference(sample, reference_sample=reference_sample)
             for sample in well.samples
-            if float(sample.md_m) > float(window_md_m) + 1e-6
+            if float(sample.md_m) > scan_start_md_m + 1e-6
         ),
     )
     if len(samples) < 2:
@@ -11696,7 +11697,7 @@ SMALL: float = 1e-9
 __all__ = ["DEG2RAD", "RAD2DEG", "SMALL"]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_integration.py	27063
+===BEGIN_FILE===	pywp/coordinate_integration.py	27021
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
@@ -11765,14 +11766,13 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
 ]
 
-# CSV output CRS options. CSV may be exported either in projected meters or in
-# geographic/cartographic coordinates, where X/Y columns become lon/lat degrees.
+# CSV output CRS options. CSV export is intentionally restricted to the small
+# set used in the product flow: one default input GK option, one projected UTM
+# target in meters, and WGS84 geographic degrees.
 CSV_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
-    *INPUT_CRS_OPTIONS,
-    ("СК-42 (Градусные)", CoordinateSystem.PULKOVO_1942),
-    ("Пулково 1995 (Градусные)", CoordinateSystem.PULKOVO_1995),
-    ("ГСК-2011 (Градусные)", CoordinateSystem.GSK_2011),
-    ("WGS84 (Градусные)", CoordinateSystem.WGS84),
+    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
+    ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
+    ("WGS84 (градусы)", CoordinateSystem.WGS84),
 ]
 
 # Backwards-compatible name for code/tests that refer to CSV CRS choices.
@@ -27953,7 +27953,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	242442
+===BEGIN_FILE===	pywp/ptc_core.py	247476
 from __future__ import annotations
 
 import colorsys
@@ -28051,6 +28051,7 @@ from pywp.coordinate_integration import (
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
+    WelltrackPoint,
     WelltrackRecord,
     parse_welltrack_text,
     welltrack_multi_horizontal_level_count,
@@ -28155,6 +28156,7 @@ WT_LOG_COMPACT = ptc_batch_run.LOG_COMPACT
 WT_LOG_VERBOSE = ptc_batch_run.LOG_VERBOSE
 WT_LOG_LEVEL_OPTIONS = ptc_batch_run.LOG_LEVEL_OPTIONS
 WT_T1T3_MIN_DELTA_M = 0.5
+WT_T1T3_ORDER_PANEL_ANCHOR_ID = "wt-t1-t3-order-panel"
 WT_3D_RENDER_AUTO = "Авто"
 WT_3D_RENDER_DETAIL = "Детально"
 WT_3D_RENDER_FAST = "Быстро"
@@ -33363,9 +33365,12 @@ def _render_t1_t3_order_panel(
     *,
     border: bool = True,
 ) -> None:
-    visible_records = visible_well_records(records, include_zbs=False)
     panel_context = st.container(border=True) if border else nullcontext()
     with panel_context:
+        st.markdown(
+            f'<div id="{WT_T1T3_ORDER_PANEL_ANCHOR_ID}"></div>',
+            unsafe_allow_html=True,
+        )
         resolution_message = _t1_t3_order_resolution_message()
         if resolution_message is not None:
             level, message = resolution_message
@@ -33373,15 +33378,12 @@ def _render_t1_t3_order_panel(
                 st.success(message)
             else:
                 st.info(message)
-        detected_issues = detect_t1_t3_order_issues(
-            visible_records, min_delta_m=WT_T1T3_MIN_DELTA_M
+        anchor_by_well_name = _t1_t3_order_anchor_by_well_name(records)
+        detected_issues = _detected_t1_t3_order_issues(
+            records,
+            anchor_by_well_name=anchor_by_well_name,
         )
-        acknowledged_well_names = _t1_t3_order_acknowledged_well_names()
-        issues = [
-            item
-            for item in detected_issues
-            if str(item.well_name) not in acknowledged_well_names
-        ]
+        issues = _current_t1_t3_order_issues(records, detected_issues=detected_issues)
         if not issues:
             if detected_issues:
                 st.info(
@@ -33393,7 +33395,7 @@ def _render_t1_t3_order_panel(
             return
 
         st.warning(
-            "Найдены скважины, где отход до t1 больше, чем до t3. "
+            "Найдены скважины, где отход от опорной точки до t1 больше, чем до t3. "
             "Вероятно, порядок точек t1/t3 перепутан."
         )
         header_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 3.0], gap="small")
@@ -33402,8 +33404,8 @@ def _render_t1_t3_order_panel(
             unsafe_allow_html=True,
         )
         header_cols[1].markdown("**Скважина**")
-        header_cols[2].markdown("**Отход S→t1, м**")
-        header_cols[3].markdown("**Отход S→t3, м**")
+        header_cols[2].markdown("**Отход →t1, м**")
+        header_cols[3].markdown("**Отход →t3, м**")
         header_cols[4].markdown("**Δ (t1 - t3), м**")
         st.markdown(
             "<div style='height: 0.25rem;'></div>",
@@ -33421,8 +33423,9 @@ def _render_t1_t3_order_panel(
                 label_visibility="collapsed",
             )
             row_cols[1].markdown(f"`{well_name}`")
-            row_cols[2].markdown(f"{float(item.t1_offset_m):.2f}")
-            row_cols[3].markdown(f"{float(item.t3_offset_m):.2f}")
+            anchor_label = str(getattr(item, "anchor_label", "S→") or "S→")
+            row_cols[2].markdown(f"{anchor_label}{float(item.t1_offset_m):.2f}")
+            row_cols[3].markdown(f"{anchor_label}{float(item.t3_offset_m):.2f}")
             row_cols[4].markdown(f"{float(item.delta_m):.2f}")
 
         fix_col, keep_col = st.columns(2, gap="small")
@@ -33447,6 +33450,8 @@ def _render_t1_t3_order_panel(
             st.session_state["wt_records"] = swap_t1_t3_for_wells(
                 records=list(records),
                 well_names=target_names,
+                anchor_by_well_name=anchor_by_well_name,
+                min_delta_m=WT_T1T3_MIN_DELTA_M,
             )
             original_records = st.session_state.get("wt_records_original")
             if original_records is None:
@@ -33454,6 +33459,8 @@ def _render_t1_t3_order_panel(
             st.session_state["wt_records_original"] = swap_t1_t3_for_wells(
                 records=list(original_records),
                 well_names=target_names,
+                anchor_by_well_name=anchor_by_well_name,
+                min_delta_m=WT_T1T3_MIN_DELTA_M,
             )
             _set_t1_t3_order_acknowledged_well_names(
                 _t1_t3_order_acknowledged_well_names() - target_names
@@ -33482,8 +33489,143 @@ def _render_t1_t3_order_panel(
             st.rerun()
         st.caption(
             "Исправление меняет местами координаты `t1` и `t3`, но сохраняет MD "
-            "во 2-й и 3-й позиции, чтобы не ломать порядок MD."
+            "в исходных позициях, чтобы не ломать порядок MD."
         )
+
+
+def _detected_t1_t3_order_issues(
+    records: list[WelltrackRecord],
+    *,
+    anchor_by_well_name: dict[str, Point3D] | None = None,
+) -> list[object]:
+    return detect_t1_t3_order_issues(
+        visible_well_records(records, include_zbs=True),
+        min_delta_m=WT_T1T3_MIN_DELTA_M,
+        anchor_by_well_name=(
+            anchor_by_well_name
+            if anchor_by_well_name is not None
+            else _t1_t3_order_anchor_by_well_name(records)
+        ),
+    )
+
+
+def _current_t1_t3_order_issues(
+    records: list[WelltrackRecord],
+    *,
+    detected_issues: list[object] | None = None,
+) -> list[object]:
+    issues = (
+        detected_issues
+        if detected_issues is not None
+        else _detected_t1_t3_order_issues(records)
+    )
+    acknowledged_well_names = _t1_t3_order_acknowledged_well_names()
+    return [
+        item for item in issues if str(item.well_name) not in acknowledged_well_names
+    ]
+
+
+def _t1_t3_order_anchor_by_well_name(
+    records: list[WelltrackRecord],
+) -> dict[str, Point3D]:
+    record_list = list(records)
+    zbs_records = [
+        record
+        for record in record_list
+        if is_zbs_name(record.name) and len(record.points) >= 2
+    ]
+    if not zbs_records:
+        return {}
+    zbs_parent_keys = {
+        well_name_key(parent_name_for_zbs(record.name)) for record in zbs_records
+    }
+    anchor_by_well_name: dict[str, Point3D] = {}
+    parent_points_by_key: dict[str, tuple[Point3D, ...]] = {}
+    parent_points_priority_by_key: dict[str, int] = {}
+    for record in record_list:
+        parent_key = well_name_key(record.name)
+        if (
+            is_pilot_name(record.name)
+            or is_zbs_name(record.name)
+            or not record.points
+            or parent_key not in zbs_parent_keys
+        ):
+            continue
+        points = tuple(record.points)
+        parent_points = tuple(
+            Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+            for point in points
+        )
+        if not parent_points:
+            continue
+        anchor_by_well_name[str(record.name)] = parent_points[0]
+        parent_points_by_key[parent_key] = parent_points
+        parent_points_priority_by_key[parent_key] = 2
+
+    for reference_well in _reference_wells_from_state():
+        parent_key = well_name_key(reference_well.name)
+        if parent_key not in zbs_parent_keys:
+            continue
+        reference_points = _reference_well_points(reference_well)
+        priority = 3 if str(reference_well.kind) == REFERENCE_WELL_ACTUAL else 1
+        if reference_points:
+            existing_priority = parent_points_priority_by_key.get(parent_key, -1)
+            if priority >= existing_priority:
+                parent_points_by_key[parent_key] = reference_points
+                parent_points_priority_by_key[parent_key] = priority
+        anchor_by_well_name.setdefault(
+            str(reference_well.name),
+            reference_well.surface,
+        )
+
+    for record in zbs_records:
+        parent_points = parent_points_by_key.get(
+            well_name_key(parent_name_for_zbs(record.name))
+        )
+        if not parent_points:
+            continue
+        anchor_by_well_name[str(record.name)] = _nearest_xy_anchor_to_targets(
+            parent_points=parent_points,
+            target_points=tuple(record.points),
+        )
+    return anchor_by_well_name
+
+
+def _reference_well_points(
+    reference_well: ImportedTrajectoryWell,
+) -> tuple[Point3D, ...]:
+    stations = reference_well.stations
+    if not isinstance(stations, pd.DataFrame) or not {"X_m", "Y_m", "Z_m"}.issubset(
+        stations.columns
+    ):
+        return (reference_well.surface,)
+    if stations.empty:
+        return (reference_well.surface,)
+    return tuple(
+        Point3D(x=float(row.X_m), y=float(row.Y_m), z=float(row.Z_m))
+        for row in stations[["X_m", "Y_m", "Z_m"]].itertuples(index=False)
+    )
+
+
+def _nearest_xy_anchor_to_targets(
+    *,
+    parent_points: tuple[Point3D, ...],
+    target_points: tuple[WelltrackPoint, ...],
+) -> Point3D:
+    best_point = parent_points[0]
+    best_distance = float("inf")
+    for parent_point in parent_points:
+        for target in target_points:
+            distance = float(
+                np.hypot(
+                    float(parent_point.x) - float(target.x),
+                    float(parent_point.y) - float(target.y),
+                )
+            )
+            if distance < best_distance:
+                best_distance = distance
+                best_point = parent_point
+    return best_point
 
 
 def _clear_t1_t3_order_resolution_state() -> None:
@@ -33764,6 +33906,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         base_records = list(records)
     pads = _ensure_pad_configs(base_records=list(base_records))
     if not pads:
+        _render_t1_t3_order_panel(records=records, border=True)
         return
 
     with st.container(border=True):
@@ -35012,7 +35155,7 @@ def queue_all_wells_results_focus(
     session_state["wt_pending_all_wells_results_focus"] = True
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_pad_state.py	47276
+===BEGIN_FILE===	pywp/ptc_pad_state.py	47371
 from __future__ import annotations
 
 from collections import Counter
@@ -35032,6 +35175,7 @@ from pywp.well_pad import (
     PAD_WELL_AUTO_ORDER_PROJECTION,
     PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC,
     PAD_SURFACE_ANCHOR_CENTER,
+    PAD_SURFACE_ANCHOR_FIRST,
     PadLayoutPlan,
     PadWell,
     WellPad,
@@ -35044,6 +35188,8 @@ from pywp.well_pad import (
 __all__ = [
     "DEFAULT_PAD_SPACING_M",
     "DEFAULT_PAD_SURFACE_ANCHOR_MODE",
+    "PAD_SURFACE_ANCHOR_CENTER",
+    "PAD_SURFACE_ANCHOR_FIRST",
     "WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M",
     "WT_PAD_FOCUS_ALL",
     "DetectedPadUiMeta",
@@ -36509,7 +36655,7 @@ def render_target_import_section() -> None:
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_reference.py	13313
+===BEGIN_FILE===	pywp/ptc_page_reference.py	14827
 from __future__ import annotations
 
 import pandas as pd
@@ -36616,10 +36762,33 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
             "координаты - из колонок `MD X Y Z`."
         )
     elif mode == "Путь к WELLTRACK":
-        st.text_input(
-            "Путь к WELLTRACK",
-            key=reference_state.reference_welltrack_path_key(kind),
-            placeholder="tests/test_data/WELLTRACKS3.INC",
+        path_count_key = reference_state.reference_welltrack_path_count_key(kind)
+        try:
+            path_count = int(st.session_state.get(path_count_key, 1))
+        except (TypeError, ValueError):
+            path_count = 1
+        path_count = max(1, path_count)
+        st.session_state[path_count_key] = path_count
+        for index in range(path_count):
+            st.text_input(
+                "Путь к WELLTRACK или папке"
+                if index == 0
+                else f"Путь к WELLTRACK или папке #{index + 1}",
+                key=reference_state.reference_welltrack_path_entry_key(kind, index),
+                placeholder="tests/test_data/WELLTRACKS3.INC",
+            )
+        if st.button(
+            "Добавить ещё путь",
+            key=f"ptc_reference_{kind}_add_welltrack_path",
+            icon=":material/note_add:",
+            use_container_width=True,
+        ):
+            st.session_state[path_count_key] = path_count + 1
+            st.rerun()
+        st.caption(
+            "Можно указать несколько файлов WELLTRACK и/или папок. "
+            "Из папок импортируются только файлы с расширением `.INC` "
+            "без учета регистра."
         )
     else:
         uploaded_file = st.file_uploader(
@@ -36655,15 +36824,8 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
                     )
                 elif mode == "Путь к WELLTRACK":
                     parsed = parse_reference_trajectory_welltrack_text(
-                        ptc_welltrack_io.read_welltrack_file(
-                            str(
-                                st.session_state.get(
-                                    reference_state.reference_welltrack_path_key(
-                                        kind
-                                    ),
-                                    "",
-                                )
-                            ),
+                        ptc_welltrack_io.read_welltrack_sources(
+                            reference_state.reference_welltrack_paths(kind),
                             info=st.info,
                             warning=st.warning,
                             error=st.error,
@@ -36838,6 +37000,11 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
     ]
     if not zbs_records:
         return
+    active_t1_t3_issue_names = {
+        str(getattr(item, "well_name", "")).strip()
+        for item in wt._current_t1_t3_order_issues(list(records))
+        if str(getattr(item, "well_name", "")).strip()
+    }
     actual_name_by_key = {
         well_name_key(getattr(well, "name", "")): str(getattr(well, "name", ""))
         for well in actual_wells
@@ -36861,6 +37028,22 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
             )
             + "."
         )
+        matched_issue_names = [
+            zbs_name
+            for zbs_name, _actual_name in matched
+            if zbs_name in active_t1_t3_issue_names
+        ]
+        if matched_issue_names:
+            st.warning(
+                "После подцепления фактической скважины проверьте порядок целей `t1/t3` "
+                "для боковых стволов: "
+                + ", ".join(matched_issue_names)
+                + "."
+            )
+            st.markdown(
+                "[Перейти к блоку проверки t1/t3]"
+                f"(#{wt.WT_T1T3_ORDER_PANEL_ANCHOR_ID})"
+            )
     if missing:
         st.warning(
             "Для боковых стволов не найдены фактические скважины: "
@@ -36872,7 +37055,7 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_results.py	46790
+===BEGIN_FILE===	pywp/ptc_page_results.py	45503
 from __future__ import annotations
 
 import pandas as pd
@@ -37012,20 +37195,6 @@ def _pilot_study_points_by_name(records: list[object]) -> dict[str, tuple[Point3
         for record in records
         if is_pilot_name(getattr(record, "name", ""))
     }
-
-
-def _show_sidetrack_relative_cones_checkbox() -> bool:
-    key = "wt_show_sidetrack_relative_cones"
-    st.session_state.setdefault(key, False)
-    checkbox = getattr(st, "checkbox", None)
-    if not callable(checkbox):
-        return bool(st.session_state.get(key))
-    return bool(
-        checkbox(
-            "Отображать конуса для боковых стволов",
-            key=key,
-        )
-    )
 
 
 def _render_anticollision_action_button(*, has_current_analysis: bool) -> bool:
@@ -37737,14 +37906,11 @@ def _render_anticollision_visual_overview(
     name_to_color = wt._well_color_map(list(records))
     display_name_by_well_name = wt._well_label_display_names(list(records))
     reference_wells = reference_state.reference_wells_from_state()
-    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
-
     if title:
         st.markdown(title)
     if caption:
         st.caption(caption)
 
-    chart_col1, chart_col2 = st.columns(2, gap="medium")
     anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
         analysis,
         previous_successes_by_name={},
@@ -37755,10 +37921,10 @@ def _render_anticollision_visual_overview(
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=focus_names or visible_focus_names,
         render_mode=wt.WT_3D_RENDER_DETAIL,
-        show_sidetrack_relative_cones=show_sidetrack_relative_cones,
+        show_sidetrack_relative_cones=False,
     )
     wt._render_three_payload(
-        container=chart_col1,
+        container=st.container(),
         payload=anticollision_3d_payload,
         height=660,
         payload_overrides=wt._anticollision_three_payload_overrides(
@@ -37768,17 +37934,6 @@ def _render_anticollision_visual_overview(
             target_only_wells=resolved_target_only_wells,
             target_only_name_to_color=name_to_color,
         ),
-    )
-    chart_col2.plotly_chart(
-        wt._all_wells_anticollision_plan_figure(
-            analysis,
-            previous_successes_by_name={},
-            target_only_wells=resolved_target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            focus_well_names=focus_names or visible_focus_names,
-        ),
-        width="stretch",
     )
 
 
@@ -37855,9 +38010,8 @@ def _render_target_edit_overview(
         focus_well_names=tuple(focus_pad_well_names),
         render_mode=wt.WT_3D_RENDER_FAST,
     )
-    chart_col1, chart_col2 = st.columns(2, gap="medium")
     wt._render_three_payload(
-        container=chart_col1,
+        container=st.container(),
         payload=payload,
         height=660,
         payload_overrides=wt._trajectory_three_payload_overrides(
@@ -37866,16 +38020,6 @@ def _render_target_edit_overview(
             target_only_wells=target_only_wells,
             name_to_color=name_to_color,
         ),
-    )
-    chart_col2.plotly_chart(
-        wt._all_wells_plan_figure(
-            list(successes),
-            target_only_wells=target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            focus_well_names=tuple(focus_pad_well_names),
-        ),
-        width="stretch",
     )
     return True
 
@@ -38007,6 +38151,7 @@ def render_success_tabs(
             title_trajectory=None,
             title_plan=None,
             border=True,
+            show_plotly_panels=False,
             render_3d_override=render_3d_override,
         )
         render_result_tables(
@@ -38635,7 +38780,7 @@ def render_calc_params_panel(
         return config
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_reference_state.py	6048
+===BEGIN_FILE===	pywp/ptc_reference_state.py	7541
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
@@ -38655,6 +38800,7 @@ from pywp.reference_trajectories import (
 __all__ = [
     "clear_reference_dev_folder_state",
     "clear_reference_import_state",
+    "clear_reference_welltrack_path_state",
     "init_reference_state_defaults",
     "reference_dev_folder_count_key",
     "reference_dev_folder_path_key",
@@ -38665,6 +38811,9 @@ __all__ = [
     "reference_source_text_key",
     "reference_wells_from_state",
     "reference_wells_state_key",
+    "reference_welltrack_path_count_key",
+    "reference_welltrack_path_entry_key",
+    "reference_welltrack_paths",
     "reference_welltrack_path_key",
     "set_reference_wells_for_kind",
 ]
@@ -38684,6 +38833,29 @@ def reference_source_text_key(kind: str) -> str:
 
 def reference_welltrack_path_key(kind: str) -> str:
     return f"wt_reference_{str(kind)}_welltrack_path"
+
+
+def reference_welltrack_path_count_key(kind: str) -> str:
+    return f"wt_reference_{str(kind)}_welltrack_path_count"
+
+
+def reference_welltrack_path_entry_key(kind: str, index: int) -> str:
+    if int(index) <= 0:
+        return reference_welltrack_path_key(kind)
+    return f"wt_reference_{str(kind)}_welltrack_path_{int(index)}"
+
+
+def reference_welltrack_paths(kind: str) -> tuple[str, ...]:
+    path_count = _welltrack_path_count(kind)
+    return tuple(
+        str(
+            st.session_state.get(
+                reference_welltrack_path_entry_key(kind, index),
+                "",
+            )
+        ).strip()
+        for index in range(path_count)
+    )
 
 
 def reference_dev_folder_count_key(kind: str) -> str:
@@ -38710,6 +38882,12 @@ def clear_reference_dev_folder_state(kind: str) -> None:
     st.session_state[reference_dev_folder_count_key(kind)] = 1
 
 
+def clear_reference_welltrack_path_state(kind: str) -> None:
+    for index in range(_welltrack_path_count(kind)):
+        st.session_state[reference_welltrack_path_entry_key(kind, index)] = ""
+    st.session_state[reference_welltrack_path_count_key(kind)] = 1
+
+
 def clear_reference_import_state(
     kind: str,
     *,
@@ -38720,7 +38898,7 @@ def clear_reference_import_state(
         st.session_state[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = []
         st.session_state[ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY] = []
     st.session_state[reference_source_text_key(kind)] = ""
-    st.session_state[reference_welltrack_path_key(kind)] = ""
+    clear_reference_welltrack_path_state(kind)
     clear_reference_dev_folder_state(kind)
     if on_clear is not None:
         on_clear()
@@ -38803,6 +38981,7 @@ def init_reference_state_defaults() -> None:
         st.session_state.setdefault(reference_source_mode_key(kind), "Загрузить .dev")
         st.session_state.setdefault(reference_source_text_key(kind), "")
         st.session_state.setdefault(reference_welltrack_path_key(kind), "")
+        st.session_state.setdefault(reference_welltrack_path_count_key(kind), 1)
         st.session_state.setdefault(reference_dev_folder_count_key(kind), 1)
         st.session_state.setdefault(reference_dev_folder_path_key(kind, 0), "")
     st.session_state.setdefault("wt_reference_wells", ())
@@ -38817,6 +38996,17 @@ def _folder_count(kind: str) -> int:
     folder_count = max(1, folder_count)
     st.session_state[count_key] = folder_count
     return folder_count
+
+
+def _welltrack_path_count(kind: str) -> int:
+    count_key = reference_welltrack_path_count_key(kind)
+    try:
+        path_count = int(st.session_state.get(count_key, 1))
+    except (TypeError, ValueError):
+        path_count = 1
+    path_count = max(1, path_count)
+    st.session_state[count_key] = path_count
+    return path_count
 
 ===END_FILE===
 ===BEGIN_FILE===	pywp/ptc_sidetrack_state.py	2687
@@ -39685,7 +39875,7 @@ def _value_is_finite(value: object) -> bool:
         return False
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_builders.py	75304
+===BEGIN_FILE===	pywp/ptc_three_builders.py	77989
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
@@ -39703,7 +39893,7 @@ from pywp.anticollision import (
 )
 from pywp.constants import SMALL
 from pywp.models import Point3D
-from pywp.pilot_wells import is_pilot_name
+from pywp.pilot_wells import is_pilot_name, well_name_key
 from pywp.plot_axes import equalized_axis_ranges
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp import ptc_three_overrides
@@ -39735,8 +39925,8 @@ PLAN_CSB_COLOR = "#0B6E4F"
 ACTUAL_PROFILE_COLOR = "#111111"
 TARGET_COLOR_PRIMARY = "#C1121F"
 UNCERTAINTY_SURFACE_COLOR = "#5A5A5A"
-REFERENCE_LABEL_ACTUAL_COLOR = "#111111"
-REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
+REFERENCE_LABEL_ACTUAL_COLOR = "#374151"
+REFERENCE_LABEL_APPROVED_COLOR = "#F87171"
 REFERENCE_PAD_LABEL_COLOR = "#334155"
 REFERENCE_PAD_GROUP_DISTANCE_M = 300.0
 WT_3D_RENDER_FAST = "Быстро"
@@ -40033,6 +40223,10 @@ def all_wells_three_payload(
     focus_set = _clean_name_set(focus_well_names)
     color_map = dict(name_to_color or {})
     pilot_points_map = dict(pilot_study_points_by_name or {})
+    highlighted_reference_well_names = _overview_highlight_reference_well_names(
+        successes=successes,
+        reference_wells=reference_wells,
+    )
 
     for index, success in enumerate(successes):
         well_name = str(success.name)
@@ -40112,6 +40306,7 @@ def all_wells_three_payload(
         x_arrays=x_arrays,
         y_arrays=y_arrays,
         z_arrays=z_arrays,
+        highlighted_names=highlighted_reference_well_names,
     )
 
     for target_only in target_only_wells or ():
@@ -40199,6 +40394,12 @@ def anticollision_three_payload(
     show_sidetrack_relative_cones: bool = False,
 ) -> dict[str, object]:
     payload = _base_payload(title="Anti-collision: 3D конусы неопределенности")
+    payload["anti_collision_layer_state"] = {
+        "cones": True,
+        "overlaps": True,
+        "segments": True,
+        "sidetrack_relative_cones": bool(show_sidetrack_relative_cones),
+    }
     x_arrays: list[np.ndarray] = []
     y_arrays: list[np.ndarray] = []
     z_arrays: list[np.ndarray] = []
@@ -40458,19 +40659,17 @@ def anticollision_three_payload(
                     stations["Y_m"].to_numpy(dtype=float),
                     stations["Z_m"].to_numpy(dtype=float),
                 )
-    if str(render_mode).strip() != WT_3D_RENDER_FAST:
-        _append_reference_name_labels(payload, analysis_reference_wells)
+    _append_reference_name_labels(payload, analysis_reference_wells)
     _append_reference_pad_labels(payload, analysis_reference_wells)
-    if bool(show_sidetrack_relative_cones):
-        _append_sidetrack_relative_cone_overlays(
-            payload,
-            analysis=analysis,
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-            focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays),
-            focus_set=focus_set,
-        )
+    _append_sidetrack_relative_cone_overlays(
+        payload,
+        analysis=analysis,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+        focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays),
+        focus_set=focus_set,
+    )
 
     for corridor in analysis.corridors:
         overlap_rings = _valid_overlap_rings(corridor.overlap_rings_xyz)
@@ -41040,12 +41239,41 @@ def _append_reference_wells(
     x_arrays: list[np.ndarray],
     y_arrays: list[np.ndarray],
     z_arrays: list[np.ndarray],
+    highlighted_names: frozenset[str] = frozenset(),
 ) -> None:
     reference_tuple = tuple(reference_wells)
     if str(render_mode).strip() == WT_3D_RENDER_FAST:
+        highlighted_reference_wells = tuple(
+            well
+            for well in reference_tuple
+            if well_name_key(getattr(well, "name", "")) in highlighted_names
+        )
+        combined_reference_wells = tuple(
+            well
+            for well in reference_tuple
+            if well_name_key(getattr(well, "name", "")) not in highlighted_names
+        )
+        for reference_well in highlighted_reference_wells:
+            stations = getattr(reference_well, "stations")
+            if stations.empty:
+                continue
+            kind = _reference_kind_value(reference_well)
+            color = REFERENCE_WELL_KIND_COLORS.get(kind, "#A0A0A0")
+            _append_station_line(
+                payload,
+                stations=stations,
+                name=reference_well_display_label(reference_well),
+                color=color,
+                width_role="line",
+                hover_name=_reference_hover_name(reference_well),
+                hover_role="reference_hover",
+                x_arrays=x_arrays,
+                y_arrays=y_arrays,
+                z_arrays=z_arrays,
+            )
         _append_combined_reference_wells(
             payload,
-            reference_wells=reference_tuple,
+            reference_wells=combined_reference_wells,
             x_arrays=x_arrays,
             y_arrays=y_arrays,
             z_arrays=z_arrays,
@@ -41072,7 +41300,43 @@ def _append_reference_wells(
     _append_reference_legend(payload, reference_tuple)
     if str(render_mode).strip() != WT_3D_RENDER_FAST:
         _append_reference_name_labels(payload, reference_tuple)
+    elif highlighted_names:
+        _append_reference_name_labels(
+            payload,
+            [
+                well
+                for well in reference_tuple
+                if well_name_key(getattr(well, "name", "")) in highlighted_names
+            ],
+        )
     _append_reference_pad_labels(payload, reference_tuple)
+
+
+def _overview_highlight_reference_well_names(
+    *,
+    successes: Iterable[SuccessfulWellPlan],
+    reference_wells: Iterable[object],
+) -> frozenset[str]:
+    actual_reference_keys = {
+        well_name_key(getattr(well, "name", ""))
+        for well in reference_wells
+        if _reference_kind_value(well) == REFERENCE_WELL_ACTUAL
+    }
+    highlighted_keys: set[str] = set()
+    for success in successes:
+        summary = dict(getattr(success, "summary", {}) or {})
+        parent_name = str(
+            summary.get("actual_parent_well_name")
+            or summary.get("sidetrack_parent_well_name")
+            or summary.get("pilot_well_name")
+            or ""
+        ).strip()
+        if not parent_name:
+            continue
+        parent_key = well_name_key(parent_name)
+        if parent_key in actual_reference_keys:
+            highlighted_keys.add(parent_key)
+    return frozenset(highlighted_keys)
 
 
 def _append_combined_reference_wells(
@@ -43100,7 +43364,7 @@ def _best_event_zone(
     return None
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_payload.py	9911
+===BEGIN_FILE===	pywp/ptc_three_payload.py	10074
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
@@ -43182,9 +43446,14 @@ def optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
         ).tolist()
         reference_labels = [reference_labels[index] for index in indices]
 
-    labels = other_labels + reference_labels
-    if len(labels) > WT_THREE_MAX_LABELS:
-        labels = labels[:WT_THREE_MAX_LABELS]
+    if reference_labels:
+        remaining_other_label_slots = max(
+            int(WT_THREE_MAX_LABELS) - len(reference_labels),
+            0,
+        )
+        labels = other_labels[:remaining_other_label_slots] + reference_labels
+    else:
+        labels = other_labels[:WT_THREE_MAX_LABELS]
     optimized["labels"] = labels
     optimized["legend"] = list(payload.get("legend") or [])
     return optimized
@@ -43407,15 +43676,19 @@ def merge_raw_bounds(
     }
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_welltrack_io.py	2151
+===BEGIN_FILE===	pywp/ptc_welltrack_io.py	5159
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from pywp.eclipse_welltrack import decode_welltrack_bytes
 
-__all__ = ["decode_welltrack_payload", "read_welltrack_file"]
+__all__ = [
+    "decode_welltrack_payload",
+    "read_welltrack_file",
+    "read_welltrack_sources",
+]
 
 MessageSink = Callable[[str], object]
 
@@ -43479,6 +43752,96 @@ def read_welltrack_file(
     except OSError as exc:
         _notify(error, f"Не удалось прочитать файл `{file_path}`: {exc}")
         return ""
+
+
+def read_welltrack_sources(
+    path_texts: Iterable[str],
+    *,
+    cwd: Path | None = None,
+    info: MessageSink | None = None,
+    warning: MessageSink | None = None,
+    error: MessageSink | None = None,
+) -> str:
+    resolved_files = _resolve_welltrack_source_files(
+        path_texts,
+        cwd=cwd,
+        warning=warning,
+        error=error,
+    )
+    if not resolved_files:
+        return ""
+    texts: list[str] = []
+    for file_path in resolved_files:
+        try:
+            text = decode_welltrack_payload(
+                file_path.read_bytes(),
+                source_label=f"Файл `{file_path}`",
+                info=info,
+                warning=warning,
+            )
+        except OSError as exc:
+            _notify(error, f"Не удалось прочитать файл `{file_path}`: {exc}")
+            continue
+        if text.strip():
+            texts.append(text.strip())
+    return "\n\n".join(texts)
+
+
+def _resolve_welltrack_source_files(
+    path_texts: Iterable[str],
+    *,
+    cwd: Path | None = None,
+    warning: MessageSink | None = None,
+    error: MessageSink | None = None,
+) -> list[Path]:
+    resolved_files: list[Path] = []
+    seen_paths: set[Path] = set()
+    for raw_path in path_texts:
+        path_text = str(raw_path or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text).expanduser()
+        if not path.is_absolute():
+            path = ((cwd or Path.cwd()) / path).resolve()
+        if not path.exists():
+            _notify(error, f"Путь не найден: {path}")
+            continue
+        if path.is_dir():
+            try:
+                inc_files = sorted(
+                    (
+                        child.resolve()
+                        for child in path.iterdir()
+                        if child.is_file() and child.suffix.casefold() == ".inc"
+                    ),
+                    key=lambda item: item.name.casefold(),
+                )
+            except OSError as exc:
+                _notify(error, f"Не удалось прочитать папку `{path}`: {exc}")
+                continue
+            if not inc_files:
+                _notify(
+                    warning,
+                    f"В папке `{path}` не найдено WELLTRACK файлов с расширением `.INC`.",
+                )
+                continue
+            for inc_file in inc_files:
+                if inc_file in seen_paths:
+                    continue
+                seen_paths.add(inc_file)
+                resolved_files.append(inc_file)
+            continue
+        if not path.is_file():
+            _notify(error, f"Путь не является файлом или папкой: {path}")
+            continue
+        resolved_path = path.resolve()
+        if resolved_path in seen_paths:
+            continue
+        seen_paths.add(resolved_path)
+        resolved_files.append(resolved_path)
+    if not resolved_files:
+        _notify(warning, "Укажите хотя бы один путь к WELLTRACK файлу или папке.")
+    return resolved_files
 
 
 def _notify(sink: MessageSink | None, message: str) -> None:
@@ -46271,7 +46634,7 @@ class FastReplan {
 // window.updateLineGeometry = updateLineGeometry;
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	224449
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	228114
 <!doctype html>
 <html lang="en">
   <head>
@@ -46808,6 +47171,10 @@ class FastReplan {
         white-space: normal;
       }
 
+      .scene-label.reference-well-label {
+        font-size: 10px;
+      }
+
       .scene-axis-label {
         font-size: 11px;
         font-weight: 700;
@@ -47194,7 +47561,7 @@ class FastReplan {
         border-radius: 12px;
         box-shadow: 0 9px 24px rgba(15,23,42,0.12);
         padding: 15px 21px 36px;
-        font-size: 16.5px;
+        font-size: 15px;
         line-height: 1.45;
         color: #475569;
         pointer-events: auto;
@@ -47504,6 +47871,10 @@ class FastReplan {
               <span>Конусы неопределенности</span>
             </label>
             <label class="anti-collision-option">
+              <input type="checkbox" data-ac-layer="sidetrack_relative_cones" />
+              <span>Относительные конуса боковых стволов</span>
+            </label>
+            <label class="anti-collision-option">
               <input type="checkbox" data-ac-layer="overlaps" checked />
               <span>Зоны пересечений</span>
             </label>
@@ -47740,19 +48111,46 @@ class FastReplan {
         const editableBaseMaterials = [];
         const antiCollisionVisualObjects = {
           cones: [],
+          sidetrack_relative_cones: [],
           overlaps: [],
           segments: [],
         };
         const miniMapHiddenContourObjects = [];
         const antiCollisionLayerLabels = {
           cones: "Конусы неопределенности",
+          sidetrack_relative_cones: "Относительные конуса боковых стволов",
           overlaps: "Зоны пересечений",
           segments: "Конфликтные участки ствола",
         };
+        const payloadAntiCollisionLayerState =
+          payload.anti_collision_layer_state &&
+          typeof payload.anti_collision_layer_state === "object"
+            ? payload.anti_collision_layer_state
+            : {};
         const antiCollisionLayerState = {
-          cones: true,
-          overlaps: true,
-          segments: true,
+          cones: Boolean(
+            Object.prototype.hasOwnProperty.call(payloadAntiCollisionLayerState, "cones")
+              ? payloadAntiCollisionLayerState.cones
+              : true,
+          ),
+          sidetrack_relative_cones: Boolean(
+            Object.prototype.hasOwnProperty.call(
+              payloadAntiCollisionLayerState,
+              "sidetrack_relative_cones",
+            )
+              ? payloadAntiCollisionLayerState.sidetrack_relative_cones
+              : false,
+          ),
+          overlaps: Boolean(
+            Object.prototype.hasOwnProperty.call(payloadAntiCollisionLayerState, "overlaps")
+              ? payloadAntiCollisionLayerState.overlaps
+              : true,
+          ),
+          segments: Boolean(
+            Object.prototype.hasOwnProperty.call(payloadAntiCollisionLayerState, "segments")
+              ? payloadAntiCollisionLayerState.segments
+              : true,
+          ),
         };
 
         const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
@@ -47862,6 +48260,7 @@ class FastReplan {
               ? Number(material.opacity)
               : 1.0,
             transparent: Boolean(material.transparent),
+            depthTest: Boolean(material.depthTest),
             depthWrite: Boolean(material.depthWrite),
           });
         }
@@ -47871,6 +48270,9 @@ class FastReplan {
           const selectedColorKey = String((selectedWell && selectedWell.color) || "")
             .trim()
             .toLowerCase();
+          const selectedWellDirty = Boolean(
+            Number.isInteger(selectedWellIndex) && editDirtyFlags[selectedWellIndex]
+          );
           editableBaseMaterials.forEach((item) => {
             const material = item.material;
             const baseOpacity = Number.isFinite(Number(item.opacity))
@@ -47887,7 +48289,10 @@ class FastReplan {
                 )
               );
             material.transparent = applies || item.transparent || baseOpacity < 0.999;
-            material.opacity = applies ? Math.min(baseOpacity, 0.18) : baseOpacity;
+            material.opacity = applies
+              ? Math.min(baseOpacity, selectedWellDirty ? 0.36 : 0.18)
+              : baseOpacity;
+            material.depthTest = applies && selectedWellDirty ? false : item.depthTest;
             material.depthWrite = applies ? false : item.depthWrite;
             material.needsUpdate = true;
           });
@@ -47895,13 +48300,14 @@ class FastReplan {
 
         function antiCollisionLayerForRole(roleValue) {
           const role = String(roleValue || "");
+          if (role === "cone" || role === "cone_tip") {
+            return "cones";
+          }
           if (
-            role === "cone" ||
-            role === "cone_tip" ||
             role === "sidetrack_relative_cone" ||
             role === "sidetrack_relative_cone_tip"
           ) {
-            return "cones";
+            return "sidetrack_relative_cones";
           }
           if (role === "overlap" || role === "overlap_volume") {
             return "overlaps";
@@ -48002,6 +48408,14 @@ class FastReplan {
             .forEach((input) => {
               const layer = String(input.getAttribute("data-ac-layer") || "");
               if (!Object.prototype.hasOwnProperty.call(antiCollisionLayerState, layer)) {
+                return;
+              }
+              const option = input.closest(".anti-collision-option");
+              const hasObjects = (antiCollisionVisualObjects[layer] || []).length > 0;
+              if (option) {
+                option.style.display = hasObjects ? "" : "none";
+              }
+              if (!hasObjects) {
                 return;
               }
               input.checked = Boolean(antiCollisionLayerState[layer]);
@@ -48410,13 +48824,20 @@ class FastReplan {
 
         function addSceneLabel(text, position, color, extraClassName, options) {
           const labelRole = String((options && options.role) || "label");
-          const roleClassName =
-            labelRole === "well_label" || labelRole === "pilot_point_label"
-              ? "well-name-label"
-              : "";
+          const roleClassNames = [];
+          if (
+            labelRole === "well_label" ||
+            labelRole === "pilot_point_label" ||
+            labelRole === "reference_label"
+          ) {
+            roleClassNames.push("well-name-label");
+          }
+          if (labelRole === "reference_label") {
+            roleClassNames.push("reference-well-label");
+          }
           const element = document.createElement("div");
           element.className =
-            `scene-label ${roleClassName} ${String(extraClassName || "").trim()}`.trim();
+            `scene-label ${roleClassNames.join(" ")} ${String(extraClassName || "").trim()}`.trim();
           element.textContent = String(text || "");
           element.style.color = String(color || "#0f172a");
           labelLayerElement.appendChild(element);
@@ -49811,12 +50232,12 @@ class FastReplan {
           const role = String(item.role || "label");
           const position = displayPoint(item.position || [0, 0, 0]);
           const offsetY =
-            role === "well_label" || role === "pilot_point_label"
+            role === "well_label" ||
+            role === "pilot_point_label" ||
+            role === "reference_label"
               ? 14
               : role === "reference_pad_label"
               ? 12
-              : role === "reference_label"
-              ? 10
               : role === "target_label" || role === "control_point_label"
               ? 10
               : 0;
@@ -50318,7 +50739,7 @@ class FastReplan {
         let editPlane = "xy"; // "xy" | "z"
         let editMoveScope = "point"; // "point" | "pair"
         let editTransformMode = "move"; // "move" | "rotate"
-        const editHandles = []; // {mesh, pickMesh, previewMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
+        const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
@@ -50559,6 +50980,14 @@ class FastReplan {
           return !editWellUsesSidetrackWindowPreview(wellIndex);
         }
 
+        function editWellSupportsRotation(wellIndex) {
+          return (
+            Number.isInteger(wellIndex) &&
+            !sidetrackWindowEntryForWell(wellIndex) &&
+            !editWellHasComplexExplicitPoints(wellIndex)
+          );
+        }
+
         function cloneEditState(wellIndex) {
           return {
             points: copyEditPointEntries(editCurrentPoints[wellIndex]),
@@ -50664,7 +51093,7 @@ class FastReplan {
             editMoveScope === "pair" &&
             editTransformMode === "rotate" &&
             Number.isInteger(selectedEditWellIndex) &&
-            !editWellHasComplexExplicitPoints(selectedEditWellIndex)
+            editWellSupportsRotation(selectedEditWellIndex)
           );
         }
 
@@ -51217,8 +51646,8 @@ class FastReplan {
             ? selectedEditWellIndex
             : null;
           const hasSelection = selectedIndex !== null;
-          const selectedHasComplexExplicitPoints =
-            hasSelection && editWellHasComplexExplicitPoints(selectedIndex);
+          const selectedSupportsRotation =
+            hasSelection && editWellSupportsRotation(selectedIndex);
           editUndoBtn.disabled =
             !editModeActive ||
             !hasSelection ||
@@ -51244,7 +51673,7 @@ class FastReplan {
               !editModeActive ||
               !hasSelection ||
               (btn.dataset.operation === "rotate" &&
-                (editMoveScope !== "pair" || selectedHasComplexExplicitPoints));
+                (editMoveScope !== "pair" || !selectedSupportsRotation));
           });
         }
 
@@ -51374,6 +51803,18 @@ class FastReplan {
               previewMesh.visible = false;
               previewMesh.renderOrder = 8;
               scene.add(previewMesh);
+              const originalMat = new THREE.MeshBasicMaterial({
+                color: "#ffffff",
+                transparent: true,
+                opacity: 0.82,
+                depthTest: false,
+                depthWrite: false,
+              });
+              const originalMesh = new THREE.Mesh(handleGeometry, originalMat);
+              originalMesh.position.copy(displayPoint(point));
+              originalMesh.visible = false;
+              originalMesh.renderOrder = 12;
+              scene.add(originalMesh);
               const pickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
               pickMesh.position.copy(pointMesh.position);
               pickMesh.visible = false;
@@ -51383,6 +51824,7 @@ class FastReplan {
                 mesh: pointMesh,
                 pickMesh: pickMesh,
                 previewMesh: previewMesh,
+                originalMesh: originalMesh,
                 wellIndex: idx,
                 pointType: pointLabel,
                 pointRole: pointRole,
@@ -51451,6 +51893,11 @@ class FastReplan {
             }
             if (h.previewMesh) {
               h.previewMesh.scale.setScalar(editHandleScale(displayPosition, 10.0));
+            }
+            if (h.originalMesh) {
+              h.originalMesh.scale.setScalar(
+                editHandleScale(h.originalMesh.position, 11.0)
+              );
             }
           });
         }
@@ -51534,6 +51981,13 @@ class FastReplan {
                 Boolean(editDirtyFlags[h.wellIndex]) &&
                 handleDeltaLength(h) > EDIT_DELTA_EPS_M;
             }
+            if (h.originalMesh) {
+              h.originalMesh.visible =
+                editModeActive &&
+                visible &&
+                Boolean(editDirtyFlags[h.wellIndex]) &&
+                handleDeltaLength(h) > EDIT_DELTA_EPS_M;
+            }
           });
           setEditableBaseDimmed(editModeActive, selectedIndex);
           editLineObjects.forEach((lineObject, index) => {
@@ -51561,7 +52015,7 @@ class FastReplan {
           }
           selectedEditWellIndex = nextIndex;
           if (
-            editWellHasComplexExplicitPoints(nextIndex) &&
+            !editWellSupportsRotation(nextIndex) &&
             editTransformMode === "rotate"
           ) {
             setEditTransformMode("move");
@@ -51642,7 +52096,7 @@ class FastReplan {
             operation === "rotate" &&
             (editMoveScope !== "pair" ||
               (Number.isInteger(selectedEditWellIndex) &&
-                editWellHasComplexExplicitPoints(selectedEditWellIndex)))
+                !editWellSupportsRotation(selectedEditWellIndex)))
           ) {
             return;
           }
@@ -55163,7 +55617,7 @@ def format_run_log_line(run_started_s: float, message: str) -> str:
     return f"[{timestamp}] elapsed={elapsed_s:.2f}s | {message}"
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_well_panels.py	8790
+===BEGIN_FILE===	pywp/ui_well_panels.py	9131
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -55266,11 +55720,11 @@ def render_trajectory_dls_panel(
     pilot_stations: pd.DataFrame | None = None,
     pilot_study_points: tuple[Point3D, ...] = (),
     render_3d_override: Callable[[object, dict[str, object]], None] | None = None,
+    show_plotly_chart: bool = True,
 ) -> None:
     def _render_body() -> None:
         if title:
             st.markdown(f"### {title}")
-        row1_col1, row1_col2 = st.columns(2, gap="medium")
         payload = single_well_three_payload(
             stations,
             well_name=well_name,
@@ -55288,19 +55742,25 @@ def render_trajectory_dls_panel(
             pilot_stations=pilot_stations,
             pilot_study_points=pilot_study_points,
         )
-        if render_3d_override is not None:
-            render_3d_override(row1_col1, payload)
+        plotly_container = None
+        if show_plotly_chart:
+            three_container, plotly_container = st.columns(2, gap="medium")
         else:
-            with row1_col1:
+            three_container = st.container()
+        if render_3d_override is not None:
+            render_3d_override(three_container, payload)
+        else:
+            with three_container:
                 render_local_three_scene(
                     payload,
                     height=560,
                     key=f"single-well-3d-{str(well_name or 'trajectory')}",
                 )
-        row1_col2.plotly_chart(
-            dls_figure(stations, dls_limits=dls_limits),
-            width="stretch",
-        )
+        if plotly_container is not None:
+            plotly_container.plotly_chart(
+                dls_figure(stations, dls_limits=dls_limits),
+                width="stretch",
+            )
 
     if border:
         with st.container(border=True):
@@ -55326,8 +55786,11 @@ def render_plan_section_panel(
     pilot_name: str | None = None,
     pilot_stations: pd.DataFrame | None = None,
     pilot_study_points: tuple[Point3D, ...] = (),
+    show_plotly_charts: bool = True,
 ) -> None:
     def _render_body() -> None:
+        if not show_plotly_charts:
+            return
         if title:
             st.markdown(f"### {title}")
         row2_col1, row2_col2 = st.columns(2, gap="medium")
@@ -55443,7 +55906,7 @@ def render_survey_table_with_download(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_well_result.py	23810
+===BEGIN_FILE===	pywp/ui_well_result.py	24103
 from __future__ import annotations
 
 from typing import Callable, Mapping, Sequence
@@ -55915,13 +56378,19 @@ def render_result_plots(
     title_plan: str | None,
     border: bool = True,
     render_3d_override: Callable[[object, dict[str, object]], None] | None = None,
+    show_plotly_panels: bool = True,
 ) -> None:
     show_uncertainty = st.checkbox(
         "Показать конус неопределенности",
         key=uncertainty_toggle_key(well_name=view.well_name),
         help=(
-            "Включает planning-level 2σ конус неопределенности для 3D, плана и "
-            "вертикального разреза. Он строится по последовательности эллиптических "
+            "Включает planning-level 2σ конус неопределенности для 3D"
+            + (
+                ", плана и вертикального разреза. "
+                if show_plotly_panels
+                else ". "
+            )
+            + "Он строится по последовательности эллиптических "
             "сечений вдоль ствола. Это базовая визуализация по first-order "
             "ошибкам INC/AZI, без полной ISCWSA tool model."
         ),
@@ -55989,24 +56458,26 @@ def render_result_plots(
         pilot_stations=view.pilot_stations,
         pilot_study_points=view.pilot_study_points,
         render_3d_override=render_3d_override,
+        show_plotly_chart=show_plotly_panels,
     )
-    render_plan_section_panel(
-        stations=view.stations,
-        well_name=view.well_name,
-        surface=view.surface,
-        t1=view.t1,
-        t3=view.t3,
-        azimuth_deg=float(view.azimuth_deg),
-        title=title_plan,
-        border=border,
-        trajectory_line_dash=view.trajectory_line_dash,
-        plan_csb_stations=view.plan_csb_stations,
-        actual_stations=view.actual_stations,
-        uncertainty_overlay=uncertainty_overlay,
-        pilot_name=view.pilot_name,
-        pilot_stations=view.pilot_stations,
-        pilot_study_points=view.pilot_study_points,
-    )
+    if show_plotly_panels:
+        render_plan_section_panel(
+            stations=view.stations,
+            well_name=view.well_name,
+            surface=view.surface,
+            t1=view.t1,
+            t3=view.t3,
+            azimuth_deg=float(view.azimuth_deg),
+            title=title_plan,
+            border=border,
+            trajectory_line_dash=view.trajectory_line_dash,
+            plan_csb_stations=view.plan_csb_stations,
+            actual_stations=view.actual_stations,
+            uncertainty_overlay=uncertainty_overlay,
+            pilot_name=view.pilot_name,
+            pilot_stations=view.pilot_stations,
+            pilot_study_points=view.pilot_study_points,
+        )
 
 
 def render_result_tables(
@@ -61501,10 +61972,11 @@ def recommended_batch_selection(
     return recommended
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_quality.py	2919
+===BEGIN_FILE===	pywp/welltrack_quality.py	7191
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Iterable
 
 from pywp.eclipse_welltrack import (
@@ -61512,7 +61984,8 @@ from pywp.eclipse_welltrack import (
     WelltrackRecord,
     welltrack_multi_horizontal_level_count,
 )
-from pywp.pilot_wells import is_zbs_name
+from pywp.models import Point3D
+from pywp.pilot_wells import is_zbs_name, parent_name_for_zbs, well_name_key
 from pywp.pydantic_base import FrozenModel
 
 
@@ -61521,27 +61994,59 @@ class T1T3OrderIssue(FrozenModel):
     t1_offset_m: float
     t3_offset_m: float
     delta_m: float
+    anchor_label: str = "S→"
 
 
 def detect_t1_t3_order_issues(
     records: Iterable[WelltrackRecord],
     *,
     min_delta_m: float = 0.5,
+    anchor_by_well_name: Mapping[str, WelltrackPoint | Point3D] | None = None,
 ) -> list[T1T3OrderIssue]:
     issues: list[T1T3OrderIssue] = []
     min_delta = float(max(min_delta_m, 0.0))
+    anchor_by_key = {
+        well_name_key(name): point
+        for name, point in (anchor_by_well_name or {}).items()
+        if str(name).strip()
+    }
 
     for record in records:
         points = tuple(record.points)
-        if is_zbs_name(record.name):
+        is_zbs = is_zbs_name(record.name)
+        if is_zbs:
+            if len(points) < 2 or len(points) % 2 != 0:
+                continue
+            anchor = anchor_by_key.get(well_name_key(record.name))
+            if anchor is None:
+                anchor = anchor_by_key.get(
+                    well_name_key(parent_name_for_zbs(record.name))
+                )
+            if anchor is None:
+                continue
+            issue = _worst_t1_t3_order_issue_for_pairs(
+                well_name=str(record.name),
+                pairs=tuple(
+                    (points[index], points[index + 1])
+                    for index in range(0, len(points), 2)
+                ),
+                anchor=anchor,
+                min_delta_m=min_delta,
+                anchor_label="родитель→",
+            )
+            if issue is not None:
+                issues.append(issue)
             continue
-        if len(points) < 3:
-            continue
-        if welltrack_multi_horizontal_level_count(points) > 1:
-            continue
-        surface = points[0]
-        t1 = points[1]
-        t3 = points[2]
+        else:
+            if len(points) < 3:
+                continue
+            if welltrack_multi_horizontal_level_count(points) > 1:
+                continue
+            surface = points[0]
+            t1 = points[1]
+            t3 = points[2]
+            anchor_label = "S→"
+
         t1_offset_m = _offset_xy(surface=surface, target=t1)
         t3_offset_m = _offset_xy(surface=surface, target=t3)
         delta_m = float(t1_offset_m - t3_offset_m)
@@ -61552,10 +62057,14 @@ def detect_t1_t3_order_issues(
                     t1_offset_m=float(t1_offset_m),
                     t3_offset_m=float(t3_offset_m),
                     delta_m=float(delta_m),
+                    anchor_label=anchor_label,
                 )
             )
 
-    issues.sort(key=lambda item: (float(item.delta_m), str(item.well_name)), reverse=True)
+    issues.sort(
+        key=lambda item: (float(item.delta_m), str(item.well_name)),
+        reverse=True,
+    )
     return issues
 
 
@@ -61563,15 +62072,36 @@ def swap_t1_t3_for_wells(
     records: Iterable[WelltrackRecord],
     *,
     well_names: set[str],
+    anchor_by_well_name: Mapping[str, WelltrackPoint | Point3D] | None = None,
+    min_delta_m: float = 0.5,
 ) -> list[WelltrackRecord]:
     if not well_names:
         return list(records)
 
     updated: list[WelltrackRecord] = []
+    anchor_by_key = {
+        well_name_key(name): point
+        for name, point in (anchor_by_well_name or {}).items()
+        if str(name).strip()
+    }
+    min_delta = float(max(min_delta_m, 0.0))
     for record in records:
         points = tuple(record.points)
         name = str(record.name)
         if is_zbs_name(record.name):
+            if name in well_names and len(points) >= 2 and len(points) % 2 == 0:
+                anchor = anchor_by_key.get(well_name_key(name))
+                if anchor is None:
+                    anchor = anchor_by_key.get(
+                        well_name_key(parent_name_for_zbs(name))
+                    )
+                updated_points = _swap_zbs_t1_t3_pairs(
+                    points=points,
+                    anchor=anchor,
+                    min_delta_m=min_delta,
+                )
+                updated.append(WelltrackRecord(name=name, points=updated_points))
+                continue
             updated.append(record)
             continue
         if len(points) < 3 or name not in well_names:
@@ -61600,7 +62130,70 @@ def swap_t1_t3_for_wells(
     return updated
 
 
-def _offset_xy(*, surface: WelltrackPoint, target: WelltrackPoint) -> float:
+def _worst_t1_t3_order_issue_for_pairs(
+    *,
+    well_name: str,
+    pairs: tuple[tuple[WelltrackPoint, WelltrackPoint], ...],
+    anchor: WelltrackPoint | Point3D,
+    min_delta_m: float,
+    anchor_label: str,
+) -> T1T3OrderIssue | None:
+    worst: T1T3OrderIssue | None = None
+    for t1, t3 in pairs:
+        t1_offset_m = _offset_xy(surface=anchor, target=t1)
+        t3_offset_m = _offset_xy(surface=anchor, target=t3)
+        delta_m = float(t1_offset_m - t3_offset_m)
+        if delta_m <= float(min_delta_m):
+            continue
+        candidate = T1T3OrderIssue(
+            well_name=str(well_name),
+            t1_offset_m=float(t1_offset_m),
+            t3_offset_m=float(t3_offset_m),
+            delta_m=float(delta_m),
+            anchor_label=str(anchor_label),
+        )
+        if worst is None or float(candidate.delta_m) > float(worst.delta_m):
+            worst = candidate
+    return worst
+
+
+def _swap_zbs_t1_t3_pairs(
+    *,
+    points: tuple[WelltrackPoint, ...],
+    anchor: WelltrackPoint | Point3D | None,
+    min_delta_m: float,
+) -> tuple[WelltrackPoint, ...]:
+    updated: list[WelltrackPoint] = []
+    for index in range(0, len(points), 2):
+        t1, t3 = points[index], points[index + 1]
+        should_swap = False
+        if anchor is None:
+            should_swap = len(points) == 2
+        else:
+            delta_m = _offset_xy(surface=anchor, target=t1) - _offset_xy(
+                surface=anchor,
+                target=t3,
+            )
+            should_swap = bool(delta_m > float(min_delta_m))
+        if should_swap:
+            updated.extend(
+                (_copy_point_with_md(t3, t1.md), _copy_point_with_md(t1, t3.md))
+            )
+        else:
+            updated.extend((t1, t3))
+    return tuple(updated)
+
+
+def _copy_point_with_md(point: WelltrackPoint, md: float) -> WelltrackPoint:
+    return WelltrackPoint(
+        x=float(point.x),
+        y=float(point.y),
+        z=float(point.z),
+        md=float(md),
+    )
+
+
+def _offset_xy(*, surface: WelltrackPoint | Point3D, target: WelltrackPoint) -> float:
     dx = float(target.x - surface.x)
     dy = float(target.y - surface.y)
     return float(math.hypot(dx, dy))
@@ -62979,7 +63572,7 @@ def test_min_kop_calculation() -> None:
     assert min_kop_tight > min_kop_gentle
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_anticollision.py	142553
+===BEGIN_FILE===	tests/test_anticollision.py	142784
 from __future__ import annotations
 
 from concurrent.futures import Future
@@ -64069,7 +64662,7 @@ def test_fact_sidetrack_parent_relative_uncertainty_starts_at_window() -> None:
     )
 
 
-def test_sidetrack_parent_relative_cone_overlay_starts_at_window() -> None:
+def test_sidetrack_parent_relative_cone_overlay_starts_after_window_skip() -> None:
     model = PlanningUncertaintyModel(sample_step_m=25.0, min_refined_step_m=10.0)
     analysis = build_anti_collision_analysis_for_successes(
         [_fact_sidetrack_success_on_parent_path()],
@@ -64087,15 +64680,16 @@ def test_sidetrack_parent_relative_cone_overlay_starts_at_window() -> None:
     assert overlay.side_name == "9010_ZBS"
     assert overlay.parent_name == "9010"
     assert overlay.window_md_m == pytest.approx(1000.0)
+    start_md = 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
     for relative_overlay in (overlay.side_overlay, overlay.parent_overlay):
         samples = tuple(relative_overlay.samples)
         assert len(samples) >= 2
-        assert samples[0].md_m == pytest.approx(1000.0)
-        assert float(np.trace(samples[0].covariance_xyz)) == pytest.approx(0.0)
+        assert samples[0].md_m == pytest.approx(start_md)
+        assert float(np.trace(samples[0].covariance_xyz)) > 0.0
         first_ring_radius = np.max(
             np.linalg.norm(samples[0].ring_xyz - samples[0].center_xyz, axis=1)
         )
-        assert first_ring_radius == pytest.approx(0.0)
+        assert first_ring_radius > 0.0
         assert float(np.trace(samples[-1].covariance_xyz)) > 0.0
 
 
@@ -64119,7 +64713,9 @@ def test_sidetrack_parent_relative_cone_overlay_is_display_downsampled() -> None
     for relative_overlay in (overlay.side_overlay, overlay.parent_overlay):
         md_values = [float(sample.md_m) for sample in relative_overlay.samples]
         assert len(md_values) <= 5
-        assert md_values[0] == pytest.approx(1000.0)
+        assert md_values[0] == pytest.approx(
+            1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
+        )
         assert md_values[-1] == pytest.approx(2000.0)
 
 
@@ -64139,8 +64735,9 @@ def test_pilot_sidetrack_relative_cone_overlay_uses_pilot_parent() -> None:
     assert len(overlays) == 1
     assert overlays[0].side_name == "WELL-04"
     assert overlays[0].parent_name == "WELL-04_PL"
-    assert overlays[0].side_overlay.samples[0].md_m == pytest.approx(1000.0)
-    assert overlays[0].parent_overlay.samples[0].md_m == pytest.approx(1000.0)
+    expected_start_md = 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
+    assert overlays[0].side_overlay.samples[0].md_m == pytest.approx(expected_start_md)
+    assert overlays[0].parent_overlay.samples[0].md_m == pytest.approx(expected_start_md)
 
 
 def test_reused_sidetrack_well_refreshes_parent_collision_metadata() -> None:
@@ -67509,7 +68106,7 @@ def test_unspecified_thresholds_are_resolved_once_for_interpolation_anchors() ->
     assert anchor_1000.hold_complex_max_deg == float(rule_2000.hold_complex_max_deg)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_coordinate_integration.py	19250
+===BEGIN_FILE===	tests/test_coordinate_integration.py	19101
 """Tests for coordinate system integration with trajectory planning."""
 import pandas as pd
 import pytest
@@ -67556,34 +68153,30 @@ class TestCoordinateIntegration:
         assert all(crs.is_projected() for _label, crs in INPUT_CRS_OPTIONS)
         assert not CoordinateSystem.GSK_2011_GEOCENTRIC.is_projected()
 
-    def test_csv_crs_options_include_geographic_outputs(self) -> None:
-        """CSV output CRS options include projected meters and geographic degrees."""
-        labels = [label for label, _ in CSV_CRS_OPTIONS]
+    def test_csv_crs_options_match_supported_export_set(self) -> None:
+        """CSV output CRS options stay limited to the supported export targets."""
         assert CRS_OPTIONS == CSV_CRS_OPTIONS
-        assert "WGS84 (Градусные)" in labels
-        assert "СК-42 (Градусные)" in labels
-        assert "WGS84 UTM 43N" in labels
-        assert "ГК_13N_42" in labels
-        assert CoordinateSystem.WGS84 in {crs for _label, crs in CSV_CRS_OPTIONS}
-        assert CoordinateSystem.WGS84_UTM_ZONE_43N in {
-            crs for _label, crs in CSV_CRS_OPTIONS
-        }
+        assert CSV_CRS_OPTIONS == [
+            ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
+            ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
+            ("WGS84 (градусы)", CoordinateSystem.WGS84),
+        ]
 
     def test_geographic_csv_outputs_are_really_geographic_crs(self) -> None:
         """CRS options labelled as degree outputs must not point to geocentric EPSG."""
         geographic_labels = {
             label: crs
             for label, crs in CSV_CRS_OPTIONS
-            if "Градусные" in label
+            if "градус" in label.lower()
         }
 
         assert geographic_labels
         assert all(crs.is_geographic() for crs in geographic_labels.values())
         assert CoordinateSystem.GSK_2011.value == "EPSG:7683"
 
-    def test_crs_options_contains_pulkovo_zones(self) -> None:
-        """CRS options should include Pulkovo 1942 zones."""
-        labels = [label for label, _ in CRS_OPTIONS]
+    def test_input_crs_options_contains_pulkovo_zones(self) -> None:
+        """Input CRS options should include the supported projected Pulkovo zones."""
+        labels = [label for label, _ in INPUT_CRS_OPTIONS]
         assert "СК-42 Зона 8" in labels
         assert "ГК_13N_42" in labels
         assert "СК-42 Зона 13 (13 млн)" in labels
@@ -75509,11 +76102,12 @@ def test_fixed_slots_editor_normalizes_dataframe_rows() -> None:
     assert any("дубль" in warning for warning in warnings)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_page_results.py	32591
+===BEGIN_FILE===	tests/test_ptc_page_results.py	33580
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from pywp import ptc_core
@@ -75575,42 +76169,6 @@ def test_full_anticollision_recalc_button_does_not_reset_when_not_clicked(
 
     assert ptc_page_results._render_full_anticollision_recalc_button() is False
     assert calls == []
-
-
-def test_sidetrack_relative_cones_checkbox_defaults_to_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str]] = []
-
-    class FakeStreamlit:
-        session_state: dict[str, object] = {}
-
-        def checkbox(self, label: str, *, key: str) -> bool:
-            calls.append((str(label), str(key)))
-            return bool(self.session_state.get(str(key)))
-
-    fake_st = FakeStreamlit()
-    monkeypatch.setattr(ptc_page_results, "st", fake_st)
-
-    assert ptc_page_results._show_sidetrack_relative_cones_checkbox() is False
-    assert fake_st.session_state["wt_show_sidetrack_relative_cones"] is False
-    assert calls == [
-        ("Отображать конуса для боковых стволов", "wt_show_sidetrack_relative_cones")
-    ]
-
-
-def test_sidetrack_relative_cones_checkbox_reads_session_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeStreamlit:
-        session_state: dict[str, object] = {"wt_show_sidetrack_relative_cones": True}
-
-        def checkbox(self, _label: str, *, key: str) -> bool:
-            return bool(self.session_state.get(str(key)))
-
-    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
-
-    assert ptc_page_results._show_sidetrack_relative_cones_checkbox() is True
 
 
 def test_anticollision_panel_requires_explicit_run_before_first_analysis(
@@ -75841,9 +76399,12 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     target_only = SimpleNamespace(name="WELL-A")
     calls: dict[str, object] = {}
 
-    class FakeColumn:
-        def plotly_chart(self, figure: object, **kwargs: object) -> None:
-            calls["plotly"] = (figure, kwargs)
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
     class FakeStreamlit:
         session_state: dict[str, object] = {
@@ -75863,8 +76424,8 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
         def markdown(self, message: str) -> None:
             calls.setdefault("markdown", []).append(str(message))
 
-        def columns(self, *args: object, **kwargs: object) -> list[FakeColumn]:
-            return [FakeColumn(), FakeColumn()]
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
 
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
@@ -75914,11 +76475,6 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
         "_render_three_payload",
         lambda **kwargs: calls.setdefault("render_payload", kwargs),
     )
-    monkeypatch.setattr(
-        ptc_page_results.wt,
-        "_all_wells_anticollision_plan_figure",
-        lambda *args, **kwargs: "plan-figure",
-    )
 
     ptc_page_results._render_anticollision_panel(
         successes=[],
@@ -75934,7 +76490,7 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     assert [str(well.name) for well in rendered_analysis.wells] == ["WELL-B"]
     assert calls["payload_kwargs"]["target_only_wells"] == [target_only]
     assert calls["payload_kwargs"]["show_sidetrack_relative_cones"] is False
-    assert calls["plotly"][0] == "plan-figure"
+    assert "plotly" not in calls
     assert calls["override_kwargs"]["target_only_wells"] == [target_only]
     assert calls["override_kwargs"]["target_only_name_to_color"] == {"WELL-A": "#123456"}
 
@@ -76039,9 +76595,12 @@ def test_target_edit_overview_keeps_reference_wells(
     reference_wells = (object(),)
     calls: dict[str, object] = {}
 
-    class FakeColumn:
-        def plotly_chart(self, figure: object, **kwargs: object) -> None:
-            calls["plotly"] = (figure, kwargs)
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
     class FakeStreamlit:
         def info(self, message: str) -> None:
@@ -76053,8 +76612,8 @@ def test_target_edit_overview_keeps_reference_wells(
         def caption(self, message: str) -> None:
             calls["caption"] = str(message)
 
-        def columns(self, *args: object, **kwargs: object) -> list[FakeColumn]:
-            return [FakeColumn(), FakeColumn()]
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
 
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
@@ -76105,7 +76664,7 @@ def test_target_edit_overview_keeps_reference_wells(
 
     assert rendered is True
     assert calls["three_kwargs"]["reference_wells"] == reference_wells
-    assert calls["plan_kwargs"]["reference_wells"] == reference_wells
+    assert "plan_kwargs" not in calls
 
 
 def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
@@ -76401,9 +76960,8 @@ def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
         def selectbox(self, *_args: object, **_kwargs: object) -> str:
             return ""
 
-        def columns(self, spec, **_kwargs: object):
-            count = int(spec) if isinstance(spec, int) else len(spec)
-            return tuple(_DummyContext() for _ in range(count))
+        def container(self) -> _DummyContext:
+            return _DummyContext()
 
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
@@ -76455,12 +77013,6 @@ def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
         "_trajectory_three_payload_overrides",
         lambda **_kwargs: {},
     )
-    monkeypatch.setattr(
-        ptc_page_results.wt,
-        "_all_wells_plan_figure",
-        lambda *_args, **_kwargs: object(),
-    )
-
     rendered = ptc_page_results._render_target_edit_overview(
         successes=[SimpleNamespace(name="WELL-A")],
         records=[],
@@ -76473,6 +77025,88 @@ def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
 
     assert rendered is True
     assert captured["render_mode"] == ptc_core.WT_3D_RENDER_FAST
+
+
+def test_render_success_tabs_hides_plotly_panels_for_single_well_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+    success = SimpleNamespace(
+        name="WELL-A",
+        surface=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        t1=SimpleNamespace(x=100.0, y=0.0, z=1000.0),
+        t3=SimpleNamespace(x=200.0, y=0.0, z=1100.0),
+        target_pairs=(),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "X_m": [0.0, 200.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 1100.0],
+                "INC_deg": [0.0, 90.0],
+                "AZI_deg": [0.0, 90.0],
+                "DLS_deg_per_30m": [0.0, 0.0],
+                "segment": ["VERTICAL", "HORIZONTAL"],
+            }
+        ),
+        summary={},
+        config=SimpleNamespace(dls_limits_deg_per_30m={}),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        runtime_s=1.0,
+        md_postcheck_message="",
+        md_postcheck_exceeded=False,
+    )
+
+    class FakeStreamlit:
+        session_state = {"wt_results_view_mode": "Отдельная скважина"}
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Отдельная скважина"
+
+        def selectbox(self, _label: str, *, options: list[str]) -> str:
+            assert options == ["WELL-A"]
+            return "WELL-A"
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(ptc_page_results, "get_input_crs", lambda: "input-crs")
+    monkeypatch.setattr(ptc_page_results, "get_selected_crs", lambda: "selected-crs")
+    monkeypatch.setattr(ptc_page_results, "should_auto_convert", lambda: False)
+    monkeypatch.setattr(ptc_page_results, "csv_export_crs", lambda *_args, **_kwargs: "input-crs")
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_find_selected_success",
+        lambda **_kwargs: success,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_single_well_pilot_context",
+        lambda **_kwargs: (None, None, ()),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_key_metrics",
+        lambda **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_result_plots",
+        lambda **kwargs: calls.setdefault("plots_kwargs", kwargs),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_result_tables",
+        lambda **_kwargs: None,
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[success],
+        records=[],
+        summary_rows=[],
+    )
+
+    assert calls["plots_kwargs"]["show_plotly_panels"] is False
 
 
 def test_apply_pad_order_optimization_updates_source_records_and_keeps_ac_cache(
@@ -77537,7 +78171,7 @@ def test_records_overview_hides_pilot_row_but_reports_pilot_problem_on_parent() 
     assert "Пилот:" in str(overview_df.iloc[0]["Проблема"])
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_three_overrides.py	39942
+===BEGIN_FILE===	tests/test_ptc_three_overrides.py	41539
 from __future__ import annotations
 
 from pathlib import Path
@@ -77890,6 +78524,59 @@ def test_anticollision_arrow_uses_record_wellhead_for_sidetrack_surface() -> Non
         float(record_surface.y),
         float(record_surface.z),
     ]
+
+
+def test_anticollision_zbs_targets_do_not_render_pad_first_surface_arrow() -> None:
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=604606.04, y=7408871.93, z=3791.81, md=1.0),
+            WelltrackPoint(x=603829.49, y=7408056.91, z=3791.0, md=2.0),
+        ),
+    )
+    stations = pd.DataFrame(
+        {
+            "MD_m": [2608.62, 2700.0],
+            "X_m": [604800.0, 604606.04],
+            "Y_m": [7409000.0, 7408871.93],
+            "Z_m": [2600.0, 3791.81],
+        }
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            AntiCollisionWell(
+                name="9010_ZBS",
+                color="#22c55e",
+                overlay=SimpleNamespace(),
+                samples=(),
+                stations=stations,
+                surface=Point3D(x=604800.0, y=7409000.0, z=2600.0),
+                t1=Point3D(x=604606.04, y=7408871.93, z=3791.81),
+                t3=Point3D(x=603829.49, y=7408056.91, z=3791.0),
+                md_t1_m=2700.0,
+                md_t3_m=3100.0,
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    overrides = ptc_three_overrides.anticollision_three_payload_overrides(
+        {},
+        records=[zbs_record],
+        analysis=analysis,
+    )
+
+    assert [
+        item
+        for item in list(overrides["extra_meshes"])
+        if str(item.get("role")) == "pad_first_surface_arrow"
+    ] == []
 
 
 def test_first_surface_arrow_mesh_spans_first_to_seventh_surface() -> None:
@@ -78796,7 +79483,7 @@ def test_augment_three_payload_appends_overlap_volume_and_legend_once() -> None:
     assert [str(item["label"]) for item in updated["legend"]] == ["Зоны пересечений"]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_three_payload.py	24908
+===BEGIN_FILE===	tests/test_ptc_three_payload.py	33029
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -78924,6 +79611,45 @@ def test_optimize_three_payload_preserves_zero_opacity() -> None:
     assert optimized["lines"][0]["opacity"] == 0.0
     assert optimized["points"][0]["opacity"] == 0.0
     assert optimized["meshes"][0]["opacity"] == 0.0
+
+
+def test_optimize_three_payload_reserves_slots_for_reference_labels() -> None:
+    regular_labels = [
+        {
+            "text": f"WELL-{index}",
+            "position": [float(index), 0.0, 0.0],
+            "color": "#111111",
+            "role": "well_label",
+        }
+        for index in range(ptc_three_payload.WT_THREE_MAX_LABELS + 10)
+    ]
+    reference_labels = [
+        {
+            "text": "FACT-1",
+            "position": [1000.0, 0.0, 0.0],
+            "color": "#374151",
+            "role": "reference_label",
+        },
+        {
+            "text": "APP-1",
+            "position": [1100.0, 0.0, 0.0],
+            "color": "#F87171",
+            "role": "reference_label",
+        },
+    ]
+    payload = {
+        "lines": [],
+        "points": [],
+        "meshes": [],
+        "labels": [*regular_labels, *reference_labels],
+        "legend": [],
+    }
+
+    optimized = ptc_three_payload.optimize_three_payload(payload)
+
+    assert len(optimized["labels"]) == ptc_three_payload.WT_THREE_MAX_LABELS
+    label_texts = {str(item.get("text")) for item in optimized["labels"]}
+    assert {"FACT-1", "APP-1"}.issubset(label_texts)
 
 
 def test_optimize_three_payload_keeps_named_wells_separate() -> None:
@@ -79288,6 +80014,149 @@ def test_anticollision_three_payload_can_show_pad_position_in_well_label() -> No
     )
 
 
+def test_anticollision_three_payload_labels_reference_wells_in_fast_mode() -> None:
+    calc_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "X_m": [0.0, 1000.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 1000.0],
+            "DLS_deg_per_30m": [0.0, 0.0],
+        }
+    )
+    actual_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1200.0],
+            "X_m": [100.0, 1800.0],
+            "Y_m": [25.0, 25.0],
+            "Z_m": [0.0, 420.0],
+        }
+    )
+    approved_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1100.0],
+            "X_m": [150.0, 1700.0],
+            "Y_m": [-35.0, -35.0],
+            "Z_m": [0.0, 360.0],
+        }
+    )
+    analysis = SimpleNamespace(
+        wells=(
+            SimpleNamespace(
+                name="well_01",
+                color="#22C55E",
+                overlay=SimpleNamespace(samples=()),
+                stations=calc_stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(300.0, 0.0, 300.0),
+                t3=Point3D(1000.0, 0.0, 1000.0),
+                md_t1_m=300.0,
+                is_reference_only=False,
+                target_pairs=(),
+            ),
+            SimpleNamespace(
+                name="FACT-1",
+                well_kind=REFERENCE_WELL_ACTUAL,
+                color="#6B7280",
+                overlay=SimpleNamespace(samples=()),
+                stations=actual_stations,
+                surface=Point3D(100.0, 25.0, 0.0),
+                t1=None,
+                t3=None,
+                is_reference_only=True,
+            ),
+            SimpleNamespace(
+                name="APP-1",
+                well_kind=REFERENCE_WELL_APPROVED,
+                color="#C62828",
+                overlay=SimpleNamespace(samples=()),
+                stations=approved_stations,
+                surface=Point3D(150.0, -35.0, 0.0),
+                t1=None,
+                t3=None,
+                is_reference_only=True,
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+    )
+
+    payload = anticollision_three_payload(analysis)
+
+    reference_labels = {
+        str(item.get("text")): item
+        for item in payload["labels"]
+        if str(item.get("role")) == "reference_label"
+    }
+    assert reference_labels["FACT-1"]["position"] == [1800.0, 25.0, 420.0]
+    assert reference_labels["FACT-1"]["color"] == "#374151"
+    assert reference_labels["APP-1"]["position"] == [1700.0, -35.0, 360.0]
+    assert reference_labels["APP-1"]["color"] == "#F87171"
+
+
+def test_anticollision_three_payload_does_not_label_display_only_reference_wells_fast() -> None:
+    calc_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "X_m": [0.0, 1000.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 1000.0],
+            "DLS_deg_per_30m": [0.0, 0.0],
+        }
+    )
+    display_only_reference = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "FACT-FAR",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 5000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "FACT-FAR",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 6000.0,
+                "Y": 0.0,
+                "Z": 500.0,
+                "MD": 1200.0,
+            },
+        ]
+    )
+    analysis = SimpleNamespace(
+        wells=(
+            SimpleNamespace(
+                name="well_01",
+                color="#22C55E",
+                overlay=SimpleNamespace(samples=()),
+                stations=calc_stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(300.0, 0.0, 300.0),
+                t3=Point3D(1000.0, 0.0, 1000.0),
+                md_t1_m=300.0,
+                is_reference_only=False,
+                target_pairs=(),
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+    )
+
+    payload = anticollision_three_payload(
+        analysis,
+        reference_wells=tuple(display_only_reference),
+    )
+
+    assert not any(
+        str(item.get("text")) == "FACT-FAR"
+        and str(item.get("role")) == "reference_label"
+        for item in payload["labels"]
+    )
+
+
 def _sidetrack_parent_payload_analysis():
     stations = pd.DataFrame(
         {
@@ -79356,15 +80225,17 @@ def _sidetrack_parent_payload_analysis():
     )
 
 
-def test_anticollision_three_payload_hides_sidetrack_relative_cones_by_default() -> None:
+def test_anticollision_three_payload_includes_sidetrack_relative_cones_with_hidden_default() -> None:
     payload = anticollision_three_payload(_sidetrack_parent_payload_analysis())
 
-    assert {
-        str(item.get("role")) for item in payload["meshes"]
-    }.isdisjoint({"sidetrack_relative_cone"})
+    assert any(
+        str(item.get("role")) == "sidetrack_relative_cone"
+        for item in payload["meshes"]
+    )
+    assert payload["anti_collision_layer_state"]["sidetrack_relative_cones"] is False
 
 
-def test_anticollision_three_payload_can_show_sidetrack_relative_cones() -> None:
+def test_anticollision_three_payload_can_enable_sidetrack_relative_cones_layer() -> None:
     payload = anticollision_three_payload(
         _sidetrack_parent_payload_analysis(),
         show_sidetrack_relative_cones=True,
@@ -79382,6 +80253,7 @@ def test_anticollision_three_payload_can_show_sidetrack_relative_cones() -> None
         str(item.get("label")) == "Относительные конуса боковых стволов"
         for item in payload["legend"]
     )
+    assert payload["anti_collision_layer_state"]["sidetrack_relative_cones"] is True
 
 
 def test_all_wells_three_payload_places_reference_labels_at_well_end() -> None:
@@ -79438,6 +80310,87 @@ def test_all_wells_three_payload_places_reference_labels_at_well_end() -> None:
 
     assert reference_labels["FACT-1"] == [1800.0, 25.0, 400.0]
     assert reference_labels["APP-1"] == [1700.0, -35.0, 320.0]
+
+
+def test_all_wells_three_payload_highlights_actual_sidetrack_parent_in_fast_mode() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "INC_deg": [90.0, 90.0, 90.0, 90.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0],
+            "X_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    zbs = SuccessfulWellPlan(
+        name="9010_ZBS",
+        surface=Point3D(1000.0, 0.0, 0.0),
+        t1=Point3D(1200.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=stations,
+        summary={
+            "trajectory_type": "FACT_SIDETRACK",
+            "actual_parent_well_name": "9010",
+            "sidetrack_parent_well_name": "9010",
+            "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+            "sidetrack_window_md_m": 1000.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1200.0,
+        config=TrajectoryConfig(),
+    )
+    parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 1000.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 2000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 2000.0,
+            },
+        ],
+        default_kind=REFERENCE_WELL_ACTUAL,
+    )[0]
+
+    payload = all_wells_three_payload(
+        [zbs],
+        reference_wells=(parent,),
+        render_mode="Быстро",
+    )
+
+    reference_labels = {
+        str(item.get("text")): list(item.get("position") or [])
+        for item in payload["labels"]
+        if str(item.get("role")) == "reference_label"
+    }
+    hover_names = {
+        str(hover.get("name"))
+        for item in payload["points"]
+        if str(item.get("role")) == "reference_hover"
+        for hover in list(item.get("hover") or [])
+    }
+
+    assert reference_labels["9010"] == [2000.0, 0.0, 0.0]
+    assert "9010" in hover_names
 
 
 def test_all_wells_three_payload_can_show_pad_position_in_well_label() -> None:
@@ -79623,10 +80576,14 @@ def test_all_wells_three_payload_includes_multi_horizontal_target_only_pairs() -
     assert legend_item["symbol"] == "point"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_welltrack_io.py	1045
+===BEGIN_FILE===	tests/test_ptc_welltrack_io.py	1899
 from __future__ import annotations
 
-from pywp.ptc_welltrack_io import decode_welltrack_payload, read_welltrack_file
+from pywp.ptc_welltrack_io import (
+    decode_welltrack_payload,
+    read_welltrack_file,
+    read_welltrack_sources,
+)
 
 
 def test_decode_welltrack_payload_reports_non_utf8_fallback() -> None:
@@ -79663,6 +80620,31 @@ def test_read_welltrack_file_reports_empty_path() -> None:
 
     assert text == ""
     assert warnings == ["Укажите путь к файлу WELLTRACK."]
+
+
+def test_read_welltrack_sources_accepts_file_and_folder_with_case_insensitive_inc(
+    tmp_path,
+) -> None:
+    direct_file = tmp_path / "direct.inc"
+    direct_file.write_text("WELLTRACK 'DIRECT'\n0 0 0 0\n/\n", encoding="utf-8")
+    folder = tmp_path / "bundle"
+    folder.mkdir()
+    (folder / "a.InC").write_text(
+        "WELLTRACK 'FOLDER-A'\n0 0 0 0\n/\n",
+        encoding="utf-8",
+    )
+    (folder / "b.INC").write_text(
+        "WELLTRACK 'FOLDER-B'\n0 0 0 0\n/\n",
+        encoding="utf-8",
+    )
+    (folder / "skip.txt").write_text("ignore", encoding="utf-8")
+
+    text = read_welltrack_sources([str(direct_file), str(folder)], cwd=tmp_path)
+
+    assert "WELLTRACK 'DIRECT'" in text
+    assert "WELLTRACK 'FOLDER-A'" in text
+    assert "WELLTRACK 'FOLDER-B'" in text
+    assert "skip" not in text
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_reference_depth_cluster_welltracks.py	1198
@@ -80810,7 +81792,7 @@ def test_default_three_camera_uses_z_up_eye() -> None:
     assert DEFAULT_THREE_CAMERA["eye"] == {"x": 1.25, "y": 1.25, "z": 1.25}
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	23309
+===BEGIN_FILE===	tests/test_three_viewer.py	24091
 from __future__ import annotations
 
 from pathlib import Path
@@ -80827,12 +81809,14 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="anti-collision-btn"' in html
     assert 'id="anti-collision-controls"' in html
     assert 'data-ac-layer="cones"' in html
+    assert 'data-ac-layer="sidetrack_relative_cones"' in html
     assert 'data-ac-layer="overlaps"' in html
     assert 'data-ac-layer="segments"' in html
     assert "function initAntiCollisionControls()" in html
     assert "function registerAntiCollisionVisualObject(object, itemOrRole)" in html
     assert 'role === "sidetrack_relative_cone"' in html
     assert 'role === "sidetrack_relative_cone_tip"' in html
+    assert 'return "sidetrack_relative_cones";' in html
     assert 'role === "overlap" || role === "overlap_volume"' in html
     assert 'role === "conflict_segment" || role === "conflict_hover"' in html
     assert "function antiCollisionLayerForItem(itemOrRole)" in html
@@ -80855,7 +81839,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "white-space: normal;" in html
     assert "transform: translate(8px, -50%);" in html
     assert "contain: layout paint;" in html
-    assert 'labelRole === "well_label" || labelRole === "pilot_point_label"' in html
+    assert 'labelRole === "well_label" ||' in html
+    assert 'labelRole === "pilot_point_label" ||' in html
+    assert 'labelRole === "reference_label"' in html
     assert 'role === "target_label" || role === "control_point_label"' in html
     assert "font-size: 10px;" in html
     assert ".axes-gizmo-line" in html
@@ -80869,7 +81855,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "controls.screenSpacePanning = true;" in html
     assert "function updateLabels()" in html
     assert "offsetY: Number((options && options.offsetY) || 0)" in html
-    assert 'role === "well_label" || role === "pilot_point_label"' in html
+    assert 'role === "well_label" ||' in html
+    assert 'role === "pilot_point_label" ||' in html
+    assert 'role === "reference_label"' in html
     assert 'role === "reference_pad_label"' in html
     assert "item.offsetY" in html
     assert "renderer.domElement.getBoundingClientRect()" in html
@@ -80927,6 +81915,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "data-edit-well-index" in html
     assert "function selectEditWell(index, options)" in html
     assert "function sendEditTargetsToStreamlit(changes)" in html
+    assert "font-size: 15px;" in html
+    assert "const originalMesh = new THREE.Mesh(handleGeometry, originalMat);" in html
+    assert "originalMesh.position.copy(displayPoint(point));" in html
+    assert "h.originalMesh.visible =" in html
+    assert "material.depthTest = applies && selectedWellDirty ? false : item.depthTest;" in html
     assert 'id="edit-toolbox"' in html
     assert "editToolbox.classList.toggle" in html
     assert "function initEditToolboxDrag()" in html
@@ -80965,8 +81958,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "editWellHasExplicitPoints(wellIndex)" in html
     assert "editWellHasComplexExplicitPoints(wellIndex)" in html
     assert "editWellUsesSidetrackWindowPreview(wellIndex)" in html
+    assert "function editWellSupportsRotation(wellIndex)" in html
     assert "sidetrackWindowEntryForWell(wellIndex)" in html
-    assert "!editWellHasComplexExplicitPoints(selectedEditWellIndex)" in html
+    assert "editWellSupportsRotation(selectedEditWellIndex)" in html
+    assert "!editWellSupportsRotation(selectedEditWellIndex)" in html
     assert "const targetPoints = pointEntries.filter" in html
     assert "change.points = targetPoints.map" in html
     assert 'editDragMoveScope === "pair"' in html
@@ -81135,6 +82130,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "depthWrite: !isConeTip && !isConflictSegment" in html
     assert "wireframe.renderOrder = mesh.renderOrder + 0.05" in html
     assert 'role === "cone" || role === "sidetrack_relative_cone"' in html
+    assert 'sidetrack_relative_cones: []' in html
     assert "Math.min(opacity, 0.10)" in html
     assert "opacity: 0.07" in html
     assert 'x: "#16A34A"' in html
@@ -81822,7 +82818,7 @@ def test_render_hero_supports_centered_variant_with_constrained_width(
     assert bool(captured["unsafe"]) is True
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ui_well_panels.py	4596
+===BEGIN_FILE===	tests/test_ui_well_panels.py	6099
 from __future__ import annotations
 
 from io import BytesIO
@@ -81976,6 +82972,54 @@ def test_trajectory_panel_uses_local_three_for_default_3d(monkeypatch) -> None:
     assert captured["three_payload"]["lines"]
     assert len(captured["plotly_calls"]) == 1
     assert captured["plotly_calls"][0][1] == {"width": "stretch"}
+
+
+def test_trajectory_panel_can_render_only_three_without_plotly(monkeypatch) -> None:
+    import pywp.ui_well_panels as panels
+
+    captured: dict[str, object] = {"plotly_calls": []}
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def plotly_chart(self, figure, **kwargs):
+            captured["plotly_calls"].append((figure, dict(kwargs)))
+
+    def fake_three_scene(payload, **kwargs):
+        captured["three_payload"] = payload
+        captured["three_kwargs"] = dict(kwargs)
+        return None
+
+    monkeypatch.setattr(panels.st, "container", lambda: _DummyContainer())
+    monkeypatch.setattr(panels, "dls_figure", lambda *args, **kwargs: go.Figure())
+    monkeypatch.setattr(panels, "render_local_three_scene", fake_three_scene)
+
+    render_trajectory_dls_panel(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 10.0],
+                "X_m": [0.0, 10.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 5.0],
+            }
+        ),
+        well_name="WELL-A",
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        t1=Point3D(x=5.0, y=0.0, z=2.0),
+        t3=Point3D(x=10.0, y=0.0, z=5.0),
+        md_t1_m=5.0,
+        dls_limits={},
+        border=False,
+        show_plotly_chart=False,
+    )
+
+    assert captured["three_kwargs"]["height"] == 560
+    assert captured["three_payload"]["lines"]
+    assert captured["plotly_calls"] == []
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_ui_well_result.py	8476
@@ -88213,7 +89257,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	268685
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	277630
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -88940,6 +89984,210 @@ def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> N
     assert "Оставить все точки без изменений" in button_labels
 
 
+def test_welltrack_page_renders_and_fixes_zbs_t1_t3_order_from_parent() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1600.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=1100.0, y=0.0, z=2501.0, md=2.0),
+        ),
+    )
+    actual_parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+        ]
+    )[0]
+    at.session_state["wt_records"] = [zbs_record]
+    at.session_state["wt_records_original"] = [zbs_record]
+    at.session_state["wt_reference_actual_wells"] = [actual_parent]
+    at.session_state["wt_reference_wells"] = [actual_parent]
+
+    at.run(timeout=120)
+
+    assert any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+    assert any(
+        "Подцепили фактическую скважину для бокового ствола" in str(widget.value)
+        for widget in at.info
+    )
+    assert any(
+        "После подцепления фактической скважины проверьте порядок целей" in str(widget.value)
+        for widget in at.warning
+    )
+    assert any("`9010_ZBS`" in str(widget.value) for widget in at.markdown)
+    assert any("родитель→" in str(widget.value) for widget in at.markdown)
+    assert any(
+        "#wt-t1-t3-order-panel" in str(widget.value) for widget in at.markdown
+    )
+
+    _click_button(at, "Исправить порядок для выбранных скважин")
+    at.run(timeout=120)
+
+    fixed = at.session_state["wt_records"][0]
+    assert [point.md for point in fixed.points] == pytest.approx([1.0, 2.0])
+    assert [point.x for point in fixed.points] == pytest.approx([1100.0, 1600.0])
+
+
+def test_t1_t3_order_anchor_skips_reference_scan_without_zbs(monkeypatch) -> None:
+    page = wt_import_module
+    monkeypatch.setattr(
+        page,
+        "_reference_wells_from_state",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected reference scan")),
+    )
+
+    assert page._t1_t3_order_anchor_by_well_name(_bad_order_records()) == {}
+
+
+def test_t1_t3_order_anchor_uses_nearest_parent_point_for_zbs(monkeypatch) -> None:
+    page = wt_import_module
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=900.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+    actual_parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+        ]
+    )[0]
+    monkeypatch.setattr(page, "_reference_wells_from_state", lambda: (actual_parent,))
+
+    anchors = page._t1_t3_order_anchor_by_well_name([zbs_record])
+
+    assert anchors["9010_ZBS"].x == pytest.approx(1000.0)
+    assert anchors["9010_ZBS"].z == pytest.approx(2500.0)
+
+
+def test_t1_t3_order_anchor_prefers_actual_parent_over_approved_duplicate(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=900.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+    actual_parent, approved_parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "approved",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "approved",
+                "X": 5000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        page,
+        "_reference_wells_from_state",
+        lambda: (actual_parent, approved_parent),
+    )
+
+    anchors = page._t1_t3_order_anchor_by_well_name([zbs_record])
+
+    assert anchors["9010_ZBS"].x == pytest.approx(1000.0)
+
+
+def test_t1_t3_order_anchor_supports_multi_horizontal_zbs(monkeypatch) -> None:
+    page = wt_import_module
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=900.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=2.0),
+            WelltrackPoint(x=1300.0, y=50.0, z=2520.0, md=3.0),
+            WelltrackPoint(x=1700.0, y=50.0, z=2520.0, md=4.0),
+        ),
+    )
+    actual_parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+        ]
+    )[0]
+    monkeypatch.setattr(page, "_reference_wells_from_state", lambda: (actual_parent,))
+
+    anchors = page._t1_t3_order_anchor_by_well_name([zbs_record])
+
+    assert anchors["9010_ZBS"].x == pytest.approx(1000.0)
+    assert anchors["9010_ZBS"].z == pytest.approx(2500.0)
+
+
 def test_welltrack_page_initial_crs_selectbox_has_no_session_state_default_warning() -> (
     None
 ):
@@ -88962,6 +90210,19 @@ def test_welltrack_page_defaults_csv_crs_to_wgs84_utm43() -> None:
     select_values = {str(widget.label): widget.value for widget in at.selectbox}
     assert select_values["Входная CRS"] == "ГК_13N_42"
     assert select_values["CRS CSV-выгрузки"] == "WGS84 UTM 43N"
+
+
+def test_welltrack_page_limits_csv_crs_options() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+
+    at.run(timeout=120)
+
+    selectboxes_by_label = {str(widget.label): widget for widget in at.selectbox}
+    assert list(selectboxes_by_label["CRS CSV-выгрузки"].options) == [
+        "ГК_13N_42",
+        "WGS84 UTM 43N",
+        "WGS84 (градусы)",
+    ]
 
 
 def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None:
@@ -89775,6 +91036,70 @@ def test_reference_trajectory_welltrack_path_import_populates_reference_wells_st
     assert str(approved_wells[0].name) == "APP-1"
 
 
+def test_reference_trajectory_welltrack_path_import_supports_multiple_paths_and_folder(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    direct_file = tmp_path / "actual_direct.inc"
+    direct_file.write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'FACT-DIRECT'",
+                "0 0 20 0",
+                "900 800 20 250",
+                "1800 1600 20 350",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    folder = tmp_path / "actual_folder"
+    folder.mkdir()
+    (folder / "actual_02.InC").write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'FACT-FOLDER-A'",
+                "0 0 30 0",
+                "850 780 30 240",
+                "1700 1560 30 340",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (folder / "actual_03.INC").write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'FACT-FOLDER-B'",
+                "0 0 40 0",
+                "870 790 40 245",
+                "1740 1580 40 345",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (folder / "ignore_me.txt").write_text("skip", encoding="utf-8")
+    at.session_state["ptc_reference_source_mode::actual"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_actual_welltrack_path_count"] = 2
+    at.session_state["wt_reference_actual_welltrack_path"] = str(direct_file)
+    at.session_state["wt_reference_actual_welltrack_path_1"] = str(folder)
+
+    at.run(timeout=120)
+    _click_button(at, "Загрузить фактические скважины")
+    at.run(timeout=120)
+
+    actual_wells = tuple(at.session_state["wt_reference_actual_wells"])
+    assert [str(well.name) for well in actual_wells] == [
+        "FACT-DIRECT",
+        "FACT-FOLDER-A",
+        "FACT-FOLDER-B",
+    ]
+
+
 def test_reference_trajectory_dev_folder_import_is_default_and_uses_file_names(
     tmp_path,
 ) -> None:
@@ -89950,14 +91275,18 @@ def test_reference_welltrack_clear_button_resets_path_without_widget_state_error
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
     at.session_state["ptc_reference_source_mode::actual"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_actual_welltrack_path_count"] = 2
     at.session_state["wt_reference_actual_welltrack_path"] = str(welltrack_path)
+    at.session_state["wt_reference_actual_welltrack_path_1"] = str(tmp_path)
 
     at.run(timeout=120)
     _click_button(at, "Очистить фактические скважины")
     at.run(timeout=120)
 
     assert not at.exception
+    assert int(at.session_state["wt_reference_actual_welltrack_path_count"]) == 1
     assert str(at.session_state["wt_reference_actual_welltrack_path"]) == ""
+    assert str(at.session_state["wt_reference_actual_welltrack_path_1"]) == ""
 
 
 def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> None:
@@ -94622,8 +95951,8 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     label_by_text = {str(item["text"]): item for item in payload_3d["labels"]}
     assert "FACT-1" in label_by_text
     assert "APP-1" in label_by_text
-    assert str(label_by_text["FACT-1"]["color"]) == "#111111"
-    assert str(label_by_text["APP-1"]["color"]) == "#C62828"
+    assert str(label_by_text["FACT-1"]["color"]) == "#374151"
+    assert str(label_by_text["APP-1"]["color"]) == "#F87171"
 
 
 def test_actual_reference_mwd_assignment_defaults_to_poor_and_selects_unknown() -> None:
@@ -96241,10 +97570,12 @@ def test_parse_welltrack_points_table_accepts_excel_style_numeric_strings() -> N
     assert records[0].points[2].x == pytest.approx(1500.5)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_quality.py	3215
+===BEGIN_FILE===	tests/test_welltrack_quality.py	6536
 from __future__ import annotations
 
 import math
+
+import pytest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.welltrack_quality import detect_t1_t3_order_issues, swap_t1_t3_for_wells
@@ -96342,5 +97673,102 @@ def test_swap_t1_t3_for_wells_leaves_multi_horizontal_records_unchanged() -> Non
     updated = swap_t1_t3_for_wells([source], well_names={str(source.name)})
 
     assert tuple(updated[0].points) == tuple(source.points)
+
+
+def test_detect_t1_t3_order_issues_checks_zbs_from_parent_anchor() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+    parent_surface = WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0)
+
+    issues = detect_t1_t3_order_issues(
+        [source],
+        min_delta_m=0.1,
+        anchor_by_well_name={"9010": parent_surface},
+    )
+
+    assert [item.well_name for item in issues] == ["9010_ZBS"]
+    assert issues[0].anchor_label == "родитель→"
+    assert issues[0].delta_m == pytest.approx(700.0)
+
+
+def test_detect_t1_t3_order_issues_skips_zbs_without_parent_anchor() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+
+    assert detect_t1_t3_order_issues([source], min_delta_m=0.1) == []
+
+
+def test_swap_t1_t3_for_wells_supports_zbs_and_preserves_md_positions() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2501.0, md=2.0),
+        ),
+    )
+
+    fixed = swap_t1_t3_for_wells([source], well_names={"9010_ZBS"})[0]
+
+    assert fixed.name == "9010_ZBS"
+    assert fixed.points[0].md == pytest.approx(1.0)
+    assert fixed.points[1].md == pytest.approx(2.0)
+    assert fixed.points[0].x == pytest.approx(500.0)
+    assert fixed.points[0].z == pytest.approx(2501.0)
+    assert fixed.points[1].x == pytest.approx(1200.0)
+
+
+def test_zbs_multi_horizontal_order_check_reports_worst_reversed_pair() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+            WelltrackPoint(x=600.0, y=100.0, z=2520.0, md=3.0),
+            WelltrackPoint(x=1300.0, y=100.0, z=2520.0, md=4.0),
+        ),
+    )
+    parent_surface = WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0)
+
+    issues = detect_t1_t3_order_issues(
+        [source],
+        min_delta_m=0.1,
+        anchor_by_well_name={"9010": parent_surface},
+    )
+
+    assert [item.well_name for item in issues] == ["9010_ZBS"]
+    assert issues[0].delta_m == pytest.approx(700.0)
+
+
+def test_swap_t1_t3_for_wells_supports_zbs_multi_horizontal_selectively() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+            WelltrackPoint(x=600.0, y=100.0, z=2520.0, md=3.0),
+            WelltrackPoint(x=1300.0, y=100.0, z=2520.0, md=4.0),
+        ),
+    )
+    parent_surface = WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0)
+
+    fixed = swap_t1_t3_for_wells(
+        [source],
+        well_names={"9010_ZBS"},
+        anchor_by_well_name={"9010": parent_surface},
+        min_delta_m=0.1,
+    )[0]
+
+    assert [point.md for point in fixed.points] == pytest.approx([1.0, 2.0, 3.0, 4.0])
+    assert [point.x for point in fixed.points] == pytest.approx([500.0, 1200.0, 600.0, 1300.0])
 
 ===END_FILE===

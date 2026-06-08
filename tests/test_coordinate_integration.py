@@ -44,34 +44,30 @@ class TestCoordinateIntegration:
         assert all(crs.is_projected() for _label, crs in INPUT_CRS_OPTIONS)
         assert not CoordinateSystem.GSK_2011_GEOCENTRIC.is_projected()
 
-    def test_csv_crs_options_include_geographic_outputs(self) -> None:
-        """CSV output CRS options include projected meters and geographic degrees."""
-        labels = [label for label, _ in CSV_CRS_OPTIONS]
+    def test_csv_crs_options_match_supported_export_set(self) -> None:
+        """CSV output CRS options stay limited to the supported export targets."""
         assert CRS_OPTIONS == CSV_CRS_OPTIONS
-        assert "WGS84 (Градусные)" in labels
-        assert "СК-42 (Градусные)" in labels
-        assert "WGS84 UTM 43N" in labels
-        assert "ГК_13N_42" in labels
-        assert CoordinateSystem.WGS84 in {crs for _label, crs in CSV_CRS_OPTIONS}
-        assert CoordinateSystem.WGS84_UTM_ZONE_43N in {
-            crs for _label, crs in CSV_CRS_OPTIONS
-        }
+        assert CSV_CRS_OPTIONS == [
+            ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
+            ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
+            ("WGS84 (градусы)", CoordinateSystem.WGS84),
+        ]
 
     def test_geographic_csv_outputs_are_really_geographic_crs(self) -> None:
         """CRS options labelled as degree outputs must not point to geocentric EPSG."""
         geographic_labels = {
             label: crs
             for label, crs in CSV_CRS_OPTIONS
-            if "Градусные" in label
+            if "градус" in label.lower()
         }
 
         assert geographic_labels
         assert all(crs.is_geographic() for crs in geographic_labels.values())
         assert CoordinateSystem.GSK_2011.value == "EPSG:7683"
 
-    def test_crs_options_contains_pulkovo_zones(self) -> None:
-        """CRS options should include Pulkovo 1942 zones."""
-        labels = [label for label, _ in CRS_OPTIONS]
+    def test_input_crs_options_contains_pulkovo_zones(self) -> None:
+        """Input CRS options should include the supported projected Pulkovo zones."""
+        labels = [label for label, _ in INPUT_CRS_OPTIONS]
         assert "СК-42 Зона 8" in labels
         assert "ГК_13N_42" in labels
         assert "СК-42 Зона 13 (13 млн)" in labels

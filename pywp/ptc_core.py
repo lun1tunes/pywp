@@ -95,6 +95,7 @@ from pywp.coordinate_integration import (
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import (
     WelltrackParseError,
+    WelltrackPoint,
     WelltrackRecord,
     parse_welltrack_text,
     welltrack_multi_horizontal_level_count,
@@ -199,6 +200,7 @@ WT_LOG_COMPACT = ptc_batch_run.LOG_COMPACT
 WT_LOG_VERBOSE = ptc_batch_run.LOG_VERBOSE
 WT_LOG_LEVEL_OPTIONS = ptc_batch_run.LOG_LEVEL_OPTIONS
 WT_T1T3_MIN_DELTA_M = 0.5
+WT_T1T3_ORDER_PANEL_ANCHOR_ID = "wt-t1-t3-order-panel"
 WT_3D_RENDER_AUTO = "Авто"
 WT_3D_RENDER_DETAIL = "Детально"
 WT_3D_RENDER_FAST = "Быстро"
@@ -5407,9 +5409,12 @@ def _render_t1_t3_order_panel(
     *,
     border: bool = True,
 ) -> None:
-    visible_records = visible_well_records(records, include_zbs=False)
     panel_context = st.container(border=True) if border else nullcontext()
     with panel_context:
+        st.markdown(
+            f'<div id="{WT_T1T3_ORDER_PANEL_ANCHOR_ID}"></div>',
+            unsafe_allow_html=True,
+        )
         resolution_message = _t1_t3_order_resolution_message()
         if resolution_message is not None:
             level, message = resolution_message
@@ -5417,15 +5422,12 @@ def _render_t1_t3_order_panel(
                 st.success(message)
             else:
                 st.info(message)
-        detected_issues = detect_t1_t3_order_issues(
-            visible_records, min_delta_m=WT_T1T3_MIN_DELTA_M
+        anchor_by_well_name = _t1_t3_order_anchor_by_well_name(records)
+        detected_issues = _detected_t1_t3_order_issues(
+            records,
+            anchor_by_well_name=anchor_by_well_name,
         )
-        acknowledged_well_names = _t1_t3_order_acknowledged_well_names()
-        issues = [
-            item
-            for item in detected_issues
-            if str(item.well_name) not in acknowledged_well_names
-        ]
+        issues = _current_t1_t3_order_issues(records, detected_issues=detected_issues)
         if not issues:
             if detected_issues:
                 st.info(
@@ -5437,7 +5439,7 @@ def _render_t1_t3_order_panel(
             return
 
         st.warning(
-            "Найдены скважины, где отход до t1 больше, чем до t3. "
+            "Найдены скважины, где отход от опорной точки до t1 больше, чем до t3. "
             "Вероятно, порядок точек t1/t3 перепутан."
         )
         header_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 3.0], gap="small")
@@ -5446,8 +5448,8 @@ def _render_t1_t3_order_panel(
             unsafe_allow_html=True,
         )
         header_cols[1].markdown("**Скважина**")
-        header_cols[2].markdown("**Отход S→t1, м**")
-        header_cols[3].markdown("**Отход S→t3, м**")
+        header_cols[2].markdown("**Отход →t1, м**")
+        header_cols[3].markdown("**Отход →t3, м**")
         header_cols[4].markdown("**Δ (t1 - t3), м**")
         st.markdown(
             "<div style='height: 0.25rem;'></div>",
@@ -5465,8 +5467,9 @@ def _render_t1_t3_order_panel(
                 label_visibility="collapsed",
             )
             row_cols[1].markdown(f"`{well_name}`")
-            row_cols[2].markdown(f"{float(item.t1_offset_m):.2f}")
-            row_cols[3].markdown(f"{float(item.t3_offset_m):.2f}")
+            anchor_label = str(getattr(item, "anchor_label", "S→") or "S→")
+            row_cols[2].markdown(f"{anchor_label}{float(item.t1_offset_m):.2f}")
+            row_cols[3].markdown(f"{anchor_label}{float(item.t3_offset_m):.2f}")
             row_cols[4].markdown(f"{float(item.delta_m):.2f}")
 
         fix_col, keep_col = st.columns(2, gap="small")
@@ -5491,6 +5494,8 @@ def _render_t1_t3_order_panel(
             st.session_state["wt_records"] = swap_t1_t3_for_wells(
                 records=list(records),
                 well_names=target_names,
+                anchor_by_well_name=anchor_by_well_name,
+                min_delta_m=WT_T1T3_MIN_DELTA_M,
             )
             original_records = st.session_state.get("wt_records_original")
             if original_records is None:
@@ -5498,6 +5503,8 @@ def _render_t1_t3_order_panel(
             st.session_state["wt_records_original"] = swap_t1_t3_for_wells(
                 records=list(original_records),
                 well_names=target_names,
+                anchor_by_well_name=anchor_by_well_name,
+                min_delta_m=WT_T1T3_MIN_DELTA_M,
             )
             _set_t1_t3_order_acknowledged_well_names(
                 _t1_t3_order_acknowledged_well_names() - target_names
@@ -5526,8 +5533,143 @@ def _render_t1_t3_order_panel(
             st.rerun()
         st.caption(
             "Исправление меняет местами координаты `t1` и `t3`, но сохраняет MD "
-            "во 2-й и 3-й позиции, чтобы не ломать порядок MD."
+            "в исходных позициях, чтобы не ломать порядок MD."
         )
+
+
+def _detected_t1_t3_order_issues(
+    records: list[WelltrackRecord],
+    *,
+    anchor_by_well_name: dict[str, Point3D] | None = None,
+) -> list[object]:
+    return detect_t1_t3_order_issues(
+        visible_well_records(records, include_zbs=True),
+        min_delta_m=WT_T1T3_MIN_DELTA_M,
+        anchor_by_well_name=(
+            anchor_by_well_name
+            if anchor_by_well_name is not None
+            else _t1_t3_order_anchor_by_well_name(records)
+        ),
+    )
+
+
+def _current_t1_t3_order_issues(
+    records: list[WelltrackRecord],
+    *,
+    detected_issues: list[object] | None = None,
+) -> list[object]:
+    issues = (
+        detected_issues
+        if detected_issues is not None
+        else _detected_t1_t3_order_issues(records)
+    )
+    acknowledged_well_names = _t1_t3_order_acknowledged_well_names()
+    return [
+        item for item in issues if str(item.well_name) not in acknowledged_well_names
+    ]
+
+
+def _t1_t3_order_anchor_by_well_name(
+    records: list[WelltrackRecord],
+) -> dict[str, Point3D]:
+    record_list = list(records)
+    zbs_records = [
+        record
+        for record in record_list
+        if is_zbs_name(record.name) and len(record.points) >= 2
+    ]
+    if not zbs_records:
+        return {}
+    zbs_parent_keys = {
+        well_name_key(parent_name_for_zbs(record.name)) for record in zbs_records
+    }
+    anchor_by_well_name: dict[str, Point3D] = {}
+    parent_points_by_key: dict[str, tuple[Point3D, ...]] = {}
+    parent_points_priority_by_key: dict[str, int] = {}
+    for record in record_list:
+        parent_key = well_name_key(record.name)
+        if (
+            is_pilot_name(record.name)
+            or is_zbs_name(record.name)
+            or not record.points
+            or parent_key not in zbs_parent_keys
+        ):
+            continue
+        points = tuple(record.points)
+        parent_points = tuple(
+            Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+            for point in points
+        )
+        if not parent_points:
+            continue
+        anchor_by_well_name[str(record.name)] = parent_points[0]
+        parent_points_by_key[parent_key] = parent_points
+        parent_points_priority_by_key[parent_key] = 2
+
+    for reference_well in _reference_wells_from_state():
+        parent_key = well_name_key(reference_well.name)
+        if parent_key not in zbs_parent_keys:
+            continue
+        reference_points = _reference_well_points(reference_well)
+        priority = 3 if str(reference_well.kind) == REFERENCE_WELL_ACTUAL else 1
+        if reference_points:
+            existing_priority = parent_points_priority_by_key.get(parent_key, -1)
+            if priority >= existing_priority:
+                parent_points_by_key[parent_key] = reference_points
+                parent_points_priority_by_key[parent_key] = priority
+        anchor_by_well_name.setdefault(
+            str(reference_well.name),
+            reference_well.surface,
+        )
+
+    for record in zbs_records:
+        parent_points = parent_points_by_key.get(
+            well_name_key(parent_name_for_zbs(record.name))
+        )
+        if not parent_points:
+            continue
+        anchor_by_well_name[str(record.name)] = _nearest_xy_anchor_to_targets(
+            parent_points=parent_points,
+            target_points=tuple(record.points),
+        )
+    return anchor_by_well_name
+
+
+def _reference_well_points(
+    reference_well: ImportedTrajectoryWell,
+) -> tuple[Point3D, ...]:
+    stations = reference_well.stations
+    if not isinstance(stations, pd.DataFrame) or not {"X_m", "Y_m", "Z_m"}.issubset(
+        stations.columns
+    ):
+        return (reference_well.surface,)
+    if stations.empty:
+        return (reference_well.surface,)
+    return tuple(
+        Point3D(x=float(row.X_m), y=float(row.Y_m), z=float(row.Z_m))
+        for row in stations[["X_m", "Y_m", "Z_m"]].itertuples(index=False)
+    )
+
+
+def _nearest_xy_anchor_to_targets(
+    *,
+    parent_points: tuple[Point3D, ...],
+    target_points: tuple[WelltrackPoint, ...],
+) -> Point3D:
+    best_point = parent_points[0]
+    best_distance = float("inf")
+    for parent_point in parent_points:
+        for target in target_points:
+            distance = float(
+                np.hypot(
+                    float(parent_point.x) - float(target.x),
+                    float(parent_point.y) - float(target.y),
+                )
+            )
+            if distance < best_distance:
+                best_distance = distance
+                best_point = parent_point
+    return best_point
 
 
 def _clear_t1_t3_order_resolution_state() -> None:
@@ -5808,6 +5950,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         base_records = list(records)
     pads = _ensure_pad_configs(base_records=list(base_records))
     if not pads:
+        _render_t1_t3_order_panel(records=records, border=True)
         return
 
     with st.container(border=True):

@@ -79,9 +79,14 @@ def optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
         ).tolist()
         reference_labels = [reference_labels[index] for index in indices]
 
-    labels = other_labels + reference_labels
-    if len(labels) > WT_THREE_MAX_LABELS:
-        labels = labels[:WT_THREE_MAX_LABELS]
+    if reference_labels:
+        remaining_other_label_slots = max(
+            int(WT_THREE_MAX_LABELS) - len(reference_labels),
+            0,
+        )
+        labels = other_labels[:remaining_other_label_slots] + reference_labels
+    else:
+        labels = other_labels[:WT_THREE_MAX_LABELS]
     optimized["labels"] = labels
     optimized["legend"] = list(payload.get("legend") or [])
     return optimized

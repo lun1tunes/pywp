@@ -139,20 +139,6 @@ def _pilot_study_points_by_name(records: list[object]) -> dict[str, tuple[Point3
     }
 
 
-def _show_sidetrack_relative_cones_checkbox() -> bool:
-    key = "wt_show_sidetrack_relative_cones"
-    st.session_state.setdefault(key, False)
-    checkbox = getattr(st, "checkbox", None)
-    if not callable(checkbox):
-        return bool(st.session_state.get(key))
-    return bool(
-        checkbox(
-            "Отображать конуса для боковых стволов",
-            key=key,
-        )
-    )
-
-
 def _render_anticollision_action_button(*, has_current_analysis: bool) -> bool:
     return bool(
         st.button(
@@ -862,14 +848,11 @@ def _render_anticollision_visual_overview(
     name_to_color = wt._well_color_map(list(records))
     display_name_by_well_name = wt._well_label_display_names(list(records))
     reference_wells = reference_state.reference_wells_from_state()
-    show_sidetrack_relative_cones = _show_sidetrack_relative_cones_checkbox()
-
     if title:
         st.markdown(title)
     if caption:
         st.caption(caption)
 
-    chart_col1, chart_col2 = st.columns(2, gap="medium")
     anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
         analysis,
         previous_successes_by_name={},
@@ -880,10 +863,10 @@ def _render_anticollision_visual_overview(
         pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
         focus_well_names=focus_names or visible_focus_names,
         render_mode=wt.WT_3D_RENDER_DETAIL,
-        show_sidetrack_relative_cones=show_sidetrack_relative_cones,
+        show_sidetrack_relative_cones=False,
     )
     wt._render_three_payload(
-        container=chart_col1,
+        container=st.container(),
         payload=anticollision_3d_payload,
         height=660,
         payload_overrides=wt._anticollision_three_payload_overrides(
@@ -893,17 +876,6 @@ def _render_anticollision_visual_overview(
             target_only_wells=resolved_target_only_wells,
             target_only_name_to_color=name_to_color,
         ),
-    )
-    chart_col2.plotly_chart(
-        wt._all_wells_anticollision_plan_figure(
-            analysis,
-            previous_successes_by_name={},
-            target_only_wells=resolved_target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            focus_well_names=focus_names or visible_focus_names,
-        ),
-        width="stretch",
     )
 
 
@@ -980,9 +952,8 @@ def _render_target_edit_overview(
         focus_well_names=tuple(focus_pad_well_names),
         render_mode=wt.WT_3D_RENDER_FAST,
     )
-    chart_col1, chart_col2 = st.columns(2, gap="medium")
     wt._render_three_payload(
-        container=chart_col1,
+        container=st.container(),
         payload=payload,
         height=660,
         payload_overrides=wt._trajectory_three_payload_overrides(
@@ -991,16 +962,6 @@ def _render_target_edit_overview(
             target_only_wells=target_only_wells,
             name_to_color=name_to_color,
         ),
-    )
-    chart_col2.plotly_chart(
-        wt._all_wells_plan_figure(
-            list(successes),
-            target_only_wells=target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            focus_well_names=tuple(focus_pad_well_names),
-        ),
-        width="stretch",
     )
     return True
 
@@ -1132,6 +1093,7 @@ def render_success_tabs(
             title_trajectory=None,
             title_plan=None,
             border=True,
+            show_plotly_panels=False,
             render_3d_override=render_3d_override,
         )
         render_result_tables(

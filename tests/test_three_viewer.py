@@ -14,12 +14,14 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="anti-collision-btn"' in html
     assert 'id="anti-collision-controls"' in html
     assert 'data-ac-layer="cones"' in html
+    assert 'data-ac-layer="sidetrack_relative_cones"' in html
     assert 'data-ac-layer="overlaps"' in html
     assert 'data-ac-layer="segments"' in html
     assert "function initAntiCollisionControls()" in html
     assert "function registerAntiCollisionVisualObject(object, itemOrRole)" in html
     assert 'role === "sidetrack_relative_cone"' in html
     assert 'role === "sidetrack_relative_cone_tip"' in html
+    assert 'return "sidetrack_relative_cones";' in html
     assert 'role === "overlap" || role === "overlap_volume"' in html
     assert 'role === "conflict_segment" || role === "conflict_hover"' in html
     assert "function antiCollisionLayerForItem(itemOrRole)" in html
@@ -42,7 +44,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "white-space: normal;" in html
     assert "transform: translate(8px, -50%);" in html
     assert "contain: layout paint;" in html
-    assert 'labelRole === "well_label" || labelRole === "pilot_point_label"' in html
+    assert 'labelRole === "well_label" ||' in html
+    assert 'labelRole === "pilot_point_label" ||' in html
+    assert 'labelRole === "reference_label"' in html
     assert 'role === "target_label" || role === "control_point_label"' in html
     assert "font-size: 10px;" in html
     assert ".axes-gizmo-line" in html
@@ -56,7 +60,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "controls.screenSpacePanning = true;" in html
     assert "function updateLabels()" in html
     assert "offsetY: Number((options && options.offsetY) || 0)" in html
-    assert 'role === "well_label" || role === "pilot_point_label"' in html
+    assert 'role === "well_label" ||' in html
+    assert 'role === "pilot_point_label" ||' in html
+    assert 'role === "reference_label"' in html
     assert 'role === "reference_pad_label"' in html
     assert "item.offsetY" in html
     assert "renderer.domElement.getBoundingClientRect()" in html
@@ -114,6 +120,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "data-edit-well-index" in html
     assert "function selectEditWell(index, options)" in html
     assert "function sendEditTargetsToStreamlit(changes)" in html
+    assert "font-size: 15px;" in html
+    assert "const originalMesh = new THREE.Mesh(handleGeometry, originalMat);" in html
+    assert "originalMesh.position.copy(displayPoint(point));" in html
+    assert "h.originalMesh.visible =" in html
+    assert "material.depthTest = applies && selectedWellDirty ? false : item.depthTest;" in html
     assert 'id="edit-toolbox"' in html
     assert "editToolbox.classList.toggle" in html
     assert "function initEditToolboxDrag()" in html
@@ -152,8 +163,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "editWellHasExplicitPoints(wellIndex)" in html
     assert "editWellHasComplexExplicitPoints(wellIndex)" in html
     assert "editWellUsesSidetrackWindowPreview(wellIndex)" in html
+    assert "function editWellSupportsRotation(wellIndex)" in html
     assert "sidetrackWindowEntryForWell(wellIndex)" in html
-    assert "!editWellHasComplexExplicitPoints(selectedEditWellIndex)" in html
+    assert "editWellSupportsRotation(selectedEditWellIndex)" in html
+    assert "!editWellSupportsRotation(selectedEditWellIndex)" in html
     assert "const targetPoints = pointEntries.filter" in html
     assert "change.points = targetPoints.map" in html
     assert 'editDragMoveScope === "pair"' in html
@@ -322,6 +335,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "depthWrite: !isConeTip && !isConflictSegment" in html
     assert "wireframe.renderOrder = mesh.renderOrder + 0.05" in html
     assert 'role === "cone" || role === "sidetrack_relative_cone"' in html
+    assert 'sidetrack_relative_cones: []' in html
     assert "Math.min(opacity, 0.10)" in html
     assert "opacity: 0.07" in html
     assert 'x: "#16A34A"' in html

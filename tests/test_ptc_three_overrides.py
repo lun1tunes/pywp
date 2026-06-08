@@ -352,6 +352,59 @@ def test_anticollision_arrow_uses_record_wellhead_for_sidetrack_surface() -> Non
     ]
 
 
+def test_anticollision_zbs_targets_do_not_render_pad_first_surface_arrow() -> None:
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=604606.04, y=7408871.93, z=3791.81, md=1.0),
+            WelltrackPoint(x=603829.49, y=7408056.91, z=3791.0, md=2.0),
+        ),
+    )
+    stations = pd.DataFrame(
+        {
+            "MD_m": [2608.62, 2700.0],
+            "X_m": [604800.0, 604606.04],
+            "Y_m": [7409000.0, 7408871.93],
+            "Z_m": [2600.0, 3791.81],
+        }
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            AntiCollisionWell(
+                name="9010_ZBS",
+                color="#22c55e",
+                overlay=SimpleNamespace(),
+                samples=(),
+                stations=stations,
+                surface=Point3D(x=604800.0, y=7409000.0, z=2600.0),
+                t1=Point3D(x=604606.04, y=7408871.93, z=3791.81),
+                t3=Point3D(x=603829.49, y=7408056.91, z=3791.0),
+                md_t1_m=2700.0,
+                md_t3_m=3100.0,
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    overrides = ptc_three_overrides.anticollision_three_payload_overrides(
+        {},
+        records=[zbs_record],
+        analysis=analysis,
+    )
+
+    assert [
+        item
+        for item in list(overrides["extra_meshes"])
+        if str(item.get("role")) == "pad_first_surface_arrow"
+    ] == []
+
+
 def test_first_surface_arrow_mesh_spans_first_to_seventh_surface() -> None:
     arrow = ptc_three_overrides._pad_first_surface_arrow_payload(
         surface=Point3D(x=0.0, y=0.0, z=0.0),

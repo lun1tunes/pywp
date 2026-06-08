@@ -100,11 +100,11 @@ def render_trajectory_dls_panel(
     pilot_stations: pd.DataFrame | None = None,
     pilot_study_points: tuple[Point3D, ...] = (),
     render_3d_override: Callable[[object, dict[str, object]], None] | None = None,
+    show_plotly_chart: bool = True,
 ) -> None:
     def _render_body() -> None:
         if title:
             st.markdown(f"### {title}")
-        row1_col1, row1_col2 = st.columns(2, gap="medium")
         payload = single_well_three_payload(
             stations,
             well_name=well_name,
@@ -122,19 +122,25 @@ def render_trajectory_dls_panel(
             pilot_stations=pilot_stations,
             pilot_study_points=pilot_study_points,
         )
-        if render_3d_override is not None:
-            render_3d_override(row1_col1, payload)
+        plotly_container = None
+        if show_plotly_chart:
+            three_container, plotly_container = st.columns(2, gap="medium")
         else:
-            with row1_col1:
+            three_container = st.container()
+        if render_3d_override is not None:
+            render_3d_override(three_container, payload)
+        else:
+            with three_container:
                 render_local_three_scene(
                     payload,
                     height=560,
                     key=f"single-well-3d-{str(well_name or 'trajectory')}",
                 )
-        row1_col2.plotly_chart(
-            dls_figure(stations, dls_limits=dls_limits),
-            width="stretch",
-        )
+        if plotly_container is not None:
+            plotly_container.plotly_chart(
+                dls_figure(stations, dls_limits=dls_limits),
+                width="stretch",
+            )
 
     if border:
         with st.container(border=True):
@@ -160,8 +166,11 @@ def render_plan_section_panel(
     pilot_name: str | None = None,
     pilot_stations: pd.DataFrame | None = None,
     pilot_study_points: tuple[Point3D, ...] = (),
+    show_plotly_charts: bool = True,
 ) -> None:
     def _render_body() -> None:
+        if not show_plotly_charts:
+            return
         if title:
             st.markdown(f"### {title}")
         row2_col1, row2_col2 = st.columns(2, gap="medium")

@@ -534,6 +534,10 @@
         white-space: normal;
       }
 
+      .scene-label.reference-well-label {
+        font-size: 10px;
+      }
+
       .scene-axis-label {
         font-size: 11px;
         font-weight: 700;
@@ -920,7 +924,7 @@
         border-radius: 12px;
         box-shadow: 0 9px 24px rgba(15,23,42,0.12);
         padding: 15px 21px 36px;
-        font-size: 16.5px;
+        font-size: 15px;
         line-height: 1.45;
         color: #475569;
         pointer-events: auto;
@@ -1230,6 +1234,10 @@
               <span>Конусы неопределенности</span>
             </label>
             <label class="anti-collision-option">
+              <input type="checkbox" data-ac-layer="sidetrack_relative_cones" />
+              <span>Относительные конуса боковых стволов</span>
+            </label>
+            <label class="anti-collision-option">
               <input type="checkbox" data-ac-layer="overlaps" checked />
               <span>Зоны пересечений</span>
             </label>
@@ -1466,19 +1474,46 @@
         const editableBaseMaterials = [];
         const antiCollisionVisualObjects = {
           cones: [],
+          sidetrack_relative_cones: [],
           overlaps: [],
           segments: [],
         };
         const miniMapHiddenContourObjects = [];
         const antiCollisionLayerLabels = {
           cones: "Конусы неопределенности",
+          sidetrack_relative_cones: "Относительные конуса боковых стволов",
           overlaps: "Зоны пересечений",
           segments: "Конфликтные участки ствола",
         };
+        const payloadAntiCollisionLayerState =
+          payload.anti_collision_layer_state &&
+          typeof payload.anti_collision_layer_state === "object"
+            ? payload.anti_collision_layer_state
+            : {};
         const antiCollisionLayerState = {
-          cones: true,
-          overlaps: true,
-          segments: true,
+          cones: Boolean(
+            Object.prototype.hasOwnProperty.call(payloadAntiCollisionLayerState, "cones")
+              ? payloadAntiCollisionLayerState.cones
+              : true,
+          ),
+          sidetrack_relative_cones: Boolean(
+            Object.prototype.hasOwnProperty.call(
+              payloadAntiCollisionLayerState,
+              "sidetrack_relative_cones",
+            )
+              ? payloadAntiCollisionLayerState.sidetrack_relative_cones
+              : false,
+          ),
+          overlaps: Boolean(
+            Object.prototype.hasOwnProperty.call(payloadAntiCollisionLayerState, "overlaps")
+              ? payloadAntiCollisionLayerState.overlaps
+              : true,
+          ),
+          segments: Boolean(
+            Object.prototype.hasOwnProperty.call(payloadAntiCollisionLayerState, "segments")
+              ? payloadAntiCollisionLayerState.segments
+              : true,
+          ),
         };
 
         const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
@@ -1588,6 +1623,7 @@
               ? Number(material.opacity)
               : 1.0,
             transparent: Boolean(material.transparent),
+            depthTest: Boolean(material.depthTest),
             depthWrite: Boolean(material.depthWrite),
           });
         }
@@ -1597,6 +1633,9 @@
           const selectedColorKey = String((selectedWell && selectedWell.color) || "")
             .trim()
             .toLowerCase();
+          const selectedWellDirty = Boolean(
+            Number.isInteger(selectedWellIndex) && editDirtyFlags[selectedWellIndex]
+          );
           editableBaseMaterials.forEach((item) => {
             const material = item.material;
             const baseOpacity = Number.isFinite(Number(item.opacity))
@@ -1613,7 +1652,10 @@
                 )
               );
             material.transparent = applies || item.transparent || baseOpacity < 0.999;
-            material.opacity = applies ? Math.min(baseOpacity, 0.18) : baseOpacity;
+            material.opacity = applies
+              ? Math.min(baseOpacity, selectedWellDirty ? 0.36 : 0.18)
+              : baseOpacity;
+            material.depthTest = applies && selectedWellDirty ? false : item.depthTest;
             material.depthWrite = applies ? false : item.depthWrite;
             material.needsUpdate = true;
           });
@@ -1621,13 +1663,14 @@
 
         function antiCollisionLayerForRole(roleValue) {
           const role = String(roleValue || "");
+          if (role === "cone" || role === "cone_tip") {
+            return "cones";
+          }
           if (
-            role === "cone" ||
-            role === "cone_tip" ||
             role === "sidetrack_relative_cone" ||
             role === "sidetrack_relative_cone_tip"
           ) {
-            return "cones";
+            return "sidetrack_relative_cones";
           }
           if (role === "overlap" || role === "overlap_volume") {
             return "overlaps";
@@ -1728,6 +1771,14 @@
             .forEach((input) => {
               const layer = String(input.getAttribute("data-ac-layer") || "");
               if (!Object.prototype.hasOwnProperty.call(antiCollisionLayerState, layer)) {
+                return;
+              }
+              const option = input.closest(".anti-collision-option");
+              const hasObjects = (antiCollisionVisualObjects[layer] || []).length > 0;
+              if (option) {
+                option.style.display = hasObjects ? "" : "none";
+              }
+              if (!hasObjects) {
                 return;
               }
               input.checked = Boolean(antiCollisionLayerState[layer]);
@@ -2136,13 +2187,20 @@
 
         function addSceneLabel(text, position, color, extraClassName, options) {
           const labelRole = String((options && options.role) || "label");
-          const roleClassName =
-            labelRole === "well_label" || labelRole === "pilot_point_label"
-              ? "well-name-label"
-              : "";
+          const roleClassNames = [];
+          if (
+            labelRole === "well_label" ||
+            labelRole === "pilot_point_label" ||
+            labelRole === "reference_label"
+          ) {
+            roleClassNames.push("well-name-label");
+          }
+          if (labelRole === "reference_label") {
+            roleClassNames.push("reference-well-label");
+          }
           const element = document.createElement("div");
           element.className =
-            `scene-label ${roleClassName} ${String(extraClassName || "").trim()}`.trim();
+            `scene-label ${roleClassNames.join(" ")} ${String(extraClassName || "").trim()}`.trim();
           element.textContent = String(text || "");
           element.style.color = String(color || "#0f172a");
           labelLayerElement.appendChild(element);
@@ -3537,12 +3595,12 @@
           const role = String(item.role || "label");
           const position = displayPoint(item.position || [0, 0, 0]);
           const offsetY =
-            role === "well_label" || role === "pilot_point_label"
+            role === "well_label" ||
+            role === "pilot_point_label" ||
+            role === "reference_label"
               ? 14
               : role === "reference_pad_label"
               ? 12
-              : role === "reference_label"
-              ? 10
               : role === "target_label" || role === "control_point_label"
               ? 10
               : 0;
@@ -4044,7 +4102,7 @@
         let editPlane = "xy"; // "xy" | "z"
         let editMoveScope = "point"; // "point" | "pair"
         let editTransformMode = "move"; // "move" | "rotate"
-        const editHandles = []; // {mesh, pickMesh, previewMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
+        const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
@@ -4285,6 +4343,14 @@
           return !editWellUsesSidetrackWindowPreview(wellIndex);
         }
 
+        function editWellSupportsRotation(wellIndex) {
+          return (
+            Number.isInteger(wellIndex) &&
+            !sidetrackWindowEntryForWell(wellIndex) &&
+            !editWellHasComplexExplicitPoints(wellIndex)
+          );
+        }
+
         function cloneEditState(wellIndex) {
           return {
             points: copyEditPointEntries(editCurrentPoints[wellIndex]),
@@ -4390,7 +4456,7 @@
             editMoveScope === "pair" &&
             editTransformMode === "rotate" &&
             Number.isInteger(selectedEditWellIndex) &&
-            !editWellHasComplexExplicitPoints(selectedEditWellIndex)
+            editWellSupportsRotation(selectedEditWellIndex)
           );
         }
 
@@ -4943,8 +5009,8 @@
             ? selectedEditWellIndex
             : null;
           const hasSelection = selectedIndex !== null;
-          const selectedHasComplexExplicitPoints =
-            hasSelection && editWellHasComplexExplicitPoints(selectedIndex);
+          const selectedSupportsRotation =
+            hasSelection && editWellSupportsRotation(selectedIndex);
           editUndoBtn.disabled =
             !editModeActive ||
             !hasSelection ||
@@ -4970,7 +5036,7 @@
               !editModeActive ||
               !hasSelection ||
               (btn.dataset.operation === "rotate" &&
-                (editMoveScope !== "pair" || selectedHasComplexExplicitPoints));
+                (editMoveScope !== "pair" || !selectedSupportsRotation));
           });
         }
 
@@ -5100,6 +5166,18 @@
               previewMesh.visible = false;
               previewMesh.renderOrder = 8;
               scene.add(previewMesh);
+              const originalMat = new THREE.MeshBasicMaterial({
+                color: "#ffffff",
+                transparent: true,
+                opacity: 0.82,
+                depthTest: false,
+                depthWrite: false,
+              });
+              const originalMesh = new THREE.Mesh(handleGeometry, originalMat);
+              originalMesh.position.copy(displayPoint(point));
+              originalMesh.visible = false;
+              originalMesh.renderOrder = 12;
+              scene.add(originalMesh);
               const pickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
               pickMesh.position.copy(pointMesh.position);
               pickMesh.visible = false;
@@ -5109,6 +5187,7 @@
                 mesh: pointMesh,
                 pickMesh: pickMesh,
                 previewMesh: previewMesh,
+                originalMesh: originalMesh,
                 wellIndex: idx,
                 pointType: pointLabel,
                 pointRole: pointRole,
@@ -5177,6 +5256,11 @@
             }
             if (h.previewMesh) {
               h.previewMesh.scale.setScalar(editHandleScale(displayPosition, 10.0));
+            }
+            if (h.originalMesh) {
+              h.originalMesh.scale.setScalar(
+                editHandleScale(h.originalMesh.position, 11.0)
+              );
             }
           });
         }
@@ -5260,6 +5344,13 @@
                 Boolean(editDirtyFlags[h.wellIndex]) &&
                 handleDeltaLength(h) > EDIT_DELTA_EPS_M;
             }
+            if (h.originalMesh) {
+              h.originalMesh.visible =
+                editModeActive &&
+                visible &&
+                Boolean(editDirtyFlags[h.wellIndex]) &&
+                handleDeltaLength(h) > EDIT_DELTA_EPS_M;
+            }
           });
           setEditableBaseDimmed(editModeActive, selectedIndex);
           editLineObjects.forEach((lineObject, index) => {
@@ -5287,7 +5378,7 @@
           }
           selectedEditWellIndex = nextIndex;
           if (
-            editWellHasComplexExplicitPoints(nextIndex) &&
+            !editWellSupportsRotation(nextIndex) &&
             editTransformMode === "rotate"
           ) {
             setEditTransformMode("move");
@@ -5368,7 +5459,7 @@
             operation === "rotate" &&
             (editMoveScope !== "pair" ||
               (Number.isInteger(selectedEditWellIndex) &&
-                editWellHasComplexExplicitPoints(selectedEditWellIndex)))
+                !editWellSupportsRotation(selectedEditWellIndex)))
           ) {
             return;
           }

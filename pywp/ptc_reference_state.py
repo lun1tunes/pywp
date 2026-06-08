@@ -17,6 +17,7 @@ from pywp.reference_trajectories import (
 __all__ = [
     "clear_reference_dev_folder_state",
     "clear_reference_import_state",
+    "clear_reference_welltrack_path_state",
     "init_reference_state_defaults",
     "reference_dev_folder_count_key",
     "reference_dev_folder_path_key",
@@ -27,6 +28,9 @@ __all__ = [
     "reference_source_text_key",
     "reference_wells_from_state",
     "reference_wells_state_key",
+    "reference_welltrack_path_count_key",
+    "reference_welltrack_path_entry_key",
+    "reference_welltrack_paths",
     "reference_welltrack_path_key",
     "set_reference_wells_for_kind",
 ]
@@ -46,6 +50,29 @@ def reference_source_text_key(kind: str) -> str:
 
 def reference_welltrack_path_key(kind: str) -> str:
     return f"wt_reference_{str(kind)}_welltrack_path"
+
+
+def reference_welltrack_path_count_key(kind: str) -> str:
+    return f"wt_reference_{str(kind)}_welltrack_path_count"
+
+
+def reference_welltrack_path_entry_key(kind: str, index: int) -> str:
+    if int(index) <= 0:
+        return reference_welltrack_path_key(kind)
+    return f"wt_reference_{str(kind)}_welltrack_path_{int(index)}"
+
+
+def reference_welltrack_paths(kind: str) -> tuple[str, ...]:
+    path_count = _welltrack_path_count(kind)
+    return tuple(
+        str(
+            st.session_state.get(
+                reference_welltrack_path_entry_key(kind, index),
+                "",
+            )
+        ).strip()
+        for index in range(path_count)
+    )
 
 
 def reference_dev_folder_count_key(kind: str) -> str:
@@ -72,6 +99,12 @@ def clear_reference_dev_folder_state(kind: str) -> None:
     st.session_state[reference_dev_folder_count_key(kind)] = 1
 
 
+def clear_reference_welltrack_path_state(kind: str) -> None:
+    for index in range(_welltrack_path_count(kind)):
+        st.session_state[reference_welltrack_path_entry_key(kind, index)] = ""
+    st.session_state[reference_welltrack_path_count_key(kind)] = 1
+
+
 def clear_reference_import_state(
     kind: str,
     *,
@@ -82,7 +115,7 @@ def clear_reference_import_state(
         st.session_state[ACTUAL_REFERENCE_MWD_UNKNOWN_NAMES_KEY] = []
         st.session_state[ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY] = []
     st.session_state[reference_source_text_key(kind)] = ""
-    st.session_state[reference_welltrack_path_key(kind)] = ""
+    clear_reference_welltrack_path_state(kind)
     clear_reference_dev_folder_state(kind)
     if on_clear is not None:
         on_clear()
@@ -165,6 +198,7 @@ def init_reference_state_defaults() -> None:
         st.session_state.setdefault(reference_source_mode_key(kind), "Загрузить .dev")
         st.session_state.setdefault(reference_source_text_key(kind), "")
         st.session_state.setdefault(reference_welltrack_path_key(kind), "")
+        st.session_state.setdefault(reference_welltrack_path_count_key(kind), 1)
         st.session_state.setdefault(reference_dev_folder_count_key(kind), 1)
         st.session_state.setdefault(reference_dev_folder_path_key(kind, 0), "")
     st.session_state.setdefault("wt_reference_wells", ())
@@ -179,3 +213,14 @@ def _folder_count(kind: str) -> int:
     folder_count = max(1, folder_count)
     st.session_state[count_key] = folder_count
     return folder_count
+
+
+def _welltrack_path_count(kind: str) -> int:
+    count_key = reference_welltrack_path_count_key(kind)
+    try:
+        path_count = int(st.session_state.get(count_key, 1))
+    except (TypeError, ValueError):
+        path_count = 1
+    path_count = max(1, path_count)
+    st.session_state[count_key] = path_count
+    return path_count

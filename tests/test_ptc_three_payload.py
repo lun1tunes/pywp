@@ -127,6 +127,45 @@ def test_optimize_three_payload_preserves_zero_opacity() -> None:
     assert optimized["meshes"][0]["opacity"] == 0.0
 
 
+def test_optimize_three_payload_reserves_slots_for_reference_labels() -> None:
+    regular_labels = [
+        {
+            "text": f"WELL-{index}",
+            "position": [float(index), 0.0, 0.0],
+            "color": "#111111",
+            "role": "well_label",
+        }
+        for index in range(ptc_three_payload.WT_THREE_MAX_LABELS + 10)
+    ]
+    reference_labels = [
+        {
+            "text": "FACT-1",
+            "position": [1000.0, 0.0, 0.0],
+            "color": "#374151",
+            "role": "reference_label",
+        },
+        {
+            "text": "APP-1",
+            "position": [1100.0, 0.0, 0.0],
+            "color": "#F87171",
+            "role": "reference_label",
+        },
+    ]
+    payload = {
+        "lines": [],
+        "points": [],
+        "meshes": [],
+        "labels": [*regular_labels, *reference_labels],
+        "legend": [],
+    }
+
+    optimized = ptc_three_payload.optimize_three_payload(payload)
+
+    assert len(optimized["labels"]) == ptc_three_payload.WT_THREE_MAX_LABELS
+    label_texts = {str(item.get("text")) for item in optimized["labels"]}
+    assert {"FACT-1", "APP-1"}.issubset(label_texts)
+
+
 def test_optimize_three_payload_keeps_named_wells_separate() -> None:
     payload = {
         "lines": [
@@ -489,6 +528,149 @@ def test_anticollision_three_payload_can_show_pad_position_in_well_label() -> No
     )
 
 
+def test_anticollision_three_payload_labels_reference_wells_in_fast_mode() -> None:
+    calc_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "X_m": [0.0, 1000.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 1000.0],
+            "DLS_deg_per_30m": [0.0, 0.0],
+        }
+    )
+    actual_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1200.0],
+            "X_m": [100.0, 1800.0],
+            "Y_m": [25.0, 25.0],
+            "Z_m": [0.0, 420.0],
+        }
+    )
+    approved_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1100.0],
+            "X_m": [150.0, 1700.0],
+            "Y_m": [-35.0, -35.0],
+            "Z_m": [0.0, 360.0],
+        }
+    )
+    analysis = SimpleNamespace(
+        wells=(
+            SimpleNamespace(
+                name="well_01",
+                color="#22C55E",
+                overlay=SimpleNamespace(samples=()),
+                stations=calc_stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(300.0, 0.0, 300.0),
+                t3=Point3D(1000.0, 0.0, 1000.0),
+                md_t1_m=300.0,
+                is_reference_only=False,
+                target_pairs=(),
+            ),
+            SimpleNamespace(
+                name="FACT-1",
+                well_kind=REFERENCE_WELL_ACTUAL,
+                color="#6B7280",
+                overlay=SimpleNamespace(samples=()),
+                stations=actual_stations,
+                surface=Point3D(100.0, 25.0, 0.0),
+                t1=None,
+                t3=None,
+                is_reference_only=True,
+            ),
+            SimpleNamespace(
+                name="APP-1",
+                well_kind=REFERENCE_WELL_APPROVED,
+                color="#C62828",
+                overlay=SimpleNamespace(samples=()),
+                stations=approved_stations,
+                surface=Point3D(150.0, -35.0, 0.0),
+                t1=None,
+                t3=None,
+                is_reference_only=True,
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+    )
+
+    payload = anticollision_three_payload(analysis)
+
+    reference_labels = {
+        str(item.get("text")): item
+        for item in payload["labels"]
+        if str(item.get("role")) == "reference_label"
+    }
+    assert reference_labels["FACT-1"]["position"] == [1800.0, 25.0, 420.0]
+    assert reference_labels["FACT-1"]["color"] == "#374151"
+    assert reference_labels["APP-1"]["position"] == [1700.0, -35.0, 360.0]
+    assert reference_labels["APP-1"]["color"] == "#F87171"
+
+
+def test_anticollision_three_payload_does_not_label_display_only_reference_wells_fast() -> None:
+    calc_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "X_m": [0.0, 1000.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 1000.0],
+            "DLS_deg_per_30m": [0.0, 0.0],
+        }
+    )
+    display_only_reference = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "FACT-FAR",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 5000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "FACT-FAR",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 6000.0,
+                "Y": 0.0,
+                "Z": 500.0,
+                "MD": 1200.0,
+            },
+        ]
+    )
+    analysis = SimpleNamespace(
+        wells=(
+            SimpleNamespace(
+                name="well_01",
+                color="#22C55E",
+                overlay=SimpleNamespace(samples=()),
+                stations=calc_stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(300.0, 0.0, 300.0),
+                t3=Point3D(1000.0, 0.0, 1000.0),
+                md_t1_m=300.0,
+                is_reference_only=False,
+                target_pairs=(),
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+    )
+
+    payload = anticollision_three_payload(
+        analysis,
+        reference_wells=tuple(display_only_reference),
+    )
+
+    assert not any(
+        str(item.get("text")) == "FACT-FAR"
+        and str(item.get("role")) == "reference_label"
+        for item in payload["labels"]
+    )
+
+
 def _sidetrack_parent_payload_analysis():
     stations = pd.DataFrame(
         {
@@ -557,15 +739,17 @@ def _sidetrack_parent_payload_analysis():
     )
 
 
-def test_anticollision_three_payload_hides_sidetrack_relative_cones_by_default() -> None:
+def test_anticollision_three_payload_includes_sidetrack_relative_cones_with_hidden_default() -> None:
     payload = anticollision_three_payload(_sidetrack_parent_payload_analysis())
 
-    assert {
-        str(item.get("role")) for item in payload["meshes"]
-    }.isdisjoint({"sidetrack_relative_cone"})
+    assert any(
+        str(item.get("role")) == "sidetrack_relative_cone"
+        for item in payload["meshes"]
+    )
+    assert payload["anti_collision_layer_state"]["sidetrack_relative_cones"] is False
 
 
-def test_anticollision_three_payload_can_show_sidetrack_relative_cones() -> None:
+def test_anticollision_three_payload_can_enable_sidetrack_relative_cones_layer() -> None:
     payload = anticollision_three_payload(
         _sidetrack_parent_payload_analysis(),
         show_sidetrack_relative_cones=True,
@@ -583,6 +767,7 @@ def test_anticollision_three_payload_can_show_sidetrack_relative_cones() -> None
         str(item.get("label")) == "Относительные конуса боковых стволов"
         for item in payload["legend"]
     )
+    assert payload["anti_collision_layer_state"]["sidetrack_relative_cones"] is True
 
 
 def test_all_wells_three_payload_places_reference_labels_at_well_end() -> None:
@@ -639,6 +824,87 @@ def test_all_wells_three_payload_places_reference_labels_at_well_end() -> None:
 
     assert reference_labels["FACT-1"] == [1800.0, 25.0, 400.0]
     assert reference_labels["APP-1"] == [1700.0, -35.0, 320.0]
+
+
+def test_all_wells_three_payload_highlights_actual_sidetrack_parent_in_fast_mode() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "INC_deg": [90.0, 90.0, 90.0, 90.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0],
+            "X_m": [1000.0, 1200.0, 1600.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    zbs = SuccessfulWellPlan(
+        name="9010_ZBS",
+        surface=Point3D(1000.0, 0.0, 0.0),
+        t1=Point3D(1200.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=stations,
+        summary={
+            "trajectory_type": "FACT_SIDETRACK",
+            "actual_parent_well_name": "9010",
+            "sidetrack_parent_well_name": "9010",
+            "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+            "sidetrack_window_md_m": 1000.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1200.0,
+        config=TrajectoryConfig(),
+    )
+    parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 1000.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 2000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 2000.0,
+            },
+        ],
+        default_kind=REFERENCE_WELL_ACTUAL,
+    )[0]
+
+    payload = all_wells_three_payload(
+        [zbs],
+        reference_wells=(parent,),
+        render_mode="Быстро",
+    )
+
+    reference_labels = {
+        str(item.get("text")): list(item.get("position") or [])
+        for item in payload["labels"]
+        if str(item.get("role")) == "reference_label"
+    }
+    hover_names = {
+        str(hover.get("name"))
+        for item in payload["points"]
+        if str(item.get("role")) == "reference_hover"
+        for hover in list(item.get("hover") or [])
+    }
+
+    assert reference_labels["9010"] == [2000.0, 0.0, 0.0]
+    assert "9010" in hover_names
 
 
 def test_all_wells_three_payload_can_show_pad_position_in_well_label() -> None:

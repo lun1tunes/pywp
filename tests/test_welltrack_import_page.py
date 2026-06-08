@@ -724,6 +724,210 @@ def test_welltrack_page_renders_t1_t3_order_actions_for_conflicting_wells() -> N
     assert "Оставить все точки без изменений" in button_labels
 
 
+def test_welltrack_page_renders_and_fixes_zbs_t1_t3_order_from_parent() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1600.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=1100.0, y=0.0, z=2501.0, md=2.0),
+        ),
+    )
+    actual_parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+        ]
+    )[0]
+    at.session_state["wt_records"] = [zbs_record]
+    at.session_state["wt_records_original"] = [zbs_record]
+    at.session_state["wt_reference_actual_wells"] = [actual_parent]
+    at.session_state["wt_reference_wells"] = [actual_parent]
+
+    at.run(timeout=120)
+
+    assert any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+    assert any(
+        "Подцепили фактическую скважину для бокового ствола" in str(widget.value)
+        for widget in at.info
+    )
+    assert any(
+        "После подцепления фактической скважины проверьте порядок целей" in str(widget.value)
+        for widget in at.warning
+    )
+    assert any("`9010_ZBS`" in str(widget.value) for widget in at.markdown)
+    assert any("родитель→" in str(widget.value) for widget in at.markdown)
+    assert any(
+        "#wt-t1-t3-order-panel" in str(widget.value) for widget in at.markdown
+    )
+
+    _click_button(at, "Исправить порядок для выбранных скважин")
+    at.run(timeout=120)
+
+    fixed = at.session_state["wt_records"][0]
+    assert [point.md for point in fixed.points] == pytest.approx([1.0, 2.0])
+    assert [point.x for point in fixed.points] == pytest.approx([1100.0, 1600.0])
+
+
+def test_t1_t3_order_anchor_skips_reference_scan_without_zbs(monkeypatch) -> None:
+    page = wt_import_module
+    monkeypatch.setattr(
+        page,
+        "_reference_wells_from_state",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected reference scan")),
+    )
+
+    assert page._t1_t3_order_anchor_by_well_name(_bad_order_records()) == {}
+
+
+def test_t1_t3_order_anchor_uses_nearest_parent_point_for_zbs(monkeypatch) -> None:
+    page = wt_import_module
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=900.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+    actual_parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+        ]
+    )[0]
+    monkeypatch.setattr(page, "_reference_wells_from_state", lambda: (actual_parent,))
+
+    anchors = page._t1_t3_order_anchor_by_well_name([zbs_record])
+
+    assert anchors["9010_ZBS"].x == pytest.approx(1000.0)
+    assert anchors["9010_ZBS"].z == pytest.approx(2500.0)
+
+
+def test_t1_t3_order_anchor_prefers_actual_parent_over_approved_duplicate(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=900.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+    actual_parent, approved_parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "approved",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "approved",
+                "X": 5000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        page,
+        "_reference_wells_from_state",
+        lambda: (actual_parent, approved_parent),
+    )
+
+    anchors = page._t1_t3_order_anchor_by_well_name([zbs_record])
+
+    assert anchors["9010_ZBS"].x == pytest.approx(1000.0)
+
+
+def test_t1_t3_order_anchor_supports_multi_horizontal_zbs(monkeypatch) -> None:
+    page = wt_import_module
+    zbs_record = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=900.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=2.0),
+            WelltrackPoint(x=1300.0, y=50.0, z=2520.0, md=3.0),
+            WelltrackPoint(x=1700.0, y=50.0, z=2520.0, md=4.0),
+        ),
+    )
+    actual_parent = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "9010",
+                "Type": "actual",
+                "X": 1000.0,
+                "Y": 0.0,
+                "Z": 2500.0,
+                "MD": 2500.0,
+            },
+        ]
+    )[0]
+    monkeypatch.setattr(page, "_reference_wells_from_state", lambda: (actual_parent,))
+
+    anchors = page._t1_t3_order_anchor_by_well_name([zbs_record])
+
+    assert anchors["9010_ZBS"].x == pytest.approx(1000.0)
+    assert anchors["9010_ZBS"].z == pytest.approx(2500.0)
+
+
 def test_welltrack_page_initial_crs_selectbox_has_no_session_state_default_warning() -> (
     None
 ):
@@ -746,6 +950,19 @@ def test_welltrack_page_defaults_csv_crs_to_wgs84_utm43() -> None:
     select_values = {str(widget.label): widget.value for widget in at.selectbox}
     assert select_values["Входная CRS"] == "ГК_13N_42"
     assert select_values["CRS CSV-выгрузки"] == "WGS84 UTM 43N"
+
+
+def test_welltrack_page_limits_csv_crs_options() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+
+    at.run(timeout=120)
+
+    selectboxes_by_label = {str(widget.label): widget for widget in at.selectbox}
+    assert list(selectboxes_by_label["CRS CSV-выгрузки"].options) == [
+        "ГК_13N_42",
+        "WGS84 UTM 43N",
+        "WGS84 (градусы)",
+    ]
 
 
 def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None:
@@ -1559,6 +1776,70 @@ def test_reference_trajectory_welltrack_path_import_populates_reference_wells_st
     assert str(approved_wells[0].name) == "APP-1"
 
 
+def test_reference_trajectory_welltrack_path_import_supports_multiple_paths_and_folder(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    direct_file = tmp_path / "actual_direct.inc"
+    direct_file.write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'FACT-DIRECT'",
+                "0 0 20 0",
+                "900 800 20 250",
+                "1800 1600 20 350",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    folder = tmp_path / "actual_folder"
+    folder.mkdir()
+    (folder / "actual_02.InC").write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'FACT-FOLDER-A'",
+                "0 0 30 0",
+                "850 780 30 240",
+                "1700 1560 30 340",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (folder / "actual_03.INC").write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'FACT-FOLDER-B'",
+                "0 0 40 0",
+                "870 790 40 245",
+                "1740 1580 40 345",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (folder / "ignore_me.txt").write_text("skip", encoding="utf-8")
+    at.session_state["ptc_reference_source_mode::actual"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_actual_welltrack_path_count"] = 2
+    at.session_state["wt_reference_actual_welltrack_path"] = str(direct_file)
+    at.session_state["wt_reference_actual_welltrack_path_1"] = str(folder)
+
+    at.run(timeout=120)
+    _click_button(at, "Загрузить фактические скважины")
+    at.run(timeout=120)
+
+    actual_wells = tuple(at.session_state["wt_reference_actual_wells"])
+    assert [str(well.name) for well in actual_wells] == [
+        "FACT-DIRECT",
+        "FACT-FOLDER-A",
+        "FACT-FOLDER-B",
+    ]
+
+
 def test_reference_trajectory_dev_folder_import_is_default_and_uses_file_names(
     tmp_path,
 ) -> None:
@@ -1734,14 +2015,18 @@ def test_reference_welltrack_clear_button_resets_path_without_widget_state_error
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
     at.session_state["ptc_reference_source_mode::actual"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_actual_welltrack_path_count"] = 2
     at.session_state["wt_reference_actual_welltrack_path"] = str(welltrack_path)
+    at.session_state["wt_reference_actual_welltrack_path_1"] = str(tmp_path)
 
     at.run(timeout=120)
     _click_button(at, "Очистить фактические скважины")
     at.run(timeout=120)
 
     assert not at.exception
+    assert int(at.session_state["wt_reference_actual_welltrack_path_count"]) == 1
     assert str(at.session_state["wt_reference_actual_welltrack_path"]) == ""
+    assert str(at.session_state["wt_reference_actual_welltrack_path_1"]) == ""
 
 
 def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> None:
@@ -6406,8 +6691,8 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     label_by_text = {str(item["text"]): item for item in payload_3d["labels"]}
     assert "FACT-1" in label_by_text
     assert "APP-1" in label_by_text
-    assert str(label_by_text["FACT-1"]["color"]) == "#111111"
-    assert str(label_by_text["APP-1"]["color"]) == "#C62828"
+    assert str(label_by_text["FACT-1"]["color"]) == "#374151"
+    assert str(label_by_text["APP-1"]["color"]) == "#F87171"
 
 
 def test_actual_reference_mwd_assignment_defaults_to_poor_and_selects_unknown() -> None:

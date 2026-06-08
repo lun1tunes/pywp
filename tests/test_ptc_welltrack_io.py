@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from pywp.ptc_welltrack_io import decode_welltrack_payload, read_welltrack_file
+from pywp.ptc_welltrack_io import (
+    decode_welltrack_payload,
+    read_welltrack_file,
+    read_welltrack_sources,
+)
 
 
 def test_decode_welltrack_payload_reports_non_utf8_fallback() -> None:
@@ -37,3 +41,28 @@ def test_read_welltrack_file_reports_empty_path() -> None:
 
     assert text == ""
     assert warnings == ["Укажите путь к файлу WELLTRACK."]
+
+
+def test_read_welltrack_sources_accepts_file_and_folder_with_case_insensitive_inc(
+    tmp_path,
+) -> None:
+    direct_file = tmp_path / "direct.inc"
+    direct_file.write_text("WELLTRACK 'DIRECT'\n0 0 0 0\n/\n", encoding="utf-8")
+    folder = tmp_path / "bundle"
+    folder.mkdir()
+    (folder / "a.InC").write_text(
+        "WELLTRACK 'FOLDER-A'\n0 0 0 0\n/\n",
+        encoding="utf-8",
+    )
+    (folder / "b.INC").write_text(
+        "WELLTRACK 'FOLDER-B'\n0 0 0 0\n/\n",
+        encoding="utf-8",
+    )
+    (folder / "skip.txt").write_text("ignore", encoding="utf-8")
+
+    text = read_welltrack_sources([str(direct_file), str(folder)], cwd=tmp_path)
+
+    assert "WELLTRACK 'DIRECT'" in text
+    assert "WELLTRACK 'FOLDER-A'" in text
+    assert "WELLTRACK 'FOLDER-B'" in text
+    assert "skip" not in text

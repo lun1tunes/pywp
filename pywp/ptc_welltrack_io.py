@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from pywp.eclipse_welltrack import decode_welltrack_bytes
 
-__all__ = ["decode_welltrack_payload", "read_welltrack_file"]
+__all__ = [
+    "decode_welltrack_payload",
+    "read_welltrack_file",
+    "read_welltrack_sources",
+]
 
 MessageSink = Callable[[str], object]
 
@@ -69,6 +73,96 @@ def read_welltrack_file(
     except OSError as exc:
         _notify(error, f"Не удалось прочитать файл `{file_path}`: {exc}")
         return ""
+
+
+def read_welltrack_sources(
+    path_texts: Iterable[str],
+    *,
+    cwd: Path | None = None,
+    info: MessageSink | None = None,
+    warning: MessageSink | None = None,
+    error: MessageSink | None = None,
+) -> str:
+    resolved_files = _resolve_welltrack_source_files(
+        path_texts,
+        cwd=cwd,
+        warning=warning,
+        error=error,
+    )
+    if not resolved_files:
+        return ""
+    texts: list[str] = []
+    for file_path in resolved_files:
+        try:
+            text = decode_welltrack_payload(
+                file_path.read_bytes(),
+                source_label=f"Файл `{file_path}`",
+                info=info,
+                warning=warning,
+            )
+        except OSError as exc:
+            _notify(error, f"Не удалось прочитать файл `{file_path}`: {exc}")
+            continue
+        if text.strip():
+            texts.append(text.strip())
+    return "\n\n".join(texts)
+
+
+def _resolve_welltrack_source_files(
+    path_texts: Iterable[str],
+    *,
+    cwd: Path | None = None,
+    warning: MessageSink | None = None,
+    error: MessageSink | None = None,
+) -> list[Path]:
+    resolved_files: list[Path] = []
+    seen_paths: set[Path] = set()
+    for raw_path in path_texts:
+        path_text = str(raw_path or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text).expanduser()
+        if not path.is_absolute():
+            path = ((cwd or Path.cwd()) / path).resolve()
+        if not path.exists():
+            _notify(error, f"Путь не найден: {path}")
+            continue
+        if path.is_dir():
+            try:
+                inc_files = sorted(
+                    (
+                        child.resolve()
+                        for child in path.iterdir()
+                        if child.is_file() and child.suffix.casefold() == ".inc"
+                    ),
+                    key=lambda item: item.name.casefold(),
+                )
+            except OSError as exc:
+                _notify(error, f"Не удалось прочитать папку `{path}`: {exc}")
+                continue
+            if not inc_files:
+                _notify(
+                    warning,
+                    f"В папке `{path}` не найдено WELLTRACK файлов с расширением `.INC`.",
+                )
+                continue
+            for inc_file in inc_files:
+                if inc_file in seen_paths:
+                    continue
+                seen_paths.add(inc_file)
+                resolved_files.append(inc_file)
+            continue
+        if not path.is_file():
+            _notify(error, f"Путь не является файлом или папкой: {path}")
+            continue
+        resolved_path = path.resolve()
+        if resolved_path in seen_paths:
+            continue
+        seen_paths.add(resolved_path)
+        resolved_files.append(resolved_path)
+    if not resolved_files:
+        _notify(warning, "Укажите хотя бы один путь к WELLTRACK файлу или папке.")
+    return resolved_files
 
 
 def _notify(sink: MessageSink | None, message: str) -> None:

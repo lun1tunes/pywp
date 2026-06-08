@@ -2154,15 +2154,16 @@ def _relative_overlay_from_window(
     reference_sample: AntiCollisionSample,
     window_md_m: float,
 ) -> WellUncertaintyOverlay | None:
+    scan_start_md_m = float(window_md_m) + float(SIDETRACK_PARENT_SCAN_SKIP_M)
+    if not well.samples or scan_start_md_m > float(well.samples[-1].md_m) - 1e-6:
+        return None
+    start_sample = _collision_sample_at_md(well, md_m=scan_start_md_m)
     samples = (
-        _relative_sample_from_reference(
-            reference_sample,
-            reference_sample=reference_sample,
-        ),
+        _relative_sample_from_reference(start_sample, reference_sample=reference_sample),
         *(
             _relative_sample_from_reference(sample, reference_sample=reference_sample)
             for sample in well.samples
-            if float(sample.md_m) > float(window_md_m) + 1e-6
+            if float(sample.md_m) > scan_start_md_m + 1e-6
         ),
     )
     if len(samples) < 2:

@@ -15,7 +15,7 @@ from pywp.anticollision import (
 )
 from pywp.constants import SMALL
 from pywp.models import Point3D
-from pywp.pilot_wells import is_pilot_name
+from pywp.pilot_wells import is_pilot_name, well_name_key
 from pywp.plot_axes import equalized_axis_ranges
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp import ptc_three_overrides
@@ -47,8 +47,8 @@ PLAN_CSB_COLOR = "#0B6E4F"
 ACTUAL_PROFILE_COLOR = "#111111"
 TARGET_COLOR_PRIMARY = "#C1121F"
 UNCERTAINTY_SURFACE_COLOR = "#5A5A5A"
-REFERENCE_LABEL_ACTUAL_COLOR = "#111111"
-REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
+REFERENCE_LABEL_ACTUAL_COLOR = "#374151"
+REFERENCE_LABEL_APPROVED_COLOR = "#F87171"
 REFERENCE_PAD_LABEL_COLOR = "#334155"
 REFERENCE_PAD_GROUP_DISTANCE_M = 300.0
 WT_3D_RENDER_FAST = "Быстро"
@@ -345,6 +345,10 @@ def all_wells_three_payload(
     focus_set = _clean_name_set(focus_well_names)
     color_map = dict(name_to_color or {})
     pilot_points_map = dict(pilot_study_points_by_name or {})
+    highlighted_reference_well_names = _overview_highlight_reference_well_names(
+        successes=successes,
+        reference_wells=reference_wells,
+    )
 
     for index, success in enumerate(successes):
         well_name = str(success.name)
@@ -424,6 +428,7 @@ def all_wells_three_payload(
         x_arrays=x_arrays,
         y_arrays=y_arrays,
         z_arrays=z_arrays,
+        highlighted_names=highlighted_reference_well_names,
     )
 
     for target_only in target_only_wells or ():
@@ -511,6 +516,12 @@ def anticollision_three_payload(
     show_sidetrack_relative_cones: bool = False,
 ) -> dict[str, object]:
     payload = _base_payload(title="Anti-collision: 3D конусы неопределенности")
+    payload["anti_collision_layer_state"] = {
+        "cones": True,
+        "overlaps": True,
+        "segments": True,
+        "sidetrack_relative_cones": bool(show_sidetrack_relative_cones),
+    }
     x_arrays: list[np.ndarray] = []
     y_arrays: list[np.ndarray] = []
     z_arrays: list[np.ndarray] = []
@@ -770,19 +781,17 @@ def anticollision_three_payload(
                     stations["Y_m"].to_numpy(dtype=float),
                     stations["Z_m"].to_numpy(dtype=float),
                 )
-    if str(render_mode).strip() != WT_3D_RENDER_FAST:
-        _append_reference_name_labels(payload, analysis_reference_wells)
+    _append_reference_name_labels(payload, analysis_reference_wells)
     _append_reference_pad_labels(payload, analysis_reference_wells)
-    if bool(show_sidetrack_relative_cones):
-        _append_sidetrack_relative_cone_overlays(
-            payload,
-            analysis=analysis,
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-            focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays),
-            focus_set=focus_set,
-        )
+    _append_sidetrack_relative_cone_overlays(
+        payload,
+        analysis=analysis,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+        focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays),
+        focus_set=focus_set,
+    )
 
     for corridor in analysis.corridors:
         overlap_rings = _valid_overlap_rings(corridor.overlap_rings_xyz)
@@ -1352,12 +1361,41 @@ def _append_reference_wells(
     x_arrays: list[np.ndarray],
     y_arrays: list[np.ndarray],
     z_arrays: list[np.ndarray],
+    highlighted_names: frozenset[str] = frozenset(),
 ) -> None:
     reference_tuple = tuple(reference_wells)
     if str(render_mode).strip() == WT_3D_RENDER_FAST:
+        highlighted_reference_wells = tuple(
+            well
+            for well in reference_tuple
+            if well_name_key(getattr(well, "name", "")) in highlighted_names
+        )
+        combined_reference_wells = tuple(
+            well
+            for well in reference_tuple
+            if well_name_key(getattr(well, "name", "")) not in highlighted_names
+        )
+        for reference_well in highlighted_reference_wells:
+            stations = getattr(reference_well, "stations")
+            if stations.empty:
+                continue
+            kind = _reference_kind_value(reference_well)
+            color = REFERENCE_WELL_KIND_COLORS.get(kind, "#A0A0A0")
+            _append_station_line(
+                payload,
+                stations=stations,
+                name=reference_well_display_label(reference_well),
+                color=color,
+                width_role="line",
+                hover_name=_reference_hover_name(reference_well),
+                hover_role="reference_hover",
+                x_arrays=x_arrays,
+                y_arrays=y_arrays,
+                z_arrays=z_arrays,
+            )
         _append_combined_reference_wells(
             payload,
-            reference_wells=reference_tuple,
+            reference_wells=combined_reference_wells,
             x_arrays=x_arrays,
             y_arrays=y_arrays,
             z_arrays=z_arrays,
@@ -1384,7 +1422,43 @@ def _append_reference_wells(
     _append_reference_legend(payload, reference_tuple)
     if str(render_mode).strip() != WT_3D_RENDER_FAST:
         _append_reference_name_labels(payload, reference_tuple)
+    elif highlighted_names:
+        _append_reference_name_labels(
+            payload,
+            [
+                well
+                for well in reference_tuple
+                if well_name_key(getattr(well, "name", "")) in highlighted_names
+            ],
+        )
     _append_reference_pad_labels(payload, reference_tuple)
+
+
+def _overview_highlight_reference_well_names(
+    *,
+    successes: Iterable[SuccessfulWellPlan],
+    reference_wells: Iterable[object],
+) -> frozenset[str]:
+    actual_reference_keys = {
+        well_name_key(getattr(well, "name", ""))
+        for well in reference_wells
+        if _reference_kind_value(well) == REFERENCE_WELL_ACTUAL
+    }
+    highlighted_keys: set[str] = set()
+    for success in successes:
+        summary = dict(getattr(success, "summary", {}) or {})
+        parent_name = str(
+            summary.get("actual_parent_well_name")
+            or summary.get("sidetrack_parent_well_name")
+            or summary.get("pilot_well_name")
+            or ""
+        ).strip()
+        if not parent_name:
+            continue
+        parent_key = well_name_key(parent_name)
+        if parent_key in actual_reference_keys:
+            highlighted_keys.add(parent_key)
+    return frozenset(highlighted_keys)
 
 
 def _append_combined_reference_wells(

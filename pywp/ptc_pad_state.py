@@ -17,6 +17,7 @@ from pywp.well_pad import (
     PAD_WELL_AUTO_ORDER_PROJECTION,
     PAD_WELL_AUTO_ORDER_TARGET_DEPTH_DESC,
     PAD_SURFACE_ANCHOR_CENTER,
+    PAD_SURFACE_ANCHOR_FIRST,
     PadLayoutPlan,
     PadWell,
     WellPad,
@@ -29,6 +30,8 @@ from pywp.well_pad import (
 __all__ = [
     "DEFAULT_PAD_SPACING_M",
     "DEFAULT_PAD_SURFACE_ANCHOR_MODE",
+    "PAD_SURFACE_ANCHOR_CENTER",
+    "PAD_SURFACE_ANCHOR_FIRST",
     "WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M",
     "WT_PAD_FOCUS_ALL",
     "DetectedPadUiMeta",

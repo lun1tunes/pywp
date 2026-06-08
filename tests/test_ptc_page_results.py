@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from pywp import ptc_core
@@ -63,42 +64,6 @@ def test_full_anticollision_recalc_button_does_not_reset_when_not_clicked(
 
     assert ptc_page_results._render_full_anticollision_recalc_button() is False
     assert calls == []
-
-
-def test_sidetrack_relative_cones_checkbox_defaults_to_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str]] = []
-
-    class FakeStreamlit:
-        session_state: dict[str, object] = {}
-
-        def checkbox(self, label: str, *, key: str) -> bool:
-            calls.append((str(label), str(key)))
-            return bool(self.session_state.get(str(key)))
-
-    fake_st = FakeStreamlit()
-    monkeypatch.setattr(ptc_page_results, "st", fake_st)
-
-    assert ptc_page_results._show_sidetrack_relative_cones_checkbox() is False
-    assert fake_st.session_state["wt_show_sidetrack_relative_cones"] is False
-    assert calls == [
-        ("Отображать конуса для боковых стволов", "wt_show_sidetrack_relative_cones")
-    ]
-
-
-def test_sidetrack_relative_cones_checkbox_reads_session_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeStreamlit:
-        session_state: dict[str, object] = {"wt_show_sidetrack_relative_cones": True}
-
-        def checkbox(self, _label: str, *, key: str) -> bool:
-            return bool(self.session_state.get(str(key)))
-
-    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
-
-    assert ptc_page_results._show_sidetrack_relative_cones_checkbox() is True
 
 
 def test_anticollision_panel_requires_explicit_run_before_first_analysis(
@@ -329,9 +294,12 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     target_only = SimpleNamespace(name="WELL-A")
     calls: dict[str, object] = {}
 
-    class FakeColumn:
-        def plotly_chart(self, figure: object, **kwargs: object) -> None:
-            calls["plotly"] = (figure, kwargs)
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
     class FakeStreamlit:
         session_state: dict[str, object] = {
@@ -351,8 +319,8 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
         def markdown(self, message: str) -> None:
             calls.setdefault("markdown", []).append(str(message))
 
-        def columns(self, *args: object, **kwargs: object) -> list[FakeColumn]:
-            return [FakeColumn(), FakeColumn()]
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
 
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
@@ -402,11 +370,6 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
         "_render_three_payload",
         lambda **kwargs: calls.setdefault("render_payload", kwargs),
     )
-    monkeypatch.setattr(
-        ptc_page_results.wt,
-        "_all_wells_anticollision_plan_figure",
-        lambda *args, **kwargs: "plan-figure",
-    )
 
     ptc_page_results._render_anticollision_panel(
         successes=[],
@@ -422,7 +385,7 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     assert [str(well.name) for well in rendered_analysis.wells] == ["WELL-B"]
     assert calls["payload_kwargs"]["target_only_wells"] == [target_only]
     assert calls["payload_kwargs"]["show_sidetrack_relative_cones"] is False
-    assert calls["plotly"][0] == "plan-figure"
+    assert "plotly" not in calls
     assert calls["override_kwargs"]["target_only_wells"] == [target_only]
     assert calls["override_kwargs"]["target_only_name_to_color"] == {"WELL-A": "#123456"}
 
@@ -527,9 +490,12 @@ def test_target_edit_overview_keeps_reference_wells(
     reference_wells = (object(),)
     calls: dict[str, object] = {}
 
-    class FakeColumn:
-        def plotly_chart(self, figure: object, **kwargs: object) -> None:
-            calls["plotly"] = (figure, kwargs)
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
     class FakeStreamlit:
         def info(self, message: str) -> None:
@@ -541,8 +507,8 @@ def test_target_edit_overview_keeps_reference_wells(
         def caption(self, message: str) -> None:
             calls["caption"] = str(message)
 
-        def columns(self, *args: object, **kwargs: object) -> list[FakeColumn]:
-            return [FakeColumn(), FakeColumn()]
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
 
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
@@ -593,7 +559,7 @@ def test_target_edit_overview_keeps_reference_wells(
 
     assert rendered is True
     assert calls["three_kwargs"]["reference_wells"] == reference_wells
-    assert calls["plan_kwargs"]["reference_wells"] == reference_wells
+    assert "plan_kwargs" not in calls
 
 
 def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
@@ -889,9 +855,8 @@ def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
         def selectbox(self, *_args: object, **_kwargs: object) -> str:
             return ""
 
-        def columns(self, spec, **_kwargs: object):
-            count = int(spec) if isinstance(spec, int) else len(spec)
-            return tuple(_DummyContext() for _ in range(count))
+        def container(self) -> _DummyContext:
+            return _DummyContext()
 
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
@@ -943,12 +908,6 @@ def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
         "_trajectory_three_payload_overrides",
         lambda **_kwargs: {},
     )
-    monkeypatch.setattr(
-        ptc_page_results.wt,
-        "_all_wells_plan_figure",
-        lambda *_args, **_kwargs: object(),
-    )
-
     rendered = ptc_page_results._render_target_edit_overview(
         successes=[SimpleNamespace(name="WELL-A")],
         records=[],
@@ -961,6 +920,88 @@ def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
 
     assert rendered is True
     assert captured["render_mode"] == ptc_core.WT_3D_RENDER_FAST
+
+
+def test_render_success_tabs_hides_plotly_panels_for_single_well_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+    success = SimpleNamespace(
+        name="WELL-A",
+        surface=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        t1=SimpleNamespace(x=100.0, y=0.0, z=1000.0),
+        t3=SimpleNamespace(x=200.0, y=0.0, z=1100.0),
+        target_pairs=(),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "X_m": [0.0, 200.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 1100.0],
+                "INC_deg": [0.0, 90.0],
+                "AZI_deg": [0.0, 90.0],
+                "DLS_deg_per_30m": [0.0, 0.0],
+                "segment": ["VERTICAL", "HORIZONTAL"],
+            }
+        ),
+        summary={},
+        config=SimpleNamespace(dls_limits_deg_per_30m={}),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        runtime_s=1.0,
+        md_postcheck_message="",
+        md_postcheck_exceeded=False,
+    )
+
+    class FakeStreamlit:
+        session_state = {"wt_results_view_mode": "Отдельная скважина"}
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Отдельная скважина"
+
+        def selectbox(self, _label: str, *, options: list[str]) -> str:
+            assert options == ["WELL-A"]
+            return "WELL-A"
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(ptc_page_results, "get_input_crs", lambda: "input-crs")
+    monkeypatch.setattr(ptc_page_results, "get_selected_crs", lambda: "selected-crs")
+    monkeypatch.setattr(ptc_page_results, "should_auto_convert", lambda: False)
+    monkeypatch.setattr(ptc_page_results, "csv_export_crs", lambda *_args, **_kwargs: "input-crs")
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_find_selected_success",
+        lambda **_kwargs: success,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_single_well_pilot_context",
+        lambda **_kwargs: (None, None, ()),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_key_metrics",
+        lambda **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_result_plots",
+        lambda **kwargs: calls.setdefault("plots_kwargs", kwargs),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_result_tables",
+        lambda **_kwargs: None,
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[success],
+        records=[],
+        summary_rows=[],
+    )
+
+    assert calls["plots_kwargs"]["show_plotly_panels"] is False
 
 
 def test_apply_pad_order_optimization_updates_source_records_and_keeps_ac_cache(

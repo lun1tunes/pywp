@@ -104,10 +104,33 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
             "координаты - из колонок `MD X Y Z`."
         )
     elif mode == "Путь к WELLTRACK":
-        st.text_input(
-            "Путь к WELLTRACK",
-            key=reference_state.reference_welltrack_path_key(kind),
-            placeholder="tests/test_data/WELLTRACKS3.INC",
+        path_count_key = reference_state.reference_welltrack_path_count_key(kind)
+        try:
+            path_count = int(st.session_state.get(path_count_key, 1))
+        except (TypeError, ValueError):
+            path_count = 1
+        path_count = max(1, path_count)
+        st.session_state[path_count_key] = path_count
+        for index in range(path_count):
+            st.text_input(
+                "Путь к WELLTRACK или папке"
+                if index == 0
+                else f"Путь к WELLTRACK или папке #{index + 1}",
+                key=reference_state.reference_welltrack_path_entry_key(kind, index),
+                placeholder="tests/test_data/WELLTRACKS3.INC",
+            )
+        if st.button(
+            "Добавить ещё путь",
+            key=f"ptc_reference_{kind}_add_welltrack_path",
+            icon=":material/note_add:",
+            use_container_width=True,
+        ):
+            st.session_state[path_count_key] = path_count + 1
+            st.rerun()
+        st.caption(
+            "Можно указать несколько файлов WELLTRACK и/или папок. "
+            "Из папок импортируются только файлы с расширением `.INC` "
+            "без учета регистра."
         )
     else:
         uploaded_file = st.file_uploader(
@@ -143,15 +166,8 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
                     )
                 elif mode == "Путь к WELLTRACK":
                     parsed = parse_reference_trajectory_welltrack_text(
-                        ptc_welltrack_io.read_welltrack_file(
-                            str(
-                                st.session_state.get(
-                                    reference_state.reference_welltrack_path_key(
-                                        kind
-                                    ),
-                                    "",
-                                )
-                            ),
+                        ptc_welltrack_io.read_welltrack_sources(
+                            reference_state.reference_welltrack_paths(kind),
                             info=st.info,
                             warning=st.warning,
                             error=st.error,
@@ -326,6 +342,11 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
     ]
     if not zbs_records:
         return
+    active_t1_t3_issue_names = {
+        str(getattr(item, "well_name", "")).strip()
+        for item in wt._current_t1_t3_order_issues(list(records))
+        if str(getattr(item, "well_name", "")).strip()
+    }
     actual_name_by_key = {
         well_name_key(getattr(well, "name", "")): str(getattr(well, "name", ""))
         for well in actual_wells
@@ -349,6 +370,22 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
             )
             + "."
         )
+        matched_issue_names = [
+            zbs_name
+            for zbs_name, _actual_name in matched
+            if zbs_name in active_t1_t3_issue_names
+        ]
+        if matched_issue_names:
+            st.warning(
+                "После подцепления фактической скважины проверьте порядок целей `t1/t3` "
+                "для боковых стволов: "
+                + ", ".join(matched_issue_names)
+                + "."
+            )
+            st.markdown(
+                "[Перейти к блоку проверки t1/t3]"
+                f"(#{wt.WT_T1T3_ORDER_PANEL_ANCHOR_ID})"
+            )
     if missing:
         st.warning(
             "Для боковых стволов не найдены фактические скважины: "

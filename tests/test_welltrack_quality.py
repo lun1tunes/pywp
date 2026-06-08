@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.welltrack_quality import detect_t1_t3_order_issues, swap_t1_t3_for_wells
 
@@ -98,3 +100,100 @@ def test_swap_t1_t3_for_wells_leaves_multi_horizontal_records_unchanged() -> Non
     updated = swap_t1_t3_for_wells([source], well_names={str(source.name)})
 
     assert tuple(updated[0].points) == tuple(source.points)
+
+
+def test_detect_t1_t3_order_issues_checks_zbs_from_parent_anchor() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+    parent_surface = WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0)
+
+    issues = detect_t1_t3_order_issues(
+        [source],
+        min_delta_m=0.1,
+        anchor_by_well_name={"9010": parent_surface},
+    )
+
+    assert [item.well_name for item in issues] == ["9010_ZBS"]
+    assert issues[0].anchor_label == "родитель→"
+    assert issues[0].delta_m == pytest.approx(700.0)
+
+
+def test_detect_t1_t3_order_issues_skips_zbs_without_parent_anchor() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+
+    assert detect_t1_t3_order_issues([source], min_delta_m=0.1) == []
+
+
+def test_swap_t1_t3_for_wells_supports_zbs_and_preserves_md_positions() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2501.0, md=2.0),
+        ),
+    )
+
+    fixed = swap_t1_t3_for_wells([source], well_names={"9010_ZBS"})[0]
+
+    assert fixed.name == "9010_ZBS"
+    assert fixed.points[0].md == pytest.approx(1.0)
+    assert fixed.points[1].md == pytest.approx(2.0)
+    assert fixed.points[0].x == pytest.approx(500.0)
+    assert fixed.points[0].z == pytest.approx(2501.0)
+    assert fixed.points[1].x == pytest.approx(1200.0)
+
+
+def test_zbs_multi_horizontal_order_check_reports_worst_reversed_pair() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+            WelltrackPoint(x=600.0, y=100.0, z=2520.0, md=3.0),
+            WelltrackPoint(x=1300.0, y=100.0, z=2520.0, md=4.0),
+        ),
+    )
+    parent_surface = WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0)
+
+    issues = detect_t1_t3_order_issues(
+        [source],
+        min_delta_m=0.1,
+        anchor_by_well_name={"9010": parent_surface},
+    )
+
+    assert [item.well_name for item in issues] == ["9010_ZBS"]
+    assert issues[0].delta_m == pytest.approx(700.0)
+
+
+def test_swap_t1_t3_for_wells_supports_zbs_multi_horizontal_selectively() -> None:
+    source = WelltrackRecord(
+        name="9010_ZBS",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+            WelltrackPoint(x=600.0, y=100.0, z=2520.0, md=3.0),
+            WelltrackPoint(x=1300.0, y=100.0, z=2520.0, md=4.0),
+        ),
+    )
+    parent_surface = WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0)
+
+    fixed = swap_t1_t3_for_wells(
+        [source],
+        well_names={"9010_ZBS"},
+        anchor_by_well_name={"9010": parent_surface},
+        min_delta_m=0.1,
+    )[0]
+
+    assert [point.md for point in fixed.points] == pytest.approx([1.0, 2.0, 3.0, 4.0])
+    assert [point.x for point in fixed.points] == pytest.approx([500.0, 1200.0, 600.0, 1300.0])

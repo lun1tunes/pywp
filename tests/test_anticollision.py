@@ -1087,7 +1087,7 @@ def test_fact_sidetrack_parent_relative_uncertainty_starts_at_window() -> None:
     )
 
 
-def test_sidetrack_parent_relative_cone_overlay_starts_at_window() -> None:
+def test_sidetrack_parent_relative_cone_overlay_starts_after_window_skip() -> None:
     model = PlanningUncertaintyModel(sample_step_m=25.0, min_refined_step_m=10.0)
     analysis = build_anti_collision_analysis_for_successes(
         [_fact_sidetrack_success_on_parent_path()],
@@ -1105,15 +1105,16 @@ def test_sidetrack_parent_relative_cone_overlay_starts_at_window() -> None:
     assert overlay.side_name == "9010_ZBS"
     assert overlay.parent_name == "9010"
     assert overlay.window_md_m == pytest.approx(1000.0)
+    start_md = 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
     for relative_overlay in (overlay.side_overlay, overlay.parent_overlay):
         samples = tuple(relative_overlay.samples)
         assert len(samples) >= 2
-        assert samples[0].md_m == pytest.approx(1000.0)
-        assert float(np.trace(samples[0].covariance_xyz)) == pytest.approx(0.0)
+        assert samples[0].md_m == pytest.approx(start_md)
+        assert float(np.trace(samples[0].covariance_xyz)) > 0.0
         first_ring_radius = np.max(
             np.linalg.norm(samples[0].ring_xyz - samples[0].center_xyz, axis=1)
         )
-        assert first_ring_radius == pytest.approx(0.0)
+        assert first_ring_radius > 0.0
         assert float(np.trace(samples[-1].covariance_xyz)) > 0.0
 
 
@@ -1137,7 +1138,9 @@ def test_sidetrack_parent_relative_cone_overlay_is_display_downsampled() -> None
     for relative_overlay in (overlay.side_overlay, overlay.parent_overlay):
         md_values = [float(sample.md_m) for sample in relative_overlay.samples]
         assert len(md_values) <= 5
-        assert md_values[0] == pytest.approx(1000.0)
+        assert md_values[0] == pytest.approx(
+            1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
+        )
         assert md_values[-1] == pytest.approx(2000.0)
 
 
@@ -1157,8 +1160,9 @@ def test_pilot_sidetrack_relative_cone_overlay_uses_pilot_parent() -> None:
     assert len(overlays) == 1
     assert overlays[0].side_name == "WELL-04"
     assert overlays[0].parent_name == "WELL-04_PL"
-    assert overlays[0].side_overlay.samples[0].md_m == pytest.approx(1000.0)
-    assert overlays[0].parent_overlay.samples[0].md_m == pytest.approx(1000.0)
+    expected_start_md = 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
+    assert overlays[0].side_overlay.samples[0].md_m == pytest.approx(expected_start_md)
+    assert overlays[0].parent_overlay.samples[0].md_m == pytest.approx(expected_start_md)
 
 
 def test_reused_sidetrack_well_refreshes_parent_collision_metadata() -> None:
