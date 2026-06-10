@@ -352,12 +352,16 @@ def all_wells_three_payload(
 
     for index, success in enumerate(successes):
         well_name = str(success.name)
-        display_name = _display_well_name(
-            well_name,
-            display_name_by_well_name=display_name_by_well_name,
+        is_pilot = is_pilot_name(well_name)
+        display_name = (
+            well_name
+            if is_pilot
+            else _display_well_name(
+                well_name,
+                display_name_by_well_name=display_name_by_well_name,
+            )
         )
         color = color_map.get(well_name, _fallback_color(index, fallback_color))
-        is_pilot = is_pilot_name(well_name)
         pilot_study_points = (
             _pilot_study_points_for_well(
                 well_name,
@@ -546,9 +550,14 @@ def anticollision_three_payload(
 
     for well in analysis.wells:
         well_name = str(well.name)
-        display_name = _display_well_name(
-            well_name,
-            display_name_by_well_name=display_name_by_well_name,
+        is_pilot = is_pilot_name(well_name)
+        display_name = (
+            well_name
+            if is_pilot
+            else _display_well_name(
+                well_name,
+                display_name_by_well_name=display_name_by_well_name,
+            )
         )
         overlay = collision_display_overlays.get(well_name, well.overlay)
         is_reference_only = bool(well.is_reference_only)
@@ -655,7 +664,6 @@ def anticollision_three_payload(
                 focus_arrays=focus_arrays,
             )
         if (well.t1 is not None) and (well.t3 is not None) and not is_reference_only:
-            is_pilot = is_pilot_name(well_name)
             pilot_points = (
                 _pilot_study_points_for_well(
                     well_name,
