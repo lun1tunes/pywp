@@ -151,6 +151,80 @@ def _fact_sidetrack_success_on_parent_path() -> SuccessfulWellPlan:
     )
 
 
+def _fact_sidetrack_success_with_parent_clearance_then_reentry() -> SuccessfulWellPlan:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [1000.0, 1100.0, 1300.0, 1700.0, 1900.0, 2100.0],
+            "INC_deg": [90.0, 90.0, 90.0, 90.0, 90.0, 90.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0, 90.0],
+            "X_m": [1000.0, 1100.0, 1300.0, 1700.0, 1900.0, 2100.0],
+            "Y_m": [0.0, 0.0, 60.0, 60.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "segment": [
+                "WINDOW",
+                "SIDETRACK",
+                "SIDETRACK",
+                "SIDETRACK",
+                "SIDETRACK",
+                "SIDETRACK",
+            ],
+        }
+    )
+    return SuccessfulWellPlan(
+        name="9010_ZBS",
+        surface=Point3D(1000.0, 0.0, 0.0),
+        t1=Point3D(1300.0, 60.0, 0.0),
+        t3=Point3D(2100.0, 0.0, 0.0),
+        stations=stations,
+        summary={
+            "trajectory_type": "FACT_SIDETRACK",
+            "sidetrack_parent_well_name": "9010",
+            "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+            "actual_parent_well_name": "9010",
+            "sidetrack_window_md_m": 1000.0,
+            "sidetrack_window_x_m": 1000.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 0.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1300.0,
+        config=TrajectoryConfig(),
+    )
+
+
+def _corridor_stub(
+    *,
+    well_a: str,
+    well_b: str,
+    md_a_start_m: float,
+    md_a_end_m: float,
+    md_b_start_m: float,
+    md_b_end_m: float,
+) -> AntiCollisionCorridor:
+    return AntiCollisionCorridor(
+        well_a=well_a,
+        well_b=well_b,
+        classification="trajectory",
+        priority_rank=2,
+        label_a="",
+        label_b="",
+        md_a_start_m=float(md_a_start_m),
+        md_a_end_m=float(md_a_end_m),
+        md_b_start_m=float(md_b_start_m),
+        md_b_end_m=float(md_b_end_m),
+        md_a_values_m=np.asarray([float(md_a_start_m), float(md_a_end_m)], dtype=float),
+        md_b_values_m=np.asarray([float(md_b_start_m), float(md_b_end_m)], dtype=float),
+        label_a_values=("", ""),
+        label_b_values=("", ""),
+        midpoint_xyz=np.asarray([[0.0, 0.0, 0.0]], dtype=float),
+        overlap_rings_xyz=(),
+        overlap_core_radius_m=np.asarray([1.0], dtype=float),
+        separation_factor_values=np.asarray([0.5], dtype=float),
+        overlap_depth_values_m=np.asarray([1.0], dtype=float),
+    )
+
+
 def _pilot_sidetrack_success_pair() -> tuple[SuccessfulWellPlan, SuccessfulWellPlan]:
     pilot_stations = _straight_stations(y_offset_m=0.0)
     sidetrack_stations = pd.DataFrame(
@@ -1021,7 +1095,7 @@ def test_reference_actual_well_can_use_selected_unknown_mwd_model() -> None:
     )
 
 
-def test_fact_sidetrack_parent_pair_is_scanned_after_window_skip() -> None:
+def test_fact_sidetrack_parent_initial_overlap_is_ignored_without_reentry() -> None:
     model = PlanningUncertaintyModel(
         sigma_inc_deg=0.25,
         sigma_azi_deg=0.25,
@@ -1045,17 +1119,105 @@ def test_fact_sidetrack_parent_pair_is_scanned_after_window_skip() -> None:
         if {str(corridor.well_a), str(corridor.well_b)} == {"9010_ZBS", "9010"}
     ]
     assert analysis.pair_count == 1
+    assert analysis.overlapping_pair_count == 0
+    assert not parent_corridors
+
+
+def test_fact_sidetrack_parent_late_reentry_after_clearance_is_preserved() -> None:
+    model = PlanningUncertaintyModel(
+        sigma_inc_deg=0.25,
+        sigma_azi_deg=0.25,
+        sigma_lateral_drift_m_per_1000m=2.0,
+        sample_step_m=10.0,
+        min_refined_step_m=10.0,
+    )
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [_fact_sidetrack_success_with_parent_clearance_then_reentry()],
+        model=model,
+        reference_wells=(_horizontal_reference_well(),),
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+
+    parent_corridors = [
+        corridor
+        for corridor in analysis.corridors
+        if {str(corridor.well_a), str(corridor.well_b)} == {"9010_ZBS", "9010"}
+    ]
+
+    assert analysis.pair_count == 1
+    assert analysis.overlapping_pair_count == 1
     assert parent_corridors
-    assert all(
-        float(np.min(corridor.md_a_values_m))
-        > 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
-        for corridor in parent_corridors
+    assert all(float(corridor.md_a_start_m) > 1700.0 for corridor in parent_corridors)
+    assert all(float(corridor.md_b_start_m) > 1700.0 for corridor in parent_corridors)
+
+
+def test_trim_sidetrack_parent_leading_overlap_uses_side_md_progression() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=10.0, min_refined_step_m=10.0)
+    side = build_anti_collision_well(
+        name="SIDE",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=False,
     )
-    assert all(
-        float(np.min(corridor.md_b_values_m))
-        > 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
-        for corridor in parent_corridors
+    parent = build_anti_collision_well(
+        name="PARENT",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=False,
     )
+    corridors = [
+        _corridor_stub(
+            well_a="SIDE",
+            well_b="PARENT",
+            md_a_start_m=35.0,
+            md_a_end_m=70.0,
+            md_b_start_m=35.0,
+            md_b_end_m=70.0,
+        ),
+        _corridor_stub(
+            well_a="SIDE",
+            well_b="PARENT",
+            md_a_start_m=80.0,
+            md_a_end_m=110.0,
+            md_b_start_m=300.0,
+            md_b_end_m=330.0,
+        ),
+        _corridor_stub(
+            well_a="SIDE",
+            well_b="PARENT",
+            md_a_start_m=700.0,
+            md_a_end_m=730.0,
+            md_b_start_m=40.0,
+            md_b_end_m=70.0,
+        ),
+    ]
+
+    trimmed = anticollision_module._trim_sidetrack_parent_leading_overlap_corridors(
+        corridors=corridors,
+        scan_start_md_m=30.0,
+        side_is_a=True,
+        well_a=side,
+        well_b=parent,
+    )
+
+    assert len(trimmed) == 1
+    assert trimmed[0].md_a_start_m == pytest.approx(700.0)
+    assert trimmed[0].md_b_start_m == pytest.approx(40.0)
 
 
 def test_fact_sidetrack_parent_relative_uncertainty_starts_at_window() -> None:

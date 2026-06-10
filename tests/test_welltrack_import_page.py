@@ -769,11 +769,16 @@ def test_welltrack_page_renders_and_fixes_zbs_t1_t3_order_from_parent() -> None:
         "После подцепления фактической скважины проверьте порядок целей" in str(widget.value)
         for widget in at.warning
     )
+    assert any(
+        "Перейти к блоку проверки t1/t3" in str(widget.value)
+        for widget in at.warning
+    )
+    assert any(
+        "#wt-t1-t3-order-panel" in str(widget.value)
+        for widget in at.warning
+    )
     assert any("`9010_ZBS`" in str(widget.value) for widget in at.markdown)
     assert any("родитель→" in str(widget.value) for widget in at.markdown)
-    assert any(
-        "#wt-t1-t3-order-panel" in str(widget.value) for widget in at.markdown
-    )
 
     _click_button(at, "Исправить порядок для выбранных скважин")
     at.run(timeout=120)

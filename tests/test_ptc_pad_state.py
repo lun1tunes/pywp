@@ -169,6 +169,7 @@ def test_pad_config_defaults_to_center_anchor_mode() -> None:
 
     defaults = ptc_pad_state.pad_config_defaults(pads[0])
 
+    assert defaults["spacing_m"] == ptc_pad_state.DEFAULT_PAD_SPACING_M == 40.0
     assert str(defaults["surface_anchor_mode"]) == (
         ptc_pad_state.DEFAULT_PAD_SURFACE_ANCHOR_MODE
     )

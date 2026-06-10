@@ -13,11 +13,34 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="fullscreen-btn"' in html
     assert 'id="anti-collision-btn"' in html
     assert 'id="anti-collision-controls"' in html
+    assert 'id="world-axis-control-wrap"' in html
+    assert 'id="world-axis-btn"' in html
+    assert 'id="world-axis-controls"' in html
+    assert 'id="world-axis-toggle"' in html
+    assert ".toolbar-btn.is-mini" in html
     assert 'data-ac-layer="cones"' in html
     assert 'data-ac-layer="sidetrack_relative_cones"' in html
     assert 'data-ac-layer="overlaps"' in html
     assert 'data-ac-layer="segments"' in html
     assert "function initAntiCollisionControls()" in html
+    assert "const WORLD_AXIS_STORAGE_KEY = `pywp:world-axis-overlay:${viewerStateScope}`;" in html
+    assert "const WORLD_AXIS_PLANE_RAW_Z = 0.0;" in html
+    assert "const WORLD_AXIS_ANCHOR_NDC = { x: -0.62, y: -0.68 };" in html
+    assert "function worldAxisPlaneIntersectionRaw(ndcX, ndcY, rawZ)" in html
+    assert "function worldAxisTargetRawPoint()" in html
+    assert "function syncWorldAxisAnchorRaw(initialAnchorRaw)" in html
+    assert "function worldAxisNiceStep(rawValue)" in html
+    assert "function rebuildWorldAxisGeometry()" in html
+    assert "function updateWorldAxisOverlay()" in html
+    assert "function initWorldAxisControls()" in html
+    assert "anchorInitialized: false" in html
+    assert "lastTargetRaw: { x: 0.0, y: 0.0 }" in html
+    assert "worldAxisOverlay.anchorRaw.x += Number.isFinite(deltaX) ? deltaX : 0;" in html
+    assert "worldAxisOverlay.anchorRaw.y += Number.isFinite(deltaY) ? deltaY : 0;" in html
+    assert "const unitsPerPixel = worldUnitsPerPixelAt(anchorDisplay);" in html
+    assert "viewWidth: Math.max(unitsPerPixel * canvasWidth, 10.0)," in html
+    assert "viewHeight: Math.max(unitsPerPixel * canvasHeight, 10.0)," in html
+    assert "zLength * Z_DISPLAY_SIGN" in html
     assert "function registerAntiCollisionVisualObject(object, itemOrRole)" in html
     assert 'role === "sidetrack_relative_cone"' in html
     assert 'role === "sidetrack_relative_cone_tip"' in html
@@ -59,6 +82,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "controls.dampingFactor = 0.12;" in html
     assert "controls.screenSpacePanning = true;" in html
     assert "function updateLabels()" in html
+    assert "updateWorldAxisOverlay();" in html
     assert "offsetY: Number((options && options.offsetY) || 0)" in html
     assert 'role === "well_label" ||' in html
     assert 'role === "pilot_point_label" ||' in html
@@ -258,6 +282,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "text-shadow: 0 1px 2px rgba(255,255,255,0.95);" in html
     assert 'id="minimap-toggle-btn"' in html
     assert ">План E-N</button>" in html
+    assert "initWorldAxisControls();" in html
     assert "План E-N ‹" not in html
     assert "#minimap-control:not(.is-expanded) #minimap-toggle-btn::before" in html
     assert 'content: "‹";' in html

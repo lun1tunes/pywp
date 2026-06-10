@@ -3568,7 +3568,7 @@ def format_precheck_summary_ru(result: AnalyticalPreCheckResult) -> str:
     return "\n".join(lines)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	142604
+===BEGIN_FILE===	pywp/anticollision.py	144762
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -5663,11 +5663,70 @@ def _sidetrack_parent_pair_overlap_corridors(
     )
     well_a = side_relative if bool(sidetrack_pair.side_is_a) else parent_relative
     well_b = parent_relative if bool(sidetrack_pair.side_is_a) else side_relative
-    return _standard_pair_overlap_corridors(
+    corridors = _standard_pair_overlap_corridors(
         well_a=well_a,
         well_b=well_b,
         build_overlap_geometry=build_overlap_geometry,
     )
+    return _trim_sidetrack_parent_leading_overlap_corridors(
+        corridors=corridors,
+        scan_start_md_m=scan_start_md,
+        side_is_a=bool(sidetrack_pair.side_is_a),
+        well_a=well_a,
+        well_b=well_b,
+    )
+
+
+def _trim_sidetrack_parent_leading_overlap_corridors(
+    *,
+    corridors: list[AntiCollisionCorridor],
+    scan_start_md_m: float,
+    side_is_a: bool,
+    well_a: AntiCollisionWell,
+    well_b: AntiCollisionWell,
+) -> list[AntiCollisionCorridor]:
+    if not corridors:
+        return []
+    sorted_corridors = sorted(
+        corridors,
+        key=lambda corridor: (
+            float(corridor.md_a_start_m) if side_is_a else float(corridor.md_b_start_m),
+            float(corridor.md_a_end_m) if side_is_a else float(corridor.md_b_end_m),
+            float(corridor.md_b_start_m) if side_is_a else float(corridor.md_a_start_m),
+        ),
+    )
+    merge_tolerance_m = _corridor_merge_tolerance_m((well_a, well_b))
+    first = sorted_corridors[0]
+    side_start_m = (
+        float(first.md_a_start_m) if side_is_a else float(first.md_b_start_m)
+    )
+    parent_start_m = (
+        float(first.md_b_start_m) if side_is_a else float(first.md_a_start_m)
+    )
+    if (
+        side_start_m > float(scan_start_md_m) + merge_tolerance_m
+        or parent_start_m > float(scan_start_md_m) + merge_tolerance_m
+    ):
+        return sorted_corridors
+
+    leading_end_side_m = (
+        float(first.md_a_end_m) if side_is_a else float(first.md_b_end_m)
+    )
+    keep_from_index = len(sorted_corridors)
+    for index in range(1, len(sorted_corridors)):
+        corridor = sorted_corridors[index]
+        corridor_side_start_m = (
+            float(corridor.md_a_start_m) if side_is_a else float(corridor.md_b_start_m)
+        )
+        corridor_side_end_m = (
+            float(corridor.md_a_end_m) if side_is_a else float(corridor.md_b_end_m)
+        )
+        if corridor_side_start_m <= leading_end_side_m + merge_tolerance_m:
+            leading_end_side_m = max(leading_end_side_m, corridor_side_end_m)
+            continue
+        keep_from_index = index
+        break
+    return sorted_corridors[keep_from_index:]
 
 
 def sidetrack_parent_relative_cone_overlays(
@@ -35221,7 +35280,7 @@ __all__ = [
     "source_surface_xyz",
 ]
 
-DEFAULT_PAD_SPACING_M = 20.0
+DEFAULT_PAD_SPACING_M = 40.0
 DEFAULT_PAD_SURFACE_ANCHOR_MODE = PAD_SURFACE_ANCHOR_CENTER
 WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M = 400.0
 WT_PAD_FOCUS_ALL = "__all_pads__"
@@ -36655,7 +36714,7 @@ def render_target_import_section() -> None:
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_reference.py	14827
+===BEGIN_FILE===	pywp/ptc_page_reference.py	14773
 from __future__ import annotations
 
 import pandas as pd
@@ -37038,11 +37097,8 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
                 "После подцепления фактической скважины проверьте порядок целей `t1/t3` "
                 "для боковых стволов: "
                 + ", ".join(matched_issue_names)
-                + "."
-            )
-            st.markdown(
-                "[Перейти к блоку проверки t1/t3]"
-                f"(#{wt.WT_T1T3_ORDER_PANEL_ANCHOR_ID})"
+                + ". "
+                + f"[Перейти к блоку проверки t1/t3](#{wt.WT_T1T3_ORDER_PANEL_ANCHOR_ID})."
             )
     if missing:
         st.warning(
@@ -46634,7 +46690,7 @@ class FastReplan {
 // window.updateLineGeometry = updateLineGeometry;
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	228114
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	246300
 <!doctype html>
 <html lang="en">
   <head>
@@ -46741,6 +46797,16 @@ class FastReplan {
         font-weight: 600;
         cursor: pointer;
         box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+      }
+
+      .toolbar-btn.is-mini {
+        min-width: 30px;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border-radius: 9px;
+        font-size: 14px;
+        line-height: 1;
       }
 
       .toolbar-btn:hover {
@@ -47175,6 +47241,14 @@ class FastReplan {
         font-size: 10px;
       }
 
+      .scene-label.world-axis-label {
+        font-size: 9px;
+        font-weight: 500;
+        color: #5b6472;
+        letter-spacing: 0;
+        pointer-events: none;
+      }
+
       .scene-axis-label {
         font-size: 11px;
         font-weight: 700;
@@ -47245,6 +47319,11 @@ class FastReplan {
         display: block;
       }
 
+      #world-axis-control-wrap {
+        display: block;
+        position: relative;
+      }
+
       #anti-collision-controls {
         display: none;
         position: absolute;
@@ -47260,6 +47339,24 @@ class FastReplan {
       }
 
       #anti-collision-controls.is-visible {
+        display: block;
+      }
+
+      #world-axis-controls {
+        display: none;
+        position: absolute;
+        top: calc(100% + 8px);
+        left: 0;
+        width: 214px;
+        z-index: 7;
+        padding: 9px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
+        backdrop-filter: blur(8px);
+      }
+
+      #world-axis-controls.is-visible {
         display: block;
       }
 
@@ -47884,6 +47981,21 @@ class FastReplan {
             </label>
           </div>
         </div>
+        <div id="world-axis-control-wrap">
+          <button
+            id="world-axis-btn"
+            class="toolbar-btn is-mini"
+            type="button"
+            title="Настроить координатную ось"
+            aria-label="Настроить координатную ось"
+          >⚙</button>
+          <div id="world-axis-controls">
+            <label class="anti-collision-option">
+              <input id="world-axis-toggle" type="checkbox" />
+              <span>Показать координатную ось</span>
+            </label>
+          </div>
+        </div>
       </div>
       <div id="toolbar-right">
         <button id="fullscreen-btn" class="toolbar-btn" type="button" title="Развернуть на весь экран">⛶</button>
@@ -47986,6 +48098,10 @@ class FastReplan {
         const antiCollisionControlWrap = document.getElementById("anti-collision-control-wrap");
         const antiCollisionButton = document.getElementById("anti-collision-btn");
         const antiCollisionControls = document.getElementById("anti-collision-controls");
+        const worldAxisControlWrap = document.getElementById("world-axis-control-wrap");
+        const worldAxisButton = document.getElementById("world-axis-btn");
+        const worldAxisControls = document.getElementById("world-axis-controls");
+        const worldAxisToggle = document.getElementById("world-axis-toggle");
         const Z_DISPLAY_SIGN = -1.0;
         const scene = new THREE.Scene();
         const miniMapOverlayScene = new THREE.Scene();
@@ -48109,6 +48225,22 @@ class FastReplan {
             .filter(Boolean),
         );
         const editableBaseMaterials = [];
+        const viewerStateScope = String(
+          payload.component_key || payload.title || "scene"
+        );
+        const WORLD_AXIS_STORAGE_KEY = `pywp:world-axis-overlay:${viewerStateScope}`;
+        const WORLD_AXIS_PLANE_RAW_Z = 0.0;
+        const WORLD_AXIS_ANCHOR_NDC = { x: -0.62, y: -0.68 };
+        const worldAxisOverlay = {
+          enabled: readStoredBoolean(WORLD_AXIS_STORAGE_KEY, false),
+          group: new THREE.Group(),
+          signature: "",
+          anchorInitialized: false,
+          anchorRaw: { x: 0.0, y: 0.0 },
+          lastTargetRaw: { x: 0.0, y: 0.0 },
+          labelSpecs: [],
+          labels: [],
+        };
         const antiCollisionVisualObjects = {
           cones: [],
           sidetrack_relative_cones: [],
@@ -48153,6 +48285,27 @@ class FastReplan {
           ),
         };
 
+        function readStoredBoolean(key, fallback) {
+          try {
+            const rawValue = window.localStorage.getItem(String(key || ""));
+            if (rawValue === null) {
+              return Boolean(fallback);
+            }
+            return rawValue === "1" || rawValue === "true";
+          } catch (e) {
+            return Boolean(fallback);
+          }
+        }
+
+        function storeBoolean(key, value) {
+          try {
+            window.localStorage.setItem(
+              String(key || ""),
+              value ? "1" : "0",
+            );
+          } catch (e) { /* ignore */ }
+        }
+
         const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
         const hoverSphereMaterial = new THREE.MeshBasicMaterial({
           color: "#64748b",
@@ -48162,6 +48315,8 @@ class FastReplan {
           depthTest: false,
         });
         hoverSphereMaterial.colorWrite = false;
+        worldAxisOverlay.group.visible = Boolean(worldAxisOverlay.enabled);
+        scene.add(worldAxisOverlay.group);
 
         function requestRender() {
           needsRender = true;
@@ -48935,6 +49090,404 @@ class FastReplan {
             labels +
             `</svg>`;
         }
+
+        const worldAxisRaycaster = new THREE.Raycaster();
+        const worldAxisPointer = new THREE.Vector2();
+        const worldAxisPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        const worldAxisHitPoint = new THREE.Vector3();
+
+        function worldAxisPlaneIntersectionRaw(ndcX, ndcY, rawZ) {
+          const planeDisplayZ =
+            (Number(rawZ) - Number(sceneOrigin.z || 0)) * Z_DISPLAY_SIGN;
+          worldAxisPlane.constant = -planeDisplayZ;
+          worldAxisPointer.set(Number(ndcX) || 0, Number(ndcY) || 0);
+          worldAxisRaycaster.setFromCamera(worldAxisPointer, camera);
+          if (!worldAxisRaycaster.ray.intersectPlane(worldAxisPlane, worldAxisHitPoint)) {
+            return null;
+          }
+          const rawPoint = dataPointFromDisplay(worldAxisHitPoint);
+          return [Number(rawPoint[0]) || 0, Number(rawPoint[1]) || 0, Number(rawZ) || 0];
+        }
+
+        function worldAxisNiceStep(rawValue) {
+          const safeValue = Math.max(Number(rawValue) || 0, 0.000001);
+          const exponent = Math.floor(Math.log10(safeValue));
+          const base = Math.pow(10, exponent);
+          const scaled = safeValue / base;
+          if (scaled <= 1.0) {
+            return 1.0 * base;
+          }
+          if (scaled <= 2.0) {
+            return 2.0 * base;
+          }
+          if (scaled <= 5.0) {
+            return 5.0 * base;
+          }
+          return 10.0 * base;
+        }
+
+        function formatWorldAxisValue(value, step) {
+          const safeStep = Math.max(Math.abs(Number(step) || 0), 0.000001);
+          const decimals =
+            safeStep >= 10.0 ? 0 :
+            safeStep >= 1.0 ? 1 :
+            safeStep >= 0.1 ? 2 :
+            3;
+          return Number(value || 0).toFixed(decimals);
+        }
+
+        function clearWorldAxisGeometry() {
+          while (worldAxisOverlay.group.children.length > 0) {
+            const child =
+              worldAxisOverlay.group.children[worldAxisOverlay.group.children.length - 1];
+            if (!child) {
+              continue;
+            }
+            worldAxisOverlay.group.remove(child);
+            if (child.geometry && typeof child.geometry.dispose === "function") {
+              child.geometry.dispose();
+            }
+            if (child.material) {
+              if (Array.isArray(child.material)) {
+                child.material.forEach((material) => {
+                  if (material && typeof material.dispose === "function") {
+                    material.dispose();
+                  }
+                });
+              } else if (typeof child.material.dispose === "function") {
+                child.material.dispose();
+              }
+            }
+          }
+        }
+
+        function worldAxisTargetRawPoint() {
+          const targetRaw = dataPointFromDisplay(controls.target);
+          return {
+            x: Number(targetRaw[0]) || 0,
+            y: Number(targetRaw[1]) || 0,
+          };
+        }
+
+        function syncWorldAxisAnchorRaw(initialAnchorRaw) {
+          const currentTargetRaw = worldAxisTargetRawPoint();
+          if (!worldAxisOverlay.anchorInitialized) {
+            const anchorX = Array.isArray(initialAnchorRaw)
+              ? Number(initialAnchorRaw[0])
+              : currentTargetRaw.x;
+            const anchorY = Array.isArray(initialAnchorRaw)
+              ? Number(initialAnchorRaw[1])
+              : currentTargetRaw.y;
+            worldAxisOverlay.anchorRaw = {
+              x: Number.isFinite(anchorX) ? anchorX : currentTargetRaw.x,
+              y: Number.isFinite(anchorY) ? anchorY : currentTargetRaw.y,
+            };
+            worldAxisOverlay.lastTargetRaw = {
+              x: currentTargetRaw.x,
+              y: currentTargetRaw.y,
+            };
+            worldAxisOverlay.anchorInitialized = true;
+            return;
+          }
+          const deltaX = currentTargetRaw.x - worldAxisOverlay.lastTargetRaw.x;
+          const deltaY = currentTargetRaw.y - worldAxisOverlay.lastTargetRaw.y;
+          worldAxisOverlay.anchorRaw.x += Number.isFinite(deltaX) ? deltaX : 0;
+          worldAxisOverlay.anchorRaw.y += Number.isFinite(deltaY) ? deltaY : 0;
+          worldAxisOverlay.lastTargetRaw = {
+            x: currentTargetRaw.x,
+            y: currentTargetRaw.y,
+          };
+        }
+
+        function ensureWorldAxisLabels(count) {
+          while (worldAxisOverlay.labels.length < count) {
+            worldAxisOverlay.labels.push(
+              addSceneLabel(
+                "",
+                new THREE.Vector3(0, 0, 0),
+                "#5b6472",
+                "world-axis-label",
+                { role: "world_axis_overlay", offsetX: 0, offsetY: 0 },
+              ),
+            );
+          }
+          while (worldAxisOverlay.labels.length > count) {
+            const item = worldAxisOverlay.labels.pop();
+            if (!item) {
+              continue;
+            }
+            item.visible = false;
+            if (item.element && item.element.parentNode) {
+              item.element.parentNode.removeChild(item.element);
+            }
+            const itemIndex = sceneLabels.indexOf(item);
+            if (itemIndex >= 0) {
+              sceneLabels.splice(itemIndex, 1);
+            }
+          }
+        }
+
+        function worldAxisViewMetrics() {
+          const initialAnchorRaw = worldAxisPlaneIntersectionRaw(
+            WORLD_AXIS_ANCHOR_NDC.x,
+            WORLD_AXIS_ANCHOR_NDC.y,
+            WORLD_AXIS_PLANE_RAW_Z,
+          );
+          syncWorldAxisAnchorRaw(initialAnchorRaw);
+          const anchorDisplay = displayPoint([
+            worldAxisOverlay.anchorRaw.x,
+            worldAxisOverlay.anchorRaw.y,
+            WORLD_AXIS_PLANE_RAW_Z,
+          ]);
+          const unitsPerPixel = worldUnitsPerPixelAt(anchorDisplay);
+          if (!Number.isFinite(unitsPerPixel) || unitsPerPixel <= 0.0) {
+            const fallbackSpan = Math.max(maxSpan * 0.65, 100.0);
+            return {
+              anchorRaw: {
+                x: worldAxisOverlay.anchorRaw.x,
+                y: worldAxisOverlay.anchorRaw.y,
+              },
+              viewWidth: fallbackSpan,
+              viewHeight: fallbackSpan / Math.max(camera.aspect || 1.0, 0.25),
+            };
+          }
+          const canvasWidth = Math.max(renderer.domElement.clientWidth || 1, 1);
+          const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
+          return {
+            anchorRaw: {
+              x: worldAxisOverlay.anchorRaw.x,
+              y: worldAxisOverlay.anchorRaw.y,
+            },
+            viewWidth: Math.max(unitsPerPixel * canvasWidth, 10.0),
+            viewHeight: Math.max(unitsPerPixel * canvasHeight, 10.0),
+          };
+        }
+
+        function pushWorldAxisSegment(positions, start, end) {
+          positions.push(
+            Number(start[0]) || 0,
+            Number(start[1]) || 0,
+            Number(start[2]) || 0,
+            Number(end[0]) || 0,
+            Number(end[1]) || 0,
+            Number(end[2]) || 0,
+          );
+        }
+
+        function createWorldAxisLineSegments(positions, color, opacity, renderOrder) {
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(new Float32Array(positions), 3),
+          );
+          const material = new THREE.LineBasicMaterial({
+            color: color,
+            transparent: true,
+            opacity: opacity,
+            depthTest: false,
+            depthWrite: false,
+          });
+          const lineSegments = new THREE.LineSegments(geometry, material);
+          lineSegments.renderOrder = renderOrder;
+          return lineSegments;
+        }
+
+        function rebuildWorldAxisGeometry() {
+          const metrics = worldAxisViewMetrics();
+          const targetWidth = Math.max(Number(metrics.viewWidth) * 0.24, 30.0);
+          const targetHeight = Math.max(Number(metrics.viewHeight) * 0.24, 30.0);
+          const step = worldAxisNiceStep(Math.max(targetWidth, targetHeight) / 4.8);
+          const xTickCount = Math.max(
+            3,
+            Math.min(8, Math.round(targetWidth / Math.max(step, 0.000001))),
+          );
+          const yTickCount = Math.max(
+            3,
+            Math.min(8, Math.round(targetHeight / Math.max(step, 0.000001))),
+          );
+          const zTickCount = Math.max(
+            2,
+            Math.min(5, Math.round(Math.max(xTickCount, yTickCount) * 0.75)),
+          );
+          const xLength = step * xTickCount;
+          const yLength = step * yTickCount;
+          const zLength = step * zTickCount;
+          const signature = [
+            step.toFixed(6),
+            xTickCount,
+            yTickCount,
+            zTickCount,
+          ].join("|");
+          worldAxisOverlay.anchorRaw = {
+            x: Number(metrics.anchorRaw.x) || 0,
+            y: Number(metrics.anchorRaw.y) || 0,
+          };
+          if (worldAxisOverlay.signature === signature) {
+            updateWorldAxisLabelsPosition();
+            return;
+          }
+          worldAxisOverlay.signature = signature;
+          clearWorldAxisGeometry();
+
+          const gridPositions = [];
+          for (let xIndex = 0; xIndex <= xTickCount; xIndex += 1) {
+            const xValue = step * xIndex;
+            pushWorldAxisSegment(
+              gridPositions,
+              [xValue, 0, 0],
+              [xValue, yLength, 0],
+            );
+          }
+          for (let yIndex = 0; yIndex <= yTickCount; yIndex += 1) {
+            const yValue = step * yIndex;
+            pushWorldAxisSegment(
+              gridPositions,
+              [0, yValue, 0],
+              [xLength, yValue, 0],
+            );
+          }
+
+          const axisPositions = [];
+          pushWorldAxisSegment(axisPositions, [0, 0, 0], [xLength, 0, 0]);
+          pushWorldAxisSegment(axisPositions, [0, 0, 0], [0, yLength, 0]);
+          pushWorldAxisSegment(
+            axisPositions,
+            [0, 0, 0],
+            [0, 0, zLength * Z_DISPLAY_SIGN],
+          );
+
+          worldAxisOverlay.group.add(
+            createWorldAxisLineSegments(gridPositions, "#9aa3af", 0.24, 2.0),
+          );
+          worldAxisOverlay.group.add(
+            createWorldAxisLineSegments(axisPositions, "#6b7280", 0.58, 2.2),
+          );
+
+          const labelSpecs = [];
+          for (let xIndex = 0; xIndex <= xTickCount; xIndex += 1) {
+            const xValue = step * xIndex;
+            labelSpecs.push({
+              text: formatWorldAxisValue(
+                worldAxisOverlay.anchorRaw.x + xValue,
+                step,
+              ),
+              color: "#5b6472",
+              localPosition: new THREE.Vector3(xValue, 0, 0),
+              offsetX: 0,
+              offsetY: -12,
+            });
+          }
+          for (let yIndex = 1; yIndex <= yTickCount; yIndex += 1) {
+            const yValue = step * yIndex;
+            labelSpecs.push({
+              text: formatWorldAxisValue(
+                worldAxisOverlay.anchorRaw.y + yValue,
+                step,
+              ),
+              color: "#5b6472",
+              localPosition: new THREE.Vector3(0, yValue, 0),
+              offsetX: -10,
+              offsetY: 0,
+            });
+          }
+          labelSpecs.push({
+            text: "X",
+            color: "#6b7280",
+            localPosition: new THREE.Vector3(xLength, 0, 0),
+            offsetX: 10,
+            offsetY: -2,
+          });
+          labelSpecs.push({
+            text: "Y",
+            color: "#6b7280",
+            localPosition: new THREE.Vector3(0, yLength, 0),
+            offsetX: -2,
+            offsetY: 12,
+          });
+          labelSpecs.push({
+            text: "Z",
+            color: "#6b7280",
+            localPosition: new THREE.Vector3(0, 0, zLength * Z_DISPLAY_SIGN),
+            offsetX: 8,
+            offsetY: 0,
+          });
+          worldAxisOverlay.labelSpecs = labelSpecs;
+          ensureWorldAxisLabels(labelSpecs.length);
+          updateWorldAxisLabelsPosition();
+        }
+
+        function updateWorldAxisLabelsPosition() {
+          const anchorDisplay = displayPoint([
+            worldAxisOverlay.anchorRaw.x,
+            worldAxisOverlay.anchorRaw.y,
+            WORLD_AXIS_PLANE_RAW_Z,
+          ]);
+          worldAxisOverlay.group.position.copy(anchorDisplay);
+          worldAxisOverlay.labelSpecs.forEach((spec, index) => {
+            const label = worldAxisOverlay.labels[index];
+            if (!label) {
+              return;
+            }
+            label.position.copy(anchorDisplay).add(spec.localPosition);
+            label.element.textContent = String(spec.text || "");
+            label.element.style.color = String(spec.color || "#5b6472");
+            label.offsetX = Number(spec.offsetX) || 0;
+            label.offsetY = Number(spec.offsetY) || 0;
+            label.visible = Boolean(worldAxisOverlay.enabled);
+          });
+          for (let index = worldAxisOverlay.labelSpecs.length; index < worldAxisOverlay.labels.length; index += 1) {
+            worldAxisOverlay.labels[index].visible = false;
+          }
+        }
+
+        function syncWorldAxisVisibility() {
+          worldAxisOverlay.group.visible = Boolean(worldAxisOverlay.enabled);
+          worldAxisOverlay.labels.forEach((label, index) => {
+            label.visible =
+              Boolean(worldAxisOverlay.enabled) &&
+              index < worldAxisOverlay.labelSpecs.length;
+          });
+        }
+
+        function updateWorldAxisOverlay() {
+          if (!worldAxisOverlay.enabled) {
+            syncWorldAxisVisibility();
+            return;
+          }
+          rebuildWorldAxisGeometry();
+          syncWorldAxisVisibility();
+        }
+
+        function initWorldAxisControls() {
+          if (
+            !worldAxisControlWrap ||
+            !worldAxisButton ||
+            !worldAxisControls ||
+            !worldAxisToggle
+          ) {
+            return;
+          }
+          worldAxisToggle.checked = Boolean(worldAxisOverlay.enabled);
+          worldAxisToggle.addEventListener("change", () => {
+            worldAxisOverlay.enabled = Boolean(worldAxisToggle.checked);
+            storeBoolean(WORLD_AXIS_STORAGE_KEY, worldAxisOverlay.enabled);
+            if (worldAxisOverlay.enabled) {
+              worldAxisOverlay.anchorInitialized = false;
+              rebuildWorldAxisGeometry();
+            }
+            syncWorldAxisVisibility();
+            requestRender();
+          });
+          worldAxisButton.addEventListener("click", () => {
+            const expanded = !worldAxisControls.classList.contains("is-visible");
+            worldAxisControls.classList.toggle("is-visible", expanded);
+            worldAxisButton.classList.toggle("is-active", expanded);
+            worldAxisButton.setAttribute("aria-expanded", expanded ? "true" : "false");
+          });
+          worldAxisButton.setAttribute("aria-expanded", "false");
+          syncWorldAxisVisibility();
+        }
+
         function resize() {
           const width = Math.max(root.clientWidth || 1, 1);
           const height = Math.max(root.clientHeight || 1, 1);
@@ -50360,6 +50913,7 @@ class FastReplan {
           const canvasWidth = Math.max(renderer.domElement.clientWidth || 1, 1);
           const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
           updateHandleScales();
+          updateWorldAxisOverlay();
           renderer.setViewport(0, 0, canvasWidth, canvasHeight);
           renderer.setScissorTest(false);
           renderer.clear(true, true, true);
@@ -50632,6 +51186,7 @@ class FastReplan {
         (payload.points || []).forEach(addMarkers);
         (payload.labels || []).forEach(addLabel);
         initAntiCollisionControls();
+        initWorldAxisControls();
         applyAntiCollisionLayerVisibility();
         if (miniMapToggleBtn) {
           miniMapToggleBtn.addEventListener("pointerdown", handleMiniMapResizePointerDown);
@@ -63572,7 +64127,7 @@ def test_min_kop_calculation() -> None:
     assert min_kop_tight > min_kop_gentle
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_anticollision.py	142784
+===BEGIN_FILE===	tests/test_anticollision.py	148059
 from __future__ import annotations
 
 from concurrent.futures import Future
@@ -63723,6 +64278,80 @@ def _fact_sidetrack_success_on_parent_path() -> SuccessfulWellPlan:
         azimuth_deg=90.0,
         md_t1_m=1200.0,
         config=TrajectoryConfig(),
+    )
+
+
+def _fact_sidetrack_success_with_parent_clearance_then_reentry() -> SuccessfulWellPlan:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [1000.0, 1100.0, 1300.0, 1700.0, 1900.0, 2100.0],
+            "INC_deg": [90.0, 90.0, 90.0, 90.0, 90.0, 90.0],
+            "AZI_deg": [90.0, 90.0, 90.0, 90.0, 90.0, 90.0],
+            "X_m": [1000.0, 1100.0, 1300.0, 1700.0, 1900.0, 2100.0],
+            "Y_m": [0.0, 0.0, 60.0, 60.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "segment": [
+                "WINDOW",
+                "SIDETRACK",
+                "SIDETRACK",
+                "SIDETRACK",
+                "SIDETRACK",
+                "SIDETRACK",
+            ],
+        }
+    )
+    return SuccessfulWellPlan(
+        name="9010_ZBS",
+        surface=Point3D(1000.0, 0.0, 0.0),
+        t1=Point3D(1300.0, 60.0, 0.0),
+        t3=Point3D(2100.0, 0.0, 0.0),
+        stations=stations,
+        summary={
+            "trajectory_type": "FACT_SIDETRACK",
+            "sidetrack_parent_well_name": "9010",
+            "sidetrack_parent_kind": REFERENCE_WELL_ACTUAL,
+            "actual_parent_well_name": "9010",
+            "sidetrack_window_md_m": 1000.0,
+            "sidetrack_window_x_m": 1000.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 0.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1300.0,
+        config=TrajectoryConfig(),
+    )
+
+
+def _corridor_stub(
+    *,
+    well_a: str,
+    well_b: str,
+    md_a_start_m: float,
+    md_a_end_m: float,
+    md_b_start_m: float,
+    md_b_end_m: float,
+) -> AntiCollisionCorridor:
+    return AntiCollisionCorridor(
+        well_a=well_a,
+        well_b=well_b,
+        classification="trajectory",
+        priority_rank=2,
+        label_a="",
+        label_b="",
+        md_a_start_m=float(md_a_start_m),
+        md_a_end_m=float(md_a_end_m),
+        md_b_start_m=float(md_b_start_m),
+        md_b_end_m=float(md_b_end_m),
+        md_a_values_m=np.asarray([float(md_a_start_m), float(md_a_end_m)], dtype=float),
+        md_b_values_m=np.asarray([float(md_b_start_m), float(md_b_end_m)], dtype=float),
+        label_a_values=("", ""),
+        label_b_values=("", ""),
+        midpoint_xyz=np.asarray([[0.0, 0.0, 0.0]], dtype=float),
+        overlap_rings_xyz=(),
+        overlap_core_radius_m=np.asarray([1.0], dtype=float),
+        separation_factor_values=np.asarray([0.5], dtype=float),
+        overlap_depth_values_m=np.asarray([1.0], dtype=float),
     )
 
 
@@ -64596,7 +65225,7 @@ def test_reference_actual_well_can_use_selected_unknown_mwd_model() -> None:
     )
 
 
-def test_fact_sidetrack_parent_pair_is_scanned_after_window_skip() -> None:
+def test_fact_sidetrack_parent_initial_overlap_is_ignored_without_reentry() -> None:
     model = PlanningUncertaintyModel(
         sigma_inc_deg=0.25,
         sigma_azi_deg=0.25,
@@ -64620,17 +65249,105 @@ def test_fact_sidetrack_parent_pair_is_scanned_after_window_skip() -> None:
         if {str(corridor.well_a), str(corridor.well_b)} == {"9010_ZBS", "9010"}
     ]
     assert analysis.pair_count == 1
+    assert analysis.overlapping_pair_count == 0
+    assert not parent_corridors
+
+
+def test_fact_sidetrack_parent_late_reentry_after_clearance_is_preserved() -> None:
+    model = PlanningUncertaintyModel(
+        sigma_inc_deg=0.25,
+        sigma_azi_deg=0.25,
+        sigma_lateral_drift_m_per_1000m=2.0,
+        sample_step_m=10.0,
+        min_refined_step_m=10.0,
+    )
+
+    analysis = build_anti_collision_analysis_for_successes(
+        [_fact_sidetrack_success_with_parent_clearance_then_reentry()],
+        model=model,
+        reference_wells=(_horizontal_reference_well(),),
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+        analysis_sample_step_m=10.0,
+    )
+
+    parent_corridors = [
+        corridor
+        for corridor in analysis.corridors
+        if {str(corridor.well_a), str(corridor.well_b)} == {"9010_ZBS", "9010"}
+    ]
+
+    assert analysis.pair_count == 1
+    assert analysis.overlapping_pair_count == 1
     assert parent_corridors
-    assert all(
-        float(np.min(corridor.md_a_values_m))
-        > 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
-        for corridor in parent_corridors
+    assert all(float(corridor.md_a_start_m) > 1700.0 for corridor in parent_corridors)
+    assert all(float(corridor.md_b_start_m) > 1700.0 for corridor in parent_corridors)
+
+
+def test_trim_sidetrack_parent_leading_overlap_uses_side_md_progression() -> None:
+    model = PlanningUncertaintyModel(sample_step_m=10.0, min_refined_step_m=10.0)
+    side = build_anti_collision_well(
+        name="SIDE",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=False,
     )
-    assert all(
-        float(np.min(corridor.md_b_values_m))
-        > 1000.0 + anticollision_module.SIDETRACK_PARENT_SCAN_SKIP_M
-        for corridor in parent_corridors
+    parent = build_anti_collision_well(
+        name="PARENT",
+        color="#D1495B",
+        stations=_straight_stations(y_offset_m=0.0),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        model=model,
+        include_display_geometry=False,
     )
+    corridors = [
+        _corridor_stub(
+            well_a="SIDE",
+            well_b="PARENT",
+            md_a_start_m=35.0,
+            md_a_end_m=70.0,
+            md_b_start_m=35.0,
+            md_b_end_m=70.0,
+        ),
+        _corridor_stub(
+            well_a="SIDE",
+            well_b="PARENT",
+            md_a_start_m=80.0,
+            md_a_end_m=110.0,
+            md_b_start_m=300.0,
+            md_b_end_m=330.0,
+        ),
+        _corridor_stub(
+            well_a="SIDE",
+            well_b="PARENT",
+            md_a_start_m=700.0,
+            md_a_end_m=730.0,
+            md_b_start_m=40.0,
+            md_b_end_m=70.0,
+        ),
+    ]
+
+    trimmed = anticollision_module._trim_sidetrack_parent_leading_overlap_corridors(
+        corridors=corridors,
+        scan_start_md_m=30.0,
+        side_is_a=True,
+        well_a=side,
+        well_b=parent,
+    )
+
+    assert len(trimmed) == 1
+    assert trimmed[0].md_a_start_m == pytest.approx(700.0)
+    assert trimmed[0].md_b_start_m == pytest.approx(40.0)
 
 
 def test_fact_sidetrack_parent_relative_uncertainty_starts_at_window() -> None:
@@ -75549,7 +76266,7 @@ def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:
     assert bumped == 1
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_pad_state.py	17879
+===BEGIN_FILE===	tests/test_ptc_pad_state.py	17959
 from __future__ import annotations
 
 import math
@@ -75721,6 +76438,7 @@ def test_pad_config_defaults_to_center_anchor_mode() -> None:
 
     defaults = ptc_pad_state.pad_config_defaults(pads[0])
 
+    assert defaults["spacing_m"] == ptc_pad_state.DEFAULT_PAD_SPACING_M == 40.0
     assert str(defaults["surface_anchor_mode"]) == (
         ptc_pad_state.DEFAULT_PAD_SURFACE_ANCHOR_MODE
     )
@@ -81792,7 +82510,7 @@ def test_default_three_camera_uses_z_up_eye() -> None:
     assert DEFAULT_THREE_CAMERA["eye"] == {"x": 1.25, "y": 1.25, "z": 1.25}
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	24091
+===BEGIN_FILE===	tests/test_three_viewer.py	25632
 from __future__ import annotations
 
 from pathlib import Path
@@ -81808,11 +82526,34 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="fullscreen-btn"' in html
     assert 'id="anti-collision-btn"' in html
     assert 'id="anti-collision-controls"' in html
+    assert 'id="world-axis-control-wrap"' in html
+    assert 'id="world-axis-btn"' in html
+    assert 'id="world-axis-controls"' in html
+    assert 'id="world-axis-toggle"' in html
+    assert ".toolbar-btn.is-mini" in html
     assert 'data-ac-layer="cones"' in html
     assert 'data-ac-layer="sidetrack_relative_cones"' in html
     assert 'data-ac-layer="overlaps"' in html
     assert 'data-ac-layer="segments"' in html
     assert "function initAntiCollisionControls()" in html
+    assert "const WORLD_AXIS_STORAGE_KEY = `pywp:world-axis-overlay:${viewerStateScope}`;" in html
+    assert "const WORLD_AXIS_PLANE_RAW_Z = 0.0;" in html
+    assert "const WORLD_AXIS_ANCHOR_NDC = { x: -0.62, y: -0.68 };" in html
+    assert "function worldAxisPlaneIntersectionRaw(ndcX, ndcY, rawZ)" in html
+    assert "function worldAxisTargetRawPoint()" in html
+    assert "function syncWorldAxisAnchorRaw(initialAnchorRaw)" in html
+    assert "function worldAxisNiceStep(rawValue)" in html
+    assert "function rebuildWorldAxisGeometry()" in html
+    assert "function updateWorldAxisOverlay()" in html
+    assert "function initWorldAxisControls()" in html
+    assert "anchorInitialized: false" in html
+    assert "lastTargetRaw: { x: 0.0, y: 0.0 }" in html
+    assert "worldAxisOverlay.anchorRaw.x += Number.isFinite(deltaX) ? deltaX : 0;" in html
+    assert "worldAxisOverlay.anchorRaw.y += Number.isFinite(deltaY) ? deltaY : 0;" in html
+    assert "const unitsPerPixel = worldUnitsPerPixelAt(anchorDisplay);" in html
+    assert "viewWidth: Math.max(unitsPerPixel * canvasWidth, 10.0)," in html
+    assert "viewHeight: Math.max(unitsPerPixel * canvasHeight, 10.0)," in html
+    assert "zLength * Z_DISPLAY_SIGN" in html
     assert "function registerAntiCollisionVisualObject(object, itemOrRole)" in html
     assert 'role === "sidetrack_relative_cone"' in html
     assert 'role === "sidetrack_relative_cone_tip"' in html
@@ -81854,6 +82595,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "controls.dampingFactor = 0.12;" in html
     assert "controls.screenSpacePanning = true;" in html
     assert "function updateLabels()" in html
+    assert "updateWorldAxisOverlay();" in html
     assert "offsetY: Number((options && options.offsetY) || 0)" in html
     assert 'role === "well_label" ||' in html
     assert 'role === "pilot_point_label" ||' in html
@@ -82053,6 +82795,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "text-shadow: 0 1px 2px rgba(255,255,255,0.95);" in html
     assert 'id="minimap-toggle-btn"' in html
     assert ">План E-N</button>" in html
+    assert "initWorldAxisControls();" in html
     assert "План E-N ‹" not in html
     assert "#minimap-control:not(.is-expanded) #minimap-toggle-btn::before" in html
     assert 'content: "‹";' in html
@@ -89257,7 +90000,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	277630
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	277754
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -90029,11 +90772,16 @@ def test_welltrack_page_renders_and_fixes_zbs_t1_t3_order_from_parent() -> None:
         "После подцепления фактической скважины проверьте порядок целей" in str(widget.value)
         for widget in at.warning
     )
+    assert any(
+        "Перейти к блоку проверки t1/t3" in str(widget.value)
+        for widget in at.warning
+    )
+    assert any(
+        "#wt-t1-t3-order-panel" in str(widget.value)
+        for widget in at.warning
+    )
     assert any("`9010_ZBS`" in str(widget.value) for widget in at.markdown)
     assert any("родитель→" in str(widget.value) for widget in at.markdown)
-    assert any(
-        "#wt-t1-t3-order-panel" in str(widget.value) for widget in at.markdown
-    )
 
     _click_button(at, "Исправить порядок для выбранных скважин")
     at.run(timeout=120)

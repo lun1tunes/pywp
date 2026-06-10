@@ -2092,11 +2092,70 @@ def _sidetrack_parent_pair_overlap_corridors(
     )
     well_a = side_relative if bool(sidetrack_pair.side_is_a) else parent_relative
     well_b = parent_relative if bool(sidetrack_pair.side_is_a) else side_relative
-    return _standard_pair_overlap_corridors(
+    corridors = _standard_pair_overlap_corridors(
         well_a=well_a,
         well_b=well_b,
         build_overlap_geometry=build_overlap_geometry,
     )
+    return _trim_sidetrack_parent_leading_overlap_corridors(
+        corridors=corridors,
+        scan_start_md_m=scan_start_md,
+        side_is_a=bool(sidetrack_pair.side_is_a),
+        well_a=well_a,
+        well_b=well_b,
+    )
+
+
+def _trim_sidetrack_parent_leading_overlap_corridors(
+    *,
+    corridors: list[AntiCollisionCorridor],
+    scan_start_md_m: float,
+    side_is_a: bool,
+    well_a: AntiCollisionWell,
+    well_b: AntiCollisionWell,
+) -> list[AntiCollisionCorridor]:
+    if not corridors:
+        return []
+    sorted_corridors = sorted(
+        corridors,
+        key=lambda corridor: (
+            float(corridor.md_a_start_m) if side_is_a else float(corridor.md_b_start_m),
+            float(corridor.md_a_end_m) if side_is_a else float(corridor.md_b_end_m),
+            float(corridor.md_b_start_m) if side_is_a else float(corridor.md_a_start_m),
+        ),
+    )
+    merge_tolerance_m = _corridor_merge_tolerance_m((well_a, well_b))
+    first = sorted_corridors[0]
+    side_start_m = (
+        float(first.md_a_start_m) if side_is_a else float(first.md_b_start_m)
+    )
+    parent_start_m = (
+        float(first.md_b_start_m) if side_is_a else float(first.md_a_start_m)
+    )
+    if (
+        side_start_m > float(scan_start_md_m) + merge_tolerance_m
+        or parent_start_m > float(scan_start_md_m) + merge_tolerance_m
+    ):
+        return sorted_corridors
+
+    leading_end_side_m = (
+        float(first.md_a_end_m) if side_is_a else float(first.md_b_end_m)
+    )
+    keep_from_index = len(sorted_corridors)
+    for index in range(1, len(sorted_corridors)):
+        corridor = sorted_corridors[index]
+        corridor_side_start_m = (
+            float(corridor.md_a_start_m) if side_is_a else float(corridor.md_b_start_m)
+        )
+        corridor_side_end_m = (
+            float(corridor.md_a_end_m) if side_is_a else float(corridor.md_b_end_m)
+        )
+        if corridor_side_start_m <= leading_end_side_m + merge_tolerance_m:
+            leading_end_side_m = max(leading_end_side_m, corridor_side_end_m)
+            continue
+        keep_from_index = index
+        break
+    return sorted_corridors[keep_from_index:]
 
 
 def sidetrack_parent_relative_cone_overlays(

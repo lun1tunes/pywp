@@ -380,11 +380,8 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
                 "После подцепления фактической скважины проверьте порядок целей `t1/t3` "
                 "для боковых стволов: "
                 + ", ".join(matched_issue_names)
-                + "."
-            )
-            st.markdown(
-                "[Перейти к блоку проверки t1/t3]"
-                f"(#{wt.WT_T1T3_ORDER_PANEL_ANCHOR_ID})"
+                + ". "
+                + f"[Перейти к блоку проверки t1/t3](#{wt.WT_T1T3_ORDER_PANEL_ANCHOR_ID})."
             )
     if missing:
         st.warning(
