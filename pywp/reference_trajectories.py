@@ -61,6 +61,7 @@ class ImportedTrajectoryWell(FrozenArbitraryModel):
     stations: pd.DataFrame
     surface: Point3D
     azimuth_deg: float
+    dev_export_rows: pd.DataFrame | None = None
 
 
 def parse_reference_trajectory_table(
@@ -279,6 +280,8 @@ def parse_reference_trajectory_dev_text(
     ys: list[float] = []
     zs: list[float] = []
     mds: list[float] = []
+    dev_export_rows_payload: list[dict[str, float]] = []
+    has_full_dev_rows = True
     for line_no, raw_line in enumerate(source.splitlines(), start=1):
         line = str(raw_line).strip()
         if not line or line.startswith("#"):
@@ -308,6 +311,27 @@ def parse_reference_trajectory_dev_text(
         xs.append(x)
         ys.append(y)
         zs.append(z)
+        if len(tokens) >= 11:
+            try:
+                dev_export_rows_payload.append(
+                    {
+                        "MD": md,
+                        "X": x,
+                        "Y": y,
+                        "Z": _parse_dev_float(tokens[3]),
+                        "TVD": _parse_dev_float(tokens[4]),
+                        "DX": _parse_dev_float(tokens[5]),
+                        "DY": _parse_dev_float(tokens[6]),
+                        "AZIM_TN": _parse_dev_float(tokens[7]),
+                        "INCL": _parse_dev_float(tokens[8]),
+                        "DLS": _parse_dev_float(tokens[9]),
+                        "AZIM_GN": _parse_dev_float(tokens[10]),
+                    }
+                )
+            except ValueError:
+                has_full_dev_rows = False
+        else:
+            has_full_dev_rows = False
 
     if len(mds) < 2:
         raise WelltrackParseError(
@@ -320,6 +344,14 @@ def parse_reference_trajectory_dev_text(
         zs=zs,
         mds=mds,
     )
+    dev_export_rows = None
+    if has_full_dev_rows and len(dev_export_rows_payload) == len(mds):
+        dev_export_rows = pd.DataFrame(dev_export_rows_payload).sort_values(
+            "MD", kind="mergesort"
+        )
+        dev_export_rows = dev_export_rows.drop_duplicates(
+            subset=["MD"], keep="first"
+        ).reset_index(drop=True)
     return ImportedTrajectoryWell(
         name=normalized_name,
         kind=normalized_kind,
@@ -330,6 +362,7 @@ def parse_reference_trajectory_dev_text(
             z=float(stations["Z_m"].iloc[0]),
         ),
         azimuth_deg=float(_infer_reference_azimuth_deg(stations)),
+        dev_export_rows=dev_export_rows,
     )
 
 

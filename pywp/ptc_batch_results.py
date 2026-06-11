@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
 import pandas as pd
 import py7zr
 
@@ -22,6 +23,7 @@ from pywp.coordinate_integration import (
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.mcm import dogleg_angle_rad
+from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
 from pywp.ui_well_panels import survey_export_dataframe
 from pywp.welltrack_batch import SuccessfulWellPlan
@@ -74,6 +76,21 @@ BATCH_SUMMARY_DISPLAY_ORDER: tuple[str, ...] = (
 SurveyExportFrameFunc = Callable[..., pd.DataFrame]
 DlsToPiFunc = Callable[[object], object]
 _SURVEY_EXPORT_REQUIRED_COLUMNS = ("MD_m", "X_m", "Y_m", "Z_m")
+_DEV_EXPORT_COLUMNS = (
+    "MD",
+    "X",
+    "Y",
+    "Z",
+    "TVD",
+    "DX",
+    "DY",
+    "AZIM_TN",
+    "INCL",
+    "DLS",
+    "AZIM_GN",
+)
+_DEV_EXPORT_REQUIRED_COLUMNS = ("MD", "X", "Y", "Z", "TVD", "DX", "DY")
+_DEV_EXPORT_ANGLE_COLUMNS = ("AZIM_TN", "INCL", "DLS", "AZIM_GN")
 TransformXyFunc = Callable[
     [float, float, CoordinateSystem, CoordinateSystem],
     tuple[float, float],
@@ -313,6 +330,7 @@ def build_batch_survey_dev_7z(
     target_crs: CoordinateSystem = DEFAULT_CRS,
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
     transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
 ) -> bytes:
@@ -343,7 +361,11 @@ def build_batch_survey_dev_7z(
                 )
                 source_path = temp_root / file_name
                 source_path.write_text(
-                    _dev_export_text(success=success, stations=stations),
+                    _dev_export_text(
+                        success=success,
+                        stations=stations,
+                        reference_wells=reference_wells,
+                    ),
                     encoding="utf-8",
                 )
                 archive.write(source_path, file_name)
@@ -397,6 +419,7 @@ def build_batch_survey_dev_zip(
     target_crs: CoordinateSystem = DEFAULT_CRS,
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
     transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
 ) -> bytes:
@@ -405,6 +428,7 @@ def build_batch_survey_dev_zip(
         target_crs=source_crs,
         auto_convert=False,
         source_crs=source_crs,
+        reference_wells=reference_wells,
         csv_export_crs_func=csv_export_crs_func,
         transform_stations_func=transform_stations_func,
     )
@@ -416,6 +440,7 @@ def build_batch_survey_dev_file(
     target_crs: CoordinateSystem = DEFAULT_CRS,
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
     transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
 ) -> bytes:
@@ -432,7 +457,11 @@ def build_batch_survey_dev_file(
     success, stations = prepared[0]
     if len(stations.index) < 2:
         return b""
-    return _dev_export_text(success=success, stations=stations).encode("utf-8")
+    return _dev_export_text(
+        success=success,
+        stations=stations,
+        reference_wells=reference_wells,
+    ).encode("utf-8")
 
 
 def build_batch_target_dev_file(
@@ -604,12 +633,17 @@ def _dev_export_text(
     *,
     success: SuccessfulWellPlan,
     stations: pd.DataFrame,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
 ) -> str:
-    if stations.empty:
+    rows = _dev_export_rows(
+        success=success,
+        stations=stations,
+        reference_wells=reference_wells,
+    )
+    if rows.empty:
         return ""
-    surface_x = float(stations["X_m"].iloc[0])
-    surface_y = float(stations["Y_m"].iloc[0])
-    surface_z = float(stations["Z_m"].iloc[0])
+    surface_x = float(rows["X"].iloc[0])
+    surface_y = float(rows["Y"].iloc[0])
     lines = [
         "# SURVEY FROM PYWP",
         f"# WELL NAME:                {success.name}",
@@ -622,33 +656,383 @@ def _dev_export_text(
         "    MD            X            Y            Z           TVD           DX           DY         AZIM_TN        INCL        DLS        AZIM_GN",
         "#==============================================================================================================================================",
     ]
-    for _, row in stations.iterrows():
-        x_value = _station_float(row, "X_m")
-        y_value = _station_float(row, "Y_m")
-        z_value = _station_float(row, "Z_m")
-        dev_z_value = -z_value
-        md_value = _station_float(row, "MD_m")
-        azi_value = _station_float(row, "AZI_deg")
-        inc_value = _station_float(row, "INC_deg")
-        dls_value = _station_float(row, "DLS_deg_per_30m")
+    for _, row in rows.iterrows():
         lines.append(
             " ".join(
                 [
-                    _format_export_number(md_value),
-                    _format_export_number(x_value),
-                    _format_export_number(y_value),
-                    _format_export_number(dev_z_value),
-                    _format_export_number(z_value - surface_z),
-                    _format_export_number(x_value - surface_x),
-                    _format_export_number(y_value - surface_y),
-                    _format_export_number(azi_value),
-                    _format_export_number(inc_value),
-                    _format_export_number(dls_value),
-                    _format_export_number(azi_value),
+                    _format_export_number(row["MD"]),
+                    _format_export_number(row["X"]),
+                    _format_export_number(row["Y"]),
+                    _format_export_number(row["Z"]),
+                    _format_export_number(row["TVD"]),
+                    _format_export_number(row["DX"]),
+                    _format_export_number(row["DY"]),
+                    _format_export_number(row["AZIM_TN"]),
+                    _format_export_number(row["INCL"]),
+                    _format_export_number(row["DLS"]),
+                    _format_export_number(row["AZIM_GN"]),
                 ]
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def _dev_export_rows(
+    *,
+    success: SuccessfulWellPlan,
+    stations: pd.DataFrame,
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> pd.DataFrame:
+    if stations.empty:
+        return pd.DataFrame(columns=_DEV_EXPORT_COLUMNS)
+    sidetrack_rows = _sidetrack_dev_export_rows(
+        success=success,
+        stations=stations,
+        reference_wells=reference_wells,
+    )
+    if sidetrack_rows is not None and not sidetrack_rows.empty:
+        return sidetrack_rows
+    return _dev_rows_from_stations(stations)
+
+
+def _sidetrack_dev_export_rows(
+    *,
+    success: SuccessfulWellPlan,
+    stations: pd.DataFrame,
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> pd.DataFrame | None:
+    summary = dict(getattr(success, "summary", {}) or {})
+    window_md = _summary_optional_float(summary, "sidetrack_window_md_m")
+    if window_md is None:
+        return None
+    prefix_rows = _sidetrack_parent_prefix_rows(
+        success=success,
+        window_md=window_md,
+        summary=summary,
+        reference_wells=reference_wells,
+    )
+    if prefix_rows is None or prefix_rows.empty:
+        return None
+    surface_override = (
+        float(prefix_rows["X"].iloc[0]),
+        float(prefix_rows["Y"].iloc[0]),
+        -float(prefix_rows["Z"].iloc[0]),
+    )
+    branch_rows = _dev_rows_from_stations(stations, surface_xyz=surface_override)
+    branch_rows = branch_rows.loc[
+        branch_rows["MD"].to_numpy(dtype=float) > float(window_md) + 1e-6
+    ].copy()
+    combined = pd.concat([prefix_rows, branch_rows], ignore_index=True)
+    return _sanitize_dev_export_rows(combined)
+
+
+def _sidetrack_parent_prefix_rows(
+    *,
+    success: SuccessfulWellPlan,
+    window_md: float,
+    summary: dict[str, object],
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> pd.DataFrame | None:
+    parent_well = _sidetrack_parent_reference_well(
+        summary=summary,
+        reference_wells=reference_wells,
+    )
+    parent_stations = (
+        parent_well.stations.copy()
+        if parent_well is not None
+        else _sidetrack_parent_attr_stations(success)
+    )
+    if parent_stations is None or parent_stations.empty:
+        return None
+    prefix_stations = _survey_prefix_stations(
+        parent_stations,
+        window_md=window_md,
+        window_x_m=_summary_optional_float(summary, "sidetrack_window_x_m"),
+        window_y_m=_summary_optional_float(summary, "sidetrack_window_y_m"),
+        window_z_m=_summary_optional_float(summary, "sidetrack_window_z_m"),
+        window_inc_deg=_summary_optional_float(summary, "sidetrack_window_inc_deg"),
+        window_azi_deg=_summary_optional_float(summary, "sidetrack_window_azi_deg"),
+    )
+    if prefix_stations.empty:
+        return None
+    prefix_rows = _dev_rows_from_stations(prefix_stations)
+    if parent_well is not None and parent_well.dev_export_rows is not None:
+        prefix_rows = _overlay_original_dev_rows(
+            derived_rows=prefix_rows,
+            original_rows=parent_well.dev_export_rows,
+            window_md=window_md,
+        )
+    return prefix_rows
+
+
+def _sidetrack_parent_reference_well(
+    *,
+    summary: dict[str, object],
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> ImportedTrajectoryWell | None:
+    parent_name = (
+        str(summary.get("actual_parent_well_name", "")).strip()
+        or str(summary.get("sidetrack_parent_well_name", "")).strip()
+        or str(summary.get("pilot_well_name", "")).strip()
+    )
+    if not parent_name:
+        return None
+    by_name = {
+        _well_name_key(well.name): well
+        for well in reference_wells
+    }
+    return by_name.get(_well_name_key(parent_name))
+
+
+def _sidetrack_parent_attr_stations(success: SuccessfulWellPlan) -> pd.DataFrame | None:
+    reference = getattr(success.stations, "attrs", {}).get(
+        "uncertainty_reference_stations"
+    )
+    if not isinstance(reference, pd.DataFrame):
+        return None
+    return reference.copy()
+
+
+def _survey_prefix_stations(
+    stations: pd.DataFrame,
+    *,
+    window_md: float,
+    window_x_m: float | None,
+    window_y_m: float | None,
+    window_z_m: float | None,
+    window_inc_deg: float | None,
+    window_azi_deg: float | None,
+) -> pd.DataFrame:
+    prepared = _sanitize_export_stations(stations)
+    if prepared.empty:
+        return prepared
+    clamped_md = float(window_md)
+    min_md = float(prepared["MD_m"].iloc[0])
+    max_md = float(prepared["MD_m"].iloc[-1])
+    if clamped_md < min_md:
+        clamped_md = min_md
+    elif (
+        clamped_md > max_md
+        and window_x_m is None
+        and window_y_m is None
+        and window_z_m is None
+        and window_inc_deg is None
+        and window_azi_deg is None
+    ):
+        clamped_md = max_md
+    prefix = prepared.loc[
+        prepared["MD_m"].to_numpy(dtype=float) <= clamped_md + 1e-6
+    ].copy()
+    if prefix.empty:
+        return prefix
+    if abs(float(prefix["MD_m"].iloc[-1]) - clamped_md) > 1e-6:
+        prefix = pd.concat(
+            [
+                prefix,
+                pd.DataFrame(
+                    [
+                        _interpolate_station_row(
+                            prepared,
+                            md_m=clamped_md,
+                            x_m=window_x_m,
+                            y_m=window_y_m,
+                            z_m=window_z_m,
+                            inc_deg=window_inc_deg,
+                            azi_deg=window_azi_deg,
+                        )
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+    return _sanitize_prefix_stations(prefix)
+
+
+def _sanitize_prefix_stations(stations: pd.DataFrame) -> pd.DataFrame:
+    result = stations.copy()
+    if "segment" in result.columns:
+        result["segment"] = result["segment"].astype(str)
+    result = result.sort_values("MD_m", kind="mergesort")
+    result = result.drop_duplicates(subset=["MD_m"], keep="last")
+    return result.reset_index(drop=True)
+
+
+def _interpolate_station_row(
+    stations: pd.DataFrame,
+    *,
+    md_m: float,
+    x_m: float | None,
+    y_m: float | None,
+    z_m: float | None,
+    inc_deg: float | None,
+    azi_deg: float | None,
+) -> dict[str, object]:
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    result: dict[str, object] = {
+        "MD_m": float(md_m),
+        "X_m": (
+            float(x_m)
+            if x_m is not None
+            else float(np.interp(float(md_m), md_values, stations["X_m"].to_numpy(dtype=float)))
+        ),
+        "Y_m": (
+            float(y_m)
+            if y_m is not None
+            else float(np.interp(float(md_m), md_values, stations["Y_m"].to_numpy(dtype=float)))
+        ),
+        "Z_m": (
+            float(z_m)
+            if z_m is not None
+            else float(np.interp(float(md_m), md_values, stations["Z_m"].to_numpy(dtype=float)))
+        ),
+        "INC_deg": (
+            float(inc_deg)
+            if inc_deg is not None
+            else float(np.interp(float(md_m), md_values, stations["INC_deg"].to_numpy(dtype=float)))
+        ),
+        "AZI_deg": (
+            float(azi_deg)
+            if azi_deg is not None
+            else _interp_azimuth_deg(
+                md_values=md_values,
+                azi_values_deg=stations["AZI_deg"].to_numpy(dtype=float),
+                md_m=float(md_m),
+            )
+        ),
+        "DLS_deg_per_30m": (
+            float(
+                np.interp(
+                    float(md_m),
+                    md_values,
+                    stations["DLS_deg_per_30m"].to_numpy(dtype=float),
+                )
+            )
+            if "DLS_deg_per_30m" in stations.columns
+            else 0.0
+        ),
+    }
+    if "segment" in stations.columns:
+        result["segment"] = str(stations["segment"].iloc[-1])
+    return result
+
+
+def _interp_azimuth_deg(
+    *,
+    md_values: np.ndarray,
+    azi_values_deg: np.ndarray,
+    md_m: float,
+) -> float:
+    radians = np.deg2rad(azi_values_deg % 360.0)
+    sin_value = float(np.interp(float(md_m), md_values, np.sin(radians)))
+    cos_value = float(np.interp(float(md_m), md_values, np.cos(radians)))
+    if abs(sin_value) < 1e-9 and abs(cos_value) < 1e-9:
+        return float(azi_values_deg[-1] % 360.0)
+    return float(np.degrees(np.arctan2(sin_value, cos_value)) % 360.0)
+
+
+def _overlay_original_dev_rows(
+    *,
+    derived_rows: pd.DataFrame,
+    original_rows: pd.DataFrame,
+    window_md: float,
+) -> pd.DataFrame:
+    result = derived_rows.copy()
+    source = _sanitize_dev_export_rows(original_rows)
+    if source.empty:
+        return result
+    source = source.loc[source["MD"].to_numpy(dtype=float) <= float(window_md) + 1e-6]
+    if source.empty:
+        return result
+    derived_md = result["MD"].to_numpy(dtype=float)
+    for _, row in source.iterrows():
+        matches = np.isclose(derived_md, float(row["MD"]), atol=1e-6)
+        if not np.any(matches):
+            continue
+        result.loc[int(np.flatnonzero(matches)[0]), list(_DEV_EXPORT_COLUMNS)] = [
+            row[column] for column in _DEV_EXPORT_COLUMNS
+        ]
+    return result
+
+
+def _dev_rows_from_stations(
+    stations: pd.DataFrame,
+    *,
+    surface_xyz: tuple[float, float, float] | None = None,
+) -> pd.DataFrame:
+    if stations.empty:
+        return pd.DataFrame(columns=_DEV_EXPORT_COLUMNS)
+    if surface_xyz is None:
+        surface_x = float(stations["X_m"].iloc[0])
+        surface_y = float(stations["Y_m"].iloc[0])
+        surface_z = float(stations["Z_m"].iloc[0])
+    else:
+        surface_x, surface_y, surface_z = (
+            float(surface_xyz[0]),
+            float(surface_xyz[1]),
+            float(surface_xyz[2]),
+        )
+    rows = pd.DataFrame(
+        {
+            "MD": stations["MD_m"].to_numpy(dtype=float),
+            "X": stations["X_m"].to_numpy(dtype=float),
+            "Y": stations["Y_m"].to_numpy(dtype=float),
+            "Z": -stations["Z_m"].to_numpy(dtype=float),
+            "TVD": stations["Z_m"].to_numpy(dtype=float) - float(surface_z),
+            "DX": stations["X_m"].to_numpy(dtype=float) - float(surface_x),
+            "DY": stations["Y_m"].to_numpy(dtype=float) - float(surface_y),
+            "AZIM_TN": (
+                stations["AZI_deg"].to_numpy(dtype=float)
+                if "AZI_deg" in stations.columns
+                else np.zeros(len(stations), dtype=float)
+            ),
+            "INCL": (
+                stations["INC_deg"].to_numpy(dtype=float)
+                if "INC_deg" in stations.columns
+                else np.zeros(len(stations), dtype=float)
+            ),
+            "DLS": (
+                stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+                if "DLS_deg_per_30m" in stations.columns
+                else np.zeros(len(stations), dtype=float)
+            ),
+        }
+    )
+    rows["AZIM_GN"] = rows["AZIM_TN"].to_numpy(dtype=float)
+    return _sanitize_dev_export_rows(rows)
+
+
+def _sanitize_dev_export_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    result = rows.copy()
+    for column in _DEV_EXPORT_REQUIRED_COLUMNS:
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+    for column in _DEV_EXPORT_ANGLE_COLUMNS:
+        values = pd.to_numeric(result[column], errors="coerce")
+        values = values.where(values.map(math.isfinite), 0.0)
+        result[column] = values.fillna(0.0)
+    finite_mask = pd.Series(True, index=result.index)
+    for column in _DEV_EXPORT_REQUIRED_COLUMNS:
+        finite_mask &= result[column].map(math.isfinite)
+    result = result.loc[finite_mask].copy()
+    if result.empty:
+        return pd.DataFrame(columns=_DEV_EXPORT_COLUMNS)
+    result = result.sort_values("MD", kind="mergesort")
+    result = result.drop_duplicates(subset=["MD"], keep="first")
+    return result.reset_index(drop=True)
+
+
+def _well_name_key(name: object) -> str:
+    return str(name or "").strip().casefold()
+
+
+def _summary_optional_float(summary: dict[str, object], key: str) -> float | None:
+    raw_value = summary.get(key)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 def _target_dev_export_text(

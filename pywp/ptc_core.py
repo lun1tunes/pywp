@@ -6630,6 +6630,7 @@ def _build_batch_survey_dev_7z(
         target_crs=target_crs,
         auto_convert=auto_convert,
         source_crs=source_crs,
+        reference_wells=_reference_wells_from_state(),
         csv_export_crs_func=csv_export_crs,
         transform_stations_func=transform_stations_to_crs,
     )
@@ -6662,6 +6663,7 @@ def _build_batch_survey_dev_file(
         target_crs=target_crs,
         auto_convert=auto_convert,
         source_crs=source_crs,
+        reference_wells=_reference_wells_from_state(),
         csv_export_crs_func=csv_export_crs,
         transform_stations_func=transform_stations_to_crs,
     )

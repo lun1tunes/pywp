@@ -261,170 +261,170 @@ def _render_survey_downloads(
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
 ) -> None:
-    with st_module.expander("Выгрузка"):
-        kind_key = "wt_download_kind"
-        if str(state.get(kind_key, "")) not in _EXPORT_KINDS:
-            state[kind_key] = _EXPORT_KIND_TRAJECTORIES
-        export_kind = str(
-            st_module.radio(
-                "Что выгружать",
-                options=list(_EXPORT_KINDS),
-                key=kind_key,
-                horizontal=True,
+    st_module.markdown("### Выгрузка")
+    kind_key = "wt_download_kind"
+    if str(state.get(kind_key, "")) not in _EXPORT_KINDS:
+        state[kind_key] = _EXPORT_KIND_TRAJECTORIES
+    export_kind = str(
+        st_module.radio(
+            "Что выгружать",
+            options=list(_EXPORT_KINDS),
+            key=kind_key,
+            horizontal=True,
+        )
+    )
+    if export_kind == _EXPORT_KIND_TARGETS:
+        _render_target_downloads(
+            state=state,
+            st_module=st_module,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
+            build_batch_target_csv_func=build_batch_target_csv_func,
+            build_batch_target_welltrack_func=build_batch_target_welltrack_func,
+            build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
+            build_batch_target_dev_file_func=build_batch_target_dev_file_func,
+        )
+        return
+
+    successes = list(state.get("wt_successes") or [])
+    success_names = [
+        str(success.name)
+        for success in successes
+        if not is_pilot_name(success.name)
+    ]
+    success_name_set = set(success_names)
+    selected_key = "wt_survey_download_selected_names"
+    raw_selected = _as_selection_list(state.get(selected_key, []))
+    selected_current = [
+        str(name) for name in raw_selected if str(name) in success_name_set
+    ]
+    if selected_current != raw_selected:
+        state[selected_key] = selected_current
+    selected_names = st_module.multiselect(
+        "Скважины для выгрузки",
+        options=success_names,
+        key=selected_key,
+        placeholder="Выберите скважины",
+    )
+    format_key = "wt_survey_download_format"
+    if (
+        str(state.get(format_key, "")).strip()
+        == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP
+    ):
+        state[format_key] = _SURVEY_DOWNLOAD_FORMAT_DEV
+    if str(state.get(format_key, "")) not in _SURVEY_DOWNLOAD_FORMATS:
+        state[format_key] = _SURVEY_DOWNLOAD_FORMATS[0]
+    export_format = str(
+        st_module.radio(
+            "Формат выгрузки",
+            options=list(_SURVEY_DOWNLOAD_FORMATS),
+            key=format_key,
+            horizontal=True,
+        )
+    )
+    selected_name_set = {str(name) for name in selected_names}
+    selected_successes = _successes_for_visible_selection(
+        successes=successes,
+        selected_names=selected_name_set,
+    )
+    export_config = _survey_download_config(
+        export_format=export_format,
+        build_batch_survey_csv_func=build_batch_survey_csv_func,
+        build_batch_survey_welltrack_func=build_batch_survey_welltrack_func,
+        build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
+        build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
+    )
+    station_count = _success_station_row_count(successes)
+    if station_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
+        prepare_key = "wt_prepare_survey_download_payloads"
+        state.setdefault(prepare_key, False)
+        prepare_payloads = bool(
+            st_module.toggle(
+                "Подготовить файлы выгрузки траекторий",
+                key=prepare_key,
+                help=(
+                    "Для больших наборов файлы выгрузки формируются только "
+                    "по запросу, чтобы каждый rerun Streamlit не блокировал "
+                    "отображение результатов."
+                ),
             )
         )
-        if export_kind == _EXPORT_KIND_TARGETS:
-            _render_target_downloads(
-                state=state,
-                st_module=st_module,
-                target_crs=target_crs,
-                auto_convert=auto_convert,
-                source_crs=source_crs,
-                build_batch_target_csv_func=build_batch_target_csv_func,
-                build_batch_target_welltrack_func=build_batch_target_welltrack_func,
-                build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
-                build_batch_target_dev_file_func=build_batch_target_dev_file_func,
+        if not prepare_payloads:
+            st_module.caption(
+                f"Выгрузка не сформирована автоматически: {station_count} строк survey. "
+                "Расчётные данные уже доступны в результатах; включите подготовку файлов "
+                "только перед скачиванием."
             )
             return
-
-        successes = list(state.get("wt_successes") or [])
-        success_names = [
-            str(success.name)
-            for success in successes
-            if not is_pilot_name(success.name)
-        ]
-        success_name_set = set(success_names)
-        selected_key = "wt_survey_download_selected_names"
-        raw_selected = _as_selection_list(state.get(selected_key, []))
-        selected_current = [
-            str(name) for name in raw_selected if str(name) in success_name_set
-        ]
-        if selected_current != raw_selected:
-            state[selected_key] = selected_current
-        selected_names = st_module.multiselect(
-            "Скважины для выгрузки",
-            options=success_names,
-            key=selected_key,
-            placeholder="Выберите скважины",
-        )
-        format_key = "wt_survey_download_format"
-        if (
-            str(state.get(format_key, "")).strip()
-            == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP
-        ):
-            state[format_key] = _SURVEY_DOWNLOAD_FORMAT_DEV
-        if str(state.get(format_key, "")) not in _SURVEY_DOWNLOAD_FORMATS:
-            state[format_key] = _SURVEY_DOWNLOAD_FORMATS[0]
-        export_format = str(
-            st_module.radio(
-                "Формат выгрузки",
-                options=list(_SURVEY_DOWNLOAD_FORMATS),
-                key=format_key,
-                horizontal=True,
-            )
-        )
-        selected_name_set = {str(name) for name in selected_names}
-        selected_successes = _successes_for_visible_selection(
-            successes=successes,
-            selected_names=selected_name_set,
-        )
-        export_config = _survey_download_config(
-            export_format=export_format,
-            build_batch_survey_csv_func=build_batch_survey_csv_func,
-            build_batch_survey_welltrack_func=build_batch_survey_welltrack_func,
-            build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
-            build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
-        )
-        station_count = _success_station_row_count(successes)
-        if station_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
-            prepare_key = "wt_prepare_survey_download_payloads"
-            state.setdefault(prepare_key, False)
-            prepare_payloads = bool(
-                st_module.toggle(
-                    "Подготовить файлы выгрузки траекторий",
-                    key=prepare_key,
-                    help=(
-                        "Для больших наборов файлы выгрузки формируются только "
-                        "по запросу, чтобы каждый rerun Streamlit не блокировал "
-                        "отображение результатов."
-                    ),
-                )
-            )
-            if not prepare_payloads:
-                st_module.caption(
-                    f"Выгрузка не сформирована автоматически: {station_count} строк survey. "
-                    "Расчётные данные уже доступны в результатах; включите подготовку файлов "
-                    "только перед скачиванием."
-                )
-                return
-        all_signature = _download_signature(
+    all_signature = _download_signature(
+        export_kind=export_kind,
+        export_format=export_format,
+        target_crs=target_crs,
+        source_crs=source_crs,
+        auto_convert=auto_convert,
+        item_signature=_successes_signature(successes),
+    )
+    survey_data = _download_payload_from_state_cache(
+        state=state,
+        cache_key="wt_survey_download_all_payload_cache",
+        signature=all_signature,
+        build_payload=lambda: export_config.builder(
+            successes,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
+        ),
+    )
+    selected_survey_data: bytes = b""
+    selected_label = export_config.selected_label
+    selected_file_name = export_config.selected_file_name
+    selected_mime = export_config.mime
+    if selected_successes:
+        selected_signature = _download_signature(
             export_kind=export_kind,
             export_format=export_format,
             target_crs=target_crs,
             source_crs=source_crs,
             auto_convert=auto_convert,
-            item_signature=_successes_signature(successes),
+            selected_names=tuple(selected_names),
+            item_signature=_successes_signature(selected_successes),
         )
-        survey_data = _download_payload_from_state_cache(
-            state=state,
-            cache_key="wt_survey_download_all_payload_cache",
-            signature=all_signature,
-            build_payload=lambda: export_config.builder(
-                successes,
-                target_crs=target_crs,
-                auto_convert=auto_convert,
-                source_crs=source_crs,
-            ),
+        selected_survey_data, selected_label, selected_file_name, selected_mime = (
+            _download_payload_from_state_cache(
+                state=state,
+                cache_key="wt_survey_download_selected_payload_cache",
+                signature=selected_signature,
+                build_payload=lambda: _selected_download_payload(
+                    export_config=export_config,
+                    selected_successes=selected_successes,
+                    target_crs=target_crs,
+                    auto_convert=auto_convert,
+                    source_crs=source_crs,
+                ),
+            )
         )
-        selected_survey_data: bytes = b""
-        selected_label = export_config.selected_label
-        selected_file_name = export_config.selected_file_name
-        selected_mime = export_config.mime
-        if selected_successes:
-            selected_signature = _download_signature(
-                export_kind=export_kind,
-                export_format=export_format,
-                target_crs=target_crs,
-                source_crs=source_crs,
-                auto_convert=auto_convert,
-                selected_names=tuple(selected_names),
-                item_signature=_successes_signature(selected_successes),
-            )
-            selected_survey_data, selected_label, selected_file_name, selected_mime = (
-                _download_payload_from_state_cache(
-                    state=state,
-                    cache_key="wt_survey_download_selected_payload_cache",
-                    signature=selected_signature,
-                    build_payload=lambda: _selected_download_payload(
-                        export_config=export_config,
-                        selected_successes=selected_successes,
-                        target_crs=target_crs,
-                        auto_convert=auto_convert,
-                        source_crs=source_crs,
-                    ),
-                )
-            )
-        all_col, selected_col = st_module.columns(2, gap="small")
-        with all_col:
-            st_module.download_button(
-                export_config.all_label,
-                data=survey_data or b"",
-                file_name=export_config.all_file_name,
-                mime=export_config.mime,
-                icon=":material/download:",
-                use_container_width=True,
-                disabled=not survey_data,
-            )
-        with selected_col:
-            st_module.download_button(
-                selected_label,
-                data=selected_survey_data or b"",
-                file_name=selected_file_name,
-                mime=selected_mime,
-                icon=":material/download:",
-                use_container_width=True,
-                disabled=not selected_survey_data,
-            )
+    all_col, selected_col = st_module.columns(2, gap="small")
+    with all_col:
+        st_module.download_button(
+            export_config.all_label,
+            data=survey_data or b"",
+            file_name=export_config.all_file_name,
+            mime=export_config.mime,
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not survey_data,
+        )
+    with selected_col:
+        st_module.download_button(
+            selected_label,
+            data=selected_survey_data or b"",
+            file_name=selected_file_name,
+            mime=selected_mime,
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not selected_survey_data,
+        )
 
 
 def _render_target_downloads(

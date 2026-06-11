@@ -230,6 +230,95 @@ def test_anticollision_panel_reruns_after_fresh_analysis_when_visual_is_external
     assert calls["progress_emptied"] is True
 
 
+def test_anticollision_panel_renders_settings_under_section_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+        }
+
+        def markdown(self, message: str) -> None:
+            calls.append(("markdown", str(message)))
+
+        def selectbox(
+            self,
+            label: str,
+            *,
+            options: list[str],
+            format_func=None,
+            key: str,
+        ) -> str:
+            calls.append(("selectbox", str(label)))
+            value = str(options[0])
+            self.session_state[key] = value
+            return value
+
+        def button(self, label: str, **_kwargs: object) -> bool:
+            calls.append(("button", str(label)))
+            return False
+
+        def info(self, message: str) -> None:
+            calls.append(("info", str(message)))
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (
+            SimpleNamespace(name="FACT-1", kind=ptc_core.REFERENCE_WELL_ACTUAL),
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "render_anticollision_params_block",
+        lambda **_kwargs: calls.append(("params", "rendered")),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_cached_anticollision_snapshot",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_status_run_log",
+        lambda **_kwargs: None,
+    )
+
+    ptc_page_results._render_anticollision_panel(
+        successes=[object(), object()],
+        records=[],
+        summary_rows=[],
+        focus_pad_id="",
+        focus_pad_well_names=[],
+        show_visualization=False,
+    )
+
+    assert calls[:4] == [
+        ("markdown", "### Anti-collision и пересечения"),
+        ("selectbox", "Пресет неопределенности для anti-collision"),
+        ("params", "rendered"),
+        ("button", "Расчёт пересечений"),
+    ]
+
+
 def test_anticollision_panel_pauses_on_pending_target_edits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

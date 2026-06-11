@@ -3767,7 +3767,7 @@ def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
     assert str(at.session_state["wt_results_all_view_mode"]) == "Anti-collision"
 
 
-def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
+def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
     monkeypatch,
 ) -> None:
     page = wt_import_module
@@ -3797,7 +3797,7 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     page.st.session_state["wt_survey_download_selected_names"] = ["WELL-B"]
     captured: dict[str, object] = {
         "download_buttons": [],
-        "expanders": [],
+        "markdown": [],
         "multiselect": None,
         "radios": [],
     }
@@ -3815,10 +3815,6 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     def _fake_columns(spec, *args, **kwargs):
         count = int(spec) if isinstance(spec, int) else len(spec)
         return tuple(_DummyContext() for _ in range(count))
-
-    def _fake_expander(label, *args, **kwargs):
-        captured["expanders"].append(str(label))
-        return _DummyContext()
 
     def _fake_multiselect(label, options, *args, **kwargs):
         captured["multiselect"] = {
@@ -3852,9 +3848,12 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "columns", _fake_columns)
     monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
-    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "markdown",
+        lambda message, *args, **kwargs: captured["markdown"].append(str(message)),
+    )
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
-    monkeypatch.setattr(page.st, "expander", _fake_expander)
     monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
     monkeypatch.setattr(page.st, "radio", _fake_radio)
     monkeypatch.setattr(page.st, "download_button", _fake_download_button)
@@ -3869,7 +3868,7 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     downloads = list(captured["download_buttons"])
     download_labels = {str(item["label"]) for item in downloads}
     assert "Скачать сводку (CSV)" not in download_labels
-    assert "Выгрузка" in captured["expanders"]
+    assert "### Выгрузка" in captured["markdown"]
     assert captured["multiselect"] == {
         "label": "Скважины для выгрузки",
         "options": ["WELL-A", "WELL-B"],

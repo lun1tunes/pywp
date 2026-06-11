@@ -10,7 +10,12 @@ from pywp import ptc_batch_results
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord, parse_welltrack_text
 from pywp.models import Point3D, TrajectoryConfig
-from pywp.reference_trajectories import parse_reference_trajectory_dev_text
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    REFERENCE_WELL_ACTUAL,
+    build_reference_trajectory_stations,
+    parse_reference_trajectory_dev_text,
+)
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 
@@ -60,6 +65,59 @@ def _record(
             WelltrackPoint(x=110.0, y=220.0, z=1000.0, md=2.0),
             WelltrackPoint(x=210.0, y=420.0, z=1100.0, md=3.0),
         ),
+    )
+
+
+def _reference_well(
+    name: str,
+    *,
+    xs: list[float],
+    ys: list[float],
+    zs: list[float],
+    mds: list[float],
+) -> ImportedTrajectoryWell:
+    stations = build_reference_trajectory_stations(xs=xs, ys=ys, zs=zs, mds=mds)
+    return ImportedTrajectoryWell(
+        name=name,
+        kind=REFERENCE_WELL_ACTUAL,
+        stations=stations,
+        surface=Point3D(
+            x=float(stations["X_m"].iloc[0]),
+            y=float(stations["Y_m"].iloc[0]),
+            z=float(stations["Z_m"].iloc[0]),
+        ),
+        azimuth_deg=0.0,
+    )
+
+
+def _parse_dev_rows(text: str) -> pd.DataFrame:
+    rows: list[list[float]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        tokens = stripped.split()
+        if len(tokens) != 11:
+            continue
+        try:
+            rows.append([float(token) for token in tokens])
+        except ValueError:
+            continue
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "MD",
+            "X",
+            "Y",
+            "Z",
+            "TVD",
+            "DX",
+            "DY",
+            "AZIM_TN",
+            "INCL",
+            "DLS",
+            "AZIM_GN",
+        ],
     )
 
 
@@ -403,6 +461,150 @@ def test_build_batch_survey_dev_file_exports_single_selected_well() -> None:
     assert len(parsed.stations) == 2
     assert "# WELL NAME:                WELL-A" in text
     assert "100.000000 20.000000 45.000000 -95.000000" in text
+
+
+def test_build_batch_survey_dev_file_prepends_parent_path_from_welltrack() -> None:
+    parent_well = _reference_well(
+        "9010",
+        xs=[0.0, 100.0, 200.0],
+        ys=[0.0, 0.0, 0.0],
+        zs=[0.0, 50.0, 100.0],
+        mds=[0.0, 100.0, 200.0],
+    )
+    sidetrack_stations = pd.DataFrame(
+        {
+            "MD_m": [150.0, 210.0, 270.0],
+            "X_m": [150.0, 180.0, 220.0],
+            "Y_m": [0.0, 45.0, 95.0],
+            "Z_m": [75.0, 130.0, 190.0],
+            "INC_deg": [20.0, 38.0, 52.0],
+            "AZI_deg": [0.0, 34.0, 41.0],
+            "DLS_deg_per_30m": [0.0, 1.2, 0.8],
+        }
+    )
+    success = _success(
+        name="9010_ZBS",
+        stations=sidetrack_stations,
+        summary={
+            "sidetrack_window_md_m": 150.0,
+            "sidetrack_window_x_m": 150.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 75.0,
+            "sidetrack_window_inc_deg": 0.0,
+            "sidetrack_window_azi_deg": 0.0,
+            "actual_parent_well_name": "9010",
+        },
+    )
+
+    payload = ptc_batch_results.build_batch_survey_dev_file(
+        [success],
+        reference_wells=(parent_well,),
+    )
+    rows = _parse_dev_rows(payload.decode("utf-8"))
+
+    assert list(rows["MD"]) == pytest.approx([0.0, 100.0, 150.0, 210.0, 270.0])
+    assert float(rows.iloc[0]["X"]) == pytest.approx(0.0)
+    assert float(rows.iloc[0]["Y"]) == pytest.approx(0.0)
+    assert float(rows.iloc[2]["X"]) == pytest.approx(150.0)
+    assert float(rows.iloc[2]["Z"]) == pytest.approx(-75.0)
+    assert float(rows.iloc[3]["TVD"]) == pytest.approx(130.0)
+    assert float(rows.iloc[3]["DX"]) == pytest.approx(180.0)
+
+
+def test_build_batch_survey_dev_file_preserves_original_parent_dev_rows() -> None:
+    parent_well = parse_reference_trajectory_dev_text(
+        "\n".join(
+            [
+                "# SURVEY FROM PETREL",
+                "MD X Y Z TVD DX DY AZIM_TN INCL DLS AZIM_GN",
+                "0 0 0 0 0 0 0 1.5 0.0 0.0 1.5",
+                "100 100 0 -50 50 100 0 12.5 8.0 0.7 12.5",
+                "200 200 0 -100 100 200 0 25.5 16.0 0.9 25.5",
+            ]
+        ),
+        well_name="9010",
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+    sidetrack_stations = pd.DataFrame(
+        {
+            "MD_m": [200.0, 260.0, 320.0],
+            "X_m": [200.0, 235.0, 280.0],
+            "Y_m": [0.0, 55.0, 115.0],
+            "Z_m": [100.0, 155.0, 220.0],
+            "INC_deg": [16.0, 41.0, 55.0],
+            "AZI_deg": [25.5, 38.0, 44.0],
+            "DLS_deg_per_30m": [0.0, 1.4, 1.1],
+        }
+    )
+    success = _success(
+        name="9010_ZBS",
+        stations=sidetrack_stations,
+        summary={
+            "sidetrack_window_md_m": 200.0,
+            "sidetrack_window_x_m": 200.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 100.0,
+            "sidetrack_window_inc_deg": 16.0,
+            "sidetrack_window_azi_deg": 25.5,
+            "actual_parent_well_name": "9010",
+        },
+    )
+
+    payload = ptc_batch_results.build_batch_survey_dev_file(
+        [success],
+        reference_wells=(parent_well,),
+    )
+    rows = _parse_dev_rows(payload.decode("utf-8"))
+
+    assert list(rows["MD"]) == pytest.approx([0.0, 100.0, 200.0, 260.0, 320.0])
+    assert float(rows.iloc[1]["AZIM_TN"]) == pytest.approx(12.5)
+    assert float(rows.iloc[1]["DLS"]) == pytest.approx(0.7)
+    assert float(rows.iloc[2]["AZIM_TN"]) == pytest.approx(25.5)
+    assert float(rows.iloc[2]["INCL"]) == pytest.approx(16.0)
+
+
+def test_build_batch_survey_dev_file_uses_parent_prefix_from_attrs_for_pilot() -> None:
+    parent_prefix = build_reference_trajectory_stations(
+        xs=[0.0, 100.0, 200.0],
+        ys=[0.0, 0.0, 0.0],
+        zs=[0.0, 50.0, 100.0],
+        mds=[0.0, 100.0, 200.0],
+    )
+    sidetrack_stations = pd.DataFrame(
+        {
+            "MD_m": [150.0, 210.0],
+            "X_m": [150.0, 190.0],
+            "Y_m": [0.0, 60.0],
+            "Z_m": [75.0, 140.0],
+            "INC_deg": [0.0, 44.0],
+            "AZI_deg": [0.0, 35.0],
+            "DLS_deg_per_30m": [0.0, 1.3],
+        }
+    )
+    sidetrack_stations.attrs["uncertainty_reference_stations"] = parent_prefix.loc[
+        parent_prefix["MD_m"].to_numpy(dtype=float) <= 150.0
+    ].copy()
+    success = _success(
+        name="WELL-04",
+        stations=sidetrack_stations,
+        summary={
+            "trajectory_type": "PILOT_SIDETRACK",
+            "pilot_well_name": "WELL-04_PL",
+            "sidetrack_window_md_m": 150.0,
+            "sidetrack_window_x_m": 150.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 75.0,
+            "sidetrack_window_inc_deg": 0.0,
+            "sidetrack_window_azi_deg": 0.0,
+        },
+    )
+
+    payload = ptc_batch_results.build_batch_survey_dev_file([success])
+    rows = _parse_dev_rows(payload.decode("utf-8"))
+
+    assert list(rows["MD"]) == pytest.approx([0.0, 100.0, 150.0, 210.0])
+    assert float(rows.iloc[2]["X"]) == pytest.approx(150.0)
+    assert float(rows.iloc[3]["DX"]) == pytest.approx(190.0)
 
 
 def test_build_batch_survey_dev_file_returns_empty_for_multiple_wells() -> None:

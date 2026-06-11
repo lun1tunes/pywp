@@ -9,6 +9,7 @@ import pytest
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
+    AntiCollisionReportEvent,
     AntiCollisionWell,
     anti_collision_report_events,
 )
@@ -1048,6 +1049,112 @@ def test_anticollision_overrides_keep_target_only_edit_wells_editable() -> None:
         "t1",
         "t3",
     ]
+
+
+def test_collision_payloads_group_same_wells_and_segments_by_worst_sf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    events = (
+        AntiCollisionReportEvent(
+            well_a="well_01",
+            well_b="well_02",
+            classification="trajectory",
+            priority_rank=2,
+            label_a="A",
+            label_b="B",
+            md_a_start_m=100.0,
+            md_a_end_m=140.0,
+            md_b_start_m=120.0,
+            md_b_end_m=160.0,
+            min_separation_factor=0.82,
+            max_overlap_depth_m=5.0,
+            min_center_distance_m=12.0,
+            merged_corridor_count=1,
+        ),
+        AntiCollisionReportEvent(
+            well_a="well_01",
+            well_b="well_02",
+            classification="trajectory",
+            priority_rank=2,
+            label_a="A",
+            label_b="B",
+            md_a_start_m=200.0,
+            md_a_end_m=240.0,
+            md_b_start_m=220.0,
+            md_b_end_m=260.0,
+            min_separation_factor=0.41,
+            max_overlap_depth_m=7.0,
+            min_center_distance_m=8.0,
+            merged_corridor_count=1,
+        ),
+        AntiCollisionReportEvent(
+            well_a="well_01",
+            well_b="well_02",
+            classification="trajectory",
+            priority_rank=2,
+            label_a="A",
+            label_b="B",
+            md_a_start_m=300.0,
+            md_a_end_m=340.0,
+            md_b_start_m=320.0,
+            md_b_end_m=360.0,
+            min_separation_factor=0.65,
+            max_overlap_depth_m=6.0,
+            min_center_distance_m=10.0,
+            merged_corridor_count=1,
+        ),
+    )
+
+    monkeypatch.setattr(
+        ptc_three_overrides,
+        "anti_collision_report_events",
+        lambda current_analysis: events,
+    )
+    monkeypatch.setattr(
+        ptc_three_overrides,
+        "_segment_types_for_interval",
+        lambda current_analysis, well_name, md_start_m, md_end_m: (
+            "HOLD, BUILD"
+            if float(md_start_m) < 300.0 and str(well_name) == "well_01"
+            else "BUILD, HOLD"
+            if float(md_start_m) < 300.0
+            else "HOLD"
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_three_overrides,
+        "_best_event_zone",
+        lambda **kwargs: (
+            SimpleNamespace(hotspot_xyz=(10.0, 0.0, 0.0))
+            if float(kwargs["md_a_start_m"]) < 150.0
+            else SimpleNamespace(hotspot_xyz=(25.0, 0.0, 0.0))
+            if float(kwargs["md_a_start_m"]) < 300.0
+            else SimpleNamespace(hotspot_xyz=(50.0, 0.0, 0.0))
+        ),
+    )
+
+    collisions = ptc_three_overrides._collision_payloads(analysis)
+
+    assert len(collisions) == 2
+    grouped = next(
+        item
+        for item in collisions
+        if str(item["segment_a"]) == "HOLD, BUILD"
+        and str(item["segment_b"]) == "BUILD, HOLD"
+    )
+    assert grouped["separation_factor"] == pytest.approx(0.41)
+    assert grouped["hotspot"] == [25.0, 0.0, 0.0]
+    assert grouped["grouped_collision_count"] == 2
 
 
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:

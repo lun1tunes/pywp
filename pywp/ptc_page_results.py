@@ -203,6 +203,7 @@ def _render_anticollision_panel(
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
         return
 
+    st.markdown("### Anti-collision и пересечения")
     preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
     normalized_preset = wt.normalize_uncertainty_preset(
         st.session_state.get(
@@ -219,6 +220,10 @@ def _render_anticollision_panel(
         format_func=wt.uncertainty_preset_label,
         key="wt_anticollision_uncertainty_preset",
     )
+    if reference_wells:
+        ptc_anticollision_params.render_anticollision_params_block(
+            reference_wells=reference_wells
+        )
     uncertainty_model = planning_uncertainty_model_for_preset(selected_preset)
     reference_uncertainty_models_by_name = (
         ptc_anticollision_params.reference_uncertainty_models_from_state(
@@ -237,7 +242,6 @@ def _render_anticollision_panel(
         current_snapshot is None and _cached_anticollision_snapshot() is not None
     )
 
-    st.markdown("### Anti-collision и пересечения")
     run_requested = _render_anticollision_action_button(
         has_current_analysis=has_current_analysis
     )

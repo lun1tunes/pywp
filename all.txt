@@ -25405,7 +25405,7 @@ def anticollision_focus_well_names(
     return tuple(sorted(related))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_results.py	32918
+===BEGIN_FILE===	pywp/ptc_batch_results.py	45581
 from __future__ import annotations
 
 import math
@@ -25416,6 +25416,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
 import pandas as pd
 import py7zr
 
@@ -25430,6 +25431,7 @@ from pywp.coordinate_integration import (
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.mcm import dogleg_angle_rad
+from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
 from pywp.ui_well_panels import survey_export_dataframe
 from pywp.welltrack_batch import SuccessfulWellPlan
@@ -25482,6 +25484,21 @@ BATCH_SUMMARY_DISPLAY_ORDER: tuple[str, ...] = (
 SurveyExportFrameFunc = Callable[..., pd.DataFrame]
 DlsToPiFunc = Callable[[object], object]
 _SURVEY_EXPORT_REQUIRED_COLUMNS = ("MD_m", "X_m", "Y_m", "Z_m")
+_DEV_EXPORT_COLUMNS = (
+    "MD",
+    "X",
+    "Y",
+    "Z",
+    "TVD",
+    "DX",
+    "DY",
+    "AZIM_TN",
+    "INCL",
+    "DLS",
+    "AZIM_GN",
+)
+_DEV_EXPORT_REQUIRED_COLUMNS = ("MD", "X", "Y", "Z", "TVD", "DX", "DY")
+_DEV_EXPORT_ANGLE_COLUMNS = ("AZIM_TN", "INCL", "DLS", "AZIM_GN")
 TransformXyFunc = Callable[
     [float, float, CoordinateSystem, CoordinateSystem],
     tuple[float, float],
@@ -25721,6 +25738,7 @@ def build_batch_survey_dev_7z(
     target_crs: CoordinateSystem = DEFAULT_CRS,
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
     transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
 ) -> bytes:
@@ -25751,7 +25769,11 @@ def build_batch_survey_dev_7z(
                 )
                 source_path = temp_root / file_name
                 source_path.write_text(
-                    _dev_export_text(success=success, stations=stations),
+                    _dev_export_text(
+                        success=success,
+                        stations=stations,
+                        reference_wells=reference_wells,
+                    ),
                     encoding="utf-8",
                 )
                 archive.write(source_path, file_name)
@@ -25805,6 +25827,7 @@ def build_batch_survey_dev_zip(
     target_crs: CoordinateSystem = DEFAULT_CRS,
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
     transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
 ) -> bytes:
@@ -25813,6 +25836,7 @@ def build_batch_survey_dev_zip(
         target_crs=source_crs,
         auto_convert=False,
         source_crs=source_crs,
+        reference_wells=reference_wells,
         csv_export_crs_func=csv_export_crs_func,
         transform_stations_func=transform_stations_func,
     )
@@ -25824,6 +25848,7 @@ def build_batch_survey_dev_file(
     target_crs: CoordinateSystem = DEFAULT_CRS,
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
     csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
     transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
 ) -> bytes:
@@ -25840,7 +25865,11 @@ def build_batch_survey_dev_file(
     success, stations = prepared[0]
     if len(stations.index) < 2:
         return b""
-    return _dev_export_text(success=success, stations=stations).encode("utf-8")
+    return _dev_export_text(
+        success=success,
+        stations=stations,
+        reference_wells=reference_wells,
+    ).encode("utf-8")
 
 
 def build_batch_target_dev_file(
@@ -26012,12 +26041,17 @@ def _dev_export_text(
     *,
     success: SuccessfulWellPlan,
     stations: pd.DataFrame,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
 ) -> str:
-    if stations.empty:
+    rows = _dev_export_rows(
+        success=success,
+        stations=stations,
+        reference_wells=reference_wells,
+    )
+    if rows.empty:
         return ""
-    surface_x = float(stations["X_m"].iloc[0])
-    surface_y = float(stations["Y_m"].iloc[0])
-    surface_z = float(stations["Z_m"].iloc[0])
+    surface_x = float(rows["X"].iloc[0])
+    surface_y = float(rows["Y"].iloc[0])
     lines = [
         "# SURVEY FROM PYWP",
         f"# WELL NAME:                {success.name}",
@@ -26030,33 +26064,383 @@ def _dev_export_text(
         "    MD            X            Y            Z           TVD           DX           DY         AZIM_TN        INCL        DLS        AZIM_GN",
         "#==============================================================================================================================================",
     ]
-    for _, row in stations.iterrows():
-        x_value = _station_float(row, "X_m")
-        y_value = _station_float(row, "Y_m")
-        z_value = _station_float(row, "Z_m")
-        dev_z_value = -z_value
-        md_value = _station_float(row, "MD_m")
-        azi_value = _station_float(row, "AZI_deg")
-        inc_value = _station_float(row, "INC_deg")
-        dls_value = _station_float(row, "DLS_deg_per_30m")
+    for _, row in rows.iterrows():
         lines.append(
             " ".join(
                 [
-                    _format_export_number(md_value),
-                    _format_export_number(x_value),
-                    _format_export_number(y_value),
-                    _format_export_number(dev_z_value),
-                    _format_export_number(z_value - surface_z),
-                    _format_export_number(x_value - surface_x),
-                    _format_export_number(y_value - surface_y),
-                    _format_export_number(azi_value),
-                    _format_export_number(inc_value),
-                    _format_export_number(dls_value),
-                    _format_export_number(azi_value),
+                    _format_export_number(row["MD"]),
+                    _format_export_number(row["X"]),
+                    _format_export_number(row["Y"]),
+                    _format_export_number(row["Z"]),
+                    _format_export_number(row["TVD"]),
+                    _format_export_number(row["DX"]),
+                    _format_export_number(row["DY"]),
+                    _format_export_number(row["AZIM_TN"]),
+                    _format_export_number(row["INCL"]),
+                    _format_export_number(row["DLS"]),
+                    _format_export_number(row["AZIM_GN"]),
                 ]
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def _dev_export_rows(
+    *,
+    success: SuccessfulWellPlan,
+    stations: pd.DataFrame,
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> pd.DataFrame:
+    if stations.empty:
+        return pd.DataFrame(columns=_DEV_EXPORT_COLUMNS)
+    sidetrack_rows = _sidetrack_dev_export_rows(
+        success=success,
+        stations=stations,
+        reference_wells=reference_wells,
+    )
+    if sidetrack_rows is not None and not sidetrack_rows.empty:
+        return sidetrack_rows
+    return _dev_rows_from_stations(stations)
+
+
+def _sidetrack_dev_export_rows(
+    *,
+    success: SuccessfulWellPlan,
+    stations: pd.DataFrame,
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> pd.DataFrame | None:
+    summary = dict(getattr(success, "summary", {}) or {})
+    window_md = _summary_optional_float(summary, "sidetrack_window_md_m")
+    if window_md is None:
+        return None
+    prefix_rows = _sidetrack_parent_prefix_rows(
+        success=success,
+        window_md=window_md,
+        summary=summary,
+        reference_wells=reference_wells,
+    )
+    if prefix_rows is None or prefix_rows.empty:
+        return None
+    surface_override = (
+        float(prefix_rows["X"].iloc[0]),
+        float(prefix_rows["Y"].iloc[0]),
+        -float(prefix_rows["Z"].iloc[0]),
+    )
+    branch_rows = _dev_rows_from_stations(stations, surface_xyz=surface_override)
+    branch_rows = branch_rows.loc[
+        branch_rows["MD"].to_numpy(dtype=float) > float(window_md) + 1e-6
+    ].copy()
+    combined = pd.concat([prefix_rows, branch_rows], ignore_index=True)
+    return _sanitize_dev_export_rows(combined)
+
+
+def _sidetrack_parent_prefix_rows(
+    *,
+    success: SuccessfulWellPlan,
+    window_md: float,
+    summary: dict[str, object],
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> pd.DataFrame | None:
+    parent_well = _sidetrack_parent_reference_well(
+        summary=summary,
+        reference_wells=reference_wells,
+    )
+    parent_stations = (
+        parent_well.stations.copy()
+        if parent_well is not None
+        else _sidetrack_parent_attr_stations(success)
+    )
+    if parent_stations is None or parent_stations.empty:
+        return None
+    prefix_stations = _survey_prefix_stations(
+        parent_stations,
+        window_md=window_md,
+        window_x_m=_summary_optional_float(summary, "sidetrack_window_x_m"),
+        window_y_m=_summary_optional_float(summary, "sidetrack_window_y_m"),
+        window_z_m=_summary_optional_float(summary, "sidetrack_window_z_m"),
+        window_inc_deg=_summary_optional_float(summary, "sidetrack_window_inc_deg"),
+        window_azi_deg=_summary_optional_float(summary, "sidetrack_window_azi_deg"),
+    )
+    if prefix_stations.empty:
+        return None
+    prefix_rows = _dev_rows_from_stations(prefix_stations)
+    if parent_well is not None and parent_well.dev_export_rows is not None:
+        prefix_rows = _overlay_original_dev_rows(
+            derived_rows=prefix_rows,
+            original_rows=parent_well.dev_export_rows,
+            window_md=window_md,
+        )
+    return prefix_rows
+
+
+def _sidetrack_parent_reference_well(
+    *,
+    summary: dict[str, object],
+    reference_wells: tuple[ImportedTrajectoryWell, ...],
+) -> ImportedTrajectoryWell | None:
+    parent_name = (
+        str(summary.get("actual_parent_well_name", "")).strip()
+        or str(summary.get("sidetrack_parent_well_name", "")).strip()
+        or str(summary.get("pilot_well_name", "")).strip()
+    )
+    if not parent_name:
+        return None
+    by_name = {
+        _well_name_key(well.name): well
+        for well in reference_wells
+    }
+    return by_name.get(_well_name_key(parent_name))
+
+
+def _sidetrack_parent_attr_stations(success: SuccessfulWellPlan) -> pd.DataFrame | None:
+    reference = getattr(success.stations, "attrs", {}).get(
+        "uncertainty_reference_stations"
+    )
+    if not isinstance(reference, pd.DataFrame):
+        return None
+    return reference.copy()
+
+
+def _survey_prefix_stations(
+    stations: pd.DataFrame,
+    *,
+    window_md: float,
+    window_x_m: float | None,
+    window_y_m: float | None,
+    window_z_m: float | None,
+    window_inc_deg: float | None,
+    window_azi_deg: float | None,
+) -> pd.DataFrame:
+    prepared = _sanitize_export_stations(stations)
+    if prepared.empty:
+        return prepared
+    clamped_md = float(window_md)
+    min_md = float(prepared["MD_m"].iloc[0])
+    max_md = float(prepared["MD_m"].iloc[-1])
+    if clamped_md < min_md:
+        clamped_md = min_md
+    elif (
+        clamped_md > max_md
+        and window_x_m is None
+        and window_y_m is None
+        and window_z_m is None
+        and window_inc_deg is None
+        and window_azi_deg is None
+    ):
+        clamped_md = max_md
+    prefix = prepared.loc[
+        prepared["MD_m"].to_numpy(dtype=float) <= clamped_md + 1e-6
+    ].copy()
+    if prefix.empty:
+        return prefix
+    if abs(float(prefix["MD_m"].iloc[-1]) - clamped_md) > 1e-6:
+        prefix = pd.concat(
+            [
+                prefix,
+                pd.DataFrame(
+                    [
+                        _interpolate_station_row(
+                            prepared,
+                            md_m=clamped_md,
+                            x_m=window_x_m,
+                            y_m=window_y_m,
+                            z_m=window_z_m,
+                            inc_deg=window_inc_deg,
+                            azi_deg=window_azi_deg,
+                        )
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+    return _sanitize_prefix_stations(prefix)
+
+
+def _sanitize_prefix_stations(stations: pd.DataFrame) -> pd.DataFrame:
+    result = stations.copy()
+    if "segment" in result.columns:
+        result["segment"] = result["segment"].astype(str)
+    result = result.sort_values("MD_m", kind="mergesort")
+    result = result.drop_duplicates(subset=["MD_m"], keep="last")
+    return result.reset_index(drop=True)
+
+
+def _interpolate_station_row(
+    stations: pd.DataFrame,
+    *,
+    md_m: float,
+    x_m: float | None,
+    y_m: float | None,
+    z_m: float | None,
+    inc_deg: float | None,
+    azi_deg: float | None,
+) -> dict[str, object]:
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    result: dict[str, object] = {
+        "MD_m": float(md_m),
+        "X_m": (
+            float(x_m)
+            if x_m is not None
+            else float(np.interp(float(md_m), md_values, stations["X_m"].to_numpy(dtype=float)))
+        ),
+        "Y_m": (
+            float(y_m)
+            if y_m is not None
+            else float(np.interp(float(md_m), md_values, stations["Y_m"].to_numpy(dtype=float)))
+        ),
+        "Z_m": (
+            float(z_m)
+            if z_m is not None
+            else float(np.interp(float(md_m), md_values, stations["Z_m"].to_numpy(dtype=float)))
+        ),
+        "INC_deg": (
+            float(inc_deg)
+            if inc_deg is not None
+            else float(np.interp(float(md_m), md_values, stations["INC_deg"].to_numpy(dtype=float)))
+        ),
+        "AZI_deg": (
+            float(azi_deg)
+            if azi_deg is not None
+            else _interp_azimuth_deg(
+                md_values=md_values,
+                azi_values_deg=stations["AZI_deg"].to_numpy(dtype=float),
+                md_m=float(md_m),
+            )
+        ),
+        "DLS_deg_per_30m": (
+            float(
+                np.interp(
+                    float(md_m),
+                    md_values,
+                    stations["DLS_deg_per_30m"].to_numpy(dtype=float),
+                )
+            )
+            if "DLS_deg_per_30m" in stations.columns
+            else 0.0
+        ),
+    }
+    if "segment" in stations.columns:
+        result["segment"] = str(stations["segment"].iloc[-1])
+    return result
+
+
+def _interp_azimuth_deg(
+    *,
+    md_values: np.ndarray,
+    azi_values_deg: np.ndarray,
+    md_m: float,
+) -> float:
+    radians = np.deg2rad(azi_values_deg % 360.0)
+    sin_value = float(np.interp(float(md_m), md_values, np.sin(radians)))
+    cos_value = float(np.interp(float(md_m), md_values, np.cos(radians)))
+    if abs(sin_value) < 1e-9 and abs(cos_value) < 1e-9:
+        return float(azi_values_deg[-1] % 360.0)
+    return float(np.degrees(np.arctan2(sin_value, cos_value)) % 360.0)
+
+
+def _overlay_original_dev_rows(
+    *,
+    derived_rows: pd.DataFrame,
+    original_rows: pd.DataFrame,
+    window_md: float,
+) -> pd.DataFrame:
+    result = derived_rows.copy()
+    source = _sanitize_dev_export_rows(original_rows)
+    if source.empty:
+        return result
+    source = source.loc[source["MD"].to_numpy(dtype=float) <= float(window_md) + 1e-6]
+    if source.empty:
+        return result
+    derived_md = result["MD"].to_numpy(dtype=float)
+    for _, row in source.iterrows():
+        matches = np.isclose(derived_md, float(row["MD"]), atol=1e-6)
+        if not np.any(matches):
+            continue
+        result.loc[int(np.flatnonzero(matches)[0]), list(_DEV_EXPORT_COLUMNS)] = [
+            row[column] for column in _DEV_EXPORT_COLUMNS
+        ]
+    return result
+
+
+def _dev_rows_from_stations(
+    stations: pd.DataFrame,
+    *,
+    surface_xyz: tuple[float, float, float] | None = None,
+) -> pd.DataFrame:
+    if stations.empty:
+        return pd.DataFrame(columns=_DEV_EXPORT_COLUMNS)
+    if surface_xyz is None:
+        surface_x = float(stations["X_m"].iloc[0])
+        surface_y = float(stations["Y_m"].iloc[0])
+        surface_z = float(stations["Z_m"].iloc[0])
+    else:
+        surface_x, surface_y, surface_z = (
+            float(surface_xyz[0]),
+            float(surface_xyz[1]),
+            float(surface_xyz[2]),
+        )
+    rows = pd.DataFrame(
+        {
+            "MD": stations["MD_m"].to_numpy(dtype=float),
+            "X": stations["X_m"].to_numpy(dtype=float),
+            "Y": stations["Y_m"].to_numpy(dtype=float),
+            "Z": -stations["Z_m"].to_numpy(dtype=float),
+            "TVD": stations["Z_m"].to_numpy(dtype=float) - float(surface_z),
+            "DX": stations["X_m"].to_numpy(dtype=float) - float(surface_x),
+            "DY": stations["Y_m"].to_numpy(dtype=float) - float(surface_y),
+            "AZIM_TN": (
+                stations["AZI_deg"].to_numpy(dtype=float)
+                if "AZI_deg" in stations.columns
+                else np.zeros(len(stations), dtype=float)
+            ),
+            "INCL": (
+                stations["INC_deg"].to_numpy(dtype=float)
+                if "INC_deg" in stations.columns
+                else np.zeros(len(stations), dtype=float)
+            ),
+            "DLS": (
+                stations["DLS_deg_per_30m"].to_numpy(dtype=float)
+                if "DLS_deg_per_30m" in stations.columns
+                else np.zeros(len(stations), dtype=float)
+            ),
+        }
+    )
+    rows["AZIM_GN"] = rows["AZIM_TN"].to_numpy(dtype=float)
+    return _sanitize_dev_export_rows(rows)
+
+
+def _sanitize_dev_export_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    result = rows.copy()
+    for column in _DEV_EXPORT_REQUIRED_COLUMNS:
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+    for column in _DEV_EXPORT_ANGLE_COLUMNS:
+        values = pd.to_numeric(result[column], errors="coerce")
+        values = values.where(values.map(math.isfinite), 0.0)
+        result[column] = values.fillna(0.0)
+    finite_mask = pd.Series(True, index=result.index)
+    for column in _DEV_EXPORT_REQUIRED_COLUMNS:
+        finite_mask &= result[column].map(math.isfinite)
+    result = result.loc[finite_mask].copy()
+    if result.empty:
+        return pd.DataFrame(columns=_DEV_EXPORT_COLUMNS)
+    result = result.sort_values("MD", kind="mergesort")
+    result = result.drop_duplicates(subset=["MD"], keep="first")
+    return result.reset_index(drop=True)
+
+
+def _well_name_key(name: object) -> str:
+    return str(name or "").strip().casefold()
+
+
+def _summary_optional_float(summary: dict[str, object], key: str) -> float | None:
+    raw_value = summary.get(key)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 def _target_dev_export_text(
@@ -27144,7 +27528,7 @@ def run_batch_if_clicked(
         live_log_placeholder.empty()
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	33240
+===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	32590
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
@@ -27408,170 +27792,170 @@ def _render_survey_downloads(
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
 ) -> None:
-    with st_module.expander("Выгрузка"):
-        kind_key = "wt_download_kind"
-        if str(state.get(kind_key, "")) not in _EXPORT_KINDS:
-            state[kind_key] = _EXPORT_KIND_TRAJECTORIES
-        export_kind = str(
-            st_module.radio(
-                "Что выгружать",
-                options=list(_EXPORT_KINDS),
-                key=kind_key,
-                horizontal=True,
+    st_module.markdown("### Выгрузка")
+    kind_key = "wt_download_kind"
+    if str(state.get(kind_key, "")) not in _EXPORT_KINDS:
+        state[kind_key] = _EXPORT_KIND_TRAJECTORIES
+    export_kind = str(
+        st_module.radio(
+            "Что выгружать",
+            options=list(_EXPORT_KINDS),
+            key=kind_key,
+            horizontal=True,
+        )
+    )
+    if export_kind == _EXPORT_KIND_TARGETS:
+        _render_target_downloads(
+            state=state,
+            st_module=st_module,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
+            build_batch_target_csv_func=build_batch_target_csv_func,
+            build_batch_target_welltrack_func=build_batch_target_welltrack_func,
+            build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
+            build_batch_target_dev_file_func=build_batch_target_dev_file_func,
+        )
+        return
+
+    successes = list(state.get("wt_successes") or [])
+    success_names = [
+        str(success.name)
+        for success in successes
+        if not is_pilot_name(success.name)
+    ]
+    success_name_set = set(success_names)
+    selected_key = "wt_survey_download_selected_names"
+    raw_selected = _as_selection_list(state.get(selected_key, []))
+    selected_current = [
+        str(name) for name in raw_selected if str(name) in success_name_set
+    ]
+    if selected_current != raw_selected:
+        state[selected_key] = selected_current
+    selected_names = st_module.multiselect(
+        "Скважины для выгрузки",
+        options=success_names,
+        key=selected_key,
+        placeholder="Выберите скважины",
+    )
+    format_key = "wt_survey_download_format"
+    if (
+        str(state.get(format_key, "")).strip()
+        == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP
+    ):
+        state[format_key] = _SURVEY_DOWNLOAD_FORMAT_DEV
+    if str(state.get(format_key, "")) not in _SURVEY_DOWNLOAD_FORMATS:
+        state[format_key] = _SURVEY_DOWNLOAD_FORMATS[0]
+    export_format = str(
+        st_module.radio(
+            "Формат выгрузки",
+            options=list(_SURVEY_DOWNLOAD_FORMATS),
+            key=format_key,
+            horizontal=True,
+        )
+    )
+    selected_name_set = {str(name) for name in selected_names}
+    selected_successes = _successes_for_visible_selection(
+        successes=successes,
+        selected_names=selected_name_set,
+    )
+    export_config = _survey_download_config(
+        export_format=export_format,
+        build_batch_survey_csv_func=build_batch_survey_csv_func,
+        build_batch_survey_welltrack_func=build_batch_survey_welltrack_func,
+        build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
+        build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
+    )
+    station_count = _success_station_row_count(successes)
+    if station_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
+        prepare_key = "wt_prepare_survey_download_payloads"
+        state.setdefault(prepare_key, False)
+        prepare_payloads = bool(
+            st_module.toggle(
+                "Подготовить файлы выгрузки траекторий",
+                key=prepare_key,
+                help=(
+                    "Для больших наборов файлы выгрузки формируются только "
+                    "по запросу, чтобы каждый rerun Streamlit не блокировал "
+                    "отображение результатов."
+                ),
             )
         )
-        if export_kind == _EXPORT_KIND_TARGETS:
-            _render_target_downloads(
-                state=state,
-                st_module=st_module,
-                target_crs=target_crs,
-                auto_convert=auto_convert,
-                source_crs=source_crs,
-                build_batch_target_csv_func=build_batch_target_csv_func,
-                build_batch_target_welltrack_func=build_batch_target_welltrack_func,
-                build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
-                build_batch_target_dev_file_func=build_batch_target_dev_file_func,
+        if not prepare_payloads:
+            st_module.caption(
+                f"Выгрузка не сформирована автоматически: {station_count} строк survey. "
+                "Расчётные данные уже доступны в результатах; включите подготовку файлов "
+                "только перед скачиванием."
             )
             return
-
-        successes = list(state.get("wt_successes") or [])
-        success_names = [
-            str(success.name)
-            for success in successes
-            if not is_pilot_name(success.name)
-        ]
-        success_name_set = set(success_names)
-        selected_key = "wt_survey_download_selected_names"
-        raw_selected = _as_selection_list(state.get(selected_key, []))
-        selected_current = [
-            str(name) for name in raw_selected if str(name) in success_name_set
-        ]
-        if selected_current != raw_selected:
-            state[selected_key] = selected_current
-        selected_names = st_module.multiselect(
-            "Скважины для выгрузки",
-            options=success_names,
-            key=selected_key,
-            placeholder="Выберите скважины",
-        )
-        format_key = "wt_survey_download_format"
-        if (
-            str(state.get(format_key, "")).strip()
-            == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP
-        ):
-            state[format_key] = _SURVEY_DOWNLOAD_FORMAT_DEV
-        if str(state.get(format_key, "")) not in _SURVEY_DOWNLOAD_FORMATS:
-            state[format_key] = _SURVEY_DOWNLOAD_FORMATS[0]
-        export_format = str(
-            st_module.radio(
-                "Формат выгрузки",
-                options=list(_SURVEY_DOWNLOAD_FORMATS),
-                key=format_key,
-                horizontal=True,
-            )
-        )
-        selected_name_set = {str(name) for name in selected_names}
-        selected_successes = _successes_for_visible_selection(
-            successes=successes,
-            selected_names=selected_name_set,
-        )
-        export_config = _survey_download_config(
-            export_format=export_format,
-            build_batch_survey_csv_func=build_batch_survey_csv_func,
-            build_batch_survey_welltrack_func=build_batch_survey_welltrack_func,
-            build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
-            build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
-        )
-        station_count = _success_station_row_count(successes)
-        if station_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
-            prepare_key = "wt_prepare_survey_download_payloads"
-            state.setdefault(prepare_key, False)
-            prepare_payloads = bool(
-                st_module.toggle(
-                    "Подготовить файлы выгрузки траекторий",
-                    key=prepare_key,
-                    help=(
-                        "Для больших наборов файлы выгрузки формируются только "
-                        "по запросу, чтобы каждый rerun Streamlit не блокировал "
-                        "отображение результатов."
-                    ),
-                )
-            )
-            if not prepare_payloads:
-                st_module.caption(
-                    f"Выгрузка не сформирована автоматически: {station_count} строк survey. "
-                    "Расчётные данные уже доступны в результатах; включите подготовку файлов "
-                    "только перед скачиванием."
-                )
-                return
-        all_signature = _download_signature(
+    all_signature = _download_signature(
+        export_kind=export_kind,
+        export_format=export_format,
+        target_crs=target_crs,
+        source_crs=source_crs,
+        auto_convert=auto_convert,
+        item_signature=_successes_signature(successes),
+    )
+    survey_data = _download_payload_from_state_cache(
+        state=state,
+        cache_key="wt_survey_download_all_payload_cache",
+        signature=all_signature,
+        build_payload=lambda: export_config.builder(
+            successes,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
+        ),
+    )
+    selected_survey_data: bytes = b""
+    selected_label = export_config.selected_label
+    selected_file_name = export_config.selected_file_name
+    selected_mime = export_config.mime
+    if selected_successes:
+        selected_signature = _download_signature(
             export_kind=export_kind,
             export_format=export_format,
             target_crs=target_crs,
             source_crs=source_crs,
             auto_convert=auto_convert,
-            item_signature=_successes_signature(successes),
+            selected_names=tuple(selected_names),
+            item_signature=_successes_signature(selected_successes),
         )
-        survey_data = _download_payload_from_state_cache(
-            state=state,
-            cache_key="wt_survey_download_all_payload_cache",
-            signature=all_signature,
-            build_payload=lambda: export_config.builder(
-                successes,
-                target_crs=target_crs,
-                auto_convert=auto_convert,
-                source_crs=source_crs,
-            ),
+        selected_survey_data, selected_label, selected_file_name, selected_mime = (
+            _download_payload_from_state_cache(
+                state=state,
+                cache_key="wt_survey_download_selected_payload_cache",
+                signature=selected_signature,
+                build_payload=lambda: _selected_download_payload(
+                    export_config=export_config,
+                    selected_successes=selected_successes,
+                    target_crs=target_crs,
+                    auto_convert=auto_convert,
+                    source_crs=source_crs,
+                ),
+            )
         )
-        selected_survey_data: bytes = b""
-        selected_label = export_config.selected_label
-        selected_file_name = export_config.selected_file_name
-        selected_mime = export_config.mime
-        if selected_successes:
-            selected_signature = _download_signature(
-                export_kind=export_kind,
-                export_format=export_format,
-                target_crs=target_crs,
-                source_crs=source_crs,
-                auto_convert=auto_convert,
-                selected_names=tuple(selected_names),
-                item_signature=_successes_signature(selected_successes),
-            )
-            selected_survey_data, selected_label, selected_file_name, selected_mime = (
-                _download_payload_from_state_cache(
-                    state=state,
-                    cache_key="wt_survey_download_selected_payload_cache",
-                    signature=selected_signature,
-                    build_payload=lambda: _selected_download_payload(
-                        export_config=export_config,
-                        selected_successes=selected_successes,
-                        target_crs=target_crs,
-                        auto_convert=auto_convert,
-                        source_crs=source_crs,
-                    ),
-                )
-            )
-        all_col, selected_col = st_module.columns(2, gap="small")
-        with all_col:
-            st_module.download_button(
-                export_config.all_label,
-                data=survey_data or b"",
-                file_name=export_config.all_file_name,
-                mime=export_config.mime,
-                icon=":material/download:",
-                use_container_width=True,
-                disabled=not survey_data,
-            )
-        with selected_col:
-            st_module.download_button(
-                selected_label,
-                data=selected_survey_data or b"",
-                file_name=selected_file_name,
-                mime=selected_mime,
-                icon=":material/download:",
-                use_container_width=True,
-                disabled=not selected_survey_data,
-            )
+    all_col, selected_col = st_module.columns(2, gap="small")
+    with all_col:
+        st_module.download_button(
+            export_config.all_label,
+            data=survey_data or b"",
+            file_name=export_config.all_file_name,
+            mime=export_config.mime,
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not survey_data,
+        )
+    with selected_col:
+        st_module.download_button(
+            selected_label,
+            data=selected_survey_data or b"",
+            file_name=selected_file_name,
+            mime=selected_mime,
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not selected_survey_data,
+        )
 
 
 def _render_target_downloads(
@@ -28012,7 +28396,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	247476
+===BEGIN_FILE===	pywp/ptc_core.py	247586
 from __future__ import annotations
 
 import colorsys
@@ -34645,6 +35029,7 @@ def _build_batch_survey_dev_7z(
         target_crs=target_crs,
         auto_convert=auto_convert,
         source_crs=source_crs,
+        reference_wells=_reference_wells_from_state(),
         csv_export_crs_func=csv_export_crs,
         transform_stations_func=transform_stations_to_crs,
     )
@@ -34677,6 +35062,7 @@ def _build_batch_survey_dev_file(
         target_crs=target_crs,
         auto_convert=auto_convert,
         source_crs=source_crs,
+        reference_wells=_reference_wells_from_state(),
         csv_export_crs_func=csv_export_crs,
         transform_stations_func=transform_stations_to_crs,
     )
@@ -37111,7 +37497,7 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_results.py	45503
+===BEGIN_FILE===	pywp/ptc_page_results.py	45649
 from __future__ import annotations
 
 import pandas as pd
@@ -37317,6 +37703,7 @@ def _render_anticollision_panel(
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
         return
 
+    st.markdown("### Anti-collision и пересечения")
     preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
     normalized_preset = wt.normalize_uncertainty_preset(
         st.session_state.get(
@@ -37333,6 +37720,10 @@ def _render_anticollision_panel(
         format_func=wt.uncertainty_preset_label,
         key="wt_anticollision_uncertainty_preset",
     )
+    if reference_wells:
+        ptc_anticollision_params.render_anticollision_params_block(
+            reference_wells=reference_wells
+        )
     uncertainty_model = planning_uncertainty_model_for_preset(selected_preset)
     reference_uncertainty_models_by_name = (
         ptc_anticollision_params.reference_uncertainty_models_from_state(
@@ -37351,7 +37742,6 @@ def _render_anticollision_panel(
         current_snapshot is None and _cached_anticollision_snapshot() is not None
     )
 
-    st.markdown("### Anti-collision и пересечения")
     run_requested = _render_anticollision_action_button(
         has_current_analysis=has_current_analysis
     )
@@ -38354,7 +38744,7 @@ def render_success_tabs(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_run.py	13950
+===BEGIN_FILE===	pywp/ptc_page_run.py	13753
 from __future__ import annotations
 
 import math
@@ -38363,7 +38753,6 @@ from collections.abc import Mapping, MutableMapping
 import streamlit as st
 
 from pywp import ptc_core as wt
-from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state
 from pywp.pilot_wells import (
     SidetrackWindowOverride,
@@ -38413,9 +38802,6 @@ def render_run_section(*, records: list[object]) -> None:
         sidetrack_params["overrides"] = overrides
         if overrides or _sidetrack_parent_names(records):
             st.divider()
-        ptc_anticollision_params.render_anticollision_params_block(
-            reference_wells=ptc_reference_state.reference_wells_from_state()
-        )
 
     config = render_calc_params_panel(extra_content=_render_extra_calc_params)
     sidetrack_overrides = _sidetrack_overrides_from_render_state(sidetrack_params)
@@ -42255,7 +42641,7 @@ def _reference_pad_labels(reference_wells: Iterable[object]) -> list[_ReferenceP
     return pad_labels
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_overrides.py	42307
+===BEGIN_FILE===	pywp/ptc_three_overrides.py	44743
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, MutableMapping
@@ -43204,7 +43590,75 @@ def _collision_payloads(
                 "segment_b": segment_b,
             }
         )
-    return collisions
+    return _group_collision_payloads(collisions)
+
+
+def _group_collision_payloads(
+    collisions: Iterable[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[
+        tuple[str, str, tuple[str, ...], tuple[str, ...]],
+        dict[str, object],
+    ] = {}
+    for collision in collisions:
+        key = _collision_group_key(collision)
+        existing = grouped.get(key)
+        if existing is None:
+            item = dict(collision)
+            item["grouped_collision_count"] = 1
+            grouped[key] = item
+            continue
+        grouped_count = int(existing.get("grouped_collision_count", 1)) + 1
+        if _collision_payload_is_more_extreme(collision, existing):
+            item = dict(collision)
+            item["grouped_collision_count"] = grouped_count
+            grouped[key] = item
+            continue
+        existing["grouped_collision_count"] = grouped_count
+    return list(grouped.values())
+
+
+def _collision_group_key(
+    collision: Mapping[str, object],
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        str(collision.get("well_a", "")).strip(),
+        str(collision.get("well_b", "")).strip(),
+        _normalized_collision_segment_key(collision.get("segment_a")),
+        _normalized_collision_segment_key(collision.get("segment_b")),
+    )
+
+
+def _normalized_collision_segment_key(value: object) -> tuple[str, ...]:
+    parts = [
+        str(part).strip().upper()
+        for part in str(value or "").split(",")
+        if str(part).strip()
+    ]
+    if not parts:
+        return ("—",)
+    return tuple(sorted(set(parts)))
+
+
+def _collision_payload_is_more_extreme(
+    candidate: Mapping[str, object],
+    current: Mapping[str, object],
+) -> bool:
+    candidate_sf = float(candidate.get("separation_factor", float("inf")))
+    current_sf = float(current.get("separation_factor", float("inf")))
+    if candidate_sf < current_sf:
+        return True
+    if candidate_sf > current_sf:
+        return False
+    candidate_priority = int(candidate.get("priority_rank", 999999))
+    current_priority = int(current.get("priority_rank", 999999))
+    if candidate_priority < current_priority:
+        return True
+    if candidate_priority > current_priority:
+        return False
+    candidate_distance = float(candidate.get("center_distance_m", float("inf")))
+    current_distance = float(current.get("center_distance_m", float("inf")))
+    return candidate_distance < current_distance
 
 
 def overlap_volume_payloads(
@@ -43958,7 +44412,7 @@ def coerce_model_like(value: Any, model_cls: type[BaseModelT]) -> BaseModelT:
     return model_cls.model_validate(value, from_attributes=True)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/reference_trajectories.py	23639
+===BEGIN_FILE===	pywp/reference_trajectories.py	25032
 from __future__ import annotations
 
 import math
@@ -44022,6 +44476,7 @@ class ImportedTrajectoryWell(FrozenArbitraryModel):
     stations: pd.DataFrame
     surface: Point3D
     azimuth_deg: float
+    dev_export_rows: pd.DataFrame | None = None
 
 
 def parse_reference_trajectory_table(
@@ -44240,6 +44695,8 @@ def parse_reference_trajectory_dev_text(
     ys: list[float] = []
     zs: list[float] = []
     mds: list[float] = []
+    dev_export_rows_payload: list[dict[str, float]] = []
+    has_full_dev_rows = True
     for line_no, raw_line in enumerate(source.splitlines(), start=1):
         line = str(raw_line).strip()
         if not line or line.startswith("#"):
@@ -44269,6 +44726,27 @@ def parse_reference_trajectory_dev_text(
         xs.append(x)
         ys.append(y)
         zs.append(z)
+        if len(tokens) >= 11:
+            try:
+                dev_export_rows_payload.append(
+                    {
+                        "MD": md,
+                        "X": x,
+                        "Y": y,
+                        "Z": _parse_dev_float(tokens[3]),
+                        "TVD": _parse_dev_float(tokens[4]),
+                        "DX": _parse_dev_float(tokens[5]),
+                        "DY": _parse_dev_float(tokens[6]),
+                        "AZIM_TN": _parse_dev_float(tokens[7]),
+                        "INCL": _parse_dev_float(tokens[8]),
+                        "DLS": _parse_dev_float(tokens[9]),
+                        "AZIM_GN": _parse_dev_float(tokens[10]),
+                    }
+                )
+            except ValueError:
+                has_full_dev_rows = False
+        else:
+            has_full_dev_rows = False
 
     if len(mds) < 2:
         raise WelltrackParseError(
@@ -44281,6 +44759,14 @@ def parse_reference_trajectory_dev_text(
         zs=zs,
         mds=mds,
     )
+    dev_export_rows = None
+    if has_full_dev_rows and len(dev_export_rows_payload) == len(mds):
+        dev_export_rows = pd.DataFrame(dev_export_rows_payload).sort_values(
+            "MD", kind="mergesort"
+        )
+        dev_export_rows = dev_export_rows.drop_duplicates(
+            subset=["MD"], keep="first"
+        ).reset_index(drop=True)
     return ImportedTrajectoryWell(
         name=normalized_name,
         kind=normalized_kind,
@@ -44291,6 +44777,7 @@ def parse_reference_trajectory_dev_text(
             z=float(stations["Z_m"].iloc[0]),
         ),
         azimuth_deg=float(_infer_reference_azimuth_deg(stations)),
+        dev_export_rows=dev_export_rows,
     )
 
 
@@ -74513,7 +75000,7 @@ def test_snapshots_and_report_rows_keep_ui_contract() -> None:
     ]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_batch_results.py	17357
+===BEGIN_FILE===	tests/test_ptc_batch_results.py	23808
 from __future__ import annotations
 
 from io import BytesIO
@@ -74526,7 +75013,12 @@ from pywp import ptc_batch_results
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord, parse_welltrack_text
 from pywp.models import Point3D, TrajectoryConfig
-from pywp.reference_trajectories import parse_reference_trajectory_dev_text
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    REFERENCE_WELL_ACTUAL,
+    build_reference_trajectory_stations,
+    parse_reference_trajectory_dev_text,
+)
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 
@@ -74576,6 +75068,59 @@ def _record(
             WelltrackPoint(x=110.0, y=220.0, z=1000.0, md=2.0),
             WelltrackPoint(x=210.0, y=420.0, z=1100.0, md=3.0),
         ),
+    )
+
+
+def _reference_well(
+    name: str,
+    *,
+    xs: list[float],
+    ys: list[float],
+    zs: list[float],
+    mds: list[float],
+) -> ImportedTrajectoryWell:
+    stations = build_reference_trajectory_stations(xs=xs, ys=ys, zs=zs, mds=mds)
+    return ImportedTrajectoryWell(
+        name=name,
+        kind=REFERENCE_WELL_ACTUAL,
+        stations=stations,
+        surface=Point3D(
+            x=float(stations["X_m"].iloc[0]),
+            y=float(stations["Y_m"].iloc[0]),
+            z=float(stations["Z_m"].iloc[0]),
+        ),
+        azimuth_deg=0.0,
+    )
+
+
+def _parse_dev_rows(text: str) -> pd.DataFrame:
+    rows: list[list[float]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        tokens = stripped.split()
+        if len(tokens) != 11:
+            continue
+        try:
+            rows.append([float(token) for token in tokens])
+        except ValueError:
+            continue
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "MD",
+            "X",
+            "Y",
+            "Z",
+            "TVD",
+            "DX",
+            "DY",
+            "AZIM_TN",
+            "INCL",
+            "DLS",
+            "AZIM_GN",
+        ],
     )
 
 
@@ -74919,6 +75464,150 @@ def test_build_batch_survey_dev_file_exports_single_selected_well() -> None:
     assert len(parsed.stations) == 2
     assert "# WELL NAME:                WELL-A" in text
     assert "100.000000 20.000000 45.000000 -95.000000" in text
+
+
+def test_build_batch_survey_dev_file_prepends_parent_path_from_welltrack() -> None:
+    parent_well = _reference_well(
+        "9010",
+        xs=[0.0, 100.0, 200.0],
+        ys=[0.0, 0.0, 0.0],
+        zs=[0.0, 50.0, 100.0],
+        mds=[0.0, 100.0, 200.0],
+    )
+    sidetrack_stations = pd.DataFrame(
+        {
+            "MD_m": [150.0, 210.0, 270.0],
+            "X_m": [150.0, 180.0, 220.0],
+            "Y_m": [0.0, 45.0, 95.0],
+            "Z_m": [75.0, 130.0, 190.0],
+            "INC_deg": [20.0, 38.0, 52.0],
+            "AZI_deg": [0.0, 34.0, 41.0],
+            "DLS_deg_per_30m": [0.0, 1.2, 0.8],
+        }
+    )
+    success = _success(
+        name="9010_ZBS",
+        stations=sidetrack_stations,
+        summary={
+            "sidetrack_window_md_m": 150.0,
+            "sidetrack_window_x_m": 150.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 75.0,
+            "sidetrack_window_inc_deg": 0.0,
+            "sidetrack_window_azi_deg": 0.0,
+            "actual_parent_well_name": "9010",
+        },
+    )
+
+    payload = ptc_batch_results.build_batch_survey_dev_file(
+        [success],
+        reference_wells=(parent_well,),
+    )
+    rows = _parse_dev_rows(payload.decode("utf-8"))
+
+    assert list(rows["MD"]) == pytest.approx([0.0, 100.0, 150.0, 210.0, 270.0])
+    assert float(rows.iloc[0]["X"]) == pytest.approx(0.0)
+    assert float(rows.iloc[0]["Y"]) == pytest.approx(0.0)
+    assert float(rows.iloc[2]["X"]) == pytest.approx(150.0)
+    assert float(rows.iloc[2]["Z"]) == pytest.approx(-75.0)
+    assert float(rows.iloc[3]["TVD"]) == pytest.approx(130.0)
+    assert float(rows.iloc[3]["DX"]) == pytest.approx(180.0)
+
+
+def test_build_batch_survey_dev_file_preserves_original_parent_dev_rows() -> None:
+    parent_well = parse_reference_trajectory_dev_text(
+        "\n".join(
+            [
+                "# SURVEY FROM PETREL",
+                "MD X Y Z TVD DX DY AZIM_TN INCL DLS AZIM_GN",
+                "0 0 0 0 0 0 0 1.5 0.0 0.0 1.5",
+                "100 100 0 -50 50 100 0 12.5 8.0 0.7 12.5",
+                "200 200 0 -100 100 200 0 25.5 16.0 0.9 25.5",
+            ]
+        ),
+        well_name="9010",
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+    sidetrack_stations = pd.DataFrame(
+        {
+            "MD_m": [200.0, 260.0, 320.0],
+            "X_m": [200.0, 235.0, 280.0],
+            "Y_m": [0.0, 55.0, 115.0],
+            "Z_m": [100.0, 155.0, 220.0],
+            "INC_deg": [16.0, 41.0, 55.0],
+            "AZI_deg": [25.5, 38.0, 44.0],
+            "DLS_deg_per_30m": [0.0, 1.4, 1.1],
+        }
+    )
+    success = _success(
+        name="9010_ZBS",
+        stations=sidetrack_stations,
+        summary={
+            "sidetrack_window_md_m": 200.0,
+            "sidetrack_window_x_m": 200.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 100.0,
+            "sidetrack_window_inc_deg": 16.0,
+            "sidetrack_window_azi_deg": 25.5,
+            "actual_parent_well_name": "9010",
+        },
+    )
+
+    payload = ptc_batch_results.build_batch_survey_dev_file(
+        [success],
+        reference_wells=(parent_well,),
+    )
+    rows = _parse_dev_rows(payload.decode("utf-8"))
+
+    assert list(rows["MD"]) == pytest.approx([0.0, 100.0, 200.0, 260.0, 320.0])
+    assert float(rows.iloc[1]["AZIM_TN"]) == pytest.approx(12.5)
+    assert float(rows.iloc[1]["DLS"]) == pytest.approx(0.7)
+    assert float(rows.iloc[2]["AZIM_TN"]) == pytest.approx(25.5)
+    assert float(rows.iloc[2]["INCL"]) == pytest.approx(16.0)
+
+
+def test_build_batch_survey_dev_file_uses_parent_prefix_from_attrs_for_pilot() -> None:
+    parent_prefix = build_reference_trajectory_stations(
+        xs=[0.0, 100.0, 200.0],
+        ys=[0.0, 0.0, 0.0],
+        zs=[0.0, 50.0, 100.0],
+        mds=[0.0, 100.0, 200.0],
+    )
+    sidetrack_stations = pd.DataFrame(
+        {
+            "MD_m": [150.0, 210.0],
+            "X_m": [150.0, 190.0],
+            "Y_m": [0.0, 60.0],
+            "Z_m": [75.0, 140.0],
+            "INC_deg": [0.0, 44.0],
+            "AZI_deg": [0.0, 35.0],
+            "DLS_deg_per_30m": [0.0, 1.3],
+        }
+    )
+    sidetrack_stations.attrs["uncertainty_reference_stations"] = parent_prefix.loc[
+        parent_prefix["MD_m"].to_numpy(dtype=float) <= 150.0
+    ].copy()
+    success = _success(
+        name="WELL-04",
+        stations=sidetrack_stations,
+        summary={
+            "trajectory_type": "PILOT_SIDETRACK",
+            "pilot_well_name": "WELL-04_PL",
+            "sidetrack_window_md_m": 150.0,
+            "sidetrack_window_x_m": 150.0,
+            "sidetrack_window_y_m": 0.0,
+            "sidetrack_window_z_m": 75.0,
+            "sidetrack_window_inc_deg": 0.0,
+            "sidetrack_window_azi_deg": 0.0,
+        },
+    )
+
+    payload = ptc_batch_results.build_batch_survey_dev_file([success])
+    rows = _parse_dev_rows(payload.decode("utf-8"))
+
+    assert list(rows["MD"]) == pytest.approx([0.0, 100.0, 150.0, 210.0])
+    assert float(rows.iloc[2]["X"]) == pytest.approx(150.0)
+    assert float(rows.iloc[3]["DX"]) == pytest.approx(190.0)
 
 
 def test_build_batch_survey_dev_file_returns_empty_for_multiple_wells() -> None:
@@ -76828,7 +77517,7 @@ def test_fixed_slots_editor_normalizes_dataframe_rows() -> None:
     assert any("дубль" in warning for warning in warnings)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_page_results.py	33580
+===BEGIN_FILE===	tests/test_ptc_page_results.py	36189
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -77059,6 +77748,95 @@ def test_anticollision_panel_reruns_after_fresh_analysis_when_visual_is_external
 
     assert calls["buttons"] == ["Расчёт пересечений"]
     assert calls["progress_emptied"] is True
+
+
+def test_anticollision_panel_renders_settings_under_section_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+        }
+
+        def markdown(self, message: str) -> None:
+            calls.append(("markdown", str(message)))
+
+        def selectbox(
+            self,
+            label: str,
+            *,
+            options: list[str],
+            format_func=None,
+            key: str,
+        ) -> str:
+            calls.append(("selectbox", str(label)))
+            value = str(options[0])
+            self.session_state[key] = value
+            return value
+
+        def button(self, label: str, **_kwargs: object) -> bool:
+            calls.append(("button", str(label)))
+            return False
+
+        def info(self, message: str) -> None:
+            calls.append(("info", str(message)))
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (
+            SimpleNamespace(name="FACT-1", kind=ptc_core.REFERENCE_WELL_ACTUAL),
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "render_anticollision_params_block",
+        lambda **_kwargs: calls.append(("params", "rendered")),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_cached_anticollision_snapshot",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_status_run_log",
+        lambda **_kwargs: None,
+    )
+
+    ptc_page_results._render_anticollision_panel(
+        successes=[object(), object()],
+        records=[],
+        summary_rows=[],
+        focus_pad_id="",
+        focus_pad_well_names=[],
+        show_visualization=False,
+    )
+
+    assert calls[:4] == [
+        ("markdown", "### Anti-collision и пересечения"),
+        ("selectbox", "Пресет неопределенности для anti-collision"),
+        ("params", "rendered"),
+        ("button", "Расчёт пересечений"),
+    ]
 
 
 def test_anticollision_panel_pauses_on_pending_target_edits(
@@ -77920,7 +78698,7 @@ def test_format_duration_ru_carries_rounded_seconds() -> None:
     assert ptc_core._format_duration_ru(3600.0) == "1 ч 00 мин"
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_page_run.py	4818
+===BEGIN_FILE===	tests/test_ptc_page_run.py	5335
 from __future__ import annotations
 
 import pytest
@@ -78068,6 +78846,19 @@ def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:
     assert by_name["WELL-04"].summary["sidetrack_window_md_m"] == pytest.approx(
         760.0
     )
+
+
+def test_ptc_page_run_keeps_anticollision_uncertainty_controls_out_of_run_block() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _parent_with_pilot_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+
+    multiselect_labels = {str(widget.label) for widget in at.multiselect}
+    assert "MWD POOR Magnetic" not in multiselect_labels
+    assert "MWD Unknown Magnetic" not in multiselect_labels
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/test_ptc_reference_state.py	3884
@@ -78897,7 +79688,7 @@ def test_records_overview_hides_pilot_row_but_reports_pilot_problem_on_parent() 
     assert "Пилот:" in str(overview_df.iloc[0]["Проблема"])
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_three_overrides.py	41539
+===BEGIN_FILE===	tests/test_ptc_three_overrides.py	44847
 from __future__ import annotations
 
 from pathlib import Path
@@ -78909,6 +79700,7 @@ import pytest
 
 from pywp.anticollision import (
     AntiCollisionAnalysis,
+    AntiCollisionReportEvent,
     AntiCollisionWell,
     anti_collision_report_events,
 )
@@ -79948,6 +80740,112 @@ def test_anticollision_overrides_keep_target_only_edit_wells_editable() -> None:
         "t1",
         "t3",
     ]
+
+
+def test_collision_payloads_group_same_wells_and_segments_by_worst_sf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    events = (
+        AntiCollisionReportEvent(
+            well_a="well_01",
+            well_b="well_02",
+            classification="trajectory",
+            priority_rank=2,
+            label_a="A",
+            label_b="B",
+            md_a_start_m=100.0,
+            md_a_end_m=140.0,
+            md_b_start_m=120.0,
+            md_b_end_m=160.0,
+            min_separation_factor=0.82,
+            max_overlap_depth_m=5.0,
+            min_center_distance_m=12.0,
+            merged_corridor_count=1,
+        ),
+        AntiCollisionReportEvent(
+            well_a="well_01",
+            well_b="well_02",
+            classification="trajectory",
+            priority_rank=2,
+            label_a="A",
+            label_b="B",
+            md_a_start_m=200.0,
+            md_a_end_m=240.0,
+            md_b_start_m=220.0,
+            md_b_end_m=260.0,
+            min_separation_factor=0.41,
+            max_overlap_depth_m=7.0,
+            min_center_distance_m=8.0,
+            merged_corridor_count=1,
+        ),
+        AntiCollisionReportEvent(
+            well_a="well_01",
+            well_b="well_02",
+            classification="trajectory",
+            priority_rank=2,
+            label_a="A",
+            label_b="B",
+            md_a_start_m=300.0,
+            md_a_end_m=340.0,
+            md_b_start_m=320.0,
+            md_b_end_m=360.0,
+            min_separation_factor=0.65,
+            max_overlap_depth_m=6.0,
+            min_center_distance_m=10.0,
+            merged_corridor_count=1,
+        ),
+    )
+
+    monkeypatch.setattr(
+        ptc_three_overrides,
+        "anti_collision_report_events",
+        lambda current_analysis: events,
+    )
+    monkeypatch.setattr(
+        ptc_three_overrides,
+        "_segment_types_for_interval",
+        lambda current_analysis, well_name, md_start_m, md_end_m: (
+            "HOLD, BUILD"
+            if float(md_start_m) < 300.0 and str(well_name) == "well_01"
+            else "BUILD, HOLD"
+            if float(md_start_m) < 300.0
+            else "HOLD"
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_three_overrides,
+        "_best_event_zone",
+        lambda **kwargs: (
+            SimpleNamespace(hotspot_xyz=(10.0, 0.0, 0.0))
+            if float(kwargs["md_a_start_m"]) < 150.0
+            else SimpleNamespace(hotspot_xyz=(25.0, 0.0, 0.0))
+            if float(kwargs["md_a_start_m"]) < 300.0
+            else SimpleNamespace(hotspot_xyz=(50.0, 0.0, 0.0))
+        ),
+    )
+
+    collisions = ptc_three_overrides._collision_payloads(analysis)
+
+    assert len(collisions) == 2
+    grouped = next(
+        item
+        for item in collisions
+        if str(item["segment_a"]) == "HOLD, BUILD"
+        and str(item["segment_b"]) == "BUILD, HOLD"
+    )
+    assert grouped["separation_factor"] == pytest.approx(0.41)
+    assert grouped["hotspot"] == [25.0, 0.0, 0.0]
+    assert grouped["grouped_collision_count"] == 2
 
 
 def test_augment_three_payload_hides_flat_well_legend_when_tree_present() -> None:
@@ -90121,7 +91019,7 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	277754
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	277635
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -93891,7 +94789,7 @@ def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
     assert str(at.session_state["wt_results_all_view_mode"]) == "Anti-collision"
 
 
-def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
+def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
     monkeypatch,
 ) -> None:
     page = wt_import_module
@@ -93921,7 +94819,7 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     page.st.session_state["wt_survey_download_selected_names"] = ["WELL-B"]
     captured: dict[str, object] = {
         "download_buttons": [],
-        "expanders": [],
+        "markdown": [],
         "multiselect": None,
         "radios": [],
     }
@@ -93939,10 +94837,6 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     def _fake_columns(spec, *args, **kwargs):
         count = int(spec) if isinstance(spec, int) else len(spec)
         return tuple(_DummyContext() for _ in range(count))
-
-    def _fake_expander(label, *args, **kwargs):
-        captured["expanders"].append(str(label))
-        return _DummyContext()
 
     def _fake_multiselect(label, options, *args, **kwargs):
         captured["multiselect"] = {
@@ -93976,9 +94870,12 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "columns", _fake_columns)
     monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
-    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "markdown",
+        lambda message, *args, **kwargs: captured["markdown"].append(str(message)),
+    )
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
-    monkeypatch.setattr(page.st, "expander", _fake_expander)
     monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
     monkeypatch.setattr(page.st, "radio", _fake_radio)
     monkeypatch.setattr(page.st, "download_button", _fake_download_button)
@@ -93993,7 +94890,7 @@ def test_batch_summary_moves_survey_downloads_into_trajectory_export_expander(
     downloads = list(captured["download_buttons"])
     download_labels = {str(item["label"]) for item in downloads}
     assert "Скачать сводку (CSV)" not in download_labels
-    assert "Выгрузка" in captured["expanders"]
+    assert "### Выгрузка" in captured["markdown"]
     assert captured["multiselect"] == {
         "label": "Скважины для выгрузки",
         "options": ["WELL-A", "WELL-B"],

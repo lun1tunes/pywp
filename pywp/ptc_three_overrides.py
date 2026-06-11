@@ -946,7 +946,75 @@ def _collision_payloads(
                 "segment_b": segment_b,
             }
         )
-    return collisions
+    return _group_collision_payloads(collisions)
+
+
+def _group_collision_payloads(
+    collisions: Iterable[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[
+        tuple[str, str, tuple[str, ...], tuple[str, ...]],
+        dict[str, object],
+    ] = {}
+    for collision in collisions:
+        key = _collision_group_key(collision)
+        existing = grouped.get(key)
+        if existing is None:
+            item = dict(collision)
+            item["grouped_collision_count"] = 1
+            grouped[key] = item
+            continue
+        grouped_count = int(existing.get("grouped_collision_count", 1)) + 1
+        if _collision_payload_is_more_extreme(collision, existing):
+            item = dict(collision)
+            item["grouped_collision_count"] = grouped_count
+            grouped[key] = item
+            continue
+        existing["grouped_collision_count"] = grouped_count
+    return list(grouped.values())
+
+
+def _collision_group_key(
+    collision: Mapping[str, object],
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        str(collision.get("well_a", "")).strip(),
+        str(collision.get("well_b", "")).strip(),
+        _normalized_collision_segment_key(collision.get("segment_a")),
+        _normalized_collision_segment_key(collision.get("segment_b")),
+    )
+
+
+def _normalized_collision_segment_key(value: object) -> tuple[str, ...]:
+    parts = [
+        str(part).strip().upper()
+        for part in str(value or "").split(",")
+        if str(part).strip()
+    ]
+    if not parts:
+        return ("—",)
+    return tuple(sorted(set(parts)))
+
+
+def _collision_payload_is_more_extreme(
+    candidate: Mapping[str, object],
+    current: Mapping[str, object],
+) -> bool:
+    candidate_sf = float(candidate.get("separation_factor", float("inf")))
+    current_sf = float(current.get("separation_factor", float("inf")))
+    if candidate_sf < current_sf:
+        return True
+    if candidate_sf > current_sf:
+        return False
+    candidate_priority = int(candidate.get("priority_rank", 999999))
+    current_priority = int(current.get("priority_rank", 999999))
+    if candidate_priority < current_priority:
+        return True
+    if candidate_priority > current_priority:
+        return False
+    candidate_distance = float(candidate.get("center_distance_m", float("inf")))
+    current_distance = float(current.get("center_distance_m", float("inf")))
+    return candidate_distance < current_distance
 
 
 def overlap_volume_payloads(

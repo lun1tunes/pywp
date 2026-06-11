@@ -145,3 +145,16 @@ def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:
     assert by_name["WELL-04"].summary["sidetrack_window_md_m"] == pytest.approx(
         760.0
     )
+
+
+def test_ptc_page_run_keeps_anticollision_uncertainty_controls_out_of_run_block() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _parent_with_pilot_records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    at.run(timeout=120)
+
+    multiselect_labels = {str(widget.label) for widget in at.multiselect}
+    assert "MWD POOR Magnetic" not in multiselect_labels
+    assert "MWD Unknown Magnetic" not in multiselect_labels
