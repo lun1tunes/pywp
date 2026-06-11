@@ -42641,7 +42641,7 @@ def _reference_pad_labels(reference_wells: Iterable[object]) -> list[_ReferenceP
     return pad_labels
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_overrides.py	44743
+===BEGIN_FILE===	pywp/ptc_three_overrides.py	44990
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, MutableMapping
@@ -42659,6 +42659,7 @@ from pywp.anticollision import (
 from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.models import Point3D
 from pywp import ptc_pad_state
+from pywp import ptc_target_records
 from pywp import ptc_three_payload
 from pywp.pilot_wells import is_zbs_name, well_name_key
 from pywp.reference_trajectories import ImportedTrajectoryWell
@@ -42726,6 +42727,8 @@ def _record_surface_by_name(records: Iterable[WelltrackRecord]) -> dict[str, Poi
     surface_by_name: dict[str, Point3D] = {}
     for record in records:
         if is_zbs_name(record.name):
+            continue
+        if not ptc_target_records.record_first_point_is_surface_like(record):
             continue
         points = tuple(record.points)
         if not points:
@@ -43174,6 +43177,7 @@ def trajectory_three_payload_overrides(
 ) -> dict[str, object]:
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
     surface_by_name: dict[str, Point3D] = {}
+    arrow_surface_by_name = _record_surface_by_name(records)
     for success in successes:
         bounds = successful_plan_raw_bounds(success)
         if bounds is not None:
@@ -43183,7 +43187,7 @@ def trajectory_three_payload_overrides(
         well_name = str(getattr(target_only, "name"))
         well_bounds_by_name[well_name] = target_only_raw_bounds(target_only)
         surface_by_name[well_name] = getattr(target_only, "surface")
-    surface_by_name.update(_record_surface_by_name(records))
+    surface_by_name.update(arrow_surface_by_name)
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
         records=records,
@@ -43207,7 +43211,7 @@ def trajectory_three_payload_overrides(
             session_state,
             records=records,
             visible_well_names=tuple(well_bounds_by_name.keys()),
-            surface_by_name=surface_by_name,
+            surface_by_name=arrow_surface_by_name,
         ),
         "component_key": "trajectory-overview",
     }
@@ -43227,6 +43231,7 @@ def anticollision_three_payload_overrides(
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
     name_to_color: dict[str, str] = {}
     surface_by_name: dict[str, Point3D] = {}
+    arrow_surface_by_name = _record_surface_by_name(records)
     for well in analysis.wells:
         if bool(well.is_reference_only):
             continue
@@ -43267,7 +43272,7 @@ def anticollision_three_payload_overrides(
         surface = getattr(target_only, "surface", None)
         if isinstance(surface, Point3D):
             surface_by_name[well_name] = surface
-    surface_by_name.update(_record_surface_by_name(records))
+    surface_by_name.update(arrow_surface_by_name)
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
         records=records,
@@ -43284,7 +43289,7 @@ def anticollision_three_payload_overrides(
             session_state,
             records=records,
             visible_well_names=tuple(visible_names),
-            surface_by_name=surface_by_name,
+            surface_by_name=arrow_surface_by_name,
         ),
         "component_key": "anticollision-overview",
     }
@@ -79688,7 +79693,7 @@ def test_records_overview_hides_pilot_row_but_reports_pilot_problem_on_parent() 
     assert "Пилот:" in str(overview_df.iloc[0]["Проблема"])
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_three_overrides.py	44847
+===BEGIN_FILE===	tests/test_ptc_three_overrides.py	47225
 from __future__ import annotations
 
 from pathlib import Path
@@ -80087,6 +80092,92 @@ def test_anticollision_zbs_targets_do_not_render_pad_first_surface_arrow() -> No
     overrides = ptc_three_overrides.anticollision_three_payload_overrides(
         {},
         records=[zbs_record],
+        analysis=analysis,
+    )
+
+    assert [
+        item
+        for item in list(overrides["extra_meshes"])
+        if str(item.get("role")) == "pad_first_surface_arrow"
+    ] == []
+
+
+def test_sidetrack_without_surface_point_does_not_render_pad_arrow() -> None:
+    records = [
+        WelltrackRecord(
+            name="well_04",
+            points=(
+                WelltrackPoint(x=456978.0, y=890541.0, z=1852.0, md=1.0),
+                WelltrackPoint(x=459130.0, y=887003.0, z=2554.0, md=2.0),
+            ),
+        )
+    ]
+    sidetrack_success = _successful_plan_xy(
+        name="well_04",
+        x_offset_m=456950.0,
+        y_offset_m=890500.0,
+    )
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        {},
+        records=records,
+        successes=[sidetrack_success],
+        target_only_wells=[],
+        name_to_color={},
+    )
+
+    assert [
+        item
+        for item in list(overrides["extra_meshes"])
+        if str(item.get("role")) == "pad_first_surface_arrow"
+    ] == []
+
+
+def test_anticollision_sidetrack_without_surface_point_does_not_render_pad_arrow() -> None:
+    records = [
+        WelltrackRecord(
+            name="well_04",
+            points=(
+                WelltrackPoint(x=456978.0, y=890541.0, z=1852.0, md=1.0),
+                WelltrackPoint(x=459130.0, y=887003.0, z=2554.0, md=2.0),
+            ),
+        )
+    ]
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "X_m": [456950.0, 457050.0],
+            "Y_m": [890500.0, 890520.0],
+            "Z_m": [1800.0, 1850.0],
+        }
+    )
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            AntiCollisionWell(
+                name="well_04",
+                color="#2563eb",
+                overlay=SimpleNamespace(),
+                samples=(),
+                stations=stations,
+                surface=Point3D(x=456950.0, y=890500.0, z=1800.0),
+                t1=None,
+                t3=None,
+                md_t1_m=None,
+                md_t3_m=None,
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    overrides = ptc_three_overrides.anticollision_three_payload_overrides(
+        {},
+        records=records,
         analysis=analysis,
     )
 

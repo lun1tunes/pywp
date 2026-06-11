@@ -15,6 +15,7 @@ from pywp.anticollision import (
 from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.models import Point3D
 from pywp import ptc_pad_state
+from pywp import ptc_target_records
 from pywp import ptc_three_payload
 from pywp.pilot_wells import is_zbs_name, well_name_key
 from pywp.reference_trajectories import ImportedTrajectoryWell
@@ -82,6 +83,8 @@ def _record_surface_by_name(records: Iterable[WelltrackRecord]) -> dict[str, Poi
     surface_by_name: dict[str, Point3D] = {}
     for record in records:
         if is_zbs_name(record.name):
+            continue
+        if not ptc_target_records.record_first_point_is_surface_like(record):
             continue
         points = tuple(record.points)
         if not points:
@@ -530,6 +533,7 @@ def trajectory_three_payload_overrides(
 ) -> dict[str, object]:
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
     surface_by_name: dict[str, Point3D] = {}
+    arrow_surface_by_name = _record_surface_by_name(records)
     for success in successes:
         bounds = successful_plan_raw_bounds(success)
         if bounds is not None:
@@ -539,7 +543,7 @@ def trajectory_three_payload_overrides(
         well_name = str(getattr(target_only, "name"))
         well_bounds_by_name[well_name] = target_only_raw_bounds(target_only)
         surface_by_name[well_name] = getattr(target_only, "surface")
-    surface_by_name.update(_record_surface_by_name(records))
+    surface_by_name.update(arrow_surface_by_name)
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
         records=records,
@@ -563,7 +567,7 @@ def trajectory_three_payload_overrides(
             session_state,
             records=records,
             visible_well_names=tuple(well_bounds_by_name.keys()),
-            surface_by_name=surface_by_name,
+            surface_by_name=arrow_surface_by_name,
         ),
         "component_key": "trajectory-overview",
     }
@@ -583,6 +587,7 @@ def anticollision_three_payload_overrides(
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
     name_to_color: dict[str, str] = {}
     surface_by_name: dict[str, Point3D] = {}
+    arrow_surface_by_name = _record_surface_by_name(records)
     for well in analysis.wells:
         if bool(well.is_reference_only):
             continue
@@ -623,7 +628,7 @@ def anticollision_three_payload_overrides(
         surface = getattr(target_only, "surface", None)
         if isinstance(surface, Point3D):
             surface_by_name[well_name] = surface
-    surface_by_name.update(_record_surface_by_name(records))
+    surface_by_name.update(arrow_surface_by_name)
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
         records=records,
@@ -640,7 +645,7 @@ def anticollision_three_payload_overrides(
             session_state,
             records=records,
             visible_well_names=tuple(visible_names),
-            surface_by_name=surface_by_name,
+            surface_by_name=arrow_surface_by_name,
         ),
         "component_key": "anticollision-overview",
     }
