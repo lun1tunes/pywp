@@ -776,19 +776,6 @@ def anticollision_three_payload(
             y_arrays=y_arrays,
             z_arrays=z_arrays,
         )
-        if not focus_set:
-            for reference_well in display_only_reference_wells:
-                stations = getattr(reference_well, "stations")
-                if stations.empty or not {"X_m", "Y_m", "Z_m"}.issubset(stations.columns):
-                    continue
-                _append_arrays_from_xyz(
-                    x_focus_arrays,
-                    y_focus_arrays,
-                    z_focus_arrays,
-                    stations["X_m"].to_numpy(dtype=float),
-                    stations["Y_m"].to_numpy(dtype=float),
-                    stations["Z_m"].to_numpy(dtype=float),
-                )
     _append_reference_name_labels(payload, analysis_reference_wells)
     _append_reference_pad_labels(payload, analysis_reference_wells)
     _append_sidetrack_relative_cone_overlays(

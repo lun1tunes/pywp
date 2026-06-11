@@ -7201,6 +7201,23 @@ def test_anticollision_figures_ignore_far_reference_wells_for_axis_zoom() -> Non
     assert tuple(base_plan.layout.yaxis.range) == tuple(far_ref_plan.layout.yaxis.range)
 
 
+def test_anticollision_payload_ignores_loaded_display_only_reference_wells_for_camera_bounds() -> None:
+    page = wt_import_module
+    successes = [_successful_plan(name="WELL-A", y_offset_m=0.0)]
+    analysis = page._build_anti_collision_analysis(
+        successes,
+        model=planning_uncertainty_model_for_preset(DEFAULT_UNCERTAINTY_PRESET),
+    )
+
+    base_3d = page._all_wells_anticollision_three_payload(analysis)
+    far_ref_3d = page._all_wells_anticollision_three_payload(
+        analysis,
+        reference_wells=_far_reference_wells(),
+    )
+
+    assert base_3d["bounds"] == far_ref_3d["bounds"]
+
+
 def test_all_wells_three_payload_aggregates_reference_wells_in_fast_mode() -> None:
     page = wt_import_module
     payload = page._all_wells_three_payload(
@@ -7307,6 +7324,10 @@ def test_anticollision_payload_can_show_loaded_reference_wells_outside_ac_scope(
         reference_wells=far_reference_wells,
         render_mode=page.WT_3D_RENDER_DETAIL,
     )
+    base_payload = page._all_wells_anticollision_three_payload(
+        analysis,
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
     figure_plan = page._all_wells_anticollision_plan_figure(
         analysis,
         reference_wells=far_reference_wells,
@@ -7322,7 +7343,7 @@ def test_anticollision_payload_can_show_loaded_reference_wells_outside_ac_scope(
     assert {"FACT-FAR", "APP-FAR"}.issubset(hover_names)
     assert "FACT-FAR (Фактическая)" in trace_names
     assert "APP-FAR (Проектная утвержденная)" in trace_names
-    assert float(payload["bounds"]["max"][0]) > 40_000.0
+    assert payload["bounds"] == base_payload["bounds"]
 
 
 def test_clusters_touching_focus_pad_expand_focus_to_neighbor_cluster_wells() -> None:

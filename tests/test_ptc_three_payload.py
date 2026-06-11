@@ -784,6 +784,65 @@ def test_anticollision_three_payload_does_not_label_display_only_reference_wells
     )
 
 
+def test_anticollision_three_payload_ignores_display_only_reference_wells_in_default_bounds() -> None:
+    calc_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "X_m": [0.0, 1000.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 1000.0],
+            "DLS_deg_per_30m": [0.0, 0.0],
+        }
+    )
+    display_only_reference = parse_reference_trajectory_table(
+        [
+            {
+                "Wellname": "FACT-FAR",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 5000.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "MD": 0.0,
+            },
+            {
+                "Wellname": "FACT-FAR",
+                "Type": REFERENCE_WELL_ACTUAL,
+                "X": 6000.0,
+                "Y": 0.0,
+                "Z": 500.0,
+                "MD": 1200.0,
+            },
+        ]
+    )
+    analysis = SimpleNamespace(
+        wells=(
+            SimpleNamespace(
+                name="well_01",
+                color="#22C55E",
+                overlay=SimpleNamespace(samples=()),
+                stations=calc_stations,
+                surface=Point3D(0.0, 0.0, 0.0),
+                t1=Point3D(300.0, 0.0, 300.0),
+                t3=Point3D(1000.0, 0.0, 1000.0),
+                md_t1_m=300.0,
+                is_reference_only=False,
+                target_pairs=(),
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+    )
+
+    base_payload = anticollision_three_payload(analysis)
+    payload = anticollision_three_payload(
+        analysis,
+        reference_wells=tuple(display_only_reference),
+    )
+
+    assert payload["bounds"] == base_payload["bounds"]
+
+
 def _sidetrack_parent_payload_analysis():
     stations = pd.DataFrame(
         {
