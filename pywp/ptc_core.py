@@ -1131,6 +1131,51 @@ def _all_wells_anticollision_three_payload(
     )
 
 
+_THREE_AUGMENTED_PAYLOAD_CACHE: list[dict[str, object]] = []
+
+
+def _cached_augmented_three_payload(
+    *,
+    payload: dict[str, object],
+    payload_overrides: dict[str, object] | None,
+) -> dict[str, object]:
+    if not payload_overrides:
+        return payload
+    for entry in reversed(_THREE_AUGMENTED_PAYLOAD_CACHE):
+        if (
+            entry.get("payload") is payload
+            and entry.get("payload_overrides") is payload_overrides
+            and isinstance(entry.get("augmented_payload"), dict)
+        ):
+            return entry["augmented_payload"]  # type: ignore[return-value]
+    augmented_payload = _augment_three_payload(
+        payload=payload,
+        legend_tree=list(payload_overrides.get("legend_tree") or []),
+        focus_targets=payload_overrides.get("focus_targets"),
+        hidden_flat_legend_labels=set(
+            str(item)
+            for item in (
+                payload_overrides.get("hidden_flat_legend_labels") or set()
+            )
+        ),
+        collisions=payload_overrides.get("collisions"),
+        edit_wells=payload_overrides.get("edit_wells"),
+        extra_labels=payload_overrides.get("extra_labels"),
+        extra_meshes=payload_overrides.get("extra_meshes"),
+        extra_legend_items=payload_overrides.get("extra_legend_items"),
+    )
+    _THREE_AUGMENTED_PAYLOAD_CACHE.append(
+        {
+            "payload": payload,
+            "payload_overrides": payload_overrides,
+            "augmented_payload": augmented_payload,
+        }
+    )
+    if len(_THREE_AUGMENTED_PAYLOAD_CACHE) > 4:
+        del _THREE_AUGMENTED_PAYLOAD_CACHE[:-4]
+    return augmented_payload
+
+
 def _render_three_payload(
     *,
     container: object,
@@ -1138,23 +1183,10 @@ def _render_three_payload(
     height: int,
     payload_overrides: dict[str, object] | None = None,
 ) -> None:
-    if payload_overrides:
-        payload = _augment_three_payload(
-            payload=payload,
-            legend_tree=list(payload_overrides.get("legend_tree") or []),
-            focus_targets=payload_overrides.get("focus_targets"),
-            hidden_flat_legend_labels=set(
-                str(item)
-                for item in (
-                    payload_overrides.get("hidden_flat_legend_labels") or set()
-                )
-            ),
-            collisions=payload_overrides.get("collisions"),
-            edit_wells=payload_overrides.get("edit_wells"),
-            extra_labels=payload_overrides.get("extra_labels"),
-            extra_meshes=payload_overrides.get("extra_meshes"),
-            extra_legend_items=payload_overrides.get("extra_legend_items"),
-        )
+    payload = _cached_augmented_three_payload(
+        payload=payload,
+        payload_overrides=payload_overrides,
+    )
     with container:
         edit_event = render_local_three_scene(
             payload,
@@ -1308,17 +1340,24 @@ def _anti_collision_cache_key(
     reference_uncertainty_models_by_name: (
         Mapping[str, PlanningUncertaintyModel] | None
     ) = None,
+    well_signatures: Mapping[str, str] | None = None,
 ) -> str:
-    color_map = _planned_anti_collision_color_map(successes, name_to_color)
-    well_signatures = _anti_collision_well_signatures(
-        successes=successes,
-        model=model,
-        name_to_color=color_map,
-        reference_wells=reference_wells,
-        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    resolved_well_signatures = (
+        {
+            str(well_name): str(signature)
+            for well_name, signature in well_signatures.items()
+        }
+        if well_signatures is not None
+        else _anti_collision_well_signatures(
+            successes=successes,
+            model=model,
+            name_to_color=_planned_anti_collision_color_map(successes, name_to_color),
+            reference_wells=reference_wells,
+            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        )
     )
     digest = hashlib.blake2b(digest_size=20)
-    for well_name, signature in sorted(well_signatures.items()):
+    for well_name, signature in sorted(resolved_well_signatures.items()):
         digest.update(str(well_name).encode("utf-8"))
         digest.update(str(signature).encode("utf-8"))
     return digest.hexdigest()
@@ -1473,7 +1512,7 @@ def _update_station_table_cache_digest(
     ]
     digest.update(str(tuple(stations_subset.columns)).encode("utf-8"))
     digest.update(str(len(stations_subset)).encode("utf-8"))
-    digest.update(stations_subset.to_numpy(dtype=np.float64, copy=True).tobytes())
+    digest.update(stations_subset.to_numpy(dtype=np.float64, copy=False).tobytes())
 
 
 def _update_success_context_cache_digest(
@@ -1742,6 +1781,7 @@ def _cached_anti_collision_view_model(
         name_to_color=planned_color_map,
         reference_wells=scoped_reference_wells,
         reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        well_signatures=well_signature_by_name,
     )
     cache = dict(st.session_state.get("wt_anticollision_analysis_cache") or {})
     if str(cache.get("key", "")) == cache_key:
@@ -1888,21 +1928,11 @@ def _current_anti_collision_cache_snapshot(
     tuple[AntiCollisionRecommendation, ...],
     tuple[AntiCollisionRecommendationCluster, ...],
 ] | None:
-    color_map = _well_color_map(records) if records else {}
-    scoped_reference_wells = reference_wells_in_anti_collision_scope(
-        successes,
-        tuple(reference_wells),
-    )
-    planned_color_map = _planned_anti_collision_color_map(successes, color_map)
-    cache_key = _anti_collision_cache_key(
-        successes=successes,
-        model=uncertainty_model,
-        name_to_color=planned_color_map,
-        reference_wells=scoped_reference_wells,
-        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
-    )
     cache = st.session_state.get("wt_anticollision_analysis_cache")
-    if not isinstance(cache, Mapping) or str(cache.get("key", "")) != cache_key:
+    if not isinstance(cache, Mapping):
+        return None
+    cached_key = str(cache.get("key", "")).strip()
+    if not cached_key:
         return None
     analysis = cache.get("analysis")
     recommendations = cache.get("recommendations")
@@ -1910,6 +1940,30 @@ def _current_anti_collision_cache_snapshot(
     if not isinstance(analysis, AntiCollisionAnalysis):
         return None
     if not isinstance(recommendations, tuple) or not isinstance(clusters, tuple):
+        return None
+
+    color_map = _well_color_map(records) if records else {}
+    scoped_reference_wells = reference_wells_in_anti_collision_scope(
+        successes,
+        tuple(reference_wells),
+    )
+    planned_color_map = _planned_anti_collision_color_map(successes, color_map)
+    well_signature_by_name = _anti_collision_well_signatures(
+        successes=successes,
+        model=uncertainty_model,
+        name_to_color=planned_color_map,
+        reference_wells=scoped_reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+    )
+    cache_key = _anti_collision_cache_key(
+        successes=successes,
+        model=uncertainty_model,
+        name_to_color=planned_color_map,
+        reference_wells=scoped_reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        well_signatures=well_signature_by_name,
+    )
+    if cached_key != cache_key:
         return None
     return analysis, recommendations, clusters
 
@@ -2170,6 +2224,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_error", "")
     st.session_state.setdefault("wt_last_run_at", "")
     st.session_state.setdefault("wt_last_runtime_s", None)
+    st.session_state.setdefault("wt_last_calc_param_signature", None)
     st.session_state.setdefault("wt_last_run_log_lines", [])
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault("wt_results_view_mode", "Все скважины")
@@ -2326,6 +2381,7 @@ def _clear_results() -> None:
     st.session_state["wt_last_error"] = ""
     st.session_state["wt_last_run_at"] = ""
     st.session_state["wt_last_runtime_s"] = None
+    st.session_state["wt_last_calc_param_signature"] = None
     st.session_state["wt_last_run_log_lines"] = []
     st.session_state["wt_results_view_mode"] = "Все скважины"
     st.session_state["wt_results_all_view_mode"] = "Anti-collision"

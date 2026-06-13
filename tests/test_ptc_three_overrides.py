@@ -180,6 +180,7 @@ def test_trajectory_overrides_build_tree_focus_targets_for_multi_pad() -> None:
         "PAD2-A",
         "PAD2-B",
     }
+    assert overrides["component_key"] == "results-overview"
 
 
 def test_first_surface_arrow_honors_fixed_pad_order() -> None:
@@ -1135,6 +1136,7 @@ def test_anticollision_overrides_keep_target_only_edit_wells_editable() -> None:
         "t1",
         "t3",
     ]
+    assert overrides["component_key"] == "results-overview"
 
 
 def test_collision_payloads_group_same_wells_and_segments_by_worst_sf(

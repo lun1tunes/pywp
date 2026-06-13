@@ -37,18 +37,51 @@ def _keep_ptc_calc_params_expanded() -> None:
     st.session_state[PTC_CALC_PARAMS_EXPAND_ONCE_KEY] = True
 
 
-def render_calc_params_panel(
+def _calc_params_changed_after_last_run() -> bool:
+    stored_signature = st.session_state.get("wt_last_calc_param_signature")
+    if not isinstance(stored_signature, tuple):
+        return False
+    return tuple(stored_signature) != wt.WT_CALC_PARAMS.state_signature()
+
+
+def _should_expand_calc_params_panel() -> bool:
+    sticky_expanded = bool(
+        st.session_state.get(PTC_CALC_PARAMS_EXPAND_ONCE_KEY, False)
+    )
+    stale_after_last_run = _calc_params_changed_after_last_run()
+    stored_signature = st.session_state.get("wt_last_calc_param_signature")
+    if isinstance(stored_signature, tuple) and not stale_after_last_run:
+        st.session_state[PTC_CALC_PARAMS_EXPAND_ONCE_KEY] = False
+        sticky_expanded = False
+    return bool(sticky_expanded or stale_after_last_run)
+
+
+@st.fragment
+def _render_calc_params_panel_fragment(
     *,
     extra_content: Callable[[], None] | None = None,
 ) -> TrajectoryConfig:
-    expanded = bool(st.session_state.pop(PTC_CALC_PARAMS_EXPAND_ONCE_KEY, False))
+    expanded = _should_expand_calc_params_panel()
     with st.expander("Параметры расчёта", expanded=expanded):
         config = wt._build_config_form(
             binding=wt.WT_CALC_PARAMS,
             title="",
             on_change=_keep_ptc_calc_params_expanded,
         )
+        if _calc_params_changed_after_last_run():
+            st.warning(
+                "Параметры расчёта изменены после последнего запуска. "
+                "Результаты ниже относятся к прошлому расчёту, пока вы не "
+                "запустите новый."
+            )
         if extra_content is not None:
             st.divider()
             extra_content()
         return config
+
+
+def render_calc_params_panel(
+    *,
+    extra_content: Callable[[], None] | None = None,
+) -> TrajectoryConfig:
+    return _render_calc_params_panel_fragment(extra_content=extra_content)

@@ -24,23 +24,74 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'data-ac-layer="segments"' in html
     assert "function initAntiCollisionControls()" in html
     assert "const WORLD_AXIS_STORAGE_KEY = `pywp:world-axis-overlay:${viewerStateScope}`;" in html
+    assert "const WORLD_AXIS_Z_SCALE_STORAGE_KEY = `pywp:world-axis-z-scale:${viewerStateScope}`;" in html
     assert "const WORLD_AXIS_PLANE_RAW_Z = 0.0;" in html
-    assert "const WORLD_AXIS_ANCHOR_NDC = { x: -0.62, y: -0.68 };" in html
+    assert "const WORLD_AXIS_GRID_SQUARES_PER_SIDE = 4;" in html
+    assert "const WORLD_AXIS_Z_SCALE_OPTIONS = [1, 2, 5, 10, 25, 50];" in html
+    assert 'id="world-axis-drag-handle"' in html
+    assert 'id="world-axis-z-scale-slider"' in html
+    assert 'id="world-axis-z-scale-value"' in html
+    assert ".world-axis-handle" in html
+    assert ".world-axis-scale-slider" in html
+    assert ".world-axis-scale-labels" in html
     assert "function worldAxisPlaneIntersectionRaw(ndcX, ndcY, rawZ)" in html
-    assert "function worldAxisTargetRawPoint()" in html
-    assert "function syncWorldAxisAnchorRaw(initialAnchorRaw)" in html
+    assert "function normalizedRawBounds(rawBounds)" in html
+    assert "function worldAxisDefaultPadFocusId()" in html
+    assert "function worldAxisPadFocusIdForFocusId(focusId)" in html
+    assert "function worldAxisRawBoundsForPadFocusId(focusId)" in html
+    assert "function worldAxisCurrentRawBounds()" in html
+    assert "function worldAxisBaseAnchorForBounds(rawBounds)" in html
+    assert "function worldAxisResolvedAnchorRaw()" in html
+    assert "function setWorldAxisActivePadFocus(focusId, options)" in html
+    assert "function syncWorldAxisActivePadFocus(options)" in html
+    assert "function worldAxisDepthRangeRaw()" in html
     assert "function worldAxisNiceStep(rawValue)" in html
+    assert "function worldAxisZScaleFactor()" in html
+    assert "function worldAxisZScaleLabel()" in html
+    assert "function worldAxisDisplayZ(rawZValue)" in html
+    assert "function buildWorldAxisLabelSpecs(" in html
+    assert "xyStep," in html
+    assert "zStep," in html
     assert "function rebuildWorldAxisGeometry()" in html
     assert "function updateWorldAxisOverlay()" in html
+    assert "function updateWorldAxisDragHandlePosition(" in html
+    assert "function startWorldAxisDrag(event)" in html
+    assert "function handleWorldAxisDragPointerMove(event)" in html
+    assert "function endWorldAxisDrag(event)" in html
     assert "function initWorldAxisControls()" in html
-    assert "anchorInitialized: false" in html
-    assert "lastTargetRaw: { x: 0.0, y: 0.0 }" in html
-    assert "worldAxisOverlay.anchorRaw.x += Number.isFinite(deltaX) ? deltaX : 0;" in html
-    assert "worldAxisOverlay.anchorRaw.y += Number.isFinite(deltaY) ? deltaY : 0;" in html
+    assert 'activePadFocusId: ""' in html
+    assert "dragOffsetRaw: { x: 0.0, y: 0.0 }" in html
+    assert "dragging: false" in html
+    assert "zScaleIndex: 0," in html
     assert "const unitsPerPixel = worldUnitsPerPixelAt(anchorDisplay);" in html
-    assert "viewWidth: Math.max(unitsPerPixel * canvasWidth, 10.0)," in html
-    assert "viewHeight: Math.max(unitsPerPixel * canvasHeight, 10.0)," in html
-    assert "zLength * Z_DISPLAY_SIGN" in html
+    assert "syncWorldAxisActivePadFocus({ resetOffset: false });" in html
+    assert "const xyStep = worldAxisNiceStep(" in html
+    assert "Math.max(xSpanRaw, ySpanRaw, 40.0) / WORLD_AXIS_GRID_SQUARES_PER_SIDE" in html
+    assert "const zStep = worldAxisNiceStep(Math.max(worldAxisDepthRangeRaw() / 5.0, 1000.0));" in html
+    assert "const xTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;" in html
+    assert "const yTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;" in html
+    assert "worldAxisOverlay.zScaleIndex = readStoredInteger(" in html
+    assert "function readStoredInteger(key, fallback, minValue, maxValue)" in html
+    assert "function storeStringValue(key, value)" in html
+    assert "const zScaleFactor = worldAxisZScaleFactor();" in html
+    assert "const zDisplayLength =" in html
+    assert "const zDepthRangeRaw = Math.max(worldAxisDepthRangeRaw(), zStep);" in html
+    assert "const approxZPixelLength =" in html
+    assert "const zLabelEvery = Math.max(" in html
+    assert "for (let zIndex = 1; zIndex <= zTickCount; zIndex += 1)" in html
+    assert "if (zIndex !== zTickCount && zIndex % zLabelEvery !== 0)" in html
+    assert "WORLD_AXIS_PLANE_RAW_Z + zValue" in html
+    assert "worldAxisOverlay.labelSpecs = labelSpecs;" in html
+    assert "worldAxisDisplayZ(zMax) - Math.max(zStep * 0.45 / zScaleFactor, 24.0)" in html
+    assert "localPosition: new THREE.Vector3(\n                xMax,\n                yMax,\n                worldAxisDisplayZ(zValue)," in html
+    assert "[xEnd, yEnd, 0]," in html
+    assert "[xEnd, yEnd, worldAxisDisplayZ(zLength)]," in html
+    assert "focusViewerTarget(targetBounds, String(item.id || \"\"));" in html
+    assert "window.addEventListener(\"pointermove\", handleWorldAxisDragPointerMove, true);" in html
+    assert "function syncWorldAxisScaleControls()" in html
+    assert "worldAxisZScaleSlider.addEventListener(\"input\", () => {" in html
+    assert "storeStringValue(\n                WORLD_AXIS_Z_SCALE_STORAGE_KEY," in html
+    assert "syncWorldAxisScaleControls();" in html
     assert "function registerAntiCollisionVisualObject(object, itemOrRole)" in html
     assert 'role === "sidetrack_relative_cone"' in html
     assert 'role === "sidetrack_relative_cone_tip"' in html
@@ -118,7 +169,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
     assert "function fitCameraToRawBounds(rawBounds)" in html
-    assert "const sceneOrigin = rawBoundsCenter(payload.bounds || {})" in html
+    assert "sceneOrigin = rawBoundsCenter(payload.bounds || {})" in html
     assert "function displayPoint(value)" in html
     assert "function displayXYZ(xValue, yValue, zValue)" in html
     assert "function dataPointFromDisplay(displayPosition)" in html
@@ -135,6 +186,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "fitMiniMapToRawBounds(rawBounds || payload.bounds || {})" in html
     assert "function focusMiniMapToDisplayPoint(displayCenter, focusSpan)" in html
     assert "focusMiniMapToDisplayPoint(targetCenter, offsetDistance * 2.0)" in html
+    assert "let miniMapOverlayBuilt = false;" in html
+    assert "function buildMiniMapOverlaysFromPayload()" in html
+    assert "if (!miniMapOverlayBuilt) {" in html
+    assert "buildMiniMapOverlaysFromPayload();" in html
     assert "function editWellTargetFocusBounds(index)" in html
     assert "function fitCameraToEditWellTargets(index)" in html
     assert "selectEditWell(editableIndex, { focus: !editModeActive })" in html
@@ -238,6 +293,14 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "basePoints: Array.isArray(well.base_points)" in html
     assert "warpedBaselineReplanPoints" in html
     assert "return endpointExact(warped, surface, t1, t3);" in html
+    assert "function applyViewerPayload(nextPayload, options)" in html
+    assert "function applyAntiCollisionOverlayPayload(nextPayload)" in html
+    assert "window.__PYWP_VIEWER_UPDATE__ = function (nextPayloadJson, nextPayloadDigest)" in html
+    assert "window.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__ = function (" in html
+    assert "clearViewerDataObjects();" in html
+    assert "clearAntiCollisionVisualPayload();" in html
+    assert "camera.position.add(originDelta);" in html
+    assert "controls.target.add(originDelta);" in html
     assert "sidetrack_window" in html
     assert "nearestSidetrackParentPoint" in html
     assert "snappedSidetrackWindowEntry" in html
@@ -250,21 +313,45 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "legend-item.is-focusable" in html
     assert 'id="minimap-frame"' in html
     assert 'id="minimap-label-layer"' in html
+    assert 'id="minimap-ruler-layer"' in html
+    assert 'id="minimap-ruler-line"' in html
+    assert 'id="minimap-ruler-start"' in html
+    assert 'id="minimap-ruler-end"' in html
+    assert 'id="minimap-ruler-label"' in html
     assert ".minimap-well-label" in html
+    assert ".minimap-edit-delta-label" in html
+    assert ".minimap-edit-lateral-label" in html
+    assert ".minimap-ruler-line" in html
+    assert ".minimap-ruler-point" in html
+    assert ".minimap-ruler-label" in html
     assert 'id="minimap-axes"' in html
     assert "minimap-axis-x" in html
     assert "minimap-axis-y" in html
     assert "X / E" in html
     assert "Y / N" in html
+    assert "const miniMapRulerLayer = document.getElementById(\"minimap-ruler-layer\")" in html
+    assert "const miniMapRulerBtn = document.getElementById(\"minimap-ruler-btn\")" in html
     assert "const miniMapAxes = document.getElementById(\"minimap-axes\")" in html
     assert "const miniMapLabels = [];" in html
     assert "miniMapAxes.classList.add(\"is-visible\")" in html
     assert "function updateMiniMapLabels()" in html
-    assert 'options && options.role === "well_label"' in html
+    assert "function updateMiniMapRulerOverlay()" in html
+    assert "function handleMiniMapRulerClick(event)" in html
+    assert "function setMiniMapRulerEnabled(enabled)" in html
+    assert "function syncMiniMapRulerButton()" in html
+    assert "function miniMapRulerRawPointAtEvent(event)" in html
+    assert "function miniMapRulerDisplayPoint(rawPoint)" in html
+    assert "function miniMapRulerCurrentEndRaw()" in html
+    assert "function miniMapRulerDistanceMeters(startRaw, endRaw)" in html
+    assert "function formatMiniMapDistanceMeters(distanceMeters)" in html
+    assert "function resetMiniMapRulerMeasurement()" in html
+    assert 'labelRole === "edit_delta_label"' in html
+    assert 'labelRole === "edit_lateral_label"' in html
     assert "{ offsetY: offsetY, role: role }" in html
     assert "function syncEditWellNameLabelPosition(wellIndex)" in html
     assert 'id="minimap-control"' in html
     assert 'id="minimap-label"' in html
+    assert 'id="minimap-ruler-btn"' in html
     assert "План E-N (вид сверху)" in html
     assert "const miniMapControl = document.getElementById(\"minimap-control\")" in html
     assert "miniMapControl.classList.add(\"is-expanded\")" in html
@@ -288,6 +375,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'content: "‹";' in html
     assert "font-weight: 500;" in html
     assert "#minimap-control:not(.is-expanded) #minimap-label" in html
+    assert "#minimap-control.is-expanded #minimap-ruler-btn" in html
+    assert "#minimap-ruler-btn.is-active" in html
+    assert "max-width: calc(100% - 84px);" in html
     assert 'miniMapToggleBtn.textContent = "План E-N";' in html
     assert "new THREE.OrthographicCamera" in html
     assert "function miniMapCanvasRect()" in html
@@ -332,6 +422,15 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'editDragInputMode = "minimap"' in html
     assert "editTransformMode === \"rotate\"" in html
     assert "miniMapWorldAtEvent(event)" in html
+    assert 'role: "edit_delta_label"' in html
+    assert 'role: "edit_lateral_label"' in html
+    assert "item.sourceLabel || null" in html
+    assert 'item.role === "edit_delta_label"' in html
+    assert 'miniMapRulerState.phase = "measuring";' in html
+    assert 'miniMapRulerState.phase = "fixed";' in html
+    assert "setMiniMapRulerEnabled(false);" in html
+    assert "miniMapRulerBtn.addEventListener(\"click\", (event) => {" in html
+    assert "handleMiniMapRulerClick(event);" in html
     assert "function sortedLegendItems(items)" in html
     assert '.localeCompare(legendSortLabel(right), "ru"' in html
     assert "numeric: true" in html
@@ -380,7 +479,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "const labelOffsetX = 6;" in html
     assert "rect.width - labelWidth - padding - labelOffsetX" in html
     assert "max-width: min(160px, calc(100% - 16px));" in html
-    assert "max-width: calc(100% - 48px);" in html
+    assert "max-width: calc(100% - 84px);" in html
     assert "<strong>DLS:</strong>" in html
     assert "<strong>INC:</strong>" in html
     assert 'id="reset-camera-btn"' not in html
@@ -402,19 +501,13 @@ def test_render_local_three_scene_appends_instance_token(monkeypatch) -> None:
     captured: dict[str, object] = {}
     calls: list[str] = []
 
-    def _fake_html(html: str, *, height: int, scrolling: bool) -> None:
-        calls.append("html")
-        captured["html"] = html
-        captured["height"] = height
-        captured["scrolling"] = scrolling
-
-    def _fake_bridge(**kwargs):
-        calls.append("bridge")
-        captured["bridge"] = dict(kwargs)
+    def _fake_component(**kwargs):
+        calls.append("component")
+        captured["component"] = dict(kwargs)
         return {"type": "noop"}
 
-    monkeypatch.setattr(three_viewer.components, "html", _fake_html)
-    monkeypatch.setattr(three_viewer, "_edit_bridge_component", _fake_bridge)
+    monkeypatch.setattr(three_viewer, "_viewer_component", _fake_component)
+    monkeypatch.setattr(three_viewer, "_viewer_runtime_digest", lambda: "runtime-digest")
 
     result = three_viewer.render_local_three_scene(
         {"background": "#FFFFFF"},
@@ -422,25 +515,106 @@ def test_render_local_three_scene_appends_instance_token(monkeypatch) -> None:
         instance_token=7,
     )
 
-    assert "<!-- viewer-instance:7 -->" in str(captured["html"])
-    assert '"edit_channel":"pywp_three_edit_' in str(captured["html"])
-    assert captured["height"] == 640
-    assert captured["scrolling"] is False
-    assert str(captured["bridge"]["channel"]).startswith("pywp_three_edit_")
-    assert captured["bridge"]["default"] is None
-    assert calls == ["bridge", "html"]
+    assert '"background":"#FFFFFF"' in str(captured["component"]["payload_json"])
+    assert '"edit_channel":"pywp_three_edit_' in str(
+        captured["component"]["payload_json"]
+    )
+    assert captured["component"]["payload_digest"] == three_viewer._payload_digest(
+        str(captured["component"]["payload_json"])
+    )
+    assert captured["component"]["runtime_digest"] == "runtime-digest"
+    assert captured["component"]["height"] == 640
+    assert captured["component"]["instance_token"] == 7
+    assert str(captured["component"]["channel"]).startswith("pywp_three_edit_")
+    assert captured["component"]["default"] is None
+    assert captured["component"]["key"] == "three-viewer-runtime-scene"
+    assert captured["component"]["has_anticollision_payload"] is False
+    assert calls == ["component"]
     assert result == {"type": "noop"}
 
 
-def test_three_viewer_edit_bridge_relays_json_events() -> None:
-    bridge_html = (three_viewer._ASSETS_DIR / "component" / "index.html").read_text(
+def test_render_local_three_scene_marks_anticollision_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_component(**kwargs):
+        captured.update(kwargs)
+        return {"type": "noop"}
+
+    monkeypatch.setattr(three_viewer, "_viewer_component", _fake_component)
+    monkeypatch.setattr(three_viewer, "_viewer_runtime_digest", lambda: "runtime-digest")
+
+    three_viewer.render_local_three_scene(
+        {
+            "background": "#FFFFFF",
+            "collisions": [{"id": "collision-1"}],
+        },
+        height=320,
+    )
+
+    assert captured["has_anticollision_payload"] is True
+
+
+def test_render_local_three_scene_reuses_serialized_payload_for_same_object(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+    json_calls = {"count": 0}
+    payload = {"background": "#FFFFFF", "title": "Scene"}
+    three_viewer._SERIALIZED_PAYLOAD_CACHE.clear()
+    original_json_dumps = three_viewer.json.dumps
+
+    def _fake_component(**kwargs):
+        captured.append(dict(kwargs))
+        return {"type": "noop"}
+
+    def _counting_json_dumps(*args, **kwargs):
+        json_calls["count"] += 1
+        return original_json_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(three_viewer, "_viewer_component", _fake_component)
+    monkeypatch.setattr(three_viewer, "_viewer_runtime_digest", lambda: "runtime-digest")
+    monkeypatch.setattr(three_viewer.json, "dumps", _counting_json_dumps)
+
+    three_viewer.render_local_three_scene(
+        payload,
+        height=480,
+        instance_token=3,
+        key="scene",
+    )
+    three_viewer.render_local_three_scene(
+        payload,
+        height=480,
+        instance_token=3,
+        key="scene",
+    )
+
+    assert json_calls["count"] == 1
+    assert captured[0]["payload_json"] == captured[1]["payload_json"]
+    assert captured[0]["payload_digest"] == captured[1]["payload_digest"]
+
+
+def test_three_viewer_runtime_component_relays_json_events() -> None:
+    component_html = (three_viewer._ASSETS_DIR / "index.html").read_text(
         encoding="utf-8"
     )
 
-    assert "streamlit:setComponentValue" in bridge_html
-    assert 'dataType: "json"' in bridge_html
-    assert "new BroadcastChannel(channel)" in bridge_html
-    assert 'data.type !== "pywp:editTargets"' in bridge_html
+    assert "streamlit:setComponentValue" in component_html
+    assert 'dataType: "json"' in component_html
+    assert "new BroadcastChannel(channel)" in component_html
+    assert 'data.type !== "pywp:editTargets"' in component_html
+    assert 'const assetSuffix = expectedDigest' in component_html
+    assert 'fetch("./templates/viewer_template.html" + assetSuffix' in component_html
+    assert 'fetch("./vendor/three.min.js" + assetSuffix' in component_html
+    assert 'fetch("./vendor/OrbitControls.js" + assetSuffix' in component_html
+    assert 'fetch("./fast_replan.js" + assetSuffix' in component_html
+    assert 'frame.srcdoc = sceneHtml;' in component_html
+    assert 'nextPayloadDigest === currentPayloadDigest' in component_html
+    assert "currentHasAntiCollisionPayload" in component_html
+    assert "!currentHasAntiCollisionPayload &&" in component_html
+    assert "nextHasAntiCollisionPayload &&" in component_html
+    assert 'frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__' in component_html
+    assert 'frameWindow.__PYWP_VIEWER_UPDATE__' in component_html
+    assert 'setStatus("Обновление 3D...", false);' in component_html
 
 
 def test_three_viewer_assets_are_declared_as_package_data() -> None:
@@ -448,6 +622,7 @@ def test_three_viewer_assets_are_declared_as_package_data() -> None:
 
     assert "[tool.setuptools.package-data]" in pyproject_text
     assert '"three_viewer_assets/*.js"' in pyproject_text
+    assert '"three_viewer_assets/*.html"' in pyproject_text
     assert '"three_viewer_assets/component/*.html"' in pyproject_text
     assert '"three_viewer_assets/templates/*.html"' in pyproject_text
     assert '"three_viewer_assets/vendor/*.js"' in pyproject_text

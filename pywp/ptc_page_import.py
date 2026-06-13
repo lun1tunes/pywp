@@ -7,10 +7,15 @@ from pywp import ptc_core as wt
 __all__ = ["render_target_import_section"]
 
 
+@st.fragment
+def _render_source_input_fragment() -> object:
+    return wt._render_source_input()
+
+
 def render_target_import_section() -> None:
     st.markdown("## 1. Импорт целей")
 
-    source_payload = wt._render_source_input()
+    source_payload = _render_source_input_fragment()
     parse_clicked = st.button(
         "Импорт целей",
         type="primary",

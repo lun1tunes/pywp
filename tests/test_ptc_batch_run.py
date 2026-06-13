@@ -504,6 +504,11 @@ def test_run_batch_clears_stale_error_and_recommends_no_followup_after_all_ok(
         focus_all_wells_trajectory_results=lambda: focus_calls.append("trajectory"),
     )
     monkeypatch.setattr(ptc_batch_run, "WelltrackBatchPlanner", FakeBatchPlanner)
+    monkeypatch.setattr(
+        ptc_batch_run,
+        "calc_param_signature",
+        lambda prefix="": ("calc", prefix or "signature"),
+    )
 
     ptc_batch_run.run_batch_if_clicked(
         requests=[
@@ -519,6 +524,7 @@ def test_run_batch_clears_stale_error_and_recommends_no_followup_after_all_ok(
     )
 
     assert state["wt_last_error"] == ""
+    assert state["wt_last_calc_param_signature"] == ("calc", "wt_cfg_")
     assert state["wt_pending_selected_names"] == []
     assert [str(success.name) for success in state["wt_successes"]] == [
         "WELL-A",

@@ -524,6 +524,14 @@ def test_iscwsa_mwd_poor_default_model_is_not_proxy() -> None:
 def test_uncertainty_presets_are_normalized_and_monotonic() -> None:
     assert normalize_uncertainty_preset("unknown") == DEFAULT_UNCERTAINTY_PRESET
     assert (
+        normalize_uncertainty_preset("MWD Unknown magnetic (ISCWSA)")
+        == UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+    )
+    assert (
+        normalize_uncertainty_preset("ISCWSA MWD Unknown Magnetic")
+        == UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+    )
+    assert (
         uncertainty_preset_label(UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC)
         == "MWD POOR magnetic (ISCWSA)"
     )

@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pandas as pd
 from pydantic import BaseModel
 
+from pywp import TrajectoryConfig
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.iscwsa_mwd import ISCWSA_MWD_UNKNOWN_MAGNETIC
 from pywp.models import Point3D
 from pywp.ptc_page_results import _single_well_pilot_context
 from pywp.ui_well_result import (
@@ -19,6 +21,7 @@ from pywp.ui_well_result import (
     uncertainty_preset_key,
     uncertainty_toggle_key,
 )
+import pywp.ui_well_result as ui_well_result
 
 
 def test_md_postcheck_issue_message_is_empty_without_excess() -> None:
@@ -177,6 +180,84 @@ def test_uncertainty_toggle_key_is_stable_per_well_name() -> None:
 
 def test_uncertainty_preset_key_is_stable_per_well_name() -> None:
     assert uncertainty_preset_key(well_name="WELL-1") == "uncertainty_preset::WELL-1"
+
+
+def test_render_result_plots_uses_unknown_model_from_legacy_label_state(
+    monkeypatch,
+) -> None:
+    class _DummyStreamlit:
+        def __init__(self) -> None:
+            self.session_state = {
+                uncertainty_toggle_key(well_name="WELL-1"): True,
+                uncertainty_preset_key(
+                    well_name="WELL-1"
+                ): "MWD Unknown magnetic (ISCWSA)",
+            }
+
+        def checkbox(self, *_args, **_kwargs) -> bool:
+            return True
+
+        def selectbox(self, _label: str, *, key: str, **_kwargs) -> str:
+            return str(self.session_state[key])
+
+    captured: dict[str, object] = {}
+
+    def _fake_build_uncertainty_overlay(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(ui_well_result, "st", _DummyStreamlit())
+    monkeypatch.setattr(
+        ui_well_result,
+        "build_uncertainty_overlay",
+        _fake_build_uncertainty_overlay,
+    )
+    monkeypatch.setattr(
+        ui_well_result,
+        "render_trajectory_dls_panel",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ui_well_result,
+        "render_plan_section_panel",
+        lambda **_kwargs: None,
+    )
+
+    view = SingleWellResultView(
+        well_name="WELL-1",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0],
+                "X_m": [0.0, 10.0],
+                "Y_m": [0.0, 20.0],
+                "Z_m": [0.0, 30.0],
+                "INC_deg": [0.0, 10.0],
+                "AZI_deg": [0.0, 15.0],
+            }
+        ),
+        summary={"kop_md_m": 50.0, "md_total_m": 100.0},
+        config=TrajectoryConfig(),
+        azimuth_deg=15.0,
+        md_t1_m=80.0,
+    )
+
+    ui_well_result.render_result_plots(
+        view=view,
+        title_trajectory=None,
+        title_plan=None,
+        border=False,
+        show_plotly_panels=False,
+    )
+
+    model = captured["model"]
+    assert model.iscwsa_tool_code == ISCWSA_MWD_UNKNOWN_MAGNETIC
+    assert (
+        ui_well_result.st.session_state[uncertainty_preset_key(well_name="WELL-1")]
+        == "mwd_unknown_magnetic"
+    )
 
 
 def test_build_key_metrics_rows_single_column_format() -> None:

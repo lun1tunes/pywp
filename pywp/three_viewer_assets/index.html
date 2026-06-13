@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <title>pywp three viewer runtime</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #ffffff;
+      }
+
+      #viewer-frame {
+        width: 100%;
+        height: 100%;
+        border: 0;
+        display: block;
+        background: #ffffff;
+      }
+
+      #status {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        box-sizing: border-box;
+        font:
+          13px/1.4 Inter,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        color: #334155;
+        background: rgba(255, 255, 255, 0.92);
+      }
+
+      #status.is-visible {
+        display: flex;
+      }
+
+      #status.is-error {
+        color: #b91c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <iframe
+      id="viewer-frame"
+      sandbox="allow-scripts allow-same-origin"
+      referrerpolicy="no-referrer"
+      title="pywp-three-viewer"
+    ></iframe>
+    <div id="status" aria-live="polite"></div>
+    <script>
+      (function () {
+        const READY = "streamlit:componentReady";
+        const SET_VALUE = "streamlit:setComponentValue";
+        const SET_HEIGHT = "streamlit:setFrameHeight";
+        const RENDER = "streamlit:render";
+        const frame = document.getElementById("viewer-frame");
+        const statusElement = document.getElementById("status");
+        let channel = null;
+        let broadcast = null;
+        let currentPayloadDigest = "";
+        let currentRuntimeDigest = "";
+        let runtimeHtml = "";
+        let runtimePromise = null;
+        let renderGeneration = 0;
+        let frameLoaded = false;
+        let currentHasAntiCollisionPayload = false;
+
+        function post(type, payload) {
+          window.parent.postMessage(
+            Object.assign({ isStreamlitMessage: true, type: type }, payload || {}),
+            "*",
+          );
+        }
+
+        function emitValue(value) {
+          post(SET_VALUE, { value: value, dataType: "json" });
+        }
+
+        function setStatus(message, isError) {
+          const text = String(message || "").trim();
+          if (!text) {
+            statusElement.textContent = "";
+            statusElement.classList.remove("is-visible", "is-error");
+            return;
+          }
+          statusElement.textContent = text;
+          statusElement.classList.add("is-visible");
+          statusElement.classList.toggle("is-error", Boolean(isError));
+        }
+
+        function bindChannel(nextChannel) {
+          if (broadcast) {
+            broadcast.close();
+            broadcast = null;
+          }
+          channel = String(nextChannel || "");
+          if (!channel || typeof BroadcastChannel === "undefined") {
+            return;
+          }
+          try {
+            broadcast = new BroadcastChannel(channel);
+            broadcast.onmessage = function (event) {
+              const data = event && event.data ? event.data : null;
+              if (!data || data.type !== "pywp:editTargets") {
+                return;
+              }
+              emitValue(data);
+            };
+          } catch (_error) {
+            broadcast = null;
+          }
+        }
+
+        async function loadRuntimeHtml(expectedDigest) {
+          if (runtimeHtml && currentRuntimeDigest === String(expectedDigest || "")) {
+            return runtimeHtml;
+          }
+          if (!runtimePromise || currentRuntimeDigest !== String(expectedDigest || "")) {
+            const assetSuffix = expectedDigest
+              ? "?v=" + encodeURIComponent(String(expectedDigest))
+              : "";
+            runtimePromise = Promise.all([
+              fetch("./templates/viewer_template.html" + assetSuffix, {
+                cache: "force-cache",
+              }),
+              fetch("./vendor/three.min.js" + assetSuffix, {
+                cache: "force-cache",
+              }),
+              fetch("./vendor/OrbitControls.js" + assetSuffix, {
+                cache: "force-cache",
+              }),
+              fetch("./fast_replan.js" + assetSuffix, { cache: "force-cache" }),
+            ])
+              .then((responses) =>
+                Promise.all(
+                  responses.map((response) => {
+                    if (!response.ok) {
+                      throw new Error(
+                        "Не удалось загрузить static asset: " + response.url,
+                      );
+                    }
+                    return response.text();
+                  }),
+                ),
+              )
+              .then(([template, threeJs, orbitControls, fastReplan]) =>
+                String(template)
+                  .replace("__THREE_LIBRARY__", String(threeJs))
+                  .replace("__ORBIT_CONTROLS__", String(orbitControls))
+                  .replace("__FAST_REPLAN__", String(fastReplan)),
+              );
+          }
+          runtimeHtml = await runtimePromise;
+          currentRuntimeDigest = String(expectedDigest || "");
+          return runtimeHtml;
+        }
+
+        async function renderViewer(args) {
+          const nextArgs = args && typeof args === "object" ? args : {};
+          const nextHeight = Math.max(Number(nextArgs.height) || 0, 32);
+          const nextPayloadDigest = String(nextArgs.payload_digest || "");
+          const nextRuntimeDigest = String(nextArgs.runtime_digest || "");
+          const payloadJson = String(nextArgs.payload_json || "{}");
+          const nextHasAntiCollisionPayload = Boolean(
+            nextArgs.has_anticollision_payload,
+          );
+          const instanceToken = Number(nextArgs.instance_token) || 0;
+          renderGeneration += 1;
+          const generation = renderGeneration;
+          bindChannel(nextArgs.channel || "");
+          frame.style.height = nextHeight + "px";
+          post(SET_HEIGHT, { height: nextHeight });
+          if (
+            frame.srcdoc &&
+            nextPayloadDigest &&
+            nextPayloadDigest === currentPayloadDigest &&
+            nextRuntimeDigest === currentRuntimeDigest
+          ) {
+            setStatus("", false);
+            return;
+          }
+          if (
+            frameLoaded &&
+            frame.srcdoc &&
+            nextRuntimeDigest === currentRuntimeDigest &&
+            nextPayloadDigest &&
+            nextPayloadDigest !== currentPayloadDigest
+          ) {
+            setStatus("Обновление 3D...", false);
+            window.requestAnimationFrame(function () {
+              if (generation !== renderGeneration) {
+                return;
+              }
+              try {
+                const frameWindow = frame.contentWindow;
+                if (
+                  frameWindow &&
+                  !currentHasAntiCollisionPayload &&
+                  nextHasAntiCollisionPayload &&
+                  typeof frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__ === "function"
+                ) {
+                  frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__(
+                    payloadJson,
+                    nextPayloadDigest,
+                  );
+                  currentPayloadDigest = nextPayloadDigest;
+                  currentHasAntiCollisionPayload = true;
+                  setStatus("", false);
+                  post(SET_HEIGHT, { height: nextHeight });
+                  return;
+                }
+                if (
+                  frameWindow &&
+                  typeof frameWindow.__PYWP_VIEWER_UPDATE__ === "function"
+                ) {
+                  frameWindow.__PYWP_VIEWER_UPDATE__(payloadJson, nextPayloadDigest);
+                  currentPayloadDigest = nextPayloadDigest;
+                  currentHasAntiCollisionPayload = nextHasAntiCollisionPayload;
+                  setStatus("", false);
+                  post(SET_HEIGHT, { height: nextHeight });
+                  return;
+                }
+              } catch (_error) {
+                currentPayloadDigest = "";
+              }
+              currentPayloadDigest = "";
+              currentRuntimeDigest = "";
+              frameLoaded = false;
+              renderViewer(args);
+            });
+            return;
+          }
+          setStatus("Загрузка 3D...", false);
+          try {
+            const baseHtml = await loadRuntimeHtml(nextRuntimeDigest);
+            if (generation !== renderGeneration) {
+              return;
+            }
+            const sceneHtml =
+              String(baseHtml).replace("__SCENE_PAYLOAD__", payloadJson) +
+              "\n<!-- viewer-instance:" +
+              String(instanceToken) +
+              " -->";
+            frame.onload = function () {
+              if (generation !== renderGeneration) {
+                return;
+              }
+              frameLoaded = true;
+              currentHasAntiCollisionPayload = nextHasAntiCollisionPayload;
+              setStatus("", false);
+              post(SET_HEIGHT, { height: nextHeight });
+            };
+            frameLoaded = false;
+            currentPayloadDigest = nextPayloadDigest;
+            frame.srcdoc = sceneHtml;
+          } catch (error) {
+            currentPayloadDigest = "";
+            setStatus(
+              error instanceof Error ? error.message : "Не удалось загрузить 3D viewer.",
+              true,
+            );
+          }
+        }
+
+        window.addEventListener("message", function (event) {
+          const message = event.data || {};
+          if (message.type !== RENDER) {
+            return;
+          }
+          renderViewer(message.args || {});
+        });
+
+        post(READY, { apiVersion: 1 });
+      })();
+    </script>
+  </body>
+</html>

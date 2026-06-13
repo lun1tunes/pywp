@@ -719,7 +719,7 @@ def test_anticollision_three_payload_labels_reference_wells_in_fast_mode() -> No
     assert reference_labels["FACT-1"]["position"] == [1800.0, 25.0, 420.0]
     assert reference_labels["FACT-1"]["color"] == "#374151"
     assert reference_labels["APP-1"]["position"] == [1700.0, -35.0, 360.0]
-    assert reference_labels["APP-1"]["color"] == "#F87171"
+    assert reference_labels["APP-1"]["color"] == "#C62828"
 
 
 def test_anticollision_three_payload_does_not_label_display_only_reference_wells_fast() -> None:

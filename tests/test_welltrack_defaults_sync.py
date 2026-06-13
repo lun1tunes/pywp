@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.models import TrajectoryConfig
 from pywp.ui_calc_params import calc_param_defaults
+from pywp.welltrack_batch import SuccessfulWellPlan
 
 pytestmark = pytest.mark.integration
 
@@ -32,6 +36,64 @@ def _selectbox_value(at: AppTest, label: str) -> str | None:
     if not matches:
         return None
     return str(matches[0].value)
+
+
+def _records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        )
+    ]
+
+
+def _successful_plan() -> SuccessfulWellPlan:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "INC_deg": [0.0, 90.0, 90.0],
+            "AZI_deg": [0.0, 90.0, 90.0],
+            "X_m": [0.0, 1000.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0, 0.0],
+            "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+        }
+    )
+    return SuccessfulWellPlan(
+        name="WELL-A",
+        surface={"x": 0.0, "y": 0.0, "z": 0.0},
+        t1={"x": 1000.0, "y": 0.0, "z": 0.0},
+        t3={"x": 2000.0, "y": 0.0, "z": 0.0},
+        stations=stations,
+        summary={
+            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
+            "trajectory_target_direction": "Цели в одном направлении",
+            "well_complexity": "Обычная",
+            "optimization_mode": "minimize_md",
+            "azimuth_turn_deg": 0.0,
+            "horizontal_length_m": 1000.0,
+            "entry_inc_deg": 90.0,
+            "hold_inc_deg": 90.0,
+            "build_dls_selected_deg_per_30m": 3.0,
+            "build1_dls_selected_deg_per_30m": 3.0,
+            "build2_dls_selected_deg_per_30m": 3.0,
+            "max_dls_total_deg_per_30m": 3.0,
+            "kop_md_m": 560.0,
+            "max_inc_actual_deg": 90.0,
+            "max_inc_deg": 95.0,
+            "md_total_m": 2000.0,
+            "max_total_md_postcheck_m": 6500.0,
+            "md_postcheck_excess_m": 0.0,
+        },
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
 
 
 def test_welltrack_defaults_recover_from_legacy_keys() -> None:
@@ -99,5 +161,30 @@ def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     expected_md_step = float(calc_param_defaults()["md_step"]) + 1.0
     md_step_inputs[0].set_value(expected_md_step)
     at.run()
+
+    assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
+
+
+def test_ptc_calc_param_edit_persists_with_results_loaded() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3}
+    ]
+    at.session_state["wt_successes"] = [_successful_plan()]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+
+    at.run(timeout=120)
+
+    md_step_inputs = [
+        widget for widget in at.number_input if widget.label == "Шаг MD, м"
+    ]
+    assert md_step_inputs, "Поле 'Шаг MD, м' не найдено."
+    expected_md_step = float(calc_param_defaults()["md_step"]) + 1.0
+    md_step_inputs[0].set_value(expected_md_step)
+    at.run(timeout=120)
 
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step

@@ -32,6 +32,59 @@ from pywp.ui_well_panels import render_run_log_panel
 __all__ = ["run_page"]
 
 
+@st.fragment
+def _render_pad_layout_section(records: list[object]) -> None:
+    st.markdown("## 2. Кусты и расчёт устьев")
+    wt._render_pad_layout_panel(records=records)
+
+
+@st.fragment
+def _render_records_section(records: list[object]) -> None:
+    wt._render_records_overview(records=records)
+    wt._render_raw_records_table(records=records)
+
+
+def _render_results_section(
+    *,
+    records: list[object],
+    summary_rows: list[dict[str, object]] | None,
+    successes: list[object] | None,
+) -> None:
+    st.markdown("## 5. Результаты расчёта")
+    render_run_log_panel(
+        st.session_state.get("wt_last_run_log_lines"),
+        border=False,
+    )
+
+    if not summary_rows:
+        render_small_note(
+            "Результаты расчёта появятся после запуска расчёта траекторий."
+        )
+        return
+
+    input_crs = get_input_crs()
+    selected_crs = get_selected_crs()
+    auto_convert = should_auto_convert()
+    wt._render_batch_summary(
+        summary_rows=summary_rows,
+        target_crs=selected_crs,
+        auto_convert=auto_convert,
+        source_crs=input_crs,
+    )
+    if not successes:
+        st.warning("Все выбранные скважины завершились ошибками расчёта.")
+        render_failed_target_only_results(
+            records=list(records),
+            summary_rows=list(summary_rows),
+        )
+        return
+    render_success_tabs(
+        successes=list(successes),
+        records=list(records),
+        summary_rows=list(summary_rows),
+    )
+
+
 def run_page() -> None:
     st.set_page_config(page_title="PTC", layout="wide")
     wt._init_state()
@@ -66,11 +119,9 @@ def run_page() -> None:
         st.warning("В источнике не найдено ни одной скважины.")
         return
 
-    wt._render_records_overview(records=records)
-    wt._render_raw_records_table(records=records)
+    _render_records_section(records=records)
 
-    st.markdown("## 2. Кусты и расчёт устьев")
-    wt._render_pad_layout_panel(records=records)
+    _render_pad_layout_section(records=records)
 
     render_reference_section()
     render_run_section(records=records)
@@ -78,37 +129,18 @@ def run_page() -> None:
     if st.session_state.get("wt_last_error"):
         render_solver_diagnostics(st.session_state["wt_last_error"])
 
-    st.markdown("## 5. Результаты расчёта")
-    render_run_log_panel(
-        st.session_state.get("wt_last_run_log_lines"),
-        border=False,
-    )
-
     summary_rows = st.session_state.get("wt_summary_rows")
     successes = st.session_state.get("wt_successes")
-    if not summary_rows:
-        render_small_note(
-            "Результаты расчёта появятся после запуска расчёта траекторий."
-        )
-        return
-    input_crs = get_input_crs()
-    selected_crs = get_selected_crs()
-    auto_convert = should_auto_convert()
-    wt._render_batch_summary(
-        summary_rows=summary_rows,
-        target_crs=selected_crs,
-        auto_convert=auto_convert,
-        source_crs=input_crs,
-    )
-    if not successes:
-        st.warning("Все выбранные скважины завершились ошибками расчёта.")
-        render_failed_target_only_results(
-            records=list(records),
-            summary_rows=list(summary_rows),
-        )
-        return
-    render_success_tabs(
-        successes=successes,
+    _render_results_section(
         records=list(records),
-        summary_rows=list(summary_rows),
+        summary_rows=(
+            list(summary_rows)
+            if isinstance(summary_rows, list)
+            else None
+        ),
+        successes=(
+            list(successes)
+            if isinstance(successes, list)
+            else None
+        ),
     )

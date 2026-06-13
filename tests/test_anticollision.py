@@ -1492,6 +1492,122 @@ def test_far_reference_wells_are_skipped_before_uncertainty_cone_build() -> None
     assert analysis.pair_count == 1
 
 
+def test_public_anti_collision_builder_scopes_far_reference_wells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+    reference_wells = (
+        _horizontal_reference_well("REF-NEAR", y_offset_m=100.0),
+        _horizontal_reference_well("REF-FAR", y_offset_m=2000.0),
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_build_wells(
+        successes: list[SuccessfulWellPlan],
+        *,
+        reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+        **_kwargs: object,
+    ) -> tuple[tuple[object, ...], dict[str, object], int, int]:
+        captured["success_count"] = len(successes)
+        captured["reference_names"] = tuple(
+            str(getattr(well, "name", "")) for well in reference_wells
+        )
+        return (), {}, 0, 0
+
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "build_anti_collision_wells_for_successes",
+        _fake_build_wells,
+    )
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "analyze_anti_collision",
+        lambda wells, **_kwargs: ("analysis", wells),
+    )
+
+    result = anticollision_rerun_module.build_anti_collision_analysis_for_successes(
+        [success],
+        model=PlanningUncertaintyModel(),
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert captured["success_count"] == 1
+    assert captured["reference_names"] == ("REF-NEAR",)
+    assert result == ("analysis", ())
+
+
+def test_incremental_public_anti_collision_builder_scopes_far_reference_wells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    success = SuccessfulWellPlan(
+        name="WELL-P",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        stations=_straight_stations(y_offset_m=0.0),
+        summary={"kop_md_m": 700.0},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+    )
+    reference_wells = (
+        _horizontal_reference_well("REF-NEAR", y_offset_m=100.0),
+        _horizontal_reference_well("REF-FAR", y_offset_m=2000.0),
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_build_wells(
+        successes: list[SuccessfulWellPlan],
+        *,
+        reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+        **_kwargs: object,
+    ) -> tuple[tuple[object, ...], dict[str, object], int, int]:
+        captured["success_count"] = len(successes)
+        captured["reference_names"] = tuple(
+            str(getattr(well, "name", "")) for well in reference_wells
+        )
+        return (), {}, 0, 0
+
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "build_anti_collision_wells_for_successes",
+        _fake_build_wells,
+    )
+    monkeypatch.setattr(
+        anticollision_rerun_module,
+        "analyze_anti_collision_incremental",
+        lambda wells, **_kwargs: (
+            "analysis",
+            {("WELL-P", "REF-NEAR"): object()},
+            anticollision_module.AntiCollisionIncrementalStats(),
+        ),
+    )
+
+    result = anticollision_rerun_module.build_incremental_anti_collision_analysis_for_successes(
+        [success],
+        model=PlanningUncertaintyModel(),
+        reference_wells=reference_wells,
+        include_display_geometry=False,
+        build_overlap_geometry=False,
+    )
+
+    assert captured["success_count"] == 1
+    assert captured["reference_names"] == ("REF-NEAR",)
+    assert result[0] == "analysis"
+
+
 def test_global_source_vectors_are_correlated_in_relative_clearance() -> None:
     covariance_zero = np.zeros((3, 3), dtype=float)
     sample_a = AntiCollisionSample(

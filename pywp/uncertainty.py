@@ -171,9 +171,30 @@ class UncertaintyTubeMesh:
 def normalize_uncertainty_preset(
     preset: object,
 ) -> str:
-    preset_key = str(preset or DEFAULT_UNCERTAINTY_PRESET).strip()
+    preset_key = str(preset or "").strip()
+    if not preset_key:
+        return DEFAULT_UNCERTAINTY_PRESET
     if preset_key in PLANNING_UNCERTAINTY_PRESET_MODELS:
         return preset_key
+    preset_alias = preset_key.casefold()
+    for resolved_key, model in PLANNING_UNCERTAINTY_PRESET_MODELS.items():
+        if preset_alias == str(resolved_key).casefold():
+            return resolved_key
+        if (
+            preset_alias
+            == str(UNCERTAINTY_PRESET_OPTIONS.get(resolved_key, "")).strip().casefold()
+        ):
+            return resolved_key
+        tool_code = str(model.iscwsa_tool_code or "").strip()
+        if tool_code and preset_alias == tool_code.casefold():
+            return resolved_key
+        tool_label = (
+            str(ISCWSA_MWD_TOOL_CODES[tool_code].label).strip()
+            if tool_code in ISCWSA_MWD_TOOL_CODES
+            else ""
+        )
+        if tool_label and preset_alias == tool_label.casefold():
+            return resolved_key
     return DEFAULT_UNCERTAINTY_PRESET
 
 

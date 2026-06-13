@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
+from collections.abc import Callable, Mapping, MutableMapping
+
 import pandas as pd
 import streamlit as st
 
@@ -31,6 +34,219 @@ from pywp.uncertainty import UNCERTAINTY_PRESET_OPTIONS
 from pywp.uncertainty import planning_uncertainty_model_for_preset
 
 __all__ = ["render_failed_target_only_results", "render_success_tabs"]
+
+
+def _calc_params_changed_after_last_run() -> bool:
+    stored_signature = st.session_state.get("wt_last_calc_param_signature")
+    if not isinstance(stored_signature, tuple):
+        return False
+    return tuple(stored_signature) != wt.WT_CALC_PARAMS.state_signature()
+
+
+def _point_signature(point: object | None) -> tuple[float, float, float] | None:
+    if point is None:
+        return None
+    try:
+        return (float(point.x), float(point.y), float(point.z))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _target_pairs_signature(
+    target_pairs: tuple[tuple[object, object], ...] | list[tuple[object, object]] | None,
+) -> tuple[tuple[tuple[float, float, float] | None, tuple[float, float, float] | None], ...]:
+    return tuple(
+        (_point_signature(pair_t1), _point_signature(pair_t3))
+        for pair_t1, pair_t3 in tuple(target_pairs or ())
+    )
+
+
+def _dataframe_identity_signature(frame: object) -> tuple[int | None, int]:
+    if not isinstance(frame, pd.DataFrame):
+        return (None, 0)
+    return (id(frame), int(len(frame)))
+
+
+def _record_render_signature(record: object) -> tuple[object, ...]:
+    points = tuple(getattr(record, "points", ()) or ())
+    return (
+        str(getattr(record, "name", "")),
+        id(record),
+        int(len(points)),
+        _point_signature(points[0] if points else None),
+        _point_signature(points[-1] if points else None),
+    )
+
+
+def _success_render_signature(success: object) -> tuple[object, ...]:
+    return (
+        str(getattr(success, "name", "")),
+        id(success),
+        _dataframe_identity_signature(getattr(success, "stations", None)),
+        _point_signature(getattr(success, "surface", None)),
+        _point_signature(getattr(success, "t1", None)),
+        _point_signature(getattr(success, "t3", None)),
+        bool(getattr(success, "md_postcheck_exceeded", False)),
+        _target_pairs_signature(getattr(success, "target_pairs", ()) or ()),
+    )
+
+
+def _target_only_render_signature(target_only: object) -> tuple[object, ...]:
+    return (
+        str(getattr(target_only, "name", "")),
+        str(getattr(target_only, "status", "")),
+        str(getattr(target_only, "problem", "")),
+        _point_signature(getattr(target_only, "surface", None)),
+        _point_signature(getattr(target_only, "t1", None)),
+        _point_signature(getattr(target_only, "t3", None)),
+        tuple(
+            _point_signature(point)
+            for point in tuple(getattr(target_only, "target_points", ()) or ())
+        ),
+        tuple(str(label) for label in tuple(getattr(target_only, "target_labels", ()) or ())),
+        _target_pairs_signature(getattr(target_only, "target_pairs", ()) or ()),
+    )
+
+
+def _reference_well_render_signature(reference_well: object) -> tuple[object, ...]:
+    return (
+        str(getattr(reference_well, "name", "")),
+        str(getattr(reference_well, "kind", "")),
+        id(reference_well),
+        _dataframe_identity_signature(getattr(reference_well, "stations", None)),
+        _point_signature(getattr(reference_well, "surface", None)),
+    )
+
+
+def _pilot_study_points_signature(
+    pilot_study_points_by_name: dict[str, tuple[Point3D, ...]] | None,
+) -> tuple[tuple[str, tuple[tuple[float, float, float] | None, ...]], ...]:
+    return tuple(
+        sorted(
+            (
+                str(name),
+                tuple(_point_signature(point) for point in tuple(points or ())),
+            )
+            for name, points in dict(pilot_study_points_by_name or {}).items()
+        )
+    )
+
+
+def _results_three_payload_cache() -> dict[str, dict[str, object]]:
+    session_state = getattr(st, "session_state", None)
+    if not isinstance(session_state, MutableMapping):
+        session_state = {}
+        try:
+            setattr(st, "session_state", session_state)
+        except Exception:
+            return {}
+    cache = session_state.get("wt_results_three_payload_cache")
+    if not isinstance(cache, dict):
+        cache = {}
+        session_state["wt_results_three_payload_cache"] = cache
+    return cache
+
+
+def _pad_render_state_signature() -> tuple[object, ...]:
+    session_state = getattr(st, "session_state", None)
+    if not isinstance(session_state, MutableMapping):
+        return ()
+    return (
+        _state_content_signature(session_state.get("wt_pad_configs")),
+        _state_content_signature(session_state.get("wt_pad_detected_meta")),
+        bool(session_state.get("wt_pad_auto_order_by_target_depth", False)),
+    )
+
+
+def _state_content_signature(value: object) -> object:
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, pd.DataFrame):
+        return (
+            "dataframe",
+            _dataframe_identity_signature(value),
+        )
+    if is_dataclass(value):
+        return (
+            type(value).__qualname__,
+            _state_content_signature(asdict(value)),
+        )
+    if isinstance(value, Mapping):
+        return tuple(
+            sorted(
+                (
+                    str(key),
+                    _state_content_signature(item_value),
+                )
+                for key, item_value in value.items()
+            )
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_state_content_signature(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(
+            sorted(
+                (_state_content_signature(item) for item in value),
+                key=repr,
+            )
+        )
+    if hasattr(value, "__dict__"):
+        return (
+            type(value).__qualname__,
+            _state_content_signature(vars(value)),
+        )
+    return repr(value)
+
+
+def _cached_results_render_value(
+    *,
+    cache_key: str,
+    signature: tuple[object, ...],
+    build_value: Callable[[], object],
+) -> object:
+    cache = _results_three_payload_cache()
+    entry = cache.get(str(cache_key))
+    if isinstance(entry, dict) and tuple(entry.get("signature", ())) == tuple(signature):
+        return entry.get("value")
+    value = build_value()
+    cache[str(cache_key)] = {
+        "signature": tuple(signature),
+        "value": value,
+    }
+    if len(cache) > 4:
+        for stale_key in list(cache.keys())[:-4]:
+            cache.pop(stale_key, None)
+    return value
+
+
+def _cached_results_three_payload(
+    *,
+    cache_key: str,
+    signature: tuple[object, ...],
+    build_payload: Callable[[], dict[str, object]],
+) -> dict[str, object]:
+    value = _cached_results_render_value(
+        cache_key=cache_key,
+        signature=signature,
+        build_value=lambda: dict(build_payload()),
+    )
+    return value if isinstance(value, dict) else {}
+
+
+def _cached_results_three_overrides(
+    *,
+    cache_key: str,
+    signature: tuple[object, ...],
+    build_overrides: Callable[[], dict[str, object]],
+) -> dict[str, object]:
+    value = _cached_results_render_value(
+        cache_key=cache_key,
+        signature=signature,
+        build_value=lambda: dict(build_overrides()),
+    )
+    return value if isinstance(value, dict) else {}
 
 
 def _single_well_pilot_context(
@@ -175,6 +391,14 @@ def _render_anticollision_panel(
     focus_pad_id: str,
     focus_pad_well_names: list[str],
     show_visualization: bool = True,
+    reference_wells: tuple[object, ...] | None = None,
+    reference_uncertainty_models_by_name: dict[str, object] | None = None,
+    selected_preset: str | None = None,
+    current_snapshot: (
+        tuple[AntiCollisionAnalysis, tuple[object, ...], tuple[object, ...]] | None
+    ) = None,
+    snapshot_checked: bool = False,
+    calc_params_stale: bool = False,
 ) -> None:
     pending_edit_names = wt._pending_edit_target_names()
     if pending_edit_names:
@@ -198,45 +422,78 @@ def _render_anticollision_panel(
             return
         return
 
-    reference_wells = reference_state.reference_wells_from_state()
-    if len(successes) + len(reference_wells) < 2:
+    if calc_params_stale:
+        st.markdown("### Anti-collision и пересечения")
+        st.warning(
+            "Anti-collision анализ временно недоступен: параметры расчёта "
+            "изменились после последнего запуска траекторий."
+        )
+        st.caption(
+            "Сначала пересчитайте траектории для текущих параметров. "
+            "Только после этого anti-collision будет соответствовать "
+            "актуальному набору расчёта."
+        )
+        wt._render_status_run_log(
+            title="Лог расчёта Anti-collision",
+            state_payload=st.session_state.get("wt_anticollision_last_run"),
+            empty_message="Anti-collision анализ ещё не запускался.",
+        )
+        return
+
+    resolved_reference_wells = (
+        tuple(reference_wells)
+        if reference_wells is not None
+        else reference_state.reference_wells_from_state()
+    )
+    if len(successes) + len(resolved_reference_wells) < 2:
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
         return
 
     st.markdown("### Anti-collision и пересечения")
     preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
     normalized_preset = wt.normalize_uncertainty_preset(
-        st.session_state.get(
+        selected_preset
+        or st.session_state.get(
             "wt_anticollision_uncertainty_preset",
             wt.DEFAULT_UNCERTAINTY_PRESET,
-        ),
+        )
     )
     if normalized_preset not in preset_options:
         normalized_preset = wt.DEFAULT_UNCERTAINTY_PRESET
     st.session_state["wt_anticollision_uncertainty_preset"] = normalized_preset
-    selected_preset = st.selectbox(
+    selected_preset_value = st.selectbox(
         "Пресет неопределенности для anti-collision",
         options=preset_options,
         format_func=wt.uncertainty_preset_label,
         key="wt_anticollision_uncertainty_preset",
     )
-    if reference_wells:
+    if resolved_reference_wells:
         ptc_anticollision_params.render_anticollision_params_block(
-            reference_wells=reference_wells
+            reference_wells=resolved_reference_wells
         )
-    uncertainty_model = planning_uncertainty_model_for_preset(selected_preset)
-    reference_uncertainty_models_by_name = (
-        ptc_anticollision_params.reference_uncertainty_models_from_state(
-            reference_wells
+    uncertainty_model = planning_uncertainty_model_for_preset(
+        selected_preset_value
+    )
+    resolved_reference_uncertainty_models = (
+        {
+            str(name): model
+            for name, model in reference_uncertainty_models_by_name.items()
+        }
+        if reference_uncertainty_models_by_name is not None
+        else ptc_anticollision_params.reference_uncertainty_models_from_state(
+            resolved_reference_wells
         )
     )
-    current_snapshot = wt._current_anti_collision_cache_snapshot(
-        successes=list(successes),
-        uncertainty_model=uncertainty_model,
-        records=list(records),
-        reference_wells=reference_wells,
-        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
-    )
+    if current_snapshot is None and not snapshot_checked:
+        current_snapshot = wt._current_anti_collision_cache_snapshot(
+            successes=list(successes),
+            uncertainty_model=uncertainty_model,
+            records=list(records),
+            reference_wells=resolved_reference_wells,
+            reference_uncertainty_models_by_name=(
+                resolved_reference_uncertainty_models
+            ),
+        )
     has_current_analysis = current_snapshot is not None
     has_stale_snapshot = (
         current_snapshot is None and _cached_anticollision_snapshot() is not None
@@ -290,18 +547,16 @@ def _render_anticollision_panel(
         analysis, recommendations, clusters = current_snapshot
     else:
         try:
-            analysis, recommendations, clusters = (
-                wt._cached_anti_collision_view_model(
-                    successes=successes,
-                    uncertainty_model=uncertainty_model,
-                    records=records,
-                    reference_wells=reference_wells,
-                    reference_uncertainty_models_by_name=(
-                        reference_uncertainty_models_by_name
-                    ),
-                    progress_callback=_anti_collision_progress_update,
-                    parallel_workers=anti_collision_parallel_workers,
-                )
+            analysis, recommendations, clusters = wt._cached_anti_collision_view_model(
+                successes=successes,
+                uncertainty_model=uncertainty_model,
+                records=records,
+                reference_wells=resolved_reference_wells,
+                reference_uncertainty_models_by_name=(
+                    resolved_reference_uncertainty_models
+                ),
+                progress_callback=_anti_collision_progress_update,
+                parallel_workers=anti_collision_parallel_workers,
             )
         except Exception as exc:
             if anti_collision_progress is not None:
@@ -857,29 +1112,71 @@ def _render_anticollision_visual_overview(
     if caption:
         st.caption(caption)
 
-    anticollision_3d_payload = wt._all_wells_anticollision_three_payload(
-        analysis,
-        previous_successes_by_name={},
-        target_only_wells=resolved_target_only_wells,
-        reference_wells=reference_wells,
-        name_to_color=name_to_color,
-        display_name_by_well_name=display_name_by_well_name,
-        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
-        focus_well_names=focus_names or visible_focus_names,
-        render_mode=wt.WT_3D_RENDER_DETAIL,
-        show_sidetrack_relative_cones=False,
+    pilot_study_points_by_name = _pilot_study_points_by_name(list(records))
+    anticollision_signature = (
+        "anticollision_overview",
+        id(analysis),
+        int(len(getattr(analysis, "wells", ()) or ())),
+        int(len(getattr(analysis, "corridors", ()) or ())),
+        int(len(getattr(analysis, "zones", ()) or ())),
+        tuple(_reference_well_render_signature(well) for well in reference_wells),
+        tuple(
+            sorted((str(name), str(color)) for name, color in name_to_color.items())
+        ),
+        tuple(
+            sorted(
+                (str(name), str(label))
+                for name, label in display_name_by_well_name.items()
+            )
+        ),
+        _pilot_study_points_signature(pilot_study_points_by_name),
+        tuple(str(name) for name in (focus_names or visible_focus_names)),
+        tuple(
+            _target_only_render_signature(target_only)
+            for target_only in resolved_target_only_wells
+        ),
+        str(wt.WT_3D_RENDER_DETAIL),
+        False,
     )
-    wt._render_three_payload(
-        container=st.container(),
-        payload=anticollision_3d_payload,
-        height=660,
-        payload_overrides=wt._anticollision_three_payload_overrides(
+    anticollision_3d_payload = _cached_results_three_payload(
+        cache_key="anticollision_overview",
+        signature=anticollision_signature,
+        build_payload=lambda: wt._all_wells_anticollision_three_payload(
+            analysis,
+            previous_successes_by_name={},
+            target_only_wells=resolved_target_only_wells,
+            reference_wells=reference_wells,
+            name_to_color=name_to_color,
+            display_name_by_well_name=display_name_by_well_name,
+            pilot_study_points_by_name=pilot_study_points_by_name,
+            focus_well_names=focus_names or visible_focus_names,
+            render_mode=wt.WT_3D_RENDER_DETAIL,
+            show_sidetrack_relative_cones=False,
+        ),
+    )
+    anticollision_overrides_signature = (
+        "anticollision_overrides",
+        anticollision_signature,
+        tuple(_success_render_signature(success) for success in successes),
+        tuple(_record_render_signature(record) for record in records),
+        _pad_render_state_signature(),
+    )
+    anticollision_overrides = _cached_results_three_overrides(
+        cache_key="anticollision_overrides",
+        signature=anticollision_overrides_signature,
+        build_overrides=lambda: wt._anticollision_three_payload_overrides(
             records=list(records),
             analysis=analysis,
             successes=list(successes),
             target_only_wells=resolved_target_only_wells,
             target_only_name_to_color=name_to_color,
         ),
+    )
+    wt._render_three_payload(
+        container=st.container(),
+        payload=anticollision_3d_payload,
+        height=660,
+        payload_overrides=anticollision_overrides,
     )
 
 
@@ -946,26 +1243,63 @@ def _render_target_edit_overview(
             focus_pad_id=focus_pad_id,
         )
     reference_wells = reference_state.reference_wells_from_state()
-    payload = wt._all_wells_three_payload(
-        list(successes),
-        target_only_wells=target_only_wells,
-        reference_wells=reference_wells,
-        name_to_color=name_to_color,
-        display_name_by_well_name=display_name_by_well_name,
-        pilot_study_points_by_name=_pilot_study_points_by_name(list(records)),
-        focus_well_names=tuple(focus_pad_well_names),
-        render_mode=wt.WT_3D_RENDER_FAST,
+    pilot_study_points_by_name = _pilot_study_points_by_name(list(records))
+    overview_signature = (
+        "trajectory_overview",
+        tuple(_success_render_signature(success) for success in successes),
+        tuple(
+            _target_only_render_signature(target_only)
+            for target_only in target_only_wells
+        ),
+        tuple(_reference_well_render_signature(well) for well in reference_wells),
+        tuple(
+            sorted((str(name), str(color)) for name, color in name_to_color.items())
+        ),
+        tuple(
+            sorted(
+                (str(name), str(label))
+                for name, label in display_name_by_well_name.items()
+            )
+        ),
+        _pilot_study_points_signature(pilot_study_points_by_name),
+        tuple(str(name) for name in tuple(focus_pad_well_names)),
+        str(wt.WT_3D_RENDER_FAST),
     )
-    wt._render_three_payload(
-        container=st.container(),
-        payload=payload,
-        height=660,
-        payload_overrides=wt._trajectory_three_payload_overrides(
+    payload = _cached_results_three_payload(
+        cache_key="trajectory_overview",
+        signature=overview_signature,
+        build_payload=lambda: wt._all_wells_three_payload(
+            list(successes),
+            target_only_wells=target_only_wells,
+            reference_wells=reference_wells,
+            name_to_color=name_to_color,
+            display_name_by_well_name=display_name_by_well_name,
+            pilot_study_points_by_name=pilot_study_points_by_name,
+            focus_well_names=tuple(focus_pad_well_names),
+            render_mode=wt.WT_3D_RENDER_FAST,
+        ),
+    )
+    trajectory_overrides_signature = (
+        "trajectory_overrides",
+        overview_signature,
+        tuple(_record_render_signature(record) for record in records),
+        _pad_render_state_signature(),
+    )
+    trajectory_overrides = _cached_results_three_overrides(
+        cache_key="trajectory_overrides",
+        signature=trajectory_overrides_signature,
+        build_overrides=lambda: wt._trajectory_three_payload_overrides(
             records=list(records),
             successes=list(successes),
             target_only_wells=target_only_wells,
             name_to_color=name_to_color,
         ),
+    )
+    wt._render_three_payload(
+        container=st.container(),
+        payload=payload,
+        height=660,
+        payload_overrides=trajectory_overrides,
     )
     return True
 
@@ -996,6 +1330,13 @@ def render_success_tabs(
     selected_crs = get_selected_crs()
     auto_convert = should_auto_convert()
     name_to_color = wt._well_color_map(list(records))
+    calc_params_stale = _calc_params_changed_after_last_run()
+    if calc_params_stale:
+        st.warning(
+            "Параметры расчёта изменились после последнего запуска. "
+            "Тяжёлая 3D-визуализация предыдущего результата временно скрыта "
+            "до нового расчёта, чтобы не перегружать интерфейс."
+        )
     view_mode = st.radio(
         "Режим просмотра результатов",
         options=["Отдельная скважина", "Все скважины"],
@@ -1092,14 +1433,15 @@ def render_success_tabs(
             title="Ключевые показатели",
             border=True,
         )
-        render_result_plots(
-            view=well_view,
-            title_trajectory=None,
-            title_plan=None,
-            border=True,
-            show_plotly_panels=False,
-            render_3d_override=render_3d_override,
-        )
+        if not calc_params_stale:
+            render_result_plots(
+                view=well_view,
+                title_trajectory=None,
+                title_plan=None,
+                border=True,
+                show_plotly_panels=False,
+                render_3d_override=render_3d_override,
+            )
         render_result_tables(
             view=well_view,
             t1_horizontal_offset_m=t1_horizontal_offset_m,
@@ -1161,20 +1503,22 @@ def render_success_tabs(
             wt.DEFAULT_UNCERTAINTY_PRESET,
         )
     )
-    current_anticollision_snapshot = wt._current_anti_collision_cache_snapshot(
-        successes=list(successes),
-        uncertainty_model=planning_uncertainty_model_for_preset(selected_preset),
-        records=list(records),
-        reference_wells=reference_wells,
-        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
-    )
     target_only_wells = wt._failed_target_only_wells(
         records=list(records),
         summary_rows=list(summary_rows),
     )
     has_pending_target_edits = bool(wt._pending_edit_target_names())
+    current_anticollision_snapshot = None
+    if not has_pending_target_edits and not calc_params_stale:
+        current_anticollision_snapshot = wt._current_anti_collision_cache_snapshot(
+            successes=list(successes),
+            uncertainty_model=planning_uncertainty_model_for_preset(selected_preset),
+            records=list(records),
+            reference_wells=reference_wells,
+            reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        )
     rendered_cached_snapshot = False
-    if has_pending_target_edits:
+    if has_pending_target_edits and not calc_params_stale:
         try:
             rendered_cached_snapshot = _render_cached_anticollision_snapshot_for_pending_edits(
                 successes=list(successes),
@@ -1193,6 +1537,8 @@ def render_success_tabs(
             st.caption(f"{type(exc).__name__}: {exc}")
             rendered_cached_snapshot = False
     if rendered_cached_snapshot:
+        pass
+    elif calc_params_stale:
         pass
     elif current_anticollision_snapshot is not None:
         analysis, _recommendations, clusters = current_anticollision_snapshot
@@ -1241,4 +1587,10 @@ def render_success_tabs(
         focus_pad_id=focus_pad_id,
         focus_pad_well_names=focus_pad_well_names,
         show_visualization=False,
+        reference_wells=reference_wells,
+        reference_uncertainty_models_by_name=reference_uncertainty_models_by_name,
+        selected_preset=selected_preset,
+        current_snapshot=current_anticollision_snapshot,
+        snapshot_checked=bool(calc_params_stale or not has_pending_target_edits),
+        calc_params_stale=calc_params_stale,
     )

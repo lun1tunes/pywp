@@ -139,6 +139,10 @@ def uncertainty_preset_key(*, well_name: str) -> str:
     return f"uncertainty_preset::{str(well_name)}"
 
 
+def _uncertainty_preset_widget_key(*, well_name: str) -> str:
+    return f"{uncertainty_preset_key(well_name=well_name)}::widget"
+
+
 def horizontal_offset_m(*, point: Point3D, reference: Point3D) -> float:
     dx = float(point.x - reference.x)
     dy = float(point.y - reference.y)
@@ -489,23 +493,38 @@ def render_result_plots(
     uncertainty_overlay = None
     if show_uncertainty:
         preset_key = uncertainty_preset_key(well_name=view.well_name)
-        st.session_state[preset_key] = normalize_uncertainty_preset(
-            st.session_state.get(preset_key, DEFAULT_UNCERTAINTY_PRESET)
+        widget_key = _uncertainty_preset_widget_key(well_name=view.well_name)
+        resolved_preset = normalize_uncertainty_preset(
+            st.session_state.get(
+                preset_key,
+                st.session_state.get(widget_key, DEFAULT_UNCERTAINTY_PRESET),
+            )
         )
+        st.session_state[preset_key] = resolved_preset
+        widget_value = normalize_uncertainty_preset(
+            st.session_state.get(widget_key, resolved_preset)
+        )
+        if (
+            widget_key not in st.session_state
+            or str(st.session_state.get(widget_key, "")).strip() != widget_value
+        ):
+            st.session_state[widget_key] = widget_value
         selected_preset = st.selectbox(
             "Пресет неопределенности",
             options=list(UNCERTAINTY_PRESET_OPTIONS.keys()),
             index=list(UNCERTAINTY_PRESET_OPTIONS.keys()).index(
-                st.session_state[preset_key]
+                widget_value
             ),
             format_func=uncertainty_preset_label,
-            key=preset_key,
+            key=widget_key,
             help=(
                 "Определяет уровень консерватизма planning-level модели неопределенности. "
                 "Обычный MWD подходит как базовый режим, оптимистичный уменьшает конус, "
                 "консервативный увеличивает его."
             ),
         )
+        selected_preset = normalize_uncertainty_preset(selected_preset)
+        st.session_state[preset_key] = selected_preset
         required_md_m = tuple(
             float(value)
             for value in (

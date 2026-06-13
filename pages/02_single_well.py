@@ -18,7 +18,7 @@ import streamlit as st
 
 logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
-from pywp import Point3D, TrajectoryConfig, TrajectoryPlanner
+from pywp import Point3D, TrajectoryConfig
 from pywp.classification import (
     COMPLEXITY_COMPLEX,
     COMPLEXITY_ORDINARY,
@@ -30,6 +30,7 @@ from pywp.classification import (
 
     trajectory_type_label,
 )
+from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.planner import PlanningError
 from pywp.pydantic_base import FrozenModel
 from pywp.solver_diagnostics import summarize_problem_ru
@@ -55,6 +56,7 @@ from pywp.ui_well_result import (
     render_result_plots,
     render_result_tables,
 )
+from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 
 class ScenarioPreset(FrozenModel):
@@ -733,6 +735,37 @@ def _build_config_from_state() -> TrajectoryConfig:
     return APP_CALC_PARAMS.build_config()
 
 
+def _single_well_record(
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+) -> WelltrackRecord:
+    return WelltrackRecord(
+        name=SINGLE_WELL_NAME,
+        points=(
+            WelltrackPoint(
+                x=float(surface.x),
+                y=float(surface.y),
+                z=float(surface.z),
+                md=0.0,
+            ),
+            WelltrackPoint(
+                x=float(t1.x),
+                y=float(t1.y),
+                z=float(t1.z),
+                md=1.0,
+            ),
+            WelltrackPoint(
+                x=float(t3.x),
+                y=float(t3.y),
+                z=float(t3.z),
+                md=2.0,
+            ),
+        ),
+    )
+
+
 def _validate_input(
     surface: Point3D, t1: Point3D, t3: Point3D, config: TrajectoryConfig
 ) -> list[str]:
@@ -741,8 +774,6 @@ def _validate_input(
         errors.append("t1 должен быть ниже устья S по TVD.")
     if t3.z <= surface.z:
         errors.append("t3 должен быть ниже устья S по TVD.")
-    if t3.z <= t1.z:
-        errors.append("t3 должен быть глубже t1 по TVD.")
     if horizontal_offset_m(point=t1, reference=t3) <= 1e-6:
         errors.append("Точки t1 и t3 должны различаться в плане.")
     if horizontal_offset_m(point=t1, reference=surface) <= 1e-6:
@@ -762,26 +793,80 @@ def _run_planner(
     t3: Point3D,
     config: TrajectoryConfig,
     progress_callback: Callable[[str, float], None] | None = None,
-) -> None:
-    planner = TrajectoryPlanner()
-    result = planner.plan(
-        surface=surface,
-        t1=t1,
-        t3=t3,
+) -> SuccessfulWellPlan:
+    record = _single_well_record(surface=surface, t1=t1, t3=t3)
+    planner = WelltrackBatchPlanner()
+    summary_rows, successes = planner.evaluate(
+        records=[record],
+        selected_names={SINGLE_WELL_NAME},
+        selected_order=[SINGLE_WELL_NAME],
         config=config,
-        progress_callback=progress_callback,
+        solver_progress_callback=(
+            None
+            if progress_callback is None
+            else lambda _index, _total, _name, stage_text, stage_fraction: (
+                progress_callback(stage_text, stage_fraction)
+            )
+        ),
+    )
+    if successes:
+        success = successes[0]
+        _store_successful_single_well_result(success)
+        return success
+
+    row = summary_rows[0] if summary_rows else {}
+    status = str(row.get("Статус", "") or "").strip()
+    problem = str(row.get("Проблема", "") or "").strip()
+    if status == "Ошибка формата":
+        raise ValueError(problem or "Ошибка формата входных точек.")
+    raise PlanningError(problem or "Траектория не была построена.")
+
+
+def _coerce_single_well_success(last_result: object) -> SuccessfulWellPlan:
+    if isinstance(last_result, SuccessfulWellPlan):
+        return last_result
+    if not isinstance(last_result, Mapping):
+        raise ValueError("last_result must be a SuccessfulWellPlan or mapping payload.")
+    required_keys = {
+        "surface",
+        "t1",
+        "t3",
+        "stations",
+        "summary",
+        "config",
+        "azimuth_deg",
+        "md_t1_m",
+    }
+    missing_keys = sorted(required_keys.difference(last_result))
+    if missing_keys:
+        raise ValueError(
+            "last_result is missing required fields: " + ", ".join(missing_keys)
+        )
+    summary = dict(last_result["summary"])
+    config = last_result["config"]
+    return SuccessfulWellPlan(
+        name=str(last_result.get("name", SINGLE_WELL_NAME)),
+        surface=last_result["surface"],
+        t1=last_result["t1"],
+        t3=last_result["t3"],
+        target_pairs=tuple(last_result.get("target_pairs", ()) or ()),
+        stations=last_result["stations"],
+        summary=summary,
+        azimuth_deg=float(last_result["azimuth_deg"]),
+        md_t1_m=float(last_result["md_t1_m"]),
+        config=config,
+        runtime_s=(
+            float(last_result["runtime_s"])
+            if last_result.get("runtime_s") is not None
+            else None
+        ),
+        md_postcheck_exceeded=bool(last_result.get("md_postcheck_exceeded", False)),
+        md_postcheck_message=str(last_result.get("md_postcheck_message", "") or ""),
     )
 
-    st.session_state["last_result"] = {
-        "surface": surface,
-        "t1": t1,
-        "t3": t3,
-        "config": config,
-        "stations": result.stations,
-        "summary": result.summary,
-        "azimuth_deg": result.azimuth_deg,
-        "md_t1_m": result.md_t1_m,
-    }
+
+def _store_successful_single_well_result(success: SuccessfulWellPlan) -> None:
+    st.session_state["last_result"] = success
     st.session_state["last_error"] = ""
     st.session_state["last_built_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["last_input_signature"] = _current_input_signature()
@@ -1233,25 +1318,9 @@ def _render_calculation_feedback() -> None:
 
 
 def _build_single_well_result_view(
-    last_result: dict[str, object],
+    last_result: object,
 ) -> SingleWellResultView:
-    if not isinstance(last_result, dict):
-        raise ValueError("last_result must be a mapping payload.")
-    required_keys = {
-        "surface",
-        "t1",
-        "t3",
-        "stations",
-        "summary",
-        "config",
-        "azimuth_deg",
-        "md_t1_m",
-    }
-    missing_keys = sorted(required_keys.difference(last_result))
-    if missing_keys:
-        raise ValueError(
-            "last_result is missing required fields: " + ", ".join(missing_keys)
-        )
+    success = _coerce_single_well_success(last_result)
     plan_csb_stations = st.session_state.get("plan_csb_df")
     plan_csb_df = (
         plan_csb_stations
@@ -1268,15 +1337,22 @@ def _build_single_well_result_view(
     )
     return SingleWellResultView(
         well_name="single_well",
-        surface=last_result["surface"],
-        t1=last_result["t1"],
-        t3=last_result["t3"],
-        stations=last_result["stations"],
-        summary=last_result["summary"],
-        config=last_result["config"],
-        azimuth_deg=float(last_result["azimuth_deg"]),
-        md_t1_m=float(last_result["md_t1_m"]),
-        runtime_s=st.session_state.get("last_runtime_s"),
+        surface=success.surface,
+        t1=success.t1,
+        t3=success.t3,
+        target_pairs=tuple(success.target_pairs or ()),
+        stations=success.stations,
+        summary=success.summary,
+        config=success.config,
+        azimuth_deg=float(success.azimuth_deg),
+        md_t1_m=float(success.md_t1_m),
+        runtime_s=success.runtime_s,
+        issue_messages=(
+            (str(success.md_postcheck_message),)
+            if str(success.md_postcheck_message).strip()
+            else ()
+        ),
+        trajectory_line_dash=("dash" if bool(success.md_postcheck_exceeded) else "solid"),
         plan_csb_stations=plan_csb_df,
         actual_stations=actual_df,
     )

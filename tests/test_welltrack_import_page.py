@@ -3728,6 +3728,68 @@ def test_render_three_payload_uses_local_three_renderer(monkeypatch) -> None:
     assert captured["payload"]["lines"]
 
 
+def test_render_three_payload_reuses_augmented_payload_for_same_inputs(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._THREE_AUGMENTED_PAYLOAD_CACHE.clear()
+    calls = {"augment": 0}
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    original_augment = page._augment_three_payload
+
+    def _fake_three_scene(payload, **kwargs):
+        return None
+
+    def _counting_augment(*args, **kwargs):
+        calls["augment"] += 1
+        return original_augment(*args, **kwargs)
+
+    monkeypatch.setattr(page, "render_local_three_scene", _fake_three_scene)
+    monkeypatch.setattr(page, "_augment_three_payload", _counting_augment)
+    payload = {
+        "background": "#FFFFFF",
+        "bounds": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+        "camera": DEFAULT_THREE_CAMERA,
+        "lines": [],
+        "points": [],
+        "meshes": [],
+        "labels": [],
+        "legend": [],
+    }
+    overrides = {
+        "legend_tree": [],
+        "focus_targets": {},
+        "hidden_flat_legend_labels": set(),
+        "collisions": [],
+        "edit_wells": [],
+        "extra_labels": [],
+        "extra_meshes": [],
+        "extra_legend_items": [],
+        "component_key": "test",
+    }
+
+    page._render_three_payload(
+        container=_DummyContainer(),
+        payload=payload,
+        height=420,
+        payload_overrides=overrides,
+    )
+    page._render_three_payload(
+        container=_DummyContainer(),
+        payload=payload,
+        height=420,
+        payload_overrides=overrides,
+    )
+
+    assert calls["augment"] == 1
+
+
 def test_welltrack_page_respects_anticollision_result_focus_state() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
@@ -6696,7 +6758,7 @@ def test_all_wells_overview_figures_include_reference_trajectories() -> None:
     assert "FACT-1" in label_by_text
     assert "APP-1" in label_by_text
     assert str(label_by_text["FACT-1"]["color"]) == "#374151"
-    assert str(label_by_text["APP-1"]["color"]) == "#F87171"
+    assert str(label_by_text["APP-1"]["color"]) == "#C62828"
 
 
 def test_actual_reference_mwd_assignment_defaults_to_poor_and_selects_unknown() -> None:

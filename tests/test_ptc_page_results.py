@@ -137,6 +137,134 @@ def test_anticollision_panel_requires_explicit_run_before_first_analysis(
     assert "Запустите anti-collision отдельным шагом" in str(calls["info"])
 
 
+def test_anticollision_panel_skips_duplicate_snapshot_check_when_already_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {"buttons": []}
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+        }
+
+        def info(self, message: str) -> None:
+            calls["info"] = str(message)
+
+        def button(self, label: str, **_kwargs: object) -> bool:
+            calls["buttons"].append(str(label))
+            return False
+
+        def selectbox(
+            self,
+            _label: str,
+            *,
+            options: list[str],
+            format_func=None,
+            key: str,
+        ) -> str:
+            value = str(options[0])
+            self.session_state[key] = value
+            return value
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("snapshot must not be checked twice")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_cached_anticollision_snapshot",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_status_run_log",
+        lambda **_kwargs: None,
+    )
+
+    ptc_page_results._render_anticollision_panel(
+        successes=[object(), object()],
+        records=[],
+        summary_rows=[],
+        focus_pad_id="",
+        focus_pad_well_names=[],
+        reference_wells=(),
+        reference_uncertainty_models_by_name={},
+        current_snapshot=None,
+        snapshot_checked=True,
+    )
+
+    assert calls["buttons"] == ["Расчёт пересечений"]
+    assert "Запустите anti-collision отдельным шагом" in str(calls["info"])
+
+
+def test_anticollision_panel_blocks_run_when_calc_params_are_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {"warnings": [], "captions": []}
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def warning(self, message: str) -> None:
+            calls["warnings"].append(str(message))
+
+        def caption(self, message: str) -> None:
+            calls["captions"].append(str(message))
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def button(self, *_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("anti-collision action button must stay hidden")
+
+        def selectbox(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("preset selector must stay hidden")
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_status_run_log",
+        lambda **kwargs: calls.setdefault("log_kwargs", kwargs),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_cached_anti_collision_view_model",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale calc params must block anti-collision run")
+        ),
+    )
+
+    ptc_page_results._render_anticollision_panel(
+        successes=[object(), object()],
+        records=[],
+        summary_rows=[],
+        focus_pad_id="",
+        focus_pad_well_names=[],
+        calc_params_stale=True,
+    )
+
+    assert any("временно недоступен" in item for item in calls["warnings"])
+    assert any("Сначала пересчитайте траектории" in item for item in calls["captions"])
+    assert str(calls["log_kwargs"]["title"]) == "Лог расчёта Anti-collision"
+
+
 def test_anticollision_panel_reruns_after_fresh_analysis_when_visual_is_external(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -572,6 +700,107 @@ def test_cached_snapshot_filter_removes_pending_well_geometry_and_conflicts() ->
     assert filtered_clusters == (kept_cluster,)
 
 
+def test_anticollision_visual_overview_reuses_cached_three_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"payload_builds": 0, "override_builds": 0}
+    analysis = AntiCollisionAnalysis(
+        wells=(
+            SimpleNamespace(
+                name="WELL-A",
+                is_reference_only=False,
+                stations=pd.DataFrame(),
+                color="#123456",
+                surface=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                t1=SimpleNamespace(x=1.0, y=1.0, z=1.0),
+                t3=SimpleNamespace(x=2.0, y=2.0, z=2.0),
+                target_pairs=(),
+            ),
+        ),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def caption(self, _message: str) -> None:
+            pass
+
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_anticollision_three_payload",
+        lambda *args, **kwargs: calls.__setitem__(
+            "payload_builds", int(calls["payload_builds"]) + 1
+        )
+        or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_anticollision_three_payload_overrides",
+        lambda **_kwargs: calls.__setitem__(
+            "override_builds", int(calls["override_builds"]) + 1
+        )
+        or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_three_payload",
+        lambda **_kwargs: None,
+    )
+
+    ptc_page_results._render_anticollision_visual_overview(
+        analysis=analysis,
+        successes=[],
+        records=[],
+        summary_rows=[],
+        focus_pad_well_names=[],
+        focus_anticollision_well_names=[],
+        title="### Test",
+        caption=None,
+        target_only_wells=[],
+    )
+    ptc_page_results._render_anticollision_visual_overview(
+        analysis=analysis,
+        successes=[],
+        records=[],
+        summary_rows=[],
+        focus_pad_well_names=[],
+        focus_anticollision_well_names=[],
+        title="### Test",
+        caption=None,
+        target_only_wells=[],
+    )
+
+    assert calls["payload_builds"] == 1
+    assert calls["override_builds"] == 1
+
+
 def test_target_edit_overview_keeps_reference_wells(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -651,6 +880,237 @@ def test_target_edit_overview_keeps_reference_wells(
     assert "plan_kwargs" not in calls
 
 
+def test_target_edit_overview_reuses_cached_three_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"payload_builds": 0, "override_builds": 0}
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def info(self, _message: str) -> None:
+            pass
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def caption(self, _message: str) -> None:
+            pass
+
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
+
+    success = SimpleNamespace(
+        name="WELL-A",
+        stations=pd.DataFrame(),
+        surface=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        t1=SimpleNamespace(x=1.0, y=1.0, z=1.0),
+        t3=SimpleNamespace(x=2.0, y=2.0, z=2.0),
+        md_postcheck_exceeded=False,
+        target_pairs=(),
+    )
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_three_payload",
+        lambda *args, **kwargs: calls.__setitem__(
+            "payload_builds", int(calls["payload_builds"]) + 1
+        )
+        or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_trajectory_three_payload_overrides",
+        lambda **_kwargs: calls.__setitem__(
+            "override_builds", int(calls["override_builds"]) + 1
+        )
+        or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_three_payload",
+        lambda **_kwargs: None,
+    )
+
+    assert (
+        ptc_page_results._render_target_edit_overview(
+            successes=[success],
+            records=[],
+            summary_rows=[],
+            title="### Test",
+            empty_message="empty",
+            focus_pad_well_names=[],
+            show_focus_selector=False,
+        )
+        is True
+    )
+    assert (
+        ptc_page_results._render_target_edit_overview(
+            successes=[success],
+            records=[],
+            summary_rows=[],
+            title="### Test",
+            empty_message="empty",
+            focus_pad_well_names=[],
+            show_focus_selector=False,
+        )
+        is True
+    )
+    assert calls["payload_builds"] == 1
+    assert calls["override_builds"] == 1
+
+
+def test_target_edit_overview_rebuilds_overrides_after_pad_state_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"payload_builds": 0, "override_builds": 0}
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {
+            "wt_pad_configs": {"PAD-01": {"spacing_m": 40.0}},
+            "wt_pad_detected_meta": {},
+        }
+
+        def info(self, _message: str) -> None:
+            pass
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def caption(self, _message: str) -> None:
+            pass
+
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
+
+    success = SimpleNamespace(
+        name="WELL-A",
+        stations=pd.DataFrame(),
+        surface=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        t1=SimpleNamespace(x=1.0, y=1.0, z=1.0),
+        t3=SimpleNamespace(x=2.0, y=2.0, z=2.0),
+        md_postcheck_exceeded=False,
+        target_pairs=(),
+    )
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1.0, y=1.0, z=1.0, md=1.0),
+                WelltrackPoint(x=2.0, y=2.0, z=2.0, md=2.0),
+            ),
+        )
+    ]
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_three_payload",
+        lambda *args, **kwargs: calls.__setitem__(
+            "payload_builds", int(calls["payload_builds"]) + 1
+        )
+        or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_trajectory_three_payload_overrides",
+        lambda **_kwargs: calls.__setitem__(
+            "override_builds", int(calls["override_builds"]) + 1
+        )
+        or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_three_payload",
+        lambda **_kwargs: None,
+    )
+
+    assert (
+        ptc_page_results._render_target_edit_overview(
+            successes=[success],
+            records=records,
+            summary_rows=[],
+            title="### Test",
+            empty_message="empty",
+            focus_pad_well_names=[],
+            show_focus_selector=False,
+        )
+        is True
+    )
+    FakeStreamlit.session_state["wt_pad_configs"]["PAD-01"]["spacing_m"] = 60.0
+    assert (
+        ptc_page_results._render_target_edit_overview(
+            successes=[success],
+            records=records,
+            summary_rows=[],
+            title="### Test",
+            empty_message="empty",
+            focus_pad_well_names=[],
+            show_focus_selector=False,
+        )
+        is True
+    )
+
+    assert calls["payload_builds"] == 1
+    assert calls["override_builds"] == 2
+
+
+def test_results_calc_params_changed_after_last_run_uses_ptc_binding_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStreamlit:
+        session_state = {
+            "wt_last_calc_param_signature": ("previous",),
+        }
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "WT_CALC_PARAMS",
+        SimpleNamespace(state_signature=lambda: ("current",)),
+    )
+
+    assert ptc_page_results._calc_params_changed_after_last_run() is True
+
+
 def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -666,6 +1126,12 @@ def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
             return "Все скважины"
 
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "WT_CALC_PARAMS",
+        SimpleNamespace(state_signature=lambda: ("same",)),
+    )
+    FakeStreamlit.session_state["wt_last_calc_param_signature"] = ("same",)
     monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
     monkeypatch.setattr(ptc_page_results.wt, "_pad_membership", lambda _records: ([], {}, {}))
     monkeypatch.setattr(
@@ -745,6 +1211,12 @@ def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
             return "Все скважины"
 
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "WT_CALC_PARAMS",
+        SimpleNamespace(state_signature=lambda: ("same",)),
+    )
+    FakeStreamlit.session_state["wt_last_calc_param_signature"] = ("same",)
     monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
     monkeypatch.setattr(ptc_page_results.wt, "_pad_membership", lambda _records: ([], {}, {}))
     monkeypatch.setattr(
@@ -807,6 +1279,94 @@ def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
     )
 
     assert calls == {"overview": 0, "anticollision": 1, "visual": 1}
+
+
+def test_render_success_tabs_skips_heavy_visuals_when_calc_params_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"overview": 0, "visual": 0, "panel": 0, "warnings": [], "panel_kwargs": []}
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_results_view_mode": "Все скважины",
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+            "wt_last_calc_param_signature": ("previous",),
+        }
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Все скважины"
+
+        def warning(self, message: str) -> None:
+            calls["warnings"].append(str(message))
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "WT_CALC_PARAMS",
+        SimpleNamespace(state_signature=lambda: ("current",)),
+    )
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(ptc_page_results.wt, "_pad_membership", lambda _records: ([], {}, {}))
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_normalize_focus_pad_id",
+        lambda **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_focus_pad_well_names",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_anticollision_params,
+        "reference_uncertainty_models_from_state",
+        lambda _reference_wells: {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_failed_target_only_wells",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_target_edit_overview",
+        lambda **_kwargs: calls.__setitem__("overview", calls["overview"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_visual_overview",
+        lambda **_kwargs: calls.__setitem__("visual", calls["visual"] + 1),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_panel",
+        lambda **kwargs: calls.__setitem__("panel", calls["panel"] + 1)
+        or calls["panel_kwargs"].append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale calc params must skip current AC snapshot lookup")
+        ),
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[SimpleNamespace(name="WELL-A")],
+        records=[],
+        summary_rows=[],
+    )
+
+    assert calls["overview"] == 0
+    assert calls["visual"] == 0
+    assert calls["panel"] == 1
+    assert calls["panel_kwargs"][0]["calc_params_stale"] is True
+    assert any("3D-визуализация" in item for item in calls["warnings"])
 
 
 def test_render_success_tabs_keeps_report_panel_when_ac_visual_fails(

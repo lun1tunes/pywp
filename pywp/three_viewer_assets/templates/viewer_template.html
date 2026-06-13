@@ -556,6 +556,37 @@
         pointer-events: none;
       }
 
+      .world-axis-handle {
+        position: absolute;
+        display: none;
+        width: 20px;
+        height: 20px;
+        border: 1px solid rgba(71,85,105,0.28);
+        border-radius: 999px;
+        background: rgba(255,255,255,0.94);
+        box-shadow: 0 3px 10px rgba(15,23,42,0.12);
+        color: #475569;
+        font-size: 11px;
+        line-height: 18px;
+        text-align: center;
+        cursor: grab;
+        pointer-events: auto;
+        transform: translate(-50%, -50%);
+        touch-action: none;
+        user-select: none;
+        z-index: 5;
+      }
+
+      .world-axis-handle:hover {
+        background: rgba(255,255,255,0.99);
+        color: #1f2937;
+      }
+
+      .world-axis-handle.is-dragging {
+        cursor: grabbing;
+        box-shadow: 0 5px 14px rgba(15,23,42,0.18);
+      }
+
       .scene-axis-label {
         font-size: 11px;
         font-weight: 700;
@@ -654,7 +685,7 @@
         position: absolute;
         top: calc(100% + 8px);
         left: 0;
-        width: 214px;
+        width: 248px;
         z-index: 7;
         padding: 9px 10px;
         border-radius: 10px;
@@ -690,6 +721,56 @@
         margin: 0;
         accent-color: #dc2626;
         flex: 0 0 auto;
+      }
+
+      .world-axis-scale-block {
+        display: block;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(148,163,184,0.18);
+      }
+
+      .world-axis-scale-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 6px;
+        color: #334155;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .world-axis-scale-value {
+        color: #1d4ed8;
+        font-family:
+          "SFMono-Regular",
+          ui-monospace,
+          Menlo,
+          Consolas,
+          monospace;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .world-axis-scale-slider {
+        width: 100%;
+        margin: 0;
+      }
+
+      .world-axis-scale-labels {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 4px;
+        margin-top: 4px;
+        color: #64748b;
+        font-size: 9px;
+        line-height: 1.1;
+      }
+
+      .world-axis-scale-labels span {
+        text-align: center;
+        white-space: nowrap;
       }
 
       #edit-toolbox {
@@ -1023,6 +1104,58 @@
         display: block;
       }
 
+      #minimap-ruler-layer {
+        display: none;
+        position: absolute;
+        z-index: 4;
+        overflow: hidden;
+        pointer-events: none;
+      }
+
+      #minimap-ruler-layer.is-visible {
+        display: block;
+      }
+
+      .minimap-ruler-line {
+        position: absolute;
+        display: none;
+        height: 2px;
+        border-radius: 999px;
+        background: rgba(15,23,42,0.84);
+        box-shadow:
+          0 0 0 1px rgba(255,255,255,0.88),
+          0 1px 4px rgba(15,23,42,0.16);
+        transform-origin: 0 50%;
+      }
+
+      .minimap-ruler-point {
+        position: absolute;
+        display: none;
+        width: 8px;
+        height: 8px;
+        border: 2px solid rgba(15,23,42,0.82);
+        border-radius: 999px;
+        background: rgba(255,255,255,0.96);
+        box-shadow: 0 1px 4px rgba(15,23,42,0.18);
+        transform: translate(-50%, -50%);
+      }
+
+      .minimap-ruler-label {
+        position: absolute;
+        display: none;
+        padding: 2px 6px;
+        border: 1px solid rgba(148,163,184,0.34);
+        border-radius: 999px;
+        background: rgba(255,255,255,0.96);
+        color: #0f172a;
+        box-shadow: 0 4px 10px rgba(15,23,42,0.12);
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 1.2;
+        white-space: nowrap;
+        transform: translate(-50%, -50%);
+      }
+
       .minimap-well-label {
         position: absolute;
         display: none;
@@ -1039,6 +1172,83 @@
           0 1px 4px rgba(15,23,42,0.18);
         transform: translate(6px, -50%);
         white-space: normal;
+        contain: layout paint;
+      }
+
+      .minimap-edit-delta-label {
+        position: absolute;
+        display: none;
+        min-width: 108px;
+        padding: 3px 5px;
+        border: 1px solid rgba(148,163,184,0.24);
+        border-radius: 6px;
+        background: rgba(255,255,255,0.82);
+        box-shadow: 0 4px 10px rgba(15,23,42,0.08);
+        color: rgba(15,23,42,0.86);
+        font-family:
+          "SFMono-Regular",
+          ui-monospace,
+          Menlo,
+          Consolas,
+          monospace;
+        font-size: 9px;
+        line-height: 1.3;
+        text-align: left;
+        transform: translate(10px, -100%);
+        text-shadow: 0 1px 2px rgba(255,255,255,0.95);
+        backdrop-filter: blur(4px);
+        white-space: nowrap;
+        contain: layout paint;
+      }
+
+      .minimap-edit-delta-label .edit-delta-head {
+        display: block;
+        margin-bottom: 3px;
+        color: rgba(15,23,42,0.88);
+        font-family:
+          Inter,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        font-size: 10px;
+        font-weight: 700;
+      }
+
+      .minimap-edit-delta-label .edit-delta-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .minimap-edit-delta-label .edit-delta-total {
+        margin-top: 3px;
+        padding-top: 3px;
+        border-top: 1px solid rgba(15,23,42,0.12);
+        color: rgba(15,23,42,0.94);
+        font-weight: 700;
+      }
+
+      .minimap-edit-lateral-label {
+        position: absolute;
+        display: none;
+        padding: 4px 8px;
+        border: 1px solid rgba(37,99,235,0.18);
+        border-radius: 999px;
+        background: rgba(255,255,255,0.80);
+        box-shadow: 0 4px 10px rgba(15,23,42,0.08);
+        color: #1d4ed8;
+        font-family:
+          "SFMono-Regular",
+          ui-monospace,
+          Menlo,
+          Consolas,
+          monospace;
+        font-size: 10px;
+        font-weight: 700;
+        text-shadow: 0 1px 2px rgba(255,255,255,0.95);
+        transform: translate(-50%, -50%);
+        white-space: nowrap;
         contain: layout paint;
       }
 
@@ -1160,7 +1370,7 @@
         position: absolute;
         left: 50%;
         top: 6px;
-        max-width: calc(100% - 48px);
+        max-width: calc(100% - 84px);
         overflow: hidden;
         text-overflow: ellipsis;
         transform: translateX(-50%);
@@ -1256,6 +1466,44 @@
         border-top-color: rgba(51,65,85,0.74);
       }
 
+      #minimap-ruler-btn {
+        display: none;
+        pointer-events: auto;
+      }
+
+      #minimap-control.is-expanded #minimap-ruler-btn {
+        position: absolute;
+        right: 0;
+        top: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: none;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.76);
+        color: #475569;
+        box-shadow: 0 3px 10px rgba(15,23,42,0.12);
+        cursor: pointer;
+        font-size: 15px;
+        line-height: 1;
+      }
+
+      #minimap-ruler-btn:hover {
+        background: rgba(255,255,255,0.92);
+        color: #0f172a;
+      }
+
+      #minimap-ruler-btn.is-active {
+        background: rgba(37,99,235,0.14);
+        color: #1d4ed8;
+        box-shadow:
+          inset 0 0 0 1px rgba(37,99,235,0.22),
+          0 3px 10px rgba(15,23,42,0.12);
+      }
+
       @keyframes fadeInUp {
         from { opacity: 0; transform: translateY(8px); }
         to { opacity: 1; transform: translateY(0); }
@@ -1301,6 +1549,29 @@
               <input id="world-axis-toggle" type="checkbox" />
               <span>Показать координатную ось</span>
             </label>
+            <div class="world-axis-scale-block">
+              <div class="world-axis-scale-head">
+                <span>Масштаб Z</span>
+                <span id="world-axis-z-scale-value" class="world-axis-scale-value">1:1</span>
+              </div>
+              <input
+                id="world-axis-z-scale-slider"
+                class="world-axis-scale-slider"
+                type="range"
+                min="0"
+                max="5"
+                step="1"
+                value="0"
+              />
+              <div class="world-axis-scale-labels" aria-hidden="true">
+                <span>1:1</span>
+                <span>1:2</span>
+                <span>1:5</span>
+                <span>1:10</span>
+                <span>1:25</span>
+                <span>1:50</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1353,11 +1624,18 @@
       </div>
       <div id="axes-gizmo"></div>
       <div id="label-layer"></div>
+      <button id="world-axis-drag-handle" class="world-axis-handle" type="button" title="Перетащить координатную сетку по XY">✋</button>
       <div id="collisions-panel"></div>
       <div id="legend"></div>
       <div id="tooltip"></div>
       <div id="minimap-frame"></div>
       <div id="minimap-label-layer"></div>
+      <div id="minimap-ruler-layer">
+        <div id="minimap-ruler-line" class="minimap-ruler-line"></div>
+        <div id="minimap-ruler-start" class="minimap-ruler-point"></div>
+        <div id="minimap-ruler-end" class="minimap-ruler-point"></div>
+        <div id="minimap-ruler-label" class="minimap-ruler-label"></div>
+      </div>
       <div id="minimap-axes" aria-hidden="true">
         <div class="minimap-axis minimap-axis-x"></div>
         <div class="minimap-axis minimap-axis-y"></div>
@@ -1367,6 +1645,7 @@
       <div id="minimap-control">
         <div id="minimap-label">План E-N (вид сверху)</div>
         <button id="minimap-toggle-btn" type="button" title="Показать вид сверху">План E-N</button>
+        <button id="minimap-ruler-btn" type="button" title="Измерить расстояние на плане E-N" aria-label="Измерить расстояние на плане E-N">&#128207;</button>
       </div>
     </div>
     <script>
@@ -1387,17 +1666,24 @@
         if (!payloadElement) {
           return;
         }
-        const payload = JSON.parse(payloadElement.textContent || "{}");
+        let payload = JSON.parse(payloadElement.textContent || "{}");
         const root = document.getElementById("root");
         const labelLayerElement = document.getElementById("label-layer");
+        const worldAxisDragHandle = document.getElementById("world-axis-drag-handle");
         const legendElement = document.getElementById("legend");
         const tooltipElement = document.getElementById("tooltip");
         const miniMapFrame = document.getElementById("minimap-frame");
         const miniMapLabelLayer = document.getElementById("minimap-label-layer");
+        const miniMapRulerLayer = document.getElementById("minimap-ruler-layer");
+        const miniMapRulerLine = document.getElementById("minimap-ruler-line");
+        const miniMapRulerStart = document.getElementById("minimap-ruler-start");
+        const miniMapRulerEnd = document.getElementById("minimap-ruler-end");
+        const miniMapRulerLabel = document.getElementById("minimap-ruler-label");
         const miniMapAxes = document.getElementById("minimap-axes");
         const miniMapControl = document.getElementById("minimap-control");
         const miniMapLabel = document.getElementById("minimap-label");
         const miniMapToggleBtn = document.getElementById("minimap-toggle-btn");
+        const miniMapRulerBtn = document.getElementById("minimap-ruler-btn");
         const fitButton = document.getElementById("fit-camera-btn");
         const fullscreenButton = document.getElementById("fullscreen-btn");
         const axesGizmoElement = document.getElementById("axes-gizmo");
@@ -1409,53 +1695,80 @@
         const worldAxisButton = document.getElementById("world-axis-btn");
         const worldAxisControls = document.getElementById("world-axis-controls");
         const worldAxisToggle = document.getElementById("world-axis-toggle");
+        const worldAxisZScaleSlider = document.getElementById("world-axis-z-scale-slider");
+        const worldAxisZScaleValue = document.getElementById("world-axis-z-scale-value");
         const Z_DISPLAY_SIGN = -1.0;
+        let payloadDigest = "";
+
+        function payloadSceneComplexity(payloadValue) {
+          const lineItems = Array.isArray(payloadValue && payloadValue.lines)
+            ? payloadValue.lines
+            : [];
+          const pointItems = Array.isArray(payloadValue && payloadValue.points)
+            ? payloadValue.points
+            : [];
+          const labelItems = Array.isArray(payloadValue && payloadValue.labels)
+            ? payloadValue.labels
+            : [];
+          const meshItems = Array.isArray(payloadValue && payloadValue.meshes)
+            ? payloadValue.meshes
+            : [];
+          return (
+            lineItems.reduce(
+              (acc, item) =>
+                acc +
+                (Array.isArray(item.segments)
+                  ? item.segments.reduce(
+                      (segmentAcc, segment) =>
+                        segmentAcc +
+                        (Array.isArray(segment) ? Math.max(segment.length - 1, 0) : 0),
+                      0,
+                    )
+                  : 0),
+              0,
+            ) +
+            pointItems.reduce(
+              (acc, item) => acc + (Array.isArray(item.points) ? item.points.length : 0),
+              0,
+            ) +
+            labelItems.length * 12 +
+            meshItems.reduce(
+              (acc, item) => {
+                const vertexCount = Array.isArray(item.vertices) ? item.vertices.length : 0;
+                const ringCount = Array.isArray(item.rings)
+                  ? item.rings.reduce(
+                      (ringAcc, ring) => ringAcc + (Array.isArray(ring) ? ring.length : 0),
+                      0,
+                    )
+                  : 0;
+                return acc + vertexCount + ringCount;
+              },
+              0,
+            )
+          );
+        }
+
+        function payloadMaxPixelRatio(nextSceneComplexity) {
+          return nextSceneComplexity > 180000
+            ? 0.95
+            : nextSceneComplexity > 90000
+              ? 1.0
+              : nextSceneComplexity > 30000
+                ? 1.25
+                : 1.65;
+        }
+
+        let backgroundColor = String(payload.background || "#ffffff");
+        let sceneComplexity = payloadSceneComplexity(payload);
+        let maxPixelRatio = payloadMaxPixelRatio(sceneComplexity);
         const scene = new THREE.Scene();
         const miniMapOverlayScene = new THREE.Scene();
-        const backgroundColor = String(payload.background || "#ffffff");
         scene.background = new THREE.Color(backgroundColor);
-        scene.add(new THREE.AmbientLight(0xffffff, 0.72));
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.72);
+        scene.add(ambientLight);
         const surfaceShadeLight = new THREE.DirectionalLight(0xffffff, 0.58);
         surfaceShadeLight.position.set(0.35, -0.45, 0.82).normalize();
         scene.add(surfaceShadeLight);
-
-        const sceneComplexity =
-          (payload.lines || []).reduce(
-            (acc, item) =>
-              acc +
-              (Array.isArray(item.segments)
-                ? item.segments.reduce(
-                    (segmentAcc, segment) =>
-                      segmentAcc +
-                      (Array.isArray(segment) ? Math.max(segment.length - 1, 0) : 0),
-                    0,
-                  )
-                : 0),
-            0,
-          ) +
-          (payload.points || []).reduce(
-            (acc, item) => acc + (Array.isArray(item.points) ? item.points.length : 0),
-            0,
-          ) +
-          (payload.labels || []).length * 12 +
-          (payload.meshes || []).reduce(
-            (acc, item) => {
-              const vertexCount = Array.isArray(item.vertices) ? item.vertices.length : 0;
-              const ringCount = Array.isArray(item.rings)
-                ? item.rings.reduce(
-                    (ringAcc, ring) => ringAcc + (Array.isArray(ring) ? ring.length : 0),
-                    0,
-                  )
-                : 0;
-              return acc + vertexCount + ringCount;
-            },
-            0,
-          );
-        const maxPixelRatio =
-          sceneComplexity > 180000 ? 0.95 :
-          sceneComplexity > 90000 ? 1.0 :
-          sceneComplexity > 30000 ? 1.25 :
-          1.65;
 
         const renderer = new THREE.WebGLRenderer({
           antialias: sceneComplexity <= 25000,
@@ -1509,44 +1822,110 @@
           resizeStartWorldPerPixel: 1.0,
           rect: { x: 0, y: 0, width: 0, height: 0 },
         };
-        const hasTreeLegend =
+        const miniMapRulerState = {
+          enabled: false,
+          phase: "idle",
+          startRaw: null,
+          endRaw: null,
+          previewRaw: null,
+        };
+        let miniMapOverlayBuilt = false;
+        let hasTreeLegend =
           Array.isArray(payload.legend_tree) && payload.legend_tree.length > 0;
-        const focusTargets =
+        let focusTargets =
           payload.focus_targets && typeof payload.focus_targets === "object"
             ? payload.focus_targets
             : {};
-        const editWells = Array.isArray(payload.edit_wells) ? payload.edit_wells : [];
-        const editChannelName = String(payload.edit_channel || "");
+        let editWells = Array.isArray(payload.edit_wells) ? payload.edit_wells : [];
+        let editChannelName = String(payload.edit_channel || "");
+        const worldAxisFocusPadById = new Map();
+        const worldAxisPadFocusIds = [];
         const editWellIndexByName = new Map();
-        editWells.forEach((well, index) => {
-          const name = String((well && well.name) || "").trim();
-          if (!name) {
-            return;
-          }
-          editWellIndexByName.set(name, index);
-          editWellIndexByName.set(`well::${name}`, index);
-        });
         const editableWellColors = new Set(
           editWells
             .map((well) => String((well && well.color) || "").trim().toLowerCase())
             .filter(Boolean),
         );
+
+        function syncPayloadCollections() {
+          hasTreeLegend =
+            Array.isArray(payload.legend_tree) && payload.legend_tree.length > 0;
+          focusTargets =
+            payload.focus_targets && typeof payload.focus_targets === "object"
+              ? payload.focus_targets
+              : {};
+          worldAxisFocusPadById.clear();
+          worldAxisPadFocusIds.length = 0;
+          (Array.isArray(payload.legend_tree) ? payload.legend_tree : []).forEach((group) => {
+            const groupId = String((group && group.id) || "").trim();
+            if (!groupId.startsWith("pad::")) {
+              return;
+            }
+            if (Object.prototype.hasOwnProperty.call(focusTargets, groupId)) {
+              worldAxisPadFocusIds.push(groupId);
+            }
+            worldAxisFocusPadById.set(groupId, groupId);
+            (Array.isArray(group && group.children) ? group.children : []).forEach((child) => {
+              const childId = String((child && child.id) || "").trim();
+              if (childId) {
+                worldAxisFocusPadById.set(childId, groupId);
+              }
+            });
+          });
+          Object.keys(focusTargets).forEach((focusId) => {
+            if (!String(focusId).startsWith("pad::")) {
+              return;
+            }
+            if (!worldAxisPadFocusIds.includes(String(focusId))) {
+              worldAxisPadFocusIds.push(String(focusId));
+            }
+            if (!worldAxisFocusPadById.has(String(focusId))) {
+              worldAxisFocusPadById.set(String(focusId), String(focusId));
+            }
+          });
+          editWells = Array.isArray(payload.edit_wells) ? payload.edit_wells : [];
+          editChannelName = String(payload.edit_channel || "");
+          editWellIndexByName.clear();
+          editWells.forEach((well, index) => {
+            const name = String((well && well.name) || "").trim();
+            if (!name) {
+              return;
+            }
+            editWellIndexByName.set(name, index);
+            editWellIndexByName.set(`well::${name}`, index);
+          });
+          editableWellColors.clear();
+          editWells
+            .map((well) => String((well && well.color) || "").trim().toLowerCase())
+            .filter(Boolean)
+            .forEach((colorKey) => editableWellColors.add(colorKey));
+        }
+
+        syncPayloadCollections();
         const editableBaseMaterials = [];
         const viewerStateScope = String(
           payload.component_key || payload.title || "scene"
         );
         const WORLD_AXIS_STORAGE_KEY = `pywp:world-axis-overlay:${viewerStateScope}`;
+        const WORLD_AXIS_Z_SCALE_STORAGE_KEY = `pywp:world-axis-z-scale:${viewerStateScope}`;
         const WORLD_AXIS_PLANE_RAW_Z = 0.0;
-        const WORLD_AXIS_ANCHOR_NDC = { x: -0.62, y: -0.68 };
+        const WORLD_AXIS_GRID_SQUARES_PER_SIDE = 4;
+        const WORLD_AXIS_Z_SCALE_OPTIONS = [1, 2, 5, 10, 25, 50];
         const worldAxisOverlay = {
           enabled: readStoredBoolean(WORLD_AXIS_STORAGE_KEY, false),
           group: new THREE.Group(),
           signature: "",
-          anchorInitialized: false,
+          activePadFocusId: "",
+          activeBoundsRaw: null,
+          baseAnchorRaw: { x: 0.0, y: 0.0 },
+          dragOffsetRaw: { x: 0.0, y: 0.0 },
           anchorRaw: { x: 0.0, y: 0.0 },
-          lastTargetRaw: { x: 0.0, y: 0.0 },
           labelSpecs: [],
           labels: [],
+          dragging: false,
+          dragStartRaw: null,
+          dragStartOffsetRaw: { x: 0.0, y: 0.0 },
+          zScaleIndex: 0,
         };
         const antiCollisionVisualObjects = {
           cones: [],
@@ -1591,6 +1970,8 @@
               : true,
           ),
         };
+        let antiCollisionControlsInitialized = false;
+        let worldAxisControlsInitialized = false;
 
         function readStoredBoolean(key, fallback) {
           try {
@@ -1604,6 +1985,25 @@
           }
         }
 
+        function readStoredInteger(key, fallback, minValue, maxValue) {
+          try {
+            const rawValue = window.localStorage.getItem(String(key || ""));
+            if (rawValue === null) {
+              return Number(fallback) || 0;
+            }
+            const parsed = Math.round(Number(rawValue));
+            if (!Number.isFinite(parsed)) {
+              return Number(fallback) || 0;
+            }
+            return Math.min(
+              Math.max(parsed, Number(minValue) || 0),
+              Number(maxValue) || parsed,
+            );
+          } catch (e) {
+            return Number(fallback) || 0;
+          }
+        }
+
         function storeBoolean(key, value) {
           try {
             window.localStorage.setItem(
@@ -1612,6 +2012,19 @@
             );
           } catch (e) { /* ignore */ }
         }
+
+        function storeStringValue(key, value) {
+          try {
+            window.localStorage.setItem(String(key || ""), String(value || ""));
+          } catch (e) { /* ignore */ }
+        }
+
+        worldAxisOverlay.zScaleIndex = readStoredInteger(
+          WORLD_AXIS_Z_SCALE_STORAGE_KEY,
+          0,
+          0,
+          WORLD_AXIS_Z_SCALE_OPTIONS.length - 1,
+        );
 
         const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
         const hoverSphereMaterial = new THREE.MeshBasicMaterial({
@@ -1649,7 +2062,7 @@
           };
         }
 
-        const sceneOrigin = rawBoundsCenter(payload.bounds || {});
+        let sceneOrigin = rawBoundsCenter(payload.bounds || {});
 
         function displayPoint(value) {
           return new THREE.Vector3(
@@ -1857,14 +2270,18 @@
           requestRender();
         }
 
-        function initAntiCollisionControls() {
+        function syncAntiCollisionControlsState() {
           if (!antiCollisionControlWrap || !antiCollisionButton || !antiCollisionControls) {
             return;
           }
-          if (!hasAntiCollisionVisualPayload()) {
+          const hasPayload = hasAntiCollisionVisualPayload();
+          antiCollisionControlWrap.classList.toggle("is-visible", hasPayload);
+          if (!hasPayload) {
+            antiCollisionControls.classList.remove("is-visible");
+            antiCollisionButton.classList.remove("is-active");
+            antiCollisionButton.setAttribute("aria-expanded", "false");
             return;
           }
-          antiCollisionControlWrap.classList.add("is-visible");
           antiCollisionControls
             .querySelectorAll("input[data-ac-layer]")
             .forEach((input) => {
@@ -1877,26 +2294,45 @@
               if (option) {
                 option.style.display = hasObjects ? "" : "none";
               }
-              if (!hasObjects) {
-                return;
-              }
               input.checked = Boolean(antiCollisionLayerState[layer]);
+              input.disabled = !hasObjects;
               input.setAttribute(
                 "aria-label",
                 antiCollisionLayerLabels[layer] || layer,
               );
-              input.addEventListener("change", () => {
-                antiCollisionLayerState[layer] = Boolean(input.checked);
-                applyAntiCollisionLayerVisibility();
-              });
             });
-          antiCollisionButton.addEventListener("click", () => {
-            const expanded = !antiCollisionControls.classList.contains("is-visible");
-            antiCollisionControls.classList.toggle("is-visible", expanded);
-            antiCollisionButton.classList.toggle("is-active", expanded);
-            antiCollisionButton.setAttribute("aria-expanded", expanded ? "true" : "false");
-          });
-          antiCollisionButton.setAttribute("aria-expanded", "false");
+        }
+
+        function initAntiCollisionControls() {
+          if (!antiCollisionControlWrap || !antiCollisionButton || !antiCollisionControls) {
+            return;
+          }
+          if (!antiCollisionControlsInitialized) {
+            antiCollisionControls
+              .querySelectorAll("input[data-ac-layer]")
+              .forEach((input) => {
+                const layer = String(input.getAttribute("data-ac-layer") || "");
+                if (!Object.prototype.hasOwnProperty.call(antiCollisionLayerState, layer)) {
+                  return;
+                }
+                input.addEventListener("change", () => {
+                  antiCollisionLayerState[layer] = Boolean(input.checked);
+                  applyAntiCollisionLayerVisibility();
+                });
+              });
+            antiCollisionButton.addEventListener("click", () => {
+              const expanded = !antiCollisionControls.classList.contains("is-visible");
+              antiCollisionControls.classList.toggle("is-visible", expanded);
+              antiCollisionButton.classList.toggle("is-active", expanded);
+              antiCollisionButton.setAttribute(
+                "aria-expanded",
+                expanded ? "true" : "false",
+              );
+            });
+            antiCollisionButton.setAttribute("aria-expanded", "false");
+            antiCollisionControlsInitialized = true;
+          }
+          syncAntiCollisionControlsState();
         }
 
         let circleMarkerTexture = null;
@@ -2122,15 +2558,33 @@
           const topWorld = miniMapState.target.y + viewHeight * 0.5;
           const padding = 8;
           miniMapLabels.forEach((item) => {
+            const sourceLabel = item.sourceLabel || null;
+            if (sourceLabel) {
+              if (item.role === "edit_delta_label") {
+                item.element.innerHTML = sourceLabel.element.innerHTML;
+              } else {
+                item.element.textContent = sourceLabel.element.textContent || "";
+              }
+              item.element.style.color =
+                sourceLabel.element.style.color || item.element.style.color;
+              if (sourceLabel.visible === false) {
+                item.element.style.display = "none";
+                return;
+              }
+            }
             const localX = ((item.position.x - leftWorld) / viewWidth) * rect.width;
             const localY = ((topWorld - item.position.y) / viewHeight) * rect.height;
+            const offsetX = Number(item.offsetX || 0);
+            const offsetY = Number(item.offsetY || 0);
+            const screenX = localX + offsetX;
+            const screenY = localY - offsetY;
             if (
-              !Number.isFinite(localX) ||
-              !Number.isFinite(localY) ||
-              localX < padding ||
-              localX > rect.width - padding ||
-              localY < padding ||
-              localY > rect.height - padding
+              !Number.isFinite(screenX) ||
+              !Number.isFinite(screenY) ||
+              screenX < padding ||
+              screenX > rect.width - padding ||
+              screenY < padding ||
+              screenY > rect.height - padding
             ) {
               item.element.style.display = "none";
               return;
@@ -2146,12 +2600,12 @@
             );
             const labelOffsetX = 6;
             const clampedX = clampValue(
-              localX,
+              screenX,
               padding,
               Math.max(rect.width - labelWidth - padding - labelOffsetX, padding),
             );
             const clampedY = clampValue(
-              localY,
+              screenY,
               padding + labelHeight * 0.5,
               Math.max(rect.height - padding - labelHeight * 0.5, padding),
             );
@@ -2272,17 +2726,210 @@
           };
         }
 
-        const bounds = transformedBounds(payload.bounds || {});
-        const minBound = bounds.min;
-        const maxBound = bounds.max;
-        const center = new THREE.Vector3()
+        function miniMapRulerRawPointAtEvent(event) {
+          const worldPoint = miniMapWorldAtEvent(event);
+          const rawPoint = dataPointFromDisplay(worldPoint);
+          return {
+            x: dataNumber(rawPoint[0], 0),
+            y: dataNumber(rawPoint[1], 0),
+          };
+        }
+
+        function miniMapRulerDisplayPoint(rawPoint) {
+          return displayPoint([
+            dataNumber(rawPoint && rawPoint.x, sceneOrigin.x),
+            dataNumber(rawPoint && rawPoint.y, sceneOrigin.y),
+            sceneOrigin.z,
+          ]);
+        }
+
+        function miniMapRulerCurrentEndRaw() {
+          if (
+            miniMapRulerState.phase === "measuring" &&
+            miniMapRulerState.previewRaw
+          ) {
+            return miniMapRulerState.previewRaw;
+          }
+          return miniMapRulerState.endRaw;
+        }
+
+        function miniMapRulerDistanceMeters(startRaw, endRaw) {
+          if (!startRaw || !endRaw) {
+            return 0.0;
+          }
+          return Math.hypot(
+            dataNumber(endRaw.x, 0) - dataNumber(startRaw.x, 0),
+            dataNumber(endRaw.y, 0) - dataNumber(startRaw.y, 0),
+          );
+        }
+
+        function formatMiniMapDistanceMeters(distanceMeters) {
+          const safeDistance = Math.max(Number(distanceMeters) || 0, 0);
+          const rounded =
+            safeDistance >= 1000.0
+              ? Math.round(safeDistance)
+              : Math.round(safeDistance * 10.0) / 10.0;
+          const text =
+            Math.abs(rounded - Math.round(rounded)) < 0.05
+              ? String(Math.round(rounded))
+              : rounded.toFixed(1);
+          return `${text} м`;
+        }
+
+        function resetMiniMapRulerMeasurement() {
+          miniMapRulerState.phase = "idle";
+          miniMapRulerState.startRaw = null;
+          miniMapRulerState.endRaw = null;
+          miniMapRulerState.previewRaw = null;
+        }
+
+        function syncMiniMapRulerButton() {
+          if (!miniMapRulerBtn) {
+            return;
+          }
+          miniMapRulerBtn.classList.toggle("is-active", Boolean(miniMapRulerState.enabled));
+          miniMapRulerBtn.setAttribute(
+            "aria-pressed",
+            miniMapRulerState.enabled ? "true" : "false",
+          );
+        }
+
+        function setMiniMapRulerEnabled(enabled) {
+          miniMapRulerState.enabled = Boolean(enabled);
+          if (!miniMapRulerState.enabled) {
+            resetMiniMapRulerMeasurement();
+          }
+          syncMiniMapRulerButton();
+        }
+
+        function updateMiniMapRulerOverlay() {
+          if (
+            !miniMapRulerLayer ||
+            !miniMapRulerLine ||
+            !miniMapRulerStart ||
+            !miniMapRulerEnd ||
+            !miniMapRulerLabel
+          ) {
+            return;
+          }
+          const overlayVisible =
+            miniMapState.expanded && Boolean(miniMapRulerState.enabled);
+          miniMapRulerLayer.classList.toggle("is-visible", overlayVisible);
+          if (!overlayVisible) {
+            miniMapRulerLine.style.display = "none";
+            miniMapRulerStart.style.display = "none";
+            miniMapRulerEnd.style.display = "none";
+            miniMapRulerLabel.style.display = "none";
+            miniMapRulerLayer.style.left = "";
+            miniMapRulerLayer.style.top = "";
+            miniMapRulerLayer.style.width = "";
+            miniMapRulerLayer.style.height = "";
+            return;
+          }
+          const rect = miniMapState.rect.width > 0
+            ? miniMapState.rect
+            : miniMapCanvasRect();
+          miniMapRulerLayer.style.left = `${Math.round(rect.x)}px`;
+          miniMapRulerLayer.style.top = `${Math.round(rect.canvasHeight - rect.y - rect.height)}px`;
+          miniMapRulerLayer.style.width = `${Math.round(rect.width)}px`;
+          miniMapRulerLayer.style.height = `${Math.round(rect.height)}px`;
+          const startRaw = miniMapRulerState.startRaw;
+          const endRaw = miniMapRulerCurrentEndRaw();
+          if (!startRaw || !endRaw) {
+            miniMapRulerLine.style.display = "none";
+            miniMapRulerStart.style.display = "none";
+            miniMapRulerEnd.style.display = "none";
+            miniMapRulerLabel.style.display = "none";
+            return;
+          }
+          const startLocal = miniMapLocalFromDisplayPoint(
+            miniMapRulerDisplayPoint(startRaw),
+            rect,
+          );
+          const endLocal = miniMapLocalFromDisplayPoint(
+            miniMapRulerDisplayPoint(endRaw),
+            rect,
+          );
+          if (
+            !Number.isFinite(startLocal.x) ||
+            !Number.isFinite(startLocal.y) ||
+            !Number.isFinite(endLocal.x) ||
+            !Number.isFinite(endLocal.y)
+          ) {
+            miniMapRulerLine.style.display = "none";
+            miniMapRulerStart.style.display = "none";
+            miniMapRulerEnd.style.display = "none";
+            miniMapRulerLabel.style.display = "none";
+            return;
+          }
+          const dx = endLocal.x - startLocal.x;
+          const dy = endLocal.y - startLocal.y;
+          const length = Math.hypot(dx, dy);
+          const angleDeg = Math.atan2(dy, dx) * 180.0 / Math.PI;
+          const distanceMeters = miniMapRulerDistanceMeters(startRaw, endRaw);
+          miniMapRulerStart.style.display = "block";
+          miniMapRulerStart.style.left = `${startLocal.x}px`;
+          miniMapRulerStart.style.top = `${startLocal.y}px`;
+          miniMapRulerEnd.style.display = "block";
+          miniMapRulerEnd.style.left = `${endLocal.x}px`;
+          miniMapRulerEnd.style.top = `${endLocal.y}px`;
+          miniMapRulerLine.style.display = "block";
+          miniMapRulerLine.style.left = `${startLocal.x}px`;
+          miniMapRulerLine.style.top = `${startLocal.y}px`;
+          miniMapRulerLine.style.width = `${length}px`;
+          miniMapRulerLine.style.transform =
+            `translate(0, -50%) rotate(${angleDeg}deg)`;
+          miniMapRulerLabel.textContent = formatMiniMapDistanceMeters(distanceMeters);
+          miniMapRulerLabel.style.display = "block";
+          const normalX = length > 0.000001 ? -dy / length : 0.0;
+          const normalY = length > 0.000001 ? dx / length : -1.0;
+          const labelWidth = Math.max(Number(miniMapRulerLabel.offsetWidth) || 0, 1);
+          const labelHeight = Math.max(Number(miniMapRulerLabel.offsetHeight) || 0, 1);
+          const labelCenterX = (startLocal.x + endLocal.x) * 0.5 + normalX * 16.0;
+          const labelCenterY = (startLocal.y + endLocal.y) * 0.5 + normalY * 16.0;
+          const labelLeft = clampValue(
+            labelCenterX,
+            labelWidth * 0.5 + 4.0,
+            Math.max(rect.width - labelWidth * 0.5 - 4.0, labelWidth * 0.5 + 4.0),
+          );
+          const labelTop = clampValue(
+            labelCenterY,
+            labelHeight * 0.5 + 4.0,
+            Math.max(rect.height - labelHeight * 0.5 - 4.0, labelHeight * 0.5 + 4.0),
+          );
+          miniMapRulerLabel.style.left = `${labelLeft}px`;
+          miniMapRulerLabel.style.top = `${labelTop}px`;
+        }
+
+        let bounds = transformedBounds(payload.bounds || {});
+        let minBound = bounds.min;
+        let maxBound = bounds.max;
+        let center = new THREE.Vector3()
           .addVectors(minBound, maxBound)
           .multiplyScalar(0.5);
-        const span = new THREE.Vector3().subVectors(maxBound, minBound);
-        const maxSpan = Math.max(span.x, span.y, span.z, 1);
-        const worldMarkerSize = Math.max(maxSpan * 0.008, 9.0);
-        const axisLength = Math.max(maxSpan * 0.18, 40.0);
-        fitMiniMapToRawBounds(payload.bounds || {});
+        let span = new THREE.Vector3().subVectors(maxBound, minBound);
+        let maxSpan = Math.max(span.x, span.y, span.z, 1);
+        let worldMarkerSize = Math.max(maxSpan * 0.008, 9.0);
+        let axisLength = Math.max(maxSpan * 0.18, 40.0);
+
+        function recomputeSceneMetrics(options) {
+          sceneOrigin = rawBoundsCenter(payload.bounds || {});
+          bounds = transformedBounds(payload.bounds || {});
+          minBound = bounds.min;
+          maxBound = bounds.max;
+          center = new THREE.Vector3()
+            .addVectors(minBound, maxBound)
+            .multiplyScalar(0.5);
+          span = new THREE.Vector3().subVectors(maxBound, minBound);
+          maxSpan = Math.max(span.x, span.y, span.z, 1);
+          worldMarkerSize = Math.max(maxSpan * 0.008, 9.0);
+          axisLength = Math.max(maxSpan * 0.18, 40.0);
+          if (!options || options.resetMiniMap !== false) {
+            fitMiniMapToRawBounds(payload.bounds || {});
+          }
+        }
+
+        recomputeSceneMetrics();
 
         function addSceneLabel(text, position, color, extraClassName, options) {
           const labelRole = String((options && options.role) || "label");
@@ -2313,16 +2960,42 @@
             visible: true,
           };
           sceneLabels.push(labelItem);
-          if (miniMapLabelLayer && options && options.role === "well_label") {
+          const shouldMirrorToMiniMap =
+            miniMapLabelLayer &&
+            (
+              labelRole === "well_label" ||
+              labelRole === "edit_delta_label" ||
+              labelRole === "edit_lateral_label"
+            );
+          if (shouldMirrorToMiniMap) {
             const miniMapElement = document.createElement("div");
-            miniMapElement.className = "minimap-well-label";
-            miniMapElement.textContent = String(text || "");
+            miniMapElement.className =
+              labelRole === "edit_delta_label"
+                ? "minimap-edit-delta-label"
+                : labelRole === "edit_lateral_label"
+                ? "minimap-edit-lateral-label"
+                : "minimap-well-label";
+            if (labelRole === "edit_delta_label") {
+              miniMapElement.innerHTML = String(text || "");
+            } else {
+              miniMapElement.textContent = String(text || "");
+            }
             miniMapElement.style.color = String(color || "#0f172a");
             miniMapLabelLayer.appendChild(miniMapElement);
             miniMapLabels.push({
               element: miniMapElement,
               position: position.clone(),
               text: String(text || ""),
+              role: labelRole,
+              sourceLabel: labelItem,
+              offsetX:
+                labelRole === "well_label"
+                  ? 0
+                  : Number((options && options.offsetX) || 0),
+              offsetY:
+                labelRole === "well_label"
+                  ? 0
+                  : Number((options && options.offsetY) || 0),
             });
           }
           return labelItem;
@@ -2433,6 +3106,26 @@
           return 10.0 * base;
         }
 
+        function worldAxisZScaleFactor() {
+          const index = Math.min(
+            Math.max(Math.round(Number(worldAxisOverlay.zScaleIndex) || 0), 0),
+            WORLD_AXIS_Z_SCALE_OPTIONS.length - 1,
+          );
+          return Number(WORLD_AXIS_Z_SCALE_OPTIONS[index]) || 1;
+        }
+
+        function worldAxisZScaleLabel() {
+          return `1:${String(worldAxisZScaleFactor())}`;
+        }
+
+        function worldAxisDisplayZ(rawZValue) {
+          return (
+            (Number(rawZValue) || 0) *
+            Z_DISPLAY_SIGN /
+            Math.max(worldAxisZScaleFactor(), 1.0)
+          );
+        }
+
         function formatWorldAxisValue(value, step) {
           const safeStep = Math.max(Math.abs(Number(step) || 0), 0.000001);
           const decimals =
@@ -2468,42 +3161,113 @@
           }
         }
 
-        function worldAxisTargetRawPoint() {
-          const targetRaw = dataPointFromDisplay(controls.target);
+        function normalizedRawBounds(rawBounds) {
+          if (!rawBounds || typeof rawBounds !== "object") {
+            return null;
+          }
+          const rawMin = Array.isArray(rawBounds.min) ? rawBounds.min : null;
+          const rawMax = Array.isArray(rawBounds.max) ? rawBounds.max : null;
+          if (!rawMin || !rawMax || rawMin.length < 3 || rawMax.length < 3) {
+            return null;
+          }
+          const minX = dataNumber(rawMin[0], 0);
+          const minY = dataNumber(rawMin[1], 0);
+          const minZ = dataNumber(rawMin[2], 0);
+          const maxX = dataNumber(rawMax[0], minX);
+          const maxY = dataNumber(rawMax[1], minY);
+          const maxZ = dataNumber(rawMax[2], minZ);
           return {
-            x: Number(targetRaw[0]) || 0,
-            y: Number(targetRaw[1]) || 0,
+            min: [
+              Math.min(minX, maxX),
+              Math.min(minY, maxY),
+              Math.min(minZ, maxZ),
+            ],
+            max: [
+              Math.max(minX, maxX),
+              Math.max(minY, maxY),
+              Math.max(minZ, maxZ),
+            ],
           };
         }
 
-        function syncWorldAxisAnchorRaw(initialAnchorRaw) {
-          const currentTargetRaw = worldAxisTargetRawPoint();
-          if (!worldAxisOverlay.anchorInitialized) {
-            const anchorX = Array.isArray(initialAnchorRaw)
-              ? Number(initialAnchorRaw[0])
-              : currentTargetRaw.x;
-            const anchorY = Array.isArray(initialAnchorRaw)
-              ? Number(initialAnchorRaw[1])
-              : currentTargetRaw.y;
-            worldAxisOverlay.anchorRaw = {
-              x: Number.isFinite(anchorX) ? anchorX : currentTargetRaw.x,
-              y: Number.isFinite(anchorY) ? anchorY : currentTargetRaw.y,
-            };
-            worldAxisOverlay.lastTargetRaw = {
-              x: currentTargetRaw.x,
-              y: currentTargetRaw.y,
-            };
-            worldAxisOverlay.anchorInitialized = true;
+        function worldAxisDefaultPadFocusId() {
+          return worldAxisPadFocusIds.length > 0
+            ? String(worldAxisPadFocusIds[0] || "")
+            : "";
+        }
+
+        function worldAxisPadFocusIdForFocusId(focusId) {
+          const normalizedId = String(focusId || "").trim();
+          if (!normalizedId) {
+            return "";
+          }
+          if (worldAxisFocusPadById.has(normalizedId)) {
+            return String(worldAxisFocusPadById.get(normalizedId) || "");
+          }
+          return normalizedId.startsWith("pad::") ? normalizedId : "";
+        }
+
+        function worldAxisRawBoundsForPadFocusId(focusId) {
+          const normalizedFocusId = String(focusId || "").trim();
+          if (!normalizedFocusId) {
+            return null;
+          }
+          return normalizedRawBounds(focusTargets[normalizedFocusId]);
+        }
+
+        function worldAxisCurrentRawBounds() {
+          return (
+            worldAxisRawBoundsForPadFocusId(worldAxisOverlay.activePadFocusId) ||
+            normalizedRawBounds(payload.bounds) || {
+              min: [0.0, 0.0, 0.0],
+              max: [1000.0, 1000.0, 1000.0],
+            }
+          );
+        }
+
+        function worldAxisBaseAnchorForBounds(rawBounds) {
+          const bounds = normalizedRawBounds(rawBounds) || worldAxisCurrentRawBounds();
+          return {
+            x: dataNumber(bounds.min[0], 0),
+            y: dataNumber(bounds.min[1], 0),
+          };
+        }
+
+        function worldAxisResolvedAnchorRaw() {
+          return {
+            x:
+              dataNumber(worldAxisOverlay.baseAnchorRaw.x, 0) +
+              dataNumber(worldAxisOverlay.dragOffsetRaw.x, 0),
+            y:
+              dataNumber(worldAxisOverlay.baseAnchorRaw.y, 0) +
+              dataNumber(worldAxisOverlay.dragOffsetRaw.y, 0),
+          };
+        }
+
+        function setWorldAxisActivePadFocus(focusId, options) {
+          const padFocusId =
+            worldAxisPadFocusIdForFocusId(focusId) || worldAxisDefaultPadFocusId();
+          const activeBounds =
+            worldAxisRawBoundsForPadFocusId(padFocusId) || normalizedRawBounds(payload.bounds);
+          worldAxisOverlay.activePadFocusId = activeBounds ? padFocusId : "";
+          worldAxisOverlay.activeBoundsRaw = activeBounds;
+          worldAxisOverlay.baseAnchorRaw = worldAxisBaseAnchorForBounds(activeBounds);
+          if (!options || options.resetOffset !== false) {
+            worldAxisOverlay.dragOffsetRaw = { x: 0.0, y: 0.0 };
+          }
+          worldAxisOverlay.anchorRaw = worldAxisResolvedAnchorRaw();
+          worldAxisOverlay.signature = "";
+        }
+
+        function syncWorldAxisActivePadFocus(options) {
+          const currentBounds = worldAxisRawBoundsForPadFocusId(worldAxisOverlay.activePadFocusId);
+          if (currentBounds && (!options || options.resetOffset !== true)) {
+            worldAxisOverlay.activeBoundsRaw = currentBounds;
+            worldAxisOverlay.baseAnchorRaw = worldAxisBaseAnchorForBounds(currentBounds);
+            worldAxisOverlay.anchorRaw = worldAxisResolvedAnchorRaw();
             return;
           }
-          const deltaX = currentTargetRaw.x - worldAxisOverlay.lastTargetRaw.x;
-          const deltaY = currentTargetRaw.y - worldAxisOverlay.lastTargetRaw.y;
-          worldAxisOverlay.anchorRaw.x += Number.isFinite(deltaX) ? deltaX : 0;
-          worldAxisOverlay.anchorRaw.y += Number.isFinite(deltaY) ? deltaY : 0;
-          worldAxisOverlay.lastTargetRaw = {
-            x: currentTargetRaw.x,
-            y: currentTargetRaw.y,
-          };
+          setWorldAxisActivePadFocus(worldAxisOverlay.activePadFocusId, options);
         }
 
         function ensureWorldAxisLabels(count) {
@@ -2534,16 +3298,23 @@
           }
         }
 
+        function worldAxisDepthRangeRaw() {
+          const rawBounds = worldAxisCurrentRawBounds();
+          const rawMin = Array.isArray(rawBounds.min) ? rawBounds.min : [0, 0, 0];
+          const rawMax = Array.isArray(rawBounds.max) ? rawBounds.max : [0, 0, 0];
+          const planeZ = Number(WORLD_AXIS_PLANE_RAW_Z) || 0;
+          const minZ = dataNumber(rawMin[2], planeZ);
+          const maxZ = dataNumber(rawMax[2], planeZ);
+          return Math.max(minZ, maxZ, planeZ) - planeZ;
+        }
+
         function worldAxisViewMetrics() {
-          const initialAnchorRaw = worldAxisPlaneIntersectionRaw(
-            WORLD_AXIS_ANCHOR_NDC.x,
-            WORLD_AXIS_ANCHOR_NDC.y,
-            WORLD_AXIS_PLANE_RAW_Z,
-          );
-          syncWorldAxisAnchorRaw(initialAnchorRaw);
+          syncWorldAxisActivePadFocus({ resetOffset: false });
+          const anchorRaw = worldAxisResolvedAnchorRaw();
+          worldAxisOverlay.anchorRaw = anchorRaw;
           const anchorDisplay = displayPoint([
-            worldAxisOverlay.anchorRaw.x,
-            worldAxisOverlay.anchorRaw.y,
+            anchorRaw.x,
+            anchorRaw.y,
             WORLD_AXIS_PLANE_RAW_Z,
           ]);
           const unitsPerPixel = worldUnitsPerPixelAt(anchorDisplay);
@@ -2551,22 +3322,18 @@
             const fallbackSpan = Math.max(maxSpan * 0.65, 100.0);
             return {
               anchorRaw: {
-                x: worldAxisOverlay.anchorRaw.x,
-                y: worldAxisOverlay.anchorRaw.y,
+                x: anchorRaw.x,
+                y: anchorRaw.y,
               },
-              viewWidth: fallbackSpan,
-              viewHeight: fallbackSpan / Math.max(camera.aspect || 1.0, 0.25),
+              unitsPerPixel: fallbackSpan / Math.max(renderer.domElement.clientHeight || 1, 1),
             };
           }
-          const canvasWidth = Math.max(renderer.domElement.clientWidth || 1, 1);
-          const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
           return {
             anchorRaw: {
-              x: worldAxisOverlay.anchorRaw.x,
-              y: worldAxisOverlay.anchorRaw.y,
+              x: anchorRaw.x,
+              y: anchorRaw.y,
             },
-            viewWidth: Math.max(unitsPerPixel * canvasWidth, 10.0),
-            viewHeight: Math.max(unitsPerPixel * canvasHeight, 10.0),
+            unitsPerPixel: unitsPerPixel,
           };
         }
 
@@ -2599,84 +3366,27 @@
           return lineSegments;
         }
 
-        function rebuildWorldAxisGeometry() {
-          const metrics = worldAxisViewMetrics();
-          const targetWidth = Math.max(Number(metrics.viewWidth) * 0.24, 30.0);
-          const targetHeight = Math.max(Number(metrics.viewHeight) * 0.24, 30.0);
-          const step = worldAxisNiceStep(Math.max(targetWidth, targetHeight) / 4.8);
-          const xTickCount = Math.max(
-            3,
-            Math.min(8, Math.round(targetWidth / Math.max(step, 0.000001))),
-          );
-          const yTickCount = Math.max(
-            3,
-            Math.min(8, Math.round(targetHeight / Math.max(step, 0.000001))),
-          );
-          const zTickCount = Math.max(
-            2,
-            Math.min(5, Math.round(Math.max(xTickCount, yTickCount) * 0.75)),
-          );
-          const xLength = step * xTickCount;
-          const yLength = step * yTickCount;
-          const zLength = step * zTickCount;
-          const signature = [
-            step.toFixed(6),
-            xTickCount,
-            yTickCount,
-            zTickCount,
-          ].join("|");
-          worldAxisOverlay.anchorRaw = {
-            x: Number(metrics.anchorRaw.x) || 0,
-            y: Number(metrics.anchorRaw.y) || 0,
-          };
-          if (worldAxisOverlay.signature === signature) {
-            updateWorldAxisLabelsPosition();
-            return;
-          }
-          worldAxisOverlay.signature = signature;
-          clearWorldAxisGeometry();
-
-          const gridPositions = [];
-          for (let xIndex = 0; xIndex <= xTickCount; xIndex += 1) {
-            const xValue = step * xIndex;
-            pushWorldAxisSegment(
-              gridPositions,
-              [xValue, 0, 0],
-              [xValue, yLength, 0],
-            );
-          }
-          for (let yIndex = 0; yIndex <= yTickCount; yIndex += 1) {
-            const yValue = step * yIndex;
-            pushWorldAxisSegment(
-              gridPositions,
-              [0, yValue, 0],
-              [xLength, yValue, 0],
-            );
-          }
-
-          const axisPositions = [];
-          pushWorldAxisSegment(axisPositions, [0, 0, 0], [xLength, 0, 0]);
-          pushWorldAxisSegment(axisPositions, [0, 0, 0], [0, yLength, 0]);
-          pushWorldAxisSegment(
-            axisPositions,
-            [0, 0, 0],
-            [0, 0, zLength * Z_DISPLAY_SIGN],
-          );
-
-          worldAxisOverlay.group.add(
-            createWorldAxisLineSegments(gridPositions, "#9aa3af", 0.24, 2.0),
-          );
-          worldAxisOverlay.group.add(
-            createWorldAxisLineSegments(axisPositions, "#6b7280", 0.58, 2.2),
-          );
-
+        function buildWorldAxisLabelSpecs(
+          xyStep,
+          zStep,
+          xTickCount,
+          yTickCount,
+          zTickCount,
+          xDirection,
+          yDirection,
+          zLabelEvery,
+        ) {
+          const xMax = xyStep * xTickCount * xDirection;
+          const yMax = xyStep * yTickCount * yDirection;
+          const zMax = zStep * zTickCount;
+          const zScaleFactor = worldAxisZScaleFactor();
           const labelSpecs = [];
           for (let xIndex = 0; xIndex <= xTickCount; xIndex += 1) {
-            const xValue = step * xIndex;
+            const xValue = xyStep * xIndex * xDirection;
             labelSpecs.push({
               text: formatWorldAxisValue(
                 worldAxisOverlay.anchorRaw.x + xValue,
-                step,
+                xyStep,
               ),
               color: "#5b6472",
               localPosition: new THREE.Vector3(xValue, 0, 0),
@@ -2685,11 +3395,11 @@
             });
           }
           for (let yIndex = 1; yIndex <= yTickCount; yIndex += 1) {
-            const yValue = step * yIndex;
+            const yValue = xyStep * yIndex * yDirection;
             labelSpecs.push({
               text: formatWorldAxisValue(
                 worldAxisOverlay.anchorRaw.y + yValue,
-                step,
+                xyStep,
               ),
               color: "#5b6472",
               localPosition: new THREE.Vector3(0, yValue, 0),
@@ -2697,27 +3407,171 @@
               offsetY: 0,
             });
           }
+          for (let zIndex = 1; zIndex <= zTickCount; zIndex += 1) {
+            if (zIndex !== zTickCount && zIndex % zLabelEvery !== 0) {
+              continue;
+            }
+            const zValue = zStep * zIndex;
+            labelSpecs.push({
+              text: formatWorldAxisValue(
+                WORLD_AXIS_PLANE_RAW_Z + zValue,
+                zStep,
+              ),
+              color: "#5b6472",
+              localPosition: new THREE.Vector3(
+                xMax,
+                yMax,
+                worldAxisDisplayZ(zValue),
+              ),
+              offsetX: 10,
+              offsetY: 0,
+            });
+          }
           labelSpecs.push({
             text: "X",
             color: "#6b7280",
-            localPosition: new THREE.Vector3(xLength, 0, 0),
+            localPosition: new THREE.Vector3(xMax, 0, 0),
             offsetX: 10,
             offsetY: -2,
           });
           labelSpecs.push({
             text: "Y",
             color: "#6b7280",
-            localPosition: new THREE.Vector3(0, yLength, 0),
+            localPosition: new THREE.Vector3(0, yMax, 0),
             offsetX: -2,
             offsetY: 12,
           });
           labelSpecs.push({
             text: "Z",
             color: "#6b7280",
-            localPosition: new THREE.Vector3(0, 0, zLength * Z_DISPLAY_SIGN),
+            localPosition: new THREE.Vector3(
+              xMax,
+              yMax,
+              worldAxisDisplayZ(zMax) - Math.max(zStep * 0.45 / zScaleFactor, 24.0),
+            ),
             offsetX: 8,
             offsetY: 0,
           });
+          return labelSpecs;
+        }
+
+        function rebuildWorldAxisGeometry() {
+          const metrics = worldAxisViewMetrics();
+          const activeBounds = worldAxisCurrentRawBounds();
+          const xSpanRaw = Math.max(
+            dataNumber(activeBounds.max[0], 0) - dataNumber(activeBounds.min[0], 0),
+            1.0,
+          );
+          const ySpanRaw = Math.max(
+            dataNumber(activeBounds.max[1], 0) - dataNumber(activeBounds.min[1], 0),
+            1.0,
+          );
+          const xyStep = worldAxisNiceStep(
+            Math.max(xSpanRaw, ySpanRaw, 40.0) / WORLD_AXIS_GRID_SQUARES_PER_SIDE,
+          );
+          const zStep = worldAxisNiceStep(Math.max(worldAxisDepthRangeRaw() / 5.0, 1000.0));
+          const xDirection = 1.0;
+          const yDirection = 1.0;
+          const xTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;
+          const yTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;
+          const zDepthRangeRaw = Math.max(worldAxisDepthRangeRaw(), zStep);
+          const zTickCount = Math.max(
+            1,
+            Math.ceil(zDepthRangeRaw / Math.max(zStep, 0.000001)),
+          );
+          const zLength = zStep * zTickCount;
+          const zDisplayLength = Math.abs(worldAxisDisplayZ(zLength));
+          const approxZPixelLength =
+            zDisplayLength / Math.max(Number(metrics.unitsPerPixel) || 0.000001, 0.000001);
+          const zLabelEvery = Math.max(
+            1,
+            Math.ceil(zTickCount / Math.max(Math.floor(approxZPixelLength / 54.0), 3)),
+          );
+          const xMin = Math.min(0.0, xyStep * xTickCount * xDirection);
+          const xMax = Math.max(0.0, xyStep * xTickCount * xDirection);
+          const yMin = Math.min(0.0, xyStep * yTickCount * yDirection);
+          const yMax = Math.max(0.0, xyStep * yTickCount * yDirection);
+          const xEnd = xyStep * xTickCount * xDirection;
+          const yEnd = xyStep * yTickCount * yDirection;
+          const signature = [
+            xyStep.toFixed(6),
+            zStep.toFixed(6),
+            xTickCount,
+            yTickCount,
+            zTickCount,
+            zLabelEvery,
+            worldAxisZScaleFactor().toFixed(3),
+            dataNumber(activeBounds.min[0], 0).toFixed(3),
+            dataNumber(activeBounds.min[1], 0).toFixed(3),
+            dataNumber(activeBounds.max[0], 0).toFixed(3),
+            dataNumber(activeBounds.max[1], 0).toFixed(3),
+          ].join("|");
+          worldAxisOverlay.anchorRaw = {
+            x: Number(metrics.anchorRaw.x) || 0,
+            y: Number(metrics.anchorRaw.y) || 0,
+          };
+          const labelSpecs = buildWorldAxisLabelSpecs(
+            xyStep,
+            zStep,
+            xTickCount,
+            yTickCount,
+            zTickCount,
+            xDirection,
+            yDirection,
+            zLabelEvery,
+          );
+          if (worldAxisOverlay.signature === signature) {
+            worldAxisOverlay.labelSpecs = labelSpecs;
+            ensureWorldAxisLabels(labelSpecs.length);
+            updateWorldAxisLabelsPosition();
+            return;
+          }
+          worldAxisOverlay.signature = signature;
+          clearWorldAxisGeometry();
+
+          const gridPositions = [];
+          for (let xIndex = 0; xIndex <= xTickCount; xIndex += 1) {
+            const xValue = xyStep * xIndex * xDirection;
+            pushWorldAxisSegment(
+              gridPositions,
+              [xValue, yMin, 0],
+              [xValue, yMax, 0],
+            );
+          }
+          for (let yIndex = 0; yIndex <= yTickCount; yIndex += 1) {
+            const yValue = xyStep * yIndex * yDirection;
+            pushWorldAxisSegment(
+              gridPositions,
+              [xMin, yValue, 0],
+              [xMax, yValue, 0],
+            );
+          }
+
+          const axisPositions = [];
+          pushWorldAxisSegment(axisPositions, [xMin, 0, 0], [xMax, 0, 0]);
+          pushWorldAxisSegment(axisPositions, [0, yMin, 0], [0, yMax, 0]);
+          pushWorldAxisSegment(
+            axisPositions,
+            [xEnd, yEnd, 0],
+            [xEnd, yEnd, worldAxisDisplayZ(zLength)],
+          );
+          const zTickHalf = Math.max(xyStep * 0.08, 6.0);
+          for (let zIndex = 1; zIndex <= zTickCount; zIndex += 1) {
+            const zValue = zStep * zIndex;
+            pushWorldAxisSegment(
+              axisPositions,
+              [xEnd - zTickHalf, yEnd, worldAxisDisplayZ(zValue)],
+              [xEnd + zTickHalf, yEnd, worldAxisDisplayZ(zValue)],
+            );
+          }
+
+          worldAxisOverlay.group.add(
+            createWorldAxisLineSegments(gridPositions, "#9aa3af", 0.24, 2.0),
+          );
+          worldAxisOverlay.group.add(
+            createWorldAxisLineSegments(axisPositions, "#6b7280", 0.58, 2.2),
+          );
+
           worldAxisOverlay.labelSpecs = labelSpecs;
           ensureWorldAxisLabels(labelSpecs.length);
           updateWorldAxisLabelsPosition();
@@ -2747,6 +3601,42 @@
           }
         }
 
+        function updateWorldAxisDragHandlePosition(
+          canvasRect,
+          labelRect,
+          width,
+          height,
+          offsetLeft,
+          offsetTop,
+        ) {
+          if (!worldAxisDragHandle || !worldAxisOverlay.enabled) {
+            if (worldAxisDragHandle) {
+              worldAxisDragHandle.style.display = "none";
+              worldAxisDragHandle.classList.remove("is-dragging");
+            }
+            return;
+          }
+          const projected = worldAxisOverlay.group.position.clone().project(camera);
+          if (
+            projected.z < -1.0 ||
+            projected.z > 1.0 ||
+            projected.x < -1.25 ||
+            projected.x > 1.25 ||
+            projected.y < -1.25 ||
+            projected.y > 1.25
+          ) {
+            worldAxisDragHandle.style.display = "none";
+            worldAxisDragHandle.classList.remove("is-dragging");
+            return;
+          }
+          const screenX = offsetLeft + (((projected.x + 1.0) * 0.5) * width) - 12;
+          const screenY = offsetTop + (((-projected.y + 1.0) * 0.5) * height) + 12;
+          worldAxisDragHandle.style.display = "block";
+          worldAxisDragHandle.style.left = `${Math.round(screenX)}px`;
+          worldAxisDragHandle.style.top = `${Math.round(screenY)}px`;
+          worldAxisDragHandle.classList.toggle("is-dragging", Boolean(worldAxisOverlay.dragging));
+        }
+
         function syncWorldAxisVisibility() {
           worldAxisOverlay.group.visible = Boolean(worldAxisOverlay.enabled);
           worldAxisOverlay.labels.forEach((label, index) => {
@@ -2754,6 +3644,10 @@
               Boolean(worldAxisOverlay.enabled) &&
               index < worldAxisOverlay.labelSpecs.length;
           });
+          if (!worldAxisOverlay.enabled && worldAxisDragHandle) {
+            worldAxisDragHandle.style.display = "none";
+            worldAxisDragHandle.classList.remove("is-dragging");
+          }
         }
 
         function updateWorldAxisOverlay() {
@@ -2765,33 +3659,166 @@
           syncWorldAxisVisibility();
         }
 
+        function worldAxisPointerNdcFromEvent(event) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          return {
+            x: ((Number(event.clientX || 0) - rect.left) / Math.max(rect.width, 1.0)) * 2.0 - 1.0,
+            y: -(((Number(event.clientY || 0) - rect.top) / Math.max(rect.height, 1.0)) * 2.0 - 1.0),
+          };
+        }
+
+        function startWorldAxisDrag(event) {
+          if (!worldAxisOverlay.enabled) {
+            return;
+          }
+          const ndc = worldAxisPointerNdcFromEvent(event);
+          const startRaw = worldAxisPlaneIntersectionRaw(
+            ndc.x,
+            ndc.y,
+            WORLD_AXIS_PLANE_RAW_Z,
+          );
+          if (!Array.isArray(startRaw)) {
+            return;
+          }
+          worldAxisOverlay.dragging = true;
+          worldAxisOverlay.dragStartRaw = {
+            x: dataNumber(startRaw[0], 0),
+            y: dataNumber(startRaw[1], 0),
+          };
+          worldAxisOverlay.dragStartOffsetRaw = {
+            x: dataNumber(worldAxisOverlay.dragOffsetRaw.x, 0),
+            y: dataNumber(worldAxisOverlay.dragOffsetRaw.y, 0),
+          };
+          interactionActive = true;
+          controls.enabled = false;
+          hideTooltip();
+          if (worldAxisDragHandle) {
+            worldAxisDragHandle.classList.add("is-dragging");
+            try {
+              worldAxisDragHandle.setPointerCapture(event.pointerId);
+            } catch (e) { /* ignore */ }
+          }
+          requestRender();
+          event.preventDefault();
+          event.stopPropagation();
+        }
+
+        function handleWorldAxisDragPointerMove(event) {
+          if (!worldAxisOverlay.dragging || !worldAxisOverlay.dragStartRaw) {
+            return;
+          }
+          const ndc = worldAxisPointerNdcFromEvent(event);
+          const nextRaw = worldAxisPlaneIntersectionRaw(
+            ndc.x,
+            ndc.y,
+            WORLD_AXIS_PLANE_RAW_Z,
+          );
+          if (!Array.isArray(nextRaw)) {
+            return;
+          }
+          worldAxisOverlay.dragOffsetRaw = {
+            x:
+              dataNumber(worldAxisOverlay.dragStartOffsetRaw.x, 0) +
+              (dataNumber(nextRaw[0], 0) - dataNumber(worldAxisOverlay.dragStartRaw.x, 0)),
+            y:
+              dataNumber(worldAxisOverlay.dragStartOffsetRaw.y, 0) +
+              (dataNumber(nextRaw[1], 0) - dataNumber(worldAxisOverlay.dragStartRaw.y, 0)),
+          };
+          worldAxisOverlay.anchorRaw = worldAxisResolvedAnchorRaw();
+          requestRender();
+          event.preventDefault();
+          event.stopPropagation();
+        }
+
+        function endWorldAxisDrag(event) {
+          if (!worldAxisOverlay.dragging) {
+            return;
+          }
+          worldAxisOverlay.dragging = false;
+          worldAxisOverlay.dragStartRaw = null;
+          controls.enabled = true;
+          interactionActive = false;
+          if (worldAxisDragHandle) {
+            worldAxisDragHandle.classList.remove("is-dragging");
+            try {
+              worldAxisDragHandle.releasePointerCapture(event.pointerId);
+            } catch (e) { /* ignore */ }
+          }
+          requestRender();
+          event.preventDefault();
+          event.stopPropagation();
+        }
+
+        function syncWorldAxisScaleControls() {
+          if (worldAxisZScaleSlider) {
+            worldAxisZScaleSlider.value = String(worldAxisOverlay.zScaleIndex);
+          }
+          if (worldAxisZScaleValue) {
+            worldAxisZScaleValue.textContent = worldAxisZScaleLabel();
+          }
+        }
+
         function initWorldAxisControls() {
           if (
             !worldAxisControlWrap ||
             !worldAxisButton ||
             !worldAxisControls ||
-            !worldAxisToggle
+            !worldAxisToggle ||
+            !worldAxisZScaleSlider ||
+            !worldAxisZScaleValue
           ) {
             return;
           }
-          worldAxisToggle.checked = Boolean(worldAxisOverlay.enabled);
-          worldAxisToggle.addEventListener("change", () => {
-            worldAxisOverlay.enabled = Boolean(worldAxisToggle.checked);
-            storeBoolean(WORLD_AXIS_STORAGE_KEY, worldAxisOverlay.enabled);
-            if (worldAxisOverlay.enabled) {
-              worldAxisOverlay.anchorInitialized = false;
-              rebuildWorldAxisGeometry();
+          if (!worldAxisControlsInitialized) {
+            worldAxisToggle.addEventListener("change", () => {
+              worldAxisOverlay.enabled = Boolean(worldAxisToggle.checked);
+              storeBoolean(WORLD_AXIS_STORAGE_KEY, worldAxisOverlay.enabled);
+              if (worldAxisOverlay.enabled) {
+                syncWorldAxisActivePadFocus({ resetOffset: false });
+                rebuildWorldAxisGeometry();
+              }
+              syncWorldAxisVisibility();
+              requestRender();
+            });
+            worldAxisButton.addEventListener("click", () => {
+              const expanded = !worldAxisControls.classList.contains("is-visible");
+              worldAxisControls.classList.toggle("is-visible", expanded);
+              worldAxisButton.classList.toggle("is-active", expanded);
+              worldAxisButton.setAttribute(
+                "aria-expanded",
+                expanded ? "true" : "false",
+              );
+            });
+            worldAxisButton.setAttribute("aria-expanded", "false");
+            if (worldAxisDragHandle) {
+              worldAxisDragHandle.addEventListener("pointerdown", startWorldAxisDrag);
             }
-            syncWorldAxisVisibility();
-            requestRender();
-          });
-          worldAxisButton.addEventListener("click", () => {
-            const expanded = !worldAxisControls.classList.contains("is-visible");
-            worldAxisControls.classList.toggle("is-visible", expanded);
-            worldAxisButton.classList.toggle("is-active", expanded);
-            worldAxisButton.setAttribute("aria-expanded", expanded ? "true" : "false");
-          });
-          worldAxisButton.setAttribute("aria-expanded", "false");
+            worldAxisZScaleSlider.addEventListener("input", () => {
+              const nextIndex = Math.min(
+                Math.max(Math.round(Number(worldAxisZScaleSlider.value) || 0), 0),
+                WORLD_AXIS_Z_SCALE_OPTIONS.length - 1,
+              );
+              if (nextIndex === worldAxisOverlay.zScaleIndex) {
+                syncWorldAxisScaleControls();
+                return;
+              }
+              worldAxisOverlay.zScaleIndex = nextIndex;
+              worldAxisOverlay.signature = "";
+              storeStringValue(
+                WORLD_AXIS_Z_SCALE_STORAGE_KEY,
+                String(worldAxisOverlay.zScaleIndex),
+              );
+              syncWorldAxisScaleControls();
+              if (worldAxisOverlay.enabled) {
+                rebuildWorldAxisGeometry();
+              }
+              requestRender();
+            });
+            worldAxisControlsInitialized = true;
+          }
+          worldAxisToggle.checked = Boolean(worldAxisOverlay.enabled);
+          syncWorldAxisScaleControls();
+          syncWorldAxisActivePadFocus({ resetOffset: false });
           syncWorldAxisVisibility();
         }
 
@@ -2837,6 +3864,14 @@
 
         function fitCamera() {
           fitCameraToRawBounds(payload.bounds || {});
+        }
+
+        function focusViewerTarget(rawBounds, focusId) {
+          const padFocusId = worldAxisPadFocusIdForFocusId(focusId);
+          if (padFocusId) {
+            setWorldAxisActivePadFocus(padFocusId, { resetOffset: true });
+          }
+          fitCameraToRawBounds(rawBounds);
         }
 
         function editWellTargetFocusBounds(index) {
@@ -2950,7 +3985,7 @@
                 return;
               }
               if (!editModeActive) {
-                fitCameraToRawBounds(targetBounds);
+                focusViewerTarget(targetBounds, String(item.id || ""));
               }
             });
           }
@@ -3038,7 +4073,7 @@
             }
             const targetBounds = focusTargets[String(item.id || "")];
             if (targetBounds && !editModeActive) {
-              fitCameraToRawBounds(targetBounds);
+              focusViewerTarget(targetBounds, String(item.id || ""));
             }
           });
           return button;
@@ -3687,28 +4722,10 @@
             addOverlapVolumeMesh(item);
             return;
           }
-          const vertices = Array.isArray(item.vertices) ? item.vertices : [];
-          const faces = Array.isArray(item.faces) ? item.faces : [];
-          if (vertices.length === 0 || faces.length === 0) {
+          const geometry = meshGeometryFromPayloadItem(item);
+          if (!geometry) {
             return;
           }
-          const positions = new Float32Array(vertices.length * 3);
-          vertices.forEach((vertex, index) => {
-            const [xValue, yValue, zValue] = displayXYZ(vertex[0], vertex[1], vertex[2]);
-            positions[index * 3 + 0] = xValue;
-            positions[index * 3 + 1] = yValue;
-            positions[index * 3 + 2] = zValue;
-          });
-          const indices = new Uint32Array(faces.length * 3);
-          faces.forEach((face, index) => {
-            indices[index * 3 + 0] = Number(face[0] || 0);
-            indices[index * 3 + 1] = Number(face[1] || 0);
-            indices[index * 3 + 2] = Number(face[2] || 0);
-          });
-          const geometry = new THREE.BufferGeometry();
-          geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-          geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-          geometry.computeVertexNormals();
           const baseColor = hexOrDefault(item.color, "#94a3b8");
           const opacity = numberOrDefault(item.opacity, 0.25);
           const isConeSurface =
@@ -3930,6 +4947,9 @@
         }
 
         function addMiniMapTrajectoryOverlay(item) {
+          if (!miniMapOverlayBuilt) {
+            return;
+          }
           if (!miniMapOverlayEligibleLine(item)) {
             return;
           }
@@ -3965,6 +4985,9 @@
         }
 
         function addMiniMapConeOverlay(item, sourceGeometry) {
+          if (!miniMapOverlayBuilt) {
+            return;
+          }
           if (String((item && item.role) || "") !== "cone" || !sourceGeometry) {
             return;
           }
@@ -4047,6 +5070,9 @@
         }
 
         function addMiniMapMarkerOverlay(item) {
+          if (!miniMapOverlayBuilt) {
+            return;
+          }
           if (String(item.role || "") !== "marker") {
             return;
           }
@@ -4086,6 +5112,51 @@
             depthWrite: false,
           });
           miniMapOverlayScene.add(new THREE.Points(geometry, material));
+        }
+
+        function meshGeometryFromPayloadItem(item) {
+          const vertices = Array.isArray(item && item.vertices) ? item.vertices : [];
+          const faces = Array.isArray(item && item.faces) ? item.faces : [];
+          if (vertices.length === 0 || faces.length === 0) {
+            return null;
+          }
+          const positions = new Float32Array(vertices.length * 3);
+          vertices.forEach((vertex, index) => {
+            const [xValue, yValue, zValue] = displayXYZ(vertex[0], vertex[1], vertex[2]);
+            positions[index * 3 + 0] = xValue;
+            positions[index * 3 + 1] = yValue;
+            positions[index * 3 + 2] = zValue;
+          });
+          const indices = new Uint32Array(faces.length * 3);
+          faces.forEach((face, index) => {
+            indices[index * 3 + 0] = Number(face[0] || 0);
+            indices[index * 3 + 1] = Number(face[1] || 0);
+            indices[index * 3 + 2] = Number(face[2] || 0);
+          });
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+          geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+          geometry.computeVertexNormals();
+          return geometry;
+        }
+
+        function buildMiniMapOverlaysFromPayload() {
+          if (miniMapOverlayBuilt) {
+            return;
+          }
+          miniMapOverlayBuilt = true;
+          (payload.lines || []).forEach((item) => addMiniMapTrajectoryOverlay(item));
+          (payload.points || []).forEach((item) => addMiniMapMarkerOverlay(item));
+          (payload.meshes || []).forEach((item) => {
+            const role = String((item && item.role) || "");
+            if (role !== "cone" && role !== "sidetrack_relative_cone") {
+              return;
+            }
+            const geometry = meshGeometryFromPayloadItem(item);
+            if (geometry) {
+              addMiniMapConeOverlay(item, geometry);
+            }
+          });
         }
 
         function addLabel(item) {
@@ -4226,6 +5297,7 @@
           renderer.clear(true, true, true);
           renderer.render(scene, camera);
           if (miniMapState.expanded) {
+            buildMiniMapOverlaysFromPayload();
             const miniMapRect = miniMapCanvasRect();
             miniMapState.rect = miniMapRect;
             updateMiniMapCamera(miniMapRect);
@@ -4250,6 +5322,7 @@
           updateAxesGizmo();
           updateLabels();
           updateMiniMapLabels();
+          updateMiniMapRulerOverlay();
           updateTooltip();
         }
 
@@ -4299,6 +5372,14 @@
             item.element.style.left = `${Math.round(screenX)}px`;
             item.element.style.top = `${Math.round(screenY)}px`;
           });
+          updateWorldAxisDragHandlePosition(
+            canvasRect,
+            labelRect,
+            width,
+            height,
+            offsetLeft,
+            offsetTop,
+          );
         }
 
         function consumeMiniMapEvent(event) {
@@ -4373,6 +5454,11 @@
           if (!isPointerInMiniMap(event)) {
             return;
           }
+          if (miniMapRulerState.enabled) {
+            hideTooltip();
+            consumeMiniMapEvent(event);
+            return;
+          }
           if (startMiniMapEditDrag(event)) {
             consumeMiniMapEvent(event);
             return;
@@ -4399,6 +5485,20 @@
           if (miniMapState.resizing) {
             return;
           }
+          if (miniMapRulerState.enabled) {
+            if (
+              miniMapRulerState.phase === "measuring" &&
+              isPointerInMiniMap(event)
+            ) {
+              miniMapRulerState.previewRaw = miniMapRulerRawPointAtEvent(event);
+              requestRender();
+            }
+            if (isPointerInMiniMap(event)) {
+              hideTooltip();
+              consumeMiniMapEvent(event);
+            }
+            return;
+          }
           if (!miniMapState.dragging) {
             if (isPointerInMiniMap(event)) {
               hideTooltip();
@@ -4420,6 +5520,10 @@
 
         function handleMiniMapPointerUp(event) {
           if (editDragInputMode === "minimap") {
+            return;
+          }
+          if (miniMapRulerState.enabled && isPointerInMiniMap(event)) {
+            handleMiniMapRulerClick(event);
             return;
           }
           if (!miniMapState.dragging) {
@@ -4449,6 +5553,33 @@
           const after = miniMapWorldAtEvent(event);
           miniMapState.target.add(before.sub(after));
           updateMiniMapOverlay();
+          requestRender();
+          consumeMiniMapEvent(event);
+        }
+
+        function handleMiniMapRulerClick(event) {
+          if (
+            !miniMapRulerState.enabled ||
+            miniMapState.resizing ||
+            !isPointerInMiniMap(event)
+          ) {
+            return;
+          }
+          const rawPoint = miniMapRulerRawPointAtEvent(event);
+          if (
+            miniMapRulerState.phase === "idle" ||
+            miniMapRulerState.phase === "fixed"
+          ) {
+            miniMapRulerState.phase = "measuring";
+            miniMapRulerState.startRaw = rawPoint;
+            miniMapRulerState.endRaw = null;
+            miniMapRulerState.previewRaw = rawPoint;
+          } else {
+            miniMapRulerState.phase = "fixed";
+            miniMapRulerState.previewRaw = rawPoint;
+            miniMapRulerState.endRaw = rawPoint;
+          }
+          hideTooltip();
           requestRender();
           consumeMiniMapEvent(event);
         }
@@ -4511,10 +5642,23 @@
             if (!miniMapState.expanded) {
               miniMapState.dragging = false;
               miniMapState.resizing = false;
+              setMiniMapRulerEnabled(false);
               controls.enabled = true;
               interactionActive = false;
+            } else {
+              buildMiniMapOverlaysFromPayload();
             }
             updateMiniMapOverlay();
+            requestRender();
+            event.preventDefault();
+            event.stopPropagation();
+          });
+        }
+        if (miniMapRulerBtn) {
+          syncMiniMapRulerButton();
+          miniMapRulerBtn.addEventListener("click", (event) => {
+            setMiniMapRulerEnabled(!miniMapRulerState.enabled);
+            hideTooltip();
             requestRender();
             event.preventDefault();
             event.stopPropagation();
@@ -4528,6 +5672,9 @@
           capture: true,
           passive: false,
         });
+        window.addEventListener("pointermove", handleWorldAxisDragPointerMove, true);
+        window.addEventListener("pointerup", endWorldAxisDrag, true);
+        window.addEventListener("pointercancel", endWorldAxisDrag, true);
         renderer.domElement.addEventListener("pointermove", (event) => {
           pointerScreen = {
             x: Number(event.clientX || 0),
@@ -4581,8 +5728,7 @@
         const editSaveBtn = document.getElementById("edit-save-btn");
         const editWarningToast = document.getElementById("edit-warning-toast");
         const editWarningHideBtn = document.getElementById("edit-warning-hide-btn");
-        const canEditTargets =
-          editWells.length > 0 &&
+        const hasEditUiElements = Boolean(
           editTargetsBtn &&
           editToolbox &&
           editPlaneSelector &&
@@ -4591,11 +5737,19 @@
           editUndoBtn &&
           editRedoBtn &&
           editResetBtn &&
-          editSaveBtn;
+          editSaveBtn
+        );
+        let canEditTargets = false;
 
-        if (canEditTargets) {
-          editTargetsBtn.style.display = "";
+        function syncEditCapability() {
+          canEditTargets =
+            editWells.length > 0 && hasEditUiElements;
+          if (editTargetsBtn) {
+            editTargetsBtn.style.display = canEditTargets ? "" : "none";
+          }
         }
+
+        syncEditCapability();
 
         let editModeActive = false;
         let editPlane = "xy"; // "xy" | "z"
@@ -5148,7 +6302,7 @@
             new THREE.Vector3(0, 0, 0),
             color,
             "edit-delta-label",
-            { offsetX: 14, offsetY: 18 },
+            { offsetX: 14, offsetY: 18, role: "edit_delta_label" },
           );
           label.visible = false;
           initEditDeltaLabelDrag(label);
@@ -5317,7 +6471,7 @@
             displayPoint(t1T3Midpoint(wellIndex)),
             "#1d4ed8",
             "edit-lateral-label",
-            { offsetX: 0, offsetY: 0 },
+            { offsetX: 0, offsetY: 0, role: "edit_lateral_label" },
           );
           label.visible = false;
           return label;
@@ -6753,8 +7907,322 @@
           }
         }
 
-        if (canEditTargets) {
-          initEditHandles();
+        function disposeObjectMaterial(material) {
+          if (!material) {
+            return;
+          }
+          if (Array.isArray(material)) {
+            material.forEach(disposeObjectMaterial);
+            return;
+          }
+          if (typeof material.dispose === "function") {
+            material.dispose();
+          }
+        }
+
+        function disposeObjectTree(object) {
+          if (!object || typeof object.traverse !== "function") {
+            return;
+          }
+          object.traverse((child) => {
+            if (child.geometry && typeof child.geometry.dispose === "function") {
+              child.geometry.dispose();
+            }
+            disposeObjectMaterial(child.material);
+          });
+        }
+
+        function clearThreeGroup(group) {
+          if (!group) {
+            return;
+          }
+          const children = Array.from(group.children || []);
+          children.forEach((child) => {
+            group.remove(child);
+            disposeObjectTree(child);
+          });
+        }
+
+        function clearSceneLabels() {
+          sceneLabels.forEach((item) => {
+            if (item && item.element && item.element.parentNode) {
+              item.element.parentNode.removeChild(item.element);
+            }
+          });
+          sceneLabels.length = 0;
+          miniMapLabels.forEach((item) => {
+            if (item && item.element && item.element.parentNode) {
+              item.element.parentNode.removeChild(item.element);
+            }
+          });
+          miniMapLabels.length = 0;
+          worldAxisOverlay.labels.length = 0;
+          worldAxisOverlay.labelSpecs = [];
+        }
+
+        function clearSceneLabelsByRoles(roleValues) {
+          const roleSet = new Set(
+            Array.isArray(roleValues) ? roleValues.map((value) => String(value)) : [],
+          );
+          if (roleSet.size === 0) {
+            return;
+          }
+          for (let index = sceneLabels.length - 1; index >= 0; index -= 1) {
+            const item = sceneLabels[index];
+            if (!item || !roleSet.has(String(item.role || ""))) {
+              continue;
+            }
+            if (item.element && item.element.parentNode) {
+              item.element.parentNode.removeChild(item.element);
+            }
+            sceneLabels.splice(index, 1);
+          }
+        }
+
+        function removeTrackedObjectFromCollections(object) {
+          const hoverIndex = hoverTargets.indexOf(object);
+          if (hoverIndex >= 0) {
+            hoverTargets.splice(hoverIndex, 1);
+          }
+          const hiddenContourIndex = miniMapHiddenContourObjects.indexOf(object);
+          if (hiddenContourIndex >= 0) {
+            miniMapHiddenContourObjects.splice(hiddenContourIndex, 1);
+          }
+        }
+
+        function removeTrackedObject(object) {
+          if (!object) {
+            return;
+          }
+          removeTrackedObjectFromCollections(object);
+          if (object.parent) {
+            object.parent.remove(object);
+          }
+          disposeObjectTree(object);
+        }
+
+        function clearAntiCollisionVisualPayload() {
+          Object.keys(antiCollisionVisualObjects).forEach((layer) => {
+            const trackedObjects = Array.from(antiCollisionVisualObjects[layer] || []);
+            trackedObjects.forEach(removeTrackedObject);
+            antiCollisionVisualObjects[layer].length = 0;
+          });
+          clearSceneLabelsByRoles(["reference_label", "reference_pad_label"]);
+        }
+
+        function resetEditRuntimeState() {
+          editModeActive = false;
+          controls.enabled = true;
+          interactionActive = false;
+          editDragHandle = null;
+          editDragAxisOrigin = null;
+          editDragAxisDirection = null;
+          editDragStartPosition = null;
+          editDragStartAxisT = 0.0;
+          editDragPlane = null;
+          editDragMoveScope = "point";
+          editDragPlaneZ = 0.0;
+          editDragPointerOffset = null;
+          editDragHistoryStartState = null;
+          editDragInputMode = "scene";
+          editRotateWellIndex = null;
+          editRotateStartAngle = 0.0;
+          editRotatePlaneZ = 0.0;
+          editRotateCenterDisplay = null;
+          editRotateHistoryStartState = null;
+          editRotateStartVector = null;
+          editRotateStartPreviewPoints = null;
+          editHasAnyChange = false;
+          editWarningDismissed = false;
+          selectedEditWellIndex = editWells.length > 0 ? 0 : null;
+          editHandles.length = 0;
+          editReplanners.length = 0;
+          editLineObjects.length = 0;
+          editLateralLabels.length = 0;
+          editRotationControls.length = 0;
+          editRotationPickMeshes.length = 0;
+          editOriginalPoints.length = 0;
+          editCurrentPoints.length = 0;
+          editOriginalT1.length = 0;
+          editOriginalT3.length = 0;
+          editCurrentT1.length = 0;
+          editCurrentT3.length = 0;
+          editDirtyFlags.length = 0;
+          editUndoStacks.length = 0;
+          editRedoStacks.length = 0;
+          if (editTargetsBtn) {
+            editTargetsBtn.classList.remove("is-active");
+            editTargetsBtn.textContent = "Редактировать точки";
+          }
+          if (editToolbox) {
+            editToolbox.classList.remove("is-visible");
+          }
+          if (editSaveBtn) {
+            editSaveBtn.classList.remove("is-visible", "is-pending", "is-error");
+          }
+          if (editWarningToast) {
+            editWarningToast.classList.remove("is-visible");
+          }
+          resetEditSaveButtonState();
+        }
+
+        function clearViewerDataObjects() {
+          hideTooltip();
+          clearWorldAxisGeometry();
+          worldAxisOverlay.signature = "";
+          worldAxisOverlay.dragging = false;
+          worldAxisOverlay.dragStartRaw = null;
+          const preservedSceneObjects = new Set([
+            ambientLight,
+            surfaceShadeLight,
+            worldAxisOverlay.group,
+          ]);
+          Array.from(scene.children || []).forEach((child) => {
+            if (preservedSceneObjects.has(child)) {
+              return;
+            }
+            scene.remove(child);
+            disposeObjectTree(child);
+          });
+          clearThreeGroup(miniMapOverlayScene);
+          miniMapOverlayBuilt = false;
+          hoverTargets.length = 0;
+          editableBaseMaterials.length = 0;
+          Object.keys(antiCollisionVisualObjects).forEach((layer) => {
+            antiCollisionVisualObjects[layer].length = 0;
+          });
+          miniMapHiddenContourObjects.length = 0;
+          clearSceneLabels();
+          if (legendElement) {
+            legendElement.innerHTML = "";
+          }
+          if (collisionsPanelElement) {
+            collisionsPanelElement.innerHTML = "";
+          }
+          if (worldAxisDragHandle) {
+            worldAxisDragHandle.style.display = "none";
+            worldAxisDragHandle.classList.remove("is-dragging");
+          }
+          resetEditRuntimeState();
+        }
+
+        function updateCameraClippingFromBounds() {
+          const localMaxSpan = Math.max(span.x, span.y, span.z, 1);
+          camera.near = Math.max(localMaxSpan / 1200.0, 0.1);
+          camera.far = Math.max(localMaxSpan * 40.0, 5000.0);
+          camera.updateProjectionMatrix();
+        }
+
+        function updateViewerBackground() {
+          scene.background = new THREE.Color(backgroundColor);
+          renderer.setClearColor(backgroundColor, 1.0);
+          renderer.domElement.style.background = backgroundColor;
+          root.style.background = backgroundColor;
+        }
+
+        function applyViewerPayload(nextPayload, options) {
+          const resolvedPayload =
+            nextPayload && typeof nextPayload === "object" ? nextPayload : {};
+          const preserveView = Boolean(options && options.preserveView);
+          const oldSceneOrigin = {
+            x: Number(sceneOrigin && sceneOrigin.x) || 0,
+            y: Number(sceneOrigin && sceneOrigin.y) || 0,
+            z: Number(sceneOrigin && sceneOrigin.z) || 0,
+          };
+          const previousEditChannelName = editChannelName;
+          payload = resolvedPayload;
+          backgroundColor = String(payload.background || "#ffffff");
+          sceneComplexity = payloadSceneComplexity(payload);
+          maxPixelRatio = payloadMaxPixelRatio(sceneComplexity);
+          syncPayloadCollections();
+          syncWorldAxisActivePadFocus({ resetOffset: false });
+          syncEditCapability();
+          const nextSceneOrigin = rawBoundsCenter(payload.bounds || {});
+          const originDelta = new THREE.Vector3(
+            oldSceneOrigin.x - (Number(nextSceneOrigin.x) || 0),
+            oldSceneOrigin.y - (Number(nextSceneOrigin.y) || 0),
+            (oldSceneOrigin.z - (Number(nextSceneOrigin.z) || 0)) * Z_DISPLAY_SIGN,
+          );
+          clearViewerDataObjects();
+          updateViewerBackground();
+          renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, maxPixelRatio));
+          recomputeSceneMetrics({ resetMiniMap: !preserveView });
+          if (preserveView) {
+            camera.position.add(originDelta);
+            controls.target.add(originDelta);
+            miniMapState.target.add(originDelta);
+            updateCameraClippingFromBounds();
+          } else {
+            fitCameraToRawBounds(payload.bounds || {});
+          }
+          (payload.lines || []).forEach(addLine);
+          (payload.meshes || []).forEach(addMesh);
+          (payload.points || []).forEach(addMarkers);
+          (payload.labels || []).forEach(addLabel);
+          initAntiCollisionControls();
+          applyAntiCollisionLayerVisibility();
+          if (previousEditChannelName !== editChannelName && editBroadcastChannel) {
+            editBroadcastChannel.close();
+            editBroadcastChannel = null;
+          }
+          if (canEditTargets) {
+            initEditHandles();
+            syncEditVisibility();
+            syncEditToolboxState();
+          }
+          syncLegendVisibility();
+          renderCollisions();
+          updateMiniMapOverlay();
+          updateHandleScales();
+          requestRender();
+        }
+
+        function applyAntiCollisionOverlayPayload(nextPayload) {
+          const resolvedPayload =
+            nextPayload && typeof nextPayload === "object" ? nextPayload : {};
+          payload = Object.assign({}, payload, resolvedPayload);
+          syncPayloadCollections();
+          syncWorldAxisActivePadFocus({ resetOffset: false });
+          syncEditCapability();
+          clearAntiCollisionVisualPayload();
+          (resolvedPayload.lines || [])
+            .filter((item) => Boolean(antiCollisionLayerForItem(item)))
+            .forEach(addLine);
+          (resolvedPayload.meshes || [])
+            .filter((item) => Boolean(antiCollisionLayerForItem(item)))
+            .forEach(addMesh);
+          (resolvedPayload.points || [])
+            .filter((item) => Boolean(antiCollisionLayerForItem(item)))
+            .forEach(addMarkers);
+          (resolvedPayload.labels || [])
+            .filter((item) => {
+              const role = String((item && item.role) || "");
+              return role === "reference_label" || role === "reference_pad_label";
+            })
+            .forEach(addLabel);
+          const nextLayerState =
+            resolvedPayload.anti_collision_layer_state &&
+            typeof resolvedPayload.anti_collision_layer_state === "object"
+              ? resolvedPayload.anti_collision_layer_state
+              : {};
+          Object.keys(antiCollisionLayerState).forEach((layer) => {
+            antiCollisionLayerState[layer] = Boolean(
+              Object.prototype.hasOwnProperty.call(nextLayerState, layer)
+                ? nextLayerState[layer]
+                : antiCollisionLayerState[layer],
+            );
+          });
+          initAntiCollisionControls();
+          applyAntiCollisionLayerVisibility();
+          syncLegendVisibility();
+          renderCollisions();
+          requestRender();
+        }
+
+        if (hasEditUiElements) {
+          if (canEditTargets) {
+            initEditHandles();
+          }
           initEditToolboxDrag();
           syncEditToolboxState();
           editTargetsBtn.addEventListener("click", () => {
@@ -6796,6 +8264,30 @@
         syncLegendVisibility();
         renderCollisions();
         startAnimationLoop();
+        window.__PYWP_VIEWER_UPDATE__ = function (nextPayloadJson, nextPayloadDigest) {
+          const resolvedDigest = String(nextPayloadDigest || "");
+          if (resolvedDigest && resolvedDigest === payloadDigest) {
+            return true;
+          }
+          const nextPayload = JSON.parse(String(nextPayloadJson || "{}"));
+          applyViewerPayload(nextPayload, { preserveView: true });
+          payloadDigest = resolvedDigest;
+          return true;
+        };
+        window.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__ = function (
+          nextPayloadJson,
+          nextPayloadDigest
+        ) {
+          const resolvedDigest = String(nextPayloadDigest || "");
+          if (resolvedDigest && resolvedDigest === payloadDigest) {
+            return true;
+          }
+          const nextPayload = JSON.parse(String(nextPayloadJson || "{}"));
+          applyAntiCollisionOverlayPayload(nextPayload);
+          payloadDigest = resolvedDigest;
+          return true;
+        };
+        window.__PYWP_VIEWER_READY__ = true;
       })();
     </script>
   </body>

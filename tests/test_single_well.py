@@ -139,9 +139,100 @@ def test_validate_input_rejects_invalid_t1_t3_geometry() -> None:
         config=TrajectoryConfig(),
     )
 
-    assert "t3 должен быть глубже t1 по TVD." in errors
+    assert "t3 должен быть глубже t1 по TVD." not in errors
     assert "Точки t1 и t3 должны различаться в плане." in errors
     assert "Точка t1 должна отличаться от устья S в плане." in errors
+
+
+def test_validate_input_allows_t3_shallower_than_t1_when_plan_geometry_is_valid() -> None:
+    errors = app._validate_input(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2300.0),
+        config=TrajectoryConfig(),
+    )
+
+    assert errors == []
+
+
+def test_run_planner_uses_shared_batch_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DummyStreamlit:
+        def __init__(self, session_state: dict[str, object]) -> None:
+            self.session_state = session_state
+
+    success = app.SuccessfulWellPlan(
+        name="single_well",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2300.0),
+        target_pairs=(
+            (
+                Point3D(600.0, 800.0, 2400.0),
+                Point3D(1500.0, 2000.0, 2300.0),
+            ),
+        ),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0],
+                "X_m": [0.0, 10.0],
+                "Y_m": [0.0, 20.0],
+                "Z_m": [0.0, 30.0],
+            }
+        ),
+        summary={"trajectory_type": "test"},
+        azimuth_deg=12.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+        runtime_s=1.25,
+    )
+    state: dict[str, object] = {}
+    captured: dict[str, object] = {}
+    progress_events: list[tuple[str, float]] = []
+
+    class _FakeBatchPlanner:
+        def evaluate(
+            self,
+            **kwargs: object,
+        ) -> tuple[list[dict[str, object]], list[object]]:
+            captured.update(kwargs)
+            solver_callback = kwargs.get("solver_progress_callback")
+            assert callable(solver_callback)
+            solver_callback(1, 1, "single_well", "solver stage", 0.5)
+            return ([{"Статус": "Успех"}], [success])
+
+    monkeypatch.setattr(app, "st", _DummyStreamlit(state))
+    monkeypatch.setattr(app, "WelltrackBatchPlanner", _FakeBatchPlanner)
+    monkeypatch.setattr(app, "_current_input_signature", lambda: ("sig",))
+
+    result = app._run_planner(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2300.0),
+        config=TrajectoryConfig(),
+        progress_callback=lambda text, fraction: progress_events.append(
+            (text, fraction)
+        ),
+    )
+
+    records = captured["records"]
+    assert len(records) == 1
+    assert records[0].name == "single_well"
+    assert tuple((point.x, point.y, point.z) for point in records[0].points) == (
+        (0.0, 0.0, 0.0),
+        (600.0, 800.0, 2400.0),
+        (1500.0, 2000.0, 2300.0),
+    )
+    assert captured["selected_names"] == {"single_well"}
+    assert captured["selected_order"] == ["single_well"]
+    assert progress_events == [("solver stage", 0.5)]
+    assert result is success
+    assert state["last_result"] is success
+    assert state["last_error"] == ""
+    assert state["last_input_signature"] == ("sig",)
+    assert isinstance(state["last_built_at"], str)
+    assert state["last_built_at"]
 
 
 def test_single_well_edit_wells_payload_exposes_surface_t1_t3_handles() -> None:

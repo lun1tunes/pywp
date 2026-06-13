@@ -38,6 +38,7 @@ __all__ = [
 
 MAX_EDIT_BASE_POINTS = 700
 MAX_OVERLAP_VOLUME_RINGS = 48
+RESULTS_OVERVIEW_COMPONENT_KEY = "results-overview"
 
 
 def successful_plan_raw_bounds(
@@ -569,7 +570,7 @@ def trajectory_three_payload_overrides(
             visible_well_names=tuple(well_bounds_by_name.keys()),
             surface_by_name=arrow_surface_by_name,
         ),
-        "component_key": "trajectory-overview",
+        "component_key": RESULTS_OVERVIEW_COMPONENT_KEY,
     }
 
 
@@ -647,7 +648,7 @@ def anticollision_three_payload_overrides(
             visible_well_names=tuple(visible_names),
             surface_by_name=arrow_surface_by_name,
         ),
-        "component_key": "anticollision-overview",
+        "component_key": RESULTS_OVERVIEW_COMPONENT_KEY,
     }
     if successes or target_only_wells:
         result["edit_wells"] = [

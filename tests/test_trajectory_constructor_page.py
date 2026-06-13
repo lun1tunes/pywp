@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -208,6 +210,39 @@ def test_ptc_page_defers_anticollision_when_three_edits_are_pending() -> None:
     metric_labels = {str(widget.label) for widget in at.metric}
     assert "Пресет неопределенности для anti-collision" not in selectbox_labels
     assert "Проверено пар" not in metric_labels
+
+
+def test_ptc_page_wraps_pad_layout_section_in_fragment() -> None:
+    source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
+
+    assert "@st.fragment" in source
+    assert "def _render_pad_layout_section(records: list[object]) -> None:" in source
+    assert "_render_pad_layout_section(records=records)" in source
+
+
+def test_ptc_page_renders_reference_section_directly() -> None:
+    source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
+
+    assert "def _render_reference_section_fragment() -> None:" not in source
+    assert "render_reference_section()" in source
+
+
+def test_ptc_page_wraps_records_section_in_fragment() -> None:
+    source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
+
+    assert "def _render_records_section(records: list[object]) -> None:" in source
+    assert "wt._render_records_overview(records=records)" in source
+    assert "wt._render_raw_records_table(records=records)" in source
+    assert "_render_records_section(records=records)" in source
+
+
+def test_ptc_page_extracts_results_section_helper() -> None:
+    source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
+
+    assert "def _render_results_section(" in source
+    assert 'st.markdown("## 5. Результаты расчёта")' in source
+    assert "render_success_tabs(" in source
+    assert "_render_results_section(" in source
 
 
 def test_ptc_page_renders_target_editor_when_all_results_failed() -> None:

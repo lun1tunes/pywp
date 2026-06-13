@@ -25,7 +25,7 @@ from pywp.pilot_wells import (
 from pywp.planner import TrajectoryPlanner
 from pywp.reference_trajectories import REFERENCE_WELL_ACTUAL
 from pywp.solver_diagnostics import summarize_problem_ru
-from pywp.ui_calc_params import kop_min_vertical_function_from_state
+from pywp.ui_calc_params import calc_param_signature, kop_min_vertical_function_from_state
 from pywp.ui_utils import format_run_log_line
 from pywp.uncertainty import (
     DEFAULT_UNCERTAINTY_PRESET,
@@ -737,6 +737,9 @@ def run_batch_if_clicked(
             state["wt_last_error"] = ""
             state["wt_last_run_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             state["wt_last_runtime_s"] = float(elapsed_s)
+            state["wt_last_calc_param_signature"] = calc_param_signature(
+                prefix="wt_cfg_"
+            )
             state["wt_prepared_well_overrides"] = {}
             state["wt_prepared_override_message"] = ""
             state["wt_prepared_recommendation_id"] = ""
