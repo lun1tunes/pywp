@@ -19,7 +19,11 @@ from pywp.eclipse_welltrack import (
     WelltrackRecord,
     parse_welltrack_text,
 )
-from pywp.models import Point3D, TrajectoryConfig
+from pywp.models import (
+    DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M,
+    Point3D,
+    TrajectoryConfig,
+)
 from pywp import ptc_pad_state
 from pywp import ptc_three_overrides
 from pywp.reference_trajectories import (
@@ -1056,7 +1060,10 @@ def test_build_target_only_edit_wells_payload_preserves_failed_record_points() -
         "2_t1",
         "2_t3",
     ]
-    assert edit_wells[2]["config"]["dls_horizontal_max_deg_per_30m"] == 3.0
+    assert (
+        edit_wells[2]["config"]["dls_horizontal_max_deg_per_30m"]
+        == DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M
+    )
 
 
 def test_trajectory_overrides_make_failed_target_only_wells_editable() -> None:
@@ -1366,7 +1373,11 @@ def test_welltracks4_overlap_volumes_match_report_zones() -> None:
     rows, successes = WelltrackBatchPlanner().evaluate(
         records=records,
         selected_names={str(record.name) for record in records},
-        config=TrajectoryConfig(turn_solver_max_restarts=0),
+        config=TrajectoryConfig(
+            turn_solver_max_restarts=0,
+            dls_build_max_deg_per_30m=3.0,
+            dls_horizontal_max_deg_per_30m=3.0,
+        ),
     )
     assert {row["Скважина"]: row["Статус"] for row in rows} == {
         "well_01": "OK",

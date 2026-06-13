@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from pywp.models import (
     DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
+    DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M,
     J_PROFILE_POLICY_OFF,
     J_PROFILE_POLICY_PREFER,
     J_PROFILE_POLICY_PROPOSE,
@@ -59,9 +60,15 @@ def test_build_segment_dls_limits_applies_separate_horizontal_limit() -> None:
 
 def test_trajectory_config_defaults_use_shared_segment_limit_builder() -> None:
     cfg = TrajectoryConfig()
-    expected = build_segment_dls_limits_deg_per_30m(DEFAULT_BUILD_DLS_MAX_DEG_PER_30M)
+    expected = build_segment_dls_limits_deg_per_30m(
+        DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
+        DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M,
+    )
     assert cfg.dls_build_max_deg_per_30m == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
-    assert cfg.dls_horizontal_max_deg_per_30m == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+    assert (
+        cfg.dls_horizontal_max_deg_per_30m
+        == DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M
+    )
     assert cfg.dls_limits_deg_per_30m == expected
 
 
@@ -78,10 +85,16 @@ def test_trajectory_config_validated_copy_keeps_horizontal_limit_independent() -
     updated = cfg.validated_copy(dls_build_max_deg_per_30m=4.5)
 
     assert updated.dls_build_max_deg_per_30m == 4.5
-    assert updated.dls_horizontal_max_deg_per_30m == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+    assert (
+        updated.dls_horizontal_max_deg_per_30m
+        == DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M
+    )
     assert updated.dls_limits_deg_per_30m["BUILD1"] == 4.5
     assert updated.dls_limits_deg_per_30m["BUILD2"] == 4.5
-    assert updated.dls_limits_deg_per_30m["HORIZONTAL"] == DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+    assert (
+        updated.dls_limits_deg_per_30m["HORIZONTAL"]
+        == DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M
+    )
 
     with pytest.raises(ValidationError, match="least_squares|de_hybrid"):
         cfg.validated_copy(turn_solver_mode="unsupported_turn_solver")

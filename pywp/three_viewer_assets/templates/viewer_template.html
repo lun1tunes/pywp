@@ -561,20 +561,37 @@
         display: none;
         width: 20px;
         height: 20px;
+        padding: 0;
+        box-sizing: border-box;
         border: 1px solid rgba(71,85,105,0.28);
         border-radius: 999px;
         background: rgba(255,255,255,0.94);
         box-shadow: 0 3px 10px rgba(15,23,42,0.12);
-        color: #475569;
-        font-size: 11px;
-        line-height: 18px;
-        text-align: center;
+        color: #111827;
+        appearance: none;
+        -webkit-appearance: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 0;
         cursor: grab;
         pointer-events: auto;
         transform: translate(-50%, -50%);
         touch-action: none;
         user-select: none;
         z-index: 5;
+      }
+
+      .world-axis-handle-icon {
+        width: 11px;
+        height: 11px;
+        display: block;
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        margin: 0;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
       }
 
       .world-axis-handle:hover {
@@ -756,21 +773,6 @@
       .world-axis-scale-slider {
         width: 100%;
         margin: 0;
-      }
-
-      .world-axis-scale-labels {
-        display: grid;
-        grid-template-columns: repeat(6, minmax(0, 1fr));
-        gap: 4px;
-        margin-top: 4px;
-        color: #64748b;
-        font-size: 9px;
-        line-height: 1.1;
-      }
-
-      .world-axis-scale-labels span {
-        text-align: center;
-        white-space: nowrap;
       }
 
       #edit-toolbox {
@@ -1497,11 +1499,11 @@
       }
 
       #minimap-ruler-btn.is-active {
-        background: rgba(37,99,235,0.14);
+        background: rgba(37,99,235,0.18);
         color: #1d4ed8;
         box-shadow:
-          inset 0 0 0 1px rgba(37,99,235,0.22),
-          0 3px 10px rgba(15,23,42,0.12);
+          inset 0 0 0 1.4px rgba(37,99,235,0.52),
+          0 4px 12px rgba(29,78,216,0.18);
       }
 
       @keyframes fadeInUp {
@@ -1558,19 +1560,11 @@
                 id="world-axis-z-scale-slider"
                 class="world-axis-scale-slider"
                 type="range"
-                min="0"
-                max="5"
-                step="1"
-                value="0"
+                min="1"
+                max="10"
+                step="0.05"
+                value="1"
               />
-              <div class="world-axis-scale-labels" aria-hidden="true">
-                <span>1:1</span>
-                <span>1:2</span>
-                <span>1:5</span>
-                <span>1:10</span>
-                <span>1:25</span>
-                <span>1:50</span>
-              </div>
             </div>
           </div>
         </div>
@@ -1624,7 +1618,23 @@
       </div>
       <div id="axes-gizmo"></div>
       <div id="label-layer"></div>
-      <button id="world-axis-drag-handle" class="world-axis-handle" type="button" title="Перетащить координатную сетку по XY">✋</button>
+      <button id="world-axis-drag-handle" class="world-axis-handle" type="button" title="Перетащить координатную сетку по XY">
+        <svg
+          class="world-axis-handle-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+        >
+          <path
+            d="M12 3.75V20.25M3.75 12H20.25M12 3.75L9.5 6.25M12 3.75L14.5 6.25M12 20.25L9.5 17.75M12 20.25L14.5 17.75M3.75 12L6.25 9.5M3.75 12L6.25 14.5M20.25 12L17.75 9.5M20.25 12L17.75 14.5"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
       <div id="collisions-panel"></div>
       <div id="legend"></div>
       <div id="tooltip"></div>
@@ -1908,9 +1918,12 @@
         );
         const WORLD_AXIS_STORAGE_KEY = `pywp:world-axis-overlay:${viewerStateScope}`;
         const WORLD_AXIS_Z_SCALE_STORAGE_KEY = `pywp:world-axis-z-scale:${viewerStateScope}`;
-        const WORLD_AXIS_PLANE_RAW_Z = 0.0;
+        const WORLD_AXIS_PLANE_Z_ROUND_STEP = 100.0;
         const WORLD_AXIS_GRID_SQUARES_PER_SIDE = 4;
-        const WORLD_AXIS_Z_SCALE_OPTIONS = [1, 2, 5, 10, 25, 50];
+        const VIEWER_Z_SCALE_DEFAULT = 1.0;
+        const VIEWER_Z_SCALE_MIN = 1.0;
+        const VIEWER_Z_SCALE_MAX = 10.0;
+        const VIEWER_Z_SCALE_STEP = 0.05;
         const worldAxisOverlay = {
           enabled: readStoredBoolean(WORLD_AXIS_STORAGE_KEY, false),
           group: new THREE.Group(),
@@ -1925,7 +1938,7 @@
           dragging: false,
           dragStartRaw: null,
           dragStartOffsetRaw: { x: 0.0, y: 0.0 },
-          zScaleIndex: 0,
+          zScaleFactor: VIEWER_Z_SCALE_DEFAULT,
         };
         const antiCollisionVisualObjects = {
           cones: [],
@@ -2004,6 +2017,25 @@
           }
         }
 
+        function readStoredNumber(key, fallback, minValue, maxValue) {
+          try {
+            const rawValue = window.localStorage.getItem(String(key || ""));
+            if (rawValue === null) {
+              return Number(fallback) || 0;
+            }
+            const parsed = Number(rawValue);
+            if (!Number.isFinite(parsed)) {
+              return Number(fallback) || 0;
+            }
+            return Math.min(
+              Math.max(parsed, Number(minValue) || 0),
+              Number(maxValue) || parsed,
+            );
+          } catch (e) {
+            return Number(fallback) || 0;
+          }
+        }
+
         function storeBoolean(key, value) {
           try {
             window.localStorage.setItem(
@@ -2019,11 +2051,33 @@
           } catch (e) { /* ignore */ }
         }
 
-        worldAxisOverlay.zScaleIndex = readStoredInteger(
+        function sanitizeViewerZScaleFactor(value) {
+          const parsed = Number(value);
+          if (!Number.isFinite(parsed)) {
+            return VIEWER_Z_SCALE_DEFAULT;
+          }
+          const rounded =
+            Math.round(parsed / VIEWER_Z_SCALE_STEP) * VIEWER_Z_SCALE_STEP;
+          return Math.min(
+            Math.max(Number(rounded.toFixed(3)), VIEWER_Z_SCALE_MIN),
+            VIEWER_Z_SCALE_MAX,
+          );
+        }
+
+        function worldAxisZScaleFactor() {
+          return sanitizeViewerZScaleFactor(worldAxisOverlay.zScaleFactor);
+        }
+
+        function formatViewerZScaleFactor(value) {
+          const factor = sanitizeViewerZScaleFactor(value);
+          return String(Number(factor.toFixed(2)));
+        }
+
+        worldAxisOverlay.zScaleFactor = readStoredNumber(
           WORLD_AXIS_Z_SCALE_STORAGE_KEY,
-          0,
-          0,
-          WORLD_AXIS_Z_SCALE_OPTIONS.length - 1,
+          VIEWER_Z_SCALE_DEFAULT,
+          VIEWER_Z_SCALE_MIN,
+          VIEWER_Z_SCALE_MAX,
         );
 
         const hoverSphereGeometry = new THREE.SphereGeometry(1.0, 6, 6);
@@ -2065,26 +2119,33 @@
         let sceneOrigin = rawBoundsCenter(payload.bounds || {});
 
         function displayPoint(value) {
+          const zScaleFactor = Math.max(worldAxisZScaleFactor(), 1.0);
           return new THREE.Vector3(
             dataNumber(value && value[0], 0) - sceneOrigin.x,
             dataNumber(value && value[1], 0) - sceneOrigin.y,
-            (dataNumber(value && value[2], 0) - sceneOrigin.z) * Z_DISPLAY_SIGN,
+            ((dataNumber(value && value[2], 0) - sceneOrigin.z) * Z_DISPLAY_SIGN) /
+              zScaleFactor,
           );
         }
 
         function displayXYZ(xValue, yValue, zValue) {
+          const zScaleFactor = Math.max(worldAxisZScaleFactor(), 1.0);
           return [
             dataNumber(xValue, 0) - sceneOrigin.x,
             dataNumber(yValue, 0) - sceneOrigin.y,
-            (dataNumber(zValue, 0) - sceneOrigin.z) * Z_DISPLAY_SIGN,
+            ((dataNumber(zValue, 0) - sceneOrigin.z) * Z_DISPLAY_SIGN) /
+              zScaleFactor,
           ];
         }
 
         function dataPointFromDisplay(displayPosition) {
+          const zScaleFactor = Math.max(worldAxisZScaleFactor(), 1.0);
           return [
             dataNumber(displayPosition && displayPosition.x, 0) + sceneOrigin.x,
             dataNumber(displayPosition && displayPosition.y, 0) + sceneOrigin.y,
-            dataNumber(displayPosition && displayPosition.z, 0) * Z_DISPLAY_SIGN + sceneOrigin.z,
+            (dataNumber(displayPosition && displayPosition.z, 0) * zScaleFactor) *
+              Z_DISPLAY_SIGN +
+              sceneOrigin.z,
           ];
         }
 
@@ -2387,6 +2448,111 @@
 
         function clampValue(value, minValue, maxValue) {
           return Math.max(minValue, Math.min(maxValue, value));
+        }
+
+        function isWorldAxisOverlayObject(object) {
+          let current = object || null;
+          while (current) {
+            if (current === worldAxisOverlay.group) {
+              return true;
+            }
+            current = current.parent || null;
+          }
+          return false;
+        }
+
+        function scaleGeometryZPositions(geometry, ratio) {
+          const positionAttribute =
+            geometry && typeof geometry.getAttribute === "function"
+              ? geometry.getAttribute("position")
+              : null;
+          if (
+            !positionAttribute ||
+            !positionAttribute.array ||
+            positionAttribute.itemSize < 3
+          ) {
+            return;
+          }
+          for (
+            let index = 2;
+            index < positionAttribute.array.length;
+            index += positionAttribute.itemSize
+          ) {
+            positionAttribute.array[index] *= ratio;
+          }
+          positionAttribute.needsUpdate = true;
+          if (geometry.boundingSphere) {
+            geometry.computeBoundingSphere();
+          }
+          if (geometry.boundingBox) {
+            geometry.computeBoundingBox();
+          }
+        }
+
+        function objectLocksViewerZGeometryScale(object) {
+          return Boolean(
+            object &&
+            object.userData &&
+            object.userData.lockViewerZGeometryScale,
+          );
+        }
+
+        function rescaleViewerSceneZ(ratio) {
+          const safeRatio = Number(ratio);
+          if (!Number.isFinite(safeRatio) || Math.abs(safeRatio - 1.0) < 1e-6) {
+            return;
+          }
+          const scaledGeometries = new Set();
+          scene.traverse((object) => {
+            if (
+              !object ||
+              object === scene ||
+              object.isCamera ||
+              object.isLight ||
+              isWorldAxisOverlayObject(object)
+            ) {
+              return;
+            }
+            if (object.position && Number.isFinite(object.position.z)) {
+              object.position.z *= safeRatio;
+            }
+            const geometry = object.geometry;
+            if (!geometry) {
+              return;
+            }
+            const geometryId = String(geometry.uuid || "");
+            if (geometryId && scaledGeometries.has(geometryId)) {
+              return;
+            }
+            if (geometryId) {
+              scaledGeometries.add(geometryId);
+            }
+            if (objectLocksViewerZGeometryScale(object)) {
+              return;
+            }
+            scaleGeometryZPositions(geometry, safeRatio);
+            if (
+              (object.isMesh || object.isSkinnedMesh) &&
+              typeof geometry.computeVertexNormals === "function"
+            ) {
+              geometry.computeVertexNormals();
+            }
+            if (typeof object.computeLineDistances === "function") {
+              try {
+                object.computeLineDistances();
+              } catch (e) { /* ignore */ }
+            }
+          });
+          sceneLabels.forEach((item) => {
+            if (item && item.position && Number.isFinite(item.position.z)) {
+              item.position.z *= safeRatio;
+            }
+          });
+          miniMapLabels.forEach((item) => {
+            if (item && item.position && Number.isFinite(item.position.z)) {
+              item.position.z *= safeRatio;
+            }
+          });
         }
 
         function miniMapSizeConfig(canvasWidth, canvasHeight) {
@@ -3078,7 +3244,8 @@
 
         function worldAxisPlaneIntersectionRaw(ndcX, ndcY, rawZ) {
           const planeDisplayZ =
-            (Number(rawZ) - Number(sceneOrigin.z || 0)) * Z_DISPLAY_SIGN;
+            ((Number(rawZ) - Number(sceneOrigin.z || 0)) * Z_DISPLAY_SIGN) /
+            Math.max(worldAxisZScaleFactor(), 1.0);
           worldAxisPlane.constant = -planeDisplayZ;
           worldAxisPointer.set(Number(ndcX) || 0, Number(ndcY) || 0);
           worldAxisRaycaster.setFromCamera(worldAxisPointer, camera);
@@ -3106,16 +3273,8 @@
           return 10.0 * base;
         }
 
-        function worldAxisZScaleFactor() {
-          const index = Math.min(
-            Math.max(Math.round(Number(worldAxisOverlay.zScaleIndex) || 0), 0),
-            WORLD_AXIS_Z_SCALE_OPTIONS.length - 1,
-          );
-          return Number(WORLD_AXIS_Z_SCALE_OPTIONS[index]) || 1;
-        }
-
         function worldAxisZScaleLabel() {
-          return `1:${String(worldAxisZScaleFactor())}`;
+          return `1:${formatViewerZScaleFactor(worldAxisZScaleFactor())}`;
         }
 
         function worldAxisDisplayZ(rawZValue) {
@@ -3134,6 +3293,30 @@
             safeStep >= 0.1 ? 2 :
             3;
           return Number(value || 0).toFixed(decimals);
+        }
+
+        function formatWorldAxisDistance(rawDistance) {
+          const safeDistance = Math.abs(Number(rawDistance) || 0);
+          const decimals =
+            safeDistance >= 100.0 ? 0 :
+            safeDistance >= 10.0 ? 1 :
+            safeDistance >= 1.0 ? 2 :
+            3;
+          return `${String(Number(safeDistance.toFixed(decimals))).replace(".", ",")} м`;
+        }
+
+        function worldAxisSubdivisionForPixelSpan(pixelSpan) {
+          const safeSpan = Math.max(Number(pixelSpan) || 0, 0);
+          if (safeSpan >= 560.0) {
+            return 10;
+          }
+          if (safeSpan >= 300.0) {
+            return 5;
+          }
+          if (safeSpan >= 150.0) {
+            return 2;
+          }
+          return 1;
         }
 
         function clearWorldAxisGeometry() {
@@ -3225,6 +3408,94 @@
           );
         }
 
+        function worldAxisPlaneRawZ(rawBounds) {
+          const bounds = normalizedRawBounds(rawBounds) || worldAxisCurrentRawBounds();
+          const rawMax = Array.isArray(bounds.max) ? bounds.max : [0, 0, 0];
+          const deepestRawZ = dataNumber(rawMax[2], 0);
+          const roundStep = Math.max(Number(WORLD_AXIS_PLANE_Z_ROUND_STEP) || 100.0, 1.0);
+          const roundedRawZ = Math.ceil(deepestRawZ / roundStep) * roundStep;
+          if (!Number.isFinite(roundedRawZ)) {
+            return 0.0;
+          }
+          return roundedRawZ <= deepestRawZ + 1e-6
+            ? roundedRawZ + roundStep
+            : roundedRawZ;
+        }
+
+        function worldAxisTopRawZ(rawBounds) {
+          const bounds = normalizedRawBounds(rawBounds) || worldAxisCurrentRawBounds();
+          const rawMin = Array.isArray(bounds.min) ? bounds.min : [0, 0, 0];
+          const shallowestRawZ = dataNumber(rawMin[2], 0);
+          const roundStep = Math.max(Number(WORLD_AXIS_PLANE_Z_ROUND_STEP) || 100.0, 1.0);
+          const roundedRawZ = Math.floor(shallowestRawZ / roundStep) * roundStep;
+          if (!Number.isFinite(roundedRawZ)) {
+            return 0.0;
+          }
+          return Math.min(roundedRawZ, 0.0);
+        }
+
+        function worldAxisRawLevelMatches(leftRawZ, rightRawZ) {
+          return Math.abs((Number(leftRawZ) || 0) - (Number(rightRawZ) || 0)) <= 1e-6;
+        }
+
+        function worldAxisMajorRawZValues(planeRawZ, topRawZ, zStep) {
+          const values = [];
+          const safeStep = Math.max(Number(zStep) || 0, 0.000001);
+          for (
+            let rawZ = Number(planeRawZ) - safeStep;
+            rawZ > Number(topRawZ) + 1e-6;
+            rawZ -= safeStep
+          ) {
+            values.push(rawZ);
+          }
+          values.push(Number(topRawZ) || 0);
+          if (
+            Number(planeRawZ) > 0.0 &&
+            Number(topRawZ) < 0.0 &&
+            !values.some((rawZ) => worldAxisRawLevelMatches(rawZ, 0.0))
+          ) {
+            values.push(0.0);
+          }
+          values.sort((leftRawZ, rightRawZ) => rightRawZ - leftRawZ);
+          return values;
+        }
+
+        function worldAxisMinorTickSpecs(planeRawZ, topRawZ, zStep, zMinorSubdivision) {
+          const specs = [];
+          const safeStep = Math.max(Number(zStep) || 0, 0.000001);
+          const safeSubdivision = Math.max(Math.round(Number(zMinorSubdivision) || 1), 1);
+          const tickStep = safeStep / safeSubdivision;
+          for (
+            let rawZ = Number(planeRawZ) - tickStep;
+            rawZ > Number(topRawZ) + 1e-6;
+            rawZ -= tickStep
+          ) {
+            const distanceFromPlane = Number(planeRawZ) - rawZ;
+            const major =
+              Math.abs(
+                distanceFromPlane - Math.round(distanceFromPlane / safeStep) * safeStep,
+              ) <= 1e-6;
+            specs.push({
+              rawZ: rawZ,
+              major: major,
+            });
+          }
+          const ensureLevel = (rawZValue) => {
+            if (!specs.some((item) => worldAxisRawLevelMatches(item.rawZ, rawZValue))) {
+              specs.push({
+                rawZ: Number(rawZValue) || 0,
+                major: true,
+              });
+            }
+          };
+          ensureLevel(topRawZ);
+          if (Number(planeRawZ) > 0.0 && Number(topRawZ) < 0.0) {
+            ensureLevel(0.0);
+          }
+          specs.sort((leftItem, rightItem) => rightItem.rawZ - leftItem.rawZ);
+          return specs;
+        }
+
         function worldAxisBaseAnchorForBounds(rawBounds) {
           const bounds = normalizedRawBounds(rawBounds) || worldAxisCurrentRawBounds();
           return {
@@ -3300,22 +3571,20 @@
 
         function worldAxisDepthRangeRaw() {
           const rawBounds = worldAxisCurrentRawBounds();
-          const rawMin = Array.isArray(rawBounds.min) ? rawBounds.min : [0, 0, 0];
-          const rawMax = Array.isArray(rawBounds.max) ? rawBounds.max : [0, 0, 0];
-          const planeZ = Number(WORLD_AXIS_PLANE_RAW_Z) || 0;
-          const minZ = dataNumber(rawMin[2], planeZ);
-          const maxZ = dataNumber(rawMax[2], planeZ);
-          return Math.max(minZ, maxZ, planeZ) - planeZ;
+          const planeZ = worldAxisPlaneRawZ(rawBounds);
+          const topZ = worldAxisTopRawZ(rawBounds);
+          return Math.max(planeZ - Math.min(topZ, planeZ), 0.0);
         }
 
         function worldAxisViewMetrics() {
           syncWorldAxisActivePadFocus({ resetOffset: false });
+          const planeRawZ = worldAxisPlaneRawZ(worldAxisCurrentRawBounds());
           const anchorRaw = worldAxisResolvedAnchorRaw();
           worldAxisOverlay.anchorRaw = anchorRaw;
           const anchorDisplay = displayPoint([
             anchorRaw.x,
             anchorRaw.y,
-            WORLD_AXIS_PLANE_RAW_Z,
+            planeRawZ,
           ]);
           const unitsPerPixel = worldUnitsPerPixelAt(anchorDisplay);
           if (!Number.isFinite(unitsPerPixel) || unitsPerPixel <= 0.0) {
@@ -3367,18 +3636,21 @@
         }
 
         function buildWorldAxisLabelSpecs(
+          planeRawZ,
+          topRawZ,
           xyStep,
           zStep,
           xTickCount,
           yTickCount,
-          zTickCount,
-          xDirection,
-          yDirection,
-          zLabelEvery,
+          zMajorRawValues,
+          showXyStepLabels,
+          showZStepLabels,
         ) {
+          const xDirection = 1.0;
+          const yDirection = 1.0;
           const xMax = xyStep * xTickCount * xDirection;
           const yMax = xyStep * yTickCount * yDirection;
-          const zMax = zStep * zTickCount;
+          const zMax = Math.max(Number(planeRawZ) - Number(topRawZ), 0.0);
           const zScaleFactor = worldAxisZScaleFactor();
           const labelSpecs = [];
           for (let xIndex = 0; xIndex <= xTickCount; xIndex += 1) {
@@ -3394,6 +3666,26 @@
               offsetY: -12,
             });
           }
+          labelSpecs.push({
+            text: formatWorldAxisValue(
+              worldAxisOverlay.anchorRaw.y,
+              xyStep,
+            ),
+            color: "#5b6472",
+            localPosition: new THREE.Vector3(0, 0, 0),
+            offsetX: -14,
+            offsetY: 0,
+          });
+          labelSpecs.push({
+            text: formatWorldAxisValue(
+              planeRawZ,
+              zStep,
+            ),
+            color: "#5b6472",
+            localPosition: new THREE.Vector3(0, 0, 0),
+            offsetX: 12,
+            offsetY: 0,
+          });
           for (let yIndex = 1; yIndex <= yTickCount; yIndex += 1) {
             const yValue = xyStep * yIndex * yDirection;
             labelSpecs.push({
@@ -3407,26 +3699,125 @@
               offsetY: 0,
             });
           }
-          for (let zIndex = 1; zIndex <= zTickCount; zIndex += 1) {
-            if (zIndex !== zTickCount && zIndex % zLabelEvery !== 0) {
-              continue;
+          if (showXyStepLabels) {
+            const xyStepLabel = formatWorldAxisDistance(xyStep);
+            for (let xIndex = 0; xIndex < xTickCount; xIndex += 1) {
+              const xMid = xyStep * (xIndex + 0.5) * xDirection;
+              labelSpecs.push({
+                text: xyStepLabel,
+                color: "#6b7ea6",
+                localPosition: new THREE.Vector3(xMid, 0, 0),
+                offsetX: 0,
+                offsetY: 12,
+              });
             }
-            const zValue = zStep * zIndex;
-            labelSpecs.push({
-              text: formatWorldAxisValue(
-                WORLD_AXIS_PLANE_RAW_Z + zValue,
-                zStep,
-              ),
-              color: "#5b6472",
-              localPosition: new THREE.Vector3(
-                xMax,
-                yMax,
-                worldAxisDisplayZ(zValue),
-              ),
-              offsetX: 10,
-              offsetY: 0,
+            for (let yIndex = 0; yIndex < yTickCount; yIndex += 1) {
+              const yMid = xyStep * (yIndex + 0.5) * yDirection;
+              labelSpecs.push({
+                text: xyStepLabel,
+                color: "#6b7ea6",
+                localPosition: new THREE.Vector3(0, yMid, 0),
+                offsetX: 12,
+                offsetY: 0,
+              });
+            }
+          }
+          const zLabelEvery = Math.max(
+            1,
+            Math.ceil(
+              zMajorRawValues.length /
+              Math.max(Math.floor(Math.abs(worldAxisDisplayZ(-zMax)) / 54.0), 3),
+            ),
+          );
+          const pushZAxisCoordinateLabels = (
+            axisLocalX,
+            axisLocalY,
+            coordinateOffsetX,
+            coordinateOffsetY,
+            includeBaseLabel,
+          ) => {
+            if (includeBaseLabel) {
+              labelSpecs.push({
+                text: formatWorldAxisValue(
+                  planeRawZ,
+                  zStep,
+                ),
+                color: "#5b6472",
+                localPosition: new THREE.Vector3(axisLocalX, axisLocalY, 0),
+                offsetX: coordinateOffsetX,
+                offsetY: coordinateOffsetY,
+              });
+            }
+            zMajorRawValues.forEach((rawZValue, zIndex) => {
+              const isTop = worldAxisRawLevelMatches(rawZValue, topRawZ);
+              const isZero = worldAxisRawLevelMatches(rawZValue, 0.0);
+              if (
+                !isTop &&
+                !isZero &&
+                zIndex !== zMajorRawValues.length - 1 &&
+                zIndex % zLabelEvery !== 0
+              ) {
+                return;
+              }
+              const distanceFromPlane = Number(planeRawZ) - Number(rawZValue);
+              if (distanceFromPlane <= 0.0) {
+                return;
+              }
+              labelSpecs.push({
+                text: formatWorldAxisValue(
+                  rawZValue,
+                  zStep,
+                ),
+                color: "#5b6472",
+                localPosition: new THREE.Vector3(
+                  axisLocalX,
+                  axisLocalY,
+                  worldAxisDisplayZ(-distanceFromPlane),
+                ),
+                offsetX: coordinateOffsetX,
+                offsetY: coordinateOffsetY,
+              });
+            });
+          };
+          pushZAxisCoordinateLabels(0, 0, 10, 0, false);
+          pushZAxisCoordinateLabels(xMax, 0, 10, 0, true);
+          pushZAxisCoordinateLabels(0, yMax, -10, 0, true);
+          if (showZStepLabels) {
+            let previousRawZ = Number(planeRawZ) || 0.0;
+            zMajorRawValues.forEach((rawZValue) => {
+              const segmentDistance = previousRawZ - Number(rawZValue);
+              if (segmentDistance <= 0.0) {
+                previousRawZ = Number(rawZValue);
+                return;
+              }
+              const zMidRawZ = (previousRawZ + Number(rawZValue)) * 0.5;
+              labelSpecs.push({
+                text: formatWorldAxisDistance(segmentDistance),
+                color: "#6b7ea6",
+                localPosition: new THREE.Vector3(
+                  0,
+                  0,
+                  worldAxisDisplayZ(-(Number(planeRawZ) - zMidRawZ)),
+                ),
+                offsetX: -14,
+                offsetY: 0,
+              });
+              previousRawZ = Number(rawZValue);
             });
           }
+          const pushZAxisTitleLabel = (axisLocalX, axisLocalY, offsetX, offsetY) => {
+            labelSpecs.push({
+              text: "Z",
+              color: "#6b7280",
+              localPosition: new THREE.Vector3(
+                axisLocalX,
+                axisLocalY,
+                worldAxisDisplayZ(-zMax) + Math.max(zStep * 0.45 / zScaleFactor, 24.0),
+              ),
+              offsetX: offsetX,
+              offsetY: offsetY,
+            });
+          };
           labelSpecs.push({
             text: "X",
             color: "#6b7280",
@@ -3441,23 +3832,19 @@
             offsetX: -2,
             offsetY: 12,
           });
-          labelSpecs.push({
-            text: "Z",
-            color: "#6b7280",
-            localPosition: new THREE.Vector3(
-              xMax,
-              yMax,
-              worldAxisDisplayZ(zMax) - Math.max(zStep * 0.45 / zScaleFactor, 24.0),
-            ),
-            offsetX: 8,
-            offsetY: 0,
-          });
+          pushZAxisTitleLabel(0, 0, 8, 0);
+          pushZAxisTitleLabel(xMax, 0, 8, 0);
+          pushZAxisTitleLabel(0, yMax, -8, 0);
           return labelSpecs;
         }
 
         function rebuildWorldAxisGeometry() {
           const metrics = worldAxisViewMetrics();
           const activeBounds = worldAxisCurrentRawBounds();
+          const planeRawZ = worldAxisPlaneRawZ(activeBounds);
+          const topRawZ = worldAxisTopRawZ(activeBounds);
+          const xDirection = 1.0;
+          const yDirection = 1.0;
           const xSpanRaw = Math.max(
             dataNumber(activeBounds.max[0], 0) - dataNumber(activeBounds.min[0], 0),
             1.0,
@@ -3470,55 +3857,65 @@
             Math.max(xSpanRaw, ySpanRaw, 40.0) / WORLD_AXIS_GRID_SQUARES_PER_SIDE,
           );
           const zStep = worldAxisNiceStep(Math.max(worldAxisDepthRangeRaw() / 5.0, 1000.0));
-          const xDirection = 1.0;
-          const yDirection = 1.0;
           const xTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;
           const yTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;
-          const zDepthRangeRaw = Math.max(worldAxisDepthRangeRaw(), zStep);
-          const zTickCount = Math.max(
-            1,
-            Math.ceil(zDepthRangeRaw / Math.max(zStep, 0.000001)),
-          );
-          const zLength = zStep * zTickCount;
-          const zDisplayLength = Math.abs(worldAxisDisplayZ(zLength));
+          const zLength = Math.max(Number(planeRawZ) - Number(topRawZ), 0.0);
+          const zDisplayLength = Math.abs(worldAxisDisplayZ(-zLength));
           const approxZPixelLength =
             zDisplayLength / Math.max(Number(metrics.unitsPerPixel) || 0.000001, 0.000001);
-          const zLabelEvery = Math.max(
-            1,
-            Math.ceil(zTickCount / Math.max(Math.floor(approxZPixelLength / 54.0), 3)),
-          );
+          const xyMajorPixelSpan =
+            xyStep / Math.max(Number(metrics.unitsPerPixel) || 0.000001, 0.000001);
+          const zMajorPixelSpan =
+            Math.abs(worldAxisDisplayZ(-zStep)) /
+            Math.max(Number(metrics.unitsPerPixel) || 0.000001, 0.000001);
+          const xyMinorSubdivision = worldAxisSubdivisionForPixelSpan(xyMajorPixelSpan);
+          const zMinorSubdivision = worldAxisSubdivisionForPixelSpan(zMajorPixelSpan);
+          const xyTickStep = xyStep / xyMinorSubdivision;
+          const showXyStepLabels = xyMajorPixelSpan >= 86.0;
+          const showZStepLabels = zMajorPixelSpan >= 96.0;
           const xMin = Math.min(0.0, xyStep * xTickCount * xDirection);
           const xMax = Math.max(0.0, xyStep * xTickCount * xDirection);
           const yMin = Math.min(0.0, xyStep * yTickCount * yDirection);
           const yMax = Math.max(0.0, xyStep * yTickCount * yDirection);
-          const xEnd = xyStep * xTickCount * xDirection;
-          const yEnd = xyStep * yTickCount * yDirection;
+          const zMajorRawValues = worldAxisMajorRawZValues(planeRawZ, topRawZ, zStep);
+          const zTickSpecs = worldAxisMinorTickSpecs(
+            planeRawZ,
+            topRawZ,
+            zStep,
+            zMinorSubdivision,
+          );
           const signature = [
             xyStep.toFixed(6),
             zStep.toFixed(6),
             xTickCount,
             yTickCount,
-            zTickCount,
-            zLabelEvery,
+            zMajorRawValues.map((value) => Number(value).toFixed(3)).join(","),
+            zTickSpecs.map((item) => `${Number(item.rawZ).toFixed(3)}:${item.major ? 1 : 0}`).join(","),
+            xyMinorSubdivision,
+            zMinorSubdivision,
             worldAxisZScaleFactor().toFixed(3),
+            planeRawZ.toFixed(3),
             dataNumber(activeBounds.min[0], 0).toFixed(3),
             dataNumber(activeBounds.min[1], 0).toFixed(3),
+            dataNumber(activeBounds.min[2], 0).toFixed(3),
             dataNumber(activeBounds.max[0], 0).toFixed(3),
             dataNumber(activeBounds.max[1], 0).toFixed(3),
+            dataNumber(activeBounds.max[2], 0).toFixed(3),
           ].join("|");
           worldAxisOverlay.anchorRaw = {
             x: Number(metrics.anchorRaw.x) || 0,
             y: Number(metrics.anchorRaw.y) || 0,
           };
           const labelSpecs = buildWorldAxisLabelSpecs(
+            planeRawZ,
+            topRawZ,
             xyStep,
             zStep,
             xTickCount,
             yTickCount,
-            zTickCount,
-            xDirection,
-            yDirection,
-            zLabelEvery,
+            zMajorRawValues,
+            showXyStepLabels,
+            showZStepLabels,
           );
           if (worldAxisOverlay.signature === signature) {
             worldAxisOverlay.labelSpecs = labelSpecs;
@@ -3546,24 +3943,116 @@
               [xMax, yValue, 0],
             );
           }
+          for (let xIndex = 0; xIndex <= xTickCount; xIndex += 1) {
+            const xValue = xyStep * xIndex * xDirection;
+            pushWorldAxisSegment(
+              gridPositions,
+              [xValue, 0, 0],
+              [xValue, 0, worldAxisDisplayZ(-zLength)],
+            );
+          }
+          for (let yIndex = 0; yIndex <= yTickCount; yIndex += 1) {
+            const yValue = xyStep * yIndex * yDirection;
+            pushWorldAxisSegment(
+              gridPositions,
+              [0, yValue, 0],
+              [0, yValue, worldAxisDisplayZ(-zLength)],
+            );
+          }
+          zMajorRawValues.forEach((rawZValue) => {
+            const distanceFromPlane = Number(planeRawZ) - Number(rawZValue);
+            if (distanceFromPlane <= 0.0) {
+              return;
+            }
+            const zValue = worldAxisDisplayZ(-distanceFromPlane);
+            pushWorldAxisSegment(
+              gridPositions,
+              [xMin, 0, zValue],
+              [xMax, 0, zValue],
+            );
+            pushWorldAxisSegment(
+              gridPositions,
+              [0, yMin, zValue],
+              [0, yMax, zValue],
+            );
+          });
 
           const axisPositions = [];
           pushWorldAxisSegment(axisPositions, [xMin, 0, 0], [xMax, 0, 0]);
           pushWorldAxisSegment(axisPositions, [0, yMin, 0], [0, yMax, 0]);
           pushWorldAxisSegment(
             axisPositions,
-            [xEnd, yEnd, 0],
-            [xEnd, yEnd, worldAxisDisplayZ(zLength)],
+            [0, 0, 0],
+            [0, 0, worldAxisDisplayZ(-zLength)],
           );
-          const zTickHalf = Math.max(xyStep * 0.08, 6.0);
-          for (let zIndex = 1; zIndex <= zTickCount; zIndex += 1) {
-            const zValue = zStep * zIndex;
+          pushWorldAxisSegment(
+            axisPositions,
+            [xMax, 0, 0],
+            [xMax, 0, worldAxisDisplayZ(-zLength)],
+          );
+          pushWorldAxisSegment(
+            axisPositions,
+            [0, yMax, 0],
+            [0, yMax, worldAxisDisplayZ(-zLength)],
+          );
+          const xyTickMinorHalf = Math.max(Math.min(xyStep * 0.03, 9.0), 3.0);
+          const xyTickMajorHalf = xyTickMinorHalf * 1.6;
+          for (
+            let xTickIndex = 1;
+            xTickIndex <= xTickCount * xyMinorSubdivision;
+            xTickIndex += 1
+          ) {
+            const xValue = xyTickStep * xTickIndex * xDirection;
+            const tickHalf =
+              xTickIndex % xyMinorSubdivision === 0
+                ? xyTickMajorHalf
+                : xyTickMinorHalf;
             pushWorldAxisSegment(
               axisPositions,
-              [xEnd - zTickHalf, yEnd, worldAxisDisplayZ(zValue)],
-              [xEnd + zTickHalf, yEnd, worldAxisDisplayZ(zValue)],
+              [xValue, -tickHalf, 0],
+              [xValue, tickHalf, 0],
             );
           }
+          for (
+            let yTickIndex = 1;
+            yTickIndex <= yTickCount * xyMinorSubdivision;
+            yTickIndex += 1
+          ) {
+            const yValue = xyTickStep * yTickIndex * yDirection;
+            const tickHalf =
+              yTickIndex % xyMinorSubdivision === 0
+                ? xyTickMajorHalf
+                : xyTickMinorHalf;
+            pushWorldAxisSegment(
+              axisPositions,
+              [-tickHalf, yValue, 0],
+              [tickHalf, yValue, 0],
+            );
+          }
+          const zTickMinorHalf = Math.max(Math.min(xyStep * 0.06, 8.0), 2.5);
+          const zTickMajorHalf = zTickMinorHalf * 1.6;
+          zTickSpecs.forEach((tickSpec) => {
+            const distanceFromPlane = Number(planeRawZ) - Number(tickSpec.rawZ);
+            if (distanceFromPlane <= 0.0) {
+              return;
+            }
+            const zTickHalf = tickSpec.major ? zTickMajorHalf : zTickMinorHalf;
+            pushWorldAxisSegment(
+              axisPositions,
+              [-zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)],
+              [zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)],
+            );
+            pushWorldAxisSegment(
+              axisPositions,
+              [xMax - zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)],
+              [xMax + zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)],
+            );
+            pushWorldAxisSegment(
+              axisPositions,
+              [0, yMax - zTickHalf, worldAxisDisplayZ(-distanceFromPlane)],
+              [0, yMax + zTickHalf, worldAxisDisplayZ(-distanceFromPlane)],
+            );
+          });
 
           worldAxisOverlay.group.add(
             createWorldAxisLineSegments(gridPositions, "#9aa3af", 0.24, 2.0),
@@ -3578,10 +4067,11 @@
         }
 
         function updateWorldAxisLabelsPosition() {
+          const planeRawZ = worldAxisPlaneRawZ(worldAxisCurrentRawBounds());
           const anchorDisplay = displayPoint([
             worldAxisOverlay.anchorRaw.x,
             worldAxisOverlay.anchorRaw.y,
-            WORLD_AXIS_PLANE_RAW_Z,
+            planeRawZ,
           ]);
           worldAxisOverlay.group.position.copy(anchorDisplay);
           worldAxisOverlay.labelSpecs.forEach((spec, index) => {
@@ -3616,7 +4106,11 @@
             }
             return;
           }
-          const projected = worldAxisOverlay.group.position.clone().project(camera);
+          const projected = displayPoint([
+            worldAxisOverlay.anchorRaw.x,
+            worldAxisOverlay.anchorRaw.y,
+            0.0,
+          ]).project(camera);
           if (
             projected.z < -1.0 ||
             projected.z > 1.0 ||
@@ -3629,8 +4123,8 @@
             worldAxisDragHandle.classList.remove("is-dragging");
             return;
           }
-          const screenX = offsetLeft + (((projected.x + 1.0) * 0.5) * width) - 12;
-          const screenY = offsetTop + (((-projected.y + 1.0) * 0.5) * height) + 12;
+          const screenX = offsetLeft + (((projected.x + 1.0) * 0.5) * width);
+          const screenY = offsetTop + (((-projected.y + 1.0) * 0.5) * height);
           worldAxisDragHandle.style.display = "block";
           worldAxisDragHandle.style.left = `${Math.round(screenX)}px`;
           worldAxisDragHandle.style.top = `${Math.round(screenY)}px`;
@@ -3671,11 +4165,12 @@
           if (!worldAxisOverlay.enabled) {
             return;
           }
+          const planeRawZ = worldAxisPlaneRawZ(worldAxisCurrentRawBounds());
           const ndc = worldAxisPointerNdcFromEvent(event);
           const startRaw = worldAxisPlaneIntersectionRaw(
             ndc.x,
             ndc.y,
-            WORLD_AXIS_PLANE_RAW_Z,
+            planeRawZ,
           );
           if (!Array.isArray(startRaw)) {
             return;
@@ -3707,11 +4202,12 @@
           if (!worldAxisOverlay.dragging || !worldAxisOverlay.dragStartRaw) {
             return;
           }
+          const planeRawZ = worldAxisPlaneRawZ(worldAxisCurrentRawBounds());
           const ndc = worldAxisPointerNdcFromEvent(event);
           const nextRaw = worldAxisPlaneIntersectionRaw(
             ndc.x,
             ndc.y,
-            WORLD_AXIS_PLANE_RAW_Z,
+            planeRawZ,
           );
           if (!Array.isArray(nextRaw)) {
             return;
@@ -3749,9 +4245,63 @@
           event.stopPropagation();
         }
 
+        function applyViewerZScaleFactor(value) {
+          const previousFactor = Math.max(worldAxisZScaleFactor(), 1.0);
+          const nextFactor = sanitizeViewerZScaleFactor(value);
+          if (Math.abs(nextFactor - previousFactor) < 1e-6) {
+            worldAxisOverlay.zScaleFactor = nextFactor;
+            syncWorldAxisScaleControls();
+            return;
+          }
+          const zRatio = previousFactor / nextFactor;
+          worldAxisOverlay.zScaleFactor = nextFactor;
+          storeStringValue(
+            WORLD_AXIS_Z_SCALE_STORAGE_KEY,
+            String(nextFactor),
+          );
+          rescaleViewerSceneZ(zRatio);
+          camera.position.z *= zRatio;
+          controls.target.z *= zRatio;
+          if (miniMapState.target && Number.isFinite(miniMapState.target.z)) {
+            miniMapState.target.z *= zRatio;
+          }
+          if (editDragStartPosition && Number.isFinite(editDragStartPosition.z)) {
+            editDragStartPosition.z *= zRatio;
+          }
+          if (editDragAxisOrigin && Number.isFinite(editDragAxisOrigin.z)) {
+            editDragAxisOrigin.z *= zRatio;
+          }
+          if (editDragPointerOffset && Number.isFinite(editDragPointerOffset.z)) {
+            editDragPointerOffset.z *= zRatio;
+          }
+          if (Number.isFinite(editDragPlaneZ)) {
+            editDragPlaneZ *= zRatio;
+          }
+          if (editRotateCenterDisplay && Number.isFinite(editRotateCenterDisplay.z)) {
+            editRotateCenterDisplay.z *= zRatio;
+          }
+          if (editRotateStartVector && Number.isFinite(editRotateStartVector.z)) {
+            editRotateStartVector.z *= zRatio;
+          }
+          if (Number.isFinite(editRotatePlaneZ)) {
+            editRotatePlaneZ *= zRatio;
+          }
+          worldAxisOverlay.signature = "";
+          recomputeSceneMetrics({ resetMiniMap: false });
+          updateCameraClippingFromBounds();
+          updateHandleScales();
+          if (worldAxisOverlay.enabled) {
+            rebuildWorldAxisGeometry();
+          } else {
+            syncWorldAxisVisibility();
+          }
+          syncWorldAxisScaleControls();
+          requestRender();
+        }
+
         function syncWorldAxisScaleControls() {
           if (worldAxisZScaleSlider) {
-            worldAxisZScaleSlider.value = String(worldAxisOverlay.zScaleIndex);
+            worldAxisZScaleSlider.value = String(worldAxisZScaleFactor());
           }
           if (worldAxisZScaleValue) {
             worldAxisZScaleValue.textContent = worldAxisZScaleLabel();
@@ -3794,25 +4344,7 @@
               worldAxisDragHandle.addEventListener("pointerdown", startWorldAxisDrag);
             }
             worldAxisZScaleSlider.addEventListener("input", () => {
-              const nextIndex = Math.min(
-                Math.max(Math.round(Number(worldAxisZScaleSlider.value) || 0), 0),
-                WORLD_AXIS_Z_SCALE_OPTIONS.length - 1,
-              );
-              if (nextIndex === worldAxisOverlay.zScaleIndex) {
-                syncWorldAxisScaleControls();
-                return;
-              }
-              worldAxisOverlay.zScaleIndex = nextIndex;
-              worldAxisOverlay.signature = "";
-              storeStringValue(
-                WORLD_AXIS_Z_SCALE_STORAGE_KEY,
-                String(worldAxisOverlay.zScaleIndex),
-              );
-              syncWorldAxisScaleControls();
-              if (worldAxisOverlay.enabled) {
-                rebuildWorldAxisGeometry();
-              }
-              requestRender();
+              applyViewerZScaleFactor(worldAxisZScaleSlider.value);
             });
             worldAxisControlsInitialized = true;
           }
@@ -3862,8 +4394,91 @@
           requestRender();
         }
 
+        const DEFAULT_FIT_LEFT_BIAS_RATIO = 0.12;
+
+        function rawBoundsMatch(leftRawBounds, rightRawBounds) {
+          const leftBounds = normalizedRawBounds(leftRawBounds);
+          const rightBounds = normalizedRawBounds(rightRawBounds);
+          if (!leftBounds || !rightBounds) {
+            return false;
+          }
+          const tolerance = 0.001;
+          return (
+            Math.abs(dataNumber(leftBounds.min[0], 0) - dataNumber(rightBounds.min[0], 0)) <= tolerance &&
+            Math.abs(dataNumber(leftBounds.min[1], 0) - dataNumber(rightBounds.min[1], 0)) <= tolerance &&
+            Math.abs(dataNumber(leftBounds.min[2], 0) - dataNumber(rightBounds.min[2], 0)) <= tolerance &&
+            Math.abs(dataNumber(leftBounds.max[0], 0) - dataNumber(rightBounds.max[0], 0)) <= tolerance &&
+            Math.abs(dataNumber(leftBounds.max[1], 0) - dataNumber(rightBounds.max[1], 0)) <= tolerance &&
+            Math.abs(dataNumber(leftBounds.max[2], 0) - dataNumber(rightBounds.max[2], 0)) <= tolerance
+          );
+        }
+
+        function sharedSinglePadFitBiasRatio(padFocusId, rawBounds) {
+          const normalizedPadFocusId = String(padFocusId || "").trim();
+          const onlyPadFocusId =
+            worldAxisPadFocusIds.length === 1
+              ? String(worldAxisPadFocusIds[0] || "").trim()
+              : "";
+          if (!normalizedPadFocusId || normalizedPadFocusId !== onlyPadFocusId) {
+            return null;
+          }
+          const onlyPadBounds = worldAxisRawBoundsForPadFocusId(onlyPadFocusId);
+          if (
+            !rawBoundsMatch(rawBounds, payload.bounds || {}) ||
+            !rawBoundsMatch(onlyPadBounds, payload.bounds || {})
+          ) {
+            return null;
+          }
+          return DEFAULT_FIT_LEFT_BIAS_RATIO * 0.5;
+        }
+
+        function resolvedDefaultFitBiasRatio() {
+          const onlyPadFocusId =
+            worldAxisPadFocusIds.length === 1
+              ? String(worldAxisPadFocusIds[0] || "").trim()
+              : "";
+          const sharedBiasRatio = sharedSinglePadFitBiasRatio(
+            onlyPadFocusId,
+            worldAxisRawBoundsForPadFocusId(onlyPadFocusId),
+          );
+          return Number.isFinite(sharedBiasRatio)
+            ? sharedBiasRatio
+            : DEFAULT_FIT_LEFT_BIAS_RATIO;
+        }
+
+        function applyCameraHorizontalBias(horizontalRatio) {
+          const ratio = Number(horizontalRatio);
+          if (!Number.isFinite(ratio) || Math.abs(ratio) < 1e-6) {
+            return;
+          }
+          const viewDirection = new THREE.Vector3().subVectors(
+            controls.target,
+            camera.position,
+          );
+          const distance = viewDirection.length();
+          if (!Number.isFinite(distance) || distance <= 1e-6) {
+            return;
+          }
+          viewDirection.normalize();
+          const rightDirection = new THREE.Vector3()
+            .crossVectors(viewDirection, camera.up)
+            .normalize();
+          if (rightDirection.lengthSq() <= 1e-12) {
+            return;
+          }
+          const fovRad = THREE.MathUtils.degToRad(camera.fov);
+          const viewHeight = 2.0 * Math.tan(fovRad * 0.5) * distance;
+          const viewWidth = viewHeight * Math.max(camera.aspect, 0.01);
+          const offset = rightDirection.multiplyScalar(viewWidth * ratio);
+          camera.position.add(offset);
+          controls.target.add(offset);
+          controls.update();
+          requestRender();
+        }
+
         function fitCamera() {
           fitCameraToRawBounds(payload.bounds || {});
+          applyCameraHorizontalBias(resolvedDefaultFitBiasRatio());
         }
 
         function focusViewerTarget(rawBounds, focusId) {
@@ -3872,6 +4487,10 @@
             setWorldAxisActivePadFocus(padFocusId, { resetOffset: true });
           }
           fitCameraToRawBounds(rawBounds);
+          const sharedBiasRatio = sharedSinglePadFitBiasRatio(padFocusId, rawBounds);
+          if (Number.isFinite(sharedBiasRatio)) {
+            applyCameraHorizontalBias(sharedBiasRatio);
+          }
         }
 
         function editWellTargetFocusBounds(index) {
@@ -4355,7 +4974,8 @@
                 camera.position.set(
                   targetCenter.x + offsetDistance * 0.8,
                   targetCenter.y + offsetDistance * 0.6,
-                  targetCenter.z + offsetDistance * 0.4,
+                  targetCenter.z +
+                    (offsetDistance * 0.4) / Math.max(worldAxisZScaleFactor(), 1.0),
                 );
                 controls.target.copy(targetCenter);
                 camera.updateProjectionMatrix();
@@ -4821,6 +5441,7 @@
           const mesh = new THREE.Mesh(hoverSphereGeometry, hoverSphereMaterial);
           mesh.scale.setScalar(markerScale * 0.52);
           mesh.position.copy(displayPoint(point));
+          mesh.userData.lockViewerZGeometryScale = true;
           mesh.userData.hover = Object.assign(
             {
               color: hexOrDefault(item.color, "#64748b"),
@@ -5454,12 +6075,13 @@
           if (!isPointerInMiniMap(event)) {
             return;
           }
-          if (miniMapRulerState.enabled) {
+          const forcePan = Number(event.button || 0) === 2;
+          if (!forcePan && miniMapRulerState.enabled) {
             hideTooltip();
             consumeMiniMapEvent(event);
             return;
           }
-          if (startMiniMapEditDrag(event)) {
+          if (!forcePan && startMiniMapEditDrag(event)) {
             consumeMiniMapEvent(event);
             return;
           }
@@ -5485,6 +6107,19 @@
           if (miniMapState.resizing) {
             return;
           }
+          if (miniMapState.dragging) {
+            const worldPerPixel = miniMapWorldPerPixel();
+            const dx = Number(event.clientX || 0) - miniMapState.pointerStart.x;
+            const dy = Number(event.clientY || 0) - miniMapState.pointerStart.y;
+            miniMapState.target.set(
+              miniMapState.targetStart.x - dx * worldPerPixel,
+              miniMapState.targetStart.y + dy * worldPerPixel,
+              miniMapState.targetStart.z,
+            );
+            requestRender();
+            consumeMiniMapEvent(event);
+            return;
+          }
           if (miniMapRulerState.enabled) {
             if (
               miniMapRulerState.phase === "measuring" &&
@@ -5499,22 +6134,10 @@
             }
             return;
           }
-          if (!miniMapState.dragging) {
-            if (isPointerInMiniMap(event)) {
-              hideTooltip();
-              consumeMiniMapEvent(event);
-            }
+          if (!isPointerInMiniMap(event)) {
             return;
           }
-          const worldPerPixel = miniMapWorldPerPixel();
-          const dx = Number(event.clientX || 0) - miniMapState.pointerStart.x;
-          const dy = Number(event.clientY || 0) - miniMapState.pointerStart.y;
-          miniMapState.target.set(
-            miniMapState.targetStart.x - dx * worldPerPixel,
-            miniMapState.targetStart.y + dy * worldPerPixel,
-            miniMapState.targetStart.z,
-          );
-          requestRender();
+          hideTooltip();
           consumeMiniMapEvent(event);
         }
 
@@ -5522,21 +6145,24 @@
           if (editDragInputMode === "minimap") {
             return;
           }
-          if (miniMapRulerState.enabled && isPointerInMiniMap(event)) {
+          if (miniMapState.dragging) {
+            miniMapState.dragging = false;
+            controls.enabled = true;
+            interactionActive = false;
+            try {
+              renderer.domElement.releasePointerCapture(event.pointerId);
+            } catch (e) { /* ignore */ }
+            requestRender();
+            consumeMiniMapEvent(event);
+            return;
+          }
+          if (
+            miniMapRulerState.enabled &&
+            Number(event.button || 0) !== 2 &&
+            isPointerInMiniMap(event)
+          ) {
             handleMiniMapRulerClick(event);
-            return;
           }
-          if (!miniMapState.dragging) {
-            return;
-          }
-          miniMapState.dragging = false;
-          controls.enabled = true;
-          interactionActive = false;
-          try {
-            renderer.domElement.releasePointerCapture(event.pointerId);
-          } catch (e) { /* ignore */ }
-          requestRender();
-          consumeMiniMapEvent(event);
         }
 
         function handleMiniMapWheel(event) {
@@ -5668,6 +6294,13 @@
         renderer.domElement.addEventListener("pointermove", handleMiniMapPointerMove, true);
         renderer.domElement.addEventListener("pointerup", handleMiniMapPointerUp, true);
         renderer.domElement.addEventListener("pointercancel", handleMiniMapPointerUp, true);
+        renderer.domElement.addEventListener("contextmenu", (event) => {
+          if (!isPointerInMiniMap(event)) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+        }, true);
         renderer.domElement.addEventListener("wheel", handleMiniMapWheel, {
           capture: true,
           passive: false,
@@ -6782,8 +7415,8 @@
               config: {
                 entryIncTargetDeg: config.entry_inc_target_deg || 86,
                 maxIncDeg: config.max_inc_deg || 95,
-                dlsBuildMaxDegPer30m: config.dls_build_max_deg_per_30m || 3.0,
-                dlsHorizontalMaxDegPer30m: config.dls_horizontal_max_deg_per_30m || config.dls_build_max_deg_per_30m || 3.0,
+                dlsBuildMaxDegPer30m: config.dls_build_max_deg_per_30m || 2.4,
+                dlsHorizontalMaxDegPer30m: config.dls_horizontal_max_deg_per_30m || config.dls_build_max_deg_per_30m || 1.5,
                 kopMinVerticalM: config.kop_min_vertical_m || 550,
                 mdStepM: 30,
                 basePoints: Array.isArray(well.base_points) ? well.base_points : [],
@@ -6804,6 +7437,7 @@
               });
               const pointMesh = new THREE.Mesh(handleGeometry, pointMat);
               pointMesh.position.copy(displayPoint(point));
+              pointMesh.userData.lockViewerZGeometryScale = true;
               pointMesh.visible = false;
               pointMesh.renderOrder = 10;
               scene.add(pointMesh);
@@ -6816,6 +7450,7 @@
               });
               const previewMesh = new THREE.Mesh(handleGeometry, previewMat);
               previewMesh.position.copy(pointMesh.position);
+              previewMesh.userData.lockViewerZGeometryScale = true;
               previewMesh.visible = false;
               previewMesh.renderOrder = 8;
               scene.add(previewMesh);
@@ -6828,11 +7463,13 @@
               });
               const originalMesh = new THREE.Mesh(handleGeometry, originalMat);
               originalMesh.position.copy(displayPoint(point));
+              originalMesh.userData.lockViewerZGeometryScale = true;
               originalMesh.visible = false;
               originalMesh.renderOrder = 12;
               scene.add(originalMesh);
               const pickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
               pickMesh.position.copy(pointMesh.position);
+              pickMesh.userData.lockViewerZGeometryScale = true;
               pickMesh.visible = false;
               pickMesh.renderOrder = 11;
               scene.add(pickMesh);
@@ -7142,6 +7779,7 @@
                 points,
                 Z_DISPLAY_SIGN,
                 sceneOrigin,
+                worldAxisZScaleFactor(),
               );
               syncEditVisibility();
               return;
@@ -7167,6 +7805,7 @@
             pts,
             Z_DISPLAY_SIGN,
             sceneOrigin,
+            worldAxisZScaleFactor(),
           );
           syncEditVisibility();
         }
@@ -7254,6 +7893,7 @@
               rotatedPoints,
               Z_DISPLAY_SIGN,
               sceneOrigin,
+              worldAxisZScaleFactor(),
             );
             syncEditVisibility();
             return;
@@ -8141,7 +8781,8 @@
           const originDelta = new THREE.Vector3(
             oldSceneOrigin.x - (Number(nextSceneOrigin.x) || 0),
             oldSceneOrigin.y - (Number(nextSceneOrigin.y) || 0),
-            (oldSceneOrigin.z - (Number(nextSceneOrigin.z) || 0)) * Z_DISPLAY_SIGN,
+            ((oldSceneOrigin.z - (Number(nextSceneOrigin.z) || 0)) * Z_DISPLAY_SIGN) /
+              Math.max(worldAxisZScaleFactor(), 1.0),
           );
           clearViewerDataObjects();
           updateViewerBackground();

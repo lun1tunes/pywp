@@ -101,16 +101,35 @@ def run_page() -> None:
 
     render_target_import_section()
     edit_applied = st.session_state.pop("wt_edit_targets_applied", None)
+    edit_applied_source = str(
+        st.session_state.pop("wt_edit_targets_applied_source", "")
+    ).strip()
+    edit_applied_note = str(
+        st.session_state.pop("wt_edit_targets_applied_note", "")
+    ).strip()
     if edit_applied:
-        st.success(
-            f"Точки обновлены из 3D-редактора: {', '.join(edit_applied)}. "
-            "Проверьте подсветку t1/t3 ниже и запустите пересчёт."
-        )
-        st.toast(
-            f"Цели обновлены из 3D-редактора: {', '.join(edit_applied)}. "
-            "Запустите пересчёт для уточнения траекторий.",
-            icon=":material/edit:",
-        )
+        if edit_applied_source == "bulk_horizontal_length_preprocess":
+            message = (
+                f"Длина ГС скорректирована для: {', '.join(edit_applied)}. "
+                "Проверьте обновлённые точки `t3` и запустите пересчёт."
+            )
+            if edit_applied_note:
+                message = f"{message} {edit_applied_note}"
+            st.success(message)
+            st.toast(
+                f"Длина ГС обновлена для {len(edit_applied)} скважин.",
+                icon=":material/straighten:",
+            )
+        else:
+            st.success(
+                f"Точки обновлены из 3D-редактора: {', '.join(edit_applied)}. "
+                "Проверьте подсветку t1/t3 ниже и запустите пересчёт."
+            )
+            st.toast(
+                f"Цели обновлены из 3D-редактора: {', '.join(edit_applied)}. "
+                "Запустите пересчёт для уточнения траекторий.",
+                icon=":material/edit:",
+            )
     records = st.session_state.get("wt_records")
     if records is None:
         st.info("Загрузите цели и нажмите «Импорт целей».")

@@ -57,7 +57,7 @@ def test_batch_survey_csv_applies_selected_crs(
         auto_convert=True,
         source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
     )
-    result = pd.read_csv(BytesIO(payload), sep="\t")
+    result = pd.read_csv(BytesIO(payload), sep=",")
 
     assert "X_m" not in result.columns
     assert "Y_m" not in result.columns
@@ -94,7 +94,7 @@ def test_batch_target_csv_applies_selected_crs(
         auto_convert=True,
         source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
     )
-    result = pd.read_csv(BytesIO(payload), sep="\t")
+    result = pd.read_csv(BytesIO(payload), sep=",")
 
     assert result["X_СК_42_З16_m"].iloc[0] == pytest.approx(10.0)
     assert result["Y_СК_42_З16_m"].iloc[0] == pytest.approx(20.0)

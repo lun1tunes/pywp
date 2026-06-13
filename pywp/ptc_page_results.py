@@ -35,12 +35,57 @@ from pywp.uncertainty import planning_uncertainty_model_for_preset
 
 __all__ = ["render_failed_target_only_results", "render_success_tabs"]
 
+_ANTI_COLLISION_PARALLEL_OPTIONS: tuple[tuple[str, int], ...] = (
+    ("Без Multiprocessing", 0),
+    ("2 процессов", 2),
+    ("4 процессов", 4),
+)
+_ANTI_COLLISION_PARALLEL_VALUES = {
+    label: value for label, value in _ANTI_COLLISION_PARALLEL_OPTIONS
+}
+_ANTI_COLLISION_PARALLEL_LABEL_BY_VALUE = {
+    value: label for label, value in _ANTI_COLLISION_PARALLEL_OPTIONS
+}
+
 
 def _calc_params_changed_after_last_run() -> bool:
     stored_signature = st.session_state.get("wt_last_calc_param_signature")
     if not isinstance(stored_signature, tuple):
         return False
     return tuple(stored_signature) != wt.WT_CALC_PARAMS.state_signature()
+
+
+def _normalize_anticollision_parallel_workers(raw_value: object) -> int:
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 0
+    allowed_values = sorted(_ANTI_COLLISION_PARALLEL_LABEL_BY_VALUE.keys())
+    eligible_values = [candidate for candidate in allowed_values if candidate <= value]
+    return int(eligible_values[-1]) if eligible_values else 0
+
+
+def _render_anticollision_parallel_workers_selectbox() -> int:
+    workers_key = "wt_anticollision_parallel_workers"
+    label_key = "wt_anticollision_parallel_workers_label"
+    default_workers = _normalize_anticollision_parallel_workers(
+        st.session_state.get(
+            workers_key,
+            st.session_state.get("wt_last_parallel_workers", 0),
+        )
+    )
+    if str(st.session_state.get(label_key, "")) not in _ANTI_COLLISION_PARALLEL_VALUES:
+        st.session_state[label_key] = _ANTI_COLLISION_PARALLEL_LABEL_BY_VALUE[
+            default_workers
+        ]
+    selected_label = st.selectbox(
+        "Multiprocessing для anti-collision",
+        options=[label for label, _value in _ANTI_COLLISION_PARALLEL_OPTIONS],
+        key=label_key,
+    )
+    selected_workers = int(_ANTI_COLLISION_PARALLEL_VALUES.get(str(selected_label), 0))
+    st.session_state[workers_key] = selected_workers
+    return selected_workers
 
 
 def _point_signature(point: object | None) -> tuple[float, float, float] | None:
@@ -467,6 +512,7 @@ def _render_anticollision_panel(
         format_func=wt.uncertainty_preset_label,
         key="wt_anticollision_uncertainty_preset",
     )
+    anti_collision_parallel_workers = _render_anticollision_parallel_workers_selectbox()
     if resolved_reference_wells:
         ptc_anticollision_params.render_anticollision_params_block(
             reference_wells=resolved_reference_wells
@@ -528,10 +574,6 @@ def _render_anticollision_panel(
 
     if run_requested and has_current_analysis:
         _prepare_anticollision_incremental_rerun()
-
-    anti_collision_parallel_workers = int(
-        st.session_state.get("wt_last_parallel_workers") or 0
-    )
 
     anti_collision_progress = (
         None
@@ -718,9 +760,7 @@ def _render_anticollision_panel(
                 reference_uncertainty_models_by_name=(
                     reference_uncertainty_models_by_name
                 ),
-                parallel_workers=int(
-                    st.session_state.get("wt_last_parallel_workers") or 0
-                ),
+                parallel_workers=int(anti_collision_parallel_workers),
             )
 
             if improved:
@@ -1337,6 +1377,12 @@ def render_success_tabs(
             "Тяжёлая 3D-визуализация предыдущего результата временно скрыта "
             "до нового расчёта, чтобы не перегружать интерфейс."
         )
+    divider = getattr(st, "divider", None)
+    if callable(divider):
+        divider()
+    markdown = getattr(st, "markdown", None)
+    if callable(markdown):
+        markdown("### Просмотр результатов")
     view_mode = st.radio(
         "Режим просмотра результатов",
         options=["Отдельная скважина", "Все скважины"],

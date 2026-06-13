@@ -13,7 +13,11 @@ from pywp.anticollision import (
     anti_collision_report_events,
 )
 from pywp.eclipse_welltrack import WelltrackRecord
-from pywp.models import Point3D
+from pywp.models import (
+    DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
+    DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M,
+    Point3D,
+)
 from pywp import ptc_pad_state
 from pywp import ptc_target_records
 from pywp import ptc_three_payload
@@ -514,8 +518,8 @@ def build_target_only_edit_wells_payload(
                 "config": {
                     "entry_inc_target_deg": 86.0,
                     "max_inc_deg": 95.0,
-                    "dls_build_max_deg_per_30m": 3.0,
-                    "dls_horizontal_max_deg_per_30m": 3.0,
+                    "dls_build_max_deg_per_30m": DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
+                    "dls_horizontal_max_deg_per_30m": DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M,
                     "kop_min_vertical_m": 550.0,
                 },
             }

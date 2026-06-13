@@ -455,6 +455,11 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
     )
     monkeypatch.setattr(page.st, "expander", _fake_expander)
     monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "number_input", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyExpander())
 
     page._render_records_overview([_records()[0]])
 
@@ -522,6 +527,11 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
     )
     monkeypatch.setattr(page.st, "expander", _fake_expander)
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "number_input", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyExpander())
 
     page._render_records_overview([_records()[0], incomplete])
 
@@ -575,6 +585,11 @@ def test_records_overview_metrics_count_wells_and_pilots_separately(
     )
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "number_input", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyExpander())
 
     page._render_records_overview([parent, pilot])
 
@@ -629,6 +644,11 @@ def test_records_overview_metrics_count_multi_horizontal_wells(
     )
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "number_input", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyExpander())
 
     page._render_records_overview([regular, multi_horizontal])
 
@@ -682,6 +702,11 @@ def test_records_overview_metrics_count_multi_horizontal_zbs(
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "number_input", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyExpander())
 
     page._render_records_overview([zbs_multi])
 
@@ -692,6 +717,115 @@ def test_records_overview_metrics_count_multi_horizontal_zbs(
         ("Многопластовых скважин", "1"),
         ("Проблем", "0"),
     ]
+
+
+def test_records_overview_preprocess_uses_fixed_default_and_step(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    captured: dict[str, object] = {}
+
+    class _DummyColumn:
+        def metric(self, *args, **kwargs):
+            return None
+
+        def number_input(self, label, **kwargs):
+            captured["number_input"] = {
+                "label": str(label),
+                "step": float(kwargs.get("step", 0.0)),
+                "min_value": float(kwargs.get("min_value", 0.0)),
+                "key": str(kwargs.get("key", "")),
+            }
+            return None
+
+        def button(self, *args, **kwargs):
+            return False
+
+        def caption(self, *args, **kwargs):
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+
+    page._render_records_overview([_records()[0]])
+
+    assert page.st.session_state["wt_preprocess_horizontal_length_m"] == 1500.0
+    assert captured["number_input"] == {
+        "label": "Новая длина ГС, м",
+        "step": 100.0,
+        "min_value": 1.0,
+        "key": "wt_preprocess_horizontal_length_m",
+    }
+
+
+def test_records_overview_preprocess_waits_for_apply_button(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    original_records = [_records()[0]]
+    page.st.session_state["wt_records"] = list(original_records)
+    calls: list[float] = []
+
+    class _DummyColumn:
+        def metric(self, *args, **kwargs):
+            return None
+
+        def number_input(self, _label, **kwargs):
+            key = str(kwargs.get("key", ""))
+            page.st.session_state[key] = 1700.0
+            return 1700.0
+
+        def button(self, *args, **kwargs):
+            return False
+
+        def caption(self, *args, **kwargs):
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page,
+        "_bulk_horizontal_length_changes",
+        lambda *args, **kwargs: calls.append(float(kwargs["target_length_m"])) or ([], []),
+    )
+
+    page._render_records_overview(original_records)
+
+    assert page.st.session_state["wt_preprocess_horizontal_length_m"] == 1700.0
+    assert calls == []
+    assert page.st.session_state["wt_records"] == list(original_records)
 
 
 def test_t1_t3_resolution_message_reports_fixed_and_kept_wells() -> None:
@@ -3017,6 +3151,146 @@ def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
     assert records[1].points[2].y == pytest.approx(1980.0)
 
 
+def test_source_table_editor_keeps_canonical_rows_unchanged_until_apply(monkeypatch) -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    original_df = pd.DataFrame(
+        [
+            {"Wellname": "TAB-01", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "TAB-01", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "TAB-01", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+        ]
+    )
+    edited_df = pd.DataFrame(
+        [
+            {"Wellname": "TAB-01", "Point": "wellhead", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "TAB-01", "Point": "t1", "X": 610.0, "Y": 810.0, "Z": 2410.0},
+            {"Wellname": "TAB-01", "Point": "t3", "X": 1510.0, "Y": 2010.0, "Z": 2510.0},
+        ]
+    )
+    page.st.session_state["wt_source_format"] = page.WT_SOURCE_FORMAT_TARGET_TABLE
+    page.st.session_state["wt_source_table_df"] = original_df.copy()
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_radio(_label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyContext(), _DummyContext()),
+    )
+    monkeypatch.setattr(page.st, "radio", _fake_radio)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: edited_df.copy())
+    monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "TextColumn",
+        lambda *args, **kwargs: {"type": "text"},
+    )
+    monkeypatch.setattr(
+        page.st.column_config,
+        "NumberColumn",
+        lambda *args, **kwargs: {"type": "number"},
+    )
+
+    page._render_source_input()
+
+    pd.testing.assert_frame_equal(
+        page.st.session_state["wt_source_table_df"].reset_index(drop=True),
+        original_df.reset_index(drop=True),
+    )
+    payload = page._build_source_payload_from_state()
+    pd.testing.assert_frame_equal(
+        payload.table_rows.reset_index(drop=True),
+        original_df.reset_index(drop=True),
+    )
+
+
+def test_source_table_editor_applies_rows_on_first_submit(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    original_df = pd.DataFrame(
+        [
+            {"Wellname": "TAB-01", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "TAB-01", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "TAB-01", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+        ]
+    )
+    edited_df = pd.DataFrame(
+        [
+            {"Wellname": "TAB-01", "Point": "wellhead", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "TAB-01", "Point": "t1", "X": 610.0, "Y": 810.0, "Z": 2410.0},
+            {"Wellname": "TAB-01", "Point": "t3", "X": 1510.0, "Y": 2010.0, "Z": 2510.0},
+        ]
+    )
+    page.st.session_state["wt_source_format"] = page.WT_SOURCE_FORMAT_TARGET_TABLE
+    page.st.session_state["wt_source_table_df"] = original_df.copy()
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_radio(_label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyContext(), _DummyContext()),
+    )
+    monkeypatch.setattr(page.st, "radio", _fake_radio)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: edited_df.copy())
+    monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "TextColumn",
+        lambda *args, **kwargs: {"type": "text"},
+    )
+    monkeypatch.setattr(
+        page.st.column_config,
+        "NumberColumn",
+        lambda *args, **kwargs: {"type": "number"},
+    )
+
+    page._render_source_input()
+
+    applied_df = page.st.session_state["wt_source_table_df"].reset_index(drop=True)
+    assert list(applied_df["Point"]) == ["S", "t1", "t3"]
+    assert list(applied_df["X"]) == [10.0, 610.0, 1510.0]
+    payload = page._build_source_payload_from_state()
+    assert payload.mode == page.WT_SOURCE_MODE_TARGET_TABLE
+    assert payload.table_rows is not None
+    assert list(payload.table_rows.reset_index(drop=True)["X"]) == [10.0, 610.0, 1510.0]
+
+
 def test_normalize_source_table_df_for_ui_accepts_excel_like_single_column_rows() -> (
     None
 ):
@@ -3089,8 +3363,15 @@ def test_welltrack_page_prompts_to_run_anticollision_for_successful_batch() -> N
     assert "Минимальный SF" not in metric_labels
     button_labels = [str(widget.label) for widget in at.button]
     assert "Расчёт пересечений" in button_labels
-    selectbox_labels = [widget.label for widget in at.selectbox]
+    selectboxes_by_label = {str(widget.label): widget for widget in at.selectbox}
+    selectbox_labels = list(selectboxes_by_label.keys())
     assert "Пресет неопределенности для anti-collision" in selectbox_labels
+    assert "Multiprocessing для anti-collision" in selectbox_labels
+    assert list(selectboxes_by_label["Multiprocessing для anti-collision"].options) == [
+        "Без Multiprocessing",
+        "2 процессов",
+        "4 процессов",
+    ]
 
 
 def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() -> None:
@@ -3386,6 +3667,40 @@ def test_render_raw_records_table_highlights_changed_regular_pilot_and_multi_poi
     assert highlighted_rows == {1, 2, 3, 5, 6, 9}
 
 
+def test_render_raw_records_table_uses_preprocess_highlight_message(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    page.st.session_state["wt_edit_targets_highlight_names"] = ["WELL-A"]
+    page.st.session_state["wt_edit_targets_highlight_points"] = {"WELL-A": [2]}
+    page.st.session_state["wt_edit_targets_last_source"] = (
+        "bulk_horizontal_length_preprocess"
+    )
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(
+        page.st,
+        "success",
+        lambda message, *args, **kwargs: captured.setdefault("success", str(message)),
+    )
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+
+    page._render_raw_records_table(_records()[:1])
+
+    assert captured["success"] == (
+        "Скорректированные точки `t3` подсвечены. "
+        "Запустите расчёт для обновления траекторий."
+    )
+
+
 def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
     page = wt_import_module
     page.st.session_state.clear()
@@ -3482,6 +3797,8 @@ def test_multihorizontal_streamlit_flow_recalculates_after_target_edit_with_incr
     assert "well_08" in {str(record.name) for record in at.session_state["wt_records"]}
 
     selected_names = ["well_08", "well_09", "well_12"]
+    at.session_state["wt_cfg_dls_build_max"] = 1.0
+    at.session_state["wt_cfg_dls_horizontal_max"] = 1.0
     at.session_state["wt_selected_names"] = selected_names
     _click_button(at, "Рассчитать траектории")
     at.run(timeout=240)
@@ -4189,7 +4506,7 @@ def test_batch_summary_can_export_target_points(monkeypatch) -> None:
         _successful_plan(name="WELL-A", y_offset_m=0.0),
         _successful_plan(name="WELL-B", y_offset_m=25.0),
     ]
-    captured: dict[str, object] = {"download_buttons": []}
+    captured: dict[str, object] = {"download_buttons": [], "radios": []}
 
     class _DummyContext:
         def __enter__(self):
@@ -4229,13 +4546,17 @@ def test_batch_summary_can_export_target_points(monkeypatch) -> None:
             page.st.session_state.get(kwargs.get("key"), [])
         ),
     )
-    monkeypatch.setattr(
-        page.st,
-        "radio",
-        lambda _label, options, *args, **kwargs: str(
-            page.st.session_state.get(kwargs.get("key"), options[0])
-        ),
-    )
+    def _fake_radio(label, options, *args, **kwargs):
+        captured["radios"].append(
+            {
+                "label": str(label),
+                "options": [str(option) for option in options],
+                "key": str(kwargs.get("key")),
+            }
+        )
+        return str(page.st.session_state.get(kwargs.get("key"), options[0]))
+
+    monkeypatch.setattr(page.st, "radio", _fake_radio)
     monkeypatch.setattr(page.st, "download_button", _fake_download_button)
 
     page._render_batch_summary(
@@ -4247,6 +4568,18 @@ def test_batch_summary_can_export_target_points(monkeypatch) -> None:
 
     downloads = list(captured["download_buttons"])
     labels = {item["label"] for item in downloads}
+    assert captured["radios"] == [
+        {
+            "label": "Что выгружать",
+            "options": ["Траектории", "Цели"],
+            "key": "wt_download_kind",
+        },
+        {
+            "label": "Формат выгрузки",
+            "options": ["CSV", "WELLTRACK", ".dev (7z)"],
+            "key": "wt_target_download_format",
+        },
+    ]
     assert labels == {
         "Скачать цели всех скважин",
         "Скачать цели выбранных скважин",

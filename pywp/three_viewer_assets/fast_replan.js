@@ -24,15 +24,15 @@
  *     config: {
  *       entryIncTargetDeg: 86,
  *       maxIncDeg: 95,
- *       dlsBuildMaxDegPer30m: 3.0,
- *       dlsHorizontalMaxDegPer30m: 3.0,
+ *       dlsBuildMaxDegPer30m: 2.4,
+ *       dlsHorizontalMaxDegPer30m: 1.5,
  *       kopMinVerticalM: 550,
  *     },
  *   });
  *
  *   // On drag tick:
  *   const pts = replan.compute([t1x, t1y, t1z], [t3x, t3y, t3z]);
- *   updateLineGeometry(trajectoryLine, pts, -1.0, sceneOrigin);
+ *   updateLineGeometry(trajectoryLine, pts, -1.0, sceneOrigin, zScaleFactor);
  *
  * The preview is intentionally lightweight: when Python sends the
  * already solved survey stations, the client warps that baseline path
@@ -507,8 +507,9 @@ function fastReplanPoints(surface, t1, t3, config) {
 // ---------------------------------------------------------------------------
 // Geometry update helper: replace a THREE.LineSegments buffer in-place.
 // ---------------------------------------------------------------------------
-function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin) {
+function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin, zScaleFactor) {
   const sign = zDisplaySign || -1.0;
+  const scaleFactor = Math.max(Number(zScaleFactor) || 1.0, 1.0);
   const origin = displayOrigin || {};
   const originX = Number.isFinite(Number(origin.x)) ? Number(origin.x) : 0.0;
   const originY = Number.isFinite(Number(origin.y)) ? Number(origin.y) : 0.0;
@@ -522,12 +523,12 @@ function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin) {
     positions.push(
       Number(prev[0] || 0) - originX,
       Number(prev[1] || 0) - originY,
-      (Number(prev[2] || 0) - originZ) * sign,
+      ((Number(prev[2] || 0) - originZ) * sign) / scaleFactor,
     );
     positions.push(
       Number(curr[0] || 0) - originX,
       Number(curr[1] || 0) - originY,
-      (Number(curr[2] || 0) - originZ) * sign,
+      ((Number(curr[2] || 0) - originZ) * sign) / scaleFactor,
     );
   }
 
@@ -561,8 +562,8 @@ class FastReplan {
       {
         entryIncTargetDeg: 86,
         maxIncDeg: 95,
-        dlsBuildMaxDegPer30m: 3.0,
-        dlsHorizontalMaxDegPer30m: 3.0,
+        dlsBuildMaxDegPer30m: 2.4,
+        dlsHorizontalMaxDegPer30m: 1.5,
         kopMinVerticalM: 550,
         mdStepM: 30,
         basePoints: [],

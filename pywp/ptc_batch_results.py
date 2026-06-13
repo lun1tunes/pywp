@@ -25,7 +25,7 @@ from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.mcm import dogleg_angle_rad
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
-from pywp.ui_well_panels import survey_export_dataframe
+from pywp.ui_well_panels import survey_export_csv_bytes, survey_export_dataframe
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 __all__ = [
@@ -91,6 +91,8 @@ _DEV_EXPORT_COLUMNS = (
 )
 _DEV_EXPORT_REQUIRED_COLUMNS = ("MD", "X", "Y", "Z", "TVD", "DX", "DY")
 _DEV_EXPORT_ANGLE_COLUMNS = ("AZIM_TN", "INCL", "DLS", "AZIM_GN")
+_DEV_EXPORT_COLUMN_WIDTHS: tuple[int, ...] = (14, 13, 13, 12, 14, 13, 11, 15, 12, 11, 12)
+_DEV_EXPORT_DATA_ROW_PREFIX = "    "
 TransformXyFunc = Callable[
     [float, float, CoordinateSystem, CoordinateSystem],
     tuple[float, float],
@@ -160,7 +162,7 @@ def build_batch_survey_csv(
     if not frames:
         return b""
     combined = pd.concat(frames, ignore_index=True)
-    return combined.to_csv(index=False, sep="\t").encode("utf-8")
+    return survey_export_csv_bytes(combined)
 
 
 def build_batch_target_csv(
@@ -255,7 +257,7 @@ def build_batch_target_csv(
     if not frames:
         return b""
     combined = pd.concat(frames, ignore_index=True)
-    return combined.to_csv(index=False, sep="\t").encode("utf-8")
+    return survey_export_csv_bytes(combined)
 
 
 def build_batch_survey_welltrack(
@@ -657,23 +659,7 @@ def _dev_export_text(
         "#==============================================================================================================================================",
     ]
     for _, row in rows.iterrows():
-        lines.append(
-            " ".join(
-                [
-                    _format_export_number(row["MD"]),
-                    _format_export_number(row["X"]),
-                    _format_export_number(row["Y"]),
-                    _format_export_number(row["Z"]),
-                    _format_export_number(row["TVD"]),
-                    _format_export_number(row["DX"]),
-                    _format_export_number(row["DY"]),
-                    _format_export_number(row["AZIM_TN"]),
-                    _format_export_number(row["INCL"]),
-                    _format_export_number(row["DLS"]),
-                    _format_export_number(row["AZIM_GN"]),
-                ]
-            )
-        )
+        lines.append(_format_dev_export_data_row(row))
     return "\n".join(lines) + "\n"
 
 
@@ -1106,20 +1092,18 @@ def _target_dev_export_text(
                 else 0.0
             )
         lines.append(
-            " ".join(
-                [
-                    _format_export_number(cumulative_md),
-                    _format_export_number(x_value),
-                    _format_export_number(y_value),
-                    _format_export_number(-z_value),
-                    _format_export_number(z_value - surface_z),
-                    _format_export_number(x_value - surface_x),
-                    _format_export_number(y_value - surface_y),
-                    _format_export_number(azi_deg),
-                    _format_export_number(inc_deg),
-                    _format_export_number(dls_deg_per_30m),
-                    _format_export_number(azi_deg),
-                ]
+            _format_dev_export_data_values(
+                cumulative_md,
+                x_value,
+                y_value,
+                -z_value,
+                z_value - surface_z,
+                x_value - surface_x,
+                y_value - surface_y,
+                azi_deg,
+                inc_deg,
+                dls_deg_per_30m,
+                azi_deg,
             )
         )
         prev_x = x_value
@@ -1161,6 +1145,31 @@ def _format_export_number(value: object) -> str:
     if abs(numeric_value) < 5e-10:
         numeric_value = 0.0
     return f"{numeric_value:.6f}"
+
+
+def _format_padded_export_number(value: object, *, width: int) -> str:
+    text = _format_export_number(value)
+    if len(text) >= width:
+        return text
+    return text.rjust(width)
+
+
+def _format_dev_export_data_values(*values: object) -> str:
+    if len(values) != len(_DEV_EXPORT_COLUMNS):
+        raise ValueError(
+            f"expected {len(_DEV_EXPORT_COLUMNS)} .dev values, got {len(values)}"
+        )
+    parts = [
+        _format_padded_export_number(value, width=width)
+        for value, width in zip(values, _DEV_EXPORT_COLUMN_WIDTHS, strict=True)
+    ]
+    return _DEV_EXPORT_DATA_ROW_PREFIX + " ".join(parts)
+
+
+def _format_dev_export_data_row(row: pd.Series) -> str:
+    return _format_dev_export_data_values(
+        *(row[column] for column in _DEV_EXPORT_COLUMNS)
+    )
 
 
 def _unique_export_file_name(

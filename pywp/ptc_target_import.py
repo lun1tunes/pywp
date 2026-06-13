@@ -203,6 +203,7 @@ def init_target_source_state_defaults(
     session_state.setdefault("wt_source_mode", WT_SOURCE_MODE_FILE_PATH)
     session_state.setdefault("wt_source_path", str(DEFAULT_WELLTRACK_PATH))
     session_state.setdefault("wt_source_inline", "")
+    session_state.setdefault("wt_source_upload_file", None)
     session_state.setdefault("wt_source_table_df", empty_source_table_df())
     session_state.setdefault("wt_source_table_editor_nonce", 0)
 
@@ -269,6 +270,9 @@ def store_imported_records(
     session_state["wt_records"] = list(normalized_records)
     session_state["wt_records_original"] = list(normalized_records)
     session_state["wt_loaded_at"] = str(loaded_at_text)
+    session_state.pop("wt_preprocess_horizontal_length_m", None)
+    session_state.pop("wt_records_overview_expand_once", None)
+    session_state.pop("wt_edit_targets_applied_note", None)
     clear_t1_t3_order_state()
     clear_pad_state()
     session_state["wt_last_error"] = ""
@@ -292,6 +296,9 @@ def reset_failed_import_state(
 
     session_state["wt_records"] = None
     session_state["wt_records_original"] = None
+    session_state.pop("wt_preprocess_horizontal_length_m", None)
+    session_state.pop("wt_records_overview_expand_once", None)
+    session_state.pop("wt_edit_targets_applied_note", None)
     clear_t1_t3_order_state()
     clear_pad_state()
     session_state["wt_last_error"] = str(error_message)
@@ -314,6 +321,9 @@ def clear_target_import_flow_state(
         session_state[str(key)] = ()
     session_state["wt_selected_names"] = []
     session_state["wt_loaded_at"] = ""
+    session_state.pop("wt_preprocess_horizontal_length_m", None)
+    session_state.pop("wt_records_overview_expand_once", None)
+    session_state.pop("wt_edit_targets_applied_note", None)
     clear_t1_t3_order_state()
     clear_pad_state()
     clear_results()

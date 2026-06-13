@@ -4,11 +4,17 @@ from collections.abc import Callable, Iterable, Mapping, MutableMapping
 import math
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.pilot_wells import is_pilot_name, parent_name_for_pilot, well_name_key
+from pywp.pilot_wells import (
+    is_pilot_name,
+    is_zbs_name,
+    parent_name_for_pilot,
+    well_name_key,
+)
 from pywp.ptc_sidetrack_state import queue_editor_sidetrack_window_override
 
 __all__ = [
     "apply_edit_targets_changes",
+    "bulk_horizontal_length_changes",
     "edit_target_point",
     "handle_three_edit_event",
     "invalidate_results_for_edited_targets",
@@ -32,6 +38,111 @@ def edit_target_point(value: object) -> list[float] | None:
     if not all(math.isfinite(item) for item in point):
         return None
     return point
+
+
+def bulk_horizontal_length_changes(
+    records: Iterable[WelltrackRecord],
+    *,
+    target_length_m: float,
+) -> tuple[list[dict[str, object]], list[str]]:
+    try:
+        normalized_target_length_m = float(target_length_m)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Новая длина ГС должна быть числом.") from exc
+    if not math.isfinite(normalized_target_length_m) or normalized_target_length_m <= 0.0:
+        raise ValueError("Новая длина ГС должна быть положительным конечным числом.")
+
+    changes: list[dict[str, object]] = []
+    skipped_names: list[str] = []
+    for record in records:
+        if is_pilot_name(record.name):
+            continue
+        pair_indices = _horizontal_length_pair_indices(record)
+        if pair_indices is None:
+            if tuple(record.points):
+                skipped_names.append(str(record.name))
+            continue
+        point_updates: list[dict[str, object]] = []
+        failed = False
+        for t1_index, t3_index in pair_indices:
+            next_t3_position = _scaled_t3_position(
+                record.points[t1_index],
+                record.points[t3_index],
+                target_length_m=normalized_target_length_m,
+            )
+            if next_t3_position is None:
+                failed = True
+                break
+            if _point_matches_xyz(record.points[t3_index], next_t3_position):
+                continue
+            point_updates.append(
+                {
+                    "index": int(t3_index),
+                    "position": next_t3_position,
+                }
+            )
+        if failed:
+            skipped_names.append(str(record.name))
+            continue
+        if point_updates:
+            changes.append(
+                {
+                    "name": str(record.name),
+                    "points": point_updates,
+                }
+            )
+    return changes, unique_well_names(skipped_names)
+
+
+def _horizontal_length_pair_indices(
+    record: WelltrackRecord,
+) -> tuple[tuple[int, int], ...] | None:
+    points = tuple(record.points)
+    if is_zbs_name(record.name):
+        if len(points) < 2 or len(points) % 2 != 0:
+            return None
+        return tuple((index, index + 1) for index in range(0, len(points), 2))
+    if len(points) < 3 or (len(points) - 1) % 2 != 0:
+        return None
+    return tuple((index, index + 1) for index in range(1, len(points), 2))
+
+
+def _scaled_t3_position(
+    t1_point: WelltrackPoint,
+    t3_point: WelltrackPoint,
+    *,
+    target_length_m: float,
+) -> list[float] | None:
+    coords = (
+        float(t1_point.x),
+        float(t1_point.y),
+        float(t1_point.z),
+        float(t3_point.x),
+        float(t3_point.y),
+        float(t3_point.z),
+    )
+    if not all(math.isfinite(value) for value in coords):
+        return None
+    dx = float(t3_point.x) - float(t1_point.x)
+    dy = float(t3_point.y) - float(t1_point.y)
+    dz = float(t3_point.z) - float(t1_point.z)
+    current_length_m = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if current_length_m <= 1e-9:
+        return None
+    scale = float(target_length_m) / current_length_m
+    return [
+        float(t1_point.x) + dx * scale,
+        float(t1_point.y) + dy * scale,
+        float(t1_point.z) + dz * scale,
+    ]
+
+
+def _point_matches_xyz(point: WelltrackPoint, xyz: list[float]) -> bool:
+    return (
+        math.isclose(float(point.x), float(xyz[0]), abs_tol=1e-9)
+        and math.isclose(float(point.y), float(xyz[1]), abs_tol=1e-9)
+        and math.isclose(float(point.z), float(xyz[2]), abs_tol=1e-9)
+    )
 
 
 def _sidetrack_window_change(value: object) -> dict[str, object] | None:
@@ -405,6 +516,7 @@ def apply_edit_targets_changes(
     )
     session_state["wt_edit_targets_pending_names"] = pending_names
     session_state["wt_edit_targets_applied"] = updated_names
+    session_state["wt_edit_targets_applied_source"] = str(source or "").strip()
     session_state["wt_edit_targets_highlight_names"] = pending_names
     existing_highlight_points = session_state.get("wt_edit_targets_highlight_points")
     if isinstance(existing_highlight_points, Mapping):

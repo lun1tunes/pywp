@@ -46,7 +46,8 @@ INTERPOLATION_RODRIGUES = "rodrigues"
 ALLOWED_INTERPOLATION_METHODS = (INTERPOLATION_RODRIGUES, INTERPOLATION_SLERP)
 InterpolationMethod = Literal["rodrigues", "slerp"]
 
-DEFAULT_BUILD_DLS_MAX_DEG_PER_30M = 3.0
+DEFAULT_BUILD_DLS_MAX_DEG_PER_30M = 2.4
+DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M = 1.5
 
 __all__ = [
     # Constants
@@ -65,6 +66,7 @@ __all__ = [
     "ALLOWED_INTERPOLATION_METHODS",
     "InterpolationMethod",
     "DEFAULT_BUILD_DLS_MAX_DEG_PER_30M",
+    "DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M",
     "J_PROFILE_POLICY_OFF",
     "J_PROFILE_POLICY_PROPOSE",
     "J_PROFILE_POLICY_PREFER",
@@ -165,7 +167,7 @@ class TrajectoryConfig(FrozenModel):
         DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     )
     dls_horizontal_max_deg_per_30m: NonNegativeFiniteScalar = (
-        DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
+        DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M
     )
     kop_min_vertical_m: NonNegativeFiniteScalar = 400.0
 

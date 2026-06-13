@@ -90,6 +90,20 @@ def _reference_well(
     )
 
 
+def _is_dev_data_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    tokens = stripped.split()
+    if len(tokens) != 11:
+        return False
+    try:
+        [float(token) for token in tokens]
+    except ValueError:
+        return False
+    return True
+
+
 def _parse_dev_rows(text: str) -> pd.DataFrame:
     rows: list[list[float]] = []
     for line in text.splitlines():
@@ -141,7 +155,7 @@ def test_build_batch_survey_csv_labels_transformed_geographic_coordinates() -> N
         source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
         transform_stations_func=fake_transform,
     )
-    result = pd.read_csv(BytesIO(payload), sep="\t")
+    result = pd.read_csv(BytesIO(payload), sep=",")
 
     assert "X_m" not in result.columns
     assert "Y_m" not in result.columns
@@ -191,7 +205,7 @@ def test_build_batch_target_csv_includes_input_and_output_coordinate_blocks() ->
         source_crs=CoordinateSystem.PULKOVO_1942_GK_13N,
         transform_xy_func=fake_transform_xy,
     )
-    result = pd.read_csv(BytesIO(payload), sep="\t")
+    result = pd.read_csv(BytesIO(payload), sep=",")
 
     assert list(result.columns[:3]) == ["well_name", "point_name", "point_md_m"]
     assert "X_ГК_13N_42_m" in result.columns
@@ -213,7 +227,7 @@ def test_build_batch_target_csv_keeps_single_coordinate_block_when_not_convertin
         auto_convert=True,
         source_crs=CoordinateSystem.PULKOVO_1942_GK_13N,
     )
-    result = pd.read_csv(BytesIO(payload), sep="\t")
+    result = pd.read_csv(BytesIO(payload), sep=",")
 
     assert list(result.columns) == [
         "well_name",
@@ -376,7 +390,37 @@ def test_build_batch_survey_dev_file_stays_in_source_crs() -> None:
 
     text = payload.decode("utf-8")
 
-    assert "100.000000 20.000000 45.000000 -95.000000" in text
+    rows = _parse_dev_rows(text)
+    assert rows.iloc[1]["MD"] == pytest.approx(100.0)
+    assert rows.iloc[1]["X"] == pytest.approx(20.0)
+    assert rows.iloc[1]["Y"] == pytest.approx(45.0)
+    assert rows.iloc[1]["Z"] == pytest.approx(-95.0)
+
+
+def test_build_batch_survey_dev_file_pads_numeric_columns() -> None:
+    payload = ptc_batch_results.build_batch_survey_dev_file(
+        [
+            _success(
+                name="WELL-A",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 100.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [30.0, 45.0],
+                        "Z_m": [-5.0, 95.0],
+                        "INC_deg": [0.0, 20.0],
+                        "AZI_deg": [0.0, 45.0],
+                    }
+                ),
+            )
+        ],
+    )
+    text = payload.decode("utf-8")
+    data_lines = [line for line in text.splitlines() if _is_dev_data_line(line)]
+
+    assert len(data_lines) == 2
+    assert data_lines[0].find("10.000000") == data_lines[1].find("20.000000")
+    assert data_lines[0].find("30.000000") == data_lines[1].find("45.000000")
 
 
 def test_build_batch_survey_dev_7z_exports_one_dev_file_per_well(tmp_path) -> None:
@@ -427,7 +471,8 @@ def test_build_batch_survey_dev_7z_exports_one_dev_file_per_well(tmp_path) -> No
     assert parsed.name == "WELL-A"
     assert len(parsed.stations) == 2
     assert float(parsed.stations["Z_m"].iloc[1]) == pytest.approx(95.0)
-    assert "100.000000 20.000000 45.000000 -95.000000" in well_a_text
+    rows = _parse_dev_rows(well_a_text)
+    assert rows.iloc[1]["MD"] == pytest.approx(100.0)
 
 
 def test_build_batch_survey_dev_file_exports_single_selected_well() -> None:
@@ -460,7 +505,9 @@ def test_build_batch_survey_dev_file_exports_single_selected_well() -> None:
     assert parsed.name == "WELL-A"
     assert len(parsed.stations) == 2
     assert "# WELL NAME:                WELL-A" in text
-    assert "100.000000 20.000000 45.000000 -95.000000" in text
+    rows = _parse_dev_rows(text)
+    assert rows.iloc[1]["MD"] == pytest.approx(100.0)
+    assert rows.iloc[1]["X"] == pytest.approx(20.0)
 
 
 def test_build_batch_survey_dev_file_prepends_parent_path_from_welltrack() -> None:

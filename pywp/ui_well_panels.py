@@ -57,6 +57,10 @@ def survey_export_dataframe(
     )
 
 
+def survey_export_csv_bytes(export_df: pd.DataFrame) -> bytes:
+    return export_df.to_csv(index=False, sep=",").encode("utf-8")
+
+
 def render_run_log_panel(
     run_log_lines: Sequence[str] | None,
     *,
@@ -268,17 +272,17 @@ def render_survey_table_with_download(
     )
     st.download_button(
         button_label,
-        data=survey_export_dataframe(
-            export_df,
-            xy_label_suffix=(
-                xy_label_suffix
-                if export_xy_label_suffix is None
-                else export_xy_label_suffix
-            ),
-            xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
-        )
-        .to_csv(index=False, sep="\t")
-        .encode("utf-8"),
+        data=survey_export_csv_bytes(
+            survey_export_dataframe(
+                export_df,
+                xy_label_suffix=(
+                    xy_label_suffix
+                    if export_xy_label_suffix is None
+                    else export_xy_label_suffix
+                ),
+                xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
+            )
+        ),
         file_name=file_name,
         mime="text/csv",
         icon=":material/download:",

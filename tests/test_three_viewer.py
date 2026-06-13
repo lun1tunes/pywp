@@ -25,16 +25,29 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function initAntiCollisionControls()" in html
     assert "const WORLD_AXIS_STORAGE_KEY = `pywp:world-axis-overlay:${viewerStateScope}`;" in html
     assert "const WORLD_AXIS_Z_SCALE_STORAGE_KEY = `pywp:world-axis-z-scale:${viewerStateScope}`;" in html
-    assert "const WORLD_AXIS_PLANE_RAW_Z = 0.0;" in html
+    assert "const WORLD_AXIS_PLANE_Z_ROUND_STEP = 100.0;" in html
     assert "const WORLD_AXIS_GRID_SQUARES_PER_SIDE = 4;" in html
-    assert "const WORLD_AXIS_Z_SCALE_OPTIONS = [1, 2, 5, 10, 25, 50];" in html
+    assert "const VIEWER_Z_SCALE_DEFAULT = 1.0;" in html
+    assert "const VIEWER_Z_SCALE_MIN = 1.0;" in html
+    assert "const VIEWER_Z_SCALE_MAX = 10.0;" in html
+    assert "const VIEWER_Z_SCALE_STEP = 0.05;" in html
     assert 'id="world-axis-drag-handle"' in html
     assert 'id="world-axis-z-scale-slider"' in html
     assert 'id="world-axis-z-scale-value"' in html
     assert ".world-axis-handle" in html
+    assert ".world-axis-handle-icon" in html
+    assert "box-sizing: border-box;" in html
+    assert "appearance: none;" in html
+    assert "-webkit-appearance: none;" in html
+    assert "line-height: 0;" in html
+    assert "left: 50%;" in html
+    assert "top: 50%;" in html
+    assert "pointer-events: none;" in html
     assert ".world-axis-scale-slider" in html
-    assert ".world-axis-scale-labels" in html
+    assert ".world-axis-scale-labels" not in html
+    assert 'step="0.05"' in html
     assert "function worldAxisPlaneIntersectionRaw(ndcX, ndcY, rawZ)" in html
+    assert "((Number(rawZ) - Number(sceneOrigin.z || 0)) * Z_DISPLAY_SIGN) /" in html
     assert "function normalizedRawBounds(rawBounds)" in html
     assert "function worldAxisDefaultPadFocusId()" in html
     assert "function worldAxisPadFocusIdForFocusId(focusId)" in html
@@ -44,14 +57,30 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function worldAxisResolvedAnchorRaw()" in html
     assert "function setWorldAxisActivePadFocus(focusId, options)" in html
     assert "function syncWorldAxisActivePadFocus(options)" in html
+    assert "function worldAxisPlaneRawZ(rawBounds)" in html
+    assert "function worldAxisTopRawZ(rawBounds)" in html
+    assert "function worldAxisRawLevelMatches(leftRawZ, rightRawZ)" in html
+    assert "function worldAxisMajorRawZValues(planeRawZ, topRawZ, zStep)" in html
+    assert "function worldAxisMinorTickSpecs(planeRawZ, topRawZ, zStep, zMinorSubdivision)" in html
+    assert "const deepestRawZ = dataNumber(rawMax[2], 0);" in html
+    assert "const roundedRawZ = Math.ceil(deepestRawZ / roundStep) * roundStep;" in html
+    assert "roundedRawZ <= deepestRawZ + 1e-6" in html
+    assert "const shallowestRawZ = dataNumber(rawMin[2], 0);" in html
+    assert "return Math.min(roundedRawZ, 0.0);" in html
     assert "function worldAxisDepthRangeRaw()" in html
     assert "function worldAxisNiceStep(rawValue)" in html
+    assert "function formatWorldAxisDistance(rawDistance)" in html
+    assert "function worldAxisSubdivisionForPixelSpan(pixelSpan)" in html
     assert "function worldAxisZScaleFactor()" in html
     assert "function worldAxisZScaleLabel()" in html
     assert "function worldAxisDisplayZ(rawZValue)" in html
     assert "function buildWorldAxisLabelSpecs(" in html
     assert "xyStep," in html
     assert "zStep," in html
+    assert "text: formatWorldAxisValue(\n              worldAxisOverlay.anchorRaw.y,\n              xyStep," in html
+    assert "text: formatWorldAxisValue(\n              planeRawZ,\n              zStep," in html
+    assert "localPosition: new THREE.Vector3(0, 0, 0),\n            offsetX: -14," in html
+    assert "localPosition: new THREE.Vector3(0, 0, 0),\n            offsetX: 12," in html
     assert "function rebuildWorldAxisGeometry()" in html
     assert "function updateWorldAxisOverlay()" in html
     assert "function updateWorldAxisDragHandlePosition(" in html
@@ -62,7 +91,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'activePadFocusId: ""' in html
     assert "dragOffsetRaw: { x: 0.0, y: 0.0 }" in html
     assert "dragging: false" in html
-    assert "zScaleIndex: 0," in html
+    assert "zScaleFactor: VIEWER_Z_SCALE_DEFAULT," in html
     assert "const unitsPerPixel = worldUnitsPerPixelAt(anchorDisplay);" in html
     assert "syncWorldAxisActivePadFocus({ resetOffset: false });" in html
     assert "const xyStep = worldAxisNiceStep(" in html
@@ -70,27 +99,69 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "const zStep = worldAxisNiceStep(Math.max(worldAxisDepthRangeRaw() / 5.0, 1000.0));" in html
     assert "const xTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;" in html
     assert "const yTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;" in html
-    assert "worldAxisOverlay.zScaleIndex = readStoredInteger(" in html
+    assert "worldAxisOverlay.zScaleFactor = readStoredNumber(" in html
     assert "function readStoredInteger(key, fallback, minValue, maxValue)" in html
+    assert "function readStoredNumber(key, fallback, minValue, maxValue)" in html
     assert "function storeStringValue(key, value)" in html
+    assert "function sanitizeViewerZScaleFactor(value)" in html
+    assert "String(Number(factor.toFixed(2)))" in html
     assert "const zScaleFactor = worldAxisZScaleFactor();" in html
+    assert "const xyMajorPixelSpan =" in html
+    assert "const zMajorPixelSpan =" in html
+    assert "const xyMinorSubdivision = worldAxisSubdivisionForPixelSpan(xyMajorPixelSpan);" in html
+    assert "const zMinorSubdivision = worldAxisSubdivisionForPixelSpan(zMajorPixelSpan);" in html
+    assert "const xyTickStep = xyStep / xyMinorSubdivision;" in html
+    assert "const zMajorRawValues = worldAxisMajorRawZValues(planeRawZ, topRawZ, zStep);" in html
+    assert "const zTickSpecs = worldAxisMinorTickSpecs(" in html
+    assert "const tickStep = safeStep / safeSubdivision;" in html
+    assert "values.push(0.0);" in html
+    assert "const pushZAxisCoordinateLabels = (" in html
+    assert "pushZAxisCoordinateLabels(xMax, 0, 10, 0, true);" in html
+    assert "pushZAxisCoordinateLabels(0, yMax, -10, 0, true);" in html
+    assert "const pushZAxisTitleLabel = (axisLocalX, axisLocalY, offsetX, offsetY) => {" in html
+    assert "pushZAxisTitleLabel(xMax, 0, 8, 0);" in html
+    assert "pushZAxisTitleLabel(0, yMax, -8, 0);" in html
     assert "const zDisplayLength =" in html
-    assert "const zDepthRangeRaw = Math.max(worldAxisDepthRangeRaw(), zStep);" in html
+    assert "const zLength = Math.max(Number(planeRawZ) - Number(topRawZ), 0.0);" in html
     assert "const approxZPixelLength =" in html
     assert "const zLabelEvery = Math.max(" in html
-    assert "for (let zIndex = 1; zIndex <= zTickCount; zIndex += 1)" in html
-    assert "if (zIndex !== zTickCount && zIndex % zLabelEvery !== 0)" in html
-    assert "WORLD_AXIS_PLANE_RAW_Z + zValue" in html
+    assert "zMajorRawValues.forEach((rawZValue, zIndex) => {" in html
+    assert "const isTop = worldAxisRawLevelMatches(rawZValue, topRawZ);" in html
+    assert "const isZero = worldAxisRawLevelMatches(rawZValue, 0.0);" in html
+    assert "const distanceFromPlane = Number(planeRawZ) - Number(rawZValue);" in html
     assert "worldAxisOverlay.labelSpecs = labelSpecs;" in html
-    assert "worldAxisDisplayZ(zMax) - Math.max(zStep * 0.45 / zScaleFactor, 24.0)" in html
-    assert "localPosition: new THREE.Vector3(\n                xMax,\n                yMax,\n                worldAxisDisplayZ(zValue)," in html
-    assert "[xEnd, yEnd, 0]," in html
-    assert "[xEnd, yEnd, worldAxisDisplayZ(zLength)]," in html
+    assert "worldAxisDisplayZ(-zMax) + Math.max(zStep * 0.45 / zScaleFactor, 24.0)" in html
+    assert 'color: "#6b7ea6"' in html
+    assert "const xyStepLabel = formatWorldAxisDistance(xyStep);" in html
+    assert "let previousRawZ = Number(planeRawZ) || 0.0;" in html
+    assert "const zMidRawZ = (previousRawZ + Number(rawZValue)) * 0.5;" in html
+    assert "text: formatWorldAxisDistance(segmentDistance)," in html
+    assert "localPosition: new THREE.Vector3(\n                  0,\n                  0,\n                  worldAxisDisplayZ(-(Number(planeRawZ) - zMidRawZ))," in html
+    assert "[0, 0, 0]," in html
+    assert "[0, 0, worldAxisDisplayZ(-zLength)]," in html
+    assert "[xValue, 0, 0]," in html
+    assert "[xValue, 0, worldAxisDisplayZ(-zLength)]," in html
+    assert "[0, yValue, 0]," in html
+    assert "[0, yValue, worldAxisDisplayZ(-zLength)]," in html
+    assert "[xMin, 0, zValue]," in html
+    assert "[xMax, 0, zValue]," in html
+    assert "[0, yMin, zValue]," in html
+    assert "[0, yMax, zValue]," in html
+    assert "[xValue, -tickHalf, 0]," in html
+    assert "[-tickHalf, yValue, 0]," in html
+    assert "zTickSpecs.forEach((tickSpec) => {" in html
+    assert "[-zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)]," in html
+    assert "[xMax - zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)]," in html
+    assert "[0, yMax - zTickHalf, worldAxisDisplayZ(-distanceFromPlane)]," in html
     assert "focusViewerTarget(targetBounds, String(item.id || \"\"));" in html
     assert "window.addEventListener(\"pointermove\", handleWorldAxisDragPointerMove, true);" in html
+    assert "displayPoint([\n            worldAxisOverlay.anchorRaw.x,\n            worldAxisOverlay.anchorRaw.y,\n            0.0,\n          ]).project(camera);" in html
     assert "function syncWorldAxisScaleControls()" in html
+    assert "function applyViewerZScaleFactor(value)" in html
+    assert "function rescaleViewerSceneZ(ratio)" in html
+    assert "function objectLocksViewerZGeometryScale(object)" in html
     assert "worldAxisZScaleSlider.addEventListener(\"input\", () => {" in html
-    assert "storeStringValue(\n                WORLD_AXIS_Z_SCALE_STORAGE_KEY," in html
+    assert "applyViewerZScaleFactor(worldAxisZScaleSlider.value);" in html
     assert "syncWorldAxisScaleControls();" in html
     assert "function registerAntiCollisionVisualObject(object, itemOrRole)" in html
     assert 'role === "sidetrack_relative_cone"' in html
@@ -144,6 +215,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "labelLayerElement.getBoundingClientRect()" in html
     assert "transform-origin: 50% 100%;" in html
     assert "position.z += labelLift;" not in html
+    assert "align-items: center;" in html
+    assert "justify-content: center;" in html
+    assert 'xmlns="http://www.w3.org/2000/svg"' in html
+    assert "✋" not in html
     assert "X / East" in html
     assert "Y / North" in html
     assert 'label: "Z"' in html
@@ -165,27 +240,44 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "gapSize: Math.max(maxSpan * 0.0012, 1.6)" in html
     assert "#collisions-panel {" in html
     assert "z-index: 8;" in html
+    assert "#minimap-ruler-btn.is-active {" in html
     assert "function syncLegendVisibility()" in html
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
     assert "function fitCameraToRawBounds(rawBounds)" in html
+    assert "const DEFAULT_FIT_LEFT_BIAS_RATIO = 0.12;" in html
+    assert "function rawBoundsMatch(leftRawBounds, rightRawBounds)" in html
+    assert "const tolerance = 0.001;" in html
+    assert "function sharedSinglePadFitBiasRatio(padFocusId, rawBounds)" in html
+    assert "return DEFAULT_FIT_LEFT_BIAS_RATIO * 0.5;" in html
+    assert "function resolvedDefaultFitBiasRatio()" in html
+    assert "function applyCameraHorizontalBias(horizontalRatio)" in html
+    assert "crossVectors(viewDirection, camera.up)" in html
+    assert "const fovRad = THREE.MathUtils.degToRad(camera.fov);" in html
+    assert "applyCameraHorizontalBias(resolvedDefaultFitBiasRatio());" in html
+    assert "const sharedBiasRatio = sharedSinglePadFitBiasRatio(padFocusId, rawBounds);" in html
     assert "sceneOrigin = rawBoundsCenter(payload.bounds || {})" in html
     assert "function displayPoint(value)" in html
     assert "function displayXYZ(xValue, yValue, zValue)" in html
     assert "function dataPointFromDisplay(displayPosition)" in html
     assert "dataNumber(value && value[0], 0) - sceneOrigin.x" in html
     assert "dataNumber(value && value[1], 0) - sceneOrigin.y" in html
-    assert "(dataNumber(value && value[2], 0) - sceneOrigin.z) * Z_DISPLAY_SIGN" in html
+    assert "((dataNumber(value && value[2], 0) - sceneOrigin.z) * Z_DISPLAY_SIGN) /" in html
     assert "dataNumber(displayPosition && displayPosition.x, 0) + sceneOrigin.x" in html
     assert "dataNumber(displayPosition && displayPosition.y, 0) + sceneOrigin.y" in html
-    assert "dataNumber(displayPosition && displayPosition.z, 0) * Z_DISPLAY_SIGN + sceneOrigin.z" in html
-    assert "function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin)" in html
+    assert "(dataNumber(displayPosition && displayPosition.z, 0) * zScaleFactor) *" in html
+    assert "function updateLineGeometry(lineObject, points, zDisplaySign, displayOrigin, zScaleFactor)" in html
     assert "const originX = Number.isFinite(Number(origin.x)) ? Number(origin.x) : 0.0;" in html
-    assert "updateLineGeometry(\n                editLineObjects[wellIndex],\n                points,\n                Z_DISPLAY_SIGN,\n                sceneOrigin," in html
-    assert "updateLineGeometry(\n            editLineObjects[wellIndex],\n            pts,\n            Z_DISPLAY_SIGN,\n            sceneOrigin," in html
+    assert "const scaleFactor = Math.max(Number(zScaleFactor) || 1.0, 1.0);" in html
+    assert "updateLineGeometry(\n                editLineObjects[wellIndex],\n                points,\n                Z_DISPLAY_SIGN,\n                sceneOrigin,\n                worldAxisZScaleFactor()," in html
+    assert "updateLineGeometry(\n            editLineObjects[wellIndex],\n            pts,\n            Z_DISPLAY_SIGN,\n            sceneOrigin,\n            worldAxisZScaleFactor()," in html
     assert "fitMiniMapToRawBounds(rawBounds || payload.bounds || {})" in html
     assert "function focusMiniMapToDisplayPoint(displayCenter, focusSpan)" in html
     assert "focusMiniMapToDisplayPoint(targetCenter, offsetDistance * 2.0)" in html
+    assert "const forcePan = Number(event.button || 0) === 2;" in html
+    assert "if (!forcePan && miniMapRulerState.enabled) {" in html
+    assert "if (!forcePan && startMiniMapEditDrag(event)) {" in html
+    assert "renderer.domElement.addEventListener(\"contextmenu\", (event) => {" in html
     assert "let miniMapOverlayBuilt = false;" in html
     assert "function buildMiniMapOverlaysFromPayload()" in html
     assert "if (!miniMapOverlayBuilt) {" in html
@@ -202,6 +294,10 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "font-size: 15px;" in html
     assert "const originalMesh = new THREE.Mesh(handleGeometry, originalMat);" in html
     assert "originalMesh.position.copy(displayPoint(point));" in html
+    assert "pointMesh.userData.lockViewerZGeometryScale = true;" in html
+    assert "previewMesh.userData.lockViewerZGeometryScale = true;" in html
+    assert "originalMesh.userData.lockViewerZGeometryScale = true;" in html
+    assert "pickMesh.userData.lockViewerZGeometryScale = true;" in html
     assert "h.originalMesh.visible =" in html
     assert "material.depthTest = applies && selectedWellDirty ? false : item.depthTest;" in html
     assert 'id="edit-toolbox"' in html
@@ -472,6 +568,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function addHoverPointCloud(points, item, hoverItems)" in html
     assert 'const defaultHoverColor = hexOrDefault(item.color, "#64748b")' in html
     assert "{ color: defaultHoverColor }" in html
+    assert "mesh.userData.lockViewerZGeometryScale = true;" in html
     assert "pointCloud.userData.hover = { color: defaultHoverColor }" in html
     assert "pointCloud.userData.hoverItems = itemHoverData" in html
     assert "raycaster.params.Points.threshold = Math.max(worldMarkerSize * 0.55, 3.0)" in html

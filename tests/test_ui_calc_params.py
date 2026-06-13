@@ -51,6 +51,8 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["j_profile_policy"] == J_PROFILE_POLICY_OFF
     assert defaults["offer_j_profile"] == bool(cfg.offer_j_profile)
     assert defaults["offer_j_profile"] is False
+    assert abs(float(defaults["dls_build_max"]) - 0.8) < 1e-12
+    assert abs(float(defaults["dls_horizontal_max"]) - 0.5) < 1e-12
 
 
 def test_apply_defaults_resyncs_when_signature_changed(monkeypatch) -> None:

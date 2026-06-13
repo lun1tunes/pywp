@@ -145,6 +145,13 @@ def test_ptc_page_shows_user_facing_import_and_run_controls() -> None:
     assert "Очистить импорт" not in button_labels
 
 
+def test_ptc_page_limits_parallel_worker_options_to_four() -> None:
+    source = Path("pywp/ptc_page_run.py").read_text(encoding="utf-8")
+
+    assert "*((f\"{n} процессов\", n) for n in (2, 4))" in source
+    assert "*((f\"{n} процессов\", n) for n in (2, 4, 6, 8))" not in source
+
+
 def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sections() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
@@ -218,6 +225,14 @@ def test_ptc_page_wraps_pad_layout_section_in_fragment() -> None:
     assert "@st.fragment" in source
     assert "def _render_pad_layout_section(records: list[object]) -> None:" in source
     assert "_render_pad_layout_section(records=records)" in source
+
+
+def test_ptc_core_contains_bulk_horizontal_length_preprocess_controls() -> None:
+    source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
+
+    assert "Препроцессинг траекторий" in source
+    assert "Новая длина ГС, м" in source
+    assert "Применить ко всем" in source
 
 
 def test_ptc_page_renders_reference_section_directly() -> None:

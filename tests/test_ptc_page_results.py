@@ -358,6 +358,43 @@ def test_anticollision_panel_reruns_after_fresh_analysis_when_visual_is_external
     assert calls["progress_emptied"] is True
 
 
+def test_anticollision_parallel_workers_widget_uses_separate_state_and_clamps_legacy_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeStreamlit:
+        session_state = {"wt_last_parallel_workers": 8}
+
+        def selectbox(
+            self,
+            label: str,
+            *,
+            options: list[str],
+            key: str,
+        ) -> str:
+            calls["label"] = str(label)
+            calls["options"] = list(options)
+            return str(self.session_state[key])
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+
+    selected_workers = ptc_page_results._render_anticollision_parallel_workers_selectbox()
+
+    assert calls["label"] == "Multiprocessing для anti-collision"
+    assert calls["options"] == [
+        "Без Multiprocessing",
+        "2 процессов",
+        "4 процессов",
+    ]
+    assert selected_workers == 4
+    assert ptc_page_results.st.session_state["wt_anticollision_parallel_workers"] == 4
+    assert (
+        ptc_page_results.st.session_state["wt_anticollision_parallel_workers_label"]
+        == "4 процессов"
+    )
+
+
 def test_anticollision_panel_renders_settings_under_section_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -439,12 +476,145 @@ def test_anticollision_panel_renders_settings_under_section_header(
         show_visualization=False,
     )
 
-    assert calls[:4] == [
+    assert calls[:5] == [
         ("markdown", "### Anti-collision и пересечения"),
         ("selectbox", "Пресет неопределенности для anti-collision"),
+        ("selectbox", "Multiprocessing для anti-collision"),
         ("params", "rendered"),
         ("button", "Расчёт пересечений"),
     ]
+
+
+def test_anticollision_panel_uses_its_own_parallel_worker_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+    captured_parallel_workers: list[int] = []
+
+    class _DummyExpander:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyMetricColumn:
+        def metric(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_last_parallel_workers": 0,
+            "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
+            "wt_anticollision_parallel_workers_label": "4 процессов",
+        }
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def selectbox(
+            self,
+            _label: str,
+            *,
+            options: list[str],
+            format_func=None,
+            key: str,
+        ) -> str:
+            if key not in self.session_state:
+                self.session_state[key] = str(options[0])
+            return str(self.session_state[key])
+
+        def button(self, label: str, **_kwargs: object) -> bool:
+            return str(label) == "Расчёт пересечений"
+
+        def progress(self, _value: int, *, text: str):
+            class _Progress:
+                def progress(self, value: int, *, text: str) -> None:
+                    pass
+
+                def empty(self) -> None:
+                    pass
+
+            return _Progress()
+
+        def metric(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def columns(self, *_args: object, **_kwargs: object):
+            return (
+                _DummyMetricColumn(),
+                _DummyMetricColumn(),
+                _DummyMetricColumn(),
+                _DummyMetricColumn(),
+            )
+
+        def expander(self, *_args: object, **_kwargs: object):
+            return _DummyExpander()
+
+        def success(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_pending_edit_target_names",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_current_anti_collision_cache_snapshot",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_cached_anticollision_snapshot",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_cached_anti_collision_view_model",
+        lambda **kwargs: (
+            captured_parallel_workers.append(int(kwargs["parallel_workers"])),
+            analysis,
+            (),
+            (),
+        )[1:],
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_status_run_log",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_render_anticollision_visual_overview",
+        lambda **_kwargs: None,
+    )
+
+    ptc_page_results._render_anticollision_panel(
+        successes=[object(), object()],
+        records=[],
+        summary_rows=[],
+        focus_pad_id="",
+        focus_pad_well_names=[],
+        show_visualization=True,
+    )
+
+    assert captured_parallel_workers == [4]
 
 
 def test_anticollision_panel_pauses_on_pending_target_edits(

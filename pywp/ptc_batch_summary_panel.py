@@ -265,14 +265,31 @@ def _render_survey_downloads(
     kind_key = "wt_download_kind"
     if str(state.get(kind_key, "")) not in _EXPORT_KINDS:
         state[kind_key] = _EXPORT_KIND_TRAJECTORIES
-    export_kind = str(
-        st_module.radio(
-            "Что выгружать",
-            options=list(_EXPORT_KINDS),
-            key=kind_key,
-            horizontal=True,
+    controls_col, format_col = st_module.columns([1, 1], gap="medium")
+    with controls_col:
+        export_kind = str(
+            st_module.radio(
+                "Что выгружать",
+                options=list(_EXPORT_KINDS),
+                key=kind_key,
+                horizontal=True,
+            )
         )
+    format_key = (
+        "wt_target_download_format"
+        if export_kind == _EXPORT_KIND_TARGETS
+        else "wt_survey_download_format"
     )
+    _normalize_download_format(state=state, format_key=format_key)
+    with format_col:
+        export_format = str(
+            st_module.radio(
+                "Формат выгрузки",
+                options=list(_SURVEY_DOWNLOAD_FORMATS),
+                key=format_key,
+                horizontal=True,
+            )
+        )
     if export_kind == _EXPORT_KIND_TARGETS:
         _render_target_downloads(
             state=state,
@@ -280,6 +297,7 @@ def _render_survey_downloads(
             target_crs=target_crs,
             auto_convert=auto_convert,
             source_crs=source_crs,
+            export_format=export_format,
             build_batch_target_csv_func=build_batch_target_csv_func,
             build_batch_target_welltrack_func=build_batch_target_welltrack_func,
             build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
@@ -306,22 +324,6 @@ def _render_survey_downloads(
         options=success_names,
         key=selected_key,
         placeholder="Выберите скважины",
-    )
-    format_key = "wt_survey_download_format"
-    if (
-        str(state.get(format_key, "")).strip()
-        == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP
-    ):
-        state[format_key] = _SURVEY_DOWNLOAD_FORMAT_DEV
-    if str(state.get(format_key, "")) not in _SURVEY_DOWNLOAD_FORMATS:
-        state[format_key] = _SURVEY_DOWNLOAD_FORMATS[0]
-    export_format = str(
-        st_module.radio(
-            "Формат выгрузки",
-            options=list(_SURVEY_DOWNLOAD_FORMATS),
-            key=format_key,
-            horizontal=True,
-        )
     )
     selected_name_set = {str(name) for name in selected_names}
     selected_successes = _successes_for_visible_selection(
@@ -434,6 +436,7 @@ def _render_target_downloads(
     target_crs: CoordinateSystem,
     auto_convert: bool,
     source_crs: CoordinateSystem,
+    export_format: str,
     build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
     build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
@@ -454,22 +457,6 @@ def _render_target_downloads(
         options=record_names,
         key=selected_key,
         placeholder="Выберите скважины",
-    )
-    format_key = "wt_target_download_format"
-    if (
-        str(state.get(format_key, "")).strip()
-        == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP
-    ):
-        state[format_key] = _SURVEY_DOWNLOAD_FORMAT_DEV
-    if str(state.get(format_key, "")) not in _SURVEY_DOWNLOAD_FORMATS:
-        state[format_key] = _SURVEY_DOWNLOAD_FORMATS[0]
-    export_format = str(
-        st_module.radio(
-            "Формат выгрузки",
-            options=list(_SURVEY_DOWNLOAD_FORMATS),
-            key=format_key,
-            horizontal=True,
-        )
     )
     selected_name_set = {str(name) for name in selected_names}
     selected_records = _records_for_visible_selection(
@@ -572,6 +559,20 @@ def _render_target_downloads(
             use_container_width=True,
             disabled=not selected_target_data,
         )
+
+
+def _normalize_download_format(
+    *,
+    state: MutableMapping[str, object],
+    format_key: str,
+) -> str:
+    current_value = str(state.get(format_key, "")).strip()
+    if current_value == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP:
+        current_value = _SURVEY_DOWNLOAD_FORMAT_DEV
+    if current_value not in _SURVEY_DOWNLOAD_FORMATS:
+        current_value = _SURVEY_DOWNLOAD_FORMATS[0]
+    state[format_key] = current_value
+    return current_value
 
 
 def _download_payload_from_state_cache(

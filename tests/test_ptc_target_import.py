@@ -19,6 +19,7 @@ def test_target_source_defaults_preserve_legacy_table_mode() -> None:
     assert session_state["wt_source_path"] == str(
         target_import.DEFAULT_WELLTRACK_PATH
     )
+    assert session_state["wt_source_upload_file"] is None
     assert list(session_state["wt_source_table_df"].columns) == [
         "Wellname",
         "Point",

@@ -46,18 +46,18 @@ def render_run_section(*, records: list[object]) -> None:
     ):
         st.session_state["wt_batch_select_pad_id"] = pad_ids[0]
 
-    sidetrack_params: dict[str, object] = {
-        "overrides": {},
-    }
+    sidetrack_parent_names = _sidetrack_parent_names(records)
 
     def _render_extra_calc_params() -> None:
-        overrides, _error = _render_sidetrack_window_params(records=records)
-        sidetrack_params["overrides"] = overrides
-        if overrides or _sidetrack_parent_names(records):
+        _render_sidetrack_window_params(records=records)
+        if sidetrack_parent_names:
             st.divider()
 
     config = render_calc_params_panel(extra_content=_render_extra_calc_params)
-    sidetrack_overrides = _sidetrack_overrides_from_render_state(sidetrack_params)
+    sidetrack_overrides, _sidetrack_override_error = _sidetrack_window_overrides_from_state(
+        sidetrack_parent_names,
+        st.session_state,
+    )
 
     with st.form("ptc_run_form", clear_on_submit=False):
         select_all_clicked = False
@@ -116,7 +116,7 @@ def render_run_section(*, records: list[object]) -> None:
 
         _parallel_options = [
             ("Без Multiprocessing", 0),
-            *((f"{n} процессов", n) for n in (2, 4, 6, 8)),
+            *((f"{n} процессов", n) for n in (2, 4)),
         ]
         _parallel_labels = [label for label, _ in _parallel_options]
         _parallel_values = {label: value for label, value in _parallel_options}
@@ -310,19 +310,6 @@ def _sidetrack_radio_state_kwargs(
     return {
         "key": key,
         "index": options.index(default_value),
-    }
-
-
-def _sidetrack_overrides_from_render_state(
-    sidetrack_params: Mapping[str, object],
-) -> dict[str, SidetrackWindowOverride]:
-    raw_overrides = sidetrack_params.get("overrides", {})
-    if not isinstance(raw_overrides, Mapping):
-        return {}
-    return {
-        str(name): override
-        for name, override in raw_overrides.items()
-        if isinstance(override, SidetrackWindowOverride)
     }
 
 

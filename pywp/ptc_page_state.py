@@ -10,6 +10,8 @@ from pywp.models import TrajectoryConfig
 __all__ = ["force_ptc_defaults", "render_calc_params_panel"]
 
 PTC_CALC_PARAMS_EXPAND_ONCE_KEY = "ptc_calc_params_expand_once"
+PTC_CALC_PARAMS_OPEN_KEY = "ptc_calc_params_panel_open"
+PTC_CALC_PARAMS_AUTO_OPEN_KEY = "ptc_calc_params_panel_auto_open"
 
 
 def force_ptc_defaults() -> None:
@@ -35,6 +37,8 @@ def force_ptc_defaults() -> None:
 
 def _keep_ptc_calc_params_expanded() -> None:
     st.session_state[PTC_CALC_PARAMS_EXPAND_ONCE_KEY] = True
+    st.session_state[PTC_CALC_PARAMS_OPEN_KEY] = True
+    st.session_state[PTC_CALC_PARAMS_AUTO_OPEN_KEY] = True
 
 
 def _calc_params_changed_after_last_run() -> bool:
@@ -45,15 +49,30 @@ def _calc_params_changed_after_last_run() -> bool:
 
 
 def _should_expand_calc_params_panel() -> bool:
-    sticky_expanded = bool(
-        st.session_state.get(PTC_CALC_PARAMS_EXPAND_ONCE_KEY, False)
-    )
+    sticky_expanded = bool(st.session_state.get(PTC_CALC_PARAMS_EXPAND_ONCE_KEY, False))
+    panel_open_raw = st.session_state.get(PTC_CALC_PARAMS_OPEN_KEY)
+    panel_open = True if panel_open_raw is None else bool(panel_open_raw)
+    panel_auto_open = bool(st.session_state.get(PTC_CALC_PARAMS_AUTO_OPEN_KEY, False))
     stale_after_last_run = _calc_params_changed_after_last_run()
     stored_signature = st.session_state.get("wt_last_calc_param_signature")
-    if isinstance(stored_signature, tuple) and not stale_after_last_run:
-        st.session_state[PTC_CALC_PARAMS_EXPAND_ONCE_KEY] = False
-        sticky_expanded = False
-    return bool(sticky_expanded or stale_after_last_run)
+    if sticky_expanded or stale_after_last_run:
+        panel_open = True
+        panel_auto_open = True
+    elif isinstance(stored_signature, tuple) and panel_auto_open:
+        panel_open = False
+        panel_auto_open = False
+    st.session_state[PTC_CALC_PARAMS_EXPAND_ONCE_KEY] = False
+    st.session_state[PTC_CALC_PARAMS_OPEN_KEY] = panel_open
+    st.session_state[PTC_CALC_PARAMS_AUTO_OPEN_KEY] = panel_auto_open
+    return bool(panel_open)
+
+
+def _toggle_calc_params_panel() -> bool:
+    next_open = not bool(st.session_state.get(PTC_CALC_PARAMS_OPEN_KEY, False))
+    st.session_state[PTC_CALC_PARAMS_OPEN_KEY] = next_open
+    st.session_state[PTC_CALC_PARAMS_AUTO_OPEN_KEY] = False
+    st.session_state[PTC_CALC_PARAMS_EXPAND_ONCE_KEY] = False
+    return next_open
 
 
 @st.fragment
@@ -62,7 +81,24 @@ def _render_calc_params_panel_fragment(
     extra_content: Callable[[], None] | None = None,
 ) -> TrajectoryConfig:
     expanded = _should_expand_calc_params_panel()
-    with st.expander("Параметры расчёта", expanded=expanded):
+    with st.container(border=True):
+        title_col, toggle_col = st.columns(
+            [9.0, 1.1],
+            gap="small",
+            vertical_alignment="center",
+        )
+        with title_col:
+            st.markdown("### Параметры расчёта")
+        with toggle_col:
+            if st.button(
+                "Скрыть" if expanded else "Показать",
+                key="ptc_calc_params_panel_toggle",
+                icon=":material/expand_less:" if expanded else ":material/expand_more:",
+                width="content",
+            ):
+                expanded = _toggle_calc_params_panel()
+        if not expanded:
+            return wt.WT_CALC_PARAMS.build_config()
         config = wt._build_config_form(
             binding=wt.WT_CALC_PARAMS,
             title="",

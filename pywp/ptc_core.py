@@ -2332,6 +2332,17 @@ def _unique_well_names(names: Iterable[object]) -> list[str]:
     return ptc_edit_targets.unique_well_names(names)
 
 
+def _bulk_horizontal_length_changes(
+    records: Iterable[WelltrackRecord],
+    *,
+    target_length_m: float,
+) -> tuple[list[dict[str, object]], list[str]]:
+    return ptc_edit_targets.bulk_horizontal_length_changes(
+        records=records,
+        target_length_m=target_length_m,
+    )
+
+
 def _pending_edit_target_names() -> list[str]:
     return ptc_edit_targets.pending_edit_target_names(st.session_state)
 
@@ -4022,7 +4033,47 @@ def _prepare_rerun_from_cluster(
     st.session_state["wt_pending_selected_names"] = None
 
 
-def _render_source_input() -> _WelltrackSourcePayload:
+def _build_source_payload_from_state() -> _WelltrackSourcePayload:
+    source_format = str(st.session_state.get("wt_source_format", "")).strip()
+    source_mode = str(st.session_state.get("wt_source_mode", "")).strip()
+
+    if source_format == WT_SOURCE_FORMAT_TARGET_TABLE:
+        return _WelltrackSourcePayload(
+            mode=WT_SOURCE_MODE_TARGET_TABLE,
+            table_rows=pd.DataFrame(
+                st.session_state.get("wt_source_table_df", _empty_source_table_df())
+            ),
+        )
+
+    if source_mode == WT_SOURCE_MODE_FILE_PATH:
+        source_path = str(st.session_state.get("wt_source_path", "")).strip()
+        return _WelltrackSourcePayload(
+            mode=source_mode,
+            source_text=_read_welltrack_file(source_path),
+        )
+
+    if source_mode == WT_SOURCE_MODE_UPLOAD:
+        uploaded_file = st.session_state.get("wt_source_upload_file")
+        if uploaded_file is None:
+            return _WelltrackSourcePayload(mode=source_mode)
+        return _WelltrackSourcePayload(
+            mode=source_mode,
+            source_text=_decode_welltrack_payload(
+                uploaded_file.getvalue(),
+                source_label=f"Загруженный файл `{uploaded_file.name}`",
+            ),
+        )
+
+    if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
+        return _WelltrackSourcePayload(
+            mode=source_mode,
+            source_text=str(st.session_state.get("wt_source_inline", "")),
+        )
+
+    return _WelltrackSourcePayload(mode=source_mode or WT_SOURCE_MODE_FILE_PATH)
+
+
+def _render_source_input() -> None:
     if str(st.session_state.get("wt_source_format", "")).strip() not in set(
         WT_SOURCE_FORMAT_OPTIONS
     ):
@@ -4051,40 +4102,56 @@ def _render_source_input() -> _WelltrackSourcePayload:
         st.session_state["wt_source_mode"] = WT_SOURCE_MODE_TARGET_TABLE
 
     if source_mode == WT_SOURCE_MODE_FILE_PATH:
-        source_path = st.text_input(
-            "Путь к файлу WELLTRACK",
-            key="wt_source_path",
-            placeholder="tests/test_data/WELLTRACKS3.INC",
-        )
-        return _WelltrackSourcePayload(
-            mode=source_mode,
-            source_text=_read_welltrack_file(source_path),
-        )
+        with st.form("wt_source_path_form", clear_on_submit=False):
+            st.text_input(
+                "Путь к файлу WELLTRACK",
+                key="wt_source_path",
+                placeholder="tests/test_data/WELLTRACKS3.INC",
+            )
+            parse_clicked = st.form_submit_button(
+                "Импорт целей",
+                type="primary",
+                icon=":material/upload_file:",
+                width="content",
+            )
+        if parse_clicked:
+            st.session_state["wt_source_parse_clicked"] = True
+        return
 
     if source_mode == WT_SOURCE_MODE_UPLOAD:
-        uploaded_file = st.file_uploader(
-            "Файл ECLIPSE/INC", type=["inc", "txt", "data", "ecl"]
-        )
-        if uploaded_file is None:
-            return _WelltrackSourcePayload(mode=source_mode)
-        return _WelltrackSourcePayload(
-            mode=source_mode,
-            source_text=_decode_welltrack_payload(
-                uploaded_file.getvalue(),
-                source_label=f"Загруженный файл `{uploaded_file.name}`",
-            ),
-        )
+        with st.form("wt_source_upload_form", clear_on_submit=False):
+            st.file_uploader(
+                "Файл ECLIPSE/INC",
+                type=["inc", "txt", "data", "ecl"],
+                key="wt_source_upload_file",
+            )
+            parse_clicked = st.form_submit_button(
+                "Импорт целей",
+                type="primary",
+                icon=":material/upload_file:",
+                width="content",
+            )
+        if parse_clicked:
+            st.session_state["wt_source_parse_clicked"] = True
+        return
 
     if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
-        return _WelltrackSourcePayload(
-            mode=source_mode,
-            source_text=st.text_area(
+        with st.form("wt_source_inline_form", clear_on_submit=False):
+            st.text_area(
                 "Текст WELLTRACK",
                 key="wt_source_inline",
                 height=220,
                 placeholder="WELLTRACK 'WELL-1'\n457091 891257 -63.2 0\n457707 890374 1852 1\n/",
-            ),
-        )
+            )
+            parse_clicked = st.form_submit_button(
+                "Импорт целей",
+                type="primary",
+                icon=":material/upload_file:",
+                width="content",
+            )
+        if parse_clicked:
+            st.session_state["wt_source_parse_clicked"] = True
+        return
 
     with st.expander("Таблица точек целей", expanded=True):
         note_col, clear_col = st.columns(
@@ -4119,28 +4186,38 @@ def _render_source_input() -> _WelltrackSourcePayload:
         source_table_df = _normalize_source_table_df_for_ui(
             st.session_state.get("wt_source_table_df", _empty_source_table_df())
         )
-        edited_table = st.data_editor(
-            source_table_df,
-            key=f"wt_source_table_editor_{int(st.session_state.get('wt_source_table_editor_nonce', 0))}",
-            hide_index=True,
-            num_rows="dynamic",
-            width="stretch",
-            column_config={
-                "Wellname": st.column_config.TextColumn("Wellname"),
-                "Point": st.column_config.TextColumn("Point"),
-                "X": st.column_config.NumberColumn("X"),
-                "Y": st.column_config.NumberColumn("Y"),
-                "Z": st.column_config.NumberColumn("Z"),
-            },
-        )
-        st.session_state["wt_source_table_df"] = _normalize_source_table_df_for_ui(
-            pd.DataFrame(edited_table)
-        )
-
-    return _WelltrackSourcePayload(
-        mode=WT_SOURCE_MODE_TARGET_TABLE,
-        table_rows=pd.DataFrame(st.session_state["wt_source_table_df"]),
-    )
+        with st.form("wt_source_table_form", clear_on_submit=False):
+            edited_table = st.data_editor(
+                source_table_df,
+                key=f"wt_source_table_editor_{int(st.session_state.get('wt_source_table_editor_nonce', 0))}",
+                hide_index=True,
+                num_rows="dynamic",
+                width="stretch",
+                column_config={
+                    "Wellname": st.column_config.TextColumn("Wellname"),
+                    "Point": st.column_config.TextColumn("Point"),
+                    "X": st.column_config.NumberColumn("X"),
+                    "Y": st.column_config.NumberColumn("Y"),
+                    "Z": st.column_config.NumberColumn("Z"),
+                },
+            )
+            action_cols = st.columns([1.0, 4.4], gap="small")
+            parse_submit_button = getattr(
+                action_cols[0],
+                "form_submit_button",
+                st.form_submit_button,
+            )
+            parse_table_clicked = parse_submit_button(
+                "Импорт целей",
+                type="primary",
+                icon=":material/upload_file:",
+                width="content",
+            )
+        if parse_table_clicked:
+            st.session_state["wt_source_table_df"] = _normalize_source_table_df_for_ui(
+                pd.DataFrame(edited_table)
+            )
+            st.session_state["wt_source_parse_clicked"] = True
 
 
 def _store_parsed_records(records: list[WelltrackRecord]) -> bool:
@@ -4326,6 +4403,7 @@ def _handle_import_actions(
 def _render_records_overview(records: list[WelltrackRecord]) -> None:
     parsed_df = _records_overview_dataframe(records)
     problem_count = int(sum(str(item) != "✅" for item in parsed_df["Статус"].tolist()))
+    overview_expand_once = bool(st.session_state.pop("wt_records_overview_expand_once", False))
     well_count = int(
         sum(
             not is_pilot_name(record.name) and not is_zbs_name(record.name)
@@ -4374,8 +4452,84 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
 
     with st.expander(
         "Статус загрузки целей",
-        expanded=bool(problem_count > 0),
+        expanded=bool(problem_count > 0 or overview_expand_once),
     ):
+        preprocess_length_key = "wt_preprocess_horizontal_length_m"
+        raw_preprocess_length = st.session_state.get(preprocess_length_key)
+        if not isinstance(raw_preprocess_length, (int, float)) or not np.isfinite(
+            float(raw_preprocess_length)
+        ) or float(raw_preprocess_length) <= 0.0:
+            st.session_state[preprocess_length_key] = 1500.0
+
+        st.markdown("#### Препроцессинг траекторий")
+        st.caption(
+            "Массово меняет только точку `t3`: удлиняет или срезает ГС вдоль "
+            "прямой `t1 → t3` для всех импортированных горизонтальных участков."
+        )
+        preprocess_cols = st.columns(
+            [2.4, 1.2, 2.4],
+            gap="small",
+            vertical_alignment="bottom",
+        )
+        preprocess_length_col = preprocess_cols[0] if len(preprocess_cols) > 0 else st
+        preprocess_action_col = preprocess_cols[1] if len(preprocess_cols) > 1 else st
+        preprocess_hint_col = preprocess_cols[2] if len(preprocess_cols) > 2 else st
+        length_input = getattr(preprocess_length_col, "number_input", st.number_input)
+        action_button = getattr(preprocess_action_col, "button", st.button)
+        hint_caption = getattr(preprocess_hint_col, "caption", st.caption)
+        length_input(
+            "Новая длина ГС, м",
+            key=preprocess_length_key,
+            min_value=1.0,
+            step=100.0,
+            help=(
+                "Для каждой пары `t1/t3` будет изменена только координата `t3`. "
+                "Направление участка в пространстве сохранится."
+            ),
+        )
+        apply_horizontal_length_clicked = action_button(
+            "Применить ко всем",
+            key="wt_preprocess_horizontal_length_apply",
+            icon=":material/straighten:",
+            width="stretch",
+        )
+        hint_caption("По умолчанию: 1500 м. Шаг изменения: 100 м.")
+        if apply_horizontal_length_clicked:
+            try:
+                horizontal_length_changes, skipped_names = _bulk_horizontal_length_changes(
+                    records=records,
+                    target_length_m=float(st.session_state.get(preprocess_length_key, 0.0)),
+                )
+            except ValueError as exc:
+                st.warning(str(exc))
+            else:
+                if not horizontal_length_changes:
+                    if skipped_names:
+                        skipped_text = ", ".join(skipped_names[:6])
+                        skipped_suffix = "..." if len(skipped_names) > 6 else ""
+                        st.warning(
+                            "Не удалось скорректировать длину ГС для: "
+                            f"{skipped_text}{skipped_suffix}."
+                        )
+                    else:
+                        st.info("Все доступные `t3` уже соответствуют заданной длине ГС.")
+                else:
+                    updated_names = _apply_edit_targets_changes(
+                        horizontal_length_changes,
+                        source="bulk_horizontal_length_preprocess",
+                    )
+                    _clear_t1_t3_order_resolution_state()
+                    skipped_note = ""
+                    if skipped_names:
+                        skipped_text = ", ".join(skipped_names[:6])
+                        skipped_suffix = "..." if len(skipped_names) > 6 else ""
+                        skipped_note = f"Пропущено: {skipped_text}{skipped_suffix}."
+                    st.session_state["wt_edit_targets_applied_note"] = skipped_note
+                    st.session_state["wt_records_overview_expand_once"] = True
+                    if updated_names:
+                        st.rerun()
+
+        st.divider()
         st.dataframe(
             arrow_safe_text_dataframe(parsed_df),
             width="stretch",
@@ -5374,6 +5528,7 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
         for name in (st.session_state.get("wt_edit_targets_highlight_names") or [])
         if str(name).strip()
     }
+    highlight_source = str(st.session_state.get("wt_edit_targets_last_source", "")).strip()
     raw_highlight_points = st.session_state.get("wt_edit_targets_highlight_points")
     highlight_points: dict[str, set[int]] = {}
     if isinstance(raw_highlight_points, Mapping):
@@ -5420,10 +5575,16 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                 )
                 return
         if highlight_names:
-            st.success(
-                "Изменённые в 3D-редакторе точки подсвечены. "
-                "Запустите расчёт для обновления траекторий."
-            )
+            if highlight_source == "bulk_horizontal_length_preprocess":
+                st.success(
+                    "Скорректированные точки `t3` подсвечены. "
+                    "Запустите расчёт для обновления траекторий."
+                )
+            else:
+                st.success(
+                    "Изменённые в 3D-редакторе точки подсвечены. "
+                    "Запустите расчёт для обновления траекторий."
+                )
         raw_df = arrow_safe_text_dataframe(
             ptc_target_records.raw_records_dataframe(records)
         )

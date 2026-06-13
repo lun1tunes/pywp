@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -130,6 +131,91 @@ def test_records_with_edit_targets_updates_pilot_points_by_index() -> None:
     assert updated.points[2].md == pytest.approx(3.0)
 
 
+def test_bulk_horizontal_length_changes_updates_t3_along_t1_t3_vector() -> None:
+    record = _record()
+
+    changes, skipped_names = ptc_edit_targets.bulk_horizontal_length_changes(
+        [record],
+        target_length_m=2000.0,
+    )
+
+    assert skipped_names == []
+    assert len(changes) == 1
+    change = changes[0]
+    assert change["name"] == "WELL-A"
+    point_change = change["points"][0]
+    assert point_change["index"] == 2
+    expected_scale = 2000.0 / math.dist(
+        (600.0, 800.0, 2400.0),
+        (1500.0, 2000.0, 2500.0),
+    )
+    assert point_change["position"] == pytest.approx(
+        [
+            600.0 + 900.0 * expected_scale,
+            800.0 + 1200.0 * expected_scale,
+            2400.0 + 100.0 * expected_scale,
+        ]
+    )
+
+
+def test_bulk_horizontal_length_changes_updates_multi_horizontal_and_zbs_t3_points() -> None:
+    multi = _record(
+        "MULTI",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=2.0),
+            WelltrackPoint(x=250.0, y=0.0, z=2000.0, md=3.0),
+            WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=4.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2020.0, md=5.0),
+        ),
+    )
+    zbs = _record(
+        "9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+            WelltrackPoint(x=2200.0, y=0.0, z=1520.0, md=3.0),
+            WelltrackPoint(x=2800.0, y=0.0, z=1520.0, md=4.0),
+        ),
+    )
+
+    changes, skipped_names = ptc_edit_targets.bulk_horizontal_length_changes(
+        [multi, zbs],
+        target_length_m=1000.0,
+    )
+
+    assert skipped_names == []
+    assert {item["name"] for item in changes} == {"MULTI", "9010_ZBS"}
+    by_name = {item["name"]: item for item in changes}
+    assert [item["index"] for item in by_name["MULTI"]["points"]] == [2, 4]
+    assert [item["index"] for item in by_name["9010_ZBS"]["points"]] == [1, 3]
+
+
+def test_bulk_horizontal_length_changes_skips_incomplete_and_degenerate_records() -> None:
+    incomplete = _record(
+        "BROKEN",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=1.0),
+        ),
+    )
+    degenerate_zbs = _record(
+        "9010_ZBS",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=2.0),
+        ),
+    )
+
+    changes, skipped_names = ptc_edit_targets.bulk_horizontal_length_changes(
+        [incomplete, degenerate_zbs],
+        target_length_m=900.0,
+    )
+
+    assert changes == []
+    assert skipped_names == ["BROKEN", "9010_ZBS"]
+
+
 def test_pending_edit_target_names_prefers_pending_and_dedupes() -> None:
     session_state: dict[str, object] = {
         "wt_edit_targets_pending_names": [" WELL-A ", "WELL-A", "", "WELL-B"],
@@ -190,6 +276,7 @@ def test_apply_edit_targets_changes_invalidates_only_changed_wells() -> None:
         {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
     ]
     assert session_state["wt_edit_targets_pending_names"] == ["WELL-C", "WELL-A"]
+    assert session_state["wt_edit_targets_applied_source"] == "three_viewer"
     assert session_state["wt_edit_targets_highlight_names"] == ["WELL-C", "WELL-A"]
     assert session_state["wt_edit_targets_highlight_points"] == {"WELL-A": [1, 2]}
     assert session_state["wt_pending_selected_names"] == ["WELL-C", "WELL-A"]
