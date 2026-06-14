@@ -25,6 +25,7 @@ __all__ = [
     "DEFAULT_WELLHEAD_Z_TOLERANCE_M",
     "raw_records_dataframe",
     "record_first_point_is_surface_like",
+    "record_horizontal_length_preprocess_skip_reason",
     "record_has_finite_points",
     "record_has_strictly_increasing_md",
     "record_has_surface_like_point",
@@ -379,6 +380,20 @@ def _record_multi_horizontal_level_count(record: WelltrackRecord) -> int:
     if is_zbs_name(record.name):
         return zbs_multi_horizontal_level_count(tuple(record.points))
     return welltrack_multi_horizontal_level_count(record.points)
+
+
+def record_horizontal_length_preprocess_skip_reason(
+    record: WelltrackRecord,
+    *,
+    has_pilot: bool = False,
+) -> str:
+    if is_pilot_record(record):
+        return "пилот"
+    if bool(has_pilot):
+        return "есть пилот"
+    if _record_multi_horizontal_level_count(record) > 1:
+        return "многопластовая"
+    return "—"
 
 
 def _point_has_finite_xyz(point: object) -> bool:

@@ -10,6 +10,7 @@ from pywp.pilot_wells import (
     parent_name_for_pilot,
     well_name_key,
 )
+from pywp.ptc_target_records import record_horizontal_length_preprocess_skip_reason
 from pywp.ptc_sidetrack_state import queue_editor_sidetrack_window_override
 
 __all__ = [
@@ -52,10 +53,23 @@ def bulk_horizontal_length_changes(
     if not math.isfinite(normalized_target_length_m) or normalized_target_length_m <= 0.0:
         raise ValueError("Новая длина ГС должна быть положительным конечным числом.")
 
+    records_list = list(records)
+    pilot_parent_keys = {
+        well_name_key(parent_name_for_pilot(record.name))
+        for record in records_list
+        if is_pilot_name(record.name)
+    }
     changes: list[dict[str, object]] = []
     skipped_names: list[str] = []
-    for record in records:
-        if is_pilot_name(record.name):
+    for record in records_list:
+        if (
+            record_horizontal_length_preprocess_skip_reason(
+                record,
+                has_pilot=well_name_key(record.name) in pilot_parent_keys,
+            )
+            != "—"
+        ):
+            skipped_names.append(str(record.name))
             continue
         pair_indices = _horizontal_length_pair_indices(record)
         if pair_indices is None:

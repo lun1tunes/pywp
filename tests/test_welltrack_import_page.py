@@ -727,6 +727,12 @@ def test_records_overview_preprocess_uses_fixed_default_and_step(
     captured: dict[str, object] = {}
 
     class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
         def metric(self, *args, **kwargs):
             return None
 
@@ -762,10 +768,19 @@ def test_records_overview_preprocess_uses_fixed_default_and_step(
     monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, options, key, **kwargs: page.st.session_state.setdefault(
+            key, list(options)
+        ),
+    )
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
 
     page._render_records_overview([_records()[0]])
 
     assert page.st.session_state["wt_preprocess_horizontal_length_m"] == 1500.0
+    assert page.st.session_state["wt_preprocess_selected_names"] == ["WELL-A"]
     assert captured["number_input"] == {
         "label": "Новая длина ГС, м",
         "step": 100.0,
@@ -784,6 +799,12 @@ def test_records_overview_preprocess_waits_for_apply_button(
     calls: list[float] = []
 
     class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
         def metric(self, *args, **kwargs):
             return None
 
@@ -816,6 +837,14 @@ def test_records_overview_preprocess_waits_for_apply_button(
     monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
     monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, options, key, **kwargs: page.st.session_state.setdefault(
+            key, list(options)
+        ),
+    )
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
         page,
         "_bulk_horizontal_length_changes",
         lambda *args, **kwargs: calls.append(float(kwargs["target_length_m"])) or ([], []),
@@ -826,6 +855,129 @@ def test_records_overview_preprocess_waits_for_apply_button(
     assert page.st.session_state["wt_preprocess_horizontal_length_m"] == 1700.0
     assert calls == []
     assert page.st.session_state["wt_records"] == list(original_records)
+
+
+def test_records_overview_preprocess_applies_only_selected_wells(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    original_records = _records()[:2]
+    page.st.session_state["wt_records"] = list(original_records)
+    page.st.session_state["wt_preprocess_selected_names"] = ["WELL-B"]
+    captured: dict[str, object] = {}
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+        def number_input(self, _label, **kwargs):
+            key = str(kwargs.get("key", ""))
+            page.st.session_state[key] = 1700.0
+            return 1700.0
+
+        def button(self, label, **kwargs):
+            return str(label) == "Применить"
+
+        def caption(self, *args, **kwargs):
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, options, key, **kwargs: page.st.session_state.setdefault(
+            key, ["WELL-B"]
+        ),
+    )
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda: None)
+
+    def _fake_bulk_horizontal_length_changes(records, *, target_length_m):
+        captured["selected_names"] = [str(record.name) for record in records]
+        captured["target_length_m"] = float(target_length_m)
+        return ([{"name": "WELL-B", "points": []}], [])
+
+    monkeypatch.setattr(
+        page,
+        "_bulk_horizontal_length_changes",
+        _fake_bulk_horizontal_length_changes,
+    )
+
+    def _fake_apply_edit_targets_changes(changes, *, source="3d"):
+        captured["source"] = source
+        captured["changes"] = changes
+        return ["WELL-B"]
+
+    monkeypatch.setattr(page, "_apply_edit_targets_changes", _fake_apply_edit_targets_changes)
+
+    page._render_records_overview(original_records)
+
+    assert captured["selected_names"] == ["WELL-B"]
+    assert captured["target_length_m"] == 1700.0
+    assert captured["source"] == "bulk_horizontal_length_preprocess"
+
+
+def test_preprocess_excluded_records_message_lists_pilot_and_multilevel_wells() -> None:
+    page = wt_import_module
+    parent = WelltrackRecord(
+        name="well_04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=2.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1200.0, md=3.0),
+        ),
+    )
+    pilot = WelltrackRecord(
+        name="well_04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=50.0, y=0.0, z=700.0, md=2.0),
+        ),
+    )
+    multi_horizontal = WelltrackRecord(
+        name="well_multi",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+            WelltrackPoint(x=300.0, y=0.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=400.0, y=0.0, z=1100.0, md=3.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1100.0, md=4.0),
+        ),
+    )
+
+    message = page._preprocess_excluded_records_message(
+        [parent, pilot, multi_horizontal]
+    )
+
+    assert message == (
+        "Препроцессинг не применялся к: "
+        "well_04 (есть пилот), well_multi (многопластовая)."
+    )
 
 
 def test_t1_t3_resolution_message_reports_fixed_and_kept_wells() -> None:
@@ -1167,6 +1319,8 @@ def _successful_plan(
     build_dls_max_deg_per_30m: float = 3.0,
     optimization_mode: str = "none",
     stations: pd.DataFrame | None = None,
+    md_postcheck_exceeded: bool = False,
+    md_postcheck_message: str = "",
 ) -> SuccessfulWellPlan:
     if stations is None:
         stations = pd.DataFrame(
@@ -1212,7 +1366,27 @@ def _successful_plan(
             optimization_mode=optimization_mode,
             dls_build_max_deg_per_30m=build_dls_max_deg_per_30m,
         ),
+        md_postcheck_exceeded=md_postcheck_exceeded,
+        md_postcheck_message=md_postcheck_message,
     )
+
+
+def test_all_wells_plan_figure_marks_message_only_warning_well_as_dashed() -> None:
+    page = wt_import_module
+
+    figure = page._all_wells_plan_figure(
+        [
+            _successful_plan(
+                name="WELL-A",
+                y_offset_m=0.0,
+                md_postcheck_message="MD warning",
+            )
+        ]
+    )
+
+    warning_trace = next(trace for trace in figure.data if str(trace.name) == "WELL-A")
+
+    assert str(warning_trace.line.dash) == "dash"
 
 
 def _successful_plan_xy(
@@ -3365,7 +3539,7 @@ def test_welltrack_page_prompts_to_run_anticollision_for_successful_batch() -> N
     assert "Расчёт пересечений" in button_labels
     selectboxes_by_label = {str(widget.label): widget for widget in at.selectbox}
     selectbox_labels = list(selectboxes_by_label.keys())
-    assert "Пресет неопределенности для anti-collision" in selectbox_labels
+    assert "Пресет неопределенности для anti-collision" not in selectbox_labels
     assert "Multiprocessing для anti-collision" in selectbox_labels
     assert list(selectboxes_by_label["Multiprocessing для anti-collision"].options) == [
         "Без Multiprocessing",
@@ -3393,16 +3567,36 @@ def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() ->
 
     at.run(timeout=120)
 
-    preset_widgets = [
-        widget
-        for widget in at.selectbox
-        if widget.label == "Пресет неопределенности для anti-collision"
-    ]
-    assert preset_widgets
-    assert str(preset_widgets[0].value) == DEFAULT_UNCERTAINTY_PRESET
     assert (
         str(at.session_state["wt_anticollision_uncertainty_preset"])
         == DEFAULT_UNCERTAINTY_PRESET
+    )
+
+
+def test_welltrack_page_keeps_valid_nondefault_anticollision_uncertainty_preset() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()[:2]
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        _ok_summary_row("WELL-A"),
+        _ok_summary_row("WELL-B"),
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=5.0),
+    ]
+    at.session_state["wt_anticollision_uncertainty_preset"] = (
+        UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+    )
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+
+    at.run(timeout=120)
+
+    assert (
+        str(at.session_state["wt_anticollision_uncertainty_preset"])
+        == UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
     )
 
 
@@ -6959,6 +7153,67 @@ def test_failed_target_only_wells_include_single_point_pilot_targets() -> None:
     assert marker["points"] == [[0.0, 0.0, 0.0], [100.0, 50.0, 900.0]]
     assert [hover["point"] for hover in marker["hover"]] == ["S", "PL1"]
     assert list(plan_trace.customdata[:, 0]) == ["S", "PL1"]
+
+
+def test_failed_target_only_non_zbs_two_point_fallback_keeps_distinct_t1_t3() -> None:
+    page = wt_import_module
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=50.0, z=900.0, md=1.0),
+            ),
+        )
+    ]
+    summary_rows = [
+        {
+            "Скважина": "WELL-A",
+            "Статус": "Ошибка расчета",
+            "Проблема": "not enough points for parser",
+        }
+    ]
+
+    target_only_wells = page._failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+
+    assert len(target_only_wells) == 1
+    assert target_only_wells[0].surface == Point3D(0.0, 0.0, 0.0)
+    assert target_only_wells[0].t1 == Point3D(0.0, 0.0, 0.0)
+    assert target_only_wells[0].t3 == Point3D(100.0, 50.0, 900.0)
+    assert target_only_wells[0].t1 != target_only_wells[0].t3
+
+
+def test_failed_target_only_wells_default_to_error_status_when_row_status_is_empty() -> None:
+    page = wt_import_module
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=900.0, md=900.0),
+                WelltrackPoint(x=200.0, y=0.0, z=1000.0, md=1100.0),
+            ),
+        )
+    ]
+    summary_rows = [
+        {
+            "Скважина": "WELL-A",
+            "Статус": "",
+            "Проблема": "solver failed",
+        }
+    ]
+
+    target_only_wells = page._failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+
+    assert len(target_only_wells) == 1
+    assert target_only_wells[0].status == "Ошибка расчета"
+    assert target_only_wells[0].problem == "solver failed"
 
 
 def test_failed_target_only_zbs_uses_two_targets_and_stays_in_focused_3d_bounds() -> None:

@@ -17,6 +17,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="world-axis-btn"' in html
     assert 'id="world-axis-controls"' in html
     assert 'id="world-axis-toggle"' in html
+    assert 'id="reference-labels-toggle"' in html
     assert ".toolbar-btn.is-mini" in html
     assert 'data-ac-layer="cones"' in html
     assert 'data-ac-layer="sidetrack_relative_cones"' in html
@@ -25,6 +26,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function initAntiCollisionControls()" in html
     assert "const WORLD_AXIS_STORAGE_KEY = `pywp:world-axis-overlay:${viewerStateScope}`;" in html
     assert "const WORLD_AXIS_Z_SCALE_STORAGE_KEY = `pywp:world-axis-z-scale:${viewerStateScope}`;" in html
+    assert "const REFERENCE_LABELS_STORAGE_KEY = `pywp:reference-labels:${viewerStateScope}`;" in html
     assert "const WORLD_AXIS_PLANE_Z_ROUND_STEP = 100.0;" in html
     assert "const WORLD_AXIS_GRID_SQUARES_PER_SIDE = 4;" in html
     assert "const VIEWER_Z_SCALE_DEFAULT = 1.0;" in html
@@ -54,7 +56,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function worldAxisRawBoundsForPadFocusId(focusId)" in html
     assert "function worldAxisCurrentRawBounds()" in html
     assert "function worldAxisBaseAnchorForBounds(rawBounds)" in html
-    assert "function worldAxisResolvedAnchorRaw()" in html
+    assert "function worldAxisResolvedAnchorRaw(xyStep, xTickCount, yTickCount)" in html
     assert "function setWorldAxisActivePadFocus(focusId, options)" in html
     assert "function syncWorldAxisActivePadFocus(options)" in html
     assert "function worldAxisPlaneRawZ(rawBounds)" in html
@@ -71,6 +73,11 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function worldAxisNiceStep(rawValue)" in html
     assert "function formatWorldAxisDistance(rawDistance)" in html
     assert "function worldAxisSubdivisionForPixelSpan(pixelSpan)" in html
+    assert "function worldAxisAdaptiveMajorStep(" in html
+    assert "function worldAxisAdaptiveZMajorStep(" in html
+    assert "const allowedSteps = [10000.0, 5000.0, 2000.0, 1000.0, 500.0, 100.0, 50.0];" in html
+    assert "let coarsestWithinCoverage = 0.0;" in html
+    assert "let selectedStep = 0.0;" in html
     assert "function worldAxisZScaleFactor()" in html
     assert "function worldAxisZScaleLabel()" in html
     assert "function worldAxisDisplayZ(rawZValue)" in html
@@ -94,11 +101,22 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "zScaleFactor: VIEWER_Z_SCALE_DEFAULT," in html
     assert "const unitsPerPixel = worldUnitsPerPixelAt(anchorDisplay);" in html
     assert "syncWorldAxisActivePadFocus({ resetOffset: false });" in html
-    assert "const xyStep = worldAxisNiceStep(" in html
+    assert "const xyCoverageStep = worldAxisNiceStep(" in html
     assert "Math.max(xSpanRaw, ySpanRaw, 40.0) / WORLD_AXIS_GRID_SQUARES_PER_SIDE" in html
-    assert "const zStep = worldAxisNiceStep(Math.max(worldAxisDepthRangeRaw() / 5.0, 1000.0));" in html
-    assert "const xTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;" in html
-    assert "const yTickCount = WORLD_AXIS_GRID_SQUARES_PER_SIDE;" in html
+    assert "const xyCoverageExtentRaw =" in html
+    assert "xyCoverageStep * WORLD_AXIS_GRID_SQUARES_PER_SIDE" in html
+    assert "const xyStep = worldAxisAdaptiveMajorStep(" in html
+    assert "metrics.unitsPerPixel," in html
+    assert "132.0," in html
+    assert "100.0," in html
+    assert "Math.round(\n              xyCoverageExtentRaw /" in html
+    assert "const zCoverageStep = worldAxisNiceStep(" in html
+    assert "Math.max(worldAxisDepthRangeRaw() / 5.0, 1000.0)" in html
+    assert "const zStep = worldAxisAdaptiveZMajorStep(" in html
+    assert "50.0," in html
+    assert "worldAxisZScaleFactor()," in html
+    assert "const xTickCount = Math.max(" in html
+    assert "const yTickCount = Math.max(" in html
     assert "worldAxisOverlay.zScaleFactor = readStoredNumber(" in html
     assert "function readStoredInteger(key, fallback, minValue, maxValue)" in html
     assert "function readStoredNumber(key, fallback, minValue, maxValue)" in html
@@ -114,13 +132,23 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "const zMajorRawValues = worldAxisMajorRawZValues(planeRawZ, topRawZ, zStep);" in html
     assert "const zTickSpecs = worldAxisMinorTickSpecs(" in html
     assert "const tickStep = safeStep / safeSubdivision;" in html
+    assert "const safeTopRawZ = Math.min(Number(topRawZ) || 0, 0.0);" in html
+    assert "const bottomRawZ =" in html
+    assert "Math.floor(Math.max(Number(planeRawZ) || 0, 0.0) / safeStep) * safeStep" in html
+    assert "Math.floor(Math.max(Number(planeRawZ) || 0, 0.0) / tickStep) * tickStep" in html
+    assert "for (let rawZ = bottomRawZ; rawZ >= safeTopRawZ; rawZ -= safeStep)" in html
+    assert "for (let rawZ = bottomRawZ; rawZ >= safeTopRawZ; rawZ -= tickStep)" in html
     assert "values.push(0.0);" in html
+    assert "values.push(safeTopRawZ);" in html
+    assert "rawZ: safeTopRawZ," in html
     assert "const pushZAxisCoordinateLabels = (" in html
-    assert "pushZAxisCoordinateLabels(xMax, 0, 10, 0, true);" in html
-    assert "pushZAxisCoordinateLabels(0, yMax, -10, 0, true);" in html
+    assert "pushZAxisCoordinateLabels(xMax, yMax, 10, 0, true);" in html
+    assert "pushZAxisCoordinateLabels(0, yMax, 14, 0, true);" in html
+    assert "showZStepLabels" not in html
+    assert "pushZAxisStepLabels" not in html
     assert "const pushZAxisTitleLabel = (axisLocalX, axisLocalY, offsetX, offsetY) => {" in html
-    assert "pushZAxisTitleLabel(xMax, 0, 8, 0);" in html
-    assert "pushZAxisTitleLabel(0, yMax, -8, 0);" in html
+    assert "pushZAxisTitleLabel(xMax, yMax, 8, 0);" in html
+    assert "pushZAxisTitleLabel(0, yMax, 16, 0);" in html
     assert "const zDisplayLength =" in html
     assert "const zLength = Math.max(Number(planeRawZ) - Number(topRawZ), 0.0);" in html
     assert "const approxZPixelLength =" in html
@@ -130,33 +158,39 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "const isZero = worldAxisRawLevelMatches(rawZValue, 0.0);" in html
     assert "const distanceFromPlane = Number(planeRawZ) - Number(rawZValue);" in html
     assert "worldAxisOverlay.labelSpecs = labelSpecs;" in html
-    assert "worldAxisDisplayZ(-zMax) + Math.max(zStep * 0.45 / zScaleFactor, 24.0)" in html
+    assert "worldAxisDisplayZ(-zMax)," in html
+    assert "offsetY: offsetY - 10," in html
     assert 'color: "#6b7ea6"' in html
     assert "const xyStepLabel = formatWorldAxisDistance(xyStep);" in html
-    assert "let previousRawZ = Number(planeRawZ) || 0.0;" in html
-    assert "const zMidRawZ = (previousRawZ + Number(rawZValue)) * 0.5;" in html
-    assert "text: formatWorldAxisDistance(segmentDistance)," in html
-    assert "localPosition: new THREE.Vector3(\n                  0,\n                  0,\n                  worldAxisDisplayZ(-(Number(planeRawZ) - zMidRawZ))," in html
+    assert "text: formatWorldAxisDistance(segmentDistance)," not in html
     assert "[0, 0, 0]," in html
     assert "[0, 0, worldAxisDisplayZ(-zLength)]," in html
-    assert "[xValue, 0, 0]," in html
-    assert "[xValue, 0, worldAxisDisplayZ(-zLength)]," in html
+    assert "x: (dataNumber(bounds.min[0], 0) + dataNumber(bounds.max[0], 0)) * 0.5," in html
+    assert "y: (dataNumber(bounds.min[1], 0) + dataNumber(bounds.max[1], 0)) * 0.5," in html
+    assert "x: centeredX - (Number(xyStep) * Number(xTickCount)) * 0.5," in html
+    assert "y: centeredY - (Number(xyStep) * Number(yTickCount)) * 0.5," in html
+    assert "const gridAnchorRaw = worldAxisResolvedAnchorRaw(" in html
+    assert "[xValue, yMax, 0]," in html
+    assert "[xValue, yMax, worldAxisDisplayZ(-zLength)]," in html
     assert "[0, yValue, 0]," in html
     assert "[0, yValue, worldAxisDisplayZ(-zLength)]," in html
-    assert "[xMin, 0, zValue]," in html
-    assert "[xMax, 0, zValue]," in html
+    assert "Number(rawZValue) < 0.0 &&" in html
+    assert "!worldAxisRawLevelMatches(rawZValue, 0.0)" in html
+    assert "[xMin, yMax, zValue]," in html
+    assert "[xMax, yMax, zValue]," in html
     assert "[0, yMin, zValue]," in html
     assert "[0, yMax, zValue]," in html
-    assert "[xValue, -tickHalf, 0]," in html
+    assert "[xValue, yMax - tickHalf, 0]," in html
     assert "[-tickHalf, yValue, 0]," in html
     assert "zTickSpecs.forEach((tickSpec) => {" in html
     assert "[-zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)]," in html
-    assert "[xMax - zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)]," in html
+    assert "[xMax - zTickHalf, yMax, worldAxisDisplayZ(-distanceFromPlane)]," in html
     assert "[0, yMax - zTickHalf, worldAxisDisplayZ(-distanceFromPlane)]," in html
     assert "focusViewerTarget(targetBounds, String(item.id || \"\"));" in html
     assert "window.addEventListener(\"pointermove\", handleWorldAxisDragPointerMove, true);" in html
     assert "displayPoint([\n            worldAxisOverlay.anchorRaw.x,\n            worldAxisOverlay.anchorRaw.y,\n            0.0,\n          ]).project(camera);" in html
     assert "function syncWorldAxisScaleControls()" in html
+    assert "function syncOptionalReferenceLabelsVisibility()" in html
     assert "function applyViewerZScaleFactor(value)" in html
     assert "function rescaleViewerSceneZ(ratio)" in html
     assert "function objectLocksViewerZGeometryScale(object)" in html
@@ -192,6 +226,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'labelRole === "well_label" ||' in html
     assert 'labelRole === "pilot_point_label" ||' in html
     assert 'labelRole === "reference_label"' in html
+    assert 'labelRole === "reference_label_optional"' in html
     assert 'role === "target_label" || role === "control_point_label"' in html
     assert "font-size: 10px;" in html
     assert ".axes-gizmo-line" in html
@@ -209,6 +244,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'role === "well_label" ||' in html
     assert 'role === "pilot_point_label" ||' in html
     assert 'role === "reference_label"' in html
+    assert 'role === "reference_label_optional"' in html
     assert 'role === "reference_pad_label"' in html
     assert "item.offsetY" in html
     assert "renderer.domElement.getBoundingClientRect()" in html
@@ -240,7 +276,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "gapSize: Math.max(maxSpan * 0.0012, 1.6)" in html
     assert "#collisions-panel {" in html
     assert "z-index: 8;" in html
-    assert "#minimap-ruler-btn.is-active {" in html
+    assert "#minimap-control.is-expanded #minimap-ruler-btn.is-active {" in html
+    assert "#minimap-control.is-expanded #minimap-ruler-btn.is-active:hover {" in html
     assert "function syncLegendVisibility()" in html
     assert "payload.legend_tree" in html
     assert "payload.focus_targets" in html
@@ -432,6 +469,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "miniMapAxes.classList.add(\"is-visible\")" in html
     assert "function updateMiniMapLabels()" in html
     assert "function updateMiniMapRulerOverlay()" in html
+    assert 'labelRole === "reference_label" ||' in html
+    assert 'labelRole === "reference_label_optional" ||' in html
     assert "function handleMiniMapRulerClick(event)" in html
     assert "function setMiniMapRulerEnabled(enabled)" in html
     assert "function syncMiniMapRulerButton()" in html
@@ -441,6 +480,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function miniMapRulerDistanceMeters(startRaw, endRaw)" in html
     assert "function formatMiniMapDistanceMeters(distanceMeters)" in html
     assert "function resetMiniMapRulerMeasurement()" in html
+    assert "for (let index = miniMapLabels.length - 1; index >= 0; index -= 1) {" in html
+    assert "(item && item.sourceLabel && item.sourceLabel.role)" in html
     assert 'labelRole === "edit_delta_label"' in html
     assert 'labelRole === "edit_lateral_label"' in html
     assert "{ offsetY: offsetY, role: role }" in html
@@ -448,6 +489,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert 'id="minimap-control"' in html
     assert 'id="minimap-label"' in html
     assert 'id="minimap-ruler-btn"' in html
+    assert 'class="minimap-ruler-icon"' in html
     assert "План E-N (вид сверху)" in html
     assert "const miniMapControl = document.getElementById(\"minimap-control\")" in html
     assert "miniMapControl.classList.add(\"is-expanded\")" in html
@@ -472,7 +514,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "font-weight: 500;" in html
     assert "#minimap-control:not(.is-expanded) #minimap-label" in html
     assert "#minimap-control.is-expanded #minimap-ruler-btn" in html
-    assert "#minimap-ruler-btn.is-active" in html
+    assert "#minimap-control.is-expanded #minimap-ruler-btn.is-active" in html
+    assert ".minimap-ruler-icon" in html
+    assert "stroke: currentColor;" in html
     assert "max-width: calc(100% - 84px);" in html
     assert 'miniMapToggleBtn.textContent = "План E-N";' in html
     assert "new THREE.OrthographicCamera" in html
@@ -496,6 +540,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "function addMiniMapTrajectoryOverlay(item)" in html
     assert 'const isConflictSegment = role === "conflict_segment";' in html
     assert 'role === "line" || role === "conflict_segment"' in html
+    assert 'const dashKind = String((item && item.dash) || "solid").toLowerCase();' in html
+    assert "const material = new THREE.LineDashedMaterial({" in html
+    assert "line.computeLineDistances();" in html
     assert "mesh.renderOrder = isConflictSegment ? 8 : 0;" in html
     assert "lineSegments.renderOrder = isConflictSegment ? 9 : 0;" in html
     assert "miniMapTrajectoryOverlayWidth() * 1.2" in html

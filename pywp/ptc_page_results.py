@@ -30,8 +30,8 @@ from pywp.ui_well_result import (
     render_result_plots,
     render_result_tables,
 )
-from pywp.uncertainty import UNCERTAINTY_PRESET_OPTIONS
 from pywp.uncertainty import planning_uncertainty_model_for_preset
+from pywp.welltrack_batch import successful_well_has_md_warning
 
 __all__ = ["render_failed_target_only_results", "render_success_tabs"]
 
@@ -131,7 +131,7 @@ def _success_render_signature(success: object) -> tuple[object, ...]:
         _point_signature(getattr(success, "surface", None)),
         _point_signature(getattr(success, "t1", None)),
         _point_signature(getattr(success, "t3", None)),
-        bool(getattr(success, "md_postcheck_exceeded", False)),
+        successful_well_has_md_warning(success),
         _target_pairs_signature(getattr(success, "target_pairs", ()) or ()),
     )
 
@@ -495,7 +495,6 @@ def _render_anticollision_panel(
         return
 
     st.markdown("### Anti-collision и пересечения")
-    preset_options = list(UNCERTAINTY_PRESET_OPTIONS.keys())
     normalized_preset = wt.normalize_uncertainty_preset(
         selected_preset
         or st.session_state.get(
@@ -503,22 +502,14 @@ def _render_anticollision_panel(
             wt.DEFAULT_UNCERTAINTY_PRESET,
         )
     )
-    if normalized_preset not in preset_options:
-        normalized_preset = wt.DEFAULT_UNCERTAINTY_PRESET
     st.session_state["wt_anticollision_uncertainty_preset"] = normalized_preset
-    selected_preset_value = st.selectbox(
-        "Пресет неопределенности для anti-collision",
-        options=preset_options,
-        format_func=wt.uncertainty_preset_label,
-        key="wt_anticollision_uncertainty_preset",
-    )
     anti_collision_parallel_workers = _render_anticollision_parallel_workers_selectbox()
     if resolved_reference_wells:
         ptc_anticollision_params.render_anticollision_params_block(
             reference_wells=resolved_reference_wells
         )
     uncertainty_model = planning_uncertainty_model_for_preset(
-        selected_preset_value
+        normalized_preset
     )
     resolved_reference_uncertainty_models = (
         {
@@ -1082,9 +1073,10 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         clusters=visible_clusters,
         focus_pad_well_names=visible_focus_names,
     )
-    target_only_wells = wt._failed_target_only_wells(
+    target_only_wells = wt._overview_target_only_wells(
         records=list(records),
         summary_rows=list(summary_rows),
+        successes=list(successes),
     )
     if show_visualization:
         _render_anticollision_visual_overview(
@@ -1139,9 +1131,10 @@ def _render_anticollision_visual_overview(
     resolved_target_only_wells = (
         list(target_only_wells)
         if target_only_wells is not None
-        else wt._failed_target_only_wells(
+        else wt._overview_target_only_wells(
             records=list(records),
             summary_rows=list(summary_rows),
+            successes=list(successes),
         )
     )
     name_to_color = wt._well_color_map(list(records))
@@ -1230,9 +1223,10 @@ def _render_target_edit_overview(
     focus_pad_well_names: list[str] | None = None,
     show_focus_selector: bool = True,
 ) -> bool:
-    target_only_wells = wt._failed_target_only_wells(
+    target_only_wells = wt._overview_target_only_wells(
         records=list(records),
         summary_rows=list(summary_rows),
+        successes=list(successes),
     )
     if not successes and not target_only_wells:
         st.info(empty_message)
@@ -1243,7 +1237,7 @@ def _render_target_edit_overview(
     st.markdown(title)
     if target_only_wells:
         st.caption(
-            "Скважины без успешной траектории показаны как исходные точки. "
+            "Скважины без рассчитанной траектории показаны как исходные точки. "
             "Их можно выбрать в легенде 3D и подвинуть через редактор целей."
         )
 
@@ -1374,8 +1368,8 @@ def render_success_tabs(
     if calc_params_stale:
         st.warning(
             "Параметры расчёта изменились после последнего запуска. "
-            "Тяжёлая 3D-визуализация предыдущего результата временно скрыта "
-            "до нового расчёта, чтобы не перегружать интерфейс."
+            "Ниже показаны траектории и 3D-обзор из предыдущего расчёта. "
+            "Для актуализации результатов и anti-collision запустите новый расчёт."
         )
     divider = getattr(st, "divider", None)
     if callable(divider):
@@ -1427,7 +1421,7 @@ def render_success_tabs(
                 else ()
             ),
             trajectory_line_dash=(
-                "dash" if bool(selected.md_postcheck_exceeded) else "solid"
+                "dash" if successful_well_has_md_warning(selected) else "solid"
             ),
             pilot_name=pilot_name,
             pilot_stations=pilot_stations,
@@ -1479,15 +1473,14 @@ def render_success_tabs(
             title="Ключевые показатели",
             border=True,
         )
-        if not calc_params_stale:
-            render_result_plots(
-                view=well_view,
-                title_trajectory=None,
-                title_plan=None,
-                border=True,
-                show_plotly_panels=False,
-                render_3d_override=render_3d_override,
-            )
+        render_result_plots(
+            view=well_view,
+            title_trajectory=None,
+            title_plan=None,
+            border=True,
+            show_plotly_panels=False,
+            render_3d_override=render_3d_override,
+        )
         render_result_tables(
             view=well_view,
             t1_horizontal_offset_m=t1_horizontal_offset_m,
@@ -1549,9 +1542,10 @@ def render_success_tabs(
             wt.DEFAULT_UNCERTAINTY_PRESET,
         )
     )
-    target_only_wells = wt._failed_target_only_wells(
+    target_only_wells = wt._overview_target_only_wells(
         records=list(records),
         summary_rows=list(summary_rows),
+        successes=list(successes),
     )
     has_pending_target_edits = bool(wt._pending_edit_target_names())
     current_anticollision_snapshot = None
@@ -1585,7 +1579,15 @@ def render_success_tabs(
     if rendered_cached_snapshot:
         pass
     elif calc_params_stale:
-        pass
+        _render_target_edit_overview(
+            successes=list(successes),
+            records=records,
+            summary_rows=summary_rows,
+            title="### Все скважины и точки целей",
+            empty_message="Нет данных для 3D-обзора траекторий и целей.",
+            focus_pad_well_names=list(focus_pad_well_names),
+            show_focus_selector=False,
+        )
     elif current_anticollision_snapshot is not None:
         analysis, _recommendations, clusters = current_anticollision_snapshot
         visible_clusters = wt._clusters_touching_focus_pad(

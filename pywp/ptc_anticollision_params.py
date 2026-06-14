@@ -31,6 +31,9 @@ ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY = (
 _ACTUAL_REFERENCE_MWD_POOR_DISPLAY_NAMES_KEY = (
     "wt_actual_reference_mwd_poor_display_names"
 )
+_REFERENCE_UNCERTAINTY_WIDGETS_CONTAINER_KEY = (
+    "wt_anticollision_reference_uncertainty_widgets"
+)
 
 
 def actual_reference_names(
@@ -118,28 +121,45 @@ def render_anticollision_params_block(
     if ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY not in state_mapping:
         state_mapping[ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY] = list(unknown_names)
 
-    c1, c2 = st.columns([1.0, 1.0], gap="small", vertical_alignment="bottom")
-    with c1:
-        st.multiselect(
-            "MWD POOR Magnetic",
-            options=list(actual_names),
-            default=list(poor_names),
-            disabled=True,
-            help=(
-                "Дефолтная ISCWSA модель для фактического фонда. "
-                "Скважины автоматически исключаются отсюда при выборе MWD Unknown."
-            ),
+    with st.container(key=_REFERENCE_UNCERTAINTY_WIDGETS_CONTAINER_KEY):
+        st.markdown(
+            """
+            <style>
+            .st-key-wt_anticollision_reference_uncertainty_widgets div[data-testid="stMultiSelect"] [data-baseweb="select"] > div > div {
+                max-height: 3.35rem;
+                overflow-y: auto;
+                align-content: flex-start;
+                scrollbar-width: thin;
+            }
+            .st-key-wt_anticollision_reference_uncertainty_widgets div[data-testid="stMultiSelect"] [data-baseweb="select"] > div {
+                min-height: 2.5rem;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
         )
-    with c2:
-        st.multiselect(
-            "MWD Unknown Magnetic",
-            options=list(actual_names),
-            key=ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
-            help=(
-                "Более консервативная ISCWSA модель. Выбранные скважины "
-                "считаются Unknown и исключаются из списка MWD POOR."
-            ),
-        )
+        c1, c2 = st.columns([1.0, 1.0], gap="small", vertical_alignment="bottom")
+        with c1:
+            st.multiselect(
+                "MWD POOR Magnetic",
+                options=list(actual_names),
+                default=list(poor_names),
+                disabled=True,
+                help=(
+                    "Дефолтная ISCWSA модель для фактического фонда. "
+                    "Скважины автоматически исключаются отсюда при выборе MWD Unknown."
+                ),
+            )
+        with c2:
+            st.multiselect(
+                "MWD Unknown Magnetic",
+                options=list(actual_names),
+                key=ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
+                help=(
+                    "Более консервативная ISCWSA модель. Выбранные скважины "
+                    "считаются Unknown и исключаются из списка MWD POOR."
+                ),
+            )
     st.caption(f"Факт фонд: POOR — {len(poor_names)}, Unknown — {len(unknown_names)}.")
 
 

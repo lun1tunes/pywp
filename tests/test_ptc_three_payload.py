@@ -782,6 +782,14 @@ def test_anticollision_three_payload_does_not_label_display_only_reference_wells
         and str(item.get("role")) == "reference_label"
         for item in payload["labels"]
     )
+    assert payload["optional_reference_labels"] == [
+        {
+            "text": "FACT-FAR",
+            "position": [6000.0, 0.0, 500.0],
+            "color": "#374151",
+            "role": "reference_label_optional",
+        }
+    ]
 
 
 def test_anticollision_three_payload_ignores_display_only_reference_wells_in_default_bounds() -> None:
@@ -998,6 +1006,68 @@ def test_all_wells_three_payload_places_reference_labels_at_well_end() -> None:
     assert reference_labels["APP-1"] == [1700.0, -35.0, 320.0]
 
 
+def test_all_wells_three_payload_exposes_optional_reference_labels_for_fast_mode() -> None:
+    reference_wells = tuple(
+        parse_reference_trajectory_table(
+            [
+                {
+                    "Wellname": "FACT-1",
+                    "Type": REFERENCE_WELL_ACTUAL,
+                    "X": 0.0,
+                    "Y": 25.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "FACT-1",
+                    "Type": REFERENCE_WELL_ACTUAL,
+                    "X": 1800.0,
+                    "Y": 25.0,
+                    "Z": 400.0,
+                    "MD": 1900.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": REFERENCE_WELL_APPROVED,
+                    "X": 0.0,
+                    "Y": -35.0,
+                    "Z": 0.0,
+                    "MD": 0.0,
+                },
+                {
+                    "Wellname": "APP-1",
+                    "Type": REFERENCE_WELL_APPROVED,
+                    "X": 1700.0,
+                    "Y": -35.0,
+                    "Z": 320.0,
+                    "MD": 1800.0,
+                },
+            ]
+        )
+    )
+
+    payload = all_wells_three_payload(
+        [],
+        reference_wells=reference_wells,
+        render_mode="Быстро",
+    )
+
+    optional_labels = {
+        str(item.get("text")): item
+        for item in payload["optional_reference_labels"]
+    }
+
+    assert not [
+        item for item in payload["labels"] if str(item.get("role")) == "reference_label"
+    ]
+    assert optional_labels["FACT-1"]["position"] == [1800.0, 25.0, 400.0]
+    assert optional_labels["FACT-1"]["color"] == "#374151"
+    assert optional_labels["FACT-1"]["role"] == "reference_label_optional"
+    assert optional_labels["APP-1"]["position"] == [1700.0, -35.0, 320.0]
+    assert optional_labels["APP-1"]["color"] == "#C62828"
+    assert optional_labels["APP-1"]["role"] == "reference_label_optional"
+
+
 def test_all_wells_three_payload_highlights_actual_sidetrack_parent_in_fast_mode() -> None:
     stations = pd.DataFrame(
         {
@@ -1175,6 +1245,39 @@ def test_all_wells_three_payload_marks_warning_wells_as_dashed() -> None:
     payload = all_wells_three_payload([success])
     line = next(
         item for item in payload["lines"] if str(item.get("name")) == "warning_well"
+    )
+
+    assert line["dash"] == "dash"
+
+
+def test_all_wells_three_payload_marks_message_only_warning_wells_as_dashed() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "X_m": [0.0, 1000.0, 2000.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 1200.0, 1200.0],
+        }
+    )
+    success = SuccessfulWellPlan(
+        name="warning_message_well",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 1200.0),
+        t3=Point3D(2000.0, 0.0, 1200.0),
+        stations=stations,
+        summary={},
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        config=TrajectoryConfig(),
+        md_postcheck_exceeded=False,
+        md_postcheck_message="MD warning",
+    )
+
+    payload = all_wells_three_payload([success])
+    line = next(
+        item
+        for item in payload["lines"]
+        if str(item.get("name")) == "warning_message_well"
     )
 
     assert line["dash"] == "dash"

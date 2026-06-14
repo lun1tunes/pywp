@@ -158,7 +158,7 @@ def test_bulk_horizontal_length_changes_updates_t3_along_t1_t3_vector() -> None:
     )
 
 
-def test_bulk_horizontal_length_changes_updates_multi_horizontal_and_zbs_t3_points() -> None:
+def test_bulk_horizontal_length_changes_skips_multi_horizontal_but_updates_single_zbs() -> None:
     multi = _record(
         "MULTI",
         points=(
@@ -174,8 +174,6 @@ def test_bulk_horizontal_length_changes_updates_multi_horizontal_and_zbs_t3_poin
         points=(
             WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
             WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
-            WelltrackPoint(x=2200.0, y=0.0, z=1520.0, md=3.0),
-            WelltrackPoint(x=2800.0, y=0.0, z=1520.0, md=4.0),
         ),
     )
 
@@ -184,11 +182,36 @@ def test_bulk_horizontal_length_changes_updates_multi_horizontal_and_zbs_t3_poin
         target_length_m=1000.0,
     )
 
-    assert skipped_names == []
-    assert {item["name"] for item in changes} == {"MULTI", "9010_ZBS"}
+    assert skipped_names == ["MULTI"]
+    assert {item["name"] for item in changes} == {"9010_ZBS"}
     by_name = {item["name"]: item for item in changes}
-    assert [item["index"] for item in by_name["MULTI"]["points"]] == [2, 4]
-    assert [item["index"] for item in by_name["9010_ZBS"]["points"]] == [1, 3]
+    assert [item["index"] for item in by_name["9010_ZBS"]["points"]] == [1]
+
+
+def test_bulk_horizontal_length_changes_skips_parent_well_with_pilot() -> None:
+    parent = _record(
+        "well_04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=2.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1200.0, md=3.0),
+        ),
+    )
+    pilot = _record(
+        "well_04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=50.0, y=0.0, z=700.0, md=2.0),
+        ),
+    )
+
+    changes, skipped_names = ptc_edit_targets.bulk_horizontal_length_changes(
+        [parent, pilot],
+        target_length_m=900.0,
+    )
+
+    assert changes == []
+    assert skipped_names == ["well_04", "well_04_PL"]
 
 
 def test_bulk_horizontal_length_changes_skips_incomplete_and_degenerate_records() -> None:

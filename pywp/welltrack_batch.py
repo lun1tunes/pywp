@@ -369,6 +369,13 @@ class SuccessfulWellPlan(FrozenArbitraryModel):
         return coerce_model_like(value, TrajectoryConfig)
 
 
+def successful_well_has_md_warning(value: object) -> bool:
+    return bool(
+        getattr(value, "md_postcheck_exceeded", False)
+        or str(getattr(value, "md_postcheck_message", "")).strip()
+    )
+
+
 def rebuild_optimization_context(
     *,
     context: AntiCollisionOptimizationContext | None,

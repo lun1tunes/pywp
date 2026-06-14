@@ -231,8 +231,20 @@ def test_ptc_core_contains_bulk_horizontal_length_preprocess_controls() -> None:
     source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
 
     assert "Препроцессинг траекторий" in source
+    assert "Скважины для препроцессинга" in source
     assert "Новая длина ГС, м" in source
-    assert "Применить ко всем" in source
+    assert '"wt_preprocess_select_all"' in source
+    assert '"wt_preprocess_only_pad"' in source
+    assert '"Применить"' in source
+
+
+def test_ptc_anticollision_params_limit_multiselect_height_via_scoped_container() -> None:
+    source = Path("pywp/ptc_anticollision_params.py").read_text(encoding="utf-8")
+
+    assert 'st.container(key=_REFERENCE_UNCERTAINTY_WIDGETS_CONTAINER_KEY)' in source
+    assert ".st-key-wt_anticollision_reference_uncertainty_widgets" in source
+    assert "max-height: 3.35rem;" in source
+    assert "overflow-y: auto;" in source
 
 
 def test_ptc_page_renders_reference_section_directly() -> None:

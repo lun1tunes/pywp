@@ -180,6 +180,7 @@ from pywp.welltrack_batch import (
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
     rebuild_optimization_context,
+    successful_well_has_md_warning,
 )
 from pywp.welltrack_quality import (
     detect_t1_t3_order_issues,
@@ -377,15 +378,15 @@ def _failed_target_only_wells(
     records: list[WelltrackRecord],
     summary_rows: list[dict[str, object]],
 ) -> list[_TargetOnlyWell]:
-    rows_by_name = {
-        str(row.get("Скважина", "")).strip(): row
+    rows_by_key = {
+        well_name_key(row.get("Скважина", "")): row
         for row in summary_rows
         if str(row.get("Скважина", "")).strip()
     }
     pending_edit_names = set(_pending_edit_target_names())
     target_only_wells: list[_TargetOnlyWell] = []
     for record in records:
-        row = rows_by_name.get(str(record.name))
+        row = rows_by_key.get(well_name_key(record.name))
         if row is None:
             continue
         status = str(row.get("Статус", "")).strip()
@@ -393,49 +394,107 @@ def _failed_target_only_wells(
             status == "Не рассчитана" and str(record.name) not in pending_edit_names
         ):
             continue
-        target_points = tuple(
-            Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
-            for point in tuple(record.points)
+        target_only = _target_only_well_from_record(
+            record=record,
+            status=status or "Ошибка расчета",
+            problem=str(row.get("Проблема", "")).strip(),
         )
-        if not target_points:
-            continue
-        if is_zbs_name(record.name):
-            surface = target_points[0]
-            try:
-                target_pairs = zbs_target_points_to_pairs(tuple(record.points))
-            except ValueError:
-                target_pairs = ()
-            if target_pairs:
-                t1, t3 = target_pairs[0][0], target_pairs[-1][1]
-            elif len(target_points) >= 2:
-                t1, t3 = target_points[0], target_points[-1]
-            else:
-                t1 = t3 = target_points[0]
+        if target_only is not None:
+            target_only_wells.append(target_only)
+    return target_only_wells
+
+
+def _target_only_well_from_record(
+    *,
+    record: WelltrackRecord,
+    status: str,
+    problem: str,
+) -> _TargetOnlyWell | None:
+    target_points = tuple(
+        Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+        for point in tuple(record.points)
+    )
+    if not target_points:
+        return None
+    if is_zbs_name(record.name):
+        surface = target_points[0]
+        try:
+            target_pairs = zbs_target_points_to_pairs(tuple(record.points))
+        except ValueError:
+            target_pairs = ()
+        if target_pairs:
+            t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+        elif len(target_points) >= 2:
+            t1, t3 = target_points[0], target_points[-1]
         else:
-            try:
-                surface, target_pairs = welltrack_points_to_target_pairs(record.points)
-            except ValueError:
-                surface = target_points[0]
-                target_pairs = ()
-            if target_pairs:
-                t1, t3 = target_pairs[0][0], target_pairs[-1][1]
-            elif len(target_points) >= 2:
-                t1, t3 = target_points[1], target_points[-1]
-            else:
-                t1 = t3 = target_points[0]
-        target_only_wells.append(
-            _TargetOnlyWell(
-                name=str(record.name),
-                surface=surface,
-                t1=t1,
-                t3=t3,
-                target_pairs=target_pairs,
-                target_points=target_points,
-                target_labels=_record_target_point_labels(record),
-                status=status or "Ошибка расчета",
-                problem=str(row.get("Проблема", "")).strip(),
-            )
+            t1 = t3 = target_points[0]
+    else:
+        try:
+            surface, target_pairs = welltrack_points_to_target_pairs(record.points)
+        except ValueError:
+            surface = target_points[0]
+            target_pairs = ()
+        if target_pairs:
+            t1, t3 = target_pairs[0][0], target_pairs[-1][1]
+        elif len(target_points) >= 2:
+            start_index = 1 if len(target_points) >= 3 else 0
+            t1, t3 = target_points[start_index], target_points[-1]
+        else:
+            t1 = t3 = target_points[0]
+    return _TargetOnlyWell(
+        name=str(record.name),
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        target_pairs=target_pairs,
+        target_points=target_points,
+        target_labels=_record_target_point_labels(record),
+        status=str(status).strip(),
+        problem=str(problem).strip(),
+    )
+
+
+def _overview_target_only_wells(
+    *,
+    records: list[WelltrackRecord],
+    summary_rows: list[dict[str, object]],
+    successes: list[SuccessfulWellPlan] | list[object],
+) -> list[_TargetOnlyWell]:
+    rows_by_key = {
+        well_name_key(row.get("Скважина", "")): row
+        for row in summary_rows
+        if str(row.get("Скважина", "")).strip()
+    }
+    success_keys = {
+        well_name_key(getattr(success, "name", ""))
+        for success in successes
+        if str(getattr(success, "name", "")).strip()
+    }
+    target_only_wells = _failed_target_only_wells(
+        records=records,
+        summary_rows=summary_rows,
+    )
+    existing_keys = {
+        well_name_key(getattr(target_only, "name", ""))
+        for target_only in target_only_wells
+        if str(getattr(target_only, "name", "")).strip()
+    }
+    for record in records:
+        record_key = well_name_key(record.name)
+        if record_key in success_keys or record_key in existing_keys:
+            continue
+        row = rows_by_key.get(record_key)
+        status = str((row or {}).get("Статус", "")).strip()
+        if status == "OK":
+            continue
+        target_only = _target_only_well_from_record(
+            record=record,
+            status=status or "Не рассчитана",
+            problem=str((row or {}).get("Проблема", "")).strip(),
         )
+        if target_only is not None:
+            target_only_wells.append(target_only)
+            existing_keys.add(record_key)
     return target_only_wells
 
 
@@ -2520,7 +2579,7 @@ def _all_wells_plan_figure(
     }
     for index, item in enumerate(successes):
         line_color = color_map.get(str(item.name), _well_color(index))
-        line_dash = "dash" if bool(item.md_postcheck_exceeded) else "solid"
+        line_dash = "dash" if successful_well_has_md_warning(item) else "solid"
         name = item.name
         stations = item.stations
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
@@ -4455,17 +4514,117 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
         expanded=bool(problem_count > 0 or overview_expand_once),
     ):
         preprocess_length_key = "wt_preprocess_horizontal_length_m"
+        preprocess_feedback_key = "wt_preprocess_feedback_info"
+        preprocess_selected_names_key = "wt_preprocess_selected_names"
+        preprocess_pending_names_key = "wt_preprocess_pending_selected_names"
+        preprocess_pad_key = "wt_preprocess_select_pad_id"
         raw_preprocess_length = st.session_state.get(preprocess_length_key)
         if not isinstance(raw_preprocess_length, (int, float)) or not np.isfinite(
             float(raw_preprocess_length)
         ) or float(raw_preprocess_length) <= 0.0:
             st.session_state[preprocess_length_key] = 1500.0
+        preprocess_all_names = _sync_preprocess_selection_state(
+            records=records,
+            selected_names_key=preprocess_selected_names_key,
+            pending_names_key=preprocess_pending_names_key,
+        )
+        pads, _, well_names_by_pad_id = _pad_membership(records)
+        pad_ids = [str(pad.pad_id) for pad in pads]
+        if (
+            pad_ids
+            and str(st.session_state.get(preprocess_pad_key, "")).strip()
+            not in pad_ids
+        ):
+            st.session_state[preprocess_pad_key] = pad_ids[0]
 
         st.markdown("#### Препроцессинг траекторий")
         st.caption(
             "Массово меняет только точку `t3`: удлиняет или срезает ГС вдоль "
-            "прямой `t1 → t3` для всех импортированных горизонтальных участков."
+            "прямой `t1 → t3` для выбранных скважин."
         )
+        feedback_message = str(st.session_state.pop(preprocess_feedback_key, "")).strip()
+        if feedback_message:
+            st.info(feedback_message)
+        select_cols = st.columns(
+            [7.0, 1.25],
+            gap="small",
+            vertical_alignment="bottom",
+        )
+        select_col = select_cols[0] if len(select_cols) > 0 else st
+        select_all_col = select_cols[1] if len(select_cols) > 1 else st
+        getattr(select_col, "multiselect", st.multiselect)(
+            "Скважины для препроцессинга",
+            options=preprocess_all_names,
+            key=preprocess_selected_names_key,
+            disabled=not preprocess_all_names,
+        )
+        select_all_clicked = getattr(select_all_col, "button", st.button)(
+            "Выбрать все скважины",
+            key="wt_preprocess_select_all",
+            icon=":material/done_all:",
+            width="stretch",
+            disabled=not preprocess_all_names,
+        )
+
+        add_pad_clicked = False
+        replace_with_pad_clicked = False
+        if len(pad_ids) > 1:
+            pad_cols = st.columns(
+                [2.5, 1.45, 1.45, 2.85],
+                gap="small",
+                vertical_alignment="bottom",
+            )
+            pad_col = pad_cols[0] if len(pad_cols) > 0 else st
+            pad_add_col = pad_cols[1] if len(pad_cols) > 1 else st
+            pad_only_col = pad_cols[2] if len(pad_cols) > 2 else st
+            getattr(pad_col, "selectbox", st.selectbox)(
+                "Куст для препроцессинга",
+                options=pad_ids,
+                format_func=lambda value: _pad_display_label(
+                    next(
+                        pad
+                        for pad in pads
+                        if str(pad.pad_id) == str(value)
+                    )
+                ),
+                key=preprocess_pad_key,
+            )
+            add_pad_clicked = getattr(pad_add_col, "button", st.button)(
+                "Добавить куст в выбор",
+                key="wt_preprocess_add_pad",
+                icon=":material/filter_alt:",
+                width="stretch",
+            )
+            replace_with_pad_clicked = getattr(pad_only_col, "button", st.button)(
+                "Только этот куст",
+                key="wt_preprocess_only_pad",
+                icon=":material/rule:",
+                width="stretch",
+            )
+
+        if select_all_clicked:
+            st.session_state[preprocess_pending_names_key] = list(preprocess_all_names)
+            st.rerun()
+        if add_pad_clicked:
+            selected_pad_id = str(st.session_state.get(preprocess_pad_key, "")).strip()
+            current_selected = [
+                str(name)
+                for name in st.session_state.get(preprocess_selected_names_key, [])
+            ]
+            st.session_state[preprocess_pending_names_key] = _unique_well_names(
+                [
+                    *current_selected,
+                    *well_names_by_pad_id.get(selected_pad_id, ()),
+                ]
+            )
+            st.rerun()
+        if replace_with_pad_clicked:
+            selected_pad_id = str(st.session_state.get(preprocess_pad_key, "")).strip()
+            st.session_state[preprocess_pending_names_key] = list(
+                well_names_by_pad_id.get(selected_pad_id, ())
+            )
+            st.rerun()
+
         preprocess_cols = st.columns(
             [2.4, 1.2, 2.4],
             gap="small",
@@ -4488,46 +4647,69 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
             ),
         )
         apply_horizontal_length_clicked = action_button(
-            "Применить ко всем",
+            "Применить",
             key="wt_preprocess_horizontal_length_apply",
             icon=":material/straighten:",
             width="stretch",
+            disabled=not preprocess_all_names,
         )
         hint_caption("По умолчанию: 1500 м. Шаг изменения: 100 м.")
         if apply_horizontal_length_clicked:
-            try:
-                horizontal_length_changes, skipped_names = _bulk_horizontal_length_changes(
-                    records=records,
-                    target_length_m=float(st.session_state.get(preprocess_length_key, 0.0)),
-                )
-            except ValueError as exc:
-                st.warning(str(exc))
+            selected_preprocess_names = _coerce_preprocess_selection(
+                st.session_state.get(preprocess_selected_names_key, []),
+                all_names=preprocess_all_names,
+            )
+            if not selected_preprocess_names:
+                st.warning("Выберите хотя бы одну скважину для препроцессинга.")
             else:
-                if not horizontal_length_changes:
-                    if skipped_names:
-                        skipped_text = ", ".join(skipped_names[:6])
-                        skipped_suffix = "..." if len(skipped_names) > 6 else ""
-                        st.warning(
-                            "Не удалось скорректировать длину ГС для: "
-                            f"{skipped_text}{skipped_suffix}."
-                        )
-                    else:
-                        st.info("Все доступные `t3` уже соответствуют заданной длине ГС.")
-                else:
-                    updated_names = _apply_edit_targets_changes(
-                        horizontal_length_changes,
-                        source="bulk_horizontal_length_preprocess",
+                selected_keys = {
+                    well_name_key(name) for name in selected_preprocess_names
+                }
+                excluded_message = _preprocess_excluded_records_message(records)
+                st.session_state[preprocess_feedback_key] = excluded_message
+                selected_records = [
+                    record
+                    for record in records
+                    if not is_pilot_name(record.name)
+                    and well_name_key(record.name) in selected_keys
+                ]
+                try:
+                    horizontal_length_changes, skipped_names = _bulk_horizontal_length_changes(
+                        records=selected_records,
+                        target_length_m=float(
+                            st.session_state.get(preprocess_length_key, 0.0)
+                        ),
                     )
-                    _clear_t1_t3_order_resolution_state()
-                    skipped_note = ""
-                    if skipped_names:
-                        skipped_text = ", ".join(skipped_names[:6])
-                        skipped_suffix = "..." if len(skipped_names) > 6 else ""
-                        skipped_note = f"Пропущено: {skipped_text}{skipped_suffix}."
-                    st.session_state["wt_edit_targets_applied_note"] = skipped_note
-                    st.session_state["wt_records_overview_expand_once"] = True
-                    if updated_names:
-                        st.rerun()
+                except ValueError as exc:
+                    st.warning(str(exc))
+                else:
+                    if not horizontal_length_changes:
+                        if skipped_names:
+                            skipped_text = ", ".join(skipped_names[:6])
+                            skipped_suffix = "..." if len(skipped_names) > 6 else ""
+                            st.warning(
+                                "Не удалось скорректировать длину ГС для: "
+                                f"{skipped_text}{skipped_suffix}."
+                            )
+                        else:
+                            st.info(
+                                "Все доступные `t3` уже соответствуют заданной длине ГС."
+                            )
+                    else:
+                        updated_names = _apply_edit_targets_changes(
+                            horizontal_length_changes,
+                            source="bulk_horizontal_length_preprocess",
+                        )
+                        _clear_t1_t3_order_resolution_state()
+                        skipped_note = ""
+                        if skipped_names:
+                            skipped_text = ", ".join(skipped_names[:6])
+                            skipped_suffix = "..." if len(skipped_names) > 6 else ""
+                            skipped_note = f"Пропущено: {skipped_text}{skipped_suffix}."
+                        st.session_state["wt_edit_targets_applied_note"] = skipped_note
+                        st.session_state["wt_records_overview_expand_once"] = True
+                        if updated_names:
+                            st.rerun()
 
         st.divider()
         st.dataframe(
@@ -6688,6 +6870,88 @@ def _sync_selection_state(
         st.session_state,
         records=records,
     )
+
+
+def _coerce_preprocess_selection(
+    names: object,
+    *,
+    all_names: list[str],
+) -> list[str]:
+    visible_by_key = {well_name_key(name): str(name) for name in all_names}
+    coerced: list[str] = []
+    seen: set[str] = set()
+    for raw_name in names if isinstance(names, (list, tuple, set)) else []:
+        visible_name = visible_by_key.get(well_name_key(raw_name))
+        if visible_name is None or visible_name in seen:
+            continue
+        coerced.append(visible_name)
+        seen.add(visible_name)
+    return coerced
+
+
+def _sync_preprocess_selection_state(
+    *,
+    records: list[WelltrackRecord],
+    selected_names_key: str,
+    pending_names_key: str,
+) -> list[str]:
+    pilot_parent_keys = {
+        well_name_key(parent_name_for_pilot(record.name))
+        for record in records
+        if is_pilot_name(record.name)
+    }
+    all_names = _unique_well_names(
+        str(record.name)
+        for record in records
+        if str(record.name).strip()
+        and not is_pilot_name(record.name)
+        and ptc_target_records.record_horizontal_length_preprocess_skip_reason(
+            record,
+            has_pilot=well_name_key(record.name) in pilot_parent_keys,
+        )
+        == "—"
+    )
+    pending_names = st.session_state.pop(pending_names_key, None)
+    if pending_names is not None:
+        st.session_state[selected_names_key] = _coerce_preprocess_selection(
+            pending_names,
+            all_names=all_names,
+        )
+    current = _coerce_preprocess_selection(
+        st.session_state.get(selected_names_key, []),
+        all_names=all_names,
+    )
+    if current != st.session_state.get(selected_names_key, []):
+        st.session_state[selected_names_key] = list(current)
+    if not current and all_names:
+        st.session_state[selected_names_key] = list(all_names)
+    return all_names
+
+
+def _preprocess_excluded_records_message(
+    records: list[WelltrackRecord],
+) -> str:
+    pilot_parent_keys = {
+        well_name_key(parent_name_for_pilot(record.name))
+        for record in records
+        if is_pilot_name(record.name)
+    }
+    excluded_items: list[str] = []
+    for record in records:
+        if is_pilot_name(record.name):
+            continue
+        reason = ptc_target_records.record_horizontal_length_preprocess_skip_reason(
+            record,
+            has_pilot=well_name_key(record.name) in pilot_parent_keys,
+        )
+        if reason == "—":
+            continue
+        excluded_items.append(f"{record.name} ({reason})")
+    if not excluded_items:
+        return ""
+    preview = ", ".join(excluded_items[:6])
+    suffix = "..." if len(excluded_items) > 6 else ""
+    return f"Препроцессинг не применялся к: {preview}{suffix}."
 
 
 def _render_batch_selection_status(

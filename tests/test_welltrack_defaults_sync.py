@@ -38,6 +38,44 @@ def _selectbox_value(at: AppTest, label: str) -> str | None:
     return str(matches[0].value)
 
 
+def _default_calc_param_signature() -> tuple[object, ...]:
+    defaults = calc_param_defaults()
+    return (
+        float(defaults["md_step"]),
+        float(defaults["md_control"]),
+        float(defaults["lateral_tol"]),
+        float(defaults["vertical_tol"]),
+        float(defaults["entry_inc_target"]),
+        float(defaults["entry_inc_tol"]),
+        float(defaults["max_inc"]),
+        float(defaults["max_total_md_postcheck"]),
+        float(defaults["dls_build_max"]),
+        float(defaults["dls_horizontal_max"]),
+        float(defaults["kop_min_vertical"]),
+        int(defaults["turn_solver_max_restarts"]),
+        str(defaults["optimization_mode"]),
+        str(defaults["turn_solver_mode"]),
+        str(defaults["interpolation_method"]),
+        str(defaults["j_profile_policy"]),
+        bool(defaults["offer_j_profile"]),
+        "constant",
+    )
+
+
+def _open_calc_params_panel(at: AppTest) -> None:
+    toggle_buttons = [widget for widget in at.button if str(widget.label) == "Показать"]
+    assert toggle_buttons, "Кнопка 'Показать' для панели параметров расчёта не найдена."
+    toggle_buttons[0].click()
+    at.run()
+
+
+def _import_targets(at: AppTest) -> None:
+    import_buttons = [button for button in at.button if button.label == "Импорт целей"]
+    assert import_buttons, "Кнопка импорта целей не найдена."
+    import_buttons[0].click()
+    at.run()
+
+
 def _records() -> list[WelltrackRecord]:
     return [
         WelltrackRecord(
@@ -107,10 +145,8 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
     at.session_state["wt_cfg___calc_param_defaults_schema_version__"] = 4
 
     at.run()
-    import_buttons = [button for button in at.button if button.label == "Импорт целей"]
-    assert import_buttons, "Кнопка импорта целей не найдена."
-    import_buttons[0].click()
-    at.run()
+    _import_targets(at)
+    _open_calc_params_panel(at)
 
     label_to_suffix = {
         "Шаг MD, м": "md_step",
@@ -149,10 +185,8 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
 def test_ptc_calc_param_edit_persists_without_form_submit() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     at.run()
-    import_buttons = [button for button in at.button if button.label == "Импорт целей"]
-    assert import_buttons, "Кнопка импорта целей не найдена."
-    import_buttons[0].click()
-    at.run()
+    _import_targets(at)
+    _open_calc_params_panel(at)
 
     md_step_inputs = [
         widget for widget in at.number_input if widget.label == "Шаг MD, м"
@@ -178,6 +212,7 @@ def test_ptc_calc_param_edit_persists_with_results_loaded() -> None:
     at.session_state["wt_results_all_view_mode"] = "Anti-collision"
 
     at.run(timeout=120)
+    _open_calc_params_panel(at)
 
     md_step_inputs = [
         widget for widget in at.number_input if widget.label == "Шаг MD, м"
@@ -188,3 +223,101 @@ def test_ptc_calc_param_edit_persists_with_results_loaded() -> None:
     at.run(timeout=120)
 
     assert float(at.session_state["wt_cfg_md_step"]) == expected_md_step
+
+
+def test_calc_params_panel_is_collapsed_by_default_and_opens_with_correct_toggle_text() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+
+    at.run()
+    _import_targets(at)
+
+    button_labels = [str(widget.label) for widget in at.button]
+    assert "Показать" in button_labels
+    assert "Шаг MD, м" not in [str(widget.label) for widget in at.number_input]
+
+    _open_calc_params_panel(at)
+
+    button_labels = [str(widget.label) for widget in at.button]
+    assert "Скрыть" in button_labels
+    assert "Шаг MD, м" in [str(widget.label) for widget in at.number_input]
+
+
+def test_calc_params_panel_keeps_default_values_after_hide_and_reopen() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    defaults = calc_param_defaults()
+
+    at.run()
+    _import_targets(at)
+    _open_calc_params_panel(at)
+
+    md_step_inputs = [
+        widget for widget in at.number_input if widget.label == "Шаг MD, м"
+    ]
+    build_pi_inputs = [
+        widget for widget in at.number_input if widget.label == "Макс ПИ BUILD, deg/10m"
+    ]
+    horizontal_pi_inputs = [
+        widget
+        for widget in at.number_input
+        if widget.label == "Макс ПИ HORIZONTAL, deg/10m"
+    ]
+    assert md_step_inputs and build_pi_inputs and horizontal_pi_inputs
+    assert float(md_step_inputs[0].value) == float(defaults["md_step"])
+    assert float(build_pi_inputs[0].value) == float(defaults["dls_build_max"])
+    assert float(horizontal_pi_inputs[0].value) == float(defaults["dls_horizontal_max"])
+
+    hide_buttons = [widget for widget in at.button if str(widget.label) == "Скрыть"]
+    assert hide_buttons, "Кнопка 'Скрыть' для панели параметров расчёта не найдена."
+    hide_buttons[0].click()
+    at.run()
+
+    _open_calc_params_panel(at)
+
+    md_step_inputs = [
+        widget for widget in at.number_input if widget.label == "Шаг MD, м"
+    ]
+    build_pi_inputs = [
+        widget for widget in at.number_input if widget.label == "Макс ПИ BUILD, deg/10m"
+    ]
+    horizontal_pi_inputs = [
+        widget
+        for widget in at.number_input
+        if widget.label == "Макс ПИ HORIZONTAL, deg/10m"
+    ]
+    assert md_step_inputs and build_pi_inputs and horizontal_pi_inputs
+    assert float(md_step_inputs[0].value) == float(defaults["md_step"])
+    assert float(build_pi_inputs[0].value) == float(defaults["dls_build_max"])
+    assert float(horizontal_pi_inputs[0].value) == float(defaults["dls_horizontal_max"])
+
+
+def test_calc_params_panel_can_hide_after_param_edit() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3}
+    ]
+    at.session_state["wt_successes"] = [_successful_plan()]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+    at.session_state["wt_last_calc_param_signature"] = _default_calc_param_signature()
+
+    at.run(timeout=120)
+    _open_calc_params_panel(at)
+
+    md_step_inputs = [
+        widget for widget in at.number_input if widget.label == "Шаг MD, м"
+    ]
+    assert md_step_inputs, "Поле 'Шаг MD, м' не найдено."
+    md_step_inputs[0].set_value(float(calc_param_defaults()["md_step"]) + 1.0)
+    at.run(timeout=120)
+
+    hide_buttons = [widget for widget in at.button if str(widget.label) == "Скрыть"]
+    assert hide_buttons, "Кнопка 'Скрыть' для панели параметров расчёта не найдена."
+    hide_buttons[0].click()
+    at.run(timeout=120)
+
+    button_labels = [str(widget.label) for widget in at.button]
+    assert "Показать" in button_labels
+    assert "Шаг MD, м" not in [str(widget.label) for widget in at.number_input]

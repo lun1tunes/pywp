@@ -12,6 +12,7 @@ import pytest
 from pydantic import BaseModel
 
 from pywp import ptc_pad_state
+from pywp import ptc_edit_targets
 from pywp.anticollision_optimization import (
     AntiCollisionClearanceEvaluation,
     AntiCollisionOptimizationContext,
@@ -85,6 +86,8 @@ def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
         "md_step_control_m": 2.0,
         "pos_tolerance_m": 2.0,
         "kop_min_vertical_m": 550.0,
+        "dls_build_max_deg_per_30m": 3.0,
+        "dls_horizontal_max_deg_per_30m": 3.0,
         "turn_solver_max_restarts": 0,
     }
     base.update(overrides)
@@ -203,7 +206,13 @@ def test_multi_horizontal_record_extends_base_plan_with_numbered_segments() -> N
         ),
     )
 
-    row, success = _evaluate_record_standalone(record, TrajectoryConfig())
+    row, success = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(
+            dls_build_max_deg_per_30m=3.0,
+            dls_horizontal_max_deg_per_30m=3.0,
+        ),
+    )
 
     assert success is not None
     assert row["Статус"] == "OK"
@@ -232,7 +241,13 @@ def test_multi_horizontal_record_supports_shallower_next_level_with_enough_gap()
         ),
     )
 
-    row, success = _evaluate_record_standalone(record, TrajectoryConfig())
+    row, success = _evaluate_record_standalone(
+        record,
+        TrajectoryConfig(
+            dls_build_max_deg_per_30m=3.0,
+            dls_horizontal_max_deg_per_30m=3.0,
+        ),
+    )
 
     assert success is not None
     assert row["Статус"] == "OK"
@@ -885,7 +900,7 @@ def test_welltracks4_well_12_near_tolerance_target_hit_is_reported_as_warning() 
     rows, successes = WelltrackBatchPlanner().evaluate(
         records=[well_12],
         selected_names={"well_12"},
-        config=TrajectoryConfig(),
+        config=TrajectoryConfig(dls_build_max_deg_per_30m=3.0),
     )
 
     assert rows[0]["Статус"] == "OK"
@@ -934,6 +949,7 @@ def test_import_auto_pad_layout_keeps_well_12_drillable_with_multihorizontal_nei
     config = TrajectoryConfig(
         md_step_m=20.0,
         md_step_control_m=5.0,
+        dls_build_max_deg_per_30m=3.0,
         turn_solver_max_restarts=0,
         max_total_md_postcheck_m=20000.0,
         offer_j_profile=False,
@@ -954,6 +970,47 @@ def test_import_auto_pad_layout_keeps_well_12_drillable_with_multihorizontal_nei
 
         assert rows[0]["Статус"] == "OK"
         assert {str(success.name) for success in successes} == {"well_12"}
+
+
+@pytest.mark.integration
+def test_welltracks4_preprocess_shortening_skips_well_04_and_well_12_hits_build_limit() -> (
+    None
+):
+    records = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
+    )
+    layout_records = _records_with_import_auto_pad_layout(records)
+
+    changes, skipped_names = ptc_edit_targets.bulk_horizontal_length_changes(
+        layout_records,
+        target_length_m=1500.0,
+    )
+    updated_records, updated_names = ptc_edit_targets.records_with_edit_targets(
+        layout_records,
+        {str(item["name"]): item for item in changes},
+    )
+
+    assert "well_04" in skipped_names
+    assert "well_04" not in updated_names
+
+    well_04_before = next(record for record in layout_records if record.name == "well_04")
+    well_04_after = next(record for record in updated_records if record.name == "well_04")
+    assert tuple((float(point.x), float(point.y), float(point.z)) for point in well_04_after.points) == tuple(
+        (float(point.x), float(point.y), float(point.z)) for point in well_04_before.points
+    )
+
+    well_12_after = next(record for record in updated_records if record.name == "well_12")
+    assert float(well_12_after.points[2].y) == pytest.approx(889811.8007, abs=1e-3)
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=[well_12_after],
+        selected_names={"well_12"},
+        config=TrajectoryConfig(),
+    )
+
+    assert rows[0]["Статус"] == "Ошибка расчета"
+    assert "0.80 deg/10m" in str(rows[0]["Проблема"])
+    assert successes == []
 
 
 def test_batch_planner_reports_progress_callback_for_selected_wells() -> None:

@@ -18,6 +18,13 @@ from pywp.ptc_sidetrack_state import (
 )
 
 
+def _open_calc_params_panel(at: AppTest) -> None:
+    toggle_buttons = [widget for widget in at.button if str(widget.label) == "Показать"]
+    assert toggle_buttons, "Кнопка 'Показать' для панели параметров расчёта не найдена."
+    toggle_buttons[0].click()
+    at.run(timeout=120)
+
+
 def _parent_with_pilot_records() -> list[WelltrackRecord]:
     return [
         WelltrackRecord(
@@ -116,6 +123,13 @@ def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:
     at.session_state[_sidetrack_kind_key("WELL-04")] = "MD"
     at.session_state[_sidetrack_value_key("WELL-04")] = 760.0
 
+    at.run(timeout=120)
+    _open_calc_params_panel(at)
+    build_pi_inputs = [
+        widget for widget in at.number_input if widget.label == "Макс ПИ BUILD, deg/10m"
+    ]
+    assert build_pi_inputs
+    build_pi_inputs[0].set_value(1.0)
     at.run(timeout=120)
     warning_values = [str(widget.value) for widget in at.warning]
     assert not any(

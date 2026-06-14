@@ -32,7 +32,7 @@ from pywp.uncertainty import (
     WellUncertaintyOverlay,
     build_uncertainty_tube_mesh,
 )
-from pywp.welltrack_batch import SuccessfulWellPlan
+from pywp.welltrack_batch import SuccessfulWellPlan, successful_well_has_md_warning
 
 __all__ = [
     "single_well_three_payload",
@@ -382,7 +382,7 @@ def all_wells_three_payload(
             name=well_name,
             color=color,
             width_role="line",
-            dash="dash" if bool(success.md_postcheck_exceeded) else "solid",
+            dash="dash" if successful_well_has_md_warning(success) else "solid",
             hover_name=well_name,
             x_arrays=x_arrays,
             y_arrays=y_arrays,
@@ -433,6 +433,23 @@ def all_wells_three_payload(
         y_arrays=y_arrays,
         z_arrays=z_arrays,
         highlighted_names=highlighted_reference_well_names,
+    )
+    default_reference_label_keys = (
+        {
+            _reference_identity_key(well)
+            for well in reference_wells
+            if well_name_key(getattr(well, "name", "")) in highlighted_reference_well_names
+        }
+        if str(render_mode).strip() == WT_3D_RENDER_FAST
+        else {_reference_identity_key(well) for well in reference_wells}
+    )
+    _set_optional_reference_name_labels(
+        payload,
+        [
+            well
+            for well in reference_wells
+            if _reference_identity_key(well) not in default_reference_label_keys
+        ],
     )
 
     for target_only in target_only_wells or ():
@@ -778,6 +795,22 @@ def anticollision_three_payload(
         )
     _append_reference_name_labels(payload, analysis_reference_wells)
     _append_reference_pad_labels(payload, analysis_reference_wells)
+    default_loaded_reference_label_keys = {
+        _reference_identity_key(well)
+        for well in analysis_reference_wells
+    }
+    if str(render_mode).strip() != WT_3D_RENDER_FAST:
+        default_loaded_reference_label_keys.update(
+            _reference_identity_key(well) for well in display_only_reference_wells
+        )
+    _set_optional_reference_name_labels(
+        payload,
+        [
+            well
+            for well in loaded_reference_wells
+            if _reference_identity_key(well) not in default_loaded_reference_label_keys
+        ],
+    )
     _append_sidetrack_relative_cone_overlays(
         payload,
         analysis=analysis,
@@ -907,6 +940,7 @@ def _base_payload(*, title: str) -> dict[str, object]:
         "meshes": [],
         "points": [],
         "labels": [],
+        "optional_reference_labels": [],
         "legend": [],
     }
 
@@ -1579,6 +1613,27 @@ def _append_reference_name_labels(
     payload: dict[str, object],
     reference_wells: Iterable[object],
 ) -> None:
+    payload["labels"].extend(
+        _reference_name_label_payloads(reference_wells, role="reference_label")
+    )
+
+
+def _set_optional_reference_name_labels(
+    payload: dict[str, object],
+    reference_wells: Iterable[object],
+) -> None:
+    payload["optional_reference_labels"] = _reference_name_label_payloads(
+        reference_wells,
+        role="reference_label_optional",
+    )
+
+
+def _reference_name_label_payloads(
+    reference_wells: Iterable[object],
+    *,
+    role: str,
+) -> list[dict[str, object]]:
+    labels: list[dict[str, object]] = []
     for kind in (REFERENCE_WELL_ACTUAL, REFERENCE_WELL_APPROVED):
         for well in reference_wells:
             if _reference_kind_value(well) != str(kind):
@@ -1586,14 +1641,15 @@ def _append_reference_name_labels(
             anchor = _reference_label_anchor_point(well)
             if anchor is None:
                 continue
-            payload["labels"].append(
+            labels.append(
                 {
                     "text": str(getattr(well, "name")),
                     "position": [float(anchor[0]), float(anchor[1]), float(anchor[2])],
                     "color": _reference_label_color(str(kind)),
-                    "role": "reference_label",
+                    "role": str(role),
                 }
             )
+    return labels
 
 
 def _append_reference_pad_labels(
@@ -2162,6 +2218,13 @@ def _reference_label_anchor_point(reference_well: object) -> tuple[float, float,
 def _reference_kind_value(reference_well: object) -> str:
     return str(
         getattr(reference_well, "kind", getattr(reference_well, "well_kind", ""))
+    )
+
+
+def _reference_identity_key(reference_well: object) -> tuple[str, str]:
+    return (
+        str(getattr(reference_well, "name", "")).strip(),
+        _reference_kind_value(reference_well).strip(),
     )
 
 

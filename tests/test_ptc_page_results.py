@@ -476,9 +476,8 @@ def test_anticollision_panel_renders_settings_under_section_header(
         show_visualization=False,
     )
 
-    assert calls[:5] == [
+    assert calls[:4] == [
         ("markdown", "### Anti-collision и пересечения"),
-        ("selectbox", "Пресет неопределенности для anti-collision"),
         ("selectbox", "Multiprocessing для anti-collision"),
         ("params", "rendered"),
         ("button", "Расчёт пересечений"),
@@ -724,7 +723,7 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     )
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [target_only],
     )
     monkeypatch.setattr(
@@ -1001,7 +1000,7 @@ def test_target_edit_overview_keeps_reference_wells(
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [target_only],
     )
     monkeypatch.setattr(
@@ -1090,7 +1089,7 @@ def test_target_edit_overview_reuses_cached_three_payload(
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
@@ -1202,7 +1201,7 @@ def test_target_edit_overview_rebuilds_overrides_after_pad_state_change(
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
@@ -1281,6 +1280,41 @@ def test_results_calc_params_changed_after_last_run_uses_ptc_binding_signature(
     assert ptc_page_results._calc_params_changed_after_last_run() is True
 
 
+def test_overview_target_only_wells_include_loaded_but_not_selected_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1000.0),
+                WelltrackPoint(x=200.0, y=0.0, z=1100.0, md=1200.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-B",
+            points=(
+                WelltrackPoint(x=10.0, y=10.0, z=0.0, md=0.0),
+                WelltrackPoint(x=110.0, y=10.0, z=1000.0, md=1000.0),
+                WelltrackPoint(x=210.0, y=10.0, z=1100.0, md=1200.0),
+            ),
+        ),
+    ]
+
+    monkeypatch.setattr(ptc_core, "_pending_edit_target_names", lambda: [])
+
+    target_only_wells = ptc_core._overview_target_only_wells(
+        records=records,
+        summary_rows=[{"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""}],
+        successes=[SimpleNamespace(name="WELL-A")],
+    )
+
+    assert [str(item.name) for item in target_only_wells] == ["WELL-B"]
+    assert str(target_only_wells[0].status) == "Не рассчитана"
+    assert str(target_only_wells[0].problem) == ""
+
+
 def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1331,7 +1365,7 @@ def test_render_success_tabs_shows_trajectory_overview_before_anticollision_run(
     )
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
@@ -1416,7 +1450,7 @@ def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
     )
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
@@ -1451,7 +1485,7 @@ def test_render_success_tabs_skips_trajectory_overview_when_current_ac_exists(
     assert calls == {"overview": 0, "anticollision": 1, "visual": 1}
 
 
-def test_render_success_tabs_skips_heavy_visuals_when_calc_params_changed(
+def test_render_success_tabs_keeps_trajectory_overview_when_calc_params_changed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = {"overview": 0, "visual": 0, "panel": 0, "warnings": [], "panel_kwargs": []}
@@ -1499,7 +1533,7 @@ def test_render_success_tabs_skips_heavy_visuals_when_calc_params_changed(
     )
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
@@ -1532,11 +1566,11 @@ def test_render_success_tabs_skips_heavy_visuals_when_calc_params_changed(
         summary_rows=[],
     )
 
-    assert calls["overview"] == 0
+    assert calls["overview"] == 1
     assert calls["visual"] == 0
     assert calls["panel"] == 1
     assert calls["panel_kwargs"][0]["calc_params_stale"] is True
-    assert any("3D-визуализация" in item for item in calls["warnings"])
+    assert any("Ниже показаны траектории и 3D-обзор" in item for item in calls["warnings"])
 
 
 def test_render_success_tabs_keeps_report_panel_when_ac_visual_fails(
@@ -1599,7 +1633,7 @@ def test_render_success_tabs_keeps_report_panel_when_ac_visual_fails(
     )
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
@@ -1680,7 +1714,7 @@ def test_target_edit_overview_uses_fast_3d_payload_before_anticollision(
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(
         ptc_page_results.wt,
-        "_failed_target_only_wells",
+        "_overview_target_only_wells",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
@@ -1821,6 +1855,100 @@ def test_render_success_tabs_hides_plotly_panels_for_single_well_constructor(
     )
 
     assert calls["plots_kwargs"]["show_plotly_panels"] is False
+
+
+def test_render_success_tabs_keeps_single_well_plots_when_calc_params_are_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {"warnings": []}
+    success = SimpleNamespace(
+        name="WELL-A",
+        surface=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        t1=SimpleNamespace(x=100.0, y=0.0, z=1000.0),
+        t3=SimpleNamespace(x=200.0, y=0.0, z=1100.0),
+        target_pairs=(),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "X_m": [0.0, 200.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 1100.0],
+                "INC_deg": [0.0, 90.0],
+                "AZI_deg": [0.0, 90.0],
+                "DLS_deg_per_30m": [0.0, 0.0],
+                "segment": ["VERTICAL", "HORIZONTAL"],
+            }
+        ),
+        summary={},
+        config=SimpleNamespace(dls_limits_deg_per_30m={}),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        runtime_s=1.0,
+        md_postcheck_message="",
+        md_postcheck_exceeded=False,
+    )
+
+    class FakeStreamlit:
+        session_state = {
+            "wt_results_view_mode": "Отдельная скважина",
+            "wt_last_calc_param_signature": ("previous",),
+        }
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Отдельная скважина"
+
+        def selectbox(self, _label: str, *, options: list[str]) -> str:
+            assert options == ["WELL-A"]
+            return "WELL-A"
+
+        def warning(self, message: str) -> None:
+            calls["warnings"].append(str(message))
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "WT_CALC_PARAMS",
+        SimpleNamespace(state_signature=lambda: ("current",)),
+    )
+    monkeypatch.setattr(ptc_page_results, "get_input_crs", lambda: "input-crs")
+    monkeypatch.setattr(ptc_page_results, "get_selected_crs", lambda: "selected-crs")
+    monkeypatch.setattr(ptc_page_results, "should_auto_convert", lambda: False)
+    monkeypatch.setattr(ptc_page_results, "csv_export_crs", lambda *_args, **_kwargs: "input-crs")
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_find_selected_success",
+        lambda **_kwargs: success,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_single_well_pilot_context",
+        lambda **_kwargs: (None, None, ()),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_key_metrics",
+        lambda **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_result_plots",
+        lambda **kwargs: calls.setdefault("plots_kwargs", kwargs),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_result_tables",
+        lambda **_kwargs: None,
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[success],
+        records=[],
+        summary_rows=[],
+    )
+
+    assert calls["plots_kwargs"]["show_plotly_panels"] is False
+    assert any("Ниже показаны траектории и 3D-обзор" in item for item in calls["warnings"])
 
 
 def test_apply_pad_order_optimization_updates_source_records_and_keeps_ac_cache(

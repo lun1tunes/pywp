@@ -41,6 +41,11 @@ def _keep_ptc_calc_params_expanded() -> None:
     st.session_state[PTC_CALC_PARAMS_AUTO_OPEN_KEY] = True
 
 
+def _prepare_calc_params_state() -> None:
+    wt.WT_CALC_PARAMS.preserve_state()
+    wt.WT_CALC_PARAMS.apply_defaults(force=False)
+
+
 def _calc_params_changed_after_last_run() -> bool:
     stored_signature = st.session_state.get("wt_last_calc_param_signature")
     if not isinstance(stored_signature, tuple):
@@ -51,11 +56,14 @@ def _calc_params_changed_after_last_run() -> bool:
 def _should_expand_calc_params_panel() -> bool:
     sticky_expanded = bool(st.session_state.get(PTC_CALC_PARAMS_EXPAND_ONCE_KEY, False))
     panel_open_raw = st.session_state.get(PTC_CALC_PARAMS_OPEN_KEY)
-    panel_open = True if panel_open_raw is None else bool(panel_open_raw)
+    panel_open = False if panel_open_raw is None else bool(panel_open_raw)
     panel_auto_open = bool(st.session_state.get(PTC_CALC_PARAMS_AUTO_OPEN_KEY, False))
     stale_after_last_run = _calc_params_changed_after_last_run()
     stored_signature = st.session_state.get("wt_last_calc_param_signature")
-    if sticky_expanded or stale_after_last_run:
+    if sticky_expanded:
+        panel_open = True
+        panel_auto_open = True
+    elif stale_after_last_run and (panel_auto_open or panel_open_raw is None):
         panel_open = True
         panel_auto_open = True
     elif isinstance(stored_signature, tuple) and panel_auto_open:
@@ -80,23 +88,27 @@ def _render_calc_params_panel_fragment(
     *,
     extra_content: Callable[[], None] | None = None,
 ) -> TrajectoryConfig:
+    _prepare_calc_params_state()
     expanded = _should_expand_calc_params_panel()
     with st.container(border=True):
-        title_col, toggle_col = st.columns(
-            [9.0, 1.1],
-            gap="small",
-            vertical_alignment="center",
+        st.markdown(
+            (
+                '<div style="margin:0; min-height:2.5rem; display:flex; '
+                'align-items:center; line-height:1; transform:translateY(-9px); '
+                'font-size:1.25rem; font-weight:600;">'
+                "Параметры расчёта"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
         )
-        with title_col:
-            st.markdown("### Параметры расчёта")
-        with toggle_col:
-            if st.button(
-                "Скрыть" if expanded else "Показать",
-                key="ptc_calc_params_panel_toggle",
-                icon=":material/expand_less:" if expanded else ":material/expand_more:",
-                width="content",
-            ):
-                expanded = _toggle_calc_params_panel()
+        st.button(
+            "Скрыть" if expanded else "Показать",
+            key="ptc_calc_params_panel_toggle",
+            icon=":material/expand_less:" if expanded else ":material/expand_more:",
+            width="content",
+            on_click=_toggle_calc_params_panel,
+        )
+        expanded = bool(st.session_state.get(PTC_CALC_PARAMS_OPEN_KEY, expanded))
         if not expanded:
             return wt.WT_CALC_PARAMS.build_config()
         config = wt._build_config_form(
