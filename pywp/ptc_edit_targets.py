@@ -531,7 +531,6 @@ def apply_edit_targets_changes(
     session_state["wt_edit_targets_pending_names"] = pending_names
     session_state["wt_edit_targets_applied"] = updated_names
     session_state["wt_edit_targets_applied_source"] = str(source or "").strip()
-    session_state["wt_edit_targets_highlight_names"] = pending_names
     existing_highlight_points = session_state.get("wt_edit_targets_highlight_points")
     if isinstance(existing_highlight_points, Mapping):
         highlight_points: dict[str, list[int]] = {
@@ -557,6 +556,11 @@ def apply_edit_targets_changes(
         for name, indices in highlight_points.items()
         if name in pending_names
     }
+    session_state["wt_edit_targets_highlight_names"] = [
+        name
+        for name in pending_names
+        if name in session_state["wt_edit_targets_highlight_points"]
+    ]
     session_state["wt_edit_targets_last_source"] = str(source)
     session_state["wt_edit_targets_highlight_version"] = (
         int(session_state.get("wt_edit_targets_highlight_version", 0)) + 1

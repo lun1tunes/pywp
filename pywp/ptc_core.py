@@ -5767,15 +5767,10 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                 well_name = str(row.get("Скважина", ""))
                 point_index = int(point_indices.loc[row.name])
                 explicit_indices = highlight_points.get(well_name)
-                point_label = str(row.get("Точка", ""))
-                is_legacy_target = (
-                    point_label in {"t1", "t3"}
-                    or point_label.endswith("_t1")
-                    or point_label.endswith("_t3")
-                )
-                if well_name in highlight_names and (
-                    (explicit_indices is not None and point_index in explicit_indices)
-                    or (explicit_indices is None and is_legacy_target)
+                if (
+                    well_name in highlight_names
+                    and explicit_indices is not None
+                    and point_index in explicit_indices
                 ):
                     return [
                         "background-color: rgba(34, 197, 94, 0.14); "

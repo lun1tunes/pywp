@@ -300,7 +300,7 @@ def test_apply_edit_targets_changes_invalidates_only_changed_wells() -> None:
     ]
     assert session_state["wt_edit_targets_pending_names"] == ["WELL-C", "WELL-A"]
     assert session_state["wt_edit_targets_applied_source"] == "three_viewer"
-    assert session_state["wt_edit_targets_highlight_names"] == ["WELL-C", "WELL-A"]
+    assert session_state["wt_edit_targets_highlight_names"] == ["WELL-A"]
     assert session_state["wt_edit_targets_highlight_points"] == {"WELL-A": [1, 2]}
     assert session_state["wt_pending_selected_names"] == ["WELL-C", "WELL-A"]
     assert session_state["wt_pending_all_wells_results_focus"] is True
@@ -369,10 +369,7 @@ def test_apply_edit_targets_changes_invalidates_pilot_and_parent_together() -> N
         "WELL-A_PL",
         "WELL-A",
     ]
-    assert session_state["wt_edit_targets_highlight_names"] == [
-        "WELL-A_PL",
-        "WELL-A",
-    ]
+    assert session_state["wt_edit_targets_highlight_names"] == ["WELL-A_PL"]
     assert session_state["wt_pending_selected_names"] == [
         "WELL-A_PL",
         "WELL-A",
@@ -591,6 +588,8 @@ def test_apply_edit_targets_changes_queues_sidetrack_window_override() -> None:
         "9010_ZBS": {"kind": "MD", "value_m": 1240.5}
     }
     assert session_state["wt_edit_targets_pending_names"] == ["9010_ZBS"]
+    assert session_state["wt_edit_targets_highlight_names"] == []
+    assert session_state["wt_edit_targets_highlight_points"] == {}
 
 
 def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:
