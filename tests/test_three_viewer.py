@@ -131,6 +131,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "const xyTickStep = xyStep / xyMinorSubdivision;" in html
     assert "const zMajorRawValues = worldAxisMajorRawZValues(planeRawZ, topRawZ, zStep);" in html
     assert "const zTickSpecs = worldAxisMinorTickSpecs(" in html
+    assert "const minorGridPositions = [];" in html
     assert "const tickStep = safeStep / safeSubdivision;" in html
     assert "const safeTopRawZ = Math.min(Number(topRawZ) || 0, 0.0);" in html
     assert "const bottomRawZ =" in html
@@ -174,6 +175,8 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "[xValue, yMax, worldAxisDisplayZ(-zLength)]," in html
     assert "[0, yValue, 0]," in html
     assert "[0, yValue, worldAxisDisplayZ(-zLength)]," in html
+    assert "if (tickSpec.major) {" in html
+    assert "pushWorldAxisSegment(\n              minorGridPositions," in html
     assert "Number(rawZValue) < 0.0 &&" in html
     assert "!worldAxisRawLevelMatches(rawZValue, 0.0)" in html
     assert "[xMin, yMax, zValue]," in html
@@ -186,6 +189,7 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "[-zTickHalf, 0, worldAxisDisplayZ(-distanceFromPlane)]," in html
     assert "[xMax - zTickHalf, yMax, worldAxisDisplayZ(-distanceFromPlane)]," in html
     assert "[0, yMax - zTickHalf, worldAxisDisplayZ(-distanceFromPlane)]," in html
+    assert 'createWorldAxisLineSegments(minorGridPositions, "#9aa3af", 0.12, 1.4)' in html
     assert "focusViewerTarget(targetBounds, String(item.id || \"\"));" in html
     assert "window.addEventListener(\"pointermove\", handleWorldAxisDragPointerMove, true);" in html
     assert "displayPoint([\n            worldAxisOverlay.anchorRaw.x,\n            worldAxisOverlay.anchorRaw.y,\n            0.0,\n          ]).project(camera);" in html
@@ -627,7 +631,9 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "<strong>DLS:</strong>" in html
     assert "<strong>INC:</strong>" in html
     assert 'id="reset-camera-btn"' not in html
-    assert "Легенда" not in html
+    assert ">Anti-collision</button>" in html
+    assert ">Легенда</button>" in html
+    assert 'title.textContent = "Пересечения";' in html
 
 
 def test_orbit_controls_use_expected_mouse_bindings() -> None:

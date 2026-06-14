@@ -97,8 +97,8 @@ def parse_welltrack_text(text: str) -> list[WelltrackRecord]:
             return
         if len(numeric_tokens) % 4 != 0:
             raise WelltrackParseError(
-                f"WELLTRACK '{current_name}': expected X Y Z MD groups of 4 values, "
-                f"got {len(numeric_tokens)} values at line {line_no}."
+                f"WELLTRACK '{current_name}': ожидались группы X Y Z MD по 4 значения, "
+                f"получено {len(numeric_tokens)} значений в строке {line_no}."
             )
         points: list[WelltrackPoint] = []
         for index in range(0, len(numeric_tokens), 4):
@@ -109,7 +109,7 @@ def parse_welltrack_text(text: str) -> list[WelltrackRecord]:
                 md = float(numeric_tokens[index + 3])
             except ValueError as exc:
                 raise WelltrackParseError(
-                    f"WELLTRACK '{current_name}': failed to parse numeric value near line {line_no}: {exc}"
+                    f"WELLTRACK '{current_name}': не удалось разобрать число около строки {line_no}: {exc}"
                 ) from exc
             points.append(WelltrackPoint(x=x, y=y, z=z, md=md))
         _validate_record_md(points=points, well_name=current_name)

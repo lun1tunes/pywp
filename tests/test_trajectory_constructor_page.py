@@ -230,12 +230,31 @@ def test_ptc_page_wraps_pad_layout_section_in_fragment() -> None:
 def test_ptc_core_contains_bulk_horizontal_length_preprocess_controls() -> None:
     source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
 
-    assert "Препроцессинг траекторий" in source
-    assert "Скважины для препроцессинга" in source
+    assert "Изменить длину ГС" in source
+    assert "Скважины для изменения длины ГС" in source
     assert "Новая длина ГС, м" in source
     assert '"wt_preprocess_select_all"' in source
     assert '"wt_preprocess_only_pad"' in source
     assert '"Применить"' in source
+
+
+def test_ptc_core_keeps_explicit_pilot_and_zbs_name_matching_guidance() -> None:
+    source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
+
+    assert "Имя `well` должно совпадать с основной скважиной." in source
+    assert "`fact_well` должно совпадать с именем загруженной " in source
+    assert "фактической скважины." in source
+    assert "Есть ЗБС: для расчёта загрузите " in source
+    assert 'фактическую основную скважину "' in source
+
+
+def test_ptc_core_keeps_auto_order_guardrails_for_source_defined_wellheads() -> None:
+    source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
+
+    assert "начинает переставлять скважины только после включения" in source
+    assert "локального тумблера " in source
+    assert "'Применить авто-порядок'" in source
+    assert "исходная привязка скважин сохраняется" in source
 
 
 def test_ptc_anticollision_params_limit_multiselect_height_via_scoped_container() -> None:

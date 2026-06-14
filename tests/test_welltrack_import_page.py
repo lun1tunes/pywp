@@ -975,7 +975,7 @@ def test_preprocess_excluded_records_message_lists_pilot_and_multilevel_wells() 
     )
 
     assert message == (
-        "Препроцессинг не применялся к: "
+        "Изменение длины ГС не применялось к: "
         "well_04 (есть пилот), well_multi (многопластовая)."
     )
 
@@ -1046,7 +1046,7 @@ def test_welltrack_page_renders_and_fixes_zbs_t1_t3_order_from_parent() -> None:
 
     at.run(timeout=120)
 
-    assert any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+    assert any("перепутаны местами" in str(widget.value) for widget in at.warning)
     assert any(
         "Подцепили фактическую скважину для бокового ствола" in str(widget.value)
         for widget in at.info
@@ -1265,7 +1265,7 @@ def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None
     at.run(timeout=120)
 
     assert any(
-        "Проверка порядка t1/t3 — OK." in str(widget.value) for widget in at.success
+        "Проверка порядка t1/t3 — без замечаний." in str(widget.value) for widget in at.success
     )
 
 
@@ -1284,7 +1284,7 @@ def test_welltrack_page_hides_t1_t3_warning_after_keep_action() -> None:
         for widget in at.info
     )
     assert not any(
-        "Вероятно, порядок точек" in str(widget.value) for widget in at.warning
+        "перепутаны местами" in str(widget.value) for widget in at.warning
     )
 
 
@@ -1304,7 +1304,7 @@ def test_welltrack_page_shows_only_remaining_t1_t3_issue_after_partial_fix() -> 
         "Порядок t1/t3 изменился для скважин: BAD-1." in str(widget.value)
         for widget in at.success
     )
-    assert any("Вероятно, порядок точек" in str(widget.value) for widget in at.warning)
+    assert any("перепутаны местами" in str(widget.value) for widget in at.warning)
     markdown_values = [str(widget.value) for widget in at.markdown]
     assert any("`BAD-2`" in value for value in markdown_values)
     assert not any("`BAD-1`" in value for value in markdown_values)
@@ -2681,6 +2681,65 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
     ]
 
 
+def test_pad_layout_preview_hides_midpoint_anchor_and_surface_z_columns(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    captured: dict[str, object] = {"preview_columns": None}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_dataframe(data, *args, **kwargs):
+        if isinstance(data, pd.DataFrame) and "Порядок" in data.columns:
+            captured["preview_columns"] = list(data.columns)
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+
+    page._render_pad_layout_panel(list(_records()))
+
+    assert captured["preview_columns"] == [
+        "Порядок",
+        "Скважина",
+        "Фиксация",
+        "Новое S X, м",
+        "Новое S Y, м",
+    ]
+
+
 def test_pad_layout_clear_fixed_slots_resets_editor_key(monkeypatch) -> None:
     page = wt_import_module
     page.st.session_state.clear()
@@ -2776,7 +2835,11 @@ def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference()
     at.run(timeout=120)
 
     assert any(
-        "Положения устьев были заданы в исходных данных" in str(widget.value)
+        "Устья заданы в исходных данных" in str(widget.value)
+        for widget in at.info
+    )
+    assert any(
+        "Исходная привязка скважин к позициям сохраняется" in str(widget.value)
         for widget in at.info
     )
 
@@ -3286,7 +3349,10 @@ def test_welltrack_import_target_table_format_hides_welltrack_method() -> None:
 
     radio_labels = {str(widget.label) for widget in at.radio}
     assert radio_labels == {"Формат импорта"}
-    assert [str(widget.label) for widget in at.expander] == ["Таблица точек целей"]
+    assert [str(widget.label) for widget in at.expander] == [
+        "Таблица точек целей",
+        "Пилоты, ЗБС и многопластовые",
+    ]
 
 
 def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
@@ -3540,8 +3606,8 @@ def test_welltrack_page_prompts_to_run_anticollision_for_successful_batch() -> N
     selectboxes_by_label = {str(widget.label): widget for widget in at.selectbox}
     selectbox_labels = list(selectboxes_by_label.keys())
     assert "Пресет неопределенности для anti-collision" not in selectbox_labels
-    assert "Multiprocessing для anti-collision" in selectbox_labels
-    assert list(selectboxes_by_label["Multiprocessing для anti-collision"].options) == [
+    assert "Параллельный расчёт anti-collision" in selectbox_labels
+    assert list(selectboxes_by_label["Параллельный расчёт anti-collision"].options) == [
         "Без Multiprocessing",
         "2 процессов",
         "4 процессов",
@@ -4584,7 +4650,7 @@ def test_batch_summary_skips_large_download_payloads_until_requested(monkeypatch
     )
 
     assert captured["download_buttons"] == 0
-    assert any("Выгрузка не сформирована автоматически" in item for item in captured["captions"])
+    assert any("Включите подготовку файлов перед скачиванием" in item for item in captured["captions"])
 
 
 def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> None:
@@ -5153,7 +5219,7 @@ def test_prepared_override_rows_include_sf_before() -> None:
         "WELL-B": {
             "update_fields": {"optimization_mode": "anti_collision_avoidance"},
             "source": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
-            "reason": "Prepared pairwise anti-collision rerun.",
+            "reason": "Подготовлен anti-collision пересчёт для пары.",
         }
     }
     page.st.session_state["wt_prepared_recommendation_snapshot"] = {
@@ -5169,10 +5235,10 @@ def test_prepared_override_rows_include_sf_before() -> None:
             "Порядок": "1",
             "Скважина": "WELL-B",
             "Маневр": "Pre-entry azimuth turn / сдвиг HOLD до t1",
-            "Оптимизация": "Anti-collision avoidance",
+            "Оптимизация": "Anti-collision",
             "SF до": "0.69",
             "Источник": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
-            "Причина": "Prepared pairwise anti-collision rerun.",
+            "Причина": "Подготовлен anti-collision пересчёт для пары.",
         }
     ]
 
@@ -5183,12 +5249,12 @@ def test_format_prepared_override_scope_shows_local_mode_for_selected_wells() ->
         "WELL-B": {
             "update_fields": {"optimization_mode": "anti_collision_avoidance"},
             "source": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
-            "reason": "Prepared pairwise anti-collision rerun.",
+            "reason": "Подготовлен anti-collision пересчёт для пары.",
         },
         "WELL-C": {
             "update_fields": {"optimization_mode": "anti_collision_avoidance"},
             "source": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
-            "reason": "Early collision: cone-aware rerun по KOP/BUILD1.",
+            "reason": "Раннее пересечение: anti-collision пересчёт по KOP/BUILD1.",
         },
     }
     page.st.session_state["wt_prepared_recommendation_snapshot"] = {
@@ -5214,13 +5280,13 @@ def test_format_prepared_override_scope_shows_local_mode_for_selected_wells() ->
     assert rows == [
         {
             "Скважина": "WELL-B",
-            "Локальный режим": "Anti-collision avoidance",
+            "Локальный режим": "Anti-collision",
             "Источник": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
             "Маневр": "Сместить post-entry / HORIZONTAL",
         },
         {
             "Скважина": "WELL-C",
-            "Локальный режим": "Anti-collision avoidance",
+            "Локальный режим": "Anti-collision",
             "Источник": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
             "Маневр": "Сместить ранний уход: KOP / BUILD1",
         },
@@ -5248,7 +5314,7 @@ def test_prepared_override_rows_follow_cluster_action_step_order() -> None:
         "WELL-B": {
             "update_fields": {"optimization_mode": "anti_collision_avoidance"},
             "source": "ac-cluster-001 · WELL-A, WELL-B, WELL-C · событий 2 · SF 0.71",
-            "reason": "Early collision: cone-aware rerun по KOP/BUILD1.",
+            "reason": "Раннее пересечение: anti-collision пересчёт по KOP/BUILD1.",
         },
     }
     page.st.session_state["wt_prepared_recommendation_snapshot"] = {
@@ -5285,7 +5351,7 @@ def test_build_last_anticollision_resolution_reports_sf_after() -> None:
             "well_a": "WELL-A",
             "well_b": "WELL-B",
             "source_label": "WELL-A ↔ WELL-B · Траектория / review · SF 0.69",
-            "action_label": "Подготовить anti-collision пересчет",
+            "action_label": "Подготовить anti-collision пересчёт",
             "area_label": "траектория ↔ траектория",
             "before_sf": 0.69,
             "before_overlap_m": 8.0,
@@ -6192,10 +6258,10 @@ def test_prepare_rerun_from_cluster_is_blocked_for_target_spacing_conflicts() ->
     assert page.st.session_state["wt_prepared_well_overrides"] == {}
     assert page.st.session_state["wt_prepared_recommendation_snapshot"] is None
     assert page.st.session_state["wt_pending_selected_names"] is None
-    assert "Cluster-level пересчет недоступен" in str(
+    assert "Пересчёт по кластеру недоступен" in str(
         page.st.session_state["wt_prepared_override_message"]
     )
-    assert "spacing целей" in str(page.st.session_state["wt_prepared_override_message"])
+    assert "разнести цели" in str(page.st.session_state["wt_prepared_override_message"])
 
 
 def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_well_plan() -> (
@@ -6361,8 +6427,8 @@ def test_prepare_rerun_from_cluster_merges_vertical_and_trajectory_into_mixed_we
     assert (
         str(payload["update_fields"]["optimization_mode"]) == "anti_collision_avoidance"
     )
-    assert "cone-aware rerun" in str(payload["reason"])
-    assert "anti-collision avoidance rerun" in str(payload["reason"])
+    assert "anti-collision пересчёт по KOP/BUILD1" in str(payload["reason"])
+    assert "anti-collision пересчёт" in str(payload["reason"])
 
 
 def test_prepare_rerun_from_cluster_stages_mixed_well_to_early_kop_build1_first() -> (
@@ -6624,7 +6690,7 @@ def test_build_last_anticollision_resolution_supports_cluster_snapshot() -> None
                     "well_a": "WELL-A",
                     "well_b": "WELL-C",
                     "source_label": "WELL-A ↔ WELL-C · Траектория / review · SF 0.74",
-                    "action_label": "Подготовить anti-collision пересчет",
+                    "action_label": "Подготовить anti-collision пересчёт",
                     "expected_maneuver": "Сместить post-entry / HORIZONTAL",
                     "area_label": "траектория ↔ траектория",
                     "before_sf": 0.74,
@@ -6639,7 +6705,7 @@ def test_build_last_anticollision_resolution_supports_cluster_snapshot() -> None
                     "well_a": "WELL-B",
                     "well_b": "WELL-C",
                     "source_label": "WELL-B ↔ WELL-C · Траектория / review · SF 0.71",
-                    "action_label": "Подготовить anti-collision пересчет",
+                    "action_label": "Подготовить anti-collision пересчёт",
                     "expected_maneuver": "Сместить post-entry / HORIZONTAL",
                     "area_label": "траектория ↔ траектория",
                     "before_sf": 0.71,
@@ -6687,7 +6753,7 @@ def test_build_last_anticollision_resolution_cluster_rescans_current_conflicts_b
                     "well_a": "WELL-A",
                     "well_b": "WELL-C",
                     "source_label": "WELL-A ↔ WELL-C · Траектория / review · SF 0.74",
-                    "action_label": "Подготовить anti-collision пересчет",
+                    "action_label": "Подготовить anti-collision пересчёт",
                     "expected_maneuver": "Сместить post-entry / HORIZONTAL",
                     "area_label": "траектория ↔ траектория",
                     "before_sf": 0.74,
@@ -6702,7 +6768,7 @@ def test_build_last_anticollision_resolution_cluster_rescans_current_conflicts_b
                     "well_a": "WELL-B",
                     "well_b": "WELL-C",
                     "source_label": "WELL-B ↔ WELL-C · Траектория / review · SF 0.71",
-                    "action_label": "Подготовить anti-collision пересчет",
+                    "action_label": "Подготовить anti-collision пересчёт",
                     "expected_maneuver": "Сместить post-entry / HORIZONTAL",
                     "area_label": "траектория ↔ траектория",
                     "before_sf": 0.71,
@@ -6922,7 +6988,7 @@ def test_anticollision_figures_draw_previous_trajectories_as_dashed_overlay() ->
     previous_plan = [
         trace
         for trace in figure_plan.data
-        if str(trace.name).endswith(": до anti-collision")
+        if str(trace.name).endswith(": до пересчёта")
     ]
     assert len(previous_3d) == 1
     assert len(previous_plan) == 1

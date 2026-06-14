@@ -536,7 +536,7 @@ def anticollision_three_payload(
     render_mode: str = WT_3D_RENDER_FAST,
     show_sidetrack_relative_cones: bool = False,
 ) -> dict[str, object]:
-    payload = _base_payload(title="Anti-collision: 3D конусы неопределенности")
+    payload = _base_payload(title="Anti-collision: 3D конусы неопределённости")
     payload["anti_collision_layer_state"] = {
         "cones": True,
         "overlaps": True,
@@ -669,12 +669,12 @@ def anticollision_three_payload(
             _append_station_line(
                 payload,
                 stations=previous_success.stations,
-                name=f"{well_name}: до anti-collision",
+                name=f"{well_name}: до пересчёта",
                 color=str(well.color),
                 opacity=0.78,
                 width_role="line",
                 dash="dot",
-                hover_name=f"{well_name}: до anti-collision",
+                hover_name=f"{well_name}: до пересчёта",
                 x_arrays=x_arrays,
                 y_arrays=y_arrays,
                 z_arrays=z_arrays,

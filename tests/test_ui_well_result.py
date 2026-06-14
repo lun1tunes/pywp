@@ -191,7 +191,7 @@ def test_render_result_plots_uses_unknown_model_from_legacy_label_state(
                 uncertainty_toggle_key(well_name="WELL-1"): True,
                 uncertainty_preset_key(
                     well_name="WELL-1"
-                ): "MWD Unknown magnetic (ISCWSA)",
+                ): "Консервативная точность MWD (ISCWSA Unknown)",
             }
 
         def checkbox(self, *_args, **_kwargs) -> bool:

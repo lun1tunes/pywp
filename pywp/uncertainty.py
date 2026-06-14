@@ -23,8 +23,8 @@ UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC = "mwd_poor_magnetic"
 UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC = "mwd_unknown_magnetic"
 DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
 UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
-    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: "MWD POOR magnetic (ISCWSA)",
-    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: "MWD Unknown magnetic (ISCWSA)",
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: "Стандартная точность MWD (ISCWSA POOR)",
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: "Консервативная точность MWD (ISCWSA Unknown)",
 }
 
 
@@ -242,24 +242,16 @@ def uncertainty_model_caption(
         environment = model.iscwsa_environment
         model_label = ISCWSA_MWD_TOOL_CODES[str(model.iscwsa_tool_code)].label
         return (
-            f"Показан 2σ {model_label} конус неопределенности, "
-            "построенный из 1σ tool-error covariance: depth reference/scale, "
-            "misalignment/sag, declination, magnetic field, accelerometer и "
-            "magnetometer bias/scale terms. Эллипсы считаются из полной 3x3 "
-            "covariance matrix в NEV/XYZ и затем проецируются в плоскость, "
-            "нормальную к стволу. "
-            f"Параметры магнитного поля: MTOT={float(environment.mtot_nt):.0f} nT, "
+            f"Показан 2σ конус неопределённости ({model_label}, ISCWSA). "
+            f"Магнитное поле: MTOT={float(environment.mtot_nt):.0f} nT, "
             f"DIP={float(environment.dip_deg):.1f}°, "
             f"DECL={float(environment.declination_deg):.1f}°."
         )
     return (
-        "Показан 2σ planning-level конус неопределенности, построенный по "
-        "эллиптическим сечениям в плоскости, нормальной к стволу. "
-        "Базовая модель ordinary MWD proxy: first-order по ошибкам "
+        "Показан 2σ конус неопределённости для планирования. "
+        "Базовая модель MWD: погрешности "
         f"INC/AZI = {float(model.sigma_inc_deg):.2f}°/{float(model.sigma_azi_deg):.2f}° "
-        f"(1σ) + lateral drift {float(model.sigma_lateral_drift_m_per_1000m):.1f} м/1000м (1σ), "
-        "взвешенный по латеральной экспозиции sin(INC). "
-        "Это визуализация для планирования, не полноценная ISCWSA tool model."
+        f"(1σ), дрейф {float(model.sigma_lateral_drift_m_per_1000m):.1f} м/1000 м (1σ)."
     )
 
 

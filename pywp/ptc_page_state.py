@@ -116,12 +116,6 @@ def _render_calc_params_panel_fragment(
             title="",
             on_change=_keep_ptc_calc_params_expanded,
         )
-        if _calc_params_changed_after_last_run():
-            st.warning(
-                "Параметры расчёта изменены после последнего запуска. "
-                "Результаты ниже относятся к прошлому расчёту, пока вы не "
-                "запустите новый."
-            )
         if extra_content is not None:
             st.divider()
             extra_content()

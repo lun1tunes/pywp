@@ -1629,7 +1629,7 @@ def _store_anticollision_failure_state(
             merged_log_lines.append(text)
     error_line = (
         f"[{datetime.now().strftime('%H:%M:%S')}] "
-        f"Ошибка anti-collision: {type(exc).__name__}: {exc}"
+        f"Ошибка anti-collision: {exc}"
     )
     if not merged_log_lines or merged_log_lines[-1] != error_line:
         merged_log_lines.append(error_line)
@@ -1806,7 +1806,7 @@ def _cached_anti_collision_view_model(
             progress_callback(percent, progress_text)
 
     color_map = _well_color_map(records) if records else {}
-    _emit(8, "Подготовка входных данных anti-collision.")
+    _emit(8, "Подготовка данных anti-collision.")
     all_reference_wells = tuple(reference_wells)
     scoped_reference_wells = reference_wells_in_anti_collision_scope(
         successes,
@@ -1820,7 +1820,7 @@ def _cached_anti_collision_view_model(
         _emit(
             10,
             (
-                "Anti-collision scope: "
+                "Состав набора: "
                 f"{len(scoped_reference_wells)}/{len(all_reference_wells)} "
                 "фактических/утверждённых скважин рядом с расчётными; "
                 f"{skipped_reference_count} дальних скважин пропущено."
@@ -1873,7 +1873,7 @@ def _cached_anti_collision_view_model(
             }
             return analysis, recommendations, clusters
     try:
-        _emit(12, "Подготовка конусов неопределённости anti-collision.")
+        _emit(12, "Подготовка конусов неопределённости.")
         previous_well_cache = cache.get("well_cache")
         previous_pair_cache = cache.get("pair_cache")
         if not isinstance(previous_well_cache, Mapping):
@@ -1913,7 +1913,7 @@ def _cached_anti_collision_view_model(
             _emit(
                 66,
                 (
-                    "Anti-collision рассчитан без переиспользованных пар: "
+                    "Anti-collision рассчитано без переиспользованных пар: "
                     f"скважин {incremental_stats.rebuilt_well_count}, "
                     f"пар {incremental_stats.recalculated_pair_count}."
                     + (
@@ -1928,7 +1928,7 @@ def _cached_anti_collision_view_model(
             analysis,
             well_context_by_name=_build_anticollision_well_contexts(successes),
         )
-        _emit(88, "Кластеризация рекомендаций anti-collision.")
+        _emit(88, "Кластеризация рекомендаций.")
         clusters = build_anti_collision_recommendation_clusters(recommendations)
     except Exception as exc:
         _store_anticollision_failure_state(
@@ -2075,7 +2075,7 @@ def _render_status_run_log(
         if "cluster_count" in state_payload or "overlap_count" in state_payload:
             extra_cols = st.columns(2, gap="small")
             extra_cols[0].metric(
-                "Overlap",
+                "Пересечения",
                 f"{int(state_payload.get('overlap_count') or 0)}",
             )
             extra_cols[1].metric(
@@ -2098,7 +2098,7 @@ def _render_status_run_log(
             )
         if int(state_payload.get("parallel_workers") or 0) > 1:
             st.caption(
-                "Anti-collision parallel: "
+                "Параллельный расчёт anti-collision: "
                 f"{int(state_payload.get('parallel_workers') or 0)} процессов."
             )
         if "status" in state_payload:
@@ -2899,7 +2899,7 @@ def _all_wells_anticollision_plan_figure(
                     x=previous_x,
                     y=previous_y,
                     mode="lines",
-                    name=f"{well.name}: до anti-collision",
+                    name=f"{well.name}: до пересчёта",
                     legendgroup=str(well.name),
                     showlegend=False,
                     line={
@@ -3166,7 +3166,7 @@ def _all_wells_anticollision_plan_figure(
     x_tickvals = linear_tick_values(axis_range=x_range, step=xy_dtick)
     y_tickvals = linear_tick_values(axis_range=y_range, step=xy_dtick)
     fig.update_layout(
-        title="Anti-collision: план E-N с конусами неопределенности",
+        title="Anti-collision: план E-N с конусами неопределённости",
         xaxis_title="X / Восток (м)",
         yaxis_title="Y / Север (м)",
         xaxis={
@@ -3265,10 +3265,10 @@ def _prepared_override_rows() -> list[dict[str, object]]:
 def _prepared_plan_kind_label(snapshot: Mapping[str, object] | None) -> str:
     kind = str((snapshot or {}).get("kind", "")).strip()
     if kind == "cluster":
-        return "весь связанный anti-collision кластер"
+        return "весь связанный кластер конфликтов"
     if kind == "recommendation":
-        return "одно anti-collision событие"
-    return "локальный anti-collision план"
+        return "одно событие пересечения"
+    return "локальный план пересчёта"
 
 
 def _format_prepared_override_scope(
@@ -3739,23 +3739,21 @@ def _render_last_anticollision_resolution(*, current_preset: str) -> None:
     resolution_kind = (
         str(resolution.get("kind", "recommendation")).strip() or "recommendation"
     )
-    st.markdown("### Результат последнего anti-collision пересчета")
+    st.markdown("### Результат пересчёта anti-collision")
     if resolution_kind == "cluster":
         caption = (
-            "После пересчета выполнен полный повторный anti-collision scan по текущему "
-            "набору скважин. Метрика 'SF после' и статус считаются по всем актуальным "
-            "cluster-level событиям, которые сейчас затрагивают исходные скважины "
-            "подготовленного плана."
+            "После пересчёта траекторий пересчитан SF по актуальным "
+            "конфликтам затронутых скважин."
         )
     else:
         caption = (
-            "Сравнение выполнено на исходном конфликтном окне по тем же pairwise "
-            "интервалам и текущему planning-level пресету неопределенности."
+            "Сравнение выполнено на исходном конфликтном интервале "
+            "с текущим пресетом неопределённости."
         )
     used_preset = str(resolution.get("uncertainty_preset", "")).strip()
     if used_preset and used_preset != str(current_preset):
         caption += (
-            f" Последний пересчет считался на пресете "
+            f" Последний пересчёт считался на пресете "
             f"'{uncertainty_preset_label(used_preset)}', сейчас выбран "
             f"'{uncertainty_preset_label(current_preset)}'."
         )
@@ -3779,19 +3777,15 @@ def _render_last_anticollision_resolution(*, current_preset: str) -> None:
         )
         if current_cluster_labels:
             st.caption(
-                "Актуальные кластеры после пересчета: "
+                "Актуальные кластеры после пересчёта: "
                 + "; ".join(str(label) for label in current_cluster_labels)
             )
         else:
-            st.caption(
-                "После полного повторного scan активных anti-collision кластеров "
-                "для исходных скважин не осталось."
-            )
+            st.caption("Для исходных скважин активных кластеров не осталось.")
         items = list(resolution.get("items", ()) or ())
         if not items:
             st.success(
-                "Повторный cluster-level scan не обнаружил оставшихся collision-событий "
-                "для затронутых скважин."
+                "Оставшихся пересечений по затронутым скважинам не найдено."
             )
             return
         st.dataframe(
@@ -3813,7 +3807,7 @@ def _render_last_anticollision_resolution(*, current_preset: str) -> None:
                                 float(item.get("md_b_end_m", 0.0)),
                             ),
                             "SF сейчас": _format_sf_value(item.get("current_sf")),
-                            "Overlap сейчас, м": _format_overlap_value(
+                            "Пересечение сейчас, м": _format_overlap_value(
                                 item.get("current_overlap_m")
                             ),
                         }
@@ -3858,10 +3852,10 @@ def _render_last_anticollision_resolution(*, current_preset: str) -> None:
                             float(resolution.get("md_b_start_m", 0.0)),
                             float(resolution.get("md_b_end_m", 0.0)),
                         ),
-                        "Overlap до, м": _format_overlap_value(
+                        "Пересечение до, м": _format_overlap_value(
                             resolution.get("before_overlap_m")
                         ),
-                        "Overlap после, м": _format_overlap_value(
+                        "Пересечение после, м": _format_overlap_value(
                             resolution.get("after_overlap_m")
                         ),
                     }
@@ -3917,7 +3911,7 @@ def _prepare_rerun_from_recommendation(
         ) or list(prepared.keys())
         return
     st.session_state["wt_prepared_override_message"] = (
-        "Не удалось подготовить пересчет по выбранной anti-collision рекомендации: "
+        "Не удалось подготовить пересчёт по выбранной рекомендации: "
         "контекст конфликта недоступен."
     )
     st.session_state["wt_prepared_recommendation_id"] = str(
@@ -4008,11 +4002,11 @@ def _prepare_rerun_from_cluster(
         blocking_message = (
             str(cluster.blocking_advisory)
             if cluster.blocking_advisory is not None
-            else "Для этого cluster-level пересчета доступны только advisory-рекомендации."
+            else "Для этого пересчёта по кластеру доступны только справочные рекомендации."
         )
         st.session_state["wt_prepared_well_overrides"] = {}
         st.session_state["wt_prepared_override_message"] = (
-            "Cluster-level пересчет недоступен: " + blocking_message
+            "Пересчёт по кластеру недоступен: " + blocking_message
         )
         st.session_state["wt_prepared_recommendation_id"] = ""
         st.session_state["wt_prepared_recommendation_snapshot"] = None
@@ -4037,7 +4031,7 @@ def _prepare_rerun_from_cluster(
         message = str(cluster.summary)
         if focus_well_names:
             message += (
-                " Фокус пересчета: "
+                " Фокус пересчёта: "
                 + ", ".join(str(name) for name in focus_well_names)
                 + "."
             )
@@ -4048,15 +4042,16 @@ def _prepare_rerun_from_cluster(
                 if str(name) not in set(str(name) for name in focus_well_names)
             ]
             message += (
-                " Область cluster-level пересчета: "
+                " Область пересчёта по кластеру: "
                 + ", ".join(str(name) for name in target_well_names)
                 + "."
             )
             if expanded_scope:
                 message += (
-                    " Соседние расчетные скважины других кустов будут подключены "
-                    "автоматически, потому что входят в тот же связанный anti-collision "
-                    "кластер: " + ", ".join(expanded_scope) + "."
+                    " Соседние скважины других кустов подключатся автоматически "
+                    "к тому же кластеру конфликтов: "
+                    + ", ".join(expanded_scope)
+                    + "."
                 )
         if cluster.blocking_advisory:
             message += " " + str(cluster.blocking_advisory)
@@ -4085,7 +4080,7 @@ def _prepare_rerun_from_cluster(
         st.session_state["wt_pending_selected_names"] = pending_names
         return
     st.session_state["wt_prepared_override_message"] = (
-        "Не удалось подготовить cluster-level пересчет: контекст конфликта недоступен."
+        "Не удалось подготовить пересчёт по кластеру: контекст конфликта недоступен."
     )
     st.session_state["wt_prepared_recommendation_id"] = ""
     st.session_state["wt_prepared_recommendation_snapshot"] = None
@@ -4218,18 +4213,18 @@ def _render_source_input() -> None:
         )
         with note_col:
             st.caption(
-                "Вставьте таблицу в формате `Wellname`, `Point`, `X`, `Y`, `Z`. "
-                "Поддерживается copy/paste из Excel. Для обычной скважины "
-                "`Point` принимает `S`, `t1`, `t3`. Для многопластовой скважины "
-                "задавайте пары `1_t1`, `1_t3`, `2_t1`, `2_t3`, ... в одном "
-                "`Wellname`: каждый номер — отдельный горизонтальный уровень. "
-                "Для пилота используйте имя "
-                "`wellname_PL`: точки `S`, `PL1`, `PL2`, ...; часть `wellname` "
-                "должна совпадать с основной скважиной. Для бокового ствола "
-                "от фактической скважины используйте имя `fact_well_name_ZBS` "
-                "и точки `t1`, `t3` без `S`; `fact_well_name` должен совпадать "
-                "с именем загруженной фактической скважины."
+                "Вставьте из Excel: `Wellname`, `Point`, `X`, `Y`, `Z`. "
+                "Обычная скважина: `S`, `t1`, `t3`."
             )
+            with st.expander("Пилоты, ЗБС и многопластовые", expanded=False):
+                st.caption(
+                    "Пилот: `well_PL` с точками `S`, `PL1`, `PL2`, … "
+                    "Имя `well` должно совпадать с основной скважиной. "
+                    "ЗБС от факта: `fact_well_ZBS` с `t1`, `t3` без `S`; "
+                    "`fact_well` должно совпадать с именем загруженной "
+                    "фактической скважины. "
+                    "Многопласт: `1_t1`, `1_t3`, `2_t1`, `2_t3`, … в одном `Wellname`."
+                )
         with clear_col:
             if st.button(
                 "Очистить",
@@ -4500,15 +4495,15 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
             }
         )
         st.info(
-            "В импорте есть боковой ствол - загрузите фактическую скважину "
+            "Есть ЗБС: для расчёта загрузите "
             + (
-                f'с именем "{parent_names[0]}"'
+                f'фактическую основную скважину "{parent_names[0]}"'
                 if len(parent_names) == 1
-                else "с именами " + ", ".join(f'"{name}"' for name in parent_names)
+                else "фактические основные скважины "
+                + ", ".join(f'"{name}"' for name in parent_names)
             )
-            + " для расчёта траектории."
+            + "."
         )
-
     with st.expander(
         "Статус загрузки целей",
         expanded=bool(problem_count > 0 or overview_expand_once),
@@ -4537,10 +4532,9 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
         ):
             st.session_state[preprocess_pad_key] = pad_ids[0]
 
-        st.markdown("#### Препроцессинг траекторий")
+        st.markdown("#### Изменить длину ГС")
         st.caption(
-            "Массово меняет только точку `t3`: удлиняет или срезает ГС вдоль "
-            "прямой `t1 → t3` для выбранных скважин."
+            "Массово меняет только `t3`: удлиняет или срезает ГС вдоль линии `t1 → t3`."
         )
         feedback_message = str(st.session_state.pop(preprocess_feedback_key, "")).strip()
         if feedback_message:
@@ -4553,7 +4547,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
         select_col = select_cols[0] if len(select_cols) > 0 else st
         select_all_col = select_cols[1] if len(select_cols) > 1 else st
         getattr(select_col, "multiselect", st.multiselect)(
-            "Скважины для препроцессинга",
+            "Скважины для изменения длины ГС",
             options=preprocess_all_names,
             key=preprocess_selected_names_key,
             disabled=not preprocess_all_names,
@@ -4578,7 +4572,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
             pad_add_col = pad_cols[1] if len(pad_cols) > 1 else st
             pad_only_col = pad_cols[2] if len(pad_cols) > 2 else st
             getattr(pad_col, "selectbox", st.selectbox)(
-                "Куст для препроцессинга",
+                "Куст для изменения ГС",
                 options=pad_ids,
                 format_func=lambda value: _pad_display_label(
                     next(
@@ -4660,7 +4654,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                 all_names=preprocess_all_names,
             )
             if not selected_preprocess_names:
-                st.warning("Выберите хотя бы одну скважину для препроцессинга.")
+                st.warning("Выберите хотя бы одну скважину.")
             else:
                 selected_keys = {
                     well_name_key(name) for name in selected_preprocess_names
@@ -5578,7 +5572,6 @@ def _render_actual_fund_analysis_panel(
                 st.error(
                     "Не удалось построить анализ фактического фонда для загруженных скважин."
                 )
-                st.caption(f"{type(exc).__name__}: {exc}")
             return
     metrics = tuple(item.metrics for item in analyses)
     eligible_metrics = [item for item in metrics if bool(item.is_analysis_eligible)]
@@ -5598,8 +5591,8 @@ def _render_actual_fund_analysis_panel(
 
     with st.expander("Анализ фактического фонда", expanded=False):
         st.caption(
-            "Учитываются только горизонтальные скважины с читаемым профилем "
-            "(KOP, HOLD, ГС и ПИ в норме). Скважины с аномалиями исключаются."
+            "Учитываются горизонтальные скважины с нормальным профилем "
+            "(KOP, HOLD, ГС, ПИ в допустимых пределах)."
         )
         a1, a2, a3, a4, a5 = st.columns(5, gap="small")
         a1.metric("Фактических скважин", f"{len(actual_wells)}")
@@ -5641,9 +5634,7 @@ def _render_actual_fund_analysis_panel(
         if kop_depth_function is not None:
             st.markdown("#### KOP(TVD) по фактическому фонду")
             st.caption(
-                "Скважины сгруппированы по TVD входа в ГС. "
-                "Для каждого кластера опорный KOP = min + 1σ (без выбросов). "
-                "Полученная зависимость применяется к проектным скважинам через TVD t1."
+                "KOP подбирается по фактическому фонду на глубине входа в ГС (TVD t1)."
             )
             figure = _actual_fund_kop_depth_figure(metrics)
             if figure is not None:
@@ -5697,9 +5688,8 @@ def _render_actual_fund_analysis_panel(
 
         st.markdown("#### Просмотр выбранной скважины")
         st.caption(
-            "Профили строятся по реконструированной survey-линии из фактического XYZ/MD. "
-            "Зоны `Vertical / BUILD1 / HOLD / BUILD2 / Horizontal` и точки `KOP / старт ГС` "
-            "используют ту же сегментацию, что и aggregate-анализ."
+            "Профиль восстановлен по инклинометрии (XYZ/MD). "
+            "Участки: вертикаль, набор, стабилизация, горизонталь. Отмечены KOP и начало ГС."
         )
         _render_actual_fund_well_detail(analyses)
 
@@ -5733,7 +5723,7 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
         point_count > WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT and not highlight_names
     )
     with st.expander(
-        "Текущие точки скважин (используются в расчете, включая обновленные устья S)",
+        "Текущие точки скважин",
         expanded=bool(highlight_names),
     ):
         if needs_explicit_open:
@@ -5834,12 +5824,11 @@ def _render_t1_t3_order_panel(
                     "Для отмеченных скважин текущий порядок оставлен без изменений."
                 )
             else:
-                st.success("Проверка порядка t1/t3 — OK.")
+                st.success("Проверка порядка t1/t3 — без замечаний.")
             return
 
         st.warning(
-            "Найдены скважины, где отход от опорной точки до t1 больше, чем до t3. "
-            "Вероятно, порядок точек t1/t3 перепутан."
+            "От устья до t1 дальше, чем до t3 — возможно, t1 и t3 перепутаны местами."
         )
         header_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 3.0], gap="small")
         header_cols[0].markdown(
@@ -6361,29 +6350,24 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "Если нужно вернуться к исходным устьям, нажмите "
                 "'Вернуть исходные устья'."
             )
-        st.caption(
-            f"Из исходных данных WELLTRACK / точек целей было определено кустов: {len(pads)}. "
-            "Их параметры показаны в таблице ниже."
-        )
         st.toggle(
             "Авто-порядок по глубине целевого пласта",
             key="wt_pad_auto_order_by_target_depth",
             help=(
-                "Включено: для всех кустов авто-порядок скважин задаётся от более "
-                "глубоких целей к менее глубоким. Выключено: используется "
-                "естественная сортировка имён скважин A->Z, 1->99. Для кустов "
-                "с уже заданными устьями этот режим применяется только после "
-                "разрешения редактирования и включения локального тумблера "
-                "'Применить авто-порядок'. Фиксированные позиции ниже всегда "
+                "Включено: скважины на кусте упорядочиваются от более глубоких целей "
+                "к менее глубоким. Для кустов с уже заданными устьями этот режим "
+                "начинает переставлять скважины только после включения "
+                "редактирования позиций куста и локального тумблера "
+                "'Применить авто-порядок'. Фиксированные позиции в таблице ниже "
                 "имеют приоритет."
             ),
         )
         st.caption(
-            "Базовый авто-порядок внутри каждого куста: "
+            "Авто-порядок: "
             f"{ptc_pad_state.pad_auto_order_mode_label(st.session_state)}. "
-            "Для кустов с заранее заданными устьями он не переставляет "
-            "скважины, пока не включено редактирование позиций и локальное "
-            "применение авто-порядка."
+            "Для кустов с заданными устьями исходная привязка скважин сохраняется, "
+            "пока вы явно не включите редактирование и локальное применение "
+            "авто-порядка."
         )
         pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
         pad_rows = []
@@ -6491,11 +6475,10 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         apply_auto_order = False
         if source_surfaces_defined:
             st.info(
-                "Положения устьев были заданы в исходных данных. Для этого куста "
-                "координаты устьев ниже показаны справочно и по умолчанию не "
-                "редактируются. Исходная привязка скважин к позициям куста "
-                "сохраняется, пока вы явно не разрешите редактирование и не "
-                "включите применение авто-порядка."
+                "Устья заданы в исходных данных. Чтобы менять координаты — "
+                "включите редактирование позиций куста. Исходная привязка "
+                "скважин к позициям сохраняется, пока вы явно не включите "
+                "редактирование и 'Применить авто-порядок'."
             )
             allow_source_surface_edit = st.toggle(
                 "Разрешить редактирование позиций куста",
@@ -6791,18 +6774,13 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "Порядок": int(slot_index),
                 "Скважина": str(assignment.well_name),
                 "Фиксация": fixation_label,
-                "Середина t1-t3 X, м": float(well.midpoint_x),
-                "Середина t1-t3 Y, м": float(well.midpoint_y),
-                "Опора S": _pad_anchor_mode_label(anchor_mode),
             }
             if surface_controls_disabled:
                 row["Текущее S X, м"] = float(assignment.surface_x_m)
                 row["Текущее S Y, м"] = float(assignment.surface_y_m)
-                row["Текущее S Z, м"] = float(assignment.surface_z_m)
             else:
                 row["Новое S X, м"] = float(assignment.surface_x_m)
                 row["Новое S Y, м"] = float(assignment.surface_y_m)
-                row["Новое S Z, м"] = float(assignment.surface_z_m)
             preview_rows.append(row)
         with st.expander(
             "Порядок бурения и координаты устьев на кусте",
@@ -6951,7 +6929,7 @@ def _preprocess_excluded_records_message(
         return ""
     preview = ", ".join(excluded_items[:6])
     suffix = "..." if len(excluded_items) > 6 else ""
-    return f"Препроцессинг не применялся к: {preview}{suffix}."
+    return f"Изменение длины ГС не применялось к: {preview}{suffix}."
 
 
 def _render_batch_selection_status(
@@ -6965,7 +6943,7 @@ def _render_batch_selection_status(
     if status.has_summary_rows:
         st.caption(
             "Результаты по невыбранным скважинам сохраняются. Для следующего запуска "
-            "по умолчанию выделяются нерассчитанные, ошибочные и warning-кейсы."
+            "по умолчанию выделяются нерассчитанные, ошибочные и скважины с предупреждениями."
         )
         return
 

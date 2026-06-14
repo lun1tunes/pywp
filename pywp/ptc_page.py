@@ -94,7 +94,7 @@ def run_page() -> None:
     apply_page_style(max_width_px=1700)
     render_hero(
         title="PTC",
-        subtitle="Prototype trajectory constructor",
+        subtitle="Конструктор траекторий скважин",
         centered=True,
         max_content_width_px=760,
     )

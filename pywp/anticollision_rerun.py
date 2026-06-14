@@ -803,7 +803,7 @@ def build_dynamic_cluster_execution_plan(
                 if cluster.blocking_advisory is not None
                 else (
                     "Для текущего anti-collision кластера не осталось автоматических "
-                    "шагов пересчета."
+                    "шагов пересчёта."
                 )
             ),
         )
@@ -862,14 +862,14 @@ def build_dynamic_cluster_execution_plan(
             blocking_reason = (
                 "Следующий рекомендуемый шаг снова относится к уже пересчитанной "
                 f"скважине {str(next_step.well_name)} "
-                f"({str(next_step.expected_maneuver)}). Текущий cluster-level прогон "
+                f"({str(next_step.expected_maneuver)}). Текущий прогон по кластеру "
                 "остановлен, чтобы не перетирать остальные скважины базовыми "
                 "настройками."
             )
         else:
             blocking_reason = (
-                "Для оставшихся скважин не осталось актуальных automatic "
-                "cluster-level шагов пересчета."
+                "Для оставшихся скважин не осталось актуальных шагов "
+                "пересчёта по кластеру."
             )
         return DynamicClusterExecutionPlan(
             cluster=cluster,

@@ -141,26 +141,29 @@ def render_anticollision_params_block(
         c1, c2 = st.columns([1.0, 1.0], gap="small", vertical_alignment="bottom")
         with c1:
             st.multiselect(
-                "MWD POOR Magnetic",
+                "Стандартная точность MWD",
                 options=list(actual_names),
                 default=list(poor_names),
                 disabled=True,
                 help=(
-                    "Дефолтная ISCWSA модель для фактического фонда. "
-                    "Скважины автоматически исключаются отсюда при выборе MWD Unknown."
+                    "Модель ISCWSA POOR для фактического фонда. "
+                    "Скважины с консервативной моделью исключаются из этого списка."
                 ),
             )
         with c2:
             st.multiselect(
-                "MWD Unknown Magnetic",
+                "Консервативная точность MWD",
                 options=list(actual_names),
                 key=ACTUAL_REFERENCE_MWD_UNKNOWN_WIDGET_KEY,
                 help=(
-                    "Более консервативная ISCWSA модель. Выбранные скважины "
-                    "считаются Unknown и исключаются из списка MWD POOR."
+                    "Модель ISCWSA Unknown — выше погрешность азимута. "
+                    "Выбранные скважины считаются Unknown."
                 ),
             )
-    st.caption(f"Факт фонд: POOR — {len(poor_names)}, Unknown — {len(unknown_names)}.")
+    st.caption(
+        f"Фактический фонд: стандарт — {len(poor_names)}, "
+        f"консервативно — {len(unknown_names)}."
+    )
 
 
 def _sanitize_unknown_names(

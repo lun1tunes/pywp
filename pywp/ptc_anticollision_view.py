@@ -143,14 +143,13 @@ def md_interval_label(md_start_m: float, md_end_m: float) -> str:
 
 def sf_help_markdown() -> str:
     return (
-        "**Что такое SF**\n\n"
-        "SF (`Separation Factor`) показывает запас расстояния между двумя "
-        "скважинами с учетом суммарной неопределенности их конусов.\n\n"
-        "- `SF < 1` — конусы неопределенности overlap, это collision-risk.\n"
-        "- `SF ≈ 1` — граничное состояние, запас почти исчерпан.\n"
-        "- `SF > 1` — есть запас по разнесению; чем больше число, тем комфортнее ситуация.\n\n"
-        "В текущем WELLTRACK это planning-level индикатор для сравнения вариантов, "
-        "а не абсолютная гарантия безопасности."
+        "**SF (Separation Factor)**\n\n"
+        "Запас расстояния между стволами с учётом погрешности их положения "
+        "(модель ISCWSA).\n\n"
+        "- `SF < 1` — зоны неопределённости пересекаются, риск сближения стволов.\n"
+        "- `SF ≈ 1` — на грани допустимого.\n"
+        "- `SF > 1` — есть запас; чем больше, тем комфортнее ситуация.\n\n"
+        "Ориентир при планировании, не замена инженерной оценке риска."
     )
 
 
@@ -223,7 +222,7 @@ def report_rows_from_recommendations(
                     float(item.md_b_end_m),
                 ),
                 "SF min": float(item.min_separation_factor),
-                "Overlap max, м": float(item.max_overlap_depth_m),
+                "Макс. пересечение, м": float(item.max_overlap_depth_m),
                 "Мин. расстояние, м": float(item.min_center_distance_m),
                 "Рекомендация по устранению": str(item.summary),
             }

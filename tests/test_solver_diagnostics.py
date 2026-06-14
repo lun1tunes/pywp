@@ -19,7 +19,8 @@ def test_parse_solver_error_converts_reasons_and_actions_to_russian_table() -> N
     parsed = parse_solver_error(error_text)
     rows = diagnostics_rows_ru(error_text)
 
-    assert "Не найдено допустимое решение профиля" in parsed.title_ru
+    assert "Не удалось построить стандартный профиль" in parsed.title_ru
+    assert "удержание" in parsed.title_ru
     assert len(rows) == 2
     assert "BUILD по ПИ" in rows[0]["Причина"]
     assert "0.67 deg/10m" in rows[0]["Причина"]
@@ -34,7 +35,8 @@ def test_summarize_problem_ru_returns_human_readable_reason() -> None:
         "Required straight INC is 92.00 deg, max INC is 90.00 deg."
     )
     summary = summarize_problem_ru(error_text)
-    assert "геометрия t1->t3" in summary.lower()
+    assert "геометрия t1" in summary.lower()
+    assert "t3" in summary
 
 
 def test_summarize_problem_ru_returns_empty_string_for_blank_message() -> None:
@@ -157,12 +159,26 @@ def test_parse_solver_error_build_dls_absurd_pi_with_space_shows_geometry_issue(
     assert rows
     # Unphysical PI > 15 shows ">15 deg/10m" with geometry context
     assert ">15" in rows[0]["Причина"]
-    assert "нефизично высокий ПИ" in rows[0]["Причина"]
-    assert "1340.2" in rows[0]["Причина"]
-    assert "достаточно" in rows[0]["Причина"]  # "это достаточно"
-    assert "проблема в других ограничениях" in rows[0]["Причина"]
-    # Recommends checking horizontal offset, not KOP
-    assert "горизонтальный отход" in rows[0]["Что изменить"]
+    assert "недостижима" in rows[0]["Причина"]
+    assert "отход до t1" in rows[0]["Причина"]
+    assert "отход до t1" in rows[0]["Что изменить"]
+
+
+def test_parse_solver_error_build_dls_absurd_but_numeric_pi_with_space_shows_value() -> None:
+    """When PI is absurdly high but still numeric, diagnostics should not crash."""
+    error_text = (
+        "No valid trajectory solution found within configured limits.\n"
+        "Reasons and actions:\n"
+        "- BUILD DLS upper bound is insufficient for t1 reach: "
+        "available max 3.00 deg/30m, required about 18.00 deg/30m, "
+        "build_vertical_available=150.0 m, kop_min_vertical=550.0 m, "
+        "t1_tvd=700.0 m.\n"
+    )
+    rows = diagnostics_rows_ru(error_text)
+    assert rows
+    assert "6.00" in rows[0]["Причина"]
+    assert "недостижима" in rows[0]["Причина"]
+    assert "отход до t1" in rows[0]["Что изменить"]
 
 
 def test_parse_solver_error_build_dls_moderate_pi_shows_value() -> None:

@@ -74,11 +74,14 @@ def _translate_title_ru(text: str) -> str:
     if not source:
         return "Ошибка расчета траектории."
     if "No valid VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL solution" in source:
-        return "Не найдено допустимое решение профиля VERTICAL->BUILD1->HOLD->BUILD2->HORIZONTAL."
+        return (
+            "Не удалось построить стандартный профиль "
+            "(вертикаль → набор → удержание → набор → горизонталь)."
+        )
     if "No valid trajectory solution found within configured limits" in source:
         return "Не найдено допустимое решение траектории."
     if "With current global max INC the t1->t3 geometry is infeasible without overbend" in source:
-        return "Геометрия t1->t3 небурима при текущем max INC без overbend."
+        return "Геометрия t1→t3 не проходит при текущем лимите INC."
     if "Entry INC target exceeds configured max INC" in source:
         return "Целевой INC входа выше допустимого max INC."
     if "Failed to hit t1 within tolerance" in source:
@@ -101,11 +104,12 @@ def _item_from_text(line: str) -> DiagnosticItem:
         inc_req, inc_max = match.group(1), match.group(2)
         return DiagnosticItem(
             reason_ru=(
-                f"Геометрия t1->t3 небурима без overbend: нужен INC {inc_req} deg, "
-                f"допустимый max INC {inc_max} deg."
+                f"Геометрия t1→t3 не проходит: нужен INC {inc_req}°, "
+                f"допустимый max INC {inc_max}°."
             ),
             action_ru=(
-                "Увеличьте max INC, либо сделайте t3 глубже и/или ближе к t1 по горизонтальной проекции."
+                "Увеличьте max INC или скорректируйте t1/t3: "
+                "сделайте t3 глубже и/или ближе к t1 по плану."
             ),
         )
 
@@ -119,7 +123,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
             reason_ru=(
                 f"Целевой INC входа {inc_target} deg выше max INC {inc_max} deg."
             ),
-            action_ru="Уменьшите entry INC target или увеличьте max INC.",
+            action_ru="Уменьшите целевой INC входа или увеличьте max INC.",
         )
 
     match = re.search(
@@ -192,22 +196,17 @@ def _item_from_text(line: str) -> DiagnosticItem:
             # Plenty of vertical but PI still absurd → geometry issue (horizontal offset, etc)
             if is_unphysical_pi:
                 reason = (
-                    f"Геометрия t1 недостижима с текущими ограничениями: "
-                    f"требуется нефизично высокий ПИ (>15 deg/10m) при доступном max {pi_max} deg/10m. "
-                    f"(BUILD vertical доступно: {build_vert} м — это достаточно, "
-                    f"проблема в других ограничениях: горизонтальный отход или угол входа)."
+                    f"Геометрия t1 недостижима: требуется ПИ >15°/10 м "
+                    f"при max {pi_max}°/10 м. Проверьте отход до t1 и INC входа."
                 )
             else:
                 pi_req = _pi_text_from_dls_text(dls_req)
                 reason = (
-                    f"Геометрия t1 недостижима с текущими ограничениями: "
-                    f"требуется ~{pi_req} deg/10m при доступном max {pi_max} deg/10m. "
-                    f"(BUILD vertical доступно: {build_vert} м — это достаточно, "
-                    f"проблема в других ограничениях: горизонтальный отход или угол входа)."
+                    f"Геометрия t1 недостижима: требуется ~{pi_req}°/10 м "
+                    f"при max {pi_max}°/10 м. Проверьте отход до t1 и INC входа."
                 )
             action = (
-                "Уменьшите горизонтальный отход до t1, проверьте угол входа (entry INC), "
-                "или увеличьте max ПИ BUILD."
+                "Уменьшите отход до t1, проверьте INC входа или увеличьте max ПИ BUILD."
             )
         else:
             pi_req = _pi_text_from_dls_text(dls_req)
@@ -326,8 +325,7 @@ def _item_from_text(line: str) -> DiagnosticItem:
                 f"на {_pi_text_from_dls_text(closest)} deg/10m."
             ),
             action_ru=(
-                "Это диагностическая строка поиска. Смотрите следующую причину: "
-                "обычно она показывает реальный ограничитель геометрии, координат или допусков."
+                "Это служебная строка поиска солвера — смотрите следующую причину ниже."
             ),
         )
 

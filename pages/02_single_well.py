@@ -991,9 +991,6 @@ def _render_template_controls() -> None:
 def _render_point_config_block() -> None:
     with st.container(border=True):
         st.markdown("### Конфигурация точек (S, t1, t3)")
-        st.caption(
-            "Это геометрия задачи (координаты точек). Параметры расчета и солвера задаются отдельным блоком ниже."
-        )
         st.markdown("**Импорт точек из текста (s1, t1, t3)**")
         st.text_area(
             "Формат: 3 строки __`x y z`__ для S, t1, t3",

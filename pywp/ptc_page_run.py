@@ -126,9 +126,7 @@ def render_run_section(*, records: list[object]) -> None:
             index=0,
             key="wt_parallel_workers_label_01_constructor",
             help=(
-                "Количество параллельных процессов для batch-расчёта. "
-                "Ускоряет расчёт при большом числе скважин за счёт "
-                "использования нескольких ядер CPU."
+                "Число параллельных процессов. Ускоряет расчёт большого набора скважин."
             ),
         )
         _parallel_workers = _parallel_values.get(str(_parallel_label), 0)

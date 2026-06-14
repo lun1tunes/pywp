@@ -745,8 +745,8 @@ def _actual_reference_wells_by_key(
 def _missing_zbs_parent_problem(record: WelltrackRecord) -> str:
     parent_name = parent_name_for_zbs(record.name)
     return (
-        f'Боковой ствол "{record.name}" не был рассчитан - отсутствует '
-        f'фактическая траектория основной скважины "{parent_name}".'
+        f'ЗБС "{record.name}": не найдена фактическая траектория '
+        f'основной скважины "{parent_name}" в загруженном фактическом фонде.'
     )
 
 
@@ -970,8 +970,8 @@ class WelltrackBatchPlanner:
                 row = self._base_row(record=record)
                 row["Статус"] = "Ошибка расчета"
                 row["Проблема"] = (
-                    f"Пилот {missing_pilot.name} не рассчитан; "
-                    "боковой продуктивный ствол не может быть построен от окна зарезки."
+                    f"Сначала рассчитайте пилот {missing_pilot.name}: "
+                    "без него нельзя построить боковой продуктивный ствол."
                 )
                 success = None
             else:
@@ -1908,7 +1908,7 @@ class WelltrackBatchPlanner:
             return (
                 (),
                 (
-                    "Cluster-level anti-collision пересчет достиг лимита проходов "
+                    "Пересчёт по кластеру достиг лимита проходов "
                     f"({_MAX_DYNAMIC_CLUSTER_PASSES}). Нужен новый запуск или ручная корректировка."
                 ),
                 False,
@@ -1953,8 +1953,8 @@ class WelltrackBatchPlanner:
             return (
                 (),
                 (
-                    "Следующий cluster-level проход не дал заметного улучшения SF/overlap. "
-                    "Автоматический пересчет остановлен."
+                    "Следующий проход по кластеру не улучшил SF и не уменьшил пересечение. "
+                    "Автоматический пересчёт остановлен."
                 ),
                 False,
                 current_cluster_score,
@@ -1983,7 +1983,7 @@ class WelltrackBatchPlanner:
         if not pending_names:
             return (
                 (),
-                "Для следующего cluster-level прохода не осталось скважин в текущем наборе выбора.",
+                "Для следующего прохода по кластеру не осталось скважин в выборе.",
                 False,
                 current_cluster_score,
                 prefer_trajectory_stage,

@@ -36,7 +36,7 @@ MANEUVER_BUILD2_ENTRY = "Скорректировать BUILD2 перед t1"
 MANEUVER_ENTRY_WINDOW_TURN = "Сдвиг входа и turn в окне t1"
 MANEUVER_POSTENTRY_TURN = "Сместить post-entry / HORIZONTAL"
 MANEUVER_KOP_AND_TRAJECTORY = "Сначала уменьшить KOP, затем локально отвести ствол"
-MANEUVER_CLUSTER_MIXED = "Комбинированный cluster-level маневр"
+MANEUVER_CLUSTER_MIXED = "Комбинированный маневр по кластеру"
 
 _PRE_KOP_SEGMENTS = {"VERTICAL", "BUILD1"}
 _DSS_MANAGEABLE_SEGMENTS = {"VERTICAL", "BUILD1", "HOLD"}
@@ -165,13 +165,13 @@ def anti_collision_recommendation_rows(
                 "Интервал A, м": _md_interval_label(item.md_a_start_m, item.md_a_end_m),
                 "Интервал B, м": _md_interval_label(item.md_b_start_m, item.md_b_end_m),
                 "SF min": float(item.min_separation_factor),
-                "Overlap max, м": float(item.max_overlap_depth_m),
+                "Макс. пересечение, м": float(item.max_overlap_depth_m),
                 "Мин. расстояние, м": float(item.min_center_distance_m),
                 "Spacing t1, м": _nullable_float(item.required_spacing_t1_m),
                 "Spacing t3, м": _nullable_float(item.required_spacing_t3_m),
                 "Ожидаемый маневр": item.expected_maneuver,
                 "Рекомендация по устранению": item.summary,
-                "Подготовка пересчета": item.action_label,
+                "Подготовка пересчёта": item.action_label,
             }
         )
     return rows
@@ -241,7 +241,7 @@ def build_anti_collision_recommendation_clusters(
         worst_sf = min(float(item.min_separation_factor) for item in member_recommendations)
         action_steps = _cluster_action_steps(member_recommendations)
         blocking_advisory = (
-            "Сначала решить spacing целей."
+            "Сначала разнести цели."
             if has_unresolved_target_conflicts
             else None
         )
@@ -263,10 +263,10 @@ def build_anti_collision_recommendation_clusters(
         )
         if affected_wells:
             detail = (
-                "К пересчету в текущем плане: " + ", ".join(affected_wells) + "."
+                "К пересчёту в текущем плане: " + ", ".join(affected_wells) + "."
             )
         else:
-            detail = "Для этого кластера пока доступны только advisory-рекомендации."
+            detail = "Для этого кластера пока доступны только справочные рекомендации."
         if blocking_advisory is not None:
             detail += " " + blocking_advisory
         if first_rerun_well is not None and first_rerun_maneuver is not None:
@@ -295,9 +295,9 @@ def build_anti_collision_recommendation_clusters(
                 can_prepare_rerun=can_prepare,
                 affected_wells=affected_wells,
                 action_label=(
-                    "Подготовить cluster-level пересчет"
+                    "Подготовить пересчёт по кластеру"
                     if can_prepare
-                    else "Только advisory"
+                    else "Только справочно"
                 ),
             )
         )
@@ -335,8 +335,8 @@ def anti_collision_cluster_rows(
                     else (item.blocking_advisory or "—")
                 ),
                 "Порядок": item.rerun_order_label,
-                "К пересчету": ", ".join(item.affected_wells) if item.affected_wells else "—",
-                "Подготовка пересчета": item.action_label,
+                "К пересчёту": ", ".join(item.affected_wells) if item.affected_wells else "—",
+                "Подготовка пересчёта": item.action_label,
             }
         )
     return rows
@@ -435,8 +435,8 @@ def _build_single_recommendation(
             can_adjust_early = _well_can_prepare_early_kop_build1(context)
             if current_kop is None or kop_floor is None:
                 detail_parts.append(
-                    f"{well_name}: нет полного KOP-контекста, но ранний cone-aware "
-                    "пересчет всё равно подготовлен."
+                    f"{well_name}: нет полного KOP-контекста, но ранний "
+                    "anti-collision пересчёт всё равно подготовлен."
                 )
             else:
                 if not can_adjust_early:
@@ -475,7 +475,7 @@ def _build_single_recommendation(
                         "optimization_mode": OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
                     },
                     reason=(
-                        "Early collision: cone-aware rerun по KOP/BUILD1 "
+                        "Раннее пересечение: anti-collision пересчёт по KOP/BUILD1 "
                         f"для {well_name}."
                     ),
                 )
@@ -487,7 +487,7 @@ def _build_single_recommendation(
                 f"корректировкой. {_spacing_recommendation_sentence(event)}"
             )
             detail = " ".join(detail_parts)
-            action_label = "Подготовить anti-collision пересчет (KOP/BUILD1)"
+            action_label = "Подготовить anti-collision пересчёт (KOP/BUILD1)"
             can_prepare = True
             affected_wells = tuple(suggestion.well_name for suggestion in suggestions)
         else:
@@ -498,7 +498,7 @@ def _build_single_recommendation(
             )
             detail = (
                 "Нужно переходить к следующему маневру по траектории или "
-                "проверять spacing устьев/целей."
+                "проверять spacing устьев и целей."
             )
             action_label = "Только рекомендация"
             can_prepare = False
@@ -567,13 +567,12 @@ def _build_single_recommendation(
                 exhausted=True,
             ),
             detail=(
-                "Обе проектные скважины пары уже пересчитаны в anti-collision mode, "
-                "но overlap сохраняется. Это признак того, что в текущих пределах "
-                "t1/t3, min KOP и DLS remaining late conflict требует ручной "
-                "корректировки targets/spacing или ослабления ограничений. "
-                f"Практически следующий ручной ход: разводить {preferred_moving_well} "
-                f"от {fixed_well} в lateral-плоскости на участке "
-                f"'{expected_maneuver}' минимум на {float(event.max_overlap_depth_m):.1f} м."
+                "Обе скважины пары уже пересчитаны в режиме anti-collision, "
+                "но пересечение сохраняется. Нужна ручная корректировка t1/t3, "
+                "KOP или отхода. "
+                f"Следующий шаг: развести {preferred_moving_well} "
+                f"от {fixed_well} на участке «{expected_maneuver}» "
+                f"минимум на {float(event.max_overlap_depth_m):.1f} м."
             ),
             expected_maneuver=str(expected_maneuver),
             action_label="Только рекомендация",
@@ -603,7 +602,7 @@ def _build_single_recommendation(
                     "optimization_mode": OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
                 },
                 reason=(
-                    f"Trajectory collision: подготовить anti-collision avoidance rerun "
+                    f"Пересечение траекторий: подготовить anti-collision пересчёт "
                     f"для {movable_well} на конфликтном интервале."
                 ),
             ),
@@ -613,7 +612,7 @@ def _build_single_recommendation(
                     "optimization_mode": OPTIMIZATION_ANTI_COLLISION_AVOIDANCE,
                 },
                 reason=(
-                    f"Trajectory collision: подготовить anti-collision avoidance rerun "
+                    f"Пересечение траекторий: подготовить anti-collision пересчёт "
                     f"для {secondary_well} как второй стороны пары."
                 ),
             ),
@@ -630,9 +629,9 @@ def _build_single_recommendation(
                 pair_label=f"{movable_well} ↔ {secondary_well}",
             ),
             detail=(
-                "Для trajectory-collision пересчет готовится сразу для обеих "
-                "проектных скважин пары, а optimization context учитывает "
-                "все актуальные reference-cones остальных скважин."
+                "Для пересечения траекторий пересчёт готовится сразу для обеих "
+                "проектных скважин пары с учётом актуальных конусов "
+                "остальных скважин."
             ),
             expected_maneuver=_expected_trajectory_maneuver(
                 event=event,
@@ -640,7 +639,7 @@ def _build_single_recommendation(
                 well_context_by_name=well_context_by_name,
                 analysis=analysis,
             ),
-            action_label="Подготовить anti-collision пересчет",
+            action_label="Подготовить anti-collision пересчёт",
             can_prepare_rerun=True,
             affected_wells=(str(movable_well), str(secondary_well)),
             override_suggestions=override_suggestions,
@@ -670,7 +669,7 @@ def _build_single_recommendation(
             )
         ),
         detail=(
-            "Автоматическая подготовка пересчета для этого случая пока не включена."
+            "Автоматическая подготовка пересчёта для этого случая пока не включена."
         ),
         expected_maneuver=MANEUVER_CLUSTER_MIXED,
         action_label="Ожидает anti-collision optimization",
@@ -932,7 +931,7 @@ def _trajectory_recommendation_summary(
     if can_prepare:
         return (
             f"Конфликт на {_trajectory_area_phrase(analysis, event)}: "
-            f"подготовить anti-collision пересчет пары {pair_label} "
+            f"подготовить anti-collision пересчёт для пары {pair_label} "
             "с учетом остальных конусов куста."
         )
     return (
@@ -1052,7 +1051,7 @@ def _cluster_expected_maneuver(
     if target_count > 0 and vertical_count == 0 and trajectory_count == 0:
         return MANEUVER_TARGET_SPACING
     if target_count > 0 and (vertical_count > 0 or trajectory_count > 0):
-        return "Сначала spacing целей, затем локальный пересчет"
+        return "Сначала разнести цели, затем локальный пересчёт"
     if vertical_count > 0 and trajectory_count == 0:
         return MANEUVER_EARLIER_KOP
     if trajectory_count > 0 and vertical_count == 0:

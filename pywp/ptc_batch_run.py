@@ -429,7 +429,7 @@ def run_batch_if_clicked(
     )
     if missing_anticollision_context and dynamic_cluster_context is None:
         state["wt_last_error"] = (
-            "Не удалось запустить anti-collision пересчет: отсутствует контекст "
+            "Не удалось запустить anti-collision пересчёт: отсутствует контекст "
             "конфликтного окна для скважин "
             + ", ".join(missing_anticollision_context)
             + ". Подготовьте рекомендацию повторно."
@@ -467,9 +467,9 @@ def run_batch_if_clicked(
             )
             if prepared_scope_rows:
                 append_log(
-                    "Активен prepared anti-collision plan ("
+                    "Активен подготовленный anti-collision план ("
                     + hooks.prepared_plan_kind_label(prepared_snapshot)
-                    + "). Локальные overrides будут применены к "
+                    + "). Локальные параметры будут применены к "
                     + ", ".join(
                         f"{row['Скважина']} ({row['Локальный режим']})"
                         for row in prepared_scope_rows
@@ -478,8 +478,8 @@ def run_batch_if_clicked(
                 )
             if optimization_context_by_name:
                 append_log(
-                    "Для части выбранных скважин активирован anti-collision avoidance "
-                    "mode на конфликтном окне."
+                    "Для части выбранных скважин активирован режим anti-collision "
+                    "на конфликтном интервале."
                 )
             selected_name_keys = {well_name_key(item) for item in selected_set}
             active_sidetrack_overrides = {
@@ -522,19 +522,18 @@ def run_batch_if_clicked(
                 )
             if dynamic_cluster_context is not None:
                 append_log(
-                    "Включена iterative cluster-aware execution policy: "
-                    "порядок шагов и anti-collision overrides будут пересчитываться "
-                    "после каждого успешного шага по текущей topology кластера."
+                    "Включён пошаговый пересчёт по кластеру: "
+                    "порядок и локальные параметры будут обновляться "
+                    "после каждого успешного шага."
                 )
             elif (
                 len(selected_execution_order) > 1
                 and selected_execution_order != selected_names
             ):
                 append_log(
-                    "Cluster-aware execution order: "
+                    "Порядок пересчёта: "
                     + " -> ".join(selected_execution_order)
-                    + ". Следующие скважины используют обновленные reference paths "
-                    "уже пересчитанных шагов."
+                    + ". Последующие скважины учитывают новые траектории предыдущих."
                 )
             parallel_requested = int(request.parallel_workers) > 1
             selected_has_pilot_dependencies = _has_selected_pilot_dependencies(
@@ -555,14 +554,14 @@ def run_batch_if_clicked(
                 and selected_has_pilot_dependencies
             ):
                 append_log(
-                    "Параллельный расчёт частично: независимые скважины и пилоты "
-                    f"считаются в {int(request.parallel_workers)} процессов; "
-                    "боковые стволы от пилота досчитываются после готовности пилота."
+                    "Параллельный расчёт: независимые скважины и пилоты "
+                    f"считаются в {int(request.parallel_workers)} процессов, "
+                    "боковые стволы — после готовности пилота."
                 )
             elif parallel_requested and dynamic_cluster_context is not None:
                 append_log(
-                    "Параллельный расчёт отключён: активен iterative cluster-aware "
-                    "режим (скважины зависят друг от друга)."
+                    "Параллельный расчёт отключён: активен пошаговый пересчёт "
+                    "по кластеру (скважины зависят друг от друга)."
                 )
             if pad_layout_active:
                 append_log(
@@ -678,21 +677,20 @@ def run_batch_if_clicked(
                         blocking_reason = (
                             str(batch_metadata.cluster_blocking_reason).strip()
                             if batch_metadata.cluster_blocking_reason
-                            else "cluster-level пересчет перешел в advisory-only режим."
+                            else "Пересчёт по кластеру перешёл в справочный режим."
                         )
                         append_log(
-                            "Iterative cluster-aware execution остановлен: "
+                            "Пошаговый пересчёт остановлен: "
                             + blocking_reason
-                            + " Без дополнительного пересчета оставлены: "
+                            + " Без пересчёта остались: "
                             + ", ".join(skipped_names)
                             + "."
                         )
                     elif bool(batch_metadata.cluster_resolved_early):
                         append_log(
-                            "Iterative cluster-aware execution завершился досрочно: "
-                            "после очередного шага дополнительные пересчеты для "
-                            "оставшихся скважин не потребовались. Без повторного "
-                            "пересчета оставлены: " + ", ".join(skipped_names) + "."
+                            "Пошаговый пересчёт завершён досрочно: "
+                            "конфликт исчерпан. Без повторного пересчёта: "
+                            + ", ".join(skipped_names) + "."
                         )
 
             elapsed_s = perf_counter() - started
@@ -749,7 +747,7 @@ def run_batch_if_clicked(
                 f"Batch-расчет завершен. Успешно: {len(successes)}, "
                 f"ошибок: {len(summary_rows) - len(successes)}"
                 + (
-                    f", без дополнительного пересчета оставлено: {skipped_policy_count}"
+                    f", без дополнительного пересчёта оставлено: {skipped_policy_count}"
                     if skipped_policy_count > 0
                     else ""
                 )
@@ -761,7 +759,7 @@ def run_batch_if_clicked(
                     f"Расчет завершен за {elapsed_s:.2f} с. "
                     f"Успешно: {len(successes)}"
                     + (
-                        f", без дополнительного пересчета оставлено: {skipped_policy_count}"
+                        f", без дополнительного пересчёта оставлено: {skipped_policy_count}"
                         if skipped_policy_count > 0
                         else ""
                     )

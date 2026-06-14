@@ -134,7 +134,7 @@ def test_anticollision_panel_requires_explicit_run_before_first_analysis(
     )
 
     assert calls["buttons"] == ["Расчёт пересечений"]
-    assert "Запустите anti-collision отдельным шагом" in str(calls["info"])
+    assert "Запустите расчёт пересечений" in str(calls["info"])
 
 
 def test_anticollision_panel_skips_duplicate_snapshot_check_when_already_checked(
@@ -206,7 +206,7 @@ def test_anticollision_panel_skips_duplicate_snapshot_check_when_already_checked
     )
 
     assert calls["buttons"] == ["Расчёт пересечений"]
-    assert "Запустите anti-collision отдельным шагом" in str(calls["info"])
+    assert "Запустите расчёт пересечений" in str(calls["info"])
 
 
 def test_anticollision_panel_blocks_run_when_calc_params_are_stale(
@@ -260,8 +260,9 @@ def test_anticollision_panel_blocks_run_when_calc_params_are_stale(
         calc_params_stale=True,
     )
 
-    assert any("временно недоступен" in item for item in calls["warnings"])
-    assert any("Сначала пересчитайте траектории" in item for item in calls["captions"])
+    assert any("недоступен:" in item for item in calls["warnings"])
+    assert len(calls["warnings"]) == 1
+    assert "Пересчитайте траектории" in str(calls["warnings"][0])
     assert str(calls["log_kwargs"]["title"]) == "Лог расчёта Anti-collision"
 
 
@@ -381,7 +382,7 @@ def test_anticollision_parallel_workers_widget_uses_separate_state_and_clamps_le
 
     selected_workers = ptc_page_results._render_anticollision_parallel_workers_selectbox()
 
-    assert calls["label"] == "Multiprocessing для anti-collision"
+    assert calls["label"] == "Параллельный расчёт anti-collision"
     assert calls["options"] == [
         "Без Multiprocessing",
         "2 процессов",
@@ -477,8 +478,8 @@ def test_anticollision_panel_renders_settings_under_section_header(
     )
 
     assert calls[:4] == [
-        ("markdown", "### Anti-collision и пересечения"),
-        ("selectbox", "Multiprocessing для anti-collision"),
+        ("markdown", "### Anti-collision"),
+        ("selectbox", "Параллельный расчёт anti-collision"),
         ("params", "rendered"),
         ("button", "Расчёт пересечений"),
     ]
@@ -654,12 +655,9 @@ def test_anticollision_panel_pauses_on_pending_target_edits(
 
     assert messages[0] == (
         "info",
-        "Anti-collision анализ приостановлен: есть изменённые в 3D точки "
-        "t1/t3, которые ещё не пересчитаны.",
+        "Anti-collision приостановлен: точки t1/t3 изменены в 3D. "
+        "Пересчитайте: WELL-A.",
     )
-    assert messages[1][0] == "caption"
-    assert "WELL-A" in messages[1][1]
-    assert "Предыдущий anti-collision расчёт сохранён" in messages[1][1]
 
 
 def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
@@ -766,7 +764,7 @@ def test_anticollision_panel_shows_cached_snapshot_when_targets_are_pending(
     )
 
     assert "приостановлен" in str(calls["info"])
-    assert any("последний anti-collision снимок" in item for item in calls["captions"])
+    assert any("результат anti-collision до пересчёта" in item for item in calls["captions"])
     rendered_analysis = calls["payload_analysis"]
     assert [str(well.name) for well in rendered_analysis.wells] == ["WELL-B"]
     assert calls["payload_kwargs"]["target_only_wells"] == [target_only]
@@ -1570,7 +1568,7 @@ def test_render_success_tabs_keeps_trajectory_overview_when_calc_params_changed(
     assert calls["visual"] == 0
     assert calls["panel"] == 1
     assert calls["panel_kwargs"][0]["calc_params_stale"] is True
-    assert any("Ниже показаны траектории и 3D-обзор" in item for item in calls["warnings"])
+    assert any("Ниже — траектории из предыдущего расчёта" in item for item in calls["warnings"])
 
 
 def test_render_success_tabs_keeps_report_panel_when_ac_visual_fails(
@@ -1948,7 +1946,7 @@ def test_render_success_tabs_keeps_single_well_plots_when_calc_params_are_stale(
     )
 
     assert calls["plots_kwargs"]["show_plotly_panels"] is False
-    assert any("Ниже показаны траектории и 3D-обзор" in item for item in calls["warnings"])
+    assert any("Ниже — траектории из предыдущего расчёта" in item for item in calls["warnings"])
 
 
 def test_apply_pad_order_optimization_updates_source_records_and_keeps_ac_cache(

@@ -221,9 +221,7 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
 def render_reference_section() -> None:
     st.markdown("## 3. Загрузка фактического фонда")
     st.caption(
-        "Если на месторождении уже есть фактический фонд или утверждённый "
-        "проектный (проработанный в ЦСБ) - загрузите его из папок `.dev` "
-        "или в формате WELLTRACK."
+        "Загрузите фактический или утверждённый проектный фонд из `.dev` или WELLTRACK."
     )
     c1, c2 = st.columns(2, gap="medium")
     with c1:
@@ -281,8 +279,7 @@ def render_reference_section() -> None:
                 "Показать анализ фактического фонда",
                 key=_reference_analysis_toggle_key(wt.REFERENCE_WELL_ACTUAL),
                 help=(
-                    "Тяжёлый анализ фактического фонда строится по запросу, "
-                    "чтобы не тормозить рендер страницы после расчёта траекторий."
+                    "Анализ строится по кнопке — страница откроется быстрее."
                 ),
             )
         )

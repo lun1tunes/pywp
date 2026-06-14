@@ -312,7 +312,7 @@ def anti_collision_method_caption(
             "с overlap. Приоритет в отчете отдается пересечениям в t1/t3."
         )
     return (
-        "Anti-collision scan выполнен по planning-level 2σ конусам неопределенности. "
+        "Anti-collision scan выполнен по 2σ конусам неопределённости. "
         f"Для каждой пары скважин считается отчетная сетка с шагом до {DEFINITIVE_SCAN_STEP_M:.0f} м, "
         f"а зоны с SF≤{DEFINITIVE_LOCAL_REFINE_TRIGGER_SF:.0f} локально уточняются до "
         f"{DEFINITIVE_LOCAL_REFINE_STEP_M:.0f} м. "
@@ -1154,7 +1154,7 @@ def anti_collision_report_rows(
                     float(event.md_b_end_m),
                 ),
                 "SF min": float(event.min_separation_factor),
-                "Overlap max, м": float(event.max_overlap_depth_m),
+                "Макс. пересечение, м": float(event.max_overlap_depth_m),
                 "Мин. расстояние, м": float(event.min_center_distance_m),
             }
         )

@@ -1538,7 +1538,7 @@
         <button id="fit-camera-btn" class="toolbar-btn" type="button" title="Подогнать сцену под кадр">Сброс вида</button>
         <button id="edit-targets-btn" class="toolbar-btn" type="button" title="Изменить точки скважины" style="display:none">Редактировать точки</button>
         <div id="anti-collision-control-wrap">
-          <button id="anti-collision-btn" class="toolbar-btn" type="button" title="Настроить слои anti-collision">Anti-collision</button>
+        <button id="anti-collision-btn" class="toolbar-btn" type="button" title="Слои anti-collision">Anti-collision</button>
           <div id="anti-collision-controls">
             <label class="anti-collision-option">
               <input type="checkbox" data-ac-layer="cones" checked />
@@ -1638,7 +1638,7 @@
         <button id="edit-warning-hide-btn" type="button">скрыть</button>
       </div>
       <div id="legend-toggle-wrap">
-        <button id="legend-toggle-btn" class="toolbar-btn" type="button" title="Свернуть или развернуть легенду">Legend</button>
+        <button id="legend-toggle-btn" class="toolbar-btn" type="button" title="Свернуть или развернуть легенду">Легенда</button>
       </div>
       <div id="axes-gizmo"></div>
       <div id="label-layer"></div>
@@ -4045,6 +4045,7 @@
           clearWorldAxisGeometry();
 
           const gridPositions = [];
+          const minorGridPositions = [];
           for (let xIndex = 0; xIndex <= xTickCount; xIndex += 1) {
             const xValue = xyStep * xIndex * xDirection;
             pushWorldAxisSegment(
@@ -4077,6 +4078,32 @@
               [0, yValue, worldAxisDisplayZ(-zLength)],
             );
           }
+          zTickSpecs.forEach((tickSpec) => {
+            if (tickSpec.major) {
+              return;
+            }
+            if (
+              Number(tickSpec.rawZ) < 0.0 &&
+              !worldAxisRawLevelMatches(tickSpec.rawZ, 0.0)
+            ) {
+              return;
+            }
+            const distanceFromPlane = Number(planeRawZ) - Number(tickSpec.rawZ);
+            if (distanceFromPlane <= 0.0) {
+              return;
+            }
+            const zValue = worldAxisDisplayZ(-distanceFromPlane);
+            pushWorldAxisSegment(
+              minorGridPositions,
+              [xMin, yMax, zValue],
+              [xMax, yMax, zValue],
+            );
+            pushWorldAxisSegment(
+              minorGridPositions,
+              [0, yMin, zValue],
+              [0, yMax, zValue],
+            );
+          });
           zMajorRawValues.forEach((rawZValue) => {
             if (
               Number(rawZValue) < 0.0 &&
@@ -4178,6 +4205,11 @@
             );
           });
 
+          if (minorGridPositions.length > 0) {
+            worldAxisOverlay.group.add(
+              createWorldAxisLineSegments(minorGridPositions, "#9aa3af", 0.12, 1.4),
+            );
+          }
           worldAxisOverlay.group.add(
             createWorldAxisLineSegments(gridPositions, "#9aa3af", 0.24, 2.0),
           );
@@ -4844,7 +4876,7 @@
           header.className = "legend-header";
           const title = document.createElement("div");
           title.className = "legend-header-title";
-          title.textContent = "Legend";
+          title.textContent = "Легенда";
           header.appendChild(title);
 
           const collapseBtn = document.createElement("button");
@@ -4965,7 +4997,7 @@
           header.className = "collisions-header";
           const title = document.createElement("div");
           title.className = "collisions-title";
-          title.textContent = "Collisions";
+          title.textContent = "Пересечения";
           header.appendChild(title);
           const count = document.createElement("div");
           count.className = "collisions-count";

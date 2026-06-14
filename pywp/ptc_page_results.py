@@ -79,7 +79,7 @@ def _render_anticollision_parallel_workers_selectbox() -> int:
             default_workers
         ]
     selected_label = st.selectbox(
-        "Multiprocessing для anti-collision",
+        "Параллельный расчёт anti-collision",
         options=[label for label, _value in _ANTI_COLLISION_PARALLEL_OPTIONS],
         key=label_key,
     )
@@ -412,8 +412,7 @@ def _render_anticollision_action_button(*, has_current_analysis: bool) -> bool:
             use_container_width=True,
             help=(
                 "Запускает anti-collision анализ для текущего набора рассчитанных "
-                "траекторий. При наличии предыдущего кэша будут переиспользованы "
-                "неизменённые скважины и пары."
+                "траекторий. Неизменённые скважины и пары переиспользуются из кэша."
             ),
         )
     )
@@ -448,14 +447,10 @@ def _render_anticollision_panel(
     pending_edit_names = wt._pending_edit_target_names()
     if pending_edit_names:
         st.info(
-            "Anti-collision анализ приостановлен: есть изменённые в 3D точки "
-            "t1/t3, которые ещё не пересчитаны."
-        )
-        st.caption(
-            "Сначала пересчитайте скважины: "
+            "Anti-collision приостановлен: точки t1/t3 изменены в 3D. "
+            "Пересчитайте: "
             + ", ".join(pending_edit_names)
-            + ". Предыдущий anti-collision расчёт сохранён и не будет "
-            "перезапускаться по неполному набору."
+            + "."
         )
         if _render_cached_anticollision_snapshot_for_pending_edits(
             successes=successes,
@@ -468,15 +463,9 @@ def _render_anticollision_panel(
         return
 
     if calc_params_stale:
-        st.markdown("### Anti-collision и пересечения")
+        st.markdown("### Anti-collision")
         st.warning(
-            "Anti-collision анализ временно недоступен: параметры расчёта "
-            "изменились после последнего запуска траекторий."
-        )
-        st.caption(
-            "Сначала пересчитайте траектории для текущих параметров. "
-            "Только после этого anti-collision будет соответствовать "
-            "актуальному набору расчёта."
+            "Anti-collision недоступен: изменились параметры. Пересчитайте траектории."
         )
         wt._render_status_run_log(
             title="Лог расчёта Anti-collision",
@@ -494,7 +483,7 @@ def _render_anticollision_panel(
         st.info("Для anti-collision нужно минимум две успешно рассчитанные скважины.")
         return
 
-    st.markdown("### Anti-collision и пересечения")
+    st.markdown("### Anti-collision")
     normalized_preset = wt.normalize_uncertainty_preset(
         selected_preset
         or st.session_state.get(
@@ -547,15 +536,10 @@ def _render_anticollision_panel(
     if not has_current_analysis and not run_requested:
         if has_stale_snapshot:
             st.info(
-                "Траектории обновились после прошлого anti-collision расчёта. "
-                "Нажмите 'Расчёт пересечений', чтобы пересчитать конуса и "
-                "пересечения для актуального набора."
+                "Траектории обновились. Запустите расчёт пересечений для обновления отчёта."
             )
         else:
-            st.info(
-                "Траектории рассчитаны. Запустите anti-collision отдельным "
-                "шагом, когда будете готовы проверить конуса и пересечения."
-            )
+            st.info("Траектории рассчитаны. Запустите расчёт пересечений.")
         wt._render_status_run_log(
             title="Лог расчёта Anti-collision",
             state_payload=st.session_state.get("wt_anticollision_last_run"),
@@ -603,7 +587,6 @@ def _render_anticollision_panel(
                 state_payload=st.session_state.get("wt_anticollision_last_run"),
                 empty_message="Anti-collision анализ ещё не запускался.",
             )
-            st.caption(f"{type(exc).__name__}: {exc}")
             return
     if anti_collision_progress is not None:
         anti_collision_progress.empty()
@@ -633,7 +616,7 @@ def _render_anticollision_panel(
 
     m1, m2, m3, m4 = st.columns(4, gap="small")
     m1.metric("Проверено пар", f"{int(analysis.pair_count)}")
-    m2.metric("Пар с overlap", f"{int(analysis.overlapping_pair_count)}")
+    m2.metric("Пар с пересечением", f"{int(analysis.overlapping_pair_count)}")
     m3.metric("Пересечения в t1/t3", f"{int(analysis.target_overlap_pair_count)}")
     worst_sf = analysis.worst_separation_factor
     m4.metric("Минимальный SF", "—" if worst_sf is None else f"{float(worst_sf):.2f}")
@@ -661,7 +644,6 @@ def _render_anticollision_panel(
                 state_payload=st.session_state.get("wt_anticollision_last_run"),
                 empty_message="Anti-collision анализ ещё не запускался.",
             )
-            st.caption(f"{type(exc).__name__}: {exc}")
             return
 
     if not analysis.zones:
@@ -672,19 +654,16 @@ def _render_anticollision_panel(
 
     target_zones = [zone for zone in analysis.zones if int(zone.priority_rank) < 2]
     if target_zones:
-        st.warning(
-            "Найдены пересечения, затрагивающие точки целей t1/t3. Они вынесены "
-            "в начало отчета и должны разбираться в первую очередь."
-        )
+        st.warning("Найдены пересечения в точках целей t1/t3. Разберите их в первую очередь.")
     else:
-        st.warning("Найдены пересечения 2σ конусов неопределенности по траекториям.")
+        st.warning("Найдены пересечения 2σ конусов неопределённости.")
 
     report_rows = (
         wt._report_rows_from_recommendations(visible_recommendations, analysis)
         if visible_recommendations
         else anti_collision_report_rows(analysis)
     )
-    st.markdown("### Отчет по anti-collision")
+    st.markdown("### Отчёт по anti-collision")
     st.dataframe(
         wt.arrow_safe_text_dataframe(pd.DataFrame(report_rows)),
         width="stretch",
@@ -711,10 +690,7 @@ def _render_anticollision_panel(
             )
         optimization_disabled = len(movable_pad_well_names) < 2
         if optimization_disabled:
-            st.info(
-                "Для оптимизации нужно минимум две незафиксированные скважины "
-                "на выбранном кусте."
-            )
+            st.info("Для оптимизации нужно минимум 2 незафиксированные скважины на кусте.")
         if st.button(
             "✨ Оптимизировать порядок скважин на кусте",
             type="primary",
@@ -774,8 +750,8 @@ def _render_full_anticollision_recalc_button() -> bool:
     if not st.button(
         "Полный пересчёт anti-collision",
         help=(
-            "Сбрасывает кэш скважин и пар anti-collision. Используйте после "
-            "смены набора данных или если нужен гарантированный расчёт с нуля."
+            "Сбрасывает кэш скважин и пар. Используйте после смены набора данных "
+            "или если нужен расчёт с нуля."
         ),
         use_container_width=True,
     ):
@@ -1088,10 +1064,8 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
             focus_anticollision_well_names=focus_anticollision_well_names,
             title="### Все скважины, конуса и пересечения",
             caption=(
-                "Ниже показан последний anti-collision снимок до пересчёта: "
-                "старые конусы и пересечения скрыты для изменённых скважин, а "
-                "фактический/утверждённый фонд и неизменённые скважины остаются "
-                "на экране как ориентир."
+                "Показан результат anti-collision до пересчёта. "
+                "Изменённые скважины скрыты; фонд и неизменённые скважины — для ориентира."
             ),
             target_only_wells=target_only_wells,
         )
@@ -1101,7 +1075,7 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         clusters=visible_clusters,
     )
     if show_report and visible_recommendations:
-        st.markdown("### Отчет по предыдущему anti-collision")
+        st.markdown("### Отчёт по предыдущему anti-collision")
         report_rows = wt._report_rows_from_recommendations(
             visible_recommendations,
             analysis,
@@ -1368,8 +1342,8 @@ def render_success_tabs(
     if calc_params_stale:
         st.warning(
             "Параметры расчёта изменились после последнего запуска. "
-            "Ниже показаны траектории и 3D-обзор из предыдущего расчёта. "
-            "Для актуализации результатов и anti-collision запустите новый расчёт."
+            "Ниже — траектории из предыдущего расчёта. "
+            "Нажмите «Рассчитать траектории» для обновления."
         )
     divider = getattr(st, "divider", None)
     if callable(divider):

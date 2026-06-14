@@ -835,7 +835,7 @@ def optimize_pad_order(
             progress_callback(
                 0,
                 (
-                    "Стартовая anti-collision оценка использовала кэш: "
+                    "Стартовая оценка anti-collision использовала кэш: "
                     f"{int(initial_stats.reused_pair_count)} пар."
                 ),
             )

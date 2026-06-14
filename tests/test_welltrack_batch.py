@@ -2146,7 +2146,7 @@ def test_batch_planner_dynamic_cluster_context_stops_when_cluster_becomes_blocke
             prepared_by_well={},
             skipped_wells=(),
             resolution_state="blocked",
-            blocking_reason="Сначала решить spacing целей.",
+            blocking_reason="Сначала разнести цели.",
         )
 
     monkeypatch.setattr(
@@ -2174,7 +2174,7 @@ def test_batch_planner_dynamic_cluster_context_stops_when_cluster_becomes_blocke
     assert planner.last_evaluation_metadata.cluster_resolved_early is False
     assert planner.last_evaluation_metadata.cluster_blocked is True
     assert planner.last_evaluation_metadata.cluster_blocking_reason == (
-        "Сначала решить spacing целей."
+        "Сначала разнести цели."
     )
     assert planner.last_evaluation_metadata.skipped_selected_names == ("WELL-B",)
 
@@ -2432,7 +2432,7 @@ def test_batch_planner_dynamic_cluster_context_reseeds_second_cluster_pass(
     assert planner._planner.seen_names == ["600.0", "650.0", "600.0"]
     assert planner.last_evaluation_metadata.cluster_blocked is True
     assert (
-        "не дал заметного улучшения"
+        "не улучшил sf"
         in str(planner.last_evaluation_metadata.cluster_blocking_reason).lower()
     )
 
@@ -3770,8 +3770,8 @@ def test_batch_planner_reports_missing_actual_parent_for_zbs() -> None:
 
     assert successes == []
     assert rows[0]["Статус"] == "Ошибка расчета"
-    assert 'Боковой ствол "9010_ZBS" не был рассчитан' in rows[0]["Проблема"]
-    assert '"9010"' in rows[0]["Проблема"]
+    assert 'ЗБС "9010_ZBS": не найдена фактическая траектория основной скважины "9010"' in rows[0]["Проблема"]
+    assert "9010" in rows[0]["Проблема"]
 
 
 def test_batch_planner_builds_zbs_from_actual_reference_well() -> None:
@@ -3903,7 +3903,8 @@ def test_parent_with_failed_pilot_does_not_fallback_to_regular_well() -> None:
     by_name = {str(row["Скважина"]): row for row in rows}
     assert by_name["WELL-04_PL"]["Статус"] == "Ошибка расчета"
     assert by_name["WELL-04"]["Статус"] == "Ошибка расчета"
-    assert "Пилот WELL-04_PL не рассчитан" in by_name["WELL-04"]["Проблема"]
+    assert "Сначала рассчитайте пилот WELL-04_PL" in by_name["WELL-04"]["Проблема"]
+    assert "без него нельзя построить боковой продуктивный ствол" in by_name["WELL-04"]["Проблема"]
     assert not successes
 
 

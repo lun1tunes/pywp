@@ -52,7 +52,7 @@ def test_parse_rejects_non_multiple_of_four_values() -> None:
     100 100 1000
     /
     """
-    with pytest.raises(WelltrackParseError, match="groups of 4 values"):
+    with pytest.raises(WelltrackParseError, match="группы X Y Z MD"):
         parse_welltrack_text(text)
 
 

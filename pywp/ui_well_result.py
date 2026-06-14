@@ -479,15 +479,12 @@ def render_result_plots(
         "Показать конус неопределенности",
         key=uncertainty_toggle_key(well_name=view.well_name),
         help=(
-            "Включает planning-level 2σ конус неопределенности для 3D"
+            "Показывает конус погрешности положения ствола (2σ, модель MWD ISCWSA)"
             + (
-                ", плана и вертикального разреза. "
+                " на 3D, плане и разрезе."
                 if show_plotly_panels
-                else ". "
+                else "."
             )
-            + "Он строится по последовательности эллиптических "
-            "сечений вдоль ствола. Это базовая визуализация по first-order "
-            "ошибкам INC/AZI, без полной ISCWSA tool model."
         ),
     )
     uncertainty_overlay = None
@@ -518,9 +515,8 @@ def render_result_plots(
             format_func=uncertainty_preset_label,
             key=widget_key,
             help=(
-                "Определяет уровень консерватизма planning-level модели неопределенности. "
-                "Обычный MWD подходит как базовый режим, оптимистичный уменьшает конус, "
-                "консервативный увеличивает его."
+                "Модель погрешности MWD (ISCWSA). Стандартная — базовый режим, "
+                "консервативная — больший конус неопределённости."
             ),
         )
         selected_preset = normalize_uncertainty_preset(selected_preset)

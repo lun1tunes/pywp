@@ -518,22 +518,23 @@ def test_iscwsa_mwd_poor_default_model_is_not_proxy() -> None:
     model = planning_uncertainty_model_for_preset(UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC)
 
     assert model.iscwsa_tool_code is not None
-    assert "ISCWSA MWD POOR Magnetic" in uncertainty_model_caption(model)
+    assert "ISCWSA" in uncertainty_model_caption(model)
+    assert "конус неопределённости" in uncertainty_model_caption(model)
 
 
 def test_uncertainty_presets_are_normalized_and_monotonic() -> None:
     assert normalize_uncertainty_preset("unknown") == DEFAULT_UNCERTAINTY_PRESET
     assert (
-        normalize_uncertainty_preset("MWD Unknown magnetic (ISCWSA)")
+        normalize_uncertainty_preset("Консервативная точность MWD (ISCWSA Unknown)")
         == UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
     )
     assert (
-        normalize_uncertainty_preset("ISCWSA MWD Unknown Magnetic")
-        == UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+        normalize_uncertainty_preset("Стандартная точность MWD (ISCWSA POOR)")
+        == UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
     )
     assert (
         uncertainty_preset_label(UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC)
-        == "MWD POOR magnetic (ISCWSA)"
+        == "Стандартная точность MWD (ISCWSA POOR)"
     )
 
     poor_model = planning_uncertainty_model_for_preset(

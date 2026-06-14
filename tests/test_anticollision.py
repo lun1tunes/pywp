@@ -37,6 +37,8 @@ from pywp.anticollision_recommendations import (
     RECOMMENDATION_REDUCE_KOP,
     RECOMMENDATION_TARGET_SPACING,
     RECOMMENDATION_TRAJECTORY_REVIEW,
+    AntiCollisionRecommendationCluster,
+    anti_collision_cluster_rows,
     build_anti_collision_recommendation_clusters,
     anti_collision_recommendation_rows,
     build_anti_collision_recommendations,
@@ -114,6 +116,101 @@ def _horizontal_reference_well(
         ],
         default_kind=kind,
     )[0]
+
+
+def _cluster_with_target_spacing_and_trajectory_conflicts():
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(
+            AntiCollisionCorridor(
+                well_a="well_01",
+                well_b="well_02",
+                classification="target-target",
+                priority_rank=1,
+                label_a=TARGET_T1,
+                label_b=TARGET_T1,
+                md_a_start_m=3500.0,
+                md_a_end_m=3500.0,
+                md_b_start_m=3600.0,
+                md_b_end_m=3600.0,
+                md_a_values_m=np.array([3500.0], dtype=float),
+                md_b_values_m=np.array([3600.0], dtype=float),
+                label_a_values=(TARGET_T1,),
+                label_b_values=(TARGET_T1,),
+                midpoint_xyz=np.array([[1000.0, 0.0, 2400.0]], dtype=float),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
+                overlap_core_radius_m=np.array([12.0], dtype=float),
+                separation_factor_values=np.array([0.62], dtype=float),
+                overlap_depth_values_m=np.array([18.0], dtype=float),
+            ),
+            AntiCollisionCorridor(
+                well_a="well_02",
+                well_b="well_03",
+                classification="trajectory",
+                priority_rank=2,
+                label_a="",
+                label_b="",
+                md_a_start_m=4100.0,
+                md_a_end_m=4550.0,
+                md_b_start_m=4050.0,
+                md_b_end_m=4500.0,
+                md_a_values_m=np.array([4100.0, 4550.0], dtype=float),
+                md_b_values_m=np.array([4050.0, 4500.0], dtype=float),
+                label_a_values=("", ""),
+                label_b_values=("", ""),
+                midpoint_xyz=np.array(
+                    [[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float
+                ),
+                overlap_rings_xyz=(
+                    np.zeros((16, 3), dtype=float),
+                    np.ones((16, 3), dtype=float),
+                ),
+                overlap_core_radius_m=np.array([6.0, 6.0], dtype=float),
+                separation_factor_values=np.array([0.81, 0.76], dtype=float),
+                overlap_depth_values_m=np.array([7.0, 9.0], dtype=float),
+            ),
+        ),
+        well_segments=(),
+        zones=(),
+        pair_count=2,
+        overlapping_pair_count=2,
+        target_overlap_pair_count=1,
+        worst_separation_factor=0.62,
+    )
+    contexts = {
+        "well_01": AntiCollisionWellContext(
+            well_name="well_01",
+            kop_md_m=650.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=3500.0,
+            md_total_m=5200.0,
+            optimization_mode="none",
+        ),
+        "well_02": AntiCollisionWellContext(
+            well_name="well_02",
+            kop_md_m=700.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=3600.0,
+            md_total_m=5400.0,
+            optimization_mode="none",
+        ),
+        "well_03": AntiCollisionWellContext(
+            well_name="well_03",
+            kop_md_m=900.0,
+            kop_min_vertical_m=550.0,
+            md_t1_m=4700.0,
+            md_total_m=6100.0,
+            optimization_mode="none",
+        ),
+    }
+    recommendations = build_anti_collision_recommendations(
+        analysis,
+        well_context_by_name=contexts,
+    )
+    return build_anti_collision_recommendation_clusters(recommendations)[0]
 
 
 def _fact_sidetrack_success_on_parent_path() -> SuccessfulWellPlan:
@@ -3412,7 +3509,7 @@ def test_recommendations_prioritize_target_spacing_for_target_overlap() -> None:
     )
     assert rows[0]["Тип действия"] == "Цели / spacing"
     assert "Рекомендация по устранению" in rows[0]
-    assert rows[0]["Подготовка пересчета"] == "Только рекомендация по целям"
+    assert rows[0]["Подготовка пересчёта"] == "Только рекомендация по целям"
 
 
 def test_recommendations_prepare_anticollision_kop_build1_for_vertical_collision() -> (
@@ -3481,7 +3578,7 @@ def test_recommendations_prepare_anticollision_kop_build1_for_vertical_collision
     assert recommendation.expected_maneuver == "Сместить ранний уход: KOP / BUILD1"
     assert (
         recommendation.action_label
-        == "Подготовить anti-collision пересчет (KOP/BUILD1)"
+        == "Подготовить anti-collision пересчёт (KOP/BUILD1)"
     )
 
 
@@ -3577,7 +3674,7 @@ def test_pre_kop_trajectory_conflict_is_reclassified_to_kop_build1_anticollision
     assert recommendations[0].category == RECOMMENDATION_REDUCE_KOP
     assert (
         recommendations[0].action_label
-        == "Подготовить anti-collision пересчет (KOP/BUILD1)"
+        == "Подготовить anti-collision пересчёт (KOP/BUILD1)"
     )
     assert all(
         suggestion.config_updates.get("optimization_mode") == "anti_collision_avoidance"
@@ -4011,107 +4108,41 @@ def test_recommendation_clusters_merge_connected_pairs_into_single_cluster() -> 
 
 
 def test_cluster_with_target_spacing_conflict_is_not_actionable_for_rerun() -> None:
-    analysis = AntiCollisionAnalysis(
-        wells=(),
-        corridors=(
-            AntiCollisionCorridor(
-                well_a="well_01",
-                well_b="well_02",
-                classification="target-target",
-                priority_rank=1,
-                label_a=TARGET_T1,
-                label_b=TARGET_T1,
-                md_a_start_m=3500.0,
-                md_a_end_m=3500.0,
-                md_b_start_m=3600.0,
-                md_b_end_m=3600.0,
-                md_a_values_m=np.array([3500.0], dtype=float),
-                md_b_values_m=np.array([3600.0], dtype=float),
-                label_a_values=(TARGET_T1,),
-                label_b_values=(TARGET_T1,),
-                midpoint_xyz=np.array([[1000.0, 0.0, 2400.0]], dtype=float),
-                overlap_rings_xyz=(
-                    np.zeros((16, 3), dtype=float),
-                    np.ones((16, 3), dtype=float),
-                ),
-                overlap_core_radius_m=np.array([12.0], dtype=float),
-                separation_factor_values=np.array([0.62], dtype=float),
-                overlap_depth_values_m=np.array([18.0], dtype=float),
-            ),
-            AntiCollisionCorridor(
-                well_a="well_02",
-                well_b="well_03",
-                classification="trajectory",
-                priority_rank=2,
-                label_a="",
-                label_b="",
-                md_a_start_m=4100.0,
-                md_a_end_m=4550.0,
-                md_b_start_m=4050.0,
-                md_b_end_m=4500.0,
-                md_a_values_m=np.array([4100.0, 4550.0], dtype=float),
-                md_b_values_m=np.array([4050.0, 4500.0], dtype=float),
-                label_a_values=("", ""),
-                label_b_values=("", ""),
-                midpoint_xyz=np.array(
-                    [[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]], dtype=float
-                ),
-                overlap_rings_xyz=(
-                    np.zeros((16, 3), dtype=float),
-                    np.ones((16, 3), dtype=float),
-                ),
-                overlap_core_radius_m=np.array([6.0, 6.0], dtype=float),
-                separation_factor_values=np.array([0.81, 0.76], dtype=float),
-                overlap_depth_values_m=np.array([7.0, 9.0], dtype=float),
-            ),
-        ),
-        well_segments=(),
-        zones=(),
-        pair_count=2,
-        overlapping_pair_count=2,
-        target_overlap_pair_count=1,
-        worst_separation_factor=0.62,
-    )
-    contexts = {
-        "well_01": AntiCollisionWellContext(
-            well_name="well_01",
-            kop_md_m=650.0,
-            kop_min_vertical_m=550.0,
-            md_t1_m=3500.0,
-            md_total_m=5200.0,
-            optimization_mode="none",
-        ),
-        "well_02": AntiCollisionWellContext(
-            well_name="well_02",
-            kop_md_m=700.0,
-            kop_min_vertical_m=550.0,
-            md_t1_m=3600.0,
-            md_total_m=5400.0,
-            optimization_mode="none",
-        ),
-        "well_03": AntiCollisionWellContext(
-            well_name="well_03",
-            kop_md_m=900.0,
-            kop_min_vertical_m=550.0,
-            md_t1_m=4700.0,
-            md_total_m=6100.0,
-            optimization_mode="none",
-        ),
-    }
-
-    recommendations = build_anti_collision_recommendations(
-        analysis,
-        well_context_by_name=contexts,
-    )
-    clusters = build_anti_collision_recommendation_clusters(recommendations)
-
-    assert len(clusters) == 1
-    cluster = clusters[0]
+    cluster = _cluster_with_target_spacing_and_trajectory_conflicts()
     assert cluster.target_conflict_count == 1
     assert cluster.trajectory_conflict_count == 1
     assert cluster.can_prepare_rerun is False
-    assert cluster.action_label == "Только advisory"
-    assert cluster.blocking_advisory == "Сначала решить spacing целей."
+    assert cluster.action_label == "Только справочно"
+    assert cluster.blocking_advisory == "Сначала разнести цели."
+
+
+def test_cluster_rows_keep_blocking_advisory_when_rerun_is_unavailable() -> None:
+    cluster = AntiCollisionRecommendationCluster(
+        cluster_id="ac-cluster-001",
+        well_names=("well_01", "well_02"),
+        recommendations=(),
+        recommendation_count=1,
+        target_conflict_count=1,
+        vertical_conflict_count=0,
+        trajectory_conflict_count=0,
+        worst_separation_factor=0.62,
+        summary="cluster summary",
+        detail="cluster detail",
+        expected_maneuver="Сначала разнести цели",
+        blocking_advisory="Сначала разнести цели.",
+        rerun_order_label="—",
+        first_rerun_well=None,
+        first_rerun_maneuver=None,
+        action_steps=(),
+        can_prepare_rerun=False,
+        affected_wells=(),
+        action_label="Только справочно",
+    )
+
+    rows = anti_collision_cluster_rows((cluster,))
+
+    assert rows[0]["Стартовый шаг"] == "Сначала разнести цели."
+    assert rows[0]["Подготовка пересчёта"] == "Только справочно"
 
 
 def test_cluster_action_steps_normalize_mixed_vertical_and_trajectory_for_same_well() -> (

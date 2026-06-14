@@ -16,7 +16,7 @@ def test_render_hero_supports_centered_variant_with_constrained_width(
 
     ui_theme.render_hero(
         title="PTC",
-        subtitle="Prototype trajectory constructor",
+        subtitle="Конструктор траекторий скважин",
         centered=True,
         max_content_width_px=760,
     )
@@ -25,5 +25,5 @@ def test_render_hero_supports_centered_variant_with_constrained_width(
     assert 'class="pywp-hero pywp-hero--centered"' in body
     assert "--pywp-hero-content-max-width: 760px;" in body
     assert "<h2>PTC</h2>" in body
-    assert "<p>Prototype trajectory constructor</p>" in body
+    assert "<p>Конструктор траекторий скважин</p>" in body
     assert bool(captured["unsafe"]) is True
