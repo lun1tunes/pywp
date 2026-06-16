@@ -103,6 +103,8 @@ def render_trajectory_dls_panel(
     pilot_name: str | None = None,
     pilot_stations: pd.DataFrame | None = None,
     pilot_study_points: tuple[Point3D, ...] = (),
+    pilot_kop_md_m: float | None = None,
+    sidetrack_window_point: Point3D | None = None,
     render_3d_override: Callable[[object, dict[str, object]], None] | None = None,
     show_plotly_chart: bool = True,
 ) -> None:
@@ -125,6 +127,8 @@ def render_trajectory_dls_panel(
             pilot_name=pilot_name,
             pilot_stations=pilot_stations,
             pilot_study_points=pilot_study_points,
+            pilot_kop_md_m=pilot_kop_md_m,
+            sidetrack_window_point=sidetrack_window_point,
         )
         plotly_container = None
         if show_plotly_chart:

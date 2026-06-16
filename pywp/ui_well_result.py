@@ -91,6 +91,8 @@ class SingleWellResultView(FrozenArbitraryModel):
     pilot_name: str | None = None
     pilot_stations: pd.DataFrame | None = None
     pilot_study_points: tuple[Point3D, ...] = ()
+    pilot_kop_md_m: float | None = None
+    sidetrack_window_point: Point3D | None = None
 
     @field_validator("surface", "t1", "t3", mode="before")
     @classmethod
@@ -124,6 +126,13 @@ class SingleWellResultView(FrozenArbitraryModel):
         if value is None:
             return ()
         return tuple(coerce_model_like(item, Point3D) for item in value)
+
+    @field_validator("sidetrack_window_point", mode="before")
+    @classmethod
+    def _coerce_optional_point3d(cls, value: object) -> Point3D | None:
+        if value is None:
+            return None
+        return coerce_model_like(value, Point3D)
 
     @field_validator("config", mode="before")
     @classmethod
@@ -515,8 +524,8 @@ def render_result_plots(
             format_func=uncertainty_preset_label,
             key=widget_key,
             help=(
-                "Модель погрешности MWD (ISCWSA). Стандартная — базовый режим, "
-                "консервативная — больший конус неопределённости."
+                "Модель погрешности MWD (ISCWSA). "
+                "MWD Unknown Magnetic даёт больший конус неопределённости, чем MWD POOR Magnetic."
             ),
         )
         selected_preset = normalize_uncertainty_preset(selected_preset)
@@ -563,6 +572,8 @@ def render_result_plots(
         pilot_name=view.pilot_name,
         pilot_stations=view.pilot_stations,
         pilot_study_points=view.pilot_study_points,
+        pilot_kop_md_m=view.pilot_kop_md_m,
+        sidetrack_window_point=view.sidetrack_window_point,
         render_3d_override=render_3d_override,
         show_plotly_chart=show_plotly_panels,
     )

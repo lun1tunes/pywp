@@ -87,6 +87,8 @@ def single_well_three_payload(
     pilot_name: str | None = None,
     pilot_stations: pd.DataFrame | None = None,
     pilot_study_points: tuple[Point3D, ...] = (),
+    pilot_kop_md_m: float | None = None,
+    sidetrack_window_point: Point3D | None = None,
 ) -> dict[str, object]:
     x_arrays: list[np.ndarray] = []
     y_arrays: list[np.ndarray] = []
@@ -186,8 +188,6 @@ def single_well_three_payload(
                 role="target_label",
             )
         )
-    if well_name:
-        payload["labels"].append(_well_name_label(str(well_name), t3, TARGET_COLOR_PRIMARY))
     _append_pilot_study_markers(
         payload,
         pilot_name=pilot_name,
@@ -218,8 +218,13 @@ def single_well_three_payload(
                 }
             )
 
-    if kop_md_m is not None:
-        kop_point = _station_point_at_md(stations, float(kop_md_m))
+    kop_station_source = stations
+    kop_md_value = kop_md_m
+    if pilot_stations is not None and len(pilot_stations) > 0 and pilot_kop_md_m is not None:
+        kop_station_source = pilot_stations
+        kop_md_value = pilot_kop_md_m
+    if kop_md_value is not None:
+        kop_point = _station_point_at_md(kop_station_source, float(kop_md_value))
         if kop_point is not None:
             _append_arrays_for_points(x_arrays, y_arrays, z_arrays, [kop_point])
             payload["points"].append(
@@ -234,7 +239,7 @@ def single_well_three_payload(
                         {
                             "name": "KOP",
                             "point": "KOP",
-                            "md": float(kop_md_m),
+                            "md": float(kop_md_value),
                         }
                     ],
                     "role": "marker",
@@ -248,6 +253,34 @@ def single_well_three_payload(
                     role="control_point_label",
                 )
             )
+    if sidetrack_window_point is not None:
+        window_point = _point3d_payload(sidetrack_window_point)
+        _append_arrays_for_points(x_arrays, y_arrays, z_arrays, [window_point])
+        payload["points"].append(
+            {
+                "name": "Окно зарезки",
+                "points": [window_point],
+                "color": "#4B5563",
+                "opacity": 1.0,
+                "size": 5.5,
+                "symbol": "circle",
+                "hover": [
+                    {
+                        "name": "Окно зарезки",
+                        "point": "Окно",
+                    }
+                ],
+                "role": "marker",
+            }
+        )
+        payload["labels"].append(
+            _point_payload_label(
+                "Окно",
+                window_point,
+                "#4B5563",
+                role="control_point_label",
+            )
+        )
 
     _append_single_well_zero_axes(
         payload,
@@ -300,7 +333,6 @@ def single_well_target_only_three_payload(
                 role="target_label",
             )
         )
-    payload["labels"].append(_well_name_label(str(well_name), t3, str(color)))
     _append_unique_legend_item(
         payload,
         label=marker_name,

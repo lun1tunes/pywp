@@ -148,9 +148,18 @@ def test_single_well_pilot_context_pairs_parent_with_pilot_record() -> None:
     )
     parent_success = SimpleNamespace(
         name="well_04",
-        summary={"pilot_well_name": "well_04_PL"},
+        summary={
+            "pilot_well_name": "well_04_PL",
+            "sidetrack_window_x_m": 15.0,
+            "sidetrack_window_y_m": 25.0,
+            "sidetrack_window_z_m": 35.0,
+        },
     )
-    pilot_success = SimpleNamespace(name="well_04_PL", stations=pilot_stations)
+    pilot_success = SimpleNamespace(
+        name="well_04_PL",
+        stations=pilot_stations,
+        summary={"kop_md_m": 100.0},
+    )
     pilot_record = WelltrackRecord(
         name="well_04_PL",
         points=(
@@ -160,10 +169,12 @@ def test_single_well_pilot_context_pairs_parent_with_pilot_record() -> None:
         ),
     )
 
-    pilot_name, stations, study_points = _single_well_pilot_context(
-        parent_success=parent_success,
-        successes=[parent_success, pilot_success],
-        records=[pilot_record],
+    pilot_name, stations, study_points, pilot_kop_md_m, sidetrack_window_point = (
+        _single_well_pilot_context(
+            parent_success=parent_success,
+            successes=[parent_success, pilot_success],
+            records=[pilot_record],
+        )
     )
 
     assert pilot_name == "well_04_PL"
@@ -172,6 +183,8 @@ def test_single_well_pilot_context_pairs_parent_with_pilot_record() -> None:
         Point3D(10.0, 20.0, 30.0),
         Point3D(40.0, 50.0, 60.0),
     )
+    assert pilot_kop_md_m == 100.0
+    assert sidetrack_window_point == Point3D(15.0, 25.0, 35.0)
 
 
 def test_uncertainty_toggle_key_is_stable_per_well_name() -> None:

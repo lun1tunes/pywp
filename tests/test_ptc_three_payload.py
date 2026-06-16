@@ -328,12 +328,57 @@ def test_single_well_three_payload_labels_targets_and_kop() -> None:
     )
 
     label_by_text = {str(item.get("text")): item for item in payload["labels"]}
-    assert {"well_01", "t1", "t3", "KOP"}.issubset(label_by_text)
+    assert {"t1", "t3", "KOP"}.issubset(label_by_text)
+    assert "well_01" not in label_by_text
     assert label_by_text["t1"]["role"] == "target_label"
     assert label_by_text["t3"]["role"] == "target_label"
     assert label_by_text["KOP"]["role"] == "control_point_label"
     kop_marker = next(item for item in payload["points"] if item.get("name") == "KOP")
     assert kop_marker["points"] == [[100.0, 0.0, 500.0]]
+
+
+def test_single_well_three_payload_uses_pilot_kop_and_sidetrack_window() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 500.0, 1000.0],
+            "X_m": [0.0, 100.0, 200.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 500.0, 1000.0],
+        }
+    )
+    pilot_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 700.0, 1200.0],
+            "X_m": [0.0, 200.0, 500.0],
+            "Y_m": [0.0, 50.0, 100.0],
+            "Z_m": [0.0, 650.0, 1100.0],
+        }
+    )
+
+    payload = single_well_three_payload(
+        stations,
+        well_name="well_04",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(800.0, 0.0, 900.0),
+        t3=Point3D(1000.0, 0.0, 1000.0),
+        kop_md_m=500.0,
+        pilot_name="well_04_PL",
+        pilot_stations=pilot_stations,
+        pilot_kop_md_m=700.0,
+        sidetrack_window_point=Point3D(150.0, 25.0, 500.0),
+    )
+
+    label_by_text = {str(item.get("text")): item for item in payload["labels"]}
+    kop_marker = next(item for item in payload["points"] if item.get("name") == "KOP")
+    window_marker = next(
+        item for item in payload["points"] if item.get("name") == "Окно зарезки"
+    )
+
+    assert "well_04" not in label_by_text
+    assert label_by_text["KOP"]["position"] == [200.0, 50.0, 650.0]
+    assert label_by_text["Окно"]["position"] == [150.0, 25.0, 500.0]
+    assert kop_marker["points"] == [[200.0, 50.0, 650.0]]
+    assert window_marker["points"] == [[150.0, 25.0, 500.0]]
 
 
 def test_single_well_target_only_three_payload_shows_editable_targets_context() -> None:
@@ -361,7 +406,8 @@ def test_single_well_target_only_three_payload_shows_editable_targets_context() 
         [600.0, 800.0, 2400.0],
         [1500.0, 2000.0, 2500.0],
     ]
-    assert {"S", "t1", "t3", "single_well"}.issubset(label_texts)
+    assert {"S", "t1", "t3"}.issubset(label_texts)
+    assert "single_well" not in label_texts
     assert legend_item["symbol"] == "point"
 
 

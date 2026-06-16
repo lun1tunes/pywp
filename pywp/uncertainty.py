@@ -23,8 +23,16 @@ UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC = "mwd_poor_magnetic"
 UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC = "mwd_unknown_magnetic"
 DEFAULT_UNCERTAINTY_PRESET = UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
 UNCERTAINTY_PRESET_OPTIONS: dict[str, str] = {
-    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: "Стандартная точность MWD (ISCWSA POOR)",
-    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: "Консервативная точность MWD (ISCWSA Unknown)",
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: "MWD POOR Magnetic",
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: "MWD Unknown Magnetic",
+}
+_UNCERTAINTY_PRESET_LEGACY_LABELS: dict[str, tuple[str, ...]] = {
+    UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC: (
+        "Стандартная точность MWD (ISCWSA POOR)",
+    ),
+    UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC: (
+        "Консервативная точность MWD (ISCWSA Unknown)",
+    ),
 }
 
 
@@ -184,6 +192,11 @@ def normalize_uncertainty_preset(
             preset_alias
             == str(UNCERTAINTY_PRESET_OPTIONS.get(resolved_key, "")).strip().casefold()
         ):
+            return resolved_key
+        if preset_alias in {
+            str(label).strip().casefold()
+            for label in _UNCERTAINTY_PRESET_LEGACY_LABELS.get(resolved_key, ())
+        }:
             return resolved_key
         tool_code = str(model.iscwsa_tool_code or "").strip()
         if tool_code and preset_alias == tool_code.casefold():

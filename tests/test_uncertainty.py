@@ -529,12 +529,20 @@ def test_uncertainty_presets_are_normalized_and_monotonic() -> None:
         == UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
     )
     assert (
+        normalize_uncertainty_preset("MWD Unknown Magnetic")
+        == UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC
+    )
+    assert (
         normalize_uncertainty_preset("Стандартная точность MWD (ISCWSA POOR)")
         == UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
     )
     assert (
+        normalize_uncertainty_preset("MWD POOR Magnetic")
+        == UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC
+    )
+    assert (
         uncertainty_preset_label(UNCERTAINTY_PRESET_MWD_POOR_MAGNETIC)
-        == "Стандартная точность MWD (ISCWSA POOR)"
+        == "MWD POOR Magnetic"
     )
 
     poor_model = planning_uncertainty_model_for_preset(

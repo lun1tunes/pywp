@@ -299,7 +299,13 @@ def _single_well_pilot_context(
     parent_success: object,
     successes: list[object],
     records: list[object],
-) -> tuple[str | None, pd.DataFrame | None, tuple[Point3D, ...]]:
+) -> tuple[
+    str | None,
+    pd.DataFrame | None,
+    tuple[Point3D, ...],
+    float | None,
+    Point3D | None,
+]:
     pilot_success = _pilot_success_for_parent(
         parent_success=parent_success,
         successes=successes,
@@ -314,14 +320,38 @@ def _single_well_pilot_context(
         or getattr(pilot_record, "name", "")
         or ""
     ).strip()
+    pilot_kop_md_m = None
+    pilot_summary = getattr(pilot_success, "summary", {}) or {}
+    if hasattr(pilot_summary, "get"):
+        try:
+            pilot_kop_md_m = float(pilot_summary.get("kop_md_m"))
+        except (TypeError, ValueError):
+            pilot_kop_md_m = None
+    sidetrack_window_point = None
+    parent_summary = getattr(parent_success, "summary", {}) or {}
+    if hasattr(parent_summary, "get"):
+        try:
+            sidetrack_window_point = Point3D(
+                x=float(parent_summary.get("sidetrack_window_x_m")),
+                y=float(parent_summary.get("sidetrack_window_y_m")),
+                z=float(parent_summary.get("sidetrack_window_z_m")),
+            )
+        except (TypeError, ValueError):
+            sidetrack_window_point = None
     if not pilot_name:
-        return None, None, ()
+        return None, None, (), pilot_kop_md_m, sidetrack_window_point
     study_points = (
         _pilot_study_points_from_record(pilot_record)
         if pilot_record is not None
         else _pilot_study_points_from_success(pilot_success)
     )
-    return pilot_name, getattr(pilot_success, "stations", None), study_points
+    return (
+        pilot_name,
+        getattr(pilot_success, "stations", None),
+        study_points,
+        pilot_kop_md_m,
+        sidetrack_window_point,
+    )
 
 
 def _pilot_success_for_parent(
@@ -1372,11 +1402,23 @@ def render_success_tabs(
             selected_name=str(selected_name),
             successes=successes,
         )
-        pilot_name, pilot_stations, pilot_study_points = _single_well_pilot_context(
+        pilot_context = _single_well_pilot_context(
             parent_success=selected,
             successes=successes,
             records=records,
         )
+        if len(pilot_context) >= 5:
+            (
+                pilot_name,
+                pilot_stations,
+                pilot_study_points,
+                pilot_kop_md_m,
+                sidetrack_window_point,
+            ) = pilot_context[:5]
+        else:
+            pilot_name, pilot_stations, pilot_study_points = pilot_context[:3]
+            pilot_kop_md_m = None
+            sidetrack_window_point = None
         well_view = SingleWellResultView(
             well_name=str(selected.name),
             surface=selected.surface,
@@ -1400,6 +1442,8 @@ def render_success_tabs(
             pilot_name=pilot_name,
             pilot_stations=pilot_stations,
             pilot_study_points=pilot_study_points,
+            pilot_kop_md_m=pilot_kop_md_m,
+            sidetrack_window_point=sidetrack_window_point,
         )
         survey_export_stations = None
         survey_export_xy_label_suffix = ""

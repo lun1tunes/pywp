@@ -801,6 +801,30 @@ def test_three_viewer_edit_state_has_single_preview_line_declaration() -> None:
     )
 
 
+def test_three_viewer_pair_move_scope_shifts_only_target_points() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "function editEntryMovesWithPairScope(entry)" in html
+    assert 'return pointType === "t1" || pointType === "t3";' in html
+    assert "position: editEntryMovesWithPairScope(entry)" in html
+    assert ": copyEditPoint(entry.position)," in html
+
+
+def test_three_viewer_sidetrack_window_drag_snaps_by_cursor_ray() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "function pointerRayForViewport(event, activeCamera, viewportRect)" in html
+    assert "function miniMapViewportClientRect()" in html
+    assert "function nearestSidetrackParentPointFromRawTarget(handle, target)" in html
+    assert "ray.distanceSqToSegment(" in html
+    assert 'const activeCamera = inputMode === "minimap" ? miniMapCamera : camera;' in html
+    assert "best = {" in html
+    assert "mdM: start[3] + (end[3] - start[3]) * t," in html
+    assert "return best || nearestSidetrackParentPointFromRawTarget(handle, fallbackTarget);" in html
+    assert "sidetrackWindowUpdate = snappedSidetrackWindowEntry(" in html
+    assert "editDragInputMode," in html
+
+
 def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     monkeypatch,
     tmp_path: Path,
