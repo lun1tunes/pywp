@@ -707,14 +707,22 @@ def _target_miss_warning_message(summary: Mapping[str, object]) -> str:
         f"по вертикали {t1_vertical_m:.2f}/{t3_vertical_m:.2f} м "
         f"(допуск {vertical_tolerance_m:.2f} м)."
     )
-    build_limit = _summary_float(summary, "build_dls_max_config_deg_per_30m")
+    build1_limit = _summary_float(summary, "build_dls_max_config_deg_per_30m")
+    build2_limit = _summary_float(summary, "build2_dls_max_config_deg_per_30m")
+    if build2_limit <= 0.0:
+        build2_limit = build1_limit
     build1_dls = _summary_float(summary, "build1_dls_selected_deg_per_30m")
     build2_dls = _summary_float(summary, "build2_dls_selected_deg_per_30m")
-    if build_limit > 0.0 and max(build1_dls, build2_dls) >= build_limit - 1e-3:
+    build_limit_messages: list[str] = []
+    if build1_limit > 0.0 and build1_dls >= build1_limit - 1e-3:
+        build_limit_messages.append(f"BUILD1 {dls_to_pi(build1_limit):.2f} deg/10m")
+    if build2_limit > 0.0 and build2_dls >= build2_limit - 1e-3:
+        build_limit_messages.append(f"BUILD2 {dls_to_pi(build2_limit):.2f} deg/10m")
+    if build_limit_messages:
         message += (
-            " BUILD ПИ уже на лимите "
-            f"{dls_to_pi(build_limit):.2f} deg/10m; для точного попадания "
-            "увеличьте лимит или скорректируйте геометрию целей."
+            " BUILD ПИ уже на лимите: "
+            + ", ".join(build_limit_messages)
+            + "; для точного попадания увеличьте лимит или скорректируйте геометрию целей."
         )
     return message
 

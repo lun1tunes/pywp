@@ -10,20 +10,34 @@ import pandas as pd
 
 from pywp.eclipse_welltrack import (
     WelltrackRecord,
+    WelltrackParseError,
     parse_welltrack_points_table,
     parse_welltrack_text,
 )
 from pywp.pilot_wells import visible_well_names
+from pywp.ptc_target_import_dev import (
+    DevTargetImportSummary,
+    dev_target_import_summary_dataframe,
+    dev_trajectory_text_name,
+    parse_dev_target_directory,
+    parse_dev_target_file,
+    parse_dev_target_payloads,
+)
 
 __all__ = [
     "AUTO_LAYOUT_APPLIED_MESSAGE",
     "DEFAULT_WELLTRACK_PATH",
+    "DEFAULT_DEV_TRAJECTORY_PATH",
+    "DevTargetImportSummary",
     "TargetImportEmptySourceError",
     "TargetImportOperation",
+    "TargetImportParseResult",
     "TargetImportStoreResult",
+    "WT_SOURCE_FORMAT_DEV_TRAJECTORY",
     "WT_SOURCE_FORMAT_OPTIONS",
     "WT_SOURCE_FORMAT_TARGET_TABLE",
     "WT_SOURCE_FORMAT_WELLTRACK",
+    "WT_SOURCE_KIND_DEV_TRAJECTORY",
     "WT_SOURCE_MODE_FILE_PATH",
     "WT_SOURCE_MODE_INLINE_TEXT",
     "WT_SOURCE_MODE_TARGET_TABLE",
@@ -33,6 +47,7 @@ __all__ = [
     "build_target_import_operation",
     "clear_target_import_flow_state",
     "coerce_source_table_df_columns",
+    "dev_target_import_summary_dataframe",
     "empty_source_table_df",
     "expand_single_column_source_table_df",
     "init_target_source_state_defaults",
@@ -42,10 +57,13 @@ __all__ = [
 ]
 
 DEFAULT_WELLTRACK_PATH = Path("tests/test_data/WELLTRACKS4.INC")
+DEFAULT_DEV_TRAJECTORY_PATH = Path("tests/test_data/dev_target_import")
 WT_SOURCE_FORMAT_WELLTRACK = "WELLTRACK"
+WT_SOURCE_FORMAT_DEV_TRAJECTORY = ".dev траектория"
 WT_SOURCE_FORMAT_TARGET_TABLE = "Таблица с точками целей"
 WT_SOURCE_FORMAT_OPTIONS: tuple[str, ...] = (
     WT_SOURCE_FORMAT_WELLTRACK,
+    WT_SOURCE_FORMAT_DEV_TRAJECTORY,
     WT_SOURCE_FORMAT_TARGET_TABLE,
 )
 WT_SOURCE_MODE_FILE_PATH = "Файл по пути"
@@ -64,6 +82,7 @@ AUTO_LAYOUT_APPLIED_MESSAGE = (
 )
 _TARGET_IMPORT_KIND_TABLE = "target_table"
 _TARGET_IMPORT_KIND_WELLTRACK = "welltrack"
+WT_SOURCE_KIND_DEV_TRAJECTORY = "dev_trajectory"
 _SOURCE_TABLE_COLUMNS = ("Wellname", "Point", "X", "Y", "Z")
 _SOURCE_TABLE_ALIAS_MAP = {
     "wellname": "Wellname",
@@ -96,12 +115,21 @@ class WelltrackSourcePayload:
     """Normalized payload returned by the target-source UI block."""
 
     mode: str
+    source_format: str = WT_SOURCE_FORMAT_WELLTRACK
     source_text: str = ""
+    source_path: str = ""
+    source_files: tuple[tuple[str, bytes], ...] = ()
     table_rows: pd.DataFrame | None = None
 
 
 class TargetImportEmptySourceError(ValueError):
     """Raised when the user requested import from an empty source."""
+
+
+@dataclass(frozen=True)
+class TargetImportParseResult:
+    records: tuple[WelltrackRecord, ...]
+    dev_summaries: tuple[DevTargetImportSummary, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,17 +143,34 @@ class TargetImportOperation:
     success_label_template: str
     error_label: str
     source_text: str = ""
+    source_path: str = ""
+    source_files: tuple[tuple[str, bytes], ...] = ()
     table_rows: pd.DataFrame | None = None
     parse_welltrack_text_func: Callable[[str], list[WelltrackRecord]] = (
         parse_welltrack_text
     )
 
-    def parse_records(self) -> list[WelltrackRecord]:
+    def parse(self) -> TargetImportParseResult:
         if self.source_kind == _TARGET_IMPORT_KIND_TABLE:
-            return parse_welltrack_points_table(
-                pd.DataFrame(self.table_rows).to_dict(orient="records")
+            return TargetImportParseResult(
+                records=tuple(
+                    parse_welltrack_points_table(
+                        pd.DataFrame(self.table_rows).to_dict(orient="records")
+                    )
+                )
             )
-        return self.parse_welltrack_text_func(str(self.source_text))
+        if self.source_kind == WT_SOURCE_KIND_DEV_TRAJECTORY:
+            return _parse_dev_target_payload(
+                source_text=self.source_text,
+                source_path=self.source_path,
+                source_files=self.source_files,
+            )
+        return TargetImportParseResult(
+            records=tuple(self.parse_welltrack_text_func(str(self.source_text)))
+        )
+
+    def parse_records(self) -> list[WelltrackRecord]:
+        return list(self.parse().records)
 
     def count_message(self, record_count: int) -> str:
         return self.count_message_template.format(record_count=int(record_count))
@@ -204,6 +249,8 @@ def init_target_source_state_defaults(
     session_state.setdefault("wt_source_path", str(DEFAULT_WELLTRACK_PATH))
     session_state.setdefault("wt_source_inline", "")
     session_state.setdefault("wt_source_upload_file", None)
+    session_state.setdefault("wt_source_dev_inline", "")
+    session_state.setdefault("wt_source_dev_upload_files", [])
     session_state.setdefault("wt_source_table_df", empty_source_table_df())
     session_state.setdefault("wt_source_table_editor_nonce", 0)
 
@@ -234,6 +281,40 @@ def build_target_import_operation(
             parse_welltrack_text_func=parse_welltrack_text_func,
         )
 
+    if source_payload.source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY:
+        if source_payload.mode == WT_SOURCE_MODE_FILE_PATH and not str(
+            source_payload.source_path
+        ).strip():
+            raise TargetImportEmptySourceError(
+                "Источник пустой. Укажите путь к .dev файлу или папке."
+            )
+        if (
+            source_payload.mode == WT_SOURCE_MODE_UPLOAD
+            and not tuple(source_payload.source_files)
+        ):
+            raise TargetImportEmptySourceError(
+                "Источник пустой. Загрузите хотя бы один .dev файл."
+            )
+        if (
+            source_payload.mode == WT_SOURCE_MODE_INLINE_TEXT
+            and not str(source_payload.source_text).strip()
+        ):
+            raise TargetImportEmptySourceError(
+                "Источник пустой. Вставьте текст .dev."
+            )
+        return TargetImportOperation(
+            source_kind=WT_SOURCE_KIND_DEV_TRAJECTORY,
+            status_label="Чтение и разбор .dev траекторий...",
+            progress_message="Поиск S / KOP / t1 / t3 и параметров траектории.",
+            count_message_template="Прочитано .dev траекторий: {record_count}.",
+            success_label_template="Импорт .dev завершен за {elapsed_s:.2f} с",
+            error_label="Ошибка разбора .dev",
+            source_text=str(source_payload.source_text),
+            source_path=str(source_payload.source_path),
+            source_files=tuple(source_payload.source_files),
+            parse_welltrack_text_func=parse_welltrack_text_func,
+        )
+
     source_text = str(source_payload.source_text)
     if not source_text.strip():
         raise TargetImportEmptySourceError(
@@ -255,6 +336,8 @@ def store_imported_records(
     session_state: MutableMapping[str, object],
     *,
     records: Sequence[WelltrackRecord],
+    dev_summaries: Sequence[DevTargetImportSummary] = (),
+    source_kind: str = _TARGET_IMPORT_KIND_WELLTRACK,
     loaded_at_text: str,
     clear_t1_t3_order_state: Callable[[], None],
     clear_pad_state: Callable[[], None],
@@ -268,6 +351,13 @@ def store_imported_records(
     session_state["wt_records"] = list(normalized_records)
     session_state["wt_records_original"] = list(normalized_records)
     session_state["wt_loaded_at"] = str(loaded_at_text)
+    session_state["wt_target_import_source_kind"] = str(source_kind)
+    session_state["wt_imported_dev_params"] = tuple(dev_summaries)
+    session_state["wt_well_calc_overrides_enabled"] = False
+    session_state["wt_well_calc_overrides"] = {}
+    session_state["wt_well_calc_override_selected_names"] = []
+    session_state["wt_well_calc_override_selected_signature"] = ()
+    session_state["wt_well_calc_override_feedback"] = ""
     session_state.pop("wt_preprocess_horizontal_length_m", None)
     session_state.pop("wt_records_overview_expand_once", None)
     session_state.pop("wt_edit_targets_applied_note", None)
@@ -294,6 +384,13 @@ def reset_failed_import_state(
 
     session_state["wt_records"] = None
     session_state["wt_records_original"] = None
+    session_state["wt_target_import_source_kind"] = ""
+    session_state["wt_imported_dev_params"] = ()
+    session_state["wt_well_calc_overrides_enabled"] = False
+    session_state["wt_well_calc_overrides"] = {}
+    session_state["wt_well_calc_override_selected_names"] = []
+    session_state["wt_well_calc_override_selected_signature"] = ()
+    session_state["wt_well_calc_override_feedback"] = ""
     session_state.pop("wt_preprocess_horizontal_length_m", None)
     session_state.pop("wt_records_overview_expand_once", None)
     session_state.pop("wt_edit_targets_applied_note", None)
@@ -314,6 +411,13 @@ def clear_target_import_flow_state(
 
     session_state["wt_records"] = None
     session_state["wt_records_original"] = None
+    session_state["wt_target_import_source_kind"] = ""
+    session_state["wt_imported_dev_params"] = ()
+    session_state["wt_well_calc_overrides_enabled"] = False
+    session_state["wt_well_calc_overrides"] = {}
+    session_state["wt_well_calc_override_selected_names"] = []
+    session_state["wt_well_calc_override_selected_signature"] = ()
+    session_state["wt_well_calc_override_feedback"] = ""
     session_state["wt_reference_wells"] = ()
     for key in reference_well_state_keys:
         session_state[str(key)] = ()
@@ -385,3 +489,34 @@ def expand_single_column_source_table_df(table_df: pd.DataFrame) -> pd.DataFrame
             }
         )
     return pd.DataFrame(rows, columns=list(_SOURCE_TABLE_COLUMNS))
+
+
+def _parse_dev_target_payload(
+    *,
+    source_text: str,
+    source_path: str,
+    source_files: Sequence[tuple[str, bytes]],
+) -> TargetImportParseResult:
+    pairs: list[tuple[WelltrackRecord, DevTargetImportSummary]] = []
+    normalized_path = str(source_path).strip()
+    if normalized_path:
+        path_obj = Path(normalized_path).expanduser()
+        if not path_obj.exists():
+            raise WelltrackParseError(f"Путь .dev не найден: `{path_obj}`.")
+        if path_obj.is_dir():
+            pairs.extend(parse_dev_target_directory(path_obj))
+        else:
+            pairs.append(parse_dev_target_file(path_obj))
+    elif source_files:
+        pairs.extend(parse_dev_target_payloads(tuple(source_files)))
+    else:
+        fallback_name = dev_trajectory_text_name(source_text)
+        pairs.extend(
+            parse_dev_target_payloads(
+                ((f"{fallback_name}.dev", str(source_text).encode("utf-8")),)
+            )
+        )
+    return TargetImportParseResult(
+        records=tuple(record for record, _summary in pairs),
+        dev_summaries=tuple(summary for _record, summary in pairs),
+    )

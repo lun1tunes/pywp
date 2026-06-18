@@ -1278,6 +1278,35 @@ def test_results_calc_params_changed_after_last_run_uses_ptc_binding_signature(
     assert ptc_page_results._calc_params_changed_after_last_run() is True
 
 
+def test_results_calc_params_changed_after_last_run_detects_manual_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStreamlit:
+        session_state = {
+            "wt_last_calc_param_signature": ("current",),
+            "wt_last_well_calc_override_signature": (False, ()),
+        }
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "WT_CALC_PARAMS",
+        SimpleNamespace(state_signature=lambda: ("current",)),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY",
+        "wt_last_well_calc_override_signature",
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_manual_well_calc_override_signature",
+        lambda: (True, (("WELL-A", (("dls_build_max", 0.8),)),)),
+    )
+
+    assert ptc_page_results._calc_params_changed_after_last_run() is True
+
+
 def test_overview_target_only_wells_include_loaded_but_not_selected_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

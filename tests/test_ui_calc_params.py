@@ -3,17 +3,22 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from pywp.actual_fund_analysis import ActualFundKopDepthFunction
 from pywp import TrajectoryConfig
 from pywp.models import J_PROFILE_POLICY_OFF
 from pywp.ui_calc_params import (
     CalcParamBinding,
     apply_calc_param_defaults,
+    build_config_from_values,
     build_config_from_state,
     calc_param_defaults,
+    calc_param_state_values_from_config,
     clear_kop_min_vertical_function,
     kop_min_vertical_function_from_state,
     kop_min_vertical_mode,
+    set_calc_param_state_values,
     set_kop_min_vertical_function,
 )
 from pywp.ui_utils import dls_to_pi
@@ -49,6 +54,8 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["interpolation_method"] == str(cfg.interpolation_method)
     assert defaults["j_profile_policy"] == str(cfg.j_profile_policy)
     assert defaults["j_profile_policy"] == J_PROFILE_POLICY_OFF
+    assert defaults["dls_build2_enabled"] is False
+    assert defaults["dls_build2_max"] == pytest.approx(defaults["dls_build_max"])
     assert defaults["offer_j_profile"] == bool(cfg.offer_j_profile)
     assert defaults["offer_j_profile"] is False
     assert abs(float(defaults["dls_build_max"]) - 0.8) < 1e-12
@@ -99,7 +106,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 14
+        == 15
     )
 
 
@@ -124,7 +131,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 14
+        == 15
     )
 
 
@@ -145,6 +152,79 @@ def test_build_config_from_state_uses_independent_horizontal_pi(monkeypatch) -> 
     assert config.dls_limits_deg_per_30m["BUILD1"] != config.dls_limits_deg_per_30m[
         "HORIZONTAL"
     ]
+
+
+def test_build_config_from_state_uses_optional_independent_build2_pi(
+    monkeypatch,
+) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["dls_build_max"] = 0.8
+    fake_st.session_state["dls_build2_enabled"] = True
+    fake_st.session_state["dls_build2_max"] = 1.6
+
+    config = build_config_from_state(prefix="")
+
+    assert abs(dls_to_pi(config.dls_build_max_deg_per_30m) - 0.8) < 1e-12
+    assert config.dls_build2_max_deg_per_30m is not None
+    assert abs(dls_to_pi(config.dls_build2_max_deg_per_30m) - 1.6) < 1e-12
+    assert config.dls_limits_deg_per_30m["BUILD1"] != config.dls_limits_deg_per_30m[
+        "BUILD2"
+    ]
+
+
+def test_calc_param_state_values_roundtrip_preserves_config() -> None:
+    config = TrajectoryConfig(
+        md_step_m=12.0,
+        md_step_control_m=2.5,
+        lateral_tolerance_m=7.0,
+        vertical_tolerance_m=1.2,
+        entry_inc_target_deg=86.5,
+        entry_inc_tolerance_deg=0.8,
+        max_inc_deg=92.0,
+        max_total_md_postcheck_m=8200.0,
+        dls_build_max_deg_per_30m=2.1,
+        dls_build2_max_deg_per_30m=3.6,
+        dls_horizontal_max_deg_per_30m=1.5,
+        kop_min_vertical_m=950.0,
+        optimization_mode="minimize_md",
+        turn_solver_max_restarts=3,
+        turn_solver_mode="de_hybrid",
+        interpolation_method="slerp",
+        j_profile_policy="prefer",
+        offer_j_profile=True,
+    )
+
+    values = calc_param_state_values_from_config(config)
+    restored = build_config_from_values(values)
+
+    assert restored.model_dump(exclude={"dls_build2_max_deg_per_30m"}) == (
+        config.model_dump(exclude={"dls_build2_max_deg_per_30m"})
+    )
+    assert restored.dls_build2_max_deg_per_30m == pytest.approx(
+        config.dls_build2_max_deg_per_30m
+    )
+
+
+def test_set_calc_param_state_values_populates_prefixed_state(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    values = calc_param_defaults()
+    values["dls_build_max"] = 0.6
+    values["offer_j_profile"] = True
+
+    set_calc_param_state_values(prefix="wt_local_", values=values)
+
+    assert fake_st.session_state["wt_local_dls_build_max"] == 0.6
+    assert fake_st.session_state["wt_local_offer_j_profile"] is True
+    assert fake_st.session_state["wt_local_kop_min_vertical_mode"] == "constant"
 
 
 def test_calc_param_binding_uses_shared_defaults(monkeypatch) -> None:

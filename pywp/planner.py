@@ -999,6 +999,14 @@ def _solve_turn_profile(
     search_settings: TurnSearchSettings,
     progress_callback: ProgressCallback | None = None,
 ) -> TurnSolveResult:
+    build1_dls_upper = _resolve_build_dls_max(
+        config=config,
+        constrained_segments=("BUILD1",),
+    )
+    build2_dls_upper = _resolve_build_dls_max(
+        config=config,
+        constrained_segments=("BUILD2",),
+    )
     build_dls_upper = _resolve_build_dls_max(
         config=config,
         constrained_segments=("BUILD1", "BUILD2"),
@@ -1453,20 +1461,29 @@ def _solve_turn_profile(
             best_vertical_m = fallback_vertical_m
             best_miss_build_dls = fallback_build_dls
 
-    if (
+    split_build_requested = bool(
+        not zero_azimuth_turn
+        and abs(build1_dls_upper - build2_dls_upper) > SMALL
+    )
+    if split_build_requested or (
         not candidates
         and not zero_azimuth_turn
-        and build_dls_upper > build_dls_lower + SMALL
+        and max(build1_dls_upper, build2_dls_upper) > build_dls_lower + SMALL
     ):
         _emit_progress(
             progress_callback,
-            "Солвер: rescue-поиск с независимыми BUILD1/BUILD2.",
+            (
+                "Солвер: проверяем независимые BUILD1/BUILD2."
+                if split_build_requested
+                else "Солвер: rescue-поиск с независимыми BUILD1/BUILD2."
+            ),
             0.99,
         )
         split_candidates, split_best = _collect_split_build_turn_candidates(
             geometry=geometry,
             build_dls_lower_deg_per_30m=build_dls_lower,
-            build_dls_upper_deg_per_30m=build_dls_upper,
+            build_dls_upper_deg_per_30m=build1_dls_upper,
+            build2_dls_upper_deg_per_30m=build2_dls_upper,
             bounds=bounds,
             base_seed_vectors=seed_vectors,
             post_entry=post_entry,
@@ -1500,6 +1517,9 @@ def _solve_turn_profile(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=build_dls_lower,
             upper_dls_deg_per_30m=build_dls_upper,
+            upper_build2_dls_deg_per_30m=(
+                build2_dls_upper if split_build_requested else None
+            ),
             bounds=bounds,
             profile_builder=profile_builder,
             target_point=target_point,
@@ -1603,6 +1623,7 @@ def _make_turn_profile_builder(
     zero_azimuth_turn: bool,
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
+    upper_build2_dls_deg_per_30m: float | None = None,
     min_build_segment_m: float,
     post_entry: PostEntrySection,
     split_build: bool,
@@ -1618,7 +1639,11 @@ def _make_turn_profile_builder(
             build2_dls = _decode_build_dls_from_unit(
                 unit_value=float(values_list[1]),
                 lower_dls_deg_per_30m=lower_dls_deg_per_30m,
-                upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+                upper_dls_deg_per_30m=(
+                    float(upper_build2_dls_deg_per_30m)
+                    if upper_build2_dls_deg_per_30m is not None
+                    else upper_dls_deg_per_30m
+                ),
             )
             kop_index = 2
         else:
@@ -1874,15 +1899,21 @@ def _is_md_boundary_extremum_candidate(
     *,
     candidate: ProfileParameters,
     build_dls_upper_deg_per_30m: float,
+    build2_dls_upper_deg_per_30m: float | None = None,
     kop_lower_m: float,
 ) -> bool:
+    build2_upper = (
+        float(build_dls_upper_deg_per_30m)
+        if build2_dls_upper_deg_per_30m is None
+        else float(build2_dls_upper_deg_per_30m)
+    )
     return bool(
         abs(
             float(candidate.dls_build1_deg_per_30m) - float(build_dls_upper_deg_per_30m)
         )
         <= MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE
         and abs(
-            float(candidate.dls_build2_deg_per_30m) - float(build_dls_upper_deg_per_30m)
+            float(candidate.dls_build2_deg_per_30m) - build2_upper
         )
         <= MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE
         and abs(float(candidate.kop_vertical_m) - float(kop_lower_m))
@@ -1899,6 +1930,7 @@ def _select_anti_collision_candidate(
     zero_azimuth_turn: bool,
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
+    upper_build2_dls_deg_per_30m: float | None = None,
     bounds: tuple[tuple[float, float], ...],
     profile_builder: Callable[[np.ndarray], ProfileParameters | None],
     target_point: np.ndarray,
@@ -1919,6 +1951,7 @@ def _select_anti_collision_candidate(
         zero_azimuth_turn=zero_azimuth_turn,
         lower_dls_deg_per_30m=lower_dls_deg_per_30m,
         upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
         bounds=active_bounds,
         split_build=split_build,
     )
@@ -1965,6 +1998,7 @@ def _select_anti_collision_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
             bounds=active_bounds,
             split_build=split_build,
         )
@@ -2002,6 +2036,7 @@ def _select_anti_collision_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
             bounds=active_bounds,
             split_build=split_build,
         )
@@ -2087,6 +2122,7 @@ def _select_anti_collision_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
             bounds=active_bounds,
             split_build=split_build,
         )
@@ -2099,6 +2135,7 @@ def _select_anti_collision_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
             bounds=active_bounds,
             split_build=split_build,
         )
@@ -2123,6 +2160,7 @@ def _select_anti_collision_candidate(
                     zero_azimuth_turn=zero_azimuth_turn,
                     lower_dls_deg_per_30m=lower_dls_deg_per_30m,
                     upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+                    upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
                     bounds=active_bounds,
                     split_build=split_build,
                 )
@@ -2524,6 +2562,7 @@ def _candidate_vector_distance(
     zero_azimuth_turn: bool,
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
+    upper_build2_dls_deg_per_30m: float | None = None,
     bounds: tuple[tuple[float, float], ...],
     split_build: bool = False,
 ) -> float:
@@ -2532,6 +2571,7 @@ def _candidate_vector_distance(
         zero_azimuth_turn=zero_azimuth_turn,
         lower_dls_deg_per_30m=lower_dls_deg_per_30m,
         upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
         bounds=bounds,
         split_build=split_build,
     )
@@ -2564,6 +2604,7 @@ def _candidate_to_search_vector(
     zero_azimuth_turn: bool,
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
+    upper_build2_dls_deg_per_30m: float | None = None,
     bounds: tuple[tuple[float, float], ...],
     split_build: bool = False,
 ) -> np.ndarray:
@@ -2579,7 +2620,11 @@ def _candidate_to_search_vector(
             _encode_build_dls_to_unit(
                 build_dls_deg_per_30m=float(candidate.dls_build2_deg_per_30m),
                 lower_dls_deg_per_30m=lower_dls_deg_per_30m,
-                upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+                upper_dls_deg_per_30m=(
+                    float(upper_build2_dls_deg_per_30m)
+                    if upper_build2_dls_deg_per_30m is not None
+                    else upper_dls_deg_per_30m
+                ),
             )
         )
     vector.extend(
@@ -2600,7 +2645,9 @@ def _dedupe_profile_candidates(
     zero_azimuth_turn: bool,
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
+    upper_build2_dls_deg_per_30m: float | None = None,
     bounds: tuple[tuple[float, float], ...],
+    split_build: bool = False,
 ) -> list[ProfileParameters]:
     deduped: list[ProfileParameters] = []
     seen: set[tuple[float, ...]] = set()
@@ -2610,7 +2657,9 @@ def _dedupe_profile_candidates(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
             bounds=bounds,
+            split_build=split_build,
         )
         key = tuple(np.round(vector, decimals=8).tolist())
         if key in seen:
@@ -2708,6 +2757,7 @@ def _collect_optimization_seed_vectors(
     zero_azimuth_turn: bool,
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
+    upper_build2_dls_deg_per_30m: float | None = None,
     bounds: tuple[tuple[float, float], ...],
     split_build: bool = False,
 ) -> list[np.ndarray]:
@@ -2733,6 +2783,7 @@ def _collect_optimization_seed_vectors(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
             bounds=bounds,
             split_build=split_build,
         )
@@ -3489,6 +3540,7 @@ def _select_feasible_candidate(
     zero_azimuth_turn: bool,
     lower_dls_deg_per_30m: float,
     upper_dls_deg_per_30m: float,
+    upper_build2_dls_deg_per_30m: float | None = None,
     bounds: tuple[tuple[float, float], ...],
     profile_builder: Callable[[np.ndarray], ProfileParameters | None],
     target_point: np.ndarray,
@@ -3496,12 +3548,22 @@ def _select_feasible_candidate(
     progress_callback: ProgressCallback | None = None,
     profile_family_override: str | None = None,
 ) -> TurnSolveResult:
+    split_build_active = bool(
+        not zero_azimuth_turn and upper_build2_dls_deg_per_30m is not None
+    )
+    dedupe_bounds = (
+        _split_build_optimization_bounds(bounds=bounds)
+        if split_build_active
+        else bounds
+    )
     deduped_candidates = _dedupe_profile_candidates(
         candidates=candidates,
         zero_azimuth_turn=zero_azimuth_turn,
         lower_dls_deg_per_30m=lower_dls_deg_per_30m,
         upper_dls_deg_per_30m=upper_dls_deg_per_30m,
-        bounds=bounds,
+        upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
+        bounds=dedupe_bounds,
+        split_build=split_build_active,
     )
     if not deduped_candidates:
         raise PlanningError("No feasible candidate available for final selection.")
@@ -3574,6 +3636,7 @@ def _select_feasible_candidate(
             zero_azimuth_turn=zero_azimuth_turn,
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
             min_build_segment_m=float(config.min_structural_segment_m),
             post_entry=post_entry,
             split_build=True,
@@ -3587,6 +3650,7 @@ def _select_feasible_candidate(
                 zero_azimuth_turn=zero_azimuth_turn,
                 lower_dls_deg_per_30m=lower_dls_deg_per_30m,
                 upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+                upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
                 bounds=bounds,
                 profile_builder=profile_builder,
                 target_point=target_point,
@@ -3667,6 +3731,7 @@ def _select_feasible_candidate(
         zero_azimuth_turn=zero_azimuth_turn,
         lower_dls_deg_per_30m=lower_dls_deg_per_30m,
         upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
         min_build_segment_m=float(config.min_structural_segment_m),
         post_entry=post_entry,
         split_build=True,
@@ -3677,6 +3742,7 @@ def _select_feasible_candidate(
         zero_azimuth_turn=zero_azimuth_turn,
         lower_dls_deg_per_30m=lower_dls_deg_per_30m,
         upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
         bounds=optimization_bounds,
         split_build=True,
     )
@@ -3773,6 +3839,7 @@ def _select_feasible_candidate(
         if _is_md_boundary_extremum_candidate(
             candidate=current_best_after_2d,
             build_dls_upper_deg_per_30m=upper_dls_deg_per_30m,
+            build2_dls_upper_deg_per_30m=upper_build2_dls_deg_per_30m,
             kop_lower_m=kop_lower_bound,
         ):
             improved = bool(
@@ -4421,6 +4488,7 @@ def _collect_split_build_turn_candidates(
     geometry: SectionGeometry,
     build_dls_lower_deg_per_30m: float,
     build_dls_upper_deg_per_30m: float,
+    build2_dls_upper_deg_per_30m: float | None = None,
     bounds: tuple[tuple[float, float], ...],
     base_seed_vectors: list[np.ndarray],
     post_entry: PostEntrySection,
@@ -4429,10 +4497,28 @@ def _collect_split_build_turn_candidates(
     search_settings: TurnSearchSettings,
     zero_azimuth_turn: bool,
 ) -> tuple[list[ProfileParameters], tuple[float, float, float, float]]:
+    resolved_build2_upper = (
+        float(build_dls_upper_deg_per_30m)
+        if build2_dls_upper_deg_per_30m is None
+        else float(build2_dls_upper_deg_per_30m)
+    )
     if zero_azimuth_turn:
-        return [], (np.inf, np.inf, np.inf, float(build_dls_upper_deg_per_30m))
-    if build_dls_upper_deg_per_30m <= build_dls_lower_deg_per_30m + SMALL:
-        return [], (np.inf, np.inf, np.inf, float(build_dls_upper_deg_per_30m))
+        return [], (
+            np.inf,
+            np.inf,
+            np.inf,
+            float(max(build_dls_upper_deg_per_30m, resolved_build2_upper)),
+        )
+    if (
+        max(float(build_dls_upper_deg_per_30m), resolved_build2_upper)
+        <= build_dls_lower_deg_per_30m + SMALL
+    ):
+        return [], (
+            np.inf,
+            np.inf,
+            np.inf,
+            float(max(build_dls_upper_deg_per_30m, resolved_build2_upper)),
+        )
 
     split_bounds = _split_build_optimization_bounds(bounds=bounds)
     split_builder = _make_turn_profile_builder(
@@ -4440,6 +4526,7 @@ def _collect_split_build_turn_candidates(
         zero_azimuth_turn=False,
         lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
         upper_dls_deg_per_30m=build_dls_upper_deg_per_30m,
+        upper_build2_dls_deg_per_30m=resolved_build2_upper,
         min_build_segment_m=float(config.min_structural_segment_m),
         post_entry=post_entry,
         split_build=True,
@@ -4452,7 +4539,12 @@ def _collect_split_build_turn_candidates(
         build_dls_upper_deg_per_30m=build_dls_upper_deg_per_30m,
     )
     if not seed_vectors:
-        return [], (np.inf, np.inf, np.inf, float(build_dls_upper_deg_per_30m))
+        return [], (
+            np.inf,
+            np.inf,
+            np.inf,
+            float(max(build_dls_upper_deg_per_30m, resolved_build2_upper)),
+        )
 
     lower = np.array([item[0] for item in split_bounds], dtype=float)
     upper = np.array([item[1] for item in split_bounds], dtype=float)
@@ -4467,7 +4559,7 @@ def _collect_split_build_turn_candidates(
     best_miss = np.inf
     best_lateral_m = np.inf
     best_vertical_m = np.inf
-    best_build_dls = float(build_dls_upper_deg_per_30m)
+    best_build_dls = float(max(build_dls_upper_deg_per_30m, resolved_build2_upper))
     seen: set[tuple[float, float, float, float, float]] = set()
 
     for seed in seed_vectors:
@@ -5092,12 +5184,18 @@ def _resolve_build_dls_max(
     config: TrajectoryConfig,
     constrained_segments: tuple[str, ...],
 ) -> float:
-    build_dls = float(config.dls_build_max_deg_per_30m)
+    segment_limits: list[float] = []
+    dls_limits = config.dls_limits_deg_per_30m
     for segment in constrained_segments:
-        segment_limit = config.dls_limits_deg_per_30m.get(segment)
+        segment_limit = dls_limits.get(segment)
         if segment_limit is None:
             continue
-        build_dls = min(build_dls, float(segment_limit))
+        segment_limits.append(float(segment_limit))
+    build_dls = (
+        min(segment_limits)
+        if segment_limits
+        else float(config.dls_build_max_deg_per_30m)
+    )
     if build_dls <= SMALL:
         segments = ", ".join(constrained_segments)
         raise PlanningError(

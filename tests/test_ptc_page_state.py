@@ -36,6 +36,31 @@ def test_calc_params_changed_after_last_run_is_false_without_previous_run(
     assert page_state._calc_params_changed_after_last_run() is False
 
 
+def test_calc_params_changed_after_last_run_detects_manual_override_staleness(
+    monkeypatch,
+) -> None:
+    import pywp.ptc_page_state as page_state
+
+    fake_st = SimpleNamespace(
+        session_state={
+            "wt_last_calc_param_signature": ("current",),
+            "wt_last_well_calc_override_signature": (False, ()),
+        }
+    )
+    fake_wt = SimpleNamespace(
+        WT_CALC_PARAMS=SimpleNamespace(state_signature=lambda: ("current",)),
+        WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY="wt_last_well_calc_override_signature",
+        _manual_well_calc_override_signature=lambda: (
+            True,
+            (("WELL-A", (("dls_build_max", 0.8),)),),
+        ),
+    )
+    monkeypatch.setattr(page_state, "st", fake_st)
+    monkeypatch.setattr(page_state, "wt", fake_wt)
+
+    assert page_state._calc_params_changed_after_last_run() is True
+
+
 def test_should_expand_calc_params_panel_is_closed_by_default(
     monkeypatch,
 ) -> None:

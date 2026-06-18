@@ -89,10 +89,6 @@ _SEGMENT_DLS_FIXED_LIMITS: dict[str, float] = {
     "VERTICAL": 1.0,
     "HOLD": 2.0,
 }
-_SEGMENT_DLS_BUILD_CONTROLLED: set[str] = {
-    "BUILD1",
-    "BUILD2",
-}
 SummaryValue = float | int | str | bool
 SummaryDict = dict[str, SummaryValue]
 FiniteScalar = Annotated[float, Field(allow_inf_nan=False)]
@@ -112,10 +108,16 @@ def _coerce_legacy_bool(value: object) -> bool:
 def build_segment_dls_limits_deg_per_30m(
     build_dls_max_deg_per_30m: float,
     horizontal_dls_max_deg_per_30m: float | None = None,
+    build2_dls_max_deg_per_30m: float | None = None,
 ) -> dict[str, float]:
     """Build default segment DLS limits from BUILD and post-entry max values."""
 
     build_limit = float(max(build_dls_max_deg_per_30m, 0.0))
+    build2_limit = (
+        build_limit
+        if build2_dls_max_deg_per_30m is None
+        else float(max(build2_dls_max_deg_per_30m, 0.0))
+    )
     horizontal_limit = (
         build_limit
         if horizontal_dls_max_deg_per_30m is None
@@ -123,8 +125,10 @@ def build_segment_dls_limits_deg_per_30m(
     )
     limits: dict[str, float] = {}
     for segment_name in _SEGMENT_DLS_ORDER:
-        if segment_name in _SEGMENT_DLS_BUILD_CONTROLLED:
+        if segment_name == "BUILD1":
             limits[segment_name] = build_limit
+        elif segment_name == "BUILD2":
+            limits[segment_name] = build2_limit
         elif segment_name == "HORIZONTAL":
             limits[segment_name] = horizontal_limit
         else:
@@ -166,6 +170,7 @@ class TrajectoryConfig(FrozenModel):
     dls_build_max_deg_per_30m: NonNegativeFiniteScalar = (
         DEFAULT_BUILD_DLS_MAX_DEG_PER_30M
     )
+    dls_build2_max_deg_per_30m: NonNegativeFiniteScalar | None = None
     dls_horizontal_max_deg_per_30m: NonNegativeFiniteScalar = (
         DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M
     )
@@ -217,6 +222,11 @@ class TrajectoryConfig(FrozenModel):
                     "Unsupported DLS segment names: " + ", ".join(unknown_segments)
                 )
             if (
+                "dls_build2_max_deg_per_30m" not in payload
+                and "BUILD2" in raw_limits
+            ):
+                payload["dls_build2_max_deg_per_30m"] = raw_limits["BUILD2"]
+            if (
                 "dls_horizontal_max_deg_per_30m" not in payload
                 and "HORIZONTAL" in raw_limits
             ):
@@ -260,11 +270,23 @@ class TrajectoryConfig(FrozenModel):
             raise PlanningError("dls_build_min_deg_per_30m cannot be negative.")
         if self.dls_build_max_deg_per_30m < 0.0:
             raise PlanningError("dls_build_max_deg_per_30m cannot be negative.")
+        if (
+            self.dls_build2_max_deg_per_30m is not None
+            and self.dls_build2_max_deg_per_30m < 0.0
+        ):
+            raise PlanningError("dls_build2_max_deg_per_30m cannot be negative.")
         if self.dls_horizontal_max_deg_per_30m < 0.0:
             raise PlanningError("dls_horizontal_max_deg_per_30m cannot be negative.")
         if self.dls_build_min_deg_per_30m > self.dls_build_max_deg_per_30m:
             raise PlanningError(
                 "dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m."
+            )
+        if (
+            self.dls_build2_max_deg_per_30m is not None
+            and self.dls_build_min_deg_per_30m > self.dls_build2_max_deg_per_30m
+        ):
+            raise PlanningError(
+                "dls_build_min_deg_per_30m cannot exceed dls_build2_max_deg_per_30m."
             )
         if self.max_total_md_postcheck_m <= 0.0:
             raise PlanningError("max_total_md_postcheck_m must be positive.")
@@ -300,6 +322,14 @@ class TrajectoryConfig(FrozenModel):
             raise ValueError(
                 "dls_build_min_deg_per_30m cannot exceed dls_build_max_deg_per_30m."
             )
+        if (
+            self.dls_build2_max_deg_per_30m is not None
+            and float(self.dls_build_min_deg_per_30m)
+            > float(self.dls_build2_max_deg_per_30m)
+        ):
+            raise ValueError(
+                "dls_build_min_deg_per_30m cannot exceed dls_build2_max_deg_per_30m."
+            )
         if float(self.min_structural_segment_m) < float(self.md_step_control_m):
             raise ValueError("min_structural_segment_m must be >= md_step_control_m.")
 
@@ -311,6 +341,11 @@ class TrajectoryConfig(FrozenModel):
             float(self.dls_build_max_deg_per_30m),
             horizontal_dls_max_deg_per_30m=float(
                 self.dls_horizontal_max_deg_per_30m
+            ),
+            build2_dls_max_deg_per_30m=(
+                None
+                if self.dls_build2_max_deg_per_30m is None
+                else float(self.dls_build2_max_deg_per_30m)
             ),
         )
 

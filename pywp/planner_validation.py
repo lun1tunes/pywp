@@ -410,13 +410,23 @@ def _build_summary(
         "build1_dls_selected_deg_per_30m": float(params.dls_build1_deg_per_30m),
         "build2_dls_selected_deg_per_30m": float(params.dls_build2_deg_per_30m),
         "build_dls_max_config_deg_per_30m": float(config.dls_build_max_deg_per_30m),
+        "build2_dls_max_config_deg_per_30m": float(
+            config.dls_build2_max_deg_per_30m
+            if config.dls_build2_max_deg_per_30m is not None
+            else config.dls_build_max_deg_per_30m
+        ),
         "build_dls_relaxed_from_max": (
             "yes"
             if (
                 float(params.dls_build1_deg_per_30m)
                 < float(config.dls_build_max_deg_per_30m) - 1e-6
                 or float(params.dls_build2_deg_per_30m)
-                < float(config.dls_build_max_deg_per_30m) - 1e-6
+                < float(
+                    config.dls_build2_max_deg_per_30m
+                    if config.dls_build2_max_deg_per_30m is not None
+                    else config.dls_build_max_deg_per_30m
+                )
+                - 1e-6
             )
             else "no"
         ),

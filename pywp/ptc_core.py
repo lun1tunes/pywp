@@ -102,6 +102,7 @@ from pywp.eclipse_welltrack import (
     welltrack_points_to_target_pairs,
 )
 from pywp.models import Point3D
+from pywp.models import J_PROFILE_POLICY_PREFER
 from pywp.pilot_wells import (
     is_pilot_name,
     is_zbs_name,
@@ -148,9 +149,13 @@ from pywp.reference_trajectories import (
 from pywp.three_viewer import render_local_three_scene
 from pywp.ui_calc_params import (
     CalcParamBinding,
+    calc_param_defaults,
+    calc_param_state_values_from_config,
+    build_config_from_values,
     clear_kop_min_vertical_function,
     kop_min_vertical_function_from_state,
     kop_min_vertical_mode,
+    set_calc_param_state_values,
     set_kop_min_vertical_function,
 )
 from pywp.ui_theme import render_small_note
@@ -188,7 +193,9 @@ from pywp.welltrack_quality import (
 )
 
 DEFAULT_WELLTRACK_PATH = ptc_target_import.DEFAULT_WELLTRACK_PATH
+DEFAULT_DEV_TRAJECTORY_PATH = ptc_target_import.DEFAULT_DEV_TRAJECTORY_PATH
 WT_SOURCE_FORMAT_WELLTRACK = ptc_target_import.WT_SOURCE_FORMAT_WELLTRACK
+WT_SOURCE_FORMAT_DEV_TRAJECTORY = ptc_target_import.WT_SOURCE_FORMAT_DEV_TRAJECTORY
 WT_SOURCE_FORMAT_TARGET_TABLE = ptc_target_import.WT_SOURCE_FORMAT_TARGET_TABLE
 WT_SOURCE_FORMAT_OPTIONS = ptc_target_import.WT_SOURCE_FORMAT_OPTIONS
 WT_SOURCE_MODE_FILE_PATH = ptc_target_import.WT_SOURCE_MODE_FILE_PATH
@@ -246,6 +253,38 @@ _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
     "wt_cfg_kop_min_vertical_m": "wt_cfg_kop_min_vertical",
 }
 WT_CALC_PARAMS = CalcParamBinding(prefix="wt_cfg_")
+WT_WELL_OVERRIDE_EDITOR = CalcParamBinding(prefix="wt_well_cfg_")
+WT_WELL_CALC_OVERRIDE_ENABLED_KEY = "wt_well_calc_overrides_enabled"
+WT_WELL_CALC_OVERRIDE_STATE_KEY = "wt_well_calc_overrides"
+WT_WELL_CALC_OVERRIDE_SELECTION_KEY = "wt_well_calc_override_selected_names"
+WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY = (
+    "wt_well_calc_override_selected_signature"
+)
+WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY = "wt_well_calc_override_feedback"
+WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY = (
+    "wt_last_well_calc_override_signature"
+)
+_CALC_PARAM_OVERRIDE_LABELS: dict[str, str] = {
+    "md_step": "Шаг MD",
+    "md_control": "Контрольный шаг",
+    "lateral_tol": "Допуск XY",
+    "vertical_tol": "Допуск Z",
+    "entry_inc_target": "INC на t1",
+    "entry_inc_tol": "Допуск INC",
+    "max_inc": "Макс INC",
+    "max_total_md_postcheck": "Постпроверка MD",
+    "dls_build_max": "ПИ BUILD",
+    "dls_build2_enabled": "BUILD2 отдельно",
+    "dls_build2_max": "ПИ BUILD2",
+    "dls_horizontal_max": "ПИ HORIZONTAL",
+    "kop_min_vertical": "KOP",
+    "optimization_mode": "Оптимизация",
+    "turn_solver_max_restarts": "Рестарты",
+    "turn_solver_mode": "Метод",
+    "interpolation_method": "Интерполяция",
+    "j_profile_policy": "J-профиль",
+    "offer_j_profile": "Предлагать J",
+}
 DEFAULT_PAD_SPACING_M = ptc_pad_state.DEFAULT_PAD_SPACING_M
 DEFAULT_PAD_SURFACE_ANCHOR_MODE = ptc_pad_state.DEFAULT_PAD_SURFACE_ANCHOR_MODE
 
@@ -1453,6 +1492,7 @@ _ANTI_COLLISION_SIGNATURE_SUMMARY_FIELDS = (
 _ANTI_COLLISION_SIGNATURE_CONFIG_FIELDS = (
     "kop_min_vertical_m",
     "dls_build_max_deg_per_30m",
+    "dls_build2_max_deg_per_30m",
     "dls_horizontal_max_deg_per_30m",
     "optimization_mode",
 )
@@ -2271,6 +2311,8 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_selected_names", [])
     st.session_state.setdefault("wt_pending_selected_names", None)
     st.session_state.setdefault("wt_loaded_at", "")
+    st.session_state.setdefault("wt_target_import_source_kind", "")
+    st.session_state.setdefault("wt_imported_dev_params", ())
     st.session_state.setdefault("wt_pad_configs", {})
     st.session_state.setdefault("wt_pad_detected_meta", {})
     st.session_state.setdefault("wt_pad_selected_id", "")
@@ -2284,6 +2326,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_last_run_at", "")
     st.session_state.setdefault("wt_last_runtime_s", None)
     st.session_state.setdefault("wt_last_calc_param_signature", None)
+    st.session_state.setdefault(WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY, None)
     st.session_state.setdefault("wt_last_run_log_lines", [])
     st.session_state.setdefault("wt_log_verbosity", WT_LOG_COMPACT)
     st.session_state.setdefault("wt_results_view_mode", "Все скважины")
@@ -2343,6 +2386,11 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_prepared_recommendation_id", "")
     st.session_state.setdefault("wt_anticollision_prepared_cluster_id", "")
     st.session_state.setdefault("wt_prepared_recommendation_snapshot", None)
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ENABLED_KEY, False)
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_STATE_KEY, {})
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_KEY, [])
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY, ())
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY, "")
     st.session_state.setdefault("wt_last_anticollision_resolution", None)
     st.session_state.setdefault("wt_last_anticollision_previous_successes", {})
     st.session_state.setdefault("wt_anticollision_analysis_cache", {})
@@ -2452,6 +2500,7 @@ def _clear_results() -> None:
     st.session_state["wt_last_run_at"] = ""
     st.session_state["wt_last_runtime_s"] = None
     st.session_state["wt_last_calc_param_signature"] = None
+    st.session_state[WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY] = None
     st.session_state["wt_last_run_log_lines"] = []
     st.session_state["wt_results_view_mode"] = "Все скважины"
     st.session_state["wt_results_all_view_mode"] = "Anti-collision"
@@ -3203,6 +3252,548 @@ def _build_config_form(
     return binding.build_config()
 
 
+def _coerce_calc_param_override_value(
+    *,
+    suffix: str,
+    value: object,
+) -> float | int | str | bool | None:
+    default_value = calc_param_defaults()[suffix]
+    if isinstance(default_value, bool):
+        return bool(value)
+    if isinstance(default_value, int) and not isinstance(default_value, bool):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(default_value, float):
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric_value):
+            return None
+        return float(numeric_value)
+    return str(value)
+
+
+def _normalized_calc_param_override_values(
+    raw_values: object,
+) -> dict[str, float | int | str | bool]:
+    if not isinstance(raw_values, Mapping):
+        return {}
+    normalized: dict[str, float | int | str | bool] = {}
+    for suffix in calc_param_defaults():
+        if suffix not in raw_values:
+            continue
+        coerced = _coerce_calc_param_override_value(
+            suffix=suffix,
+            value=raw_values[suffix],
+        )
+        if coerced is not None:
+            normalized[suffix] = coerced
+    return normalized
+
+
+def _manual_well_calc_override_enabled() -> bool:
+    return bool(st.session_state.get(WT_WELL_CALC_OVERRIDE_ENABLED_KEY, False))
+
+
+def _manual_well_calc_overrides() -> dict[str, dict[str, object]]:
+    raw_state = st.session_state.get(WT_WELL_CALC_OVERRIDE_STATE_KEY, {})
+    if not isinstance(raw_state, Mapping):
+        return {}
+    normalized: dict[str, dict[str, object]] = {}
+    changed = False
+    for raw_name, raw_payload in raw_state.items():
+        well_name = str(raw_name).strip()
+        if not well_name or not isinstance(raw_payload, Mapping):
+            changed = True
+            continue
+        values = _normalized_calc_param_override_values(raw_payload.get("values", {}))
+        if not values:
+            changed = True
+            continue
+        normalized[well_name] = {
+            "values": values,
+            "source": str(raw_payload.get("source", "")).strip(),
+            "note": str(raw_payload.get("note", "")).strip(),
+        }
+        if (
+            values != raw_payload.get("values")
+            or normalized[well_name]["source"] != raw_payload.get("source", "")
+            or normalized[well_name]["note"] != raw_payload.get("note", "")
+        ):
+            changed = True
+    if changed:
+        st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = normalized
+    return normalized
+
+
+def _manual_well_calc_override_signature() -> tuple[object, ...]:
+    if not _manual_well_calc_override_enabled():
+        return (False, ())
+    items: list[tuple[str, tuple[tuple[str, object], ...]]] = []
+    for well_name, payload in sorted(_manual_well_calc_overrides().items()):
+        values = _normalized_calc_param_override_values(payload.get("values", {}))
+        items.append(
+            (
+                str(well_name),
+                tuple((suffix, values[suffix]) for suffix in sorted(values)),
+            )
+        )
+    return (True, tuple(items))
+
+
+def _coerce_manual_well_override_selection(
+    names: object,
+    *,
+    available_names: list[str],
+) -> list[str]:
+    visible_by_key = {well_name_key(name): str(name) for name in available_names}
+    coerced: list[str] = []
+    seen: set[str] = set()
+    for raw_name in names if isinstance(names, (list, tuple, set)) else []:
+        visible_name = visible_by_key.get(well_name_key(raw_name))
+        if visible_name is None or visible_name in seen:
+            continue
+        coerced.append(visible_name)
+        seen.add(visible_name)
+    return coerced
+
+
+def _sync_manual_well_override_selection(
+    *,
+    available_names: list[str],
+) -> list[str]:
+    current = _coerce_manual_well_override_selection(
+        st.session_state.get(WT_WELL_CALC_OVERRIDE_SELECTION_KEY, []),
+        available_names=available_names,
+    )
+    if current != st.session_state.get(WT_WELL_CALC_OVERRIDE_SELECTION_KEY, []):
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_KEY] = list(current)
+    return current
+
+
+def _set_manual_well_override_editor_from_config(
+    config: TrajectoryConfig,
+) -> None:
+    set_calc_param_state_values(
+        prefix=WT_WELL_OVERRIDE_EDITOR.prefix,
+        values=calc_param_state_values_from_config(config),
+    )
+
+
+def _effective_manual_well_override_values(
+    *,
+    base_config: TrajectoryConfig,
+    well_name: str,
+) -> dict[str, float | int | str | bool]:
+    values = calc_param_state_values_from_config(base_config)
+    if not _manual_well_calc_override_enabled():
+        return values
+    payload = _manual_well_calc_overrides().get(str(well_name), {})
+    values.update(_normalized_calc_param_override_values(payload.get("values", {})))
+    return values
+
+
+def _sync_manual_well_override_editor_selection(
+    *,
+    base_config: TrajectoryConfig,
+    selected_names: list[str],
+    records_by_name: Mapping[str, WelltrackRecord] | None = None,
+) -> None:
+    selection_signature = tuple(str(name) for name in selected_names)
+    if (
+        tuple(st.session_state.get(WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY, ()))
+        == selection_signature
+    ):
+        return
+    if selected_names:
+        source_values = _effective_manual_well_override_values(
+            base_config=base_config,
+            well_name=str(selected_names[0]),
+        )
+        if (
+            kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix)
+            is not None
+            and "kop_min_vertical"
+            not in _normalized_calc_param_override_values(
+                _manual_well_calc_overrides()
+                .get(str(selected_names[0]), {})
+                .get("values", {})
+            )
+            and records_by_name is not None
+        ):
+            record = records_by_name.get(str(selected_names[0]))
+            if record is not None:
+                evaluated_kop_m = _evaluated_kop_min_vertical_for_record(
+                    record=record,
+                    base_config=base_config,
+                    kop_function=kop_min_vertical_function_from_state(
+                        prefix=WT_CALC_PARAMS.prefix
+                    ),
+                )
+                if evaluated_kop_m is not None:
+                    source_values["kop_min_vertical"] = float(evaluated_kop_m)
+        editor_config = build_config_from_values(source_values)
+    else:
+        editor_config = base_config
+    _set_manual_well_override_editor_from_config(editor_config)
+    st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = (
+        selection_signature
+    )
+
+
+def _manual_well_override_diff_values(
+    *,
+    base_config: TrajectoryConfig,
+    override_config: TrajectoryConfig,
+) -> dict[str, float | int | str | bool]:
+    base_values = calc_param_state_values_from_config(base_config)
+    override_values = calc_param_state_values_from_config(override_config)
+    return {
+        suffix: override_values[suffix]
+        for suffix in base_values
+        if override_values[suffix] != base_values[suffix]
+    }
+
+
+def _store_manual_well_override_values(
+    *,
+    well_name: str,
+    values: dict[str, float | int | str | bool],
+    source: str,
+    note: str = "",
+) -> None:
+    overrides = dict(_manual_well_calc_overrides())
+    if values:
+        overrides[str(well_name)] = {
+            "values": dict(values),
+            "source": str(source).strip(),
+            "note": str(note).strip(),
+        }
+    else:
+        overrides.pop(str(well_name), None)
+    st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = overrides
+
+
+def _apply_manual_well_override_editor(
+    *,
+    base_config: TrajectoryConfig,
+    selected_names: list[str],
+) -> tuple[int, int]:
+    editor_config = WT_WELL_OVERRIDE_EDITOR.build_config()
+    diff_values = _manual_well_override_diff_values(
+        base_config=base_config,
+        override_config=editor_config,
+    )
+    applied_count = 0
+    cleared_count = 0
+    for well_name in selected_names:
+        had_override = str(well_name) in _manual_well_calc_overrides()
+        _store_manual_well_override_values(
+            well_name=str(well_name),
+            values=diff_values,
+            source="Ручная настройка",
+        )
+        if diff_values:
+            applied_count += 1
+        elif had_override:
+            cleared_count += 1
+    if diff_values:
+        st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    return applied_count, cleared_count
+
+
+def _clear_manual_well_overrides(
+    *,
+    well_names: Iterable[str] | None = None,
+) -> int:
+    overrides = dict(_manual_well_calc_overrides())
+    if well_names is None:
+        cleared_count = len(overrides)
+        overrides = {}
+    else:
+        cleared_count = 0
+        for well_name in well_names:
+            if overrides.pop(str(well_name), None) is not None:
+                cleared_count += 1
+    st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = overrides
+    if not overrides:
+        st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = False
+    return cleared_count
+
+
+def _dev_summary_override_values(
+    summary: ptc_target_import.DevTargetImportSummary,
+) -> dict[str, float | int | str | bool]:
+    values: dict[str, float | int | str | bool] = {
+        "kop_min_vertical": float(summary.kop_md_m),
+        "entry_inc_target": float(summary.entry_inc_deg),
+    }
+    build_dls_values = tuple(
+        float(value)
+        for value in summary.build1_dls_deg_per_30m
+        if np.isfinite(float(value))
+    )
+    if build_dls_values:
+        values["dls_build_max"] = float(dls_to_pi(max(build_dls_values)))
+    build2_dls_values = tuple(
+        float(value)
+        for value in summary.build2_dls_deg_per_30m
+        if np.isfinite(float(value))
+    )
+    if (
+        build_dls_values
+        and build2_dls_values
+        and str(summary.profile_label).strip() != "J-профиль"
+    ):
+        build1_max = float(max(build_dls_values))
+        build2_max = float(max(build2_dls_values))
+        if abs(build2_max - build1_max) > 1e-6:
+            values["dls_build2_enabled"] = True
+            values["dls_build2_max"] = float(dls_to_pi(build2_max))
+    horizontal_dls_values = tuple(
+        float(value)
+        for value in summary.horizontal_dls_deg_per_30m
+        if np.isfinite(float(value))
+    )
+    if horizontal_dls_values:
+        values["dls_horizontal_max"] = float(dls_to_pi(max(horizontal_dls_values)))
+    if str(summary.profile_label).strip() == "J-профиль":
+        values["j_profile_policy"] = J_PROFILE_POLICY_PREFER
+        values["offer_j_profile"] = True
+    return values
+
+
+def _dev_summary_uses_separate_build2(
+    summary: ptc_target_import.DevTargetImportSummary,
+) -> bool:
+    if str(summary.profile_label).strip() == "J-профиль":
+        return False
+    build1_dls_values = tuple(
+        float(value)
+        for value in summary.build1_dls_deg_per_30m
+        if np.isfinite(float(value))
+    )
+    build2_dls_values = tuple(
+        float(value)
+        for value in summary.build2_dls_deg_per_30m
+        if np.isfinite(float(value))
+    )
+    if not build1_dls_values or not build2_dls_values:
+        return False
+    return bool(abs(max(build2_dls_values) - max(build1_dls_values)) > 1e-6)
+
+
+def _apply_dev_params_to_manual_well_overrides(
+    *,
+    selected_names: list[str],
+) -> tuple[int, list[str]]:
+    summaries = tuple(st.session_state.get("wt_imported_dev_params", ()))
+    summary_by_name = {
+        str(summary.well_name): summary
+        for summary in summaries
+        if str(summary.well_name).strip()
+    }
+    applied_count = 0
+    missing_names: list[str] = []
+    for well_name in selected_names:
+        summary = summary_by_name.get(str(well_name))
+        if summary is None:
+            missing_names.append(str(well_name))
+            continue
+        existing_payload = _manual_well_calc_overrides().get(str(well_name), {})
+        stored_values = _normalized_calc_param_override_values(
+            existing_payload.get("values", {})
+        )
+        if not _dev_summary_uses_separate_build2(summary):
+            stored_values.pop("dls_build2_enabled", None)
+            stored_values.pop("dls_build2_max", None)
+        stored_values.update(_dev_summary_override_values(summary))
+        _store_manual_well_override_values(
+            well_name=str(well_name),
+            values=stored_values,
+            source="Импорт .dev",
+            note="KOP / INC / PI из .dev",
+        )
+        applied_count += 1
+    if applied_count > 0:
+        st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    return applied_count, missing_names
+
+
+def _manual_well_override_rows() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for well_name, payload in sorted(_manual_well_calc_overrides().items()):
+        values = _normalized_calc_param_override_values(payload.get("values", {}))
+        rows.append(
+            {
+                "Скважина": str(well_name),
+                "Источник": str(payload.get("source", "")).strip() or "—",
+                "Изменено полей": int(len(values)),
+                "Параметры": ", ".join(
+                    _CALC_PARAM_OVERRIDE_LABELS.get(suffix, suffix)
+                    for suffix in values
+                ),
+                "Примечание": str(payload.get("note", "")).strip() or "—",
+            }
+        )
+    return rows
+
+
+def _render_manual_well_calc_overrides(
+    *,
+    records: list[WelltrackRecord],
+) -> None:
+    available_names = _unique_well_names(record.name for record in records)
+    if not available_names:
+        return
+    overrides = _manual_well_calc_overrides()
+    if overrides:
+        visible_keys = {well_name_key(name) for name in available_names}
+        stale_names = [
+            str(name)
+            for name in overrides
+            if well_name_key(name) not in visible_keys
+        ]
+        if stale_names:
+            _clear_manual_well_overrides(well_names=stale_names)
+            overrides = _manual_well_calc_overrides()
+    base_config = WT_CALC_PARAMS.build_config()
+    st.markdown("#### Индивидуальные параметры по скважинам")
+    st.caption(
+        "Локальные параметры накладываются только на выбранные скважины и "
+        "заменяют общие значения только по изменённым полям."
+    )
+    st.toggle(
+        "Использовать индивидуальные параметры",
+        key=WT_WELL_CALC_OVERRIDE_ENABLED_KEY,
+    )
+    feedback_message = str(
+        st.session_state.pop(WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY, "")
+    ).strip()
+    if feedback_message:
+        st.info(feedback_message)
+    selected_names = _sync_manual_well_override_selection(
+        available_names=available_names
+    )
+    st.multiselect(
+        "Скважины с локальными параметрами",
+        options=available_names,
+        key=WT_WELL_CALC_OVERRIDE_SELECTION_KEY,
+    )
+    selected_names = _sync_manual_well_override_selection(
+        available_names=available_names
+    )
+    _sync_manual_well_override_editor_selection(
+        base_config=base_config,
+        selected_names=selected_names,
+        records_by_name={str(record.name): record for record in records},
+    )
+    imported_dev_names = {
+        str(item.well_name)
+        for item in tuple(st.session_state.get("wt_imported_dev_params", ()))
+        if str(item.well_name).strip()
+    }
+    toolbar_cols = st.columns([1.2, 1.35, 1.35, 1.1], gap="small")
+    load_global_clicked = toolbar_cols[0].button(
+        "Взять общие",
+        icon=":material/content_copy:",
+        width="stretch",
+    )
+    apply_dev_clicked = toolbar_cols[1].button(
+        "Подтянуть из .dev",
+        icon=":material/file_download:",
+        width="stretch",
+        disabled=not selected_names
+        or not imported_dev_names.intersection(set(selected_names)),
+    )
+    clear_selected_clicked = toolbar_cols[2].button(
+        "Сбросить выбранные",
+        icon=":material/filter_alt_off:",
+        width="stretch",
+        disabled=not selected_names,
+    )
+    clear_all_clicked = toolbar_cols[3].button(
+        "Сбросить все",
+        icon=":material/delete_sweep:",
+        width="stretch",
+        disabled=not overrides,
+    )
+    if load_global_clicked:
+        _set_manual_well_override_editor_from_config(base_config)
+    if apply_dev_clicked:
+        applied_count, missing_names = _apply_dev_params_to_manual_well_overrides(
+            selected_names=selected_names,
+        )
+        feedback = f"Параметры .dev применены к скважинам: {applied_count}."
+        if missing_names:
+            feedback += " Без .dev параметров: " + ", ".join(missing_names) + "."
+        st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = feedback
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
+        st.rerun()
+    if clear_selected_clicked:
+        cleared_count = _clear_manual_well_overrides(well_names=selected_names)
+        st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+            f"Сброшены локальные параметры для скважин: {cleared_count}."
+        )
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
+        st.rerun()
+    if clear_all_clicked:
+        cleared_count = _clear_manual_well_overrides()
+        st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+            f"Сброшены все локальные параметры: {cleared_count}."
+        )
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
+        st.rerun()
+    if imported_dev_names:
+        st.caption(
+            "Кнопка `.dev` подставляет KOP MD, INC в t1, PI BUILD, "
+            "PI HORIZONTAL и для J-профиля включает его приоритет."
+        )
+    editor_config = _build_config_form(
+        binding=WT_WELL_OVERRIDE_EDITOR,
+        title="",
+    )
+    del editor_config
+    apply_clicked = st.button(
+        "Применить выбранным",
+        type="primary",
+        icon=":material/tune:",
+        width="content",
+        disabled=not selected_names,
+    )
+    if apply_clicked:
+        applied_count, cleared_count = _apply_manual_well_override_editor(
+            base_config=base_config,
+            selected_names=selected_names,
+        )
+        message_parts: list[str] = []
+        if applied_count > 0:
+            message_parts.append(f"Применены локальные параметры: {applied_count}.")
+        if cleared_count > 0:
+            message_parts.append(f"Сброшены совпадающие с общими: {cleared_count}.")
+        if not message_parts:
+            message_parts.append("Изменений не было.")
+        st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = " ".join(
+            message_parts
+        )
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
+        st.rerun()
+    current_rows = _manual_well_override_rows()
+    if current_rows:
+        if not _manual_well_calc_override_enabled():
+            st.caption(
+                "Локальные параметры сохранены, но сейчас отключены и в расчёте не участвуют."
+            )
+        st.dataframe(
+            arrow_safe_text_dataframe(pd.DataFrame(current_rows)),
+            hide_index=True,
+            width="stretch",
+        )
+
+
 def _prepared_override_rows() -> list[dict[str, object]]:
     prepared = st.session_state.get("wt_prepared_well_overrides", {}) or {}
     recommendation_snapshot = dict(
@@ -3339,17 +3930,31 @@ def _build_selected_override_configs(
     prepared = st.session_state.get("wt_prepared_well_overrides", {}) or {}
     kop_function = kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix)
     config_map: dict[str, TrajectoryConfig] = {}
+    manual_overrides = (
+        _manual_well_calc_overrides() if _manual_well_calc_override_enabled() else {}
+    )
     for well_name in sorted(str(name) for name in selected_names):
+        manual_payload = dict(manual_overrides.get(well_name, {}))
+        manual_values = _normalized_calc_param_override_values(
+            manual_payload.get("values", {})
+        )
         payload = dict(prepared.get(well_name, {}))
         update_fields = dict(payload.get("update_fields", {}))
-        config = (
-            base_config.validated_copy(**update_fields)
-            if update_fields
-            else base_config
+        if manual_values:
+            effective_values = calc_param_state_values_from_config(base_config)
+            effective_values.update(manual_values)
+            config = build_config_from_values(effective_values)
+        else:
+            config = base_config
+        if update_fields:
+            config = config.validated_copy(**update_fields)
+        explicit_kop_override = (
+            "kop_min_vertical" in manual_values
+            or "kop_min_vertical_m" in update_fields
         )
         if kop_function is not None and records_by_name is not None:
             record = records_by_name.get(well_name)
-            if record is not None:
+            if record is not None and not explicit_kop_override:
                 evaluated_kop_m = _evaluated_kop_min_vertical_for_record(
                     record=record,
                     base_config=config,
@@ -3357,7 +3962,7 @@ def _build_selected_override_configs(
                 )
                 if evaluated_kop_m is not None:
                     config = config.validated_copy(kop_min_vertical_m=evaluated_kop_m)
-        if config == base_config and not update_fields:
+        if config == base_config and not update_fields and not manual_values:
             continue
         config_map[well_name] = config
     return config_map
@@ -4094,24 +4699,67 @@ def _build_source_payload_from_state() -> _WelltrackSourcePayload:
     if source_format == WT_SOURCE_FORMAT_TARGET_TABLE:
         return _WelltrackSourcePayload(
             mode=WT_SOURCE_MODE_TARGET_TABLE,
+            source_format=source_format,
             table_rows=pd.DataFrame(
                 st.session_state.get("wt_source_table_df", _empty_source_table_df())
             ),
+        )
+
+    if source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY:
+        if source_mode == WT_SOURCE_MODE_FILE_PATH:
+            return _WelltrackSourcePayload(
+                mode=source_mode,
+                source_format=source_format,
+                source_path=str(st.session_state.get("wt_source_path", "")).strip(),
+            )
+
+        if source_mode == WT_SOURCE_MODE_UPLOAD:
+            raw_files = st.session_state.get("wt_source_dev_upload_files") or []
+            uploaded_files = raw_files if isinstance(raw_files, list) else [raw_files]
+            payloads = tuple(
+                (
+                    str(getattr(item, "name", f"dev_{index + 1}.dev")),
+                    bytes(item.getvalue()),
+                )
+                for index, item in enumerate(uploaded_files)
+                if item is not None
+            )
+            return _WelltrackSourcePayload(
+                mode=source_mode,
+                source_format=source_format,
+                source_files=payloads,
+            )
+
+        if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
+            return _WelltrackSourcePayload(
+                mode=source_mode,
+                source_format=source_format,
+                source_text=str(st.session_state.get("wt_source_dev_inline", "")),
+            )
+
+        return _WelltrackSourcePayload(
+            mode=source_mode or WT_SOURCE_MODE_FILE_PATH,
+            source_format=source_format,
         )
 
     if source_mode == WT_SOURCE_MODE_FILE_PATH:
         source_path = str(st.session_state.get("wt_source_path", "")).strip()
         return _WelltrackSourcePayload(
             mode=source_mode,
+            source_format=source_format,
             source_text=_read_welltrack_file(source_path),
         )
 
     if source_mode == WT_SOURCE_MODE_UPLOAD:
         uploaded_file = st.session_state.get("wt_source_upload_file")
         if uploaded_file is None:
-            return _WelltrackSourcePayload(mode=source_mode)
+            return _WelltrackSourcePayload(
+                mode=source_mode,
+                source_format=source_format,
+            )
         return _WelltrackSourcePayload(
             mode=source_mode,
+            source_format=source_format,
             source_text=_decode_welltrack_payload(
                 uploaded_file.getvalue(),
                 source_label=f"Загруженный файл `{uploaded_file.name}`",
@@ -4121,10 +4769,14 @@ def _build_source_payload_from_state() -> _WelltrackSourcePayload:
     if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
         return _WelltrackSourcePayload(
             mode=source_mode,
+            source_format=source_format,
             source_text=str(st.session_state.get("wt_source_inline", "")),
         )
 
-    return _WelltrackSourcePayload(mode=source_mode or WT_SOURCE_MODE_FILE_PATH)
+    return _WelltrackSourcePayload(
+        mode=source_mode or WT_SOURCE_MODE_FILE_PATH,
+        source_format=source_format or WT_SOURCE_FORMAT_WELLTRACK,
+    )
 
 
 def _render_source_input() -> None:
@@ -4139,14 +4791,30 @@ def _render_source_input() -> None:
         horizontal=True,
         key="wt_source_format",
     )
+    current_source_path = str(st.session_state.get("wt_source_path", "")).strip()
+    if (
+        source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY
+        and current_source_path == str(DEFAULT_WELLTRACK_PATH)
+    ):
+        st.session_state["wt_source_path"] = str(DEFAULT_DEV_TRAJECTORY_PATH)
+    elif (
+        source_format == WT_SOURCE_FORMAT_WELLTRACK
+        and current_source_path == str(DEFAULT_DEV_TRAJECTORY_PATH)
+    ):
+        st.session_state["wt_source_path"] = str(DEFAULT_WELLTRACK_PATH)
 
-    if source_format == WT_SOURCE_FORMAT_WELLTRACK:
+    if source_format in {WT_SOURCE_FORMAT_WELLTRACK, WT_SOURCE_FORMAT_DEV_TRAJECTORY}:
         if str(st.session_state.get("wt_source_mode", "")).strip() not in set(
             WT_SOURCE_WELLTRACK_MODES
         ):
             st.session_state["wt_source_mode"] = WT_SOURCE_MODE_FILE_PATH
+        mode_title = (
+            "Способ загрузки WELLTRACK"
+            if source_format == WT_SOURCE_FORMAT_WELLTRACK
+            else "Способ загрузки .dev"
+        )
         source_mode = st.radio(
-            "Способ загрузки WELLTRACK",
+            mode_title,
             options=list(WT_SOURCE_WELLTRACK_MODES),
             horizontal=True,
             key="wt_source_mode",
@@ -4158,10 +4826,23 @@ def _render_source_input() -> None:
     if source_mode == WT_SOURCE_MODE_FILE_PATH:
         with st.form("wt_source_path_form", clear_on_submit=False):
             st.text_input(
-                "Путь к файлу WELLTRACK",
+                (
+                    "Путь к файлу WELLTRACK"
+                    if source_format == WT_SOURCE_FORMAT_WELLTRACK
+                    else "Путь к .dev файлу или папке"
+                ),
                 key="wt_source_path",
-                placeholder="tests/test_data/WELLTRACKS3.INC",
+                placeholder=(
+                    "tests/test_data/WELLTRACKS3.INC"
+                    if source_format == WT_SOURCE_FORMAT_WELLTRACK
+                    else "tests/test_data/dev_target_import"
+                ),
             )
+            if source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY:
+                st.caption(
+                    "Поддерживаются классические J и BUILD/HOLD/BUILD траектории "
+                    "без пилотов, ЗБС и многопластовых скважин."
+                )
             parse_clicked = st.form_submit_button(
                 "Импорт целей",
                 type="primary",
@@ -4173,12 +4854,28 @@ def _render_source_input() -> None:
         return
 
     if source_mode == WT_SOURCE_MODE_UPLOAD:
-        with st.form("wt_source_upload_form", clear_on_submit=False):
-            st.file_uploader(
-                "Файл ECLIPSE/INC",
-                type=["inc", "txt", "data", "ecl"],
-                key="wt_source_upload_file",
-            )
+        form_key = (
+            "wt_source_upload_form"
+            if source_format == WT_SOURCE_FORMAT_WELLTRACK
+            else "wt_source_dev_upload_form"
+        )
+        with st.form(form_key, clear_on_submit=False):
+            if source_format == WT_SOURCE_FORMAT_WELLTRACK:
+                st.file_uploader(
+                    "Файл ECLIPSE/INC",
+                    type=["inc", "txt", "data", "ecl"],
+                    key="wt_source_upload_file",
+                )
+            else:
+                st.file_uploader(
+                    ".dev файлы",
+                    type=["dev", "txt"],
+                    accept_multiple_files=True,
+                    key="wt_source_dev_upload_files",
+                )
+                st.caption(
+                    "Можно загрузить один или несколько `.dev` файлов."
+                )
             parse_clicked = st.form_submit_button(
                 "Импорт целей",
                 type="primary",
@@ -4190,13 +4887,34 @@ def _render_source_input() -> None:
         return
 
     if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
-        with st.form("wt_source_inline_form", clear_on_submit=False):
-            st.text_area(
-                "Текст WELLTRACK",
-                key="wt_source_inline",
-                height=220,
-                placeholder="WELLTRACK 'WELL-1'\n457091 891257 -63.2 0\n457707 890374 1852 1\n/",
-            )
+        form_key = (
+            "wt_source_inline_form"
+            if source_format == WT_SOURCE_FORMAT_WELLTRACK
+            else "wt_source_dev_inline_form"
+        )
+        with st.form(form_key, clear_on_submit=False):
+            if source_format == WT_SOURCE_FORMAT_WELLTRACK:
+                st.text_area(
+                    "Текст WELLTRACK",
+                    key="wt_source_inline",
+                    height=220,
+                    placeholder="WELLTRACK 'WELL-1'\n457091 891257 -63.2 0\n457707 890374 1852 1\n/",
+                )
+            else:
+                st.text_area(
+                    "Текст .dev",
+                    key="wt_source_dev_inline",
+                    height=220,
+                    placeholder=(
+                        "# SURVEY FROM PYWP\n"
+                        "# WELL NAME:                WELL-1\n"
+                        "MD X Y Z TVD DX DY AZIM_TN INCL DLS AZIM_GN\n"
+                    ),
+                )
+                st.caption(
+                    "Если в тексте есть строка `# WELL NAME: ...`, имя скважины "
+                    "будет взято из неё."
+                )
             parse_clicked = st.form_submit_button(
                 "Импорт целей",
                 type="primary",
@@ -4275,9 +4993,24 @@ def _render_source_input() -> None:
 
 
 def _store_parsed_records(records: list[WelltrackRecord]) -> bool:
+    return _store_parsed_records_with_metadata(
+        records=records,
+        dev_summaries=[],
+        source_kind="welltrack",
+    )
+
+
+def _store_parsed_records_with_metadata(
+    *,
+    records: list[WelltrackRecord],
+    dev_summaries: list[ptc_target_import.DevTargetImportSummary],
+    source_kind: str,
+) -> bool:
     result = ptc_target_import.store_imported_records(
         st.session_state,
         records=list(records),
+        dev_summaries=list(dev_summaries),
+        source_kind=str(source_kind),
         loaded_at_text=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         clear_t1_t3_order_state=_clear_t1_t3_order_resolution_state,
         clear_pad_state=_clear_pad_state,
@@ -4432,9 +5165,19 @@ def _handle_import_actions(
         started = perf_counter()
         try:
             status.write(operation.progress_message)
-            records = operation.parse_records()
-            auto_layout_applied = _store_parsed_records(records=records)
+            parse_result = operation.parse()
+            records = list(parse_result.records)
+            auto_layout_applied = _store_parsed_records_with_metadata(
+                records=records,
+                dev_summaries=list(parse_result.dev_summaries),
+                source_kind=str(operation.source_kind),
+            )
             status.write(operation.count_message(len(records)))
+            if parse_result.dev_summaries:
+                st.session_state["wt_records_overview_expand_once"] = True
+                status.write(
+                    "Прочитаны параметры траекторий .dev. Они показаны ниже в статусе загрузки целей."
+                )
             if auto_layout_applied:
                 status.write(ptc_target_import.AUTO_LAYOUT_APPLIED_MESSAGE)
             elapsed = perf_counter() - started
@@ -4508,6 +5251,21 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
         "Статус загрузки целей",
         expanded=bool(problem_count > 0 or overview_expand_once),
     ):
+        imported_dev_params = tuple(st.session_state.get("wt_imported_dev_params", ()))
+        if imported_dev_params:
+            st.markdown("#### Прочитанные параметры .dev")
+            st.caption(
+                "Параметры показаны для контроля. Расчёт ниже пока использует "
+                "настройки из блока параметров расчёта."
+            )
+            st.dataframe(
+                ptc_target_import.dev_target_import_summary_dataframe(
+                    imported_dev_params
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+            st.markdown("")
         preprocess_length_key = "wt_preprocess_horizontal_length_m"
         preprocess_feedback_key = "wt_preprocess_feedback_info"
         preprocess_selected_names_key = "wt_preprocess_selected_names"
@@ -6984,6 +7742,8 @@ def _batch_run_hooks() -> ptc_batch_run.BatchRunHooks:
         build_last_anticollision_resolution=_build_last_anticollision_resolution,
         focus_all_wells_anticollision_results=_focus_all_wells_anticollision_results,
         focus_all_wells_trajectory_results=_focus_all_wells_trajectory_results,
+        manual_override_signature=_manual_well_calc_override_signature,
+        manual_override_signature_key=WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY,
     )
 
 

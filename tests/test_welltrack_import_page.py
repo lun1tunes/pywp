@@ -2459,6 +2459,33 @@ def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_res
     assert at.session_state["wt_pad_auto_applied_on_import"] is False
 
 
+def test_dev_target_import_stores_read_parameters_and_target_points() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_source_format"] = ".dev траектория"
+    at.session_state["wt_source_mode"] = "Файл по пути"
+    at.session_state["wt_source_path"] = "tests/test_data/dev_target_import"
+
+    at.run(timeout=120)
+    _click_button(at, "Импорт целей")
+    at.run(timeout=120)
+
+    records = at.session_state["wt_records"]
+    imported_params = at.session_state["wt_imported_dev_params"]
+
+    assert [record.name for record in records] == [
+        "build_hold_build_equal_pi_with_horizontal_pi",
+        "build_hold_build_split_pi",
+        "j_profile_constant_pi",
+        "j_profile_variable_pi",
+    ]
+    assert len(imported_params) == 4
+    assert imported_params[0].build1_dls_deg_per_30m == (2.4,)
+    assert imported_params[0].horizontal_dls_deg_per_30m == (1.2,)
+    assert imported_params[-1].profile_label == "J-профиль"
+    markdown_values = [str(widget.value) for widget in at.markdown]
+    assert any("Прочитанные параметры .dev" in value for value in markdown_values)
+
+
 def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface() -> (
     None
 ):
@@ -3331,6 +3358,7 @@ def test_welltrack_import_source_selector_splits_format_and_welltrack_method() -
     radios_by_label = {str(widget.label): widget for widget in at.radio}
     assert list(radios_by_label["Формат импорта"].options) == [
         "WELLTRACK",
+        ".dev траектория",
         "Таблица с точками целей",
     ]
     assert radios_by_label["Формат импорта"].value == "WELLTRACK"
@@ -3352,6 +3380,20 @@ def test_welltrack_import_target_table_format_hides_welltrack_method() -> None:
     assert [str(widget.label) for widget in at.expander] == [
         "Таблица точек целей",
         "Пилоты, ЗБС и многопластовые",
+    ]
+
+
+def test_dev_target_import_format_shows_dev_loading_methods() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_source_format"] = ".dev траектория"
+
+    at.run(timeout=120)
+
+    radios_by_label = {str(widget.label): widget for widget in at.radio}
+    assert list(radios_by_label["Способ загрузки .dev"].options) == [
+        "Файл по пути",
+        "Загрузить файл",
+        "Вставить текст",
     ]
 
 
@@ -4212,6 +4254,133 @@ def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> 
         rel=1e-6,
     )
     clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
+
+
+def test_selected_override_configs_apply_manual_per_well_values() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    base_config = TrajectoryConfig()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "WELL-A": {
+            "values": {
+                "dls_build_max": 0.6,
+                "entry_inc_target": 84.5,
+            },
+            "source": "manual",
+        }
+    }
+
+    config_map = page._build_selected_override_configs(
+        base_config=base_config,
+        selected_names={"WELL-A", "WELL-B"},
+        records_by_name={record.name: record for record in _records()},
+    )
+
+    assert set(config_map) == {"WELL-A"}
+    assert config_map["WELL-A"].entry_inc_target_deg == pytest.approx(84.5)
+    assert config_map["WELL-A"].dls_build_max_deg_per_30m == pytest.approx(1.8)
+
+
+def test_selected_override_configs_keep_manual_kop_over_global_depth_function() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
+    set_kop_min_vertical_function(
+        prefix=page.WT_CALC_PARAMS.prefix,
+        kop_function=ActualFundKopDepthFunction(
+            mode="piecewise_linear",
+            cluster_count=2,
+            anchor_depths_tvd_m=(2000.0, 2600.0),
+            anchor_kop_md_m=(900.0, 1400.0),
+            note="test",
+        ),
+    )
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "WELL-A": {
+            "values": {"kop_min_vertical": 1111.0},
+            "source": "manual",
+        }
+    }
+
+    config_map = page._build_selected_override_configs(
+        base_config=TrajectoryConfig(),
+        selected_names={"WELL-A"},
+        records_by_name={record.name: record for record in _records()},
+    )
+
+    assert config_map["WELL-A"].kop_min_vertical_m == pytest.approx(1111.0)
+    clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
+
+
+def test_apply_dev_params_to_manual_well_overrides_sets_local_values() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_imported_dev_params"] = (
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-A",
+            profile_label="J-профиль",
+            kop_md_m=980.0,
+            t1_md_m=2500.0,
+            t3_md_m=4200.0,
+            entry_inc_deg=87.0,
+            build1_dls_deg_per_30m=(2.4,),
+            horizontal_dls_deg_per_30m=(1.5,),
+        ),
+    )
+
+    applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
+        selected_names=["WELL-A", "WELL-B"],
+    )
+
+    assert applied_count == 1
+    assert missing_names == ["WELL-B"]
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["WELL-A"]
+    assert payload["source"] == "Импорт .dev"
+    assert payload["values"]["kop_min_vertical"] == pytest.approx(980.0)
+    assert payload["values"]["entry_inc_target"] == pytest.approx(87.0)
+    assert payload["values"]["dls_build_max"] == pytest.approx(0.8)
+    assert "dls_build2_enabled" not in payload["values"]
+    assert "dls_build2_max" not in payload["values"]
+    assert payload["values"]["dls_horizontal_max"] == pytest.approx(0.5)
+    assert payload["values"]["j_profile_policy"] == "prefer"
+    assert payload["values"]["offer_j_profile"] is True
+
+
+def test_apply_dev_params_to_manual_well_overrides_sets_optional_build2_when_needed() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_imported_dev_params"] = (
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-A",
+            profile_label="BUILD-HOLD-BUILD",
+            kop_md_m=980.0,
+            t1_md_m=2500.0,
+            t3_md_m=4200.0,
+            entry_inc_deg=87.0,
+            build1_dls_deg_per_30m=(2.4,),
+            build2_dls_deg_per_30m=(5.4,),
+            horizontal_dls_deg_per_30m=(1.5,),
+        ),
+    )
+
+    applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
+        selected_names=["WELL-A"],
+    )
+
+    assert applied_count == 1
+    assert missing_names == []
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["WELL-A"]
+    assert payload["values"]["dls_build_max"] == pytest.approx(0.8)
+    assert payload["values"]["dls_build2_enabled"] is True
+    assert payload["values"]["dls_build2_max"] == pytest.approx(1.8)
 
 
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:

@@ -92,6 +92,7 @@ def test_sidetrack_from_pilot_window_preserves_pose_and_first_dogleg_limit() -> 
     config = TrajectoryConfig(
         md_step_m=25.0,
         kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=3.0,
         max_inc_deg=100.0,
     )
     pilot = build_pilot_trajectory(
@@ -146,6 +147,7 @@ def test_sidetrack_window_is_selected_50_to_100m_above_first_pilot_target() -> N
     config = TrajectoryConfig(
         md_step_m=25.0,
         kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=3.0,
         max_inc_deg=100.0,
     )
     pilot = build_pilot_trajectory(
@@ -270,6 +272,7 @@ def test_manual_sidetrack_window_md_override_interpolates_pilot_pose() -> None:
     config = TrajectoryConfig(
         md_step_m=25.0,
         kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=3.0,
         max_inc_deg=100.0,
     )
     pilot = build_pilot_trajectory(
@@ -309,6 +312,7 @@ def test_manual_sidetrack_window_z_override_interpolates_pilot_pose() -> None:
     config = TrajectoryConfig(
         md_step_m=25.0,
         kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=3.0,
         max_inc_deg=100.0,
     )
     pilot = build_pilot_trajectory(
@@ -369,6 +373,7 @@ def test_sidetrack_uncertainty_at_window_inherits_pilot_covariance() -> None:
     config = TrajectoryConfig(
         md_step_m=25.0,
         kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=3.0,
         max_inc_deg=100.0,
     )
     pilot = build_pilot_trajectory(

@@ -58,6 +58,18 @@ def test_build_segment_dls_limits_applies_separate_horizontal_limit() -> None:
     assert limits["HOLD"] == 2.0
 
 
+def test_build_segment_dls_limits_applies_separate_build2_limit() -> None:
+    limits = build_segment_dls_limits(
+        2.75,
+        horizontal_dls_max_deg_per_30m=1.4,
+        build2_dls_max_deg_per_30m=4.2,
+    )
+
+    assert limits["BUILD1"] == 2.75
+    assert limits["BUILD2"] == 4.2
+    assert limits["HORIZONTAL"] == 1.4
+
+
 def test_trajectory_config_defaults_use_shared_segment_limit_builder() -> None:
     cfg = TrajectoryConfig()
     expected = build_segment_dls_limits_deg_per_30m(
@@ -111,6 +123,18 @@ def test_trajectory_config_accepts_explicit_separate_horizontal_limit() -> None:
     assert cfg.dls_limits_deg_per_30m["HORIZONTAL"] == 2.25
 
 
+def test_trajectory_config_accepts_explicit_separate_build2_limit() -> None:
+    cfg = TrajectoryConfig(
+        dls_build_max_deg_per_30m=3.0,
+        dls_build2_max_deg_per_30m=4.8,
+        dls_horizontal_max_deg_per_30m=2.25,
+    )
+
+    assert cfg.dls_limits_deg_per_30m["BUILD1"] == 3.0
+    assert cfg.dls_limits_deg_per_30m["BUILD2"] == 4.8
+    assert cfg.dls_limits_deg_per_30m["HORIZONTAL"] == 2.25
+
+
 def test_trajectory_config_rejects_cross_field_invalid_values_at_model_boundary() -> (
     None
 ):
@@ -145,6 +169,17 @@ def test_trajectory_config_strips_legacy_dls_map_and_derives_segment_limits() ->
         "HORIZONTAL": 3.5,
     }
     assert "dls_limits_deg_per_30m" not in cfg.model_dump()
+
+
+def test_trajectory_config_reads_legacy_build2_limit_from_dls_map() -> None:
+    cfg = TrajectoryConfig(
+        dls_build_max_deg_per_30m=3.0,
+        dls_limits_deg_per_30m={"BUILD2": 4.8, "HORIZONTAL": 1.5},
+    )
+
+    assert cfg.dls_build2_max_deg_per_30m == 4.8
+    assert cfg.dls_limits_deg_per_30m["BUILD1"] == 3.0
+    assert cfg.dls_limits_deg_per_30m["BUILD2"] == 4.8
 
 
 def test_trajectory_config_rejects_unknown_dls_segment_names() -> None:
@@ -207,6 +242,30 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
     assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts
     assert config.j_profile_policy == J_PROFILE_POLICY_OFF
     assert config.offer_j_profile is False
+
+
+def test_build_trajectory_config_preserves_optional_build2_limit() -> None:
+    config = build_trajectory_config(
+        md_step_m=CFG_DEFAULTS.md_step_m,
+        md_step_control_m=CFG_DEFAULTS.md_step_control_m,
+        lateral_tolerance_m=CFG_DEFAULTS.lateral_tolerance_m,
+        vertical_tolerance_m=CFG_DEFAULTS.vertical_tolerance_m,
+        entry_inc_target_deg=CFG_DEFAULTS.entry_inc_target_deg,
+        entry_inc_tolerance_deg=CFG_DEFAULTS.entry_inc_tolerance_deg,
+        max_inc_deg=CFG_DEFAULTS.max_inc_deg,
+        dls_build_max_deg_per_30m=0.8,
+        dls_build2_max_deg_per_30m=1.4,
+        dls_horizontal_max_deg_per_30m=1.2,
+        kop_min_vertical_m=CFG_DEFAULTS.kop_min_vertical_m,
+        optimization_mode=OPTIMIZATION_NONE,
+        turn_solver_mode=CFG_DEFAULTS.turn_solver_mode,
+        turn_solver_max_restarts=CFG_DEFAULTS.turn_solver_max_restarts,
+    )
+
+    assert config.dls_build_max_deg_per_30m == 0.8
+    assert config.dls_build2_max_deg_per_30m == 1.4
+    assert config.dls_limits_deg_per_30m["BUILD1"] == 0.8
+    assert config.dls_limits_deg_per_30m["BUILD2"] == 1.4
 
 
 def test_legacy_offer_j_profile_maps_to_propose_policy() -> None:

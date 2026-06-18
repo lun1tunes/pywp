@@ -502,6 +502,8 @@ def test_run_batch_clears_stale_error_and_recommends_no_followup_after_all_ok(
             "anticollision"
         ),
         focus_all_wells_trajectory_results=lambda: focus_calls.append("trajectory"),
+        manual_override_signature=lambda: (True, (("WELL-A", (("dls_build_max", 0.8),)),)),
+        manual_override_signature_key="wt_last_well_calc_override_signature",
     )
     monkeypatch.setattr(ptc_batch_run, "WelltrackBatchPlanner", FakeBatchPlanner)
     monkeypatch.setattr(
@@ -525,6 +527,10 @@ def test_run_batch_clears_stale_error_and_recommends_no_followup_after_all_ok(
 
     assert state["wt_last_error"] == ""
     assert state["wt_last_calc_param_signature"] == ("calc", "wt_cfg_")
+    assert state["wt_last_well_calc_override_signature"] == (
+        True,
+        (("WELL-A", (("dls_build_max", 0.8),)),),
+    )
     assert state["wt_pending_selected_names"] == []
     assert [str(success.name) for success in state["wt_successes"]] == [
         "WELL-A",
@@ -599,4 +605,6 @@ def _batch_run_hooks() -> ptc_batch_run.BatchRunHooks:
         build_last_anticollision_resolution=lambda **_kwargs: None,
         focus_all_wells_anticollision_results=lambda: None,
         focus_all_wells_trajectory_results=lambda: None,
+        manual_override_signature=lambda: (False, ()),
+        manual_override_signature_key="wt_last_well_calc_override_signature",
     )

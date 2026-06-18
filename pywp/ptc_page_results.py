@@ -50,9 +50,24 @@ _ANTI_COLLISION_PARALLEL_LABEL_BY_VALUE = {
 
 def _calc_params_changed_after_last_run() -> bool:
     stored_signature = st.session_state.get("wt_last_calc_param_signature")
+    override_signature_key = getattr(
+        wt,
+        "WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY",
+        "wt_last_well_calc_override_signature",
+    )
+    manual_override_signature = getattr(
+        wt,
+        "_manual_well_calc_override_signature",
+        lambda: (False, ()),
+    )
+    stored_override_signature = st.session_state.get(override_signature_key)
     if not isinstance(stored_signature, tuple):
         return False
-    return tuple(stored_signature) != wt.WT_CALC_PARAMS.state_signature()
+    if tuple(stored_signature) != wt.WT_CALC_PARAMS.state_signature():
+        return True
+    if not isinstance(stored_override_signature, tuple):
+        stored_override_signature = (False, ())
+    return tuple(stored_override_signature) != manual_override_signature()
 
 
 def _normalize_anticollision_parallel_workers(raw_value: object) -> int:

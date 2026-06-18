@@ -49,9 +49,10 @@ def render_run_section(*, records: list[object]) -> None:
     sidetrack_parent_names = _sidetrack_parent_names(records)
 
     def _render_extra_calc_params() -> None:
-        _render_sidetrack_window_params(records=records)
+        wt._render_manual_well_calc_overrides(records=records)
         if sidetrack_parent_names:
             st.divider()
+        _render_sidetrack_window_params(records=records)
 
     config = render_calc_params_panel(extra_content=_render_extra_calc_params)
     sidetrack_overrides, _sidetrack_override_error = _sidetrack_window_overrides_from_state(

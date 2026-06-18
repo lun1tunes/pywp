@@ -126,7 +126,9 @@ def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:
     at.run(timeout=120)
     _open_calc_params_panel(at)
     build_pi_inputs = [
-        widget for widget in at.number_input if widget.label == "Макс ПИ BUILD, deg/10m"
+        widget
+        for widget in at.number_input
+        if widget.label == "Макс ПИ BUILD 1/2, deg/10m"
     ]
     assert build_pi_inputs
     build_pi_inputs[0].set_value(1.0)

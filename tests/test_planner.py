@@ -597,6 +597,58 @@ def test_split_build_rescue_can_find_independent_build_candidate() -> None:
     assert best[0] < 1e-6
 
 
+def test_planner_respects_explicit_separate_build2_limit() -> None:
+    record = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
+    )[0]
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    config = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=3.0,
+        dls_build2_max_deg_per_30m=5.4,
+        turn_solver_max_restarts=0,
+    )
+
+    result = TrajectoryPlanner().plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.lateral_tolerance_m
+    assert float(result.summary["build1_dls_selected_deg_per_30m"]) <= 3.0 + 1e-6
+    assert float(result.summary["build2_dls_selected_deg_per_30m"]) <= 5.4 + 1e-6
+    assert float(result.summary["build2_dls_selected_deg_per_30m"]) > 3.0 + 1e-3
+
+
+def test_zero_azimuth_turn_does_not_trigger_split_build_rescue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    def _boom(**kwargs: object):
+        raise AssertionError("split-build rescue should not run for zero-azimuth turns")
+
+    monkeypatch.setattr(planner_module, "_collect_split_build_turn_candidates", _boom)
+
+    config = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=3.0,
+        dls_build2_max_deg_per_30m=5.4,
+        turn_solver_max_restarts=0,
+        offer_j_profile=False,
+    )
+    result = TrajectoryPlanner().plan(
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.lateral_tolerance_m
+
+
 def test_post_entry_solver_keeps_boundary_case_within_numerical_tolerance() -> None:
     import pywp.planner as planner_module
     from pywp.mcm import minimum_curvature_increment

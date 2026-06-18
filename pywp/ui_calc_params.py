@@ -26,6 +26,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "max_inc",
     "max_total_md_postcheck",
     "dls_build_max",
+    "dls_build2_max",
     "dls_horizontal_max",
     "kop_min_vertical",
 )
@@ -36,13 +37,18 @@ _STR_SUFFIXES: tuple[str, ...] = (
     "interpolation_method",
     "j_profile_policy",
 )
-_BOOL_SUFFIXES: tuple[str, ...] = ("offer_j_profile",)
+_BOOL_SUFFIXES: tuple[str, ...] = ("dls_build2_enabled", "offer_j_profile")
 
 
 def calc_param_defaults() -> dict[str, float | int | str | bool]:
     """Build UI defaults directly from TrajectoryConfig defaults."""
 
     cfg = TrajectoryConfig()
+    build2_limit = (
+        float(cfg.dls_build_max_deg_per_30m)
+        if cfg.dls_build2_max_deg_per_30m is None
+        else float(cfg.dls_build2_max_deg_per_30m)
+    )
     return {
         "md_step": float(cfg.md_step_m),
         "md_control": float(cfg.md_step_control_m),
@@ -53,6 +59,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "max_inc": float(cfg.max_inc_deg),
         "max_total_md_postcheck": float(cfg.max_total_md_postcheck_m),
         "dls_build_max": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
+        "dls_build2_max": float(dls_to_pi(build2_limit)),
         "dls_horizontal_max": float(
             dls_to_pi(cfg.dls_horizontal_max_deg_per_30m)
         ),
@@ -62,13 +69,14 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "turn_solver_mode": str(cfg.turn_solver_mode),
         "interpolation_method": str(cfg.interpolation_method),
         "j_profile_policy": str(cfg.j_profile_policy),
+        "dls_build2_enabled": bool(cfg.dls_build2_max_deg_per_30m is not None),
         "offer_j_profile": bool(cfg.offer_j_profile),
     }
 
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 14
+_DEFAULTS_SCHEMA_VERSION = 15
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
@@ -310,30 +318,98 @@ def calc_param_signature(prefix: str = "") -> tuple[object, ...]:
     return tuple(signature)
 
 
-def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
-    return build_trajectory_config(
-        md_step_m=float(_state_value(prefix, "md_step")),
-        md_step_control_m=float(_state_value(prefix, "md_control")),
-        lateral_tolerance_m=float(_state_value(prefix, "lateral_tol")),
-        vertical_tolerance_m=float(_state_value(prefix, "vertical_tol")),
-        entry_inc_target_deg=float(_state_value(prefix, "entry_inc_target")),
-        entry_inc_tolerance_deg=float(_state_value(prefix, "entry_inc_tol")),
-        max_inc_deg=float(_state_value(prefix, "max_inc")),
-        max_total_md_postcheck_m=float(_state_value(prefix, "max_total_md_postcheck")),
-        dls_build_max_deg_per_30m=pi_to_dls(
-            float(_state_value(prefix, "dls_build_max"))
-        ),
-        dls_horizontal_max_deg_per_30m=pi_to_dls(
-            float(_state_value(prefix, "dls_horizontal_max"))
-        ),
-        kop_min_vertical_m=float(_state_value(prefix, "kop_min_vertical")),
-        optimization_mode=str(_state_value(prefix, "optimization_mode")),
-        turn_solver_max_restarts=int(_state_value(prefix, "turn_solver_max_restarts")),
-        turn_solver_mode=str(_state_value(prefix, "turn_solver_mode")),
-        interpolation_method=str(_state_value(prefix, "interpolation_method")),
-        j_profile_policy=str(_state_value(prefix, "j_profile_policy")),
-        offer_j_profile=bool(_state_value(prefix, "offer_j_profile")),
+def calc_param_state_values_from_config(
+    config: TrajectoryConfig,
+) -> dict[str, float | int | str | bool]:
+    build2_limit = (
+        float(config.dls_build_max_deg_per_30m)
+        if config.dls_build2_max_deg_per_30m is None
+        else float(config.dls_build2_max_deg_per_30m)
     )
+    return {
+        "md_step": float(config.md_step_m),
+        "md_control": float(config.md_step_control_m),
+        "lateral_tol": float(config.lateral_tolerance_m),
+        "vertical_tol": float(config.vertical_tolerance_m),
+        "entry_inc_target": float(config.entry_inc_target_deg),
+        "entry_inc_tol": float(config.entry_inc_tolerance_deg),
+        "max_inc": float(config.max_inc_deg),
+        "max_total_md_postcheck": float(config.max_total_md_postcheck_m),
+        "dls_build_max": float(dls_to_pi(config.dls_build_max_deg_per_30m)),
+        "dls_build2_max": float(dls_to_pi(build2_limit)),
+        "dls_horizontal_max": float(
+            dls_to_pi(config.dls_horizontal_max_deg_per_30m)
+        ),
+        "kop_min_vertical": float(config.kop_min_vertical_m),
+        "optimization_mode": str(config.optimization_mode),
+        "turn_solver_max_restarts": int(config.turn_solver_max_restarts),
+        "turn_solver_mode": str(config.turn_solver_mode),
+        "interpolation_method": str(config.interpolation_method),
+        "j_profile_policy": str(config.j_profile_policy),
+        "dls_build2_enabled": bool(config.dls_build2_max_deg_per_30m is not None),
+        "offer_j_profile": bool(config.offer_j_profile),
+    }
+
+
+def set_calc_param_state_values(
+    *,
+    prefix: str = "",
+    values: dict[str, float | int | str | bool],
+) -> None:
+    apply_calc_param_defaults(prefix=prefix, force=False)
+    defaults = calc_param_defaults()
+    for suffix, default_value in defaults.items():
+        st.session_state[_state_key(prefix, suffix)] = values.get(suffix, default_value)
+    st.session_state[_kop_mode_key(prefix)] = KOP_MIN_VERTICAL_MODE_CONSTANT
+    st.session_state[_kop_function_payload_key(prefix)] = None
+
+
+def _build_config_kwargs_from_values(
+    values: dict[str, float | int | str | bool],
+) -> dict[str, float | int | str | bool]:
+    build2_enabled = bool(values.get("dls_build2_enabled", False))
+    return {
+        "md_step_m": float(values["md_step"]),
+        "md_step_control_m": float(values["md_control"]),
+        "lateral_tolerance_m": float(values["lateral_tol"]),
+        "vertical_tolerance_m": float(values["vertical_tol"]),
+        "entry_inc_target_deg": float(values["entry_inc_target"]),
+        "entry_inc_tolerance_deg": float(values["entry_inc_tol"]),
+        "max_inc_deg": float(values["max_inc"]),
+        "max_total_md_postcheck_m": float(values["max_total_md_postcheck"]),
+        "dls_build_max_deg_per_30m": pi_to_dls(float(values["dls_build_max"])),
+        "dls_build2_max_deg_per_30m": (
+            pi_to_dls(float(values["dls_build2_max"])) if build2_enabled else None
+        ),
+        "dls_horizontal_max_deg_per_30m": pi_to_dls(
+            float(values["dls_horizontal_max"])
+        ),
+        "kop_min_vertical_m": float(values["kop_min_vertical"]),
+        "optimization_mode": str(values["optimization_mode"]),
+        "turn_solver_max_restarts": int(values["turn_solver_max_restarts"]),
+        "turn_solver_mode": str(values["turn_solver_mode"]),
+        "interpolation_method": str(values["interpolation_method"]),
+        "j_profile_policy": str(values["j_profile_policy"]),
+        "offer_j_profile": bool(values["offer_j_profile"]),
+    }
+
+
+def build_config_from_values(
+    values: dict[str, float | int | str | bool],
+) -> TrajectoryConfig:
+    defaults = calc_param_defaults()
+    resolved = {
+        suffix: values.get(suffix, defaults[suffix]) for suffix in defaults
+    }
+    return build_trajectory_config(**_build_config_kwargs_from_values(resolved))
+
+
+def build_config_from_state(prefix: str = "") -> TrajectoryConfig:
+    defaults = calc_param_defaults()
+    resolved = {
+        suffix: _state_value(prefix, suffix) for suffix in defaults
+    }
+    return build_trajectory_config(**_build_config_kwargs_from_values(resolved))
 
 
 def render_calc_params_block(
@@ -409,19 +485,47 @@ def render_calc_params_block(
         **widget_change_kwargs,
     )
 
-    d1, d2, d3, d4 = st.columns(4, gap="small")
+    build2_enabled = bool(_state_value(prefix, "dls_build2_enabled"))
+    if not build2_enabled:
+        st.session_state[_state_key(prefix, "dls_build2_max")] = float(
+            _state_value(prefix, "dls_build_max")
+        )
+    d1, d2, d3, d4, d5 = st.columns(5, gap="small")
     d1.number_input(
-        "Макс ПИ BUILD, deg/10m",
+        "Макс ПИ BUILD 1, deg/10m" if build2_enabled else "Макс ПИ BUILD 1/2, deg/10m",
         key=_state_key(prefix, "dls_build_max"),
         min_value=0.1,
         step=0.1,
         help=(
-            "Верхняя граница поиска ПИ на BUILD-сегментах до входа в t1. "
-            "Внутри решателя автоматически переводится во внутренние единицы."
+            "Верхняя граница поиска ПИ до входа в t1. "
+            "Если BUILD 2 не задан отдельно, это общий лимит для BUILD1 и BUILD2."
         ),
         **widget_change_kwargs,
     )
-    d2.number_input(
+    d2.toggle(
+        "BUILD 2 отдельно",
+        key=_state_key(prefix, "dls_build2_enabled"),
+        help="Включите, чтобы задать отдельный лимит ПИ для BUILD2.",
+        **widget_change_kwargs,
+    )
+    if bool(_state_value(prefix, "dls_build2_enabled")):
+        d3.number_input(
+            "Макс ПИ BUILD 2, deg/10m",
+            key=_state_key(prefix, "dls_build2_max"),
+            min_value=0.1,
+            step=0.1,
+            help="Отдельный лимит ПИ для BUILD2. Для J-профиля не используется.",
+            **widget_change_kwargs,
+        )
+    else:
+        d3.text_input(
+            "Макс ПИ BUILD 2, deg/10m",
+            key=_state_key(prefix, "dls_build2_disabled_display"),
+            value="—",
+            disabled=True,
+            help="По умолчанию BUILD2 использует тот же лимит, что и BUILD1.",
+        )
+    d4.number_input(
         "Макс ПИ HORIZONTAL, deg/10m",
         key=_state_key(prefix, "dls_horizontal_max"),
         min_value=0.1,
@@ -433,7 +537,7 @@ def render_calc_params_block(
         **widget_change_kwargs,
     )
     (
-        d3.number_input(
+        d5.number_input(
             "Мин VERTICAL до KOP, м",
             key=_state_key(prefix, "kop_min_vertical"),
             min_value=0.0,
@@ -442,7 +546,7 @@ def render_calc_params_block(
             **widget_change_kwargs,
         )
         if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_CONSTANT
-        else d3.text_input(
+        else d5.text_input(
             "Мин VERTICAL до KOP, м",
             value=kop_min_vertical_display_label(prefix),
             disabled=True,
@@ -453,8 +557,8 @@ def render_calc_params_block(
         )
     )
     if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION:
-        d3.caption(kop_min_vertical_detail_label(prefix))
-    d4.number_input(
+        d5.caption(kop_min_vertical_detail_label(prefix))
+    st.number_input(
         "Макс итоговая MD (постпроверка), м",
         key=_state_key(prefix, "max_total_md_postcheck"),
         min_value=100.0,

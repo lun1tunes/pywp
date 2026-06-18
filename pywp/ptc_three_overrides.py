@@ -463,6 +463,11 @@ def build_edit_wells_payload(
                     "dls_build_max_deg_per_30m": float(
                         config.dls_build_max_deg_per_30m
                     ),
+                    "dls_build2_max_deg_per_30m": (
+                        None
+                        if config.dls_build2_max_deg_per_30m is None
+                        else float(config.dls_build2_max_deg_per_30m)
+                    ),
                     "dls_horizontal_max_deg_per_30m": float(
                         config.dls_horizontal_max_deg_per_30m
                     ),
@@ -519,6 +524,7 @@ def build_target_only_edit_wells_payload(
                     "entry_inc_target_deg": 86.0,
                     "max_inc_deg": 95.0,
                     "dls_build_max_deg_per_30m": DEFAULT_BUILD_DLS_MAX_DEG_PER_30M,
+                    "dls_build2_max_deg_per_30m": None,
                     "dls_horizontal_max_deg_per_30m": DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M,
                     "kop_min_vertical_m": 550.0,
                 },

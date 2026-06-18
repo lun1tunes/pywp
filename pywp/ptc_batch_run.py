@@ -95,6 +95,8 @@ class BatchRunHooks:
     build_last_anticollision_resolution: Callable[..., dict[str, object] | None]
     focus_all_wells_anticollision_results: Callable[[], None]
     focus_all_wells_trajectory_results: Callable[[], None]
+    manual_override_signature: Callable[[], tuple[object, ...]]
+    manual_override_signature_key: str
 
 
 def sync_selection_state(
@@ -554,7 +556,7 @@ def run_batch_if_clicked(
                 and selected_has_pilot_dependencies
             ):
                 append_log(
-                    "Параллельный расчёт: независимые скважины и пилоты "
+                    "Параллельный расчёт частично: независимые скважины и пилоты "
                     f"считаются в {int(request.parallel_workers)} процессов, "
                     "боковые стволы — после готовности пилота."
                 )
@@ -737,6 +739,9 @@ def run_batch_if_clicked(
             state["wt_last_runtime_s"] = float(elapsed_s)
             state["wt_last_calc_param_signature"] = calc_param_signature(
                 prefix="wt_cfg_"
+            )
+            state[hooks.manual_override_signature_key] = (
+                hooks.manual_override_signature()
             )
             state["wt_prepared_well_overrides"] = {}
             state["wt_prepared_override_message"] = ""
