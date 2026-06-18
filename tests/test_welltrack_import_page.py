@@ -4351,6 +4351,30 @@ def test_apply_dev_params_to_manual_well_overrides_sets_local_values() -> None:
     assert payload["values"]["offer_j_profile"] is True
 
 
+def test_apply_dev_params_to_manual_well_overrides_does_not_toggle_widget_state() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_imported_dev_params"] = (
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-A",
+            profile_label="J-профиль",
+            kop_md_m=980.0,
+            t1_md_m=2500.0,
+            t3_md_m=4200.0,
+            entry_inc_deg=87.0,
+            build1_dls_deg_per_30m=(2.4,),
+            horizontal_dls_deg_per_30m=(1.5,),
+        ),
+    )
+
+    page._apply_dev_params_to_manual_well_overrides(selected_names=["WELL-A"])
+
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] is False
+
+
 def test_apply_dev_params_to_manual_well_overrides_sets_optional_build2_when_needed() -> (
     None
 ):
@@ -4381,6 +4405,17 @@ def test_apply_dev_params_to_manual_well_overrides_sets_optional_build2_when_nee
     assert payload["values"]["dls_build_max"] == pytest.approx(0.8)
     assert payload["values"]["dls_build2_enabled"] is True
     assert payload["values"]["dls_build2_max"] == pytest.approx(1.8)
+
+
+def test_consume_manual_well_override_enabled_applies_pending_state() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+
+    page._queue_manual_well_calc_override_enabled(True)
+    page._consume_manual_well_calc_override_enabled()
+
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] is True
 
 
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:

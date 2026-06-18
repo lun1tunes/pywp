@@ -255,6 +255,9 @@ _WT_LEGACY_KEY_ALIASES: dict[str, str] = {
 WT_CALC_PARAMS = CalcParamBinding(prefix="wt_cfg_")
 WT_WELL_OVERRIDE_EDITOR = CalcParamBinding(prefix="wt_well_cfg_")
 WT_WELL_CALC_OVERRIDE_ENABLED_KEY = "wt_well_calc_overrides_enabled"
+WT_WELL_CALC_OVERRIDE_ENABLED_PENDING_KEY = (
+    "wt_well_calc_overrides_enabled_pending"
+)
 WT_WELL_CALC_OVERRIDE_STATE_KEY = "wt_well_calc_overrides"
 WT_WELL_CALC_OVERRIDE_SELECTION_KEY = "wt_well_calc_override_selected_names"
 WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY = (
@@ -2387,6 +2390,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_anticollision_prepared_cluster_id", "")
     st.session_state.setdefault("wt_prepared_recommendation_snapshot", None)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ENABLED_KEY, False)
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ENABLED_PENDING_KEY, None)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_STATE_KEY, {})
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_KEY, [])
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY, ())
@@ -3298,6 +3302,20 @@ def _manual_well_calc_override_enabled() -> bool:
     return bool(st.session_state.get(WT_WELL_CALC_OVERRIDE_ENABLED_KEY, False))
 
 
+def _queue_manual_well_calc_override_enabled(enabled: bool) -> None:
+    st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_PENDING_KEY] = bool(enabled)
+
+
+def _consume_manual_well_calc_override_enabled() -> None:
+    pending_value = st.session_state.pop(
+        WT_WELL_CALC_OVERRIDE_ENABLED_PENDING_KEY,
+        None,
+    )
+    if pending_value is None:
+        return
+    st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = bool(pending_value)
+
+
 def _manual_well_calc_overrides() -> dict[str, dict[str, object]]:
     raw_state = st.session_state.get(WT_WELL_CALC_OVERRIDE_STATE_KEY, {})
     if not isinstance(raw_state, Mapping):
@@ -3500,8 +3518,6 @@ def _apply_manual_well_override_editor(
             applied_count += 1
         elif had_override:
             cleared_count += 1
-    if diff_values:
-        st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
     return applied_count, cleared_count
 
 
@@ -3519,8 +3535,6 @@ def _clear_manual_well_overrides(
             if overrides.pop(str(well_name), None) is not None:
                 cleared_count += 1
     st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = overrides
-    if not overrides:
-        st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = False
     return cleared_count
 
 
@@ -3618,8 +3632,6 @@ def _apply_dev_params_to_manual_well_overrides(
             note="KOP / INC / PI из .dev",
         )
         applied_count += 1
-    if applied_count > 0:
-        st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
     return applied_count, missing_names
 
 
@@ -3660,12 +3672,15 @@ def _render_manual_well_calc_overrides(
         if stale_names:
             _clear_manual_well_overrides(well_names=stale_names)
             overrides = _manual_well_calc_overrides()
+            if not overrides:
+                st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = False
     base_config = WT_CALC_PARAMS.build_config()
     st.markdown("#### Индивидуальные параметры по скважинам")
     st.caption(
         "Локальные параметры накладываются только на выбранные скважины и "
         "заменяют общие значения только по изменённым полям."
     )
+    _consume_manual_well_calc_override_enabled()
     st.toggle(
         "Использовать индивидуальные параметры",
         key=WT_WELL_CALC_OVERRIDE_ENABLED_KEY,
@@ -3727,6 +3742,8 @@ def _render_manual_well_calc_overrides(
         applied_count, missing_names = _apply_dev_params_to_manual_well_overrides(
             selected_names=selected_names,
         )
+        if applied_count > 0:
+            _queue_manual_well_calc_override_enabled(True)
         feedback = f"Параметры .dev применены к скважинам: {applied_count}."
         if missing_names:
             feedback += " Без .dev параметров: " + ", ".join(missing_names) + "."
@@ -3735,6 +3752,8 @@ def _render_manual_well_calc_overrides(
         st.rerun()
     if clear_selected_clicked:
         cleared_count = _clear_manual_well_overrides(well_names=selected_names)
+        if not _manual_well_calc_overrides():
+            _queue_manual_well_calc_override_enabled(False)
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
             f"Сброшены локальные параметры для скважин: {cleared_count}."
         )
@@ -3742,6 +3761,7 @@ def _render_manual_well_calc_overrides(
         st.rerun()
     if clear_all_clicked:
         cleared_count = _clear_manual_well_overrides()
+        _queue_manual_well_calc_override_enabled(False)
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
             f"Сброшены все локальные параметры: {cleared_count}."
         )
@@ -3769,6 +3789,10 @@ def _render_manual_well_calc_overrides(
             base_config=base_config,
             selected_names=selected_names,
         )
+        if applied_count > 0:
+            _queue_manual_well_calc_override_enabled(True)
+        elif not _manual_well_calc_overrides():
+            _queue_manual_well_calc_override_enabled(False)
         message_parts: list[str] = []
         if applied_count > 0:
             message_parts.append(f"Применены локальные параметры: {applied_count}.")

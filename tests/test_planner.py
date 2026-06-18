@@ -622,6 +622,34 @@ def test_planner_respects_explicit_separate_build2_limit() -> None:
     assert float(result.summary["build2_dls_selected_deg_per_30m"]) > 3.0 + 1e-3
 
 
+def test_planner_keeps_distinct_build1_and_build2_when_build1_limit_is_higher() -> None:
+    record = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
+    )[0]
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    config = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=5.4,
+        dls_build2_max_deg_per_30m=3.0,
+        turn_solver_max_restarts=0,
+    )
+
+    result = TrajectoryPlanner().plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=config,
+    )
+
+    assert float(result.summary["distance_t1_m"]) <= config.lateral_tolerance_m
+    assert float(result.summary["build1_dls_selected_deg_per_30m"]) <= 5.4 + 1e-6
+    assert float(result.summary["build2_dls_selected_deg_per_30m"]) <= 3.0 + 1e-6
+    assert float(result.summary["build1_dls_selected_deg_per_30m"]) > float(
+        result.summary["build2_dls_selected_deg_per_30m"]
+    ) + 1e-3
+    assert str(result.summary["optimization_status"]) == "split_build_seed_selected"
+
+
 def test_zero_azimuth_turn_does_not_trigger_split_build_rescue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

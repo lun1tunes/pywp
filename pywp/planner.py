@@ -1015,6 +1015,10 @@ def _solve_turn_profile(
         config=config,
         upper_dls_deg_per_30m=build_dls_upper,
     )
+    split_build_requested = bool(
+        not zero_azimuth_turn
+        and abs(build1_dls_upper - build2_dls_upper) > SMALL
+    )
     horizontal_dls = _resolve_horizontal_dls(config=config)
 
     post_entry = _solve_post_entry_section(
@@ -1083,6 +1087,9 @@ def _solve_turn_profile(
         dtype=float,
     )
     j_candidates_cache: list[ProfileParameters] | None = None
+    j_profile_build_dls_upper = (
+        build1_dls_upper if split_build_requested else build_dls_upper
+    )
     if _j_profile_preferred_before_optimization(config):
         _emit_progress(
             progress_callback,
@@ -1094,7 +1101,7 @@ def _solve_turn_profile(
             config=config,
             post_entry=post_entry,
             build_dls_lower_deg_per_30m=build_dls_lower,
-            build_dls_upper_deg_per_30m=build_dls_upper,
+            build_dls_upper_deg_per_30m=j_profile_build_dls_upper,
             target_point=target_point,
         )
         if j_candidates_cache:
@@ -1194,6 +1201,7 @@ def _solve_turn_profile(
     best_vertical_m = np.inf
     best_miss_build_dls = float(build_dls_upper)
     profile_family_override: str | None = None
+    ran_primary_split_search = False
     for preferred_profile in preferred_profiles:
         endpoint = np.array(
             _estimate_t1_endpoint_for_profile(preferred_profile), dtype=float
@@ -1220,6 +1228,39 @@ def _solve_turn_profile(
         if not _is_candidate_feasible(candidate=preferred_profile, config=config):
             continue
         candidates.append(preferred_profile)
+    if split_build_requested:
+        _emit_progress(
+            progress_callback,
+            "Солвер: прямой поиск с независимыми BUILD1/BUILD2.",
+            0.55,
+        )
+        split_candidates, split_best = _collect_split_build_turn_candidates(
+            geometry=geometry,
+            build_dls_lower_deg_per_30m=build_dls_lower,
+            build_dls_upper_deg_per_30m=build1_dls_upper,
+            build2_dls_upper_deg_per_30m=build2_dls_upper,
+            bounds=bounds,
+            base_seed_vectors=seed_vectors,
+            post_entry=post_entry,
+            target_point=target_point,
+            config=config,
+            search_settings=search_settings,
+            zero_azimuth_turn=zero_azimuth_turn,
+        )
+        if split_candidates:
+            ran_primary_split_search = True
+            candidates.extend(split_candidates)
+            (
+                split_miss,
+                split_lateral_m,
+                split_vertical_m,
+                split_build_dls,
+            ) = split_best
+            if split_miss < best_miss - SMALL or abs(split_miss - best_miss) <= SMALL:
+                best_miss = split_miss
+                best_lateral_m = split_lateral_m
+                best_vertical_m = split_vertical_m
+                best_miss_build_dls = split_build_dls
     if zero_azimuth_turn and candidates:
         if str(config.optimization_mode) == OPTIMIZATION_NONE:
             selected = min(
@@ -1248,109 +1289,110 @@ def _solve_turn_profile(
                 ),
             )
 
-    if str(config.turn_solver_mode) == TURN_SOLVER_DE_HYBRID:
-        _emit_progress(progress_callback, "Солвер: глобальный DE-поиск.", 0.32)
-        de_result = differential_evolution(
-            func=lambda vector: _turn_scalar_cost(
-                values=np.asarray(vector, dtype=float),
-                profile_builder=profile_builder,
-                target_point=target_point,
-                config=config,
-            ),
-            bounds=list(bounds),
-            strategy="best1bin",
-            maxiter=search_settings.de_maxiter,
-            popsize=search_settings.de_popsize,
-            tol=1e-3,
-            mutation=(0.5, 1.0),
-            recombination=0.7,
-            seed=42,
-            polish=False,
-            updating="deferred",
-            workers=1,
-        )
-        if de_result.success and np.all(np.isfinite(de_result.x)):
-            seed_vectors = [
-                _clip_to_bounds(np.asarray(de_result.x, dtype=float), bounds=bounds),
-                *seed_vectors,
-            ]
-    elif str(config.turn_solver_mode) != TURN_SOLVER_LEAST_SQUARES:
-        allowed = ", ".join(ALLOWED_TURN_SOLVER_MODES)
-        raise PlanningError(f"turn_solver_mode must be one of: {allowed}.")
-
-    seed_vectors = _dedupe_seed_vectors(seed_vectors)
-    _emit_progress(
-        progress_callback,
-        (
-            f"Солвер: локальная оптимизация ({len(seed_vectors)} стартов, "
-            f"max_nfev={search_settings.local_max_nfev})."
-        ),
-        0.55,
-    )
-
-    lower = np.array([item[0] for item in bounds], dtype=float)
-    upper = np.array([item[1] for item in bounds], dtype=float)
-    total_starts = len(seed_vectors)
-    for index, seed in enumerate(seed_vectors, start=1):
-        clipped_seed = _clip_to_bounds(seed, bounds=bounds)
-        solution = least_squares(
-            fun=lambda values: _turn_residuals(
-                values=np.asarray(values, dtype=float),
-                profile_builder=profile_builder,
-                target_point=target_point,
-                config=config,
-            ),
-            x0=clipped_seed,
-            bounds=(lower, upper),
-            method="trf",
-            jac="2-point",
-            x_scale="jac",
-            ftol=1e-10,
-            xtol=1e-10,
-            gtol=1e-10,
-            max_nfev=search_settings.local_max_nfev,
-        )
-        probes = [clipped_seed]
-        if solution.success and np.all(np.isfinite(solution.x)):
-            probes.append(
-                _clip_to_bounds(np.asarray(solution.x, dtype=float), bounds=bounds)
+    if not ran_primary_split_search:
+        if str(config.turn_solver_mode) == TURN_SOLVER_DE_HYBRID:
+            _emit_progress(progress_callback, "Солвер: глобальный DE-поиск.", 0.32)
+            de_result = differential_evolution(
+                func=lambda vector: _turn_scalar_cost(
+                    values=np.asarray(vector, dtype=float),
+                    profile_builder=profile_builder,
+                    target_point=target_point,
+                    config=config,
+                ),
+                bounds=list(bounds),
+                strategy="best1bin",
+                maxiter=search_settings.de_maxiter,
+                popsize=search_settings.de_popsize,
+                tol=1e-3,
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                seed=42,
+                polish=False,
+                updating="deferred",
+                workers=1,
             )
+            if de_result.success and np.all(np.isfinite(de_result.x)):
+                seed_vectors = [
+                    _clip_to_bounds(np.asarray(de_result.x, dtype=float), bounds=bounds),
+                    *seed_vectors,
+                ]
+        elif str(config.turn_solver_mode) != TURN_SOLVER_LEAST_SQUARES:
+            allowed = ", ".join(ALLOWED_TURN_SOLVER_MODES)
+            raise PlanningError(f"turn_solver_mode must be one of: {allowed}.")
 
-        for probe in probes:
-            candidate = profile_builder(probe)
-            if candidate is None:
-                continue
-            endpoint = np.array(
-                _estimate_t1_endpoint_for_profile(candidate), dtype=float
-            )
-            _, _, _, lateral_m, vertical_m, _ = _target_miss_components(
-                endpoint, target_point
-            )
-            miss = _normalized_target_miss(
-                endpoint=endpoint,
-                target_point=target_point,
-                config=config,
-            )
-            if miss < best_miss - SMALL or abs(miss - best_miss) <= SMALL:
-                best_miss = miss
-                best_miss_build_dls = float(candidate.dls_build1_deg_per_30m)
-                best_lateral_m = float(lateral_m)
-                best_vertical_m = float(vertical_m)
-            if not _target_miss_within_tolerance(
-                lateral_m=lateral_m,
-                vertical_m=vertical_m,
-                config=config,
-            ):
-                continue
-            if not _is_candidate_feasible(candidate=candidate, config=config):
-                continue
-            candidates.append(candidate)
-
+        seed_vectors = _dedupe_seed_vectors(seed_vectors)
         _emit_progress(
             progress_callback,
-            f"Солвер: локальные решатели {index}/{total_starts}.",
-            0.60 + 0.36 * float(index / max(total_starts, 1)),
+            (
+                f"Солвер: локальная оптимизация ({len(seed_vectors)} стартов, "
+                f"max_nfev={search_settings.local_max_nfev})."
+            ),
+            0.55,
         )
+
+        lower = np.array([item[0] for item in bounds], dtype=float)
+        upper = np.array([item[1] for item in bounds], dtype=float)
+        total_starts = len(seed_vectors)
+        for index, seed in enumerate(seed_vectors, start=1):
+            clipped_seed = _clip_to_bounds(seed, bounds=bounds)
+            solution = least_squares(
+                fun=lambda values: _turn_residuals(
+                    values=np.asarray(values, dtype=float),
+                    profile_builder=profile_builder,
+                    target_point=target_point,
+                    config=config,
+                ),
+                x0=clipped_seed,
+                bounds=(lower, upper),
+                method="trf",
+                jac="2-point",
+                x_scale="jac",
+                ftol=1e-10,
+                xtol=1e-10,
+                gtol=1e-10,
+                max_nfev=search_settings.local_max_nfev,
+            )
+            probes = [clipped_seed]
+            if solution.success and np.all(np.isfinite(solution.x)):
+                probes.append(
+                    _clip_to_bounds(np.asarray(solution.x, dtype=float), bounds=bounds)
+                )
+
+            for probe in probes:
+                candidate = profile_builder(probe)
+                if candidate is None:
+                    continue
+                endpoint = np.array(
+                    _estimate_t1_endpoint_for_profile(candidate), dtype=float
+                )
+                _, _, _, lateral_m, vertical_m, _ = _target_miss_components(
+                    endpoint, target_point
+                )
+                miss = _normalized_target_miss(
+                    endpoint=endpoint,
+                    target_point=target_point,
+                    config=config,
+                )
+                if miss < best_miss - SMALL or abs(miss - best_miss) <= SMALL:
+                    best_miss = miss
+                    best_miss_build_dls = float(candidate.dls_build1_deg_per_30m)
+                    best_lateral_m = float(lateral_m)
+                    best_vertical_m = float(vertical_m)
+                if not _target_miss_within_tolerance(
+                    lateral_m=lateral_m,
+                    vertical_m=vertical_m,
+                    config=config,
+                ):
+                    continue
+                if not _is_candidate_feasible(candidate=candidate, config=config):
+                    continue
+                candidates.append(candidate)
+
+            _emit_progress(
+                progress_callback,
+                f"Солвер: локальные решатели {index}/{total_starts}.",
+                0.60 + 0.36 * float(index / max(total_starts, 1)),
+            )
 
     j_profile_policy = _j_profile_policy(config)
     j_profile_preferred = j_profile_policy == J_PROFILE_POLICY_PREFER
@@ -1365,7 +1407,7 @@ def _solve_turn_profile(
                 config=config,
                 post_entry=post_entry,
                 build_dls_lower_deg_per_30m=build_dls_lower,
-                build_dls_upper_deg_per_30m=build_dls_upper,
+                build_dls_upper_deg_per_30m=j_profile_build_dls_upper,
                 target_point=target_point,
             )
         else:
@@ -1433,7 +1475,7 @@ def _solve_turn_profile(
             candidates.append(j_candidate)
             break
 
-    if not candidates and not zero_azimuth_turn:
+    if not ran_primary_split_search and not candidates and not zero_azimuth_turn:
         _emit_progress(
             progress_callback,
             "Солвер: fallback-поиск для глубокого низкоуглового азимутального перехода.",
@@ -1461,14 +1503,13 @@ def _solve_turn_profile(
             best_vertical_m = fallback_vertical_m
             best_miss_build_dls = fallback_build_dls
 
-    split_build_requested = bool(
-        not zero_azimuth_turn
-        and abs(build1_dls_upper - build2_dls_upper) > SMALL
-    )
-    if split_build_requested or (
-        not candidates
-        and not zero_azimuth_turn
-        and max(build1_dls_upper, build2_dls_upper) > build_dls_lower + SMALL
+    if (not ran_primary_split_search) and (
+        split_build_requested
+        or (
+            not candidates
+            and not zero_azimuth_turn
+            and max(build1_dls_upper, build2_dls_upper) > build_dls_lower + SMALL
+        )
     ):
         _emit_progress(
             progress_callback,
@@ -1679,6 +1720,16 @@ def _default_candidate_sort_key(
         candidate.md_total_m,
         _candidate_turn_deg(candidate),
         -max(candidate.dls_build1_deg_per_30m, candidate.dls_build2_deg_per_30m),
+    )
+
+
+def _candidate_has_distinct_build_segments(candidate: ProfileParameters) -> bool:
+    return bool(
+        abs(
+            float(candidate.dls_build1_deg_per_30m)
+            - float(candidate.dls_build2_deg_per_30m)
+        )
+        > MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE
     )
 
 
@@ -3659,6 +3710,49 @@ def _select_feasible_candidate(
                 optimization_profile_builder=optimization_profile_builder,
                 split_build=True,
                 progress_callback=progress_callback,
+            )
+        )
+    if (
+        split_build_active
+        and optimization_mode == OPTIMIZATION_MINIMIZE_MD
+        and any(
+            _candidate_has_distinct_build_segments(candidate)
+            for candidate in deduped_candidates
+        )
+    ):
+        selected = min(
+            (
+                candidate
+                for candidate in deduped_candidates
+                if _candidate_has_distinct_build_segments(candidate)
+            ),
+            key=_default_candidate_sort_key,
+        )
+        objective_value = _optimization_objective_value(selected, optimization_mode)
+        lower_bound = _theoretical_objective_lower_bound(
+            geometry=geometry,
+            config=config,
+            mode=optimization_mode,
+        )
+        return _finalize(
+            TurnSolveResult(
+                params=selected,
+                optimization=OptimizationOutcome(
+                    mode=optimization_mode,
+                    status="split_build_seed_selected",
+                    objective_value=objective_value,
+                    theoretical_lower_bound=lower_bound,
+                    absolute_gap_value=_optimization_absolute_gap(
+                        objective_value=objective_value,
+                        theoretical_lower_bound=lower_bound,
+                    ),
+                    relative_gap_pct=_optimization_relative_gap_pct(
+                        objective_value=objective_value,
+                        theoretical_lower_bound=lower_bound,
+                    ),
+                    seeds_used=len(deduped_candidates),
+                    runs_used=0,
+                ),
             )
         )
     if optimization_mode == OPTIMIZATION_NONE:
