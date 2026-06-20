@@ -1881,7 +1881,7 @@ def test_render_success_tabs_hides_plotly_panels_for_single_well_constructor(
         summary_rows=[],
     )
 
-    assert calls["plots_kwargs"]["show_plotly_panels"] is False
+    assert calls["plots_kwargs"]["show_plotly_panels"] is True
 
 
 def test_render_success_tabs_keeps_single_well_plots_when_calc_params_are_stale(
@@ -1974,7 +1974,7 @@ def test_render_success_tabs_keeps_single_well_plots_when_calc_params_are_stale(
         summary_rows=[],
     )
 
-    assert calls["plots_kwargs"]["show_plotly_panels"] is False
+    assert calls["plots_kwargs"]["show_plotly_panels"] is True
     assert any("Ниже — траектории из предыдущего расчёта" in item for item in calls["warnings"])
 
 

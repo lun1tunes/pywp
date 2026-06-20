@@ -433,7 +433,9 @@ def plan_view_figure(
     t1: Point3D,
     t3: Point3D,
     well_name: str | None = None,
+    title_text: str | None = None,
     height: int = 460,
+    show_t1_well_label: bool = True,
     trajectory_line_dash: str = "solid",
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
@@ -570,14 +572,15 @@ def plan_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
-    t1_label_trace = _t1_label_trace_2d(
-        well_name=well_name,
-        x_value=float(t1.x),
-        y_value=float(t1.y),
-        color=TARGET_COLOR_PRIMARY,
-    )
-    if t1_label_trace is not None:
-        fig.add_trace(t1_label_trace)
+    if show_t1_well_label:
+        t1_label_trace = _t1_label_trace_2d(
+            well_name=well_name,
+            x_value=float(t1.x),
+            y_value=float(t1.y),
+            color=TARGET_COLOR_PRIMARY,
+        )
+        if t1_label_trace is not None:
+            fig.add_trace(t1_label_trace)
     if not pilot_points_df.empty:
         fig.add_trace(
             go.Scatter(
@@ -598,7 +601,7 @@ def plan_view_figure(
         )
 
     fig.update_layout(
-        title="План (E-N)",
+        title=title_text or "План (E-N)",
         xaxis_title="Восток (м)",
         yaxis_title="Север (м)",
         xaxis={
@@ -632,7 +635,9 @@ def section_view_figure(
     t1: Point3D,
     t3: Point3D,
     well_name: str | None = None,
+    title_text: str | None = None,
     height: int = 460,
+    show_t1_well_label: bool = True,
     trajectory_line_dash: str = "solid",
     plan_csb_df: pd.DataFrame | None = None,
     actual_df: pd.DataFrame | None = None,
@@ -758,14 +763,15 @@ def section_view_figure(
             hovertemplate=HOVER_TEMPLATE_XYZ_MD_DLS,
         )
     )
-    t1_label_trace = _t1_label_trace_2d(
-        well_name=well_name,
-        x_value=float(t_points.loc[1, "VS_m"]),
-        y_value=float(t_points.loc[1, "Z_m"]),
-        color=TARGET_COLOR_PRIMARY,
-    )
-    if t1_label_trace is not None:
-        fig.add_trace(t1_label_trace)
+    if show_t1_well_label:
+        t1_label_trace = _t1_label_trace_2d(
+            well_name=well_name,
+            x_value=float(t_points.loc[1, "VS_m"]),
+            y_value=float(t_points.loc[1, "Z_m"]),
+            color=TARGET_COLOR_PRIMARY,
+        )
+        if t1_label_trace is not None:
+            fig.add_trace(t1_label_trace)
     if not pilot_points_df.empty:
         pilot_points_df["VS_m"] = _section_coordinate(
             pilot_points_df,
@@ -799,7 +805,7 @@ def section_view_figure(
     )
 
     fig.update_layout(
-        title="Вертикальный разрез",
+        title=title_text or "Вертикальный разрез",
         xaxis_title="Координата по разрезу (м)",
         yaxis_title="TVD (м)",
         yaxis={"range": reversed_axis_range(section_y_values)},

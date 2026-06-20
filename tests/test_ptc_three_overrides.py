@@ -187,6 +187,74 @@ def test_trajectory_overrides_build_tree_focus_targets_for_multi_pad() -> None:
     assert overrides["component_key"] == "results-overview"
 
 
+def test_trajectory_overrides_add_imported_dev_overlay_for_matching_well() -> None:
+    success = _successful_plan_xy(name="WELL-A", x_offset_m=0.0, y_offset_m=0.0)
+    imported_dev_well = ImportedTrajectoryWell(
+        name="WELL-A",
+        kind="approved",
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0, 2300.0],
+                "X_m": [0.0, 1100.0, 2300.0],
+                "Y_m": [0.0, 10.0, 20.0],
+                "Z_m": [0.0, 0.0, 0.0],
+            }
+        ),
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        azimuth_deg=90.0,
+    )
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        {},
+        records=_records(),
+        successes=[success],
+        target_only_wells=[],
+        name_to_color={"WELL-A": "#22c55e"},
+        imported_dev_target_wells=[imported_dev_well],
+    )
+
+    extra_lines = list(overrides["extra_lines"])
+    assert len(extra_lines) == 1
+    assert extra_lines[0]["name"] == "WELL-A: импорт .dev"
+    assert extra_lines[0]["dash"] == "dash"
+    assert extra_lines[0]["color"] == "#22c55e"
+    focus_targets = dict(overrides["focus_targets"])
+    assert focus_targets["well::WELL-A"]["max"][0] == pytest.approx(2300.0)
+
+
+def test_trajectory_overrides_decimate_imported_dev_overlay_segments() -> None:
+    success = _successful_plan_xy(name="WELL-A", x_offset_m=0.0, y_offset_m=0.0)
+    station_count = 500
+    imported_dev_well = ImportedTrajectoryWell(
+        name="WELL-A",
+        kind="approved",
+        stations=pd.DataFrame(
+            {
+                "MD_m": np.linspace(0.0, 3000.0, station_count),
+                "X_m": np.linspace(0.0, 3000.0, station_count),
+                "Y_m": np.zeros(station_count, dtype=float),
+                "Z_m": np.zeros(station_count, dtype=float),
+            }
+        ),
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        azimuth_deg=90.0,
+    )
+
+    overrides = ptc_three_overrides.trajectory_three_payload_overrides(
+        {},
+        records=_records(),
+        successes=[success],
+        target_only_wells=[],
+        name_to_color={"WELL-A": "#22c55e"},
+        imported_dev_target_wells=[imported_dev_well],
+    )
+
+    extra_lines = list(overrides["extra_lines"])
+    assert len(extra_lines) == 1
+    assert len(extra_lines[0]["segments"]) == 1
+    assert len(extra_lines[0]["segments"][0]) == 180
+
+
 def test_first_surface_arrow_honors_fixed_pad_order() -> None:
     session_state: dict[str, object] = {}
     records = _records()

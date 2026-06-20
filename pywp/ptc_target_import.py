@@ -15,6 +15,7 @@ from pywp.eclipse_welltrack import (
     parse_welltrack_text,
 )
 from pywp.pilot_wells import visible_well_names
+from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ptc_target_import_dev import (
     DevTargetImportSummary,
     dev_target_import_summary_dataframe,
@@ -80,6 +81,7 @@ AUTO_LAYOUT_APPLIED_MESSAGE = (
     "разведены по параметрам блока 'Кусты и расчет устьев'. "
     "При необходимости можно нажать 'Вернуть исходные устья'."
 )
+IMPORTED_DEV_TARGET_WELLS_STATE_KEY = "wt_imported_dev_target_wells"
 _TARGET_IMPORT_KIND_TABLE = "target_table"
 _TARGET_IMPORT_KIND_WELLTRACK = "welltrack"
 WT_SOURCE_KIND_DEV_TRAJECTORY = "dev_trajectory"
@@ -130,6 +132,7 @@ class TargetImportEmptySourceError(ValueError):
 class TargetImportParseResult:
     records: tuple[WelltrackRecord, ...]
     dev_summaries: tuple[DevTargetImportSummary, ...] = ()
+    imported_dev_wells: tuple[ImportedTrajectoryWell, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -337,6 +340,7 @@ def store_imported_records(
     *,
     records: Sequence[WelltrackRecord],
     dev_summaries: Sequence[DevTargetImportSummary] = (),
+    imported_dev_wells: Sequence[ImportedTrajectoryWell] = (),
     source_kind: str = _TARGET_IMPORT_KIND_WELLTRACK,
     loaded_at_text: str,
     clear_t1_t3_order_state: Callable[[], None],
@@ -353,11 +357,20 @@ def store_imported_records(
     session_state["wt_loaded_at"] = str(loaded_at_text)
     session_state["wt_target_import_source_kind"] = str(source_kind)
     session_state["wt_imported_dev_params"] = tuple(dev_summaries)
+    session_state[IMPORTED_DEV_TARGET_WELLS_STATE_KEY] = tuple(imported_dev_wells)
     session_state["wt_well_calc_overrides_enabled"] = False
     session_state["wt_well_calc_overrides"] = {}
+    session_state["wt_well_calc_profile_assignments"] = {}
+    session_state["wt_well_calc_active_profile_id"] = ""
+    session_state["wt_well_calc_active_profile_id_pending"] = None
+    session_state["wt_well_calc_profile_import_upload"] = None
     session_state["wt_well_calc_override_selected_names"] = []
     session_state["wt_well_calc_override_selected_signature"] = ()
     session_state["wt_well_calc_override_feedback"] = ""
+    session_state["wt_well_calc_override_name_input_active_profile_id"] = ""
+    for key in list(session_state.keys()):
+        if str(key).startswith("wt_well_calc_override_profile_name__"):
+            session_state.pop(key, None)
     session_state.pop("wt_preprocess_horizontal_length_m", None)
     session_state.pop("wt_records_overview_expand_once", None)
     session_state.pop("wt_edit_targets_applied_note", None)
@@ -386,11 +399,20 @@ def reset_failed_import_state(
     session_state["wt_records_original"] = None
     session_state["wt_target_import_source_kind"] = ""
     session_state["wt_imported_dev_params"] = ()
+    session_state[IMPORTED_DEV_TARGET_WELLS_STATE_KEY] = ()
     session_state["wt_well_calc_overrides_enabled"] = False
     session_state["wt_well_calc_overrides"] = {}
+    session_state["wt_well_calc_profile_assignments"] = {}
+    session_state["wt_well_calc_active_profile_id"] = ""
+    session_state["wt_well_calc_active_profile_id_pending"] = None
+    session_state["wt_well_calc_profile_import_upload"] = None
     session_state["wt_well_calc_override_selected_names"] = []
     session_state["wt_well_calc_override_selected_signature"] = ()
     session_state["wt_well_calc_override_feedback"] = ""
+    session_state["wt_well_calc_override_name_input_active_profile_id"] = ""
+    for key in list(session_state.keys()):
+        if str(key).startswith("wt_well_calc_override_profile_name__"):
+            session_state.pop(key, None)
     session_state.pop("wt_preprocess_horizontal_length_m", None)
     session_state.pop("wt_records_overview_expand_once", None)
     session_state.pop("wt_edit_targets_applied_note", None)
@@ -413,11 +435,20 @@ def clear_target_import_flow_state(
     session_state["wt_records_original"] = None
     session_state["wt_target_import_source_kind"] = ""
     session_state["wt_imported_dev_params"] = ()
+    session_state[IMPORTED_DEV_TARGET_WELLS_STATE_KEY] = ()
     session_state["wt_well_calc_overrides_enabled"] = False
     session_state["wt_well_calc_overrides"] = {}
+    session_state["wt_well_calc_profile_assignments"] = {}
+    session_state["wt_well_calc_active_profile_id"] = ""
+    session_state["wt_well_calc_active_profile_id_pending"] = None
+    session_state["wt_well_calc_profile_import_upload"] = None
     session_state["wt_well_calc_override_selected_names"] = []
     session_state["wt_well_calc_override_selected_signature"] = ()
     session_state["wt_well_calc_override_feedback"] = ""
+    session_state["wt_well_calc_override_name_input_active_profile_id"] = ""
+    for key in list(session_state.keys()):
+        if str(key).startswith("wt_well_calc_override_profile_name__"):
+            session_state.pop(key, None)
     session_state["wt_reference_wells"] = ()
     for key in reference_well_state_keys:
         session_state[str(key)] = ()
@@ -497,26 +528,27 @@ def _parse_dev_target_payload(
     source_path: str,
     source_files: Sequence[tuple[str, bytes]],
 ) -> TargetImportParseResult:
-    pairs: list[tuple[WelltrackRecord, DevTargetImportSummary]] = []
+    parsed_wells = []
     normalized_path = str(source_path).strip()
     if normalized_path:
         path_obj = Path(normalized_path).expanduser()
         if not path_obj.exists():
             raise WelltrackParseError(f"Путь .dev не найден: `{path_obj}`.")
         if path_obj.is_dir():
-            pairs.extend(parse_dev_target_directory(path_obj))
+            parsed_wells.extend(parse_dev_target_directory(path_obj))
         else:
-            pairs.append(parse_dev_target_file(path_obj))
+            parsed_wells.append(parse_dev_target_file(path_obj))
     elif source_files:
-        pairs.extend(parse_dev_target_payloads(tuple(source_files)))
+        parsed_wells.extend(parse_dev_target_payloads(tuple(source_files)))
     else:
         fallback_name = dev_trajectory_text_name(source_text)
-        pairs.extend(
+        parsed_wells.extend(
             parse_dev_target_payloads(
                 ((f"{fallback_name}.dev", str(source_text).encode("utf-8")),)
             )
         )
     return TargetImportParseResult(
-        records=tuple(record for record, _summary in pairs),
-        dev_summaries=tuple(summary for _record, summary in pairs),
+        records=tuple(item.record for item in parsed_wells),
+        dev_summaries=tuple(item.summary for item in parsed_wells),
+        imported_dev_wells=tuple(item.imported_well for item in parsed_wells),
     )

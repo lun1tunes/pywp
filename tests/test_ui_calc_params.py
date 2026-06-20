@@ -18,6 +18,7 @@ from pywp.ui_calc_params import (
     clear_kop_min_vertical_function,
     kop_min_vertical_function_from_state,
     kop_min_vertical_mode,
+    render_calc_params_block,
     set_calc_param_state_values,
     set_kop_min_vertical_function,
 )
@@ -177,6 +178,61 @@ def test_build_config_from_state_uses_optional_independent_build2_pi(
     ]
 
 
+def test_optional_build2_input_empty_reuses_build1(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["dls_build_max"] = 0.9
+    fake_st.session_state["dls_build2_enabled"] = True
+    fake_st.session_state["dls_build2_max"] = 1.4
+    fake_st.session_state["dls_build2_optional_input"] = ""
+
+    ui_calc_params._apply_build2_optional_input_state("")
+
+    assert fake_st.session_state["dls_build2_enabled"] is False
+    assert fake_st.session_state["dls_build2_max"] == pytest.approx(0.9)
+
+
+def test_optional_build2_input_value_enables_separate_limit(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["dls_build2_optional_input"] = "1.7"
+
+    ui_calc_params._apply_build2_optional_input_state("")
+
+    assert fake_st.session_state["dls_build2_enabled"] is True
+    assert fake_st.session_state["dls_build2_max"] == pytest.approx(1.7)
+
+
+def test_handle_build2_optional_input_change_applies_state_and_forwards_callback(
+    monkeypatch,
+) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+    callback_calls: list[str] = []
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["dls_build2_optional_input"] = "1.7"
+
+    ui_calc_params._handle_build2_optional_input_change(
+        "",
+        lambda: callback_calls.append("changed"),
+    )
+
+    assert fake_st.session_state["dls_build2_enabled"] is True
+    assert fake_st.session_state["dls_build2_max"] == pytest.approx(1.7)
+    assert callback_calls == ["changed"]
+
+
 def test_calc_param_state_values_roundtrip_preserves_config() -> None:
     config = TrajectoryConfig(
         md_step_m=12.0,
@@ -239,6 +295,137 @@ def test_calc_param_binding_uses_shared_defaults(monkeypatch) -> None:
 
     for suffix, default in defaults.items():
         assert fake_st.session_state[f"wt_cfg_{suffix}"] == default
+
+
+def test_render_calc_params_block_disables_widgets(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    calls: list[tuple[str, bool]] = []
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, _label, **kwargs):
+            calls.append(("number_input", bool(kwargs.get("disabled"))))
+            return None
+
+        def toggle(self, _label, **kwargs):
+            calls.append(("toggle", bool(kwargs.get("disabled"))))
+            return None
+
+        def text_input(self, _label, **kwargs):
+            calls.append(("text_input", bool(kwargs.get("disabled"))))
+            return None
+
+        def caption(self, *args, **kwargs):
+            return None
+
+    class _FakeStreamlit(SimpleNamespace):
+        def markdown(self, *args, **kwargs):
+            return None
+
+        def columns(self, spec, *args, **kwargs):
+            count = int(spec) if isinstance(spec, int) else len(spec)
+            return tuple(_DummyColumn() for _ in range(count))
+
+        def number_input(self, _label, **kwargs):
+            calls.append(("number_input", bool(kwargs.get("disabled"))))
+            return None
+
+        def selectbox(self, _label, **kwargs):
+            calls.append(("selectbox", bool(kwargs.get("disabled"))))
+            return None
+
+        def expander(self, *args, **kwargs):
+            return _DummyContext()
+
+        def popover(self, *args, **kwargs):
+            return _DummyContext()
+
+        def caption(self, *args, **kwargs):
+            return None
+
+    fake_st = _FakeStreamlit(session_state={})
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    render_calc_params_block(disabled=True)
+
+    assert calls
+    assert all(disabled for _, disabled in calls)
+
+
+def test_render_calc_params_block_registers_build2_text_input_callback(
+    monkeypatch,
+) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    captured: dict[str, object] = {}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, _label, **kwargs):
+            return None
+
+        def toggle(self, _label, **kwargs):
+            return None
+
+        def text_input(self, label, **kwargs):
+            if str(label) == "Макс ПИ BUILD 2, deg/10m":
+                captured["on_change"] = kwargs.get("on_change")
+                captured["args"] = kwargs.get("args")
+            return None
+
+        def caption(self, *args, **kwargs):
+            return None
+
+    class _FakeStreamlit(SimpleNamespace):
+        def markdown(self, *args, **kwargs):
+            return None
+
+        def columns(self, spec, *args, **kwargs):
+            count = int(spec) if isinstance(spec, int) else len(spec)
+            return tuple(_DummyColumn() for _ in range(count))
+
+        def number_input(self, _label, **kwargs):
+            return None
+
+        def selectbox(self, _label, **kwargs):
+            return None
+
+        def expander(self, *args, **kwargs):
+            return _DummyContext()
+
+        def popover(self, *args, **kwargs):
+            return _DummyContext()
+
+        def caption(self, *args, **kwargs):
+            return None
+
+    fake_st = _FakeStreamlit(session_state={})
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+    monkeypatch.setattr(
+        ui_calc_params,
+        "_apply_build2_optional_input_state",
+        lambda prefix="": (_ for _ in ()).throw(
+            AssertionError("should not run during widget render")
+        ),
+    )
+
+    render_calc_params_block()
+
+    assert captured["on_change"] is ui_calc_params._handle_build2_optional_input_change
+    assert captured["args"] == ("", None)
 
 
 def test_kop_depth_function_state_roundtrip_updates_signature(monkeypatch) -> None:

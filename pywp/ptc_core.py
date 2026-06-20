@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import colorsys
 import hashlib
+import json
 import logging
+import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
@@ -259,14 +261,25 @@ WT_WELL_CALC_OVERRIDE_ENABLED_PENDING_KEY = (
     "wt_well_calc_overrides_enabled_pending"
 )
 WT_WELL_CALC_OVERRIDE_STATE_KEY = "wt_well_calc_overrides"
+WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY = "wt_well_calc_profile_assignments"
+WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY = "wt_well_calc_active_profile_id"
+WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY = (
+    "wt_well_calc_active_profile_id_pending"
+)
+WT_WELL_CALC_PROFILE_IMPORT_UPLOAD_KEY = "wt_well_calc_profile_import_upload"
 WT_WELL_CALC_OVERRIDE_SELECTION_KEY = "wt_well_calc_override_selected_names"
 WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY = (
     "wt_well_calc_override_selected_signature"
 )
 WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY = "wt_well_calc_override_feedback"
+WT_WELL_CALC_OVERRIDE_NAME_INPUT_ACTIVE_KEY = (
+    "wt_well_calc_override_name_input_active_profile_id"
+)
 WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY = (
     "wt_last_well_calc_override_signature"
 )
+WT_WELL_CALC_PROFILE_JSON_KIND = "pywp.manual_well_calc_profile"
+WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION = 1
 _CALC_PARAM_OVERRIDE_LABELS: dict[str, str] = {
     "md_step": "Шаг MD",
     "md_control": "Контрольный шаг",
@@ -1144,6 +1157,8 @@ def _augment_three_payload(
     hidden_flat_legend_labels: set[str] | None = None,
     collisions: list[dict[str, object]] | None = None,
     edit_wells: list[dict[str, object]] | None = None,
+    extra_bounds: dict[str, list[float]] | None = None,
+    extra_lines: list[dict[str, object]] | None = None,
     extra_labels: list[dict[str, object]] | None = None,
     extra_meshes: list[dict[str, object]] | None = None,
     extra_legend_items: list[dict[str, object]] | None = None,
@@ -1155,6 +1170,8 @@ def _augment_three_payload(
         hidden_flat_legend_labels=hidden_flat_legend_labels,
         collisions=collisions,
         edit_wells=edit_wells,
+        extra_bounds=extra_bounds,
+        extra_lines=extra_lines,
         extra_labels=extra_labels,
         extra_meshes=extra_meshes,
         extra_legend_items=extra_legend_items,
@@ -1261,6 +1278,8 @@ def _cached_augmented_three_payload(
         ),
         collisions=payload_overrides.get("collisions"),
         edit_wells=payload_overrides.get("edit_wells"),
+        extra_bounds=payload_overrides.get("extra_bounds"),
+        extra_lines=payload_overrides.get("extra_lines"),
         extra_labels=payload_overrides.get("extra_labels"),
         extra_meshes=payload_overrides.get("extra_meshes"),
         extra_legend_items=payload_overrides.get("extra_legend_items"),
@@ -1331,6 +1350,7 @@ def _trajectory_three_payload_overrides(
         target_only_wells=target_only_wells,
         name_to_color=name_to_color,
         reference_wells=_reference_wells_from_state(),
+        imported_dev_target_wells=_imported_dev_target_wells_from_state(),
     )
 
 
@@ -1350,6 +1370,19 @@ def _anticollision_three_payload_overrides(
         target_only_wells=target_only_wells,
         target_only_name_to_color=target_only_name_to_color,
         reference_wells=_reference_wells_from_state(),
+        imported_dev_target_wells=_imported_dev_target_wells_from_state(),
+    )
+
+
+def _imported_dev_target_three_payload_overrides(
+    *,
+    visible_well_names: Iterable[str],
+    name_to_color: Mapping[str, str],
+) -> dict[str, object]:
+    return ptc_three_overrides.imported_dev_target_three_payload_overrides(
+        visible_well_names=visible_well_names,
+        name_to_color=name_to_color,
+        imported_dev_target_wells=_imported_dev_target_wells_from_state(),
     )
 
 
@@ -2285,6 +2318,18 @@ def _reference_wells_from_state() -> tuple[ImportedTrajectoryWell, ...]:
     return ptc_reference_state.reference_wells_from_state()
 
 
+def _imported_dev_target_wells_from_state() -> tuple[ImportedTrajectoryWell, ...]:
+    raw_items = tuple(
+        st.session_state.get(ptc_target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY, ())
+        or ()
+    )
+    return tuple(
+        item
+        for item in raw_items
+        if isinstance(item, ImportedTrajectoryWell)
+    )
+
+
 def _reset_anticollision_view_state(*, clear_prepared: bool) -> None:
     st.session_state["wt_anticollision_analysis_cache"] = {}
     st.session_state["wt_anticollision_last_run"] = None
@@ -2316,6 +2361,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_loaded_at", "")
     st.session_state.setdefault("wt_target_import_source_kind", "")
     st.session_state.setdefault("wt_imported_dev_params", ())
+    st.session_state.setdefault(ptc_target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY, ())
     st.session_state.setdefault("wt_pad_configs", {})
     st.session_state.setdefault("wt_pad_detected_meta", {})
     st.session_state.setdefault("wt_pad_selected_id", "")
@@ -2392,9 +2438,14 @@ def _init_state() -> None:
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ENABLED_KEY, False)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ENABLED_PENDING_KEY, None)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_STATE_KEY, {})
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY, {})
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY, "")
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY, None)
+    st.session_state.setdefault(WT_WELL_CALC_PROFILE_IMPORT_UPLOAD_KEY, None)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_KEY, [])
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY, ())
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY, "")
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_NAME_INPUT_ACTIVE_KEY, "")
     st.session_state.setdefault("wt_last_anticollision_resolution", None)
     st.session_state.setdefault("wt_last_anticollision_previous_successes", {})
     st.session_state.setdefault("wt_anticollision_analysis_cache", {})
@@ -3251,8 +3302,9 @@ def _build_config_form(
     *,
     title: str = "Параметры расчета",
     on_change: Callable[[], None] | None = None,
+    disabled: bool = False,
 ) -> TrajectoryConfig:
-    binding.render_block(title=title, on_change=on_change)
+    binding.render_block(title=title, on_change=on_change, disabled=disabled)
     return binding.build_config()
 
 
@@ -3316,50 +3368,220 @@ def _consume_manual_well_calc_override_enabled() -> None:
     st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = bool(pending_value)
 
 
-def _manual_well_calc_overrides() -> dict[str, dict[str, object]]:
+def _queue_manual_well_calc_active_profile(profile_id: str) -> None:
+    st.session_state[WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY] = str(
+        profile_id
+    ).strip()
+
+
+def _consume_manual_well_calc_active_profile() -> None:
+    pending_profile_id = st.session_state.pop(
+        WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY,
+        None,
+    )
+    if pending_profile_id is None:
+        return
+    _set_manual_well_calc_active_profile(str(pending_profile_id))
+
+
+def _normalized_manual_well_profile_payload(
+    *,
+    profile_id: str,
+    raw_payload: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "name": str(raw_payload.get("name", profile_id)).strip() or str(profile_id),
+        "values": _normalized_calc_param_override_values(raw_payload.get("values", {})),
+        "source": str(raw_payload.get("source", "")).strip(),
+        "note": str(raw_payload.get("note", "")).strip(),
+    }
+
+
+def _manual_well_calc_profiles() -> dict[str, dict[str, object]]:
     raw_state = st.session_state.get(WT_WELL_CALC_OVERRIDE_STATE_KEY, {})
     if not isinstance(raw_state, Mapping):
+        st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = {}
         return {}
     normalized: dict[str, dict[str, object]] = {}
+    legacy_assignments: dict[str, str] = {}
     changed = False
-    for raw_name, raw_payload in raw_state.items():
-        well_name = str(raw_name).strip()
-        if not well_name or not isinstance(raw_payload, Mapping):
+    legacy_state = False
+    for raw_profile_id, raw_payload in raw_state.items():
+        profile_id = str(raw_profile_id).strip()
+        if not profile_id or not isinstance(raw_payload, Mapping):
             changed = True
             continue
-        values = _normalized_calc_param_override_values(raw_payload.get("values", {}))
-        if not values:
+        if "name" not in raw_payload:
+            legacy_state = True
             changed = True
-            continue
-        normalized[well_name] = {
-            "values": values,
-            "source": str(raw_payload.get("source", "")).strip(),
-            "note": str(raw_payload.get("note", "")).strip(),
-        }
+            legacy_well_name = (
+                str(raw_payload.get("well_name", profile_id)).strip() or profile_id
+            )
+            legacy_assignments[legacy_well_name] = profile_id
+        payload = _normalized_manual_well_profile_payload(
+            profile_id=profile_id,
+            raw_payload=raw_payload,
+        )
+        normalized[profile_id] = payload
+        expected_name = (
+            str(raw_payload.get("name", profile_id)).strip() or str(profile_id)
+        )
+        expected_values = _normalized_calc_param_override_values(
+            raw_payload.get("values", {})
+        )
+        expected_source = str(raw_payload.get("source", "")).strip()
+        expected_note = str(raw_payload.get("note", "")).strip()
         if (
-            values != raw_payload.get("values")
-            or normalized[well_name]["source"] != raw_payload.get("source", "")
-            or normalized[well_name]["note"] != raw_payload.get("note", "")
+            payload["name"] != expected_name
+            or payload["values"] != expected_values
+            or payload["source"] != expected_source
+            or payload["note"] != expected_note
         ):
             changed = True
     if changed:
         st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = normalized
+    if legacy_state:
+        raw_assignments = st.session_state.get(WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY)
+        if not isinstance(raw_assignments, Mapping):
+            st.session_state[WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = dict(
+                legacy_assignments
+            )
+        else:
+            merged_assignments = {
+                str(raw_well_name).strip(): str(raw_profile_id).strip()
+                for raw_well_name, raw_profile_id in raw_assignments.items()
+                if str(raw_well_name).strip() and str(raw_profile_id).strip()
+            }
+            assignments_changed = merged_assignments != dict(raw_assignments)
+            for well_name, profile_id in legacy_assignments.items():
+                current_profile_id = str(merged_assignments.get(well_name, "")).strip()
+                if current_profile_id in normalized:
+                    continue
+                if current_profile_id != profile_id:
+                    merged_assignments[well_name] = profile_id
+                    assignments_changed = True
+            if assignments_changed:
+                st.session_state[WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = (
+                    merged_assignments
+                )
     return normalized
 
 
-def _manual_well_calc_override_signature() -> tuple[object, ...]:
-    if not _manual_well_calc_override_enabled():
-        return (False, ())
+def _manual_well_calc_profile_assignments(
+    *,
+    available_names: Iterable[str] | None = None,
+) -> dict[str, str]:
+    profiles = _manual_well_calc_profiles()
+    raw_assignments = st.session_state.get(WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY, {})
+    if not isinstance(raw_assignments, Mapping):
+        st.session_state[WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {}
+        return {}
+    visible_by_key = (
+        {well_name_key(name): str(name) for name in available_names}
+        if available_names is not None
+        else None
+    )
+    normalized: dict[str, str] = {}
+    changed = False
+    for raw_well_name, raw_profile_id in raw_assignments.items():
+        raw_well_name_text = str(raw_well_name)
+        raw_profile_id_text = str(raw_profile_id)
+        well_name = raw_well_name_text.strip()
+        profile_id = raw_profile_id_text.strip()
+        if not well_name or profile_id not in profiles:
+            changed = True
+            continue
+        if visible_by_key is not None:
+            visible_name = visible_by_key.get(well_name_key(well_name))
+            if visible_name is None:
+                changed = True
+                continue
+            well_name = visible_name
+        normalized[well_name] = profile_id
+        if well_name != raw_well_name_text or profile_id != raw_profile_id_text:
+            changed = True
+    if changed:
+        st.session_state[WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = normalized
+    return normalized
+
+
+def _manual_well_calc_profile_option_ids() -> list[str]:
+    return [
+        profile_id
+        for profile_id, _payload in sorted(
+            _manual_well_calc_profiles().items(),
+            key=lambda item: (
+                well_name_natural_sort_key(str(item[1].get("name", item[0]))),
+                str(item[0]),
+            ),
+        )
+    ]
+
+
+def _set_manual_well_calc_active_profile(profile_id: str) -> None:
+    active_profile_id = str(profile_id).strip()
+    if active_profile_id not in _manual_well_calc_profiles():
+        active_profile_id = ""
+    st.session_state[WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = active_profile_id
+
+
+def _manual_well_calc_active_profile_id(*, persist: bool = True) -> str:
+    profiles = _manual_well_calc_profiles()
+    active_profile_id = str(
+        st.session_state.get(WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY, "")
+    ).strip()
+    if active_profile_id not in profiles:
+        option_ids = _manual_well_calc_profile_option_ids()
+        active_profile_id = option_ids[0] if option_ids else ""
+        if persist:
+            st.session_state[WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = active_profile_id
+    return active_profile_id
+
+
+def _manual_well_calc_profile_label(
+    *,
+    profile_id: str,
+    assignments: Mapping[str, str],
+) -> str:
+    payload = dict(_manual_well_calc_profiles().get(str(profile_id), {}))
+    assigned_count = sum(
+        1
+        for assigned_profile_id in assignments.values()
+        if assigned_profile_id == profile_id
+    )
+    suffix = f" ({assigned_count} скв.)" if assigned_count > 0 else ""
+    return f"{str(payload.get('name', profile_id)).strip() or str(profile_id)}{suffix}"
+
+
+def _manual_well_calc_override_items() -> tuple[
+    tuple[str, tuple[tuple[str, object], ...]],
+    ...,
+]:
+    profiles = _manual_well_calc_profiles()
+    assignments = _manual_well_calc_profile_assignments()
     items: list[tuple[str, tuple[tuple[str, object], ...]]] = []
-    for well_name, payload in sorted(_manual_well_calc_overrides().items()):
-        values = _normalized_calc_param_override_values(payload.get("values", {}))
+    for well_name, profile_id in sorted(assignments.items()):
+        values = _normalized_calc_param_override_values(
+            profiles.get(str(profile_id), {}).get("values", {})
+        )
+        if not values:
+            continue
         items.append(
             (
                 str(well_name),
                 tuple((suffix, values[suffix]) for suffix in sorted(values)),
             )
         )
-    return (True, tuple(items))
+    return tuple(items)
+
+
+def _manual_well_calc_override_signature() -> tuple[object, ...]:
+    if not _manual_well_calc_override_enabled():
+        return (False, ())
+    items = _manual_well_calc_override_items()
+    if not items:
+        return (True, ())
+    return (True, items)
 
 
 def _coerce_manual_well_override_selection(
@@ -3401,61 +3623,83 @@ def _set_manual_well_override_editor_from_config(
     )
 
 
-def _effective_manual_well_override_values(
+def _effective_manual_well_profile_values(
     *,
     base_config: TrajectoryConfig,
-    well_name: str,
+    profile_id: str,
+    records_by_name: Mapping[str, WelltrackRecord] | None = None,
 ) -> dict[str, float | int | str | bool]:
     values = calc_param_state_values_from_config(base_config)
-    if not _manual_well_calc_override_enabled():
+    normalized_profile_id = str(profile_id).strip()
+    payload = _manual_well_calc_profiles().get(normalized_profile_id, {})
+    manual_values = _normalized_calc_param_override_values(payload.get("values", {}))
+    values.update(manual_values)
+    kop_function = kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix)
+    records_lookup = (
+        records_by_name if isinstance(records_by_name, Mapping) else None
+    )
+    if (
+        not normalized_profile_id
+        or records_lookup is None
+        or kop_function is None
+        or "kop_min_vertical" in manual_values
+    ):
         return values
-    payload = _manual_well_calc_overrides().get(str(well_name), {})
-    values.update(_normalized_calc_param_override_values(payload.get("values", {})))
+    effective_config = build_config_from_values(values)
+    assignments = _manual_well_calc_profile_assignments()
+    for well_name, assigned_profile_id in sorted(
+        assignments.items(),
+        key=lambda item: well_name_natural_sort_key(str(item[0])),
+    ):
+        if str(assigned_profile_id).strip() != normalized_profile_id:
+            continue
+        record = records_lookup.get(str(well_name))
+        if record is None:
+            continue
+        evaluated_kop_m = _evaluated_kop_min_vertical_for_record(
+            record=record,
+            base_config=effective_config,
+            kop_function=kop_function,
+        )
+        if evaluated_kop_m is not None:
+            values["kop_min_vertical"] = float(evaluated_kop_m)
+            break
     return values
 
 
 def _sync_manual_well_override_editor_selection(
     *,
     base_config: TrajectoryConfig,
-    selected_names: list[str],
+    active_profile_id: str,
     records_by_name: Mapping[str, WelltrackRecord] | None = None,
 ) -> None:
-    selection_signature = tuple(str(name) for name in selected_names)
-    if (
-        tuple(st.session_state.get(WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY, ()))
-        == selection_signature
-    ):
-        return
-    if selected_names:
-        source_values = _effective_manual_well_override_values(
+    effective_values = (
+        _effective_manual_well_profile_values(
             base_config=base_config,
-            well_name=str(selected_names[0]),
+            profile_id=active_profile_id,
+            records_by_name=records_by_name,
         )
-        if (
-            kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix)
-            is not None
-            and "kop_min_vertical"
-            not in _normalized_calc_param_override_values(
-                _manual_well_calc_overrides()
-                .get(str(selected_names[0]), {})
-                .get("values", {})
-            )
-            and records_by_name is not None
-        ):
-            record = records_by_name.get(str(selected_names[0]))
-            if record is not None:
-                evaluated_kop_m = _evaluated_kop_min_vertical_for_record(
-                    record=record,
-                    base_config=base_config,
-                    kop_function=kop_min_vertical_function_from_state(
-                        prefix=WT_CALC_PARAMS.prefix
-                    ),
-                )
-                if evaluated_kop_m is not None:
-                    source_values["kop_min_vertical"] = float(evaluated_kop_m)
-        editor_config = build_config_from_values(source_values)
-    else:
-        editor_config = base_config
+        if active_profile_id
+        else calc_param_state_values_from_config(base_config)
+    )
+    selection_signature = (
+        str(active_profile_id),
+        WT_CALC_PARAMS.state_signature(),
+        tuple((suffix, effective_values[suffix]) for suffix in sorted(effective_values)),
+    )
+    stored_signature = st.session_state.get(
+        WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY,
+        (),
+    )
+    if not isinstance(stored_signature, (list, tuple)):
+        stored_signature = ()
+    if tuple(stored_signature) == selection_signature:
+        return
+    editor_config = (
+        build_config_from_values(effective_values)
+        if active_profile_id
+        else base_config
+    )
     _set_manual_well_override_editor_from_config(editor_config)
     st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = (
         selection_signature
@@ -3476,66 +3720,295 @@ def _manual_well_override_diff_values(
     }
 
 
-def _store_manual_well_override_values(
+def _new_manual_well_calc_profile_id() -> str:
+    existing_ids = set(_manual_well_calc_profiles())
+    profile_index = 1
+    while True:
+        profile_id = f"cfg-{profile_index}"
+        if profile_id not in existing_ids:
+            return profile_id
+        profile_index += 1
+
+
+def _next_manual_well_calc_profile_name() -> str:
+    existing_names = {
+        well_name_key(str(payload.get("name", "")).strip())
+        for payload in _manual_well_calc_profiles().values()
+    }
+    profile_index = 1
+    while True:
+        profile_name = f"Конфигурация {profile_index}"
+        if well_name_key(profile_name) not in existing_names:
+            return profile_name
+        profile_index += 1
+
+
+def _manual_well_calc_profile_name_key(active_profile_id: str) -> str:
+    normalized_profile_id = str(active_profile_id).strip() or "none"
+    return f"wt_well_calc_override_profile_name__{normalized_profile_id}"
+
+
+def _unique_manual_well_calc_profile_name(
     *,
-    well_name: str,
-    values: dict[str, float | int | str | bool],
+    profile_name: str,
+    current_profile_id: str | None = None,
+) -> str:
+    desired_name = str(profile_name).strip() or _next_manual_well_calc_profile_name()
+    profiles = _manual_well_calc_profiles()
+    desired_key = well_name_key(desired_name)
+    if all(
+        profile_id == current_profile_id
+        or well_name_key(str(payload.get("name", "")).strip()) != desired_key
+        for profile_id, payload in profiles.items()
+    ):
+        return desired_name
+    suffix = 2
+    while True:
+        candidate = f"{desired_name} ({suffix})"
+        candidate_key = well_name_key(candidate)
+        if all(
+            profile_id == current_profile_id
+            or well_name_key(str(payload.get("name", "")).strip()) != candidate_key
+            for profile_id, payload in profiles.items()
+        ):
+            return candidate
+        suffix += 1
+
+
+def _store_manual_well_calc_profile(
+    *,
+    profile_id: str,
+    profile_name: str,
+    values: Mapping[str, object],
     source: str,
     note: str = "",
-) -> None:
-    overrides = dict(_manual_well_calc_overrides())
-    if values:
-        overrides[str(well_name)] = {
-            "values": dict(values),
-            "source": str(source).strip(),
-            "note": str(note).strip(),
-        }
-    else:
-        overrides.pop(str(well_name), None)
-    st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = overrides
+) -> str:
+    normalized_profile_id = str(profile_id).strip()
+    if not normalized_profile_id:
+        return ""
+    profiles = dict(_manual_well_calc_profiles())
+    resolved_name = _unique_manual_well_calc_profile_name(
+        profile_name=profile_name,
+        current_profile_id=normalized_profile_id,
+    )
+    profiles[normalized_profile_id] = {
+        "name": resolved_name,
+        "values": _normalized_calc_param_override_values(values),
+        "source": str(source).strip(),
+        "note": str(note).strip(),
+    }
+    st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = profiles
+    st.session_state[WT_WELL_CALC_OVERRIDE_NAME_INPUT_ACTIVE_KEY] = ""
+    return resolved_name
+
+
+def _manual_well_calc_profile_id_by_name(profile_name: str) -> str:
+    desired_key = well_name_key(str(profile_name).strip())
+    if not desired_key:
+        return ""
+    for profile_id, payload in _manual_well_calc_profiles().items():
+        current_name = str(payload.get("name", "")).strip()
+        if well_name_key(current_name) == desired_key:
+            return str(profile_id)
+    return ""
+
+
+def _manual_well_calc_profile_export_payload(profile_id: str) -> dict[str, object]:
+    normalized_profile_id = str(profile_id).strip()
+    if not normalized_profile_id:
+        return {}
+    payload = dict(_manual_well_calc_profiles().get(normalized_profile_id, {}))
+    if not payload:
+        return {}
+    profile_name = str(payload.get("name", normalized_profile_id)).strip() or str(
+        normalized_profile_id
+    )
+    return {
+        "kind": WT_WELL_CALC_PROFILE_JSON_KIND,
+        "schema_version": WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION,
+        "name": profile_name,
+        "values": _normalized_calc_param_override_values(payload.get("values", {})),
+        "source": str(payload.get("source", "")).strip() or "Ручная настройка",
+        "note": str(payload.get("note", "")).strip(),
+    }
+
+
+def _manual_well_calc_profile_export_json(profile_id: str) -> str:
+    payload = _manual_well_calc_profile_export_payload(profile_id)
+    if not payload:
+        return ""
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _manual_well_calc_profile_export_file_name(profile_id: str) -> str:
+    payload = _manual_well_calc_profile_export_payload(profile_id)
+    profile_name = str(payload.get("name", "")).strip() or "configuration"
+    safe_name = re.sub(r'[\\/:*?"<>|]+', "_", profile_name).strip(" .")
+    return f"{safe_name or 'configuration'}.json"
+
+
+def _import_manual_well_calc_profile_json_bytes(
+    raw_bytes: bytes,
+) -> tuple[str, str, bool]:
+    try:
+        parsed = json.loads(bytes(raw_bytes).decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Не удалось прочитать JSON конфигурации.") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON конфигурации должен содержать объект.")
+    kind = str(parsed.get("kind", "")).strip()
+    if kind and kind != WT_WELL_CALC_PROFILE_JSON_KIND:
+        raise ValueError("JSON не похож на файл конфигурации расчёта.")
+    schema_version = parsed.get("schema_version", WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION)
+    try:
+        schema_version_int = int(schema_version)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("У JSON конфигурации некорректная версия схемы.") from exc
+    if schema_version_int != WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION:
+        raise ValueError("Версия схемы JSON конфигурации не поддерживается.")
+    profile_name = str(parsed.get("name", "")).strip()
+    if not profile_name:
+        raise ValueError("В JSON конфигурации отсутствует имя.")
+    values = _normalized_calc_param_override_values(parsed.get("values", {}))
+    source = str(parsed.get("source", "")).strip() or "Импорт JSON"
+    note = str(parsed.get("note", "")).strip()
+    existing_profile_id = _manual_well_calc_profile_id_by_name(profile_name)
+    profile_id = existing_profile_id or _new_manual_well_calc_profile_id()
+    resolved_name = _store_manual_well_calc_profile(
+        profile_id=profile_id,
+        profile_name=profile_name,
+        values=values,
+        source=source,
+        note=note,
+    )
+    _queue_manual_well_calc_active_profile(profile_id)
+    return profile_id, resolved_name, bool(existing_profile_id)
+
+
+def _import_manual_well_calc_profile_json_payloads(
+    payloads: Iterable[tuple[str, bytes]],
+) -> tuple[int, int, list[str], str]:
+    imported_count = 0
+    updated_count = 0
+    error_messages: list[str] = []
+    last_profile_id = ""
+    for file_name, raw_bytes in payloads:
+        normalized_name = str(file_name).strip() or "configuration.json"
+        try:
+            profile_id, _resolved_name, updated_existing = (
+                _import_manual_well_calc_profile_json_bytes(raw_bytes)
+            )
+        except ValueError as exc:
+            error_messages.append(f"{normalized_name}: {exc}")
+            continue
+        imported_count += 1
+        updated_count += int(updated_existing)
+        last_profile_id = str(profile_id)
+    if last_profile_id:
+        _queue_manual_well_calc_active_profile(last_profile_id)
+    return imported_count, updated_count, error_messages, last_profile_id
+
+
+def _create_manual_well_calc_profile() -> str:
+    profile_id = _new_manual_well_calc_profile_id()
+    profile_name = _next_manual_well_calc_profile_name()
+    _store_manual_well_calc_profile(
+        profile_id=profile_id,
+        profile_name=profile_name,
+        values={},
+        source="Ручная настройка",
+    )
+    _queue_manual_well_calc_active_profile(profile_id)
+    return profile_id
+
+
+def _manual_well_calc_profile_save_source(existing_source: str) -> str:
+    source = str(existing_source).strip()
+    if source == "Импорт .dev":
+        return "Импорт .dev + ручная настройка"
+    if source.startswith("Импорт .dev +"):
+        return source
+    return "Ручная настройка"
 
 
 def _apply_manual_well_override_editor(
     *,
     base_config: TrajectoryConfig,
-    selected_names: list[str],
-) -> tuple[int, int]:
+    active_profile_id: str,
+    profile_name: str,
+) -> tuple[bool, str, int]:
+    if not active_profile_id:
+        return False, "", 0
+    profiles = _manual_well_calc_profiles()
+    existing_payload = dict(profiles.get(active_profile_id, {}))
     editor_config = WT_WELL_OVERRIDE_EDITOR.build_config()
     diff_values = _manual_well_override_diff_values(
         base_config=base_config,
         override_config=editor_config,
     )
-    applied_count = 0
-    cleared_count = 0
-    for well_name in selected_names:
-        had_override = str(well_name) in _manual_well_calc_overrides()
-        _store_manual_well_override_values(
-            well_name=str(well_name),
-            values=diff_values,
-            source="Ручная настройка",
-        )
-        if diff_values:
-            applied_count += 1
-        elif had_override:
-            cleared_count += 1
-    return applied_count, cleared_count
+    resolved_name = _store_manual_well_calc_profile(
+        profile_id=active_profile_id,
+        profile_name=profile_name,
+        values=diff_values,
+        source=_manual_well_calc_profile_save_source(
+            str(existing_payload.get("source", "")).strip()
+        ),
+        note=str(existing_payload.get("note", "")).strip(),
+    )
+    updated_payload = dict(_manual_well_calc_profiles().get(active_profile_id, {}))
+    changed = updated_payload != existing_payload
+    return changed, resolved_name, int(len(diff_values))
 
 
-def _clear_manual_well_overrides(
+def _assign_manual_well_calc_profile_to_wells(
     *,
-    well_names: Iterable[str] | None = None,
+    profile_id: str,
+    well_names: Iterable[str],
 ) -> int:
-    overrides = dict(_manual_well_calc_overrides())
-    if well_names is None:
-        cleared_count = len(overrides)
-        overrides = {}
-    else:
-        cleared_count = 0
-        for well_name in well_names:
-            if overrides.pop(str(well_name), None) is not None:
-                cleared_count += 1
-    st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = overrides
+    normalized_profile_id = str(profile_id).strip()
+    if normalized_profile_id not in _manual_well_calc_profiles():
+        return 0
+    assignments = dict(_manual_well_calc_profile_assignments())
+    assigned_count = 0
+    for well_name in _unique_well_names(well_names):
+        if assignments.get(str(well_name)) == normalized_profile_id:
+            continue
+        assignments[str(well_name)] = normalized_profile_id
+        assigned_count += 1
+    st.session_state[WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = assignments
+    return assigned_count
+
+
+def _clear_manual_well_profile_assignments(
+    *,
+    well_names: Iterable[str],
+) -> int:
+    assignments = dict(_manual_well_calc_profile_assignments())
+    cleared_count = 0
+    for well_name in _unique_well_names(well_names):
+        if assignments.pop(str(well_name), None) is not None:
+            cleared_count += 1
+    st.session_state[WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = assignments
     return cleared_count
+
+
+def _delete_manual_well_calc_profile(profile_id: str) -> tuple[int, int]:
+    normalized_profile_id = str(profile_id).strip()
+    profiles = dict(_manual_well_calc_profiles())
+    if normalized_profile_id not in profiles:
+        return 0, 0
+    profiles.pop(normalized_profile_id, None)
+    assignments = dict(_manual_well_calc_profile_assignments())
+    cleared_assignments = 0
+    for well_name, assigned_profile_id in list(assignments.items()):
+        if assigned_profile_id != normalized_profile_id:
+            continue
+        assignments.pop(well_name, None)
+        cleared_assignments += 1
+    st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = profiles
+    st.session_state[WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = assignments
+    _queue_manual_well_calc_active_profile("")
+    return 1, cleared_assignments
 
 
 def _dev_summary_override_values(
@@ -3600,57 +4073,95 @@ def _dev_summary_uses_separate_build2(
     return bool(abs(max(build2_dls_values) - max(build1_dls_values)) > 1e-6)
 
 
+def _manual_well_calc_profile_id_from_dev_summary(well_name: str) -> str:
+    return f"dev::{well_name_key(well_name)}"
+
+
 def _apply_dev_params_to_manual_well_overrides(
     *,
     selected_names: list[str],
 ) -> tuple[int, list[str]]:
     summaries = tuple(st.session_state.get("wt_imported_dev_params", ()))
-    summary_by_name = {
-        str(summary.well_name): summary
+    summary_by_key = {
+        well_name_key(summary.well_name): summary
         for summary in summaries
         if str(summary.well_name).strip()
     }
+    profiles = dict(_manual_well_calc_profiles())
+    assignments = dict(_manual_well_calc_profile_assignments())
     applied_count = 0
     missing_names: list[str] = []
-    for well_name in selected_names:
-        summary = summary_by_name.get(str(well_name))
+    first_profile_id = ""
+    for well_name in _unique_well_names(selected_names):
+        summary = summary_by_key.get(well_name_key(well_name))
         if summary is None:
             missing_names.append(str(well_name))
             continue
-        existing_payload = _manual_well_calc_overrides().get(str(well_name), {})
-        stored_values = _normalized_calc_param_override_values(
-            existing_payload.get("values", {})
-        )
+        profile_id = _manual_well_calc_profile_id_from_dev_summary(well_name)
+        stored_values = _dev_summary_override_values(summary)
         if not _dev_summary_uses_separate_build2(summary):
             stored_values.pop("dls_build2_enabled", None)
             stored_values.pop("dls_build2_max", None)
-        stored_values.update(_dev_summary_override_values(summary))
-        _store_manual_well_override_values(
-            well_name=str(well_name),
-            values=stored_values,
-            source="Импорт .dev",
-            note="KOP / INC / PI из .dev",
-        )
+        profiles[profile_id] = {
+            "name": str(well_name),
+            "values": stored_values,
+            "source": "Импорт .dev",
+            "note": "KOP / INC / PI из .dev",
+        }
+        assignments[str(well_name)] = profile_id
+        if not first_profile_id:
+            first_profile_id = profile_id
         applied_count += 1
+    st.session_state[WT_WELL_CALC_OVERRIDE_STATE_KEY] = profiles
+    st.session_state[WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = assignments
+    if first_profile_id:
+        _queue_manual_well_calc_active_profile(first_profile_id)
     return applied_count, missing_names
 
 
-def _manual_well_override_rows() -> list[dict[str, object]]:
+def _manual_well_override_rows(
+    *,
+    available_names: list[str],
+) -> list[dict[str, object]]:
+    profiles = _manual_well_calc_profiles()
+    assignments = _manual_well_calc_profile_assignments(available_names=available_names)
+    wells_by_profile: dict[str, list[str]] = {profile_id: [] for profile_id in profiles}
+    unassigned_wells: list[str] = []
+    for well_name in available_names:
+        profile_id = assignments.get(str(well_name))
+        if profile_id in profiles:
+            wells_by_profile.setdefault(profile_id, []).append(str(well_name))
+        else:
+            unassigned_wells.append(str(well_name))
     rows: list[dict[str, object]] = []
-    for well_name, payload in sorted(_manual_well_calc_overrides().items()):
+    for profile_id in _manual_well_calc_profile_option_ids():
+        payload = dict(profiles.get(profile_id, {}))
         values = _normalized_calc_param_override_values(payload.get("values", {}))
         rows.append(
             {
-                "Скважина": str(well_name),
+                "Конфигурация": str(payload.get("name", profile_id)).strip()
+                or str(profile_id),
+                "Скважины": ", ".join(wells_by_profile.get(profile_id, ())) or "—",
                 "Источник": str(payload.get("source", "")).strip() or "—",
                 "Изменено полей": int(len(values)),
                 "Параметры": ", ".join(
                     _CALC_PARAM_OVERRIDE_LABELS.get(suffix, suffix)
                     for suffix in values
-                ),
+                )
+                or "—",
                 "Примечание": str(payload.get("note", "")).strip() or "—",
             }
         )
+    rows.append(
+        {
+            "Конфигурация": "Общие параметры",
+            "Скважины": ", ".join(unassigned_wells) or "—",
+            "Источник": "—",
+            "Изменено полей": 0,
+            "Параметры": "—",
+            "Примечание": "—",
+        }
+    )
     return rows
 
 
@@ -3659,32 +4170,24 @@ def _render_manual_well_calc_overrides(
     records: list[WelltrackRecord],
 ) -> None:
     available_names = _unique_well_names(record.name for record in records)
+    assignments = _manual_well_calc_profile_assignments(
+        available_names=available_names
+    )
     if not available_names:
         return
-    overrides = _manual_well_calc_overrides()
-    if overrides:
-        visible_keys = {well_name_key(name) for name in available_names}
-        stale_names = [
-            str(name)
-            for name in overrides
-            if well_name_key(name) not in visible_keys
-        ]
-        if stale_names:
-            _clear_manual_well_overrides(well_names=stale_names)
-            overrides = _manual_well_calc_overrides()
-            if not overrides:
-                st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = False
     base_config = WT_CALC_PARAMS.build_config()
     st.markdown("#### Индивидуальные параметры по скважинам")
     st.caption(
-        "Локальные параметры накладываются только на выбранные скважины и "
-        "заменяют общие значения только по изменённым полям."
+        "Создайте отдельные конфигурации расчёта и назначьте их нужным "
+        "скважинам. Скважины без назначения считают общие параметры выше."
     )
     _consume_manual_well_calc_override_enabled()
+    _consume_manual_well_calc_active_profile()
     st.toggle(
         "Использовать индивидуальные параметры",
         key=WT_WELL_CALC_OVERRIDE_ENABLED_KEY,
     )
+    overrides_enabled = _manual_well_calc_override_enabled()
     feedback_message = str(
         st.session_state.pop(WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY, "")
     ).strip()
@@ -3693,123 +4196,300 @@ def _render_manual_well_calc_overrides(
     selected_names = _sync_manual_well_override_selection(
         available_names=available_names
     )
-    st.multiselect(
-        "Скважины с локальными параметрами",
-        options=available_names,
-        key=WT_WELL_CALC_OVERRIDE_SELECTION_KEY,
-    )
-    selected_names = _sync_manual_well_override_selection(
-        available_names=available_names
-    )
+    option_ids = _manual_well_calc_profile_option_ids()
+    active_profile_id = _manual_well_calc_active_profile_id()
     _sync_manual_well_override_editor_selection(
         base_config=base_config,
-        selected_names=selected_names,
+        active_profile_id=active_profile_id,
         records_by_name={str(record.name): record for record in records},
     )
+    available_name_keys = {well_name_key(name) for name in available_names}
     imported_dev_names = {
-        str(item.well_name)
+        str(item.well_name).strip()
         for item in tuple(st.session_state.get("wt_imported_dev_params", ()))
         if str(item.well_name).strip()
+        and well_name_key(item.well_name) in available_name_keys
     }
-    toolbar_cols = st.columns([1.2, 1.35, 1.35, 1.1], gap="small")
-    load_global_clicked = toolbar_cols[0].button(
-        "Взять общие",
-        icon=":material/content_copy:",
-        width="stretch",
-    )
-    apply_dev_clicked = toolbar_cols[1].button(
-        "Подтянуть из .dev",
-        icon=":material/file_download:",
-        width="stretch",
-        disabled=not selected_names
-        or not imported_dev_names.intersection(set(selected_names)),
-    )
-    clear_selected_clicked = toolbar_cols[2].button(
-        "Сбросить выбранные",
-        icon=":material/filter_alt_off:",
-        width="stretch",
-        disabled=not selected_names,
-    )
-    clear_all_clicked = toolbar_cols[3].button(
-        "Сбросить все",
-        icon=":material/delete_sweep:",
-        width="stretch",
-        disabled=not overrides,
-    )
-    if load_global_clicked:
-        _set_manual_well_override_editor_from_config(base_config)
+    active_payload = dict(_manual_well_calc_profiles().get(active_profile_id, {}))
+    profile_name_input_key = _manual_well_calc_profile_name_key(active_profile_id)
+    last_name_input_profile_id = str(
+        st.session_state.get(WT_WELL_CALC_OVERRIDE_NAME_INPUT_ACTIVE_KEY, "")
+    ).strip()
+    if active_profile_id and (
+        profile_name_input_key not in st.session_state
+        or last_name_input_profile_id != active_profile_id
+    ):
+        st.session_state[profile_name_input_key] = str(
+            active_payload.get("name", active_profile_id)
+        )
+    st.session_state[WT_WELL_CALC_OVERRIDE_NAME_INPUT_ACTIVE_KEY] = active_profile_id
+    control_col, editor_col = st.columns([1.1, 1.6], gap="large")
+    with control_col:
+        active_profile_id = str(
+            st.selectbox(
+                "Конфигурация",
+                options=option_ids or [""],
+                format_func=lambda profile_id: (
+                    "Нет конфигураций"
+                    if not str(profile_id).strip()
+                    else _manual_well_calc_profile_label(
+                        profile_id=str(profile_id),
+                        assignments=assignments,
+                    )
+                ),
+                key=WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY,
+                disabled=not overrides_enabled or not option_ids,
+            )
+        ).strip()
+        if active_profile_id not in _manual_well_calc_profiles():
+            active_profile_id = ""
+        active_payload = dict(_manual_well_calc_profiles().get(active_profile_id, {}))
+        st.text_input(
+            "Имя конфигурации",
+            value=str(active_payload.get("name", "")),
+            key=_manual_well_calc_profile_name_key(active_profile_id),
+            disabled=not overrides_enabled or not active_profile_id,
+        )
+        profile_export_json = _manual_well_calc_profile_export_json(active_profile_id)
+        profile_export_file_name = _manual_well_calc_profile_export_file_name(
+            active_profile_id
+        )
+        profile_action_cols = st.columns(4, gap="small")
+        create_profile_clicked = profile_action_cols[0].button(
+            "Новая",
+            icon=":material/add:",
+            width="stretch",
+            disabled=not overrides_enabled,
+        )
+        delete_profile_clicked = profile_action_cols[1].button(
+            "Удалить",
+            icon=":material/delete:",
+            width="stretch",
+            disabled=not overrides_enabled or not active_profile_id,
+        )
+        apply_dev_clicked = profile_action_cols[2].button(
+            "Подтянуть из .dev",
+            icon=":material/file_download:",
+            width="stretch",
+            disabled=not overrides_enabled
+            or not selected_names
+            or not imported_dev_names.intersection(set(selected_names)),
+        )
+        profile_action_cols[3].download_button(
+            "Экспорт JSON",
+            data=profile_export_json.encode("utf-8"),
+            file_name=profile_export_file_name,
+            mime="application/json",
+            width="stretch",
+            disabled=not overrides_enabled
+            or not active_profile_id
+            or not profile_export_json,
+        )
+        if imported_dev_names:
+            st.caption(
+                "`.dev` создаст или обновит отдельные конфигурации только для "
+                "выбранных скважин, у которых найден одноимённый импорт."
+            )
+        uploaded_profile_files = st.file_uploader(
+            "JSON конфигураций",
+            type=["json"],
+            accept_multiple_files=True,
+            key=WT_WELL_CALC_PROFILE_IMPORT_UPLOAD_KEY,
+            disabled=not overrides_enabled,
+        )
+        import_profile_clicked = st.button(
+            "Импорт конфигураций",
+            icon=":material/upload_file:",
+            width="stretch",
+            disabled=not overrides_enabled or not uploaded_profile_files,
+        )
+        st.multiselect(
+            "Скважины для назначения",
+            options=available_names,
+            key=WT_WELL_CALC_OVERRIDE_SELECTION_KEY,
+            disabled=not overrides_enabled,
+        )
+        selected_names = _sync_manual_well_override_selection(
+            available_names=available_names
+        )
+        assignment_cols = st.columns(2, gap="small")
+        assign_profile_clicked = assignment_cols[0].button(
+            "Назначить выбранным",
+            icon=":material/link:",
+            width="stretch",
+            disabled=not overrides_enabled
+            or not active_profile_id
+            or not selected_names,
+        )
+        clear_assignment_clicked = assignment_cols[1].button(
+            "Снять назначение",
+            icon=":material/link_off:",
+            width="stretch",
+            disabled=not overrides_enabled or not selected_names,
+        )
+    with editor_col:
+        if (
+            active_profile_id
+            and kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix)
+            is not None
+            and "kop_min_vertical"
+            not in _normalized_calc_param_override_values(
+                active_payload.get("values", {})
+            )
+        ):
+            st.caption(
+                "KOP остаётся общим по зависимости от TVD. Локальным он "
+                "станет только после сохранения изменённого KOP в этой "
+                "конфигурации."
+            )
+        _build_config_form(
+            binding=WT_WELL_OVERRIDE_EDITOR,
+            title="Параметры конфигурации",
+            disabled=not overrides_enabled or not active_profile_id,
+        )
+        editor_action_cols = st.columns([1.0, 1.4, 3], gap="small")
+        load_global_clicked = editor_action_cols[0].button(
+            "Взять общие",
+            icon=":material/content_copy:",
+            width="stretch",
+            disabled=not overrides_enabled or not active_profile_id,
+        )
+        save_profile_clicked = editor_action_cols[1].button(
+            "Сохранить конфигурацию",
+            type="primary",
+            icon=":material/save:",
+            width="stretch",
+            disabled=not overrides_enabled or not active_profile_id,
+        )
+        if not active_profile_id:
+            st.caption("Создайте конфигурацию или подтяните параметры из `.dev`.")
+    if create_profile_clicked:
+        created_profile_id = _create_manual_well_calc_profile()
+        created_payload = dict(_manual_well_calc_profiles().get(created_profile_id, {}))
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
+        st.session_state[
+            _manual_well_calc_profile_name_key(created_profile_id)
+        ] = str(created_payload.get("name", created_profile_id))
+        st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+            f'Создана конфигурация "{created_payload.get("name", created_profile_id)}".'
+        )
+        st.rerun()
+    if delete_profile_clicked:
+        deleted_count, cleared_assignments = _delete_manual_well_calc_profile(
+            active_profile_id
+        )
+        if deleted_count > 0:
+            st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
+            st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+                "Конфигурация удалена. "
+                f"Скважин переведено на общие параметры: {cleared_assignments}."
+            )
+            st.rerun()
     if apply_dev_clicked:
         applied_count, missing_names = _apply_dev_params_to_manual_well_overrides(
             selected_names=selected_names,
         )
         if applied_count > 0:
             _queue_manual_well_calc_override_enabled(True)
-        feedback = f"Параметры .dev применены к скважинам: {applied_count}."
+        feedback = f"Конфигурации из .dev созданы или обновлены: {applied_count}."
         if missing_names:
             feedback += " Без .dev параметров: " + ", ".join(missing_names) + "."
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = feedback
-        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
         st.rerun()
-    if clear_selected_clicked:
-        cleared_count = _clear_manual_well_overrides(well_names=selected_names)
-        if not _manual_well_calc_overrides():
-            _queue_manual_well_calc_override_enabled(False)
+    if import_profile_clicked:
+        if not uploaded_profile_files:
+            st.warning("Загрузите один или несколько JSON файлов конфигураций.")
+        else:
+            imported_count, updated_count, error_messages, last_profile_id = (
+                _import_manual_well_calc_profile_json_payloads(
+                    (
+                        (str(item.name or "configuration.json"), item.getvalue())
+                        for item in uploaded_profile_files
+                    )
+                )
+            )
+            if imported_count > 0:
+                _queue_manual_well_calc_override_enabled(True)
+                st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
+                if last_profile_id:
+                    last_payload = dict(
+                        _manual_well_calc_profiles().get(last_profile_id, {})
+                    )
+                    last_name = str(
+                        last_payload.get("name", last_profile_id)
+                    ).strip() or str(last_profile_id)
+                    st.session_state[
+                        _manual_well_calc_profile_name_key(last_profile_id)
+                    ] = last_name
+                created_count = int(imported_count - updated_count)
+                feedback = (
+                    "Импортировано конфигураций: "
+                    f"{imported_count} (новых: {created_count}, обновлено: {updated_count})."
+                )
+                if error_messages:
+                    feedback += " Ошибки: " + " | ".join(error_messages)
+                st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = feedback
+                st.rerun()
+            if error_messages:
+                st.warning(
+                    "Не удалось импортировать конфигурации: "
+                    + " | ".join(error_messages)
+                )
+    if assign_profile_clicked:
+        assigned_count = _assign_manual_well_calc_profile_to_wells(
+            profile_id=active_profile_id,
+            well_names=selected_names,
+        )
+        profile_label = str(active_payload.get("name", active_profile_id)).strip() or str(
+            active_profile_id
+        )
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
-            f"Сброшены локальные параметры для скважин: {cleared_count}."
+            f'Конфигурация "{profile_label}" назначена скважинам: {assigned_count}.'
         )
-        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
         st.rerun()
-    if clear_all_clicked:
-        cleared_count = _clear_manual_well_overrides()
-        _queue_manual_well_calc_override_enabled(False)
+    if clear_assignment_clicked:
+        cleared_count = _clear_manual_well_profile_assignments(well_names=selected_names)
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
-            f"Сброшены все локальные параметры: {cleared_count}."
+            f"Назначения сняты для скважин: {cleared_count}."
         )
-        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
         st.rerun()
-    if imported_dev_names:
-        st.caption(
-            "Кнопка `.dev` подставляет KOP MD, INC в t1, PI BUILD, "
-            "PI HORIZONTAL и для J-профиля включает его приоритет."
-        )
-    editor_config = _build_config_form(
-        binding=WT_WELL_OVERRIDE_EDITOR,
-        title="",
-    )
-    del editor_config
-    apply_clicked = st.button(
-        "Применить выбранным",
-        type="primary",
-        icon=":material/tune:",
-        width="content",
-        disabled=not selected_names,
-    )
-    if apply_clicked:
-        applied_count, cleared_count = _apply_manual_well_override_editor(
+    if load_global_clicked:
+        _set_manual_well_override_editor_from_config(base_config)
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
+        st.rerun()
+    if save_profile_clicked:
+        changed, resolved_name, changed_field_count = _apply_manual_well_override_editor(
             base_config=base_config,
-            selected_names=selected_names,
+            active_profile_id=active_profile_id,
+            profile_name=str(
+                st.session_state.get(
+                    _manual_well_calc_profile_name_key(active_profile_id),
+                    active_payload.get("name", active_profile_id),
+                )
+            ),
         )
-        if applied_count > 0:
-            _queue_manual_well_calc_override_enabled(True)
-        elif not _manual_well_calc_overrides():
-            _queue_manual_well_calc_override_enabled(False)
-        message_parts: list[str] = []
-        if applied_count > 0:
-            message_parts.append(f"Применены локальные параметры: {applied_count}.")
-        if cleared_count > 0:
-            message_parts.append(f"Сброшены совпадающие с общими: {cleared_count}.")
-        if not message_parts:
-            message_parts.append("Изменений не было.")
-        st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = " ".join(
-            message_parts
-        )
-        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
+        st.session_state[
+            _manual_well_calc_profile_name_key(active_profile_id)
+        ] = resolved_name
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
+        if changed:
+            st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+                f'Конфигурация "{resolved_name}" сохранена. '
+                f"Изменённых полей: {changed_field_count}."
+            )
+        else:
+            st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+                f'Конфигурация "{resolved_name}" уже совпадает с текущими значениями.'
+            )
         st.rerun()
-    current_rows = _manual_well_override_rows()
+    current_rows = _manual_well_override_rows(available_names=available_names)
     if current_rows:
-        if not _manual_well_calc_override_enabled():
+        active_items = _manual_well_calc_override_items()
+        if not _manual_well_calc_override_enabled() and active_items:
             st.caption(
-                "Локальные параметры сохранены, но сейчас отключены и в расчёте не участвуют."
+                "Индивидуальные конфигурации сохранены, но сейчас отключены и "
+                "в расчёте не участвуют."
             )
         st.dataframe(
             arrow_safe_text_dataframe(pd.DataFrame(current_rows)),
@@ -3954,11 +4634,17 @@ def _build_selected_override_configs(
     prepared = st.session_state.get("wt_prepared_well_overrides", {}) or {}
     kop_function = kop_min_vertical_function_from_state(prefix=WT_CALC_PARAMS.prefix)
     config_map: dict[str, TrajectoryConfig] = {}
-    manual_overrides = (
-        _manual_well_calc_overrides() if _manual_well_calc_override_enabled() else {}
+    manual_profiles = (
+        _manual_well_calc_profiles() if _manual_well_calc_override_enabled() else {}
+    )
+    manual_assignments = (
+        _manual_well_calc_profile_assignments()
+        if _manual_well_calc_override_enabled()
+        else {}
     )
     for well_name in sorted(str(name) for name in selected_names):
-        manual_payload = dict(manual_overrides.get(well_name, {}))
+        profile_id = str(manual_assignments.get(well_name, "")).strip()
+        manual_payload = dict(manual_profiles.get(profile_id, {}))
         manual_values = _normalized_calc_param_override_values(
             manual_payload.get("values", {})
         )
@@ -5028,12 +5714,14 @@ def _store_parsed_records_with_metadata(
     *,
     records: list[WelltrackRecord],
     dev_summaries: list[ptc_target_import.DevTargetImportSummary],
+    imported_dev_wells: list[ImportedTrajectoryWell] | None = None,
     source_kind: str,
 ) -> bool:
     result = ptc_target_import.store_imported_records(
         st.session_state,
         records=list(records),
         dev_summaries=list(dev_summaries),
+        imported_dev_wells=list(imported_dev_wells or []),
         source_kind=str(source_kind),
         loaded_at_text=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         clear_t1_t3_order_state=_clear_t1_t3_order_resolution_state,
@@ -5194,6 +5882,7 @@ def _handle_import_actions(
             auto_layout_applied = _store_parsed_records_with_metadata(
                 records=records,
                 dev_summaries=list(parse_result.dev_summaries),
+                imported_dev_wells=list(parse_result.imported_dev_wells),
                 source_kind=str(operation.source_kind),
             )
             status.write(operation.count_message(len(records)))

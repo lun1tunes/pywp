@@ -1211,6 +1211,10 @@ def _render_anticollision_visual_overview(
         anticollision_signature,
         tuple(_success_render_signature(success) for success in successes),
         tuple(_record_render_signature(record) for record in records),
+        tuple(
+            _reference_well_render_signature(well)
+            for well in wt._imported_dev_target_wells_from_state()
+        ),
         _pad_render_state_signature(),
     )
     anticollision_overrides = _cached_results_three_overrides(
@@ -1336,6 +1340,10 @@ def _render_target_edit_overview(
         "trajectory_overrides",
         overview_signature,
         tuple(_record_render_signature(record) for record in records),
+        tuple(
+            _reference_well_render_signature(well)
+            for well in wt._imported_dev_target_wells_from_state()
+        ),
         _pad_render_state_signature(),
     )
     trajectory_overrides = _cached_results_three_overrides(
@@ -1487,6 +1495,10 @@ def render_success_tabs(
         }
 
         def render_3d_override(container: object, payload: dict[str, object]) -> None:
+            imported_dev_overrides = wt._imported_dev_target_three_payload_overrides(
+                visible_well_names=(selected.name,),
+                name_to_color=single_well_name_to_color,
+            )
             wt._render_three_payload(
                 container=container,
                 payload=payload,
@@ -1497,6 +1509,10 @@ def render_success_tabs(
                         [selected],
                         single_well_name_to_color,
                         parent_successes=list(successes),
+                    ),
+                    "extra_bounds": imported_dev_overrides.get("bounds"),
+                    "extra_lines": list(
+                        imported_dev_overrides.get("extra_lines") or []
                     ),
                 },
             )
@@ -1511,7 +1527,7 @@ def render_success_tabs(
             title_trajectory=None,
             title_plan=None,
             border=True,
-            show_plotly_panels=False,
+            show_plotly_panels=True,
             render_3d_override=render_3d_override,
         )
         render_result_tables(

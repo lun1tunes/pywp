@@ -23,6 +23,7 @@ from pywp.reference_trajectories import (
 from pywp.ui_utils import dls_to_pi
 
 __all__ = [
+    "DevTargetImportParsedWell",
     "DevTargetImportSummary",
     "dev_target_import_summary_dataframe",
     "dev_trajectory_text_name",
@@ -54,6 +55,13 @@ class DevTargetImportSummary:
     note: str = ""
 
 
+@dataclass(frozen=True)
+class DevTargetImportParsedWell:
+    record: WelltrackRecord
+    summary: DevTargetImportSummary
+    imported_well: ImportedTrajectoryWell
+
+
 def dev_trajectory_text_name(text: str, *, fallback_name: str = "dev_import_1") -> str:
     match = _DEV_WELL_NAME_RE.search(str(text or ""))
     if match is None:
@@ -62,25 +70,25 @@ def dev_trajectory_text_name(text: str, *, fallback_name: str = "dev_import_1") 
     return normalized or str(fallback_name)
 
 
-def parse_dev_target_file(path: str | Path) -> tuple[WelltrackRecord, DevTargetImportSummary]:
+def parse_dev_target_file(path: str | Path) -> DevTargetImportParsedWell:
     well = parse_reference_trajectory_dev_file(path, kind=REFERENCE_WELL_APPROVED)
-    return target_record_and_summary_from_dev_well(well)
+    return _parsed_dev_target_well(well)
 
 
 def parse_dev_target_directory(
     path: str | Path,
-) -> list[tuple[WelltrackRecord, DevTargetImportSummary]]:
+) -> list[DevTargetImportParsedWell]:
     wells = parse_reference_trajectory_dev_directories(
         [path],
         kind=REFERENCE_WELL_APPROVED,
     )
-    return [target_record_and_summary_from_dev_well(well) for well in wells]
+    return [_parsed_dev_target_well(well) for well in wells]
 
 
 def parse_dev_target_payloads(
     payloads: Sequence[tuple[str, bytes]],
-) -> list[tuple[WelltrackRecord, DevTargetImportSummary]]:
-    results: list[tuple[WelltrackRecord, DevTargetImportSummary]] = []
+) -> list[DevTargetImportParsedWell]:
+    results: list[DevTargetImportParsedWell] = []
     for fallback_index, (file_name, raw_bytes) in enumerate(payloads, start=1):
         text, _encoding = decode_welltrack_bytes(bytes(raw_bytes))
         fallback_name = Path(str(file_name or f"dev_import_{fallback_index}")).stem
@@ -90,8 +98,17 @@ def parse_dev_target_payloads(
             well_name=well_name,
             kind=REFERENCE_WELL_APPROVED,
         )
-        results.append(target_record_and_summary_from_dev_well(well))
+        results.append(_parsed_dev_target_well(well))
     return results
+
+
+def _parsed_dev_target_well(well: ImportedTrajectoryWell) -> DevTargetImportParsedWell:
+    record, summary = target_record_and_summary_from_dev_well(well)
+    return DevTargetImportParsedWell(
+        record=record,
+        summary=summary,
+        imported_well=well,
+    )
 
 
 def target_record_and_summary_from_dev_well(
@@ -206,20 +223,11 @@ def dev_target_import_summary_dataframe(
                 "t1 MD, м": float(summary.t1_md_m),
                 "t3 MD, м": float(summary.t3_md_m),
                 "INC в t1, deg": float(summary.entry_inc_deg),
-                "BUILD1 DLS, deg/30m": _format_value_list(
-                    summary.build1_dls_deg_per_30m
-                ),
                 "BUILD1 PI, deg/10m": _format_value_list(
                     tuple(float(dls_to_pi(value)) for value in summary.build1_dls_deg_per_30m)
                 ),
-                "BUILD2 DLS, deg/30m": _format_value_list(
-                    summary.build2_dls_deg_per_30m
-                ),
                 "BUILD2 PI, deg/10m": _format_value_list(
                     tuple(float(dls_to_pi(value)) for value in summary.build2_dls_deg_per_30m)
-                ),
-                "HORIZONTAL DLS, deg/30m": _format_value_list(
-                    summary.horizontal_dls_deg_per_30m
                 ),
                 "HORIZONTAL PI, deg/10m": _format_value_list(
                     tuple(

@@ -79,6 +79,8 @@ _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
 _DEFAULTS_SCHEMA_VERSION = 15
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
+_BUILD2_INPUT_SUFFIX = "dls_build2_optional_input"
+_BUILD2_INPUT_SIGNATURE_SUFFIX = "dls_build2_optional_signature"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
 KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION = "depth_function"
 
@@ -110,12 +112,14 @@ class CalcParamBinding:
         title: str = "Параметры расчета",
         show_solver_help: bool = True,
         on_change: Callable[[], None] | None = None,
+        disabled: bool = False,
     ) -> None:
         render_calc_params_block(
             prefix=self.prefix,
             title=title,
             show_solver_help=show_solver_help,
             on_change=on_change,
+            disabled=disabled,
         )
 
 
@@ -141,6 +145,68 @@ def _kop_mode_key(prefix: str = "") -> str:
 
 def _kop_function_payload_key(prefix: str = "") -> str:
     return _state_key(prefix, _KOP_FUNCTION_PAYLOAD_SUFFIX)
+
+
+def _build2_input_key(prefix: str = "") -> str:
+    return _state_key(prefix, _BUILD2_INPUT_SUFFIX)
+
+
+def _build2_input_signature_key(prefix: str = "") -> str:
+    return _state_key(prefix, _BUILD2_INPUT_SIGNATURE_SUFFIX)
+
+
+def _format_pi_input_value(value: float) -> str:
+    return f"{float(value):.1f}"
+
+
+def _sync_build2_optional_input_state(prefix: str = "") -> None:
+    build2_enabled = bool(_state_value(prefix, "dls_build2_enabled"))
+    build2_signature = (
+        build2_enabled,
+        float(_state_value(prefix, "dls_build2_max")) if build2_enabled else None,
+    )
+    signature_key = _build2_input_signature_key(prefix)
+    text_key = _build2_input_key(prefix)
+    if (
+        text_key not in st.session_state
+        or st.session_state.get(signature_key) != build2_signature
+    ):
+        st.session_state[text_key] = (
+            _format_pi_input_value(float(_state_value(prefix, "dls_build2_max")))
+            if build2_enabled
+            else ""
+        )
+        st.session_state[signature_key] = build2_signature
+
+
+def _apply_build2_optional_input_state(prefix: str = "") -> None:
+    raw_value = str(st.session_state.get(_build2_input_key(prefix), "")).strip()
+    build1_value = float(_state_value(prefix, "dls_build_max"))
+    if not raw_value:
+        st.session_state[_state_key(prefix, "dls_build2_enabled")] = False
+        st.session_state[_state_key(prefix, "dls_build2_max")] = float(build1_value)
+        st.session_state[_build2_input_signature_key(prefix)] = (False, None)
+        return
+    try:
+        parsed_value = float(raw_value)
+    except (TypeError, ValueError):
+        st.session_state[_state_key(prefix, "dls_build2_enabled")] = False
+        st.session_state[_state_key(prefix, "dls_build2_max")] = float(build1_value)
+        st.session_state[_build2_input_signature_key(prefix)] = (False, None)
+        return
+    parsed_value = max(0.1, float(parsed_value))
+    st.session_state[_state_key(prefix, "dls_build2_enabled")] = True
+    st.session_state[_state_key(prefix, "dls_build2_max")] = float(parsed_value)
+    st.session_state[_build2_input_signature_key(prefix)] = (True, float(parsed_value))
+
+
+def _handle_build2_optional_input_change(
+    prefix: str = "",
+    on_change: Callable[[], None] | None = None,
+) -> None:
+    _apply_build2_optional_input_state(prefix)
+    if on_change is not None:
+        on_change()
 
 
 def kop_min_vertical_mode(prefix: str = "") -> str:
@@ -362,6 +428,7 @@ def set_calc_param_state_values(
         st.session_state[_state_key(prefix, suffix)] = values.get(suffix, default_value)
     st.session_state[_kop_mode_key(prefix)] = KOP_MIN_VERTICAL_MODE_CONSTANT
     st.session_state[_kop_function_payload_key(prefix)] = None
+    _sync_build2_optional_input_state(prefix)
 
 
 def _build_config_kwargs_from_values(
@@ -418,10 +485,13 @@ def render_calc_params_block(
     title: str = "Параметры расчета",
     show_solver_help: bool = True,
     on_change: Callable[[], None] | None = None,
+    disabled: bool = False,
 ) -> None:
     # Guard against any code path that renders widgets before page-level init.
     apply_calc_param_defaults(prefix=prefix, force=False)
     widget_change_kwargs = {"on_change": on_change} if on_change is not None else {}
+    widget_state_kwargs = {"disabled": bool(disabled)}
+    widget_kwargs = {**widget_change_kwargs, **widget_state_kwargs}
     if title:
         st.markdown(f"### {title}")
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7, gap="small")
@@ -431,7 +501,7 @@ def render_calc_params_block(
         min_value=1.0,
         step=1.0,
         help="Шаг выходной инклинометрии. Меньше шаг = подробнее профиль.",
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
     c2.number_input(
         "Контрольный шаг MD, м",
@@ -439,7 +509,7 @@ def render_calc_params_block(
         min_value=0.5,
         step=0.5,
         help="Внутренний шаг проверки ограничений и качества решения.",
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
     c3.number_input(
         "Допуск по латерали, м",
@@ -447,7 +517,7 @@ def render_calc_params_block(
         min_value=0.1,
         step=1.0,
         help="Максимально допустимый горизонтальный промах по t1 и t3: sqrt(dX² + dY²).",
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
     c4.number_input(
         "Допуск по вертикали, м",
@@ -455,7 +525,7 @@ def render_calc_params_block(
         min_value=0.1,
         step=0.1,
         help="Максимально допустимый вертикальный промах по t1 и t3: |dZ|.",
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
     c5.number_input(
         "Целевой INC на t1, deg",
@@ -464,7 +534,7 @@ def render_calc_params_block(
         max_value=89.0,
         step=0.5,
         help="Плановый угол входа в пласт в точке t1.",
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
     c6.number_input(
         "Допуск INC на t1, deg",
@@ -473,7 +543,7 @@ def render_calc_params_block(
         max_value=5.0,
         step=0.1,
         help="Допустимое отклонение от целевого INC в точке t1.",
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
     c7.number_input(
         "Макс INC по стволу, deg",
@@ -482,15 +552,12 @@ def render_calc_params_block(
         max_value=120.0,
         step=0.5,
         help="Глобальное ограничение по зенитному углу по всей траектории.",
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
 
+    _sync_build2_optional_input_state(prefix)
     build2_enabled = bool(_state_value(prefix, "dls_build2_enabled"))
-    if not build2_enabled:
-        st.session_state[_state_key(prefix, "dls_build2_max")] = float(
-            _state_value(prefix, "dls_build_max")
-        )
-    d1, d2, d3, d4, d5 = st.columns(5, gap="small")
+    d1, d2, d3, d4 = st.columns(4, gap="small")
     d1.number_input(
         "Макс ПИ BUILD 1, deg/10m" if build2_enabled else "Макс ПИ BUILD 1/2, deg/10m",
         key=_state_key(prefix, "dls_build_max"),
@@ -500,32 +567,21 @@ def render_calc_params_block(
             "Верхняя граница поиска ПИ до входа в t1. "
             "Если BUILD 2 не задан отдельно, это общий лимит для BUILD1 и BUILD2."
         ),
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
-    d2.toggle(
-        "BUILD 2 отдельно",
-        key=_state_key(prefix, "dls_build2_enabled"),
-        help="Включите, чтобы задать отдельный лимит ПИ для BUILD2.",
-        **widget_change_kwargs,
+    d2.text_input(
+        "Макс ПИ BUILD 2, deg/10m",
+        key=_build2_input_key(prefix),
+        placeholder=_format_pi_input_value(float(_state_value(prefix, "dls_build_max"))),
+        help=(
+            "Оставьте пустым, чтобы BUILD2 использовал тот же лимит, что и BUILD1. "
+            "Если указано значение, BUILD2 считается с отдельным лимитом."
+        ),
+        on_change=_handle_build2_optional_input_change,
+        args=(prefix, on_change),
+        **widget_state_kwargs,
     )
-    if bool(_state_value(prefix, "dls_build2_enabled")):
-        d3.number_input(
-            "Макс ПИ BUILD 2, deg/10m",
-            key=_state_key(prefix, "dls_build2_max"),
-            min_value=0.1,
-            step=0.1,
-            help="Отдельный лимит ПИ для BUILD2. Для J-профиля не используется.",
-            **widget_change_kwargs,
-        )
-    else:
-        d3.text_input(
-            "Макс ПИ BUILD 2, deg/10m",
-            key=_state_key(prefix, "dls_build2_disabled_display"),
-            value="—",
-            disabled=True,
-            help="По умолчанию BUILD2 использует тот же лимит, что и BUILD1.",
-        )
-    d4.number_input(
+    d3.number_input(
         "Макс ПИ HORIZONTAL, deg/10m",
         key=_state_key(prefix, "dls_horizontal_max"),
         min_value=0.1,
@@ -534,19 +590,19 @@ def render_calc_params_block(
             "Лимит ПИ для участка после t1: HORIZONTAL-переход к t3 и "
             "HORIZONTAL_BUILD между уровнями MULTIHORIZONTAL."
         ),
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
     (
-        d5.number_input(
+        d4.number_input(
             "Мин VERTICAL до KOP, м",
             key=_state_key(prefix, "kop_min_vertical"),
             min_value=0.0,
             step=50.0,
             help="Минимальный вертикальный участок от S до начала BUILD1.",
-            **widget_change_kwargs,
+            **widget_kwargs,
         )
         if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_CONSTANT
-        else d5.text_input(
+        else d4.text_input(
             "Мин VERTICAL до KOP, м",
             value=kop_min_vertical_display_label(prefix),
             disabled=True,
@@ -557,7 +613,7 @@ def render_calc_params_block(
         )
     )
     if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION:
-        d5.caption(kop_min_vertical_detail_label(prefix))
+        d4.caption(kop_min_vertical_detail_label(prefix))
     st.number_input(
         "Макс итоговая MD (постпроверка), м",
         key=_state_key(prefix, "max_total_md_postcheck"),
@@ -567,7 +623,7 @@ def render_calc_params_block(
             "Порог итоговой длины ствола по MD для финальной проверки. "
             "На сам поиск решения не влияет."
         ),
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
     st.selectbox(
         "Режим J-профиля",
@@ -579,7 +635,7 @@ def render_calc_params_block(
             "«Предлагать» — кандидат среди вариантов. "
             "«Предпочитать» — принять J, если он допустим."
         ),
-        **widget_change_kwargs,
+        **widget_kwargs,
     )
 
     with st.expander("Параметры солвера", expanded=False):
@@ -606,7 +662,7 @@ def render_calc_params_block(
                 "Мин. MD — сократить длину ствола. "
                 "Мин. KOP — поднять точку набора."
             ),
-            **widget_change_kwargs,
+            **widget_kwargs,
         )
         st.selectbox(
             "Метод решателя",
@@ -617,7 +673,7 @@ def render_calc_params_block(
                 "Least Squares — быстрый, подходит для большинства профилей. "
                 "DE Hybrid — медленнее, но надёжнее на сложной геометрии."
             ),
-            **widget_change_kwargs,
+            **widget_kwargs,
         )
         st.selectbox(
             "Интерполяция BUILD",
@@ -628,7 +684,7 @@ def render_calc_params_block(
                 "Rodrigues — численно стабильная формула вращения, рекомендуется. "
                 "SLERP — классическая сферическая линейная интерполяция."
             ),
-            **widget_change_kwargs,
+            **widget_kwargs,
         )
         st.number_input(
             "Макс рестартов решателя",
@@ -640,5 +696,5 @@ def render_calc_params_block(
                 "Число повторных попыток при неудаче. "
                 "Каждый рестарт увеличивает сетку поиска — дольше, но надёжнее."
             ),
-            **widget_change_kwargs,
+            **widget_kwargs,
         )

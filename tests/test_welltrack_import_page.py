@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -2471,6 +2472,7 @@ def test_dev_target_import_stores_read_parameters_and_target_points() -> None:
 
     records = at.session_state["wt_records"]
     imported_params = at.session_state["wt_imported_dev_params"]
+    imported_dev_wells = at.session_state["wt_imported_dev_target_wells"]
 
     assert [record.name for record in records] == [
         "build_hold_build_equal_pi_with_horizontal_pi",
@@ -2479,6 +2481,7 @@ def test_dev_target_import_stores_read_parameters_and_target_points() -> None:
         "j_profile_variable_pi",
     ]
     assert len(imported_params) == 4
+    assert len(imported_dev_wells) == 4
     assert imported_params[0].build1_dls_deg_per_30m == (2.4,)
     assert imported_params[0].horizontal_dls_deg_per_30m == (1.2,)
     assert imported_params[-1].profile_label == "J-профиль"
@@ -4263,13 +4266,17 @@ def test_selected_override_configs_apply_manual_per_well_values() -> None:
     base_config = TrajectoryConfig()
     page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
     page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
-        "WELL-A": {
+        "cfg-1": {
+            "name": "WELL-A cfg",
             "values": {
                 "dls_build_max": 0.6,
                 "entry_inc_target": 84.5,
             },
             "source": "manual",
         }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-A": "cfg-1"
     }
 
     config_map = page._build_selected_override_configs(
@@ -4300,10 +4307,14 @@ def test_selected_override_configs_keep_manual_kop_over_global_depth_function() 
     )
     page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
     page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
-        "WELL-A": {
+        "cfg-1": {
+            "name": "WELL-A cfg",
             "values": {"kop_min_vertical": 1111.0},
             "source": "manual",
         }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-A": "cfg-1"
     }
 
     config_map = page._build_selected_override_configs(
@@ -4334,12 +4345,16 @@ def test_apply_dev_params_to_manual_well_overrides_sets_local_values() -> None:
     )
 
     applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
-        selected_names=["WELL-A", "WELL-B"],
+        selected_names=["WELL-A"],
     )
 
     assert applied_count == 1
-    assert missing_names == ["WELL-B"]
-    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["WELL-A"]
+    assert missing_names == []
+    profile_id = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY][
+        "WELL-A"
+    ]
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY][profile_id]
+    assert payload["name"] == "WELL-A"
     assert payload["source"] == "Импорт .dev"
     assert payload["values"]["kop_min_vertical"] == pytest.approx(980.0)
     assert payload["values"]["entry_inc_target"] == pytest.approx(87.0)
@@ -4349,6 +4364,10 @@ def test_apply_dev_params_to_manual_well_overrides_sets_local_values() -> None:
     assert payload["values"]["dls_horizontal_max"] == pytest.approx(0.5)
     assert payload["values"]["j_profile_policy"] == "prefer"
     assert payload["values"]["offer_j_profile"] is True
+    assert (
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY]
+        == profile_id
+    )
 
 
 def test_apply_dev_params_to_manual_well_overrides_does_not_toggle_widget_state() -> (
@@ -4401,10 +4420,209 @@ def test_apply_dev_params_to_manual_well_overrides_sets_optional_build2_when_nee
 
     assert applied_count == 1
     assert missing_names == []
-    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["WELL-A"]
+    profile_id = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY][
+        "WELL-A"
+    ]
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY][profile_id]
     assert payload["values"]["dls_build_max"] == pytest.approx(0.8)
     assert payload["values"]["dls_build2_enabled"] is True
     assert payload["values"]["dls_build2_max"] == pytest.approx(1.8)
+
+
+def test_apply_dev_params_to_manual_well_overrides_reports_selected_wells_without_dev(
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_imported_dev_params"] = (
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-A",
+            profile_label="J-профиль",
+            kop_md_m=980.0,
+            t1_md_m=2500.0,
+            t3_md_m=4200.0,
+            entry_inc_deg=87.0,
+            build1_dls_deg_per_30m=(2.4,),
+            horizontal_dls_deg_per_30m=(1.5,),
+        ),
+    )
+
+    applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
+        selected_names=["WELL-B", "WELL-A"],
+    )
+
+    assert applied_count == 1
+    assert missing_names == ["WELL-B"]
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
+        "WELL-A": page._manual_well_calc_profile_id_from_dev_summary("WELL-A")
+    }
+
+
+def test_manual_well_calc_profile_export_json_uses_profile_name() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Cfg / 1",
+        values={"dls_build_max": 0.6},
+        source="Ручная настройка",
+        note="test note",
+    )
+
+    payload = json.loads(page._manual_well_calc_profile_export_json("cfg-1"))
+
+    assert payload["kind"] == page.WT_WELL_CALC_PROFILE_JSON_KIND
+    assert payload["name"] == "Cfg / 1"
+    assert payload["values"]["dls_build_max"] == pytest.approx(0.6)
+    assert page._manual_well_calc_profile_export_file_name("cfg-1") == "Cfg _ 1.json"
+
+
+def test_import_manual_well_calc_profile_json_bytes_creates_profile_by_name() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+
+    profile_id, resolved_name, updated_existing = (
+        page._import_manual_well_calc_profile_json_bytes(
+            json.dumps(
+                {
+                    "kind": page.WT_WELL_CALC_PROFILE_JSON_KIND,
+                    "schema_version": page.WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION,
+                    "name": "Imported Config",
+                    "values": {"dls_build_max": 0.7},
+                    "source": "Импорт JSON",
+                    "note": "from file",
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+    )
+
+    assert updated_existing is False
+    assert resolved_name == "Imported Config"
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY][profile_id][
+        "values"
+    ]["dls_build_max"] == pytest.approx(0.7)
+    assert (
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY]
+        == profile_id
+    )
+
+
+def test_import_manual_well_calc_profile_json_bytes_updates_existing_profile() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Imported Config",
+        values={"dls_build_max": 0.6},
+        source="Ручная настройка",
+    )
+
+    profile_id, resolved_name, updated_existing = (
+        page._import_manual_well_calc_profile_json_bytes(
+            json.dumps(
+                {
+                    "kind": page.WT_WELL_CALC_PROFILE_JSON_KIND,
+                    "schema_version": page.WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION,
+                    "name": "Imported Config",
+                    "values": {"dls_build_max": 0.9},
+                    "source": "Импорт JSON",
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+    )
+
+    assert updated_existing is True
+    assert profile_id == "cfg-1"
+    assert resolved_name == "Imported Config"
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["cfg-1"][
+        "values"
+    ]["dls_build_max"] == pytest.approx(0.9)
+
+
+def test_import_manual_well_calc_profile_json_payloads_imports_multiple_files() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+
+    imported_count, updated_count, error_messages, last_profile_id = (
+        page._import_manual_well_calc_profile_json_payloads(
+            [
+                (
+                    "cfg_a.json",
+                    json.dumps(
+                        {
+                            "kind": page.WT_WELL_CALC_PROFILE_JSON_KIND,
+                            "schema_version": page.WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION,
+                            "name": "Cfg A",
+                            "values": {"dls_build_max": 0.7},
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                ),
+                (
+                    "cfg_b.json",
+                    json.dumps(
+                        {
+                            "kind": page.WT_WELL_CALC_PROFILE_JSON_KIND,
+                            "schema_version": page.WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION,
+                            "name": "Cfg B",
+                            "values": {"dls_build_max": 0.9},
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                ),
+            ]
+        )
+    )
+
+    assert imported_count == 2
+    assert updated_count == 0
+    assert error_messages == []
+    assert last_profile_id
+    profiles = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]
+    assert {payload["name"] for payload in profiles.values()} == {"Cfg A", "Cfg B"}
+    assert (
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY]
+        == last_profile_id
+    )
+
+
+def test_import_manual_well_calc_profile_json_payloads_collects_errors() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+
+    imported_count, updated_count, error_messages, last_profile_id = (
+        page._import_manual_well_calc_profile_json_payloads(
+            [
+                ("bad.json", b"{not-json}"),
+                (
+                    "good.json",
+                    json.dumps(
+                        {
+                            "kind": page.WT_WELL_CALC_PROFILE_JSON_KIND,
+                            "schema_version": page.WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION,
+                            "name": "Cfg Good",
+                            "values": {"dls_build_max": 0.8},
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                ),
+            ]
+        )
+    )
+
+    assert imported_count == 1
+    assert updated_count == 0
+    assert len(error_messages) == 1
+    assert "bad.json" in error_messages[0]
+    assert last_profile_id
 
 
 def test_consume_manual_well_override_enabled_applies_pending_state() -> None:
@@ -4416,6 +4634,624 @@ def test_consume_manual_well_override_enabled_applies_pending_state() -> None:
     page._consume_manual_well_calc_override_enabled()
 
     assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] is True
+
+
+def test_consume_manual_well_calc_active_profile_applies_pending_state() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": {"dls_build_max": 0.6},
+            "source": "manual",
+        }
+    }
+
+    page._queue_manual_well_calc_active_profile("cfg-1")
+    page._consume_manual_well_calc_active_profile()
+
+    assert (
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY]
+        == "cfg-1"
+    )
+    assert (
+        page.st.session_state.get(
+            page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY
+        )
+        is None
+    )
+
+
+def test_sync_manual_well_override_editor_selection_tolerates_none_signature() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = None
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": {"dls_build_max": 0.6},
+            "source": "manual",
+        }
+    }
+
+    page._sync_manual_well_override_editor_selection(
+        base_config=TrajectoryConfig(),
+        active_profile_id="cfg-1",
+    )
+
+    signature = page.st.session_state[
+        page.WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY
+    ]
+    assert signature[0] == "cfg-1"
+
+
+def test_manual_well_calc_profile_assignments_persists_normalized_raw_values() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": {"dls_build_max": 0.6},
+            "source": "manual",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        " WELL-A ": " cfg-1 "
+    }
+
+    assignments = page._manual_well_calc_profile_assignments(
+        available_names=["WELL-A"]
+    )
+
+    assert assignments == {"WELL-A": "cfg-1"}
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
+        "WELL-A": "cfg-1"
+    }
+
+
+def test_manual_well_calc_profiles_migrate_legacy_assignments_by_well_name() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "legacy-profile-1": {
+            "well_name": "WELL-A",
+            "values": {"dls_build_max": 0.6},
+            "source": "legacy",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {}
+
+    assignments = page._manual_well_calc_profile_assignments(
+        available_names=["WELL-A"]
+    )
+
+    assert assignments == {"WELL-A": "legacy-profile-1"}
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
+        "WELL-A": "legacy-profile-1"
+    }
+
+
+def test_manual_well_calc_profiles_merge_legacy_assignments_into_stale_mapping() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "legacy-profile-1": {
+            "well_name": "WELL-A",
+            "values": {"dls_build_max": 0.6},
+            "source": "legacy",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-Z": "missing-profile"
+    }
+
+    assignments = page._manual_well_calc_profile_assignments(
+        available_names=["WELL-A"]
+    )
+
+    assert assignments == {"WELL-A": "legacy-profile-1"}
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
+        "WELL-A": "legacy-profile-1"
+    }
+
+
+def test_manual_well_calc_profiles_does_not_rewrite_when_raw_mapping_normalizes_equal() -> None:
+    class _RawValues(Mapping[str, object]):
+        def __init__(self, payload: Mapping[str, object]) -> None:
+            self._payload = dict(payload)
+
+        def __getitem__(self, key: str) -> object:
+            return self._payload[key]
+
+        def __iter__(self):
+            return iter(self._payload)
+
+        def __len__(self) -> int:
+            return len(self._payload)
+
+        def __eq__(self, _other: object) -> bool:
+            return False
+
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    raw_state = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": _RawValues({"dls_build_max": 0.6}),
+            "source": "manual",
+            "note": "saved",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = raw_state
+
+    profiles = page._manual_well_calc_profiles()
+
+    assert profiles["cfg-1"]["values"] == {"dls_build_max": pytest.approx(0.6)}
+    assert (
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] is raw_state
+    )
+
+
+def test_manual_well_calc_override_signature_distinguishes_enabled_without_values() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+
+    assert page._manual_well_calc_override_signature() == (False, ())
+
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+
+    assert page._manual_well_calc_override_signature() == (True, ())
+
+
+def test_sync_manual_well_override_editor_selection_evaluates_kop_for_assigned_profile(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
+    set_kop_min_vertical_function(
+        prefix=page.WT_CALC_PARAMS.prefix,
+        kop_function=ActualFundKopDepthFunction(
+            mode="piecewise_linear",
+            cluster_count=3,
+            anchor_depths_tvd_m=(1600.0, 2500.0, 3400.0),
+            anchor_kop_md_m=(780.0, 1180.0, 1680.0),
+            note="test",
+        ),
+    )
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": {"dls_build_max": 0.6},
+            "source": "manual",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-A": "cfg-1"
+    }
+    captured: dict[str, TrajectoryConfig] = {}
+
+    monkeypatch.setattr(
+        page,
+        "_set_manual_well_override_editor_from_config",
+        lambda config: captured.setdefault("config", config),
+    )
+
+    page._sync_manual_well_override_editor_selection(
+        base_config=TrajectoryConfig(),
+        active_profile_id="cfg-1",
+        records_by_name={record.name: record for record in _records()},
+    )
+
+    assert float(captured["config"].kop_min_vertical_m) == pytest.approx(
+        1135.5555555,
+        rel=1e-6,
+    )
+    clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
+
+
+def test_effective_manual_well_profile_values_tolerates_missing_records_lookup() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
+    set_kop_min_vertical_function(
+        prefix=page.WT_CALC_PARAMS.prefix,
+        kop_function=ActualFundKopDepthFunction(
+            mode="piecewise_linear",
+            cluster_count=3,
+            anchor_depths_tvd_m=(1600.0, 2500.0, 3400.0),
+            anchor_kop_md_m=(780.0, 1180.0, 1680.0),
+            note="test",
+        ),
+    )
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": {"dls_build_max": 0.6},
+            "source": "manual",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-A": "cfg-1"
+    }
+
+    values = page._effective_manual_well_profile_values(
+        base_config=TrajectoryConfig(),
+        profile_id="cfg-1",
+        records_by_name=None,
+    )
+
+    assert values["dls_build_max"] == pytest.approx(0.6)
+    clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)
+
+
+def test_effective_manual_well_profile_values_uses_next_well_when_first_kop_is_none(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": {},
+            "source": "manual",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-A": "cfg-1",
+        "WELL-B": "cfg-1",
+    }
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        page,
+        "kop_min_vertical_function_from_state",
+        lambda prefix: object(),
+    )
+
+    def _fake_eval(*, record, base_config, kop_function):
+        calls.append(str(record.name))
+        return None if str(record.name) == "WELL-A" else 987.0
+
+    monkeypatch.setattr(
+        page,
+        "_evaluated_kop_min_vertical_for_record",
+        _fake_eval,
+    )
+
+    values = page._effective_manual_well_profile_values(
+        base_config=TrajectoryConfig(),
+        profile_id="cfg-1",
+        records_by_name={
+            "WELL-A": SimpleNamespace(name="WELL-A"),
+            "WELL-B": SimpleNamespace(name="WELL-B"),
+        },
+    )
+
+    assert calls == ["WELL-A", "WELL-B"]
+    assert values["kop_min_vertical"] == pytest.approx(987.0)
+
+
+def test_render_manual_well_calc_overrides_disables_editor_when_toggle_is_off(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = False
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": {"dls_build_max": 0.6},
+            "source": "manual",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-A": "cfg-1"
+    }
+    captured: dict[str, object] = {
+        "buttons": {},
+        "captions": [],
+        "download_buttons": {},
+        "file_uploader_disabled": None,
+    }
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            captured["buttons"][str(label)] = bool(kwargs.get("disabled"))
+            return False
+
+        def download_button(self, label, *args, **kwargs):
+            captured["download_buttons"][str(label)] = bool(kwargs.get("disabled"))
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        captured["multiselect_disabled"] = bool(kwargs.get("disabled"))
+        page.st.session_state.setdefault(key, [])
+        return []
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        captured["selectbox_disabled"] = bool(kwargs.get("disabled"))
+        page.st.session_state.setdefault(key, options[0] if options else "")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        captured["text_input_disabled"] = bool(kwargs.get("disabled"))
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_button(label, **kwargs):
+        captured["buttons"][str(label)] = bool(kwargs.get("disabled"))
+        return False
+
+    def _fake_file_uploader(_label, *args, **kwargs):
+        captured["file_uploader_disabled"] = bool(kwargs.get("disabled"))
+        captured["file_uploader_accept_multiple"] = bool(
+            kwargs.get("accept_multiple_files")
+        )
+        return None
+
+    def _fake_build_config_form(*args, **kwargs):
+        captured["editor_disabled"] = bool(kwargs.get("disabled"))
+        return TrajectoryConfig()
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "button", _fake_button)
+    monkeypatch.setattr(page.st, "file_uploader", _fake_file_uploader)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "caption",
+        lambda message, *args, **kwargs: captured["captions"].append(str(message)),
+    )
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page, "_build_config_form", _fake_build_config_form)
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    assert captured["multiselect_disabled"] is True
+    assert captured["selectbox_disabled"] is True
+    assert captured["text_input_disabled"] is True
+    assert captured["file_uploader_disabled"] is True
+    assert captured["file_uploader_accept_multiple"] is True
+    assert captured["editor_disabled"] is True
+    assert captured["buttons"] == {
+        "Новая": True,
+        "Удалить": True,
+        "Импорт конфигураций": True,
+        "Назначить выбранным": True,
+        "Снять назначение": True,
+        "Взять общие": True,
+        "Подтянуть из .dev": True,
+        "Сохранить конфигурацию": True,
+    }
+    assert captured["download_buttons"] == {"Экспорт JSON": True}
+    assert any(
+        "Индивидуальные конфигурации сохранены, но сейчас отключены" in item
+        for item in captured["captions"]
+    )
+
+
+def test_render_manual_well_calc_overrides_cleans_assignments_when_records_empty() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {
+            "name": "Cfg 1",
+            "values": {"dls_build_max": 0.6},
+            "source": "manual",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-A": "cfg-1",
+        "WELL-B": "cfg-1",
+    }
+
+    page._render_manual_well_calc_overrides(records=[])
+
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {}
+
+
+def test_render_manual_well_calc_overrides_keeps_active_profile_pending_after_dev_apply(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = "missing"
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] = ["WELL-A"]
+    page.st.session_state["wt_imported_dev_params"] = (
+        SimpleNamespace(
+            well_name="WELL-A",
+            profile_label="BuildHoldBuild",
+            kop_md_m=1200.0,
+            entry_inc_deg=87.0,
+            build1_dls_deg_per_30m=(2.4,),
+            build2_dls_deg_per_30m=(),
+            horizontal_dls_deg_per_30m=(),
+        ),
+    )
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            return str(label) == "Подтянуть из .dev"
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, options[0] if options else "")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, ["WELL-A"])
+        return page.st.session_state[key]
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda: None)
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    assignments = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY]
+    profile_id = assignments["WELL-A"]
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] == ""
+    assert (
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY]
+        == profile_id
+    )
+    assert (
+        page._manual_well_calc_profile_name_key(profile_id)
+        not in page.st.session_state
+    )
+
+
+def test_render_manual_well_calc_overrides_skips_warning_when_json_import_succeeds(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    warning_messages: list[str] = []
+
+    class _DummyUpload:
+        name = "cfg.json"
+
+        def getvalue(self) -> bytes:
+            return json.dumps(
+                {
+                    "kind": page.WT_WELL_CALC_PROFILE_JSON_KIND,
+                    "schema_version": page.WT_WELL_CALC_PROFILE_JSON_SCHEMA_VERSION,
+                    "name": "Imported Config",
+                    "values": {"dls_build_max": 0.7},
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, *args, **kwargs):
+            return False
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, options[0] if options else "")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, [])
+        return []
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(
+        page.st,
+        "button",
+        lambda label, **kwargs: str(label) == "Импорт конфигураций",
+    )
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: [_DummyUpload()])
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", warning_messages.append)
+    monkeypatch.setattr(page.st, "rerun", lambda: None)
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    assert warning_messages == []
 
 
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:

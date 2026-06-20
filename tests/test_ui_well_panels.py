@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 
 from pywp.models import Point3D
 from pywp.ui_well_panels import (
+    render_plan_section_panel,
     render_trajectory_dls_panel,
     render_survey_table_with_download,
     survey_export_dataframe,
@@ -199,3 +200,57 @@ def test_trajectory_panel_can_render_only_three_without_plotly(monkeypatch) -> N
     assert captured["three_kwargs"]["height"] == 560
     assert captured["three_payload"]["lines"]
     assert captured["plotly_calls"] == []
+
+
+def test_plan_section_panel_uses_titles_in_graphs_and_hides_t1_well_label(
+    monkeypatch,
+) -> None:
+    import pywp.ui_well_panels as panels
+
+    captured: dict[str, object] = {}
+
+    class _DummyColumn:
+        def plotly_chart(self, figure, **kwargs):
+            return None
+
+    def _fake_plan_view_figure(*args, **kwargs):
+        captured["plan_kwargs"] = dict(kwargs)
+        return go.Figure()
+
+    def _fake_section_view_figure(*args, **kwargs):
+        captured["section_kwargs"] = dict(kwargs)
+        return go.Figure()
+
+    monkeypatch.setattr(
+        panels.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn()),
+    )
+    monkeypatch.setattr(panels, "plan_view_figure", _fake_plan_view_figure)
+    monkeypatch.setattr(panels, "section_view_figure", _fake_section_view_figure)
+
+    render_plan_section_panel(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 10.0],
+                "X_m": [0.0, 10.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 5.0],
+            }
+        ),
+        well_name="WELL-A",
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        t1=Point3D(x=5.0, y=0.0, z=2.0),
+        t3=Point3D(x=10.0, y=0.0, z=5.0),
+        azimuth_deg=90.0,
+        border=False,
+    )
+
+    assert captured["plan_kwargs"]["show_t1_well_label"] is False
+    assert captured["section_kwargs"]["show_t1_well_label"] is False
+    assert captured["plan_kwargs"]["title_text"] == (
+        'План (E-N) <span style="color:#68aded;">Скв. WELL-A</span>'
+    )
+    assert captured["section_kwargs"]["title_text"] == (
+        'Вертикальный разрез <span style="color:#68aded;">Скв. WELL-A</span>'
+    )

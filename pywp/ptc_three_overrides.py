@@ -31,6 +31,7 @@ __all__ = [
     "augment_three_payload",
     "build_edit_wells_payload",
     "build_target_only_edit_wells_payload",
+    "imported_dev_target_three_payload_overrides",
     "legend_pad_label",
     "overlap_volume_payloads",
     "pad_first_surface_arrow_payloads",
@@ -78,6 +79,56 @@ def target_only_raw_bounds(target_only: object) -> dict[str, list[float]]:
         t3=getattr(target_only, "t3"),
         target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
     ) or {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+
+
+def _reference_well_stations_bounds(
+    reference_well: ImportedTrajectoryWell,
+) -> dict[str, list[float]] | None:
+    stations = reference_well.stations
+    required_columns = {"X_m", "Y_m", "Z_m"}
+    if stations.empty or not required_columns.issubset(stations.columns):
+        return None
+    return ptc_three_payload.raw_bounds_from_xyz_arrays(
+        x_values=stations["X_m"].to_numpy(dtype=float),
+        y_values=stations["Y_m"].to_numpy(dtype=float),
+        z_values=stations["Z_m"].to_numpy(dtype=float),
+    )
+
+
+def _station_segments(
+    stations: object,
+    *,
+    max_points: int = 180,
+) -> list[list[list[float]]]:
+    required_columns = {"X_m", "Y_m", "Z_m"}
+    if not hasattr(stations, "columns") or not required_columns.issubset(
+        getattr(stations, "columns", [])
+    ):
+        return []
+    xyz = np.column_stack(
+        (
+            stations["X_m"].to_numpy(dtype=float),
+            stations["Y_m"].to_numpy(dtype=float),
+            stations["Z_m"].to_numpy(dtype=float),
+        )
+    )
+    if len(xyz) > int(max_points) > 1:
+        indices = np.unique(
+            np.linspace(0, len(xyz) - 1, num=int(max_points), dtype=int)
+        )
+        xyz = xyz[indices]
+    segments: list[list[list[float]]] = []
+    current_segment: list[list[float]] = []
+    for point in xyz.tolist():
+        if all(np.isfinite(float(value)) for value in point):
+            current_segment.append([float(point[0]), float(point[1]), float(point[2])])
+            continue
+        if len(current_segment) >= 2:
+            segments.append(current_segment)
+        current_segment = []
+    if len(current_segment) >= 2:
+        segments.append(current_segment)
+    return segments
 
 
 def legend_pad_label(pad: WellPad) -> str:
@@ -313,6 +364,8 @@ def augment_three_payload(
     hidden_flat_legend_labels: set[str] | None = None,
     collisions: list[dict[str, object]] | None = None,
     edit_wells: list[dict[str, object]] | None = None,
+    extra_bounds: dict[str, list[float]] | None = None,
+    extra_lines: list[dict[str, object]] | None = None,
     extra_labels: list[dict[str, object]] | None = None,
     extra_meshes: list[dict[str, object]] | None = None,
     extra_legend_items: list[dict[str, object]] | None = None,
@@ -335,6 +388,15 @@ def augment_three_payload(
         updated["collisions"] = list(collisions)
     if edit_wells is not None:
         updated["edit_wells"] = list(edit_wells)
+    if extra_bounds is not None:
+        updated["bounds"] = ptc_three_payload.merge_raw_bounds(
+            (updated.get("bounds"), extra_bounds)
+        ) or dict(extra_bounds)
+    if extra_lines:
+        updated["lines"] = [
+            *list(updated.get("lines") or []),
+            *list(extra_lines),
+        ]
     if extra_labels:
         updated["labels"] = [
             *list(updated.get("labels") or []),
@@ -359,6 +421,51 @@ def augment_three_payload(
             seen_labels.add(label)
         updated["legend"] = legend_items
     return updated
+
+
+def imported_dev_target_three_payload_overrides(
+    *,
+    visible_well_names: Iterable[str],
+    name_to_color: Mapping[str, str],
+    imported_dev_target_wells: Iterable[ImportedTrajectoryWell] = (),
+) -> dict[str, object]:
+    visible_name_by_key = {
+        well_name_key(name): str(name)
+        for name in visible_well_names
+        if str(name).strip()
+    }
+    extra_lines: list[dict[str, object]] = []
+    well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
+    overlay_bounds: dict[str, list[float]] | None = None
+    for imported_well in tuple(imported_dev_target_wells):
+        visible_name = visible_name_by_key.get(well_name_key(imported_well.name))
+        if visible_name is None:
+            continue
+        segments = _station_segments(imported_well.stations)
+        if segments:
+            extra_lines.append(
+                {
+                    "name": f"{visible_name}: импорт .dev",
+                    "segments": segments,
+                    "color": str(name_to_color.get(visible_name, "#2563EB")),
+                    "opacity": 0.95,
+                    "dash": "dash",
+                    "role": "line",
+                }
+            )
+        bounds = _reference_well_stations_bounds(imported_well)
+        if bounds is not None:
+            overlay_bounds = ptc_three_payload.merge_raw_bounds(
+                (overlay_bounds, bounds)
+            )
+            well_bounds_by_name[visible_name] = ptc_three_payload.merge_raw_bounds(
+                (well_bounds_by_name.get(visible_name), bounds)
+            ) or bounds
+    return {
+        "bounds": overlay_bounds,
+        "extra_lines": extra_lines,
+        "well_bounds_by_name": well_bounds_by_name,
+    }
 
 
 def build_edit_wells_payload(
@@ -541,6 +648,7 @@ def trajectory_three_payload_overrides(
     target_only_wells: list[object],
     name_to_color: Mapping[str, str],
     reference_wells: Iterable[ImportedTrajectoryWell] = (),
+    imported_dev_target_wells: Iterable[ImportedTrajectoryWell] = (),
 ) -> dict[str, object]:
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
     surface_by_name: dict[str, Point3D] = {}
@@ -554,6 +662,18 @@ def trajectory_three_payload_overrides(
         well_name = str(getattr(target_only, "name"))
         well_bounds_by_name[well_name] = target_only_raw_bounds(target_only)
         surface_by_name[well_name] = getattr(target_only, "surface")
+    imported_dev_overrides = imported_dev_target_three_payload_overrides(
+        visible_well_names=well_bounds_by_name.keys(),
+        name_to_color=name_to_color,
+        imported_dev_target_wells=imported_dev_target_wells,
+    )
+    for well_name, bounds in dict(
+        imported_dev_overrides.get("well_bounds_by_name") or {}
+    ).items():
+        current_bounds = well_bounds_by_name.get(str(well_name))
+        well_bounds_by_name[str(well_name)] = ptc_three_payload.merge_raw_bounds(
+            (current_bounds, bounds)
+        ) or dict(bounds)
     surface_by_name.update(arrow_surface_by_name)
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
@@ -574,6 +694,8 @@ def trajectory_three_payload_overrides(
             ),
             *build_target_only_edit_wells_payload(target_only_wells, name_to_color),
         ],
+        "extra_bounds": imported_dev_overrides.get("bounds"),
+        "extra_lines": list(imported_dev_overrides.get("extra_lines") or []),
         "extra_meshes": pad_first_surface_arrow_payloads(
             session_state,
             records=records,
@@ -593,6 +715,7 @@ def anticollision_three_payload_overrides(
     target_only_wells: list[object] | None = None,
     target_only_name_to_color: Mapping[str, str] | None = None,
     reference_wells: Iterable[ImportedTrajectoryWell] = (),
+    imported_dev_target_wells: Iterable[ImportedTrajectoryWell] = (),
 ) -> dict[str, object]:
     visible_names: list[str] = []
     well_bounds_by_name: dict[str, dict[str, list[float]]] = {}
@@ -639,6 +762,18 @@ def anticollision_three_payload_overrides(
         surface = getattr(target_only, "surface", None)
         if isinstance(surface, Point3D):
             surface_by_name[well_name] = surface
+    imported_dev_overrides = imported_dev_target_three_payload_overrides(
+        visible_well_names=visible_names,
+        name_to_color=name_to_color,
+        imported_dev_target_wells=imported_dev_target_wells,
+    )
+    for well_name, bounds in dict(
+        imported_dev_overrides.get("well_bounds_by_name") or {}
+    ).items():
+        current_bounds = well_bounds_by_name.get(str(well_name))
+        well_bounds_by_name[str(well_name)] = ptc_three_payload.merge_raw_bounds(
+            (current_bounds, bounds)
+        ) or dict(bounds)
     surface_by_name.update(arrow_surface_by_name)
     legend_tree, focus_targets, hidden_labels = three_legend_tree_payload(
         session_state,
@@ -652,6 +787,8 @@ def anticollision_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "collisions": _collision_payloads(analysis),
+        "extra_bounds": imported_dev_overrides.get("bounds"),
+        "extra_lines": list(imported_dev_overrides.get("extra_lines") or []),
         "extra_meshes": pad_first_surface_arrow_payloads(
             session_state,
             records=records,

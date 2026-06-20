@@ -176,6 +176,14 @@ def render_plan_section_panel(
     pilot_study_points: tuple[Point3D, ...] = (),
     show_plotly_charts: bool = True,
 ) -> None:
+    def _single_well_plot_title(base_title: str) -> str:
+        normalized_well_name = str(well_name or "").strip()
+        if not normalized_well_name:
+            return base_title
+        return (
+            f'{base_title} <span style="color:#68aded;">Скв. {normalized_well_name}</span>'
+        )
+
     def _render_body() -> None:
         if not show_plotly_charts:
             return
@@ -189,6 +197,8 @@ def render_plan_section_panel(
                 surface=surface,
                 t1=t1,
                 t3=t3,
+                title_text=_single_well_plot_title("План (E-N)"),
+                show_t1_well_label=False,
                 trajectory_line_dash=trajectory_line_dash,
                 plan_csb_df=plan_csb_stations,
                 actual_df=actual_stations,
@@ -207,6 +217,8 @@ def render_plan_section_panel(
                 azimuth_deg=azimuth_deg,
                 t1=t1,
                 t3=t3,
+                title_text=_single_well_plot_title("Вертикальный разрез"),
+                show_t1_well_label=False,
                 trajectory_line_dash=trajectory_line_dash,
                 plan_csb_df=plan_csb_stations,
                 actual_df=actual_stations,

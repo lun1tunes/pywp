@@ -238,6 +238,9 @@ def test_target_import_operation_parses_dev_trajectory_from_inline_text() -> Non
 
     assert [record.name for record in parsed.records] == ["j_profile_variable_pi"]
     assert len(parsed.dev_summaries) == 1
+    assert [well.name for well in parsed.imported_dev_wells] == [
+        "j_profile_variable_pi"
+    ]
     summary = parsed.dev_summaries[0]
     assert summary.profile_label == "J-профиль"
     assert summary.build1_dls_deg_per_30m == (1.2, 2.4)
@@ -265,9 +268,15 @@ def test_target_import_operation_parses_dev_trajectory_directory() -> None:
         "j_profile_constant_pi",
         "j_profile_variable_pi",
     ]
+    assert [well.name for well in parsed.imported_dev_wells] == [
+        "build_hold_build_equal_pi_with_horizontal_pi",
+        "build_hold_build_split_pi",
+        "j_profile_constant_pi",
+        "j_profile_variable_pi",
+    ]
 
 
-def test_dev_target_import_summary_dataframe_formats_pi_and_dls_columns() -> None:
+def test_dev_target_import_summary_dataframe_formats_pi_columns() -> None:
     summary_df = target_import.dev_target_import_summary_dataframe(
         (
             target_import.DevTargetImportSummary(
@@ -285,9 +294,11 @@ def test_dev_target_import_summary_dataframe_formats_pi_and_dls_columns() -> Non
         )
     )
 
-    assert summary_df.iloc[0]["BUILD1 DLS, deg/30m"] == "2.40"
     assert summary_df.iloc[0]["BUILD1 PI, deg/10m"] == "0.80"
     assert summary_df.iloc[0]["HORIZONTAL PI, deg/10m"] == "0.40"
+    assert "BUILD1 DLS, deg/30m" not in summary_df.columns
+    assert "BUILD2 DLS, deg/30m" not in summary_df.columns
+    assert "HORIZONTAL DLS, deg/30m" not in summary_df.columns
 
 
 def test_store_imported_records_mutates_state_and_runs_callbacks() -> None:
@@ -337,8 +348,13 @@ def test_store_imported_records_mutates_state_and_runs_callbacks() -> None:
     assert session_state["wt_loaded_at"] == "2026-05-08 12:00:00"
     assert session_state["wt_last_error"] == ""
     assert session_state["wt_selected_names"] == ["TAB-01"]
+    assert session_state[target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY] == ()
     assert session_state["wt_well_calc_overrides_enabled"] is False
     assert session_state["wt_well_calc_overrides"] == {}
+    assert session_state["wt_well_calc_profile_assignments"] == {}
+    assert session_state["wt_well_calc_active_profile_id"] == ""
+    assert session_state["wt_well_calc_active_profile_id_pending"] is None
+    assert session_state["wt_well_calc_profile_import_upload"] is None
     assert events == [
         "clear_t1_t3",
         "clear_pad",
@@ -391,6 +407,8 @@ def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:
         "wt_loaded_at": "old",
         "wt_well_calc_overrides_enabled": True,
         "wt_well_calc_overrides": {"TAB-01": {"values": {"dls_build_max": 0.8}}},
+        "wt_well_calc_profile_assignments": {"TAB-01": "cfg-1"},
+        "wt_well_calc_active_profile_id": "cfg-1",
     }
     events: list[str] = []
 
@@ -404,8 +422,13 @@ def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:
     assert session_state["wt_records"] is None
     assert session_state["wt_records_original"] is None
     assert session_state["wt_last_error"] == "bad source"
+    assert session_state[target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY] == ()
     assert session_state["wt_well_calc_overrides_enabled"] is False
     assert session_state["wt_well_calc_overrides"] == {}
+    assert session_state["wt_well_calc_profile_assignments"] == {}
+    assert session_state["wt_well_calc_active_profile_id"] == ""
+    assert session_state["wt_well_calc_active_profile_id_pending"] is None
+    assert session_state["wt_well_calc_profile_import_upload"] is None
     assert events == ["clear_t1_t3", "clear_pad"]
 
     target_import.clear_target_import_flow_state(
@@ -422,10 +445,15 @@ def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:
     assert session_state["wt_records"] is None
     assert session_state["wt_records_original"] is None
     assert session_state["wt_reference_wells"] == ()
+    assert session_state[target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY] == ()
     assert session_state["wt_reference_actual_wells"] == ()
     assert session_state["wt_reference_approved_wells"] == ()
     assert session_state["wt_selected_names"] == []
     assert session_state["wt_loaded_at"] == ""
     assert session_state["wt_well_calc_overrides_enabled"] is False
     assert session_state["wt_well_calc_overrides"] == {}
+    assert session_state["wt_well_calc_profile_assignments"] == {}
+    assert session_state["wt_well_calc_active_profile_id"] == ""
+    assert session_state["wt_well_calc_active_profile_id_pending"] is None
+    assert session_state["wt_well_calc_profile_import_upload"] is None
     assert events[-3:] == ["clear_t1_t3_again", "clear_pad_again", "clear_results"]

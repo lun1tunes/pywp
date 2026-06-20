@@ -273,6 +273,59 @@ def test_render_result_plots_uses_unknown_model_from_legacy_label_state(
     )
 
 
+def test_render_result_plots_shows_plotly_panels_by_default(monkeypatch) -> None:
+    calls: dict[str, int] = {"trajectory": 0, "plan_section": 0}
+
+    class _DummyStreamlit:
+        session_state: dict[str, object] = {}
+
+        def checkbox(self, *_args, **_kwargs) -> bool:
+            return False
+
+    monkeypatch.setattr(ui_well_result, "st", _DummyStreamlit())
+    monkeypatch.setattr(
+        ui_well_result,
+        "render_trajectory_dls_panel",
+        lambda **_kwargs: calls.__setitem__("trajectory", calls["trajectory"] + 1),
+    )
+    monkeypatch.setattr(
+        ui_well_result,
+        "render_plan_section_panel",
+        lambda **_kwargs: calls.__setitem__("plan_section", calls["plan_section"] + 1),
+    )
+
+    view = SingleWellResultView(
+        well_name="WELL-1",
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(600.0, 800.0, 2400.0),
+        t3=Point3D(1500.0, 2000.0, 2500.0),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0],
+                "X_m": [0.0, 10.0],
+                "Y_m": [0.0, 20.0],
+                "Z_m": [0.0, 30.0],
+                "INC_deg": [0.0, 10.0],
+                "AZI_deg": [0.0, 15.0],
+            }
+        ),
+        summary={"kop_md_m": 50.0, "md_total_m": 100.0},
+        config=TrajectoryConfig(),
+        azimuth_deg=15.0,
+        md_t1_m=80.0,
+    )
+
+    ui_well_result.render_result_plots(
+        view=view,
+        title_trajectory=None,
+        title_plan=None,
+        border=False,
+    )
+
+    assert calls["trajectory"] == 1
+    assert calls["plan_section"] == 1
+
+
 def test_build_key_metrics_rows_single_column_format() -> None:
     view = SingleWellResultView(
         well_name="WELL-1",
