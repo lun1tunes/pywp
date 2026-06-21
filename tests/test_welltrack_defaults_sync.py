@@ -38,6 +38,13 @@ def _selectbox_value(at: AppTest, label: str) -> str | None:
     return str(matches[0].value)
 
 
+def _text_input_value(at: AppTest, label: str) -> str | None:
+    matches = [widget for widget in at.text_input if widget.label == label]
+    if not matches:
+        return None
+    return str(matches[0].value)
+
+
 def _default_calc_param_signature() -> tuple[object, ...]:
     defaults = calc_param_defaults()
     return (
@@ -53,13 +60,16 @@ def _default_calc_param_signature() -> tuple[object, ...]:
         float(defaults["dls_build2_max"]),
         float(defaults["dls_horizontal_max"]),
         float(defaults["kop_min_vertical"]),
+        float(defaults["min_hold_inc"]),
         int(defaults["turn_solver_max_restarts"]),
         str(defaults["optimization_mode"]),
         str(defaults["turn_solver_mode"]),
         str(defaults["interpolation_method"]),
         str(defaults["j_profile_policy"]),
         bool(defaults["dls_build2_enabled"]),
+        bool(defaults["min_hold_inc_enabled"]),
         bool(defaults["offer_j_profile"]),
+        bool(defaults["use_fixed_kop"]),
         "constant",
     )
 
@@ -171,6 +181,10 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
         assert abs(float(actual) - expected) < 1e-9, (
             f"Для '{label}' ожидалось {expected}, получено {actual}."
         )
+
+    min_hold_actual = _text_input_value(at, "Мин. угол стабилизации, deg")
+    assert min_hold_actual is not None, "Поле 'Мин. угол стабилизации, deg' не найдено."
+    assert min_hold_actual == ""
 
     optimization_actual = _selectbox_value(at, "Оптимизация")
     assert optimization_actual is not None, "Поле оптимизации не найдено."

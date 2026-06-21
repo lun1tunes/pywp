@@ -111,6 +111,8 @@ DEEP_LOW_ANGLE_TURN_MAX_CANDIDATES = 8
 J_PROFILE_MD_COMPETITION_FACTOR = 1.005
 J_PROFILE_MD_COMPETITION_SLACK_M = 25.0
 J_PROFILE_COMPETITIVE_AZIMUTH_DELTA_MAX_DEG = 8.0
+FIXED_KOP_TOLERANCE_M = 1e-3
+FIXED_KOP_BOUND_EPSILON_M = 1e-3
 
 
 def _j_profile_policy(config: TrajectoryConfig) -> str:
@@ -126,6 +128,83 @@ def _j_profile_policy(config: TrajectoryConfig) -> str:
 
 def _j_profile_enabled(config: TrajectoryConfig) -> bool:
     return _j_profile_policy(config) != J_PROFILE_POLICY_OFF
+
+
+def _fixed_kop_vertical_target(config: TrajectoryConfig) -> float | None:
+    if not bool(getattr(config, "use_fixed_kop", False)):
+        return None
+    return float(max(config.kop_min_vertical_m, 0.0))
+
+
+def _minimum_hold_inc_target(config: TrajectoryConfig) -> float | None:
+    raw_value = getattr(config, "min_hold_inc_deg", None)
+    if raw_value is None:
+        return None
+    return float(max(raw_value, 0.5))
+
+
+def _hold_inc_lower_bound(config: TrajectoryConfig) -> float:
+    min_hold_inc_deg = _minimum_hold_inc_target(config)
+    return 0.5 if min_hold_inc_deg is None else float(min_hold_inc_deg)
+
+
+def _recover_turn_hold_inc_bounds(
+    *,
+    min_hold_inc_deg: float,
+    max_hold_inc_deg: float,
+) -> tuple[float, float] | None:
+    lower = float(max(min_hold_inc_deg, 0.5))
+    upper = float(max_hold_inc_deg)
+    if lower > upper + SMALL:
+        return None
+    if lower > upper:
+        lower = upper
+    return lower, upper
+
+
+def _kop_satisfies_config(
+    *,
+    kop_vertical_m: float,
+    config: TrajectoryConfig,
+    tolerance_m: float = FIXED_KOP_TOLERANCE_M,
+) -> bool:
+    fixed_kop_m = _fixed_kop_vertical_target(config)
+    if fixed_kop_m is not None:
+        return bool(abs(float(kop_vertical_m) - fixed_kop_m) <= float(tolerance_m))
+    return bool(
+        float(kop_vertical_m) >= float(max(config.kop_min_vertical_m, 0.0)) - SMALL
+    )
+
+
+def _turn_kop_bounds(
+    *,
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+) -> tuple[float, float]:
+    kop_target_m = float(max(config.kop_min_vertical_m, 0.0))
+    fixed_kop_m = _fixed_kop_vertical_target(config)
+    if fixed_kop_m is None:
+        kop_lower_m = kop_target_m
+        kop_upper_m = float(max(geometry.z1_m - SMALL, kop_lower_m + SMALL))
+        return kop_lower_m, kop_upper_m
+
+    available_span_m = float(geometry.z1_m - fixed_kop_m)
+    if available_span_m <= SMALL:
+        return fixed_kop_m, fixed_kop_m
+    epsilon_m = float(
+        max(
+            min(FIXED_KOP_BOUND_EPSILON_M, 0.25 * available_span_m),
+            10.0 * SMALL,
+        )
+    )
+    kop_lower_m = float(max(fixed_kop_m - epsilon_m, 0.0))
+    kop_upper_m = float(min(fixed_kop_m + epsilon_m, geometry.z1_m - SMALL))
+    if kop_upper_m <= kop_lower_m + SMALL:
+        kop_lower_m = float(max(fixed_kop_m - 0.5 * available_span_m, 0.0))
+        kop_upper_m = float(
+            min(fixed_kop_m + 0.5 * available_span_m, geometry.z1_m - SMALL)
+        )
+    return kop_lower_m, kop_upper_m
 
 
 def _j_profile_preferred_before_optimization(config: TrajectoryConfig) -> bool:
@@ -301,6 +380,7 @@ def _profile_zero_azimuth_turn_continuous(
         kop_vertical_m=kop_vertical_m,
         min_build_segment_m=float(config.min_structural_segment_m),
         post_entry=post_entry,
+        min_hold_inc_deg=_hold_inc_lower_bound(config),
     )
 
 
@@ -329,7 +409,7 @@ def _profile_single_build_j(
         return None
 
     kop_vertical_m = float(geometry.z1_m - radius_m * sin_inc)
-    if kop_vertical_m < float(max(config.kop_min_vertical_m, 0.0)) - SMALL:
+    if not _kop_satisfies_config(kop_vertical_m=kop_vertical_m, config=config):
         return None
 
     build1_length_m = float(radius_m * inc_entry_rad)
@@ -624,12 +704,17 @@ def _variable_j_residuals(
     kop_vertical_m = float(geometry.z1_m - tvd_m)
     lateral_scale = max(float(config.lateral_tolerance_m), 1e-9)
     vertical_scale = max(float(config.vertical_tolerance_m), 1e-9)
+    fixed_kop_m = _fixed_kop_vertical_target(config)
     return np.array(
         [
             (east_m - float(target_xy[0])) / lateral_scale,
             (north_m - float(target_xy[1])) / lateral_scale,
-            max(float(config.kop_min_vertical_m) - kop_vertical_m, 0.0)
-            / vertical_scale,
+            (
+                (kop_vertical_m - float(fixed_kop_m)) / vertical_scale
+                if fixed_kop_m is not None
+                else max(float(config.kop_min_vertical_m) - kop_vertical_m, 0.0)
+                / vertical_scale
+            ),
             max(-kop_vertical_m, 0.0) / vertical_scale,
         ],
         dtype=float,
@@ -669,7 +754,7 @@ def _build_variable_j_profile_from_vector(
     ):
         return None
     kop_vertical_m = float(geometry.z1_m - tvd_m)
-    if kop_vertical_m < float(config.kop_min_vertical_m) - SMALL:
+    if not _kop_satisfies_config(kop_vertical_m=kop_vertical_m, config=config):
         return None
     if kop_vertical_m < -SMALL:
         return None
@@ -865,6 +950,11 @@ def _minimal_feasible_zero_azimuth_turn_kop(
 
     if kop_lower > kop_upper + SMALL:
         return None
+    fixed_kop_m = _fixed_kop_vertical_target(config)
+    if fixed_kop_m is not None:
+        if fixed_kop_m < kop_lower - SMALL or fixed_kop_m > kop_upper + SMALL:
+            return None
+        return float(np.clip(fixed_kop_m, 0.0, kop_upper))
     return float(np.clip(kop_lower, 0.0, kop_upper))
 
 
@@ -1050,16 +1140,16 @@ def _solve_turn_profile(
             0.06,
         )
 
-    inc_hold_min = 0.5
+    inc_hold_min = _hold_inc_lower_bound(config)
     inc_hold_max = float(geometry.inc_entry_deg - 0.5)
-    kop_min = float(max(config.kop_min_vertical_m, 0.0))
-    kop_max = float(max(geometry.z1_m - SMALL, kop_min + SMALL))
+    kop_min, kop_max = _turn_kop_bounds(geometry=geometry, config=config)
     hold_max = float(max(geometry.s1_m + geometry.z1_m, 1000.0))
 
     if inc_hold_max <= inc_hold_min + SMALL:
         raise PlanningError(
             "No valid trajectory solution found within configured limits. "
-            "INC at t1 is too small for BUILD1->BUILD2 structure."
+            "INC at t1 is too small for BUILD1->BUILD2 structure "
+            f"with minimum HOLD angle {inc_hold_min:.2f} deg."
         )
     if kop_min >= kop_max:
         raise PlanningError(
@@ -1175,6 +1265,8 @@ def _solve_turn_profile(
         min_build_segment_m=float(config.min_structural_segment_m),
         post_entry=post_entry,
         split_build=False,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+        min_hold_inc_deg=_hold_inc_lower_bound(config),
     )
 
     seed_vectors = _turn_seed_vectors(
@@ -1546,6 +1638,38 @@ def _solve_turn_profile(
             best_vertical_m = split_vertical_m
             best_miss_build_dls = split_build_dls
 
+    if not candidates and _fixed_kop_vertical_target(config) is not None:
+        _emit_progress(
+            progress_callback,
+            "Солвер: rescue-поиск с фиксированным KOP.",
+            0.995,
+        )
+        fixed_kop_candidates, fixed_kop_best = _collect_fixed_kop_turn_candidates(
+            geometry=geometry,
+            lower_dls_deg_per_30m=build_dls_lower,
+            upper_dls_deg_per_30m=build_dls_upper,
+            post_entry=post_entry,
+            target_point=target_point,
+            config=config,
+            search_settings=search_settings,
+            zero_azimuth_turn=zero_azimuth_turn,
+        )
+        candidates.extend(fixed_kop_candidates)
+        (
+            fixed_kop_miss,
+            fixed_kop_lateral_m,
+            fixed_kop_vertical_m,
+            fixed_kop_build_dls,
+        ) = fixed_kop_best
+        if (
+            fixed_kop_miss < best_miss - SMALL
+            or abs(fixed_kop_miss - best_miss) <= SMALL
+        ):
+            best_miss = fixed_kop_miss
+            best_lateral_m = fixed_kop_lateral_m
+            best_vertical_m = fixed_kop_vertical_m
+            best_miss_build_dls = fixed_kop_build_dls
+
     if candidates:
         _emit_progress(progress_callback, "Солвер: найден допустимый профиль.", 1.00)
         selected_result = _select_feasible_candidate(
@@ -1668,6 +1792,8 @@ def _make_turn_profile_builder(
     min_build_segment_m: float,
     post_entry: PostEntrySection,
     split_build: bool,
+    fixed_kop_vertical_m: float | None = None,
+    min_hold_inc_deg: float = 0.5,
 ) -> Callable[[np.ndarray], ProfileParameters | None]:
     def builder(values: np.ndarray) -> ProfileParameters | None:
         values_list = values.tolist()
@@ -1690,7 +1816,11 @@ def _make_turn_profile_builder(
         else:
             build2_dls = build1_dls
             kop_index = 1
-        kop_vertical_m = float(values_list[kop_index])
+        kop_vertical_m = (
+            float(fixed_kop_vertical_m)
+            if fixed_kop_vertical_m is not None
+            else float(values_list[kop_index])
+        )
         inc_hold_deg = float(values_list[kop_index + 1])
         hold_length_m = float(values_list[kop_index + 2])
         azimuth_hold_deg = (
@@ -1708,9 +1838,104 @@ def _make_turn_profile_builder(
             azimuth_hold_deg=azimuth_hold_deg,
             min_build_segment_m=min_build_segment_m,
             post_entry=post_entry,
+            min_hold_inc_deg=min_hold_inc_deg,
         )
 
     return builder
+
+
+def _collect_fixed_kop_turn_candidates(
+    *,
+    geometry: SectionGeometry,
+    lower_dls_deg_per_30m: float,
+    upper_dls_deg_per_30m: float,
+    post_entry: PostEntrySection,
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+    search_settings: TurnSearchSettings,
+    zero_azimuth_turn: bool,
+) -> tuple[list[ProfileParameters], tuple[float, float, float, float]]:
+    fixed_kop_vertical_m = _fixed_kop_vertical_target(config)
+    if fixed_kop_vertical_m is None:
+        return [], (np.inf, np.inf, np.inf, float(upper_dls_deg_per_30m))
+
+    build_values = list(
+        _preferred_build_dls_values(
+            lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+            upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+        )
+    )
+    for build_unit in _build_unit_seed_values(search_settings):
+        build_values.append(
+            _decode_build_dls_from_unit(
+                unit_value=float(build_unit),
+                lower_dls_deg_per_30m=lower_dls_deg_per_30m,
+                upper_dls_deg_per_30m=upper_dls_deg_per_30m,
+            )
+        )
+    deduped_build_values = _dedupe_scalar_values(
+        build_values,
+        lower=lower_dls_deg_per_30m,
+        upper=upper_dls_deg_per_30m,
+    )
+
+    candidates: list[ProfileParameters] = []
+    best_miss = np.inf
+    best_lateral_m = np.inf
+    best_vertical_m = np.inf
+    best_build_dls = float(upper_dls_deg_per_30m)
+    seen: set[tuple[float, float, float]] = set()
+
+    for build_dls in deduped_build_values:
+        candidate = _recover_profile_from_build_and_kop(
+            geometry=geometry,
+            build_dls_deg_per_30m=float(build_dls),
+            kop_vertical_m=float(fixed_kop_vertical_m),
+            min_build_segment_m=float(config.min_structural_segment_m),
+            post_entry=post_entry,
+            zero_azimuth_turn=zero_azimuth_turn,
+            min_hold_inc_deg=_hold_inc_lower_bound(config),
+        )
+        if candidate is None:
+            continue
+        endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
+        _, _, _, lateral_m, vertical_m, _ = _target_miss_components(
+            endpoint, target_point
+        )
+        miss = _normalized_target_miss(
+            endpoint=endpoint,
+            target_point=target_point,
+            config=config,
+        )
+        if miss < best_miss - SMALL or abs(miss - best_miss) <= SMALL:
+            best_miss = miss
+            best_lateral_m = float(lateral_m)
+            best_vertical_m = float(vertical_m)
+            best_build_dls = float(build_dls)
+        if not _target_miss_within_tolerance(
+            lateral_m=lateral_m,
+            vertical_m=vertical_m,
+            config=config,
+        ):
+            continue
+        if not _is_candidate_feasible(candidate=candidate, config=config):
+            continue
+        key = (
+            round(float(candidate.dls_build1_deg_per_30m), 6),
+            round(float(candidate.kop_vertical_m), 6),
+            round(float(candidate.md_total_m), 6),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+
+    return candidates, (
+        best_miss,
+        best_lateral_m,
+        best_vertical_m,
+        best_build_dls,
+    )
 
 
 def _default_candidate_sort_key(
@@ -3209,6 +3434,7 @@ def _recover_profile_from_build_and_kop(
     post_entry: PostEntrySection,
     zero_azimuth_turn: bool,
     reference_candidates: tuple[ProfileParameters, ...] = (),
+    min_hold_inc_deg: float = 0.5,
 ) -> ProfileParameters | None:
     if zero_azimuth_turn:
         return _build_profile_from_effective_targets(
@@ -3219,6 +3445,7 @@ def _recover_profile_from_build_and_kop(
             kop_vertical_m=kop_vertical_m,
             min_build_segment_m=min_build_segment_m,
             post_entry=post_entry,
+            min_hold_inc_deg=min_hold_inc_deg,
         )
     return _recover_turn_profile_from_build_and_kop(
         geometry=geometry,
@@ -3227,6 +3454,7 @@ def _recover_profile_from_build_and_kop(
         min_build_segment_m=min_build_segment_m,
         post_entry=post_entry,
         reference_candidates=reference_candidates,
+        min_hold_inc_deg=min_hold_inc_deg,
     )
 
 
@@ -3238,6 +3466,7 @@ def _recover_turn_profile_from_build_and_kop(
     min_build_segment_m: float,
     post_entry: PostEntrySection,
     reference_candidates: tuple[ProfileParameters, ...] = (),
+    min_hold_inc_deg: float = 0.5,
 ) -> ProfileParameters | None:
     if build_dls_deg_per_30m <= SMALL or kop_vertical_m < 0.0:
         return None
@@ -3256,13 +3485,20 @@ def _recover_turn_profile_from_build_and_kop(
     radius_m = _radius_from_dls(build_dls_deg_per_30m)
     min_build = max(float(min_build_segment_m), SMALL)
     pos_scale = 1.0
+    hold_inc_bounds = _recover_turn_hold_inc_bounds(
+        min_hold_inc_deg=min_hold_inc_deg,
+        max_hold_inc_deg=float(geometry.inc_entry_deg - 0.5),
+    )
+    if hold_inc_bounds is None:
+        return None
+    min_hold_inc, max_hold_inc = hold_inc_bounds
 
     def build_candidate(
         inc_hold_deg: float, azimuth_hold_deg: float
     ) -> tuple[ProfileParameters | None, np.ndarray, float]:
         inc_hold = float(inc_hold_deg)
         azimuth_hold = float(_normalize_azimuth_deg(azimuth_hold_deg))
-        if inc_hold <= SMALL or inc_hold >= float(geometry.inc_entry_deg) - SMALL:
+        if inc_hold < min_hold_inc - SMALL or inc_hold > max_hold_inc + SMALL:
             return None, np.full(3, 1e9, dtype=float), -1e9
 
         build1_dogleg_rad = float(
@@ -3314,6 +3550,7 @@ def _recover_turn_profile_from_build_and_kop(
             azimuth_hold_deg=azimuth_hold,
             min_build_segment_m=min_build_segment_m,
             post_entry=post_entry,
+            min_hold_inc_deg=min_hold_inc,
         )
         return candidate, perpendicular, hold_length_m
 
@@ -3336,7 +3573,7 @@ def _recover_turn_profile_from_build_and_kop(
         )
 
     inc_seed_default = float(
-        np.clip(geometry.inc_entry_deg * 0.6, 0.5, geometry.inc_entry_deg - 0.5)
+        np.clip(geometry.inc_entry_deg * 0.6, min_hold_inc, max_hold_inc)
     )
     az_seed_default = float(
         _mid_azimuth_deg(geometry.azimuth_surface_t1_deg, geometry.azimuth_entry_deg)
@@ -3349,8 +3586,8 @@ def _recover_turn_profile_from_build_and_kop(
                     float(
                         np.clip(
                             reference_candidate.inc_hold_deg,
-                            0.5,
-                            geometry.inc_entry_deg - 0.5,
+                            min_hold_inc,
+                            max_hold_inc,
                         )
                     ),
                     float(_normalize_azimuth_deg(reference_candidate.azimuth_hold_deg)),
@@ -3370,8 +3607,8 @@ def _recover_turn_profile_from_build_and_kop(
         ]
     )
 
-    bounds_lower = np.array([0.5, 0.0], dtype=float)
-    bounds_upper = np.array([float(geometry.inc_entry_deg - 0.5), 360.0], dtype=float)
+    bounds_lower = np.array([min_hold_inc, 0.0], dtype=float)
+    bounds_upper = np.array([max_hold_inc, 360.0], dtype=float)
     best_candidate: ProfileParameters | None = None
     best_score = np.inf
 
@@ -3473,6 +3710,7 @@ def _two_dimensional_md_refine_candidates(
     optimized: list[ProfileParameters] = []
     runs_used = 0
     eval_cache: dict[tuple[float, float], CandidateOptimizationEvaluation] = {}
+    fixed_kop_vertical_m = _fixed_kop_vertical_target(config)
 
     def evaluate(values: np.ndarray) -> CandidateOptimizationEvaluation:
         pair = tuple(np.round(np.asarray(values, dtype=float), decimals=10).tolist())
@@ -3485,7 +3723,11 @@ def _two_dimensional_md_refine_candidates(
             lower_dls_deg_per_30m=lower_dls_deg_per_30m,
             upper_dls_deg_per_30m=upper_dls_deg_per_30m,
         )
-        kop_vertical_m = float(values[1])
+        kop_vertical_m = (
+            float(fixed_kop_vertical_m)
+            if fixed_kop_vertical_m is not None
+            else float(values[1])
+        )
         ordered_reference_candidates = tuple(
             item[2]
             for item in sorted(
@@ -3505,6 +3747,7 @@ def _two_dimensional_md_refine_candidates(
             post_entry=post_entry,
             zero_azimuth_turn=zero_azimuth_turn,
             reference_candidates=ordered_reference_candidates,
+            min_hold_inc_deg=_hold_inc_lower_bound(config),
         )
         evaluation = _evaluate_profile_candidate(
             candidate=candidate,
@@ -3691,6 +3934,8 @@ def _select_feasible_candidate(
             min_build_segment_m=float(config.min_structural_segment_m),
             post_entry=post_entry,
             split_build=True,
+            fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+            min_hold_inc_deg=_hold_inc_lower_bound(config),
         )
         return _finalize(
             _select_anti_collision_candidate(
@@ -3829,6 +4074,8 @@ def _select_feasible_candidate(
         min_build_segment_m=float(config.min_structural_segment_m),
         post_entry=post_entry,
         split_build=True,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+        min_hold_inc_deg=_hold_inc_lower_bound(config),
     )
     optimization_seed_vectors = _collect_optimization_seed_vectors(
         candidates=ranked,
@@ -4624,6 +4871,8 @@ def _collect_split_build_turn_candidates(
         min_build_segment_m=float(config.min_structural_segment_m),
         post_entry=post_entry,
         split_build=True,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+        min_hold_inc_deg=_hold_inc_lower_bound(config),
     )
     seed_vectors = _split_build_rescue_seed_vectors(
         base_seed_vectors=base_seed_vectors,
@@ -4854,6 +5103,7 @@ def _build_profile_from_effective_targets(
     kop_vertical_m: float,
     min_build_segment_m: float,
     post_entry: PostEntrySection,
+    min_hold_inc_deg: float = 0.5,
 ) -> ProfileParameters | None:
     inc_entry_rad = geometry.inc_entry_deg * DEG2RAD
     if inc_entry_rad <= SMALL or inc_entry_rad >= (np.pi / 2.0) - SMALL:
@@ -4869,6 +5119,8 @@ def _build_profile_from_effective_targets(
     if inc_hold_rad <= SMALL or inc_hold_rad >= inc_entry_rad - SMALL:
         return None
     inc_hold_deg = float(inc_hold_rad * RAD2DEG)
+    if inc_hold_deg < float(max(min_hold_inc_deg, 0.5)) - SMALL:
+        return None
 
     hold_length_m = float(np.hypot(a_m, b_m))
     build1_length_m = float(radius_m * inc_hold_rad)
@@ -4907,6 +5159,7 @@ def _profile_same_direction_with_turn(
     azimuth_hold_deg: float,
     min_build_segment_m: float,
     post_entry: PostEntrySection,
+    min_hold_inc_deg: float = 0.5,
 ) -> ProfileParameters | None:
     if (
         dls_build1_deg_per_30m <= SMALL
@@ -4916,7 +5169,10 @@ def _profile_same_direction_with_turn(
         return None
     if hold_length_m < -SMALL:
         return None
-    if inc_hold_deg <= SMALL or inc_hold_deg >= geometry.inc_entry_deg - SMALL:
+    if (
+        inc_hold_deg < float(max(min_hold_inc_deg, 0.5)) - SMALL
+        or inc_hold_deg >= geometry.inc_entry_deg - SMALL
+    ):
         return None
 
     min_build = max(float(min_build_segment_m), SMALL)
@@ -5214,6 +5470,7 @@ def _diagnose_same_direction_no_solution(
 ) -> list[str]:
     messages: list[str] = []
     horizontal_dls = _resolve_horizontal_dls(config=config)
+    min_hold_inc_deg = _minimum_hold_inc_target(config)
     if geometry.s1_m <= SMALL:
         messages.append(
             "t1 lies behind the t1->t3 entry axis for the current entry azimuth. "
@@ -5246,6 +5503,14 @@ def _diagnose_same_direction_no_solution(
             "Minimum VERTICAL before KOP leaves very little room for BUILD section. "
             f"kop_min_vertical={config.kop_min_vertical_m:.1f} m, t1 TVD={geometry.z1_m:.1f} m, "
             f"available BUILD vertical={build_vertical_available_m:.1f} m."
+        )
+    if (
+        min_hold_inc_deg is not None
+        and min_hold_inc_deg >= float(geometry.inc_entry_deg - 0.5) - SMALL
+    ):
+        messages.append(
+            "Minimum HOLD angle is too high for current entry INC target. "
+            f"min_hold_inc={min_hold_inc_deg:.1f} deg, entry_inc_target={geometry.inc_entry_deg:.1f} deg."
         )
     messages.extend(
         _diagnose_post_entry_constraints(

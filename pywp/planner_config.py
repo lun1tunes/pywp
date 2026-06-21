@@ -89,6 +89,8 @@ def build_trajectory_config(
     dls_build2_max_deg_per_30m: float | None = None,
     dls_horizontal_max_deg_per_30m: float | None = None,
     kop_min_vertical_m: float,
+    use_fixed_kop: bool = False,
+    min_hold_inc_deg: float | None = None,
     optimization_mode: str,
     turn_solver_mode: str,
     turn_solver_max_restarts: int,
@@ -121,6 +123,10 @@ def build_trajectory_config(
         dls_build2_max_deg_per_30m=max_build2,
         dls_horizontal_max_deg_per_30m=max_horizontal,
         kop_min_vertical_m=float(kop_min_vertical_m),
+        use_fixed_kop=bool(use_fixed_kop),
+        min_hold_inc_deg=(
+            None if min_hold_inc_deg is None else float(min_hold_inc_deg)
+        ),
         optimization_mode=str(optimization_mode),
         turn_solver_mode=str(turn_solver_mode),
         turn_solver_max_restarts=int(turn_solver_max_restarts),

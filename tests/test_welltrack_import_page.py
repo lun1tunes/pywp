@@ -5087,14 +5087,15 @@ def test_render_manual_well_calc_overrides_disables_editor_when_toggle_is_off(
     assert captured["buttons"] == {
         "Новая": True,
         "Удалить": True,
-        "Импорт конфигураций": True,
+        "Импорт": True,
+        "Выбрать все": True,
         "Назначить выбранным": True,
         "Снять назначение": True,
         "Вернуть дефолт": True,
         "Подтянуть из .dev": True,
         "Сохранить конфигурацию": True,
     }
-    assert captured["download_buttons"] == {"Экспорт JSON": True}
+    assert captured["download_buttons"] == {"Экспорт": True}
     assert any(
         "Индивидуальные конфигурации сохранены, но сейчас отключены" in item
         for item in captured["captions"]
@@ -5151,7 +5152,7 @@ def test_render_manual_well_calc_overrides_keeps_active_profile_pending_after_de
             return False
 
         def button(self, label, **kwargs):
-            return False
+            return str(label) == "Выбрать все"
 
         def download_button(self, *args, **kwargs):
             return False
@@ -5243,7 +5244,7 @@ def test_render_manual_well_calc_overrides_enables_dev_apply_without_selection(
             return False
 
         def button(self, label, **kwargs):
-            return False
+            return str(label) == "Выбрать все"
 
         def download_button(self, *args, **kwargs):
             return False
@@ -5294,6 +5295,77 @@ def test_render_manual_well_calc_overrides_enables_dev_apply_without_selection(
     assert captured["buttons"]["Подтянуть из .dev"] is False
 
 
+def test_render_manual_well_calc_overrides_select_all_queues_full_assignment_selection(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] = ["WELL-A"]
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            return str(label) == "Выбрать все"
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, options[0] if options else "")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, ["WELL-A"])
+        return page.st.session_state[key]
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    assert page.st.session_state[
+        page.WT_WELL_CALC_OVERRIDE_SELECTION_PENDING_KEY
+    ] == ["WELL-A", "WELL-B", "WELL-C"]
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] == [
+        "WELL-A"
+    ]
+
+
 def test_render_manual_well_calc_overrides_skips_warning_when_json_import_succeeds(
     monkeypatch,
 ) -> None:
@@ -5324,8 +5396,8 @@ def test_render_manual_well_calc_overrides_skips_warning_when_json_import_succee
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def button(self, *args, **kwargs):
-            return False
+        def button(self, label, **kwargs):
+            return str(label) == "Импорт"
 
         def download_button(self, *args, **kwargs):
             return False
@@ -5355,11 +5427,7 @@ def test_render_manual_well_calc_overrides_skips_warning_when_json_import_succee
     monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
     monkeypatch.setattr(page.st, "text_input", _fake_text_input)
     monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
-    monkeypatch.setattr(
-        page.st,
-        "button",
-        lambda label, **kwargs: str(label) == "Импорт конфигураций",
-    )
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
     monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: [_DummyUpload()])
     monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
@@ -5376,6 +5444,95 @@ def test_render_manual_well_calc_overrides_skips_warning_when_json_import_succee
     page._render_manual_well_calc_overrides(records=_records())
 
     assert warning_messages == []
+    profile_ids = tuple(
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY].keys()
+    )
+    assert len(profile_ids) == 1
+    pending_profile_id = str(profile_ids[0]).strip()
+    assert (
+        page._manual_well_calc_profile_name_key(pending_profile_id)
+        not in page.st.session_state
+    )
+
+
+def test_render_manual_well_calc_overrides_saves_renamed_profile(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Config A",
+        values={},
+        source="Ручная настройка",
+    )
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = "cfg-1"
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_NAME_INPUT_ACTIVE_KEY] = "cfg-1"
+    page.st.session_state[page._manual_well_calc_profile_name_key("cfg-1")] = (
+        "Renamed Config"
+    )
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            return str(label) == "Сохранить конфигурацию"
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, "cfg-1")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, [])
+        return page.st.session_state[key]
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["cfg-1"]
+    assert payload["name"] == "Renamed Config"
+    assert "Renamed Config" in page.st.session_state[
+        page.WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY
+    ]
 
 
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:

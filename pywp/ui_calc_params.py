@@ -29,6 +29,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
     "dls_build2_max",
     "dls_horizontal_max",
     "kop_min_vertical",
+    "min_hold_inc",
 )
 _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
 _STR_SUFFIXES: tuple[str, ...] = (
@@ -37,7 +38,12 @@ _STR_SUFFIXES: tuple[str, ...] = (
     "interpolation_method",
     "j_profile_policy",
 )
-_BOOL_SUFFIXES: tuple[str, ...] = ("dls_build2_enabled", "offer_j_profile")
+_BOOL_SUFFIXES: tuple[str, ...] = (
+    "dls_build2_enabled",
+    "min_hold_inc_enabled",
+    "offer_j_profile",
+    "use_fixed_kop",
+)
 
 
 def calc_param_defaults() -> dict[str, float | int | str | bool]:
@@ -48,6 +54,11 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         float(cfg.dls_build_max_deg_per_30m)
         if cfg.dls_build2_max_deg_per_30m is None
         else float(cfg.dls_build2_max_deg_per_30m)
+    )
+    min_hold_inc = (
+        13.0
+        if cfg.min_hold_inc_deg is None
+        else float(cfg.min_hold_inc_deg)
     )
     return {
         "md_step": float(cfg.md_step_m),
@@ -64,23 +75,28 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
             dls_to_pi(cfg.dls_horizontal_max_deg_per_30m)
         ),
         "kop_min_vertical": float(cfg.kop_min_vertical_m),
+        "min_hold_inc": float(min_hold_inc),
         "optimization_mode": str(cfg.optimization_mode),
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
         "turn_solver_mode": str(cfg.turn_solver_mode),
         "interpolation_method": str(cfg.interpolation_method),
         "j_profile_policy": str(cfg.j_profile_policy),
         "dls_build2_enabled": bool(cfg.dls_build2_max_deg_per_30m is not None),
+        "min_hold_inc_enabled": bool(cfg.min_hold_inc_deg is not None),
         "offer_j_profile": bool(cfg.offer_j_profile),
+        "use_fixed_kop": bool(cfg.use_fixed_kop),
     }
 
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 15
+_DEFAULTS_SCHEMA_VERSION = 17
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 _BUILD2_INPUT_SUFFIX = "dls_build2_optional_input"
 _BUILD2_INPUT_SIGNATURE_SUFFIX = "dls_build2_optional_signature"
+_MIN_HOLD_INC_INPUT_SUFFIX = "min_hold_inc_optional_input"
+_MIN_HOLD_INC_INPUT_SIGNATURE_SUFFIX = "min_hold_inc_optional_signature"
 KOP_MIN_VERTICAL_MODE_CONSTANT = "constant"
 KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION = "depth_function"
 
@@ -106,6 +122,9 @@ class CalcParamBinding:
     def build_config(self) -> TrajectoryConfig:
         return build_config_from_state(prefix=self.prefix)
 
+    def apply_optional_inputs(self) -> None:
+        apply_optional_calc_param_inputs(prefix=self.prefix)
+
     def render_block(
         self,
         *,
@@ -113,6 +132,7 @@ class CalcParamBinding:
         show_solver_help: bool = True,
         on_change: Callable[[], None] | None = None,
         disabled: bool = False,
+        enable_live_callbacks: bool = True,
     ) -> None:
         render_calc_params_block(
             prefix=self.prefix,
@@ -120,6 +140,7 @@ class CalcParamBinding:
             show_solver_help=show_solver_help,
             on_change=on_change,
             disabled=disabled,
+            enable_live_callbacks=enable_live_callbacks,
         )
 
 
@@ -155,6 +176,14 @@ def _build2_input_signature_key(prefix: str = "") -> str:
     return _state_key(prefix, _BUILD2_INPUT_SIGNATURE_SUFFIX)
 
 
+def _min_hold_inc_input_key(prefix: str = "") -> str:
+    return _state_key(prefix, _MIN_HOLD_INC_INPUT_SUFFIX)
+
+
+def _min_hold_inc_input_signature_key(prefix: str = "") -> str:
+    return _state_key(prefix, _MIN_HOLD_INC_INPUT_SIGNATURE_SUFFIX)
+
+
 def _format_pi_input_value(value: float) -> str:
     return f"{float(value):.1f}"
 
@@ -179,6 +208,26 @@ def _sync_build2_optional_input_state(prefix: str = "") -> None:
         st.session_state[signature_key] = build2_signature
 
 
+def _sync_min_hold_inc_optional_input_state(prefix: str = "") -> None:
+    min_hold_enabled = bool(_state_value(prefix, "min_hold_inc_enabled"))
+    min_hold_signature = (
+        min_hold_enabled,
+        float(_state_value(prefix, "min_hold_inc")) if min_hold_enabled else None,
+    )
+    signature_key = _min_hold_inc_input_signature_key(prefix)
+    text_key = _min_hold_inc_input_key(prefix)
+    if (
+        text_key not in st.session_state
+        or st.session_state.get(signature_key) != min_hold_signature
+    ):
+        st.session_state[text_key] = (
+            _format_pi_input_value(float(_state_value(prefix, "min_hold_inc")))
+            if min_hold_enabled
+            else ""
+        )
+        st.session_state[signature_key] = min_hold_signature
+
+
 def _apply_build2_optional_input_state(prefix: str = "") -> None:
     raw_value = str(st.session_state.get(_build2_input_key(prefix), "")).strip()
     build1_value = float(_state_value(prefix, "dls_build_max"))
@@ -200,6 +249,30 @@ def _apply_build2_optional_input_state(prefix: str = "") -> None:
     st.session_state[_build2_input_signature_key(prefix)] = (True, float(parsed_value))
 
 
+def _apply_min_hold_inc_optional_input_state(prefix: str = "") -> None:
+    raw_value = str(st.session_state.get(_min_hold_inc_input_key(prefix), "")).strip()
+    default_value = float(calc_param_defaults()["min_hold_inc"])
+    if not raw_value:
+        st.session_state[_state_key(prefix, "min_hold_inc_enabled")] = False
+        st.session_state[_state_key(prefix, "min_hold_inc")] = float(default_value)
+        st.session_state[_min_hold_inc_input_signature_key(prefix)] = (False, None)
+        return
+    try:
+        parsed_value = float(raw_value)
+    except (TypeError, ValueError):
+        st.session_state[_state_key(prefix, "min_hold_inc_enabled")] = False
+        st.session_state[_state_key(prefix, "min_hold_inc")] = float(default_value)
+        st.session_state[_min_hold_inc_input_signature_key(prefix)] = (False, None)
+        return
+    parsed_value = max(0.5, float(parsed_value))
+    st.session_state[_state_key(prefix, "min_hold_inc_enabled")] = True
+    st.session_state[_state_key(prefix, "min_hold_inc")] = float(parsed_value)
+    st.session_state[_min_hold_inc_input_signature_key(prefix)] = (
+        True,
+        float(parsed_value),
+    )
+
+
 def _handle_build2_optional_input_change(
     prefix: str = "",
     on_change: Callable[[], None] | None = None,
@@ -207,6 +280,20 @@ def _handle_build2_optional_input_change(
     _apply_build2_optional_input_state(prefix)
     if on_change is not None:
         on_change()
+
+
+def _handle_min_hold_inc_optional_input_change(
+    prefix: str = "",
+    on_change: Callable[[], None] | None = None,
+) -> None:
+    _apply_min_hold_inc_optional_input_state(prefix)
+    if on_change is not None:
+        on_change()
+
+
+def apply_optional_calc_param_inputs(prefix: str = "") -> None:
+    _apply_build2_optional_input_state(prefix)
+    _apply_min_hold_inc_optional_input_state(prefix)
 
 
 def kop_min_vertical_mode(prefix: str = "") -> str:
@@ -407,13 +494,18 @@ def calc_param_state_values_from_config(
             dls_to_pi(config.dls_horizontal_max_deg_per_30m)
         ),
         "kop_min_vertical": float(config.kop_min_vertical_m),
+        "min_hold_inc": float(
+            13.0 if config.min_hold_inc_deg is None else config.min_hold_inc_deg
+        ),
         "optimization_mode": str(config.optimization_mode),
         "turn_solver_max_restarts": int(config.turn_solver_max_restarts),
         "turn_solver_mode": str(config.turn_solver_mode),
         "interpolation_method": str(config.interpolation_method),
         "j_profile_policy": str(config.j_profile_policy),
         "dls_build2_enabled": bool(config.dls_build2_max_deg_per_30m is not None),
+        "min_hold_inc_enabled": bool(config.min_hold_inc_deg is not None),
         "offer_j_profile": bool(config.offer_j_profile),
+        "use_fixed_kop": bool(config.use_fixed_kop),
     }
 
 
@@ -429,6 +521,7 @@ def set_calc_param_state_values(
     st.session_state[_kop_mode_key(prefix)] = KOP_MIN_VERTICAL_MODE_CONSTANT
     st.session_state[_kop_function_payload_key(prefix)] = None
     _sync_build2_optional_input_state(prefix)
+    _sync_min_hold_inc_optional_input_state(prefix)
 
 
 def _build_config_kwargs_from_values(
@@ -452,6 +545,12 @@ def _build_config_kwargs_from_values(
             float(values["dls_horizontal_max"])
         ),
         "kop_min_vertical_m": float(values["kop_min_vertical"]),
+        "use_fixed_kop": bool(values.get("use_fixed_kop", False)),
+        "min_hold_inc_deg": (
+            float(values["min_hold_inc"])
+            if bool(values.get("min_hold_inc_enabled", False))
+            else None
+        ),
         "optimization_mode": str(values["optimization_mode"]),
         "turn_solver_max_restarts": int(values["turn_solver_max_restarts"]),
         "turn_solver_mode": str(values["turn_solver_mode"]),
@@ -486,12 +585,33 @@ def render_calc_params_block(
     show_solver_help: bool = True,
     on_change: Callable[[], None] | None = None,
     disabled: bool = False,
+    enable_live_callbacks: bool = True,
 ) -> None:
     # Guard against any code path that renders widgets before page-level init.
     apply_calc_param_defaults(prefix=prefix, force=False)
-    widget_change_kwargs = {"on_change": on_change} if on_change is not None else {}
+    widget_change_kwargs = (
+        {"on_change": on_change}
+        if on_change is not None and enable_live_callbacks
+        else {}
+    )
     widget_state_kwargs = {"disabled": bool(disabled)}
     widget_kwargs = {**widget_change_kwargs, **widget_state_kwargs}
+    optional_input_callback_kwargs = (
+        {
+            "on_change": _handle_build2_optional_input_change,
+            "args": (prefix, on_change),
+        }
+        if enable_live_callbacks
+        else {}
+    )
+    min_hold_callback_kwargs = (
+        {
+            "on_change": _handle_min_hold_inc_optional_input_change,
+            "args": (prefix, on_change),
+        }
+        if enable_live_callbacks
+        else {}
+    )
     if title:
         st.markdown(f"### {title}")
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7, gap="small")
@@ -577,8 +697,7 @@ def render_calc_params_block(
             "Оставьте пустым, чтобы BUILD2 использовал тот же лимит, что и BUILD1. "
             "Если указано значение, BUILD2 считается с отдельным лимитом."
         ),
-        on_change=_handle_build2_optional_input_change,
-        args=(prefix, on_change),
+        **optional_input_callback_kwargs,
         **widget_state_kwargs,
     )
     d3.number_input(
@@ -614,6 +733,29 @@ def render_calc_params_block(
     )
     if kop_min_vertical_mode(prefix) == KOP_MIN_VERTICAL_MODE_DEPTH_FUNCTION:
         d4.caption(kop_min_vertical_detail_label(prefix))
+    _sync_min_hold_inc_optional_input_state(prefix)
+    e1, e2 = st.columns(2, gap="small")
+    e1.checkbox(
+        "Использовать фиксированный KOP",
+        key=_state_key(prefix, "use_fixed_kop"),
+        help=(
+            "Если включено, указанное значение KOP используется как точная глубина "
+            "начала BUILD. Если выключено, KOP остается минимальным ограничением, "
+            "и солвер может опустить его глубже. Для функции KOP / TVD фиксируется "
+            "рассчитанный KOP конкретной скважины."
+        ),
+        **widget_kwargs,
+    )
+    e2.text_input(
+        "Мин. угол стабилизации, deg",
+        key=_min_hold_inc_input_key(prefix),
+        help=(
+            "Оставьте пустым, чтобы не ограничивать угол HOLD дополнительно. "
+            "Если указано значение, солвер ищет решение с HOLD не ниже этого угла."
+        ),
+        **min_hold_callback_kwargs,
+        **widget_state_kwargs,
+    )
     st.number_input(
         "Макс итоговая MD (постпроверка), м",
         key=_state_key(prefix, "max_total_md_postcheck"),

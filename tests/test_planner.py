@@ -2162,6 +2162,89 @@ def test_kop_optimization_reduces_kop_for_reverse_entry_geometry() -> None:
     assert int(result_kop.summary["optimization_runs_used"]) > 0
 
 
+def test_fixed_kop_mode_uses_configured_kop_instead_of_only_minimum_bound() -> None:
+    planner = TrajectoryPlanner()
+    config_free = _fast_config(
+        dls_build_min_deg_per_30m=0.0,
+        dls_build_max_deg_per_30m=6.0,
+        kop_min_vertical_m=200.0,
+        use_fixed_kop=False,
+        optimization_mode="none",
+        turn_solver_max_restarts=0,
+        max_total_md_postcheck_m=20000.0,
+    )
+    config_fixed = _fast_config(
+        dls_build_min_deg_per_30m=0.0,
+        dls_build_max_deg_per_30m=6.0,
+        kop_min_vertical_m=200.0,
+        use_fixed_kop=True,
+        optimization_mode="none",
+        turn_solver_max_restarts=0,
+        max_total_md_postcheck_m=20000.0,
+    )
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(2500.0, 800.0, 2400.0)
+    t3 = Point3D(1500.0, 2000.0, 2500.0)
+
+    result_free = planner.plan(surface=surface, t1=t1, t3=t3, config=config_free)
+    result_fixed = planner.plan(surface=surface, t1=t1, t3=t3, config=config_fixed)
+
+    assert float(result_free.summary["kop_md_m"]) > 200.0 + 1.0
+    assert float(result_fixed.summary["kop_md_m"]) == pytest.approx(200.0, abs=1e-6)
+    assert float(result_fixed.summary["distance_t1_m"]) <= config_fixed.pos_tolerance_m
+    assert float(result_fixed.summary["distance_t3_m"]) <= config_fixed.pos_tolerance_m
+
+
+def test_recover_turn_hold_inc_bounds_keep_boundary_value() -> None:
+    import pywp.planner as planner_module
+
+    bounds = planner_module._recover_turn_hold_inc_bounds(
+        min_hold_inc_deg=85.5,
+        max_hold_inc_deg=85.5,
+    )
+
+    assert bounds is not None
+    lower, upper = bounds
+    assert lower == pytest.approx(85.5)
+    assert upper == pytest.approx(85.5)
+
+
+def test_min_hold_angle_constraint_raises_hold_inc_without_breaking_solution() -> None:
+    planner = TrajectoryPlanner()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(400.0, 0.0, 2200.0)
+    t3 = Point3D(2400.0, 0.0, 2300.0)
+    base_config = _fast_config(
+        optimization_mode="none",
+        turn_solver_max_restarts=0,
+        max_total_md_postcheck_m=20000.0,
+        offer_j_profile=False,
+    )
+    constrained_config = base_config.validated_copy(min_hold_inc_deg=13.0)
+
+    base_result = planner.plan(surface=surface, t1=t1, t3=t3, config=base_config)
+    constrained_result = planner.plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=constrained_config,
+    )
+
+    assert float(base_result.summary["hold_inc_deg"]) < 13.0
+    assert float(constrained_result.summary["hold_inc_deg"]) >= 13.0 - 1e-6
+    assert (
+        float(constrained_result.summary["distance_t1_m"])
+        <= constrained_config.pos_tolerance_m
+    )
+    assert (
+        float(constrained_result.summary["distance_t3_m"])
+        <= constrained_config.pos_tolerance_m
+    )
+    assert float(constrained_result.summary["md_total_m"]) >= float(
+        base_result.summary["md_total_m"]
+    ) - 1e-6
+
+
 def test_kop_optimization_hits_minimum_kop_limit_for_shallow_turn_case() -> None:
     planner = TrajectoryPlanner()
     surface = Point3D(0.0, 0.0, 0.0)

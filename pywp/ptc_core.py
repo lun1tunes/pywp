@@ -277,6 +277,9 @@ WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY = (
 )
 WT_WELL_CALC_PROFILE_IMPORT_UPLOAD_KEY = "wt_well_calc_profile_import_upload"
 WT_WELL_CALC_OVERRIDE_SELECTION_KEY = "wt_well_calc_override_selected_names"
+WT_WELL_CALC_OVERRIDE_SELECTION_PENDING_KEY = (
+    "wt_well_calc_override_pending_selected_names"
+)
 WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY = (
     "wt_well_calc_override_selected_signature"
 )
@@ -303,6 +306,8 @@ _CALC_PARAM_OVERRIDE_LABELS: dict[str, str] = {
     "dls_build2_max": "ПИ BUILD2",
     "dls_horizontal_max": "ПИ HORIZONTAL",
     "kop_min_vertical": "KOP",
+    "min_hold_inc_enabled": "Мин HOLD отдельно",
+    "min_hold_inc": "Мин HOLD, deg",
     "optimization_mode": "Оптимизация",
     "turn_solver_max_restarts": "Рестарты",
     "turn_solver_mode": "Метод",
@@ -2452,6 +2457,7 @@ def _init_state() -> None:
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY, None)
     st.session_state.setdefault(WT_WELL_CALC_PROFILE_IMPORT_UPLOAD_KEY, None)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_KEY, [])
+    st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_PENDING_KEY, None)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY, ())
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY, "")
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_NAME_INPUT_ACTIVE_KEY, "")
@@ -3614,6 +3620,17 @@ def _sync_manual_well_override_selection(
     *,
     available_names: list[str],
 ) -> list[str]:
+    pending_names = st.session_state.pop(
+        WT_WELL_CALC_OVERRIDE_SELECTION_PENDING_KEY,
+        None,
+    )
+    if pending_names is not None:
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_KEY] = (
+            _coerce_manual_well_override_selection(
+                pending_names,
+                available_names=available_names,
+            )
+        )
     current = _coerce_manual_well_override_selection(
         st.session_state.get(WT_WELL_CALC_OVERRIDE_SELECTION_KEY, []),
         available_names=available_names,
@@ -4305,16 +4322,17 @@ def _render_manual_well_calc_overrides(
         )
         profile_io_cols = st.columns(2, gap="small")
         import_profile_clicked = profile_io_cols[0].button(
-            "Импорт конфигураций",
+            "Импорт",
             icon=":material/upload_file:",
             width="stretch",
             disabled=not overrides_enabled or not uploaded_profile_files,
         )
         profile_io_cols[1].download_button(
-            "Экспорт JSON",
+            "Экспорт",
             data=profile_export_json.encode("utf-8"),
             file_name=profile_export_file_name,
             mime="application/json",
+            icon=":material/download:",
             width="stretch",
             disabled=not overrides_enabled
             or not active_profile_id
@@ -4329,8 +4347,14 @@ def _render_manual_well_calc_overrides(
         selected_names = _sync_manual_well_override_selection(
             available_names=available_names
         )
-        assignment_cols = st.columns(2, gap="small")
-        assign_profile_clicked = assignment_cols[0].button(
+        assignment_cols = st.columns(3, gap="small")
+        select_all_assignments_clicked = assignment_cols[0].button(
+            "Выбрать все",
+            icon=":material/done_all:",
+            width="stretch",
+            disabled=not overrides_enabled or not available_names,
+        )
+        assign_profile_clicked = assignment_cols[1].button(
             "Назначить выбранным",
             icon=":material/link:",
             width="stretch",
@@ -4338,7 +4362,7 @@ def _render_manual_well_calc_overrides(
             or not active_profile_id
             or not selected_names,
         )
-        clear_assignment_clicked = assignment_cols[1].button(
+        clear_assignment_clicked = assignment_cols[2].button(
             "Снять назначение",
             icon=":material/link_off:",
             width="stretch",
@@ -4429,16 +4453,6 @@ def _render_manual_well_calc_overrides(
             if imported_count > 0:
                 _queue_manual_well_calc_override_enabled(True)
                 st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
-                if last_profile_id:
-                    last_payload = dict(
-                        _manual_well_calc_profiles().get(last_profile_id, {})
-                    )
-                    last_name = str(
-                        last_payload.get("name", last_profile_id)
-                    ).strip() or str(last_profile_id)
-                    st.session_state[
-                        _manual_well_calc_profile_name_key(last_profile_id)
-                    ] = last_name
                 created_count = int(imported_count - updated_count)
                 feedback = (
                     "Импортировано конфигураций: "
@@ -4453,6 +4467,11 @@ def _render_manual_well_calc_overrides(
                     "Не удалось импортировать конфигурации: "
                     + " | ".join(error_messages)
                 )
+    if select_all_assignments_clicked:
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_PENDING_KEY] = list(
+            available_names
+        )
+        _rerun_fragment()
     if assign_profile_clicked:
         assigned_count = _assign_manual_well_calc_profile_to_wells(
             profile_id=active_profile_id,
@@ -4486,9 +4505,6 @@ def _render_manual_well_calc_overrides(
                 )
             ),
         )
-        st.session_state[
-            _manual_well_calc_profile_name_key(active_profile_id)
-        ] = resolved_name
         st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
         if changed:
             st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (

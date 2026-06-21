@@ -175,6 +175,8 @@ class TrajectoryConfig(FrozenModel):
         DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M
     )
     kop_min_vertical_m: NonNegativeFiniteScalar = 400.0
+    use_fixed_kop: bool = False
+    min_hold_inc_deg: NonNegativeFiniteScalar | None = None
 
     # Post-processing MD threshold for user-facing validation only.
     # Does not participate in solver search/optimization constraints.
@@ -260,6 +262,13 @@ class TrajectoryConfig(FrozenModel):
             raise PlanningError("entry_inc_target_deg must be in (0, 90).")
         if self.kop_min_vertical_m < 0.0:
             raise PlanningError("kop_min_vertical_m must be non-negative.")
+        if (
+            self.min_hold_inc_deg is not None
+            and self.min_hold_inc_deg >= self.entry_inc_target_deg - SMALL
+        ):
+            raise PlanningError(
+                "min_hold_inc_deg must be lower than entry_inc_target_deg."
+            )
         if self.entry_inc_tolerance_deg < 0.0:
             raise PlanningError("entry_inc_tolerance_deg must be non-negative.")
         if self.max_inc_deg <= 0.0 or self.max_inc_deg > 120.0:
@@ -329,6 +338,13 @@ class TrajectoryConfig(FrozenModel):
         ):
             raise ValueError(
                 "dls_build_min_deg_per_30m cannot exceed dls_build2_max_deg_per_30m."
+            )
+        if (
+            self.min_hold_inc_deg is not None
+            and float(self.min_hold_inc_deg) >= float(self.entry_inc_target_deg) - SMALL
+        ):
+            raise ValueError(
+                "min_hold_inc_deg must be lower than entry_inc_target_deg."
             )
         if float(self.min_structural_segment_m) < float(self.md_step_control_m):
             raise ValueError("min_structural_segment_m must be >= md_step_control_m.")

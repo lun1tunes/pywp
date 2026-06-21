@@ -81,6 +81,7 @@ def test_trajectory_config_defaults_use_shared_segment_limit_builder() -> None:
         cfg.dls_horizontal_max_deg_per_30m
         == DEFAULT_HORIZONTAL_DLS_MAX_DEG_PER_30M
     )
+    assert cfg.min_hold_inc_deg is None
     assert cfg.dls_limits_deg_per_30m == expected
 
 
@@ -238,6 +239,7 @@ def test_build_trajectory_config_pins_min_build_dls_to_zero_and_applies_limits()
     assert config.dls_limits_deg_per_30m["BUILD1"] == 0.8
     assert config.dls_limits_deg_per_30m["BUILD2"] == 0.8
     assert config.dls_limits_deg_per_30m["HORIZONTAL"] == 1.2
+    assert config.use_fixed_kop is False
     assert config.optimization_mode == OPTIMIZATION_NONE
     assert config.turn_solver_max_restarts == CFG_DEFAULTS.turn_solver_max_restarts
     assert config.j_profile_policy == J_PROFILE_POLICY_OFF
@@ -268,6 +270,48 @@ def test_build_trajectory_config_preserves_optional_build2_limit() -> None:
     assert config.dls_limits_deg_per_30m["BUILD2"] == 1.4
 
 
+def test_build_trajectory_config_passes_through_fixed_kop_flag() -> None:
+    config = build_trajectory_config(
+        md_step_m=CFG_DEFAULTS.md_step_m,
+        md_step_control_m=CFG_DEFAULTS.md_step_control_m,
+        lateral_tolerance_m=CFG_DEFAULTS.lateral_tolerance_m,
+        vertical_tolerance_m=CFG_DEFAULTS.vertical_tolerance_m,
+        entry_inc_target_deg=CFG_DEFAULTS.entry_inc_target_deg,
+        entry_inc_tolerance_deg=CFG_DEFAULTS.entry_inc_tolerance_deg,
+        max_inc_deg=CFG_DEFAULTS.max_inc_deg,
+        dls_build_max_deg_per_30m=0.8,
+        dls_horizontal_max_deg_per_30m=1.2,
+        kop_min_vertical_m=CFG_DEFAULTS.kop_min_vertical_m,
+        use_fixed_kop=True,
+        optimization_mode=OPTIMIZATION_NONE,
+        turn_solver_mode=CFG_DEFAULTS.turn_solver_mode,
+        turn_solver_max_restarts=CFG_DEFAULTS.turn_solver_max_restarts,
+    )
+
+    assert config.use_fixed_kop is True
+
+
+def test_build_trajectory_config_passes_through_optional_min_hold_inc() -> None:
+    config = build_trajectory_config(
+        md_step_m=CFG_DEFAULTS.md_step_m,
+        md_step_control_m=CFG_DEFAULTS.md_step_control_m,
+        lateral_tolerance_m=CFG_DEFAULTS.lateral_tolerance_m,
+        vertical_tolerance_m=CFG_DEFAULTS.vertical_tolerance_m,
+        entry_inc_target_deg=CFG_DEFAULTS.entry_inc_target_deg,
+        entry_inc_tolerance_deg=CFG_DEFAULTS.entry_inc_tolerance_deg,
+        max_inc_deg=CFG_DEFAULTS.max_inc_deg,
+        dls_build_max_deg_per_30m=0.8,
+        dls_horizontal_max_deg_per_30m=1.2,
+        kop_min_vertical_m=CFG_DEFAULTS.kop_min_vertical_m,
+        min_hold_inc_deg=13.0,
+        optimization_mode=OPTIMIZATION_NONE,
+        turn_solver_mode=CFG_DEFAULTS.turn_solver_mode,
+        turn_solver_max_restarts=CFG_DEFAULTS.turn_solver_max_restarts,
+    )
+
+    assert config.min_hold_inc_deg == pytest.approx(13.0)
+
+
 def test_legacy_offer_j_profile_maps_to_propose_policy() -> None:
     config = TrajectoryConfig(offer_j_profile=True)
 
@@ -280,3 +324,8 @@ def test_explicit_j_profile_policy_syncs_legacy_boolean() -> None:
 
     assert config.j_profile_policy == J_PROFILE_POLICY_PREFER
     assert config.offer_j_profile is True
+
+
+def test_trajectory_config_rejects_min_hold_inc_at_or_above_entry_inc() -> None:
+    with pytest.raises(ValidationError, match="min_hold_inc_deg must be lower"):
+        TrajectoryConfig(min_hold_inc_deg=86.0)

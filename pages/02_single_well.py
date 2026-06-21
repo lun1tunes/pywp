@@ -732,6 +732,7 @@ def _build_points_from_state() -> tuple[Point3D, Point3D, Point3D]:
 
 
 def _build_config_from_state() -> TrajectoryConfig:
+    APP_CALC_PARAMS.apply_optional_inputs()
     return APP_CALC_PARAMS.build_config()
 
 
@@ -1197,7 +1198,10 @@ def _render_input_form() -> bool:
     ):
         _render_point_config_block()
         with st.container(border=True):
-            APP_CALC_PARAMS.render_block(show_solver_help=True)
+            APP_CALC_PARAMS.render_block(
+                show_solver_help=True,
+                enable_live_callbacks=False,
+            )
         with st.container(border=True):
             st.markdown("### Расчет траектории")
             build_clicked = st.form_submit_button(

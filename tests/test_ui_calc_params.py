@@ -49,6 +49,7 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
         dls_to_pi(cfg.dls_horizontal_max_deg_per_30m)
     )
     assert defaults["kop_min_vertical"] == float(cfg.kop_min_vertical_m)
+    assert defaults["min_hold_inc"] == pytest.approx(13.0)
     assert defaults["optimization_mode"] == str(cfg.optimization_mode)
     assert defaults["turn_solver_max_restarts"] == int(cfg.turn_solver_max_restarts)
     assert defaults["turn_solver_mode"] == str(cfg.turn_solver_mode)
@@ -56,9 +57,12 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["j_profile_policy"] == str(cfg.j_profile_policy)
     assert defaults["j_profile_policy"] == J_PROFILE_POLICY_OFF
     assert defaults["dls_build2_enabled"] is False
+    assert defaults["min_hold_inc_enabled"] is False
     assert defaults["dls_build2_max"] == pytest.approx(defaults["dls_build_max"])
     assert defaults["offer_j_profile"] == bool(cfg.offer_j_profile)
     assert defaults["offer_j_profile"] is False
+    assert defaults["use_fixed_kop"] is bool(cfg.use_fixed_kop)
+    assert defaults["use_fixed_kop"] is False
     assert abs(float(defaults["dls_build_max"]) - 0.8) < 1e-12
     assert abs(float(defaults["dls_horizontal_max"]) - 0.5) < 1e-12
 
@@ -107,7 +111,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 15
+        == 17
     )
 
 
@@ -132,7 +136,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 15
+        == 17
     )
 
 
@@ -178,6 +182,21 @@ def test_build_config_from_state_uses_optional_independent_build2_pi(
     ]
 
 
+def test_build_config_from_state_uses_optional_min_hold_inc(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["min_hold_inc_enabled"] = True
+    fake_st.session_state["min_hold_inc"] = 13.0
+
+    config = build_config_from_state(prefix="")
+
+    assert config.min_hold_inc_deg == pytest.approx(13.0)
+
+
 def test_optional_build2_input_empty_reuses_build1(monkeypatch) -> None:
     import pywp.ui_calc_params as ui_calc_params
 
@@ -211,6 +230,38 @@ def test_optional_build2_input_value_enables_separate_limit(monkeypatch) -> None
     assert fake_st.session_state["dls_build2_max"] == pytest.approx(1.7)
 
 
+def test_optional_min_hold_input_empty_disables_limit(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["min_hold_inc_enabled"] = True
+    fake_st.session_state["min_hold_inc"] = 18.0
+    fake_st.session_state["min_hold_inc_optional_input"] = ""
+
+    ui_calc_params._apply_min_hold_inc_optional_input_state("")
+
+    assert fake_st.session_state["min_hold_inc_enabled"] is False
+    assert fake_st.session_state["min_hold_inc"] == pytest.approx(13.0)
+
+
+def test_optional_min_hold_input_value_enables_limit(monkeypatch) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["min_hold_inc_optional_input"] = "13.0"
+
+    ui_calc_params._apply_min_hold_inc_optional_input_state("")
+
+    assert fake_st.session_state["min_hold_inc_enabled"] is True
+    assert fake_st.session_state["min_hold_inc"] == pytest.approx(13.0)
+
+
 def test_handle_build2_optional_input_change_applies_state_and_forwards_callback(
     monkeypatch,
 ) -> None:
@@ -233,6 +284,28 @@ def test_handle_build2_optional_input_change_applies_state_and_forwards_callback
     assert callback_calls == ["changed"]
 
 
+def test_handle_min_hold_input_change_applies_state_and_forwards_callback(
+    monkeypatch,
+) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+    callback_calls: list[str] = []
+
+    apply_calc_param_defaults(prefix="", force=True)
+    fake_st.session_state["min_hold_inc_optional_input"] = "13.0"
+
+    ui_calc_params._handle_min_hold_inc_optional_input_change(
+        "",
+        lambda: callback_calls.append("changed"),
+    )
+
+    assert fake_st.session_state["min_hold_inc_enabled"] is True
+    assert fake_st.session_state["min_hold_inc"] == pytest.approx(13.0)
+    assert callback_calls == ["changed"]
+
+
 def test_calc_param_state_values_roundtrip_preserves_config() -> None:
     config = TrajectoryConfig(
         md_step_m=12.0,
@@ -247,6 +320,8 @@ def test_calc_param_state_values_roundtrip_preserves_config() -> None:
         dls_build2_max_deg_per_30m=3.6,
         dls_horizontal_max_deg_per_30m=1.5,
         kop_min_vertical_m=950.0,
+        use_fixed_kop=True,
+        min_hold_inc_deg=13.0,
         optimization_mode="minimize_md",
         turn_solver_max_restarts=3,
         turn_solver_mode="de_hybrid",
@@ -275,11 +350,17 @@ def test_set_calc_param_state_values_populates_prefixed_state(monkeypatch) -> No
     values = calc_param_defaults()
     values["dls_build_max"] = 0.6
     values["offer_j_profile"] = True
+    values["use_fixed_kop"] = True
+    values["min_hold_inc_enabled"] = True
+    values["min_hold_inc"] = 13.0
 
     set_calc_param_state_values(prefix="wt_local_", values=values)
 
     assert fake_st.session_state["wt_local_dls_build_max"] == 0.6
     assert fake_st.session_state["wt_local_offer_j_profile"] is True
+    assert fake_st.session_state["wt_local_use_fixed_kop"] is True
+    assert fake_st.session_state["wt_local_min_hold_inc_enabled"] is True
+    assert fake_st.session_state["wt_local_min_hold_inc"] == pytest.approx(13.0)
     assert fake_st.session_state["wt_local_kop_min_vertical_mode"] == "constant"
 
 
@@ -314,6 +395,10 @@ def test_render_calc_params_block_disables_widgets(monkeypatch) -> None:
             calls.append(("number_input", bool(kwargs.get("disabled"))))
             return None
 
+        def checkbox(self, _label, **kwargs):
+            calls.append(("checkbox", bool(kwargs.get("disabled"))))
+            return None
+
         def toggle(self, _label, **kwargs):
             calls.append(("toggle", bool(kwargs.get("disabled"))))
             return None
@@ -335,6 +420,10 @@ def test_render_calc_params_block_disables_widgets(monkeypatch) -> None:
 
         def number_input(self, _label, **kwargs):
             calls.append(("number_input", bool(kwargs.get("disabled"))))
+            return None
+
+        def checkbox(self, _label, **kwargs):
+            calls.append(("checkbox", bool(kwargs.get("disabled"))))
             return None
 
         def selectbox(self, _label, **kwargs):
@@ -359,7 +448,7 @@ def test_render_calc_params_block_disables_widgets(monkeypatch) -> None:
     assert all(disabled for _, disabled in calls)
 
 
-def test_render_calc_params_block_registers_build2_text_input_callback(
+def test_render_calc_params_block_registers_optional_text_input_callbacks(
     monkeypatch,
 ) -> None:
     import pywp.ui_calc_params as ui_calc_params
@@ -377,13 +466,19 @@ def test_render_calc_params_block_registers_build2_text_input_callback(
         def number_input(self, _label, **kwargs):
             return None
 
+        def checkbox(self, _label, **kwargs):
+            return None
+
         def toggle(self, _label, **kwargs):
             return None
 
         def text_input(self, label, **kwargs):
             if str(label) == "Макс ПИ BUILD 2, deg/10m":
-                captured["on_change"] = kwargs.get("on_change")
-                captured["args"] = kwargs.get("args")
+                captured["build2_on_change"] = kwargs.get("on_change")
+                captured["build2_args"] = kwargs.get("args")
+            if str(label) == "Мин. угол стабилизации, deg":
+                captured["min_hold_on_change"] = kwargs.get("on_change")
+                captured["min_hold_args"] = kwargs.get("args")
             return None
 
         def caption(self, *args, **kwargs):
@@ -398,6 +493,9 @@ def test_render_calc_params_block_registers_build2_text_input_callback(
             return tuple(_DummyColumn() for _ in range(count))
 
         def number_input(self, _label, **kwargs):
+            return None
+
+        def checkbox(self, _label, **kwargs):
             return None
 
         def selectbox(self, _label, **kwargs):
@@ -421,11 +519,120 @@ def test_render_calc_params_block_registers_build2_text_input_callback(
             AssertionError("should not run during widget render")
         ),
     )
+    monkeypatch.setattr(
+        ui_calc_params,
+        "_apply_min_hold_inc_optional_input_state",
+        lambda prefix="": (_ for _ in ()).throw(
+            AssertionError("should not run during widget render")
+        ),
+    )
 
     render_calc_params_block()
 
-    assert captured["on_change"] is ui_calc_params._handle_build2_optional_input_change
-    assert captured["args"] == ("", None)
+    assert (
+        captured["build2_on_change"]
+        is ui_calc_params._handle_build2_optional_input_change
+    )
+    assert captured["build2_args"] == ("", None)
+    assert (
+        captured["min_hold_on_change"]
+        is ui_calc_params._handle_min_hold_inc_optional_input_change
+    )
+    assert captured["min_hold_args"] == ("", None)
+
+
+def test_render_calc_params_block_skips_optional_callbacks_when_disabled(
+    monkeypatch,
+) -> None:
+    import pywp.ui_calc_params as ui_calc_params
+
+    fake_st = _fake_streamlit()
+    monkeypatch.setattr(ui_calc_params, "st", fake_st)
+
+    captured: dict[str, object] = {}
+
+    class _FakeColumn:
+        def number_input(self, _label, **kwargs):
+            return None
+
+        def checkbox(self, _label, **kwargs):
+            return None
+
+        def toggle(self, _label, **kwargs):
+            return None
+
+        def text_input(self, label, **kwargs):
+            if str(label) == "Макс ПИ BUILD 2, deg/10m":
+                captured["build2_on_change"] = kwargs.get("on_change")
+                captured["build2_args"] = kwargs.get("args")
+            if str(label) == "Мин. угол стабилизации, deg":
+                captured["min_hold_on_change"] = kwargs.get("on_change")
+                captured["min_hold_args"] = kwargs.get("args")
+            return None
+
+        def caption(self, *args, **kwargs):
+            return None
+
+    class _FakeExpander:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def checkbox(self, _label, **kwargs):
+            return None
+
+        def toggle(self, _label, **kwargs):
+            return None
+
+        def number_input(self, _label, **kwargs):
+            return None
+
+        def checkbox(self, _label, **kwargs):
+            return None
+
+        def selectbox(self, _label, **kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        fake_st,
+        "columns",
+        lambda spec, **kwargs: tuple(_FakeColumn() for _ in range(int(spec))),
+        raising=False,
+    )
+    monkeypatch.setattr(fake_st, "markdown", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(
+        fake_st, "number_input", lambda *args, **kwargs: None, raising=False
+    )
+    monkeypatch.setattr(fake_st, "checkbox", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(fake_st, "text_input", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(fake_st, "toggle", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(fake_st, "selectbox", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(fake_st, "caption", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(
+        fake_st,
+        "expander",
+        lambda *args, **kwargs: _FakeExpander(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        fake_st,
+        "popover",
+        lambda *args, **kwargs: _FakeExpander(),
+        raising=False,
+    )
+
+    apply_calc_param_defaults(prefix="", force=True)
+    render_calc_params_block(enable_live_callbacks=False)
+
+    assert captured["build2_on_change"] is None
+    assert captured["build2_args"] is None
+    assert captured["min_hold_on_change"] is None
+    assert captured["min_hold_args"] is None
 
 
 def test_kop_depth_function_state_roundtrip_updates_signature(monkeypatch) -> None:
