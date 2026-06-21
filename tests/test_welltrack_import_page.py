@@ -4345,7 +4345,7 @@ def test_apply_dev_params_to_manual_well_overrides_sets_local_values() -> None:
     )
 
     applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
-        selected_names=["WELL-A"],
+        well_names=["WELL-A"],
     )
 
     assert applied_count == 1
@@ -4389,7 +4389,7 @@ def test_apply_dev_params_to_manual_well_overrides_does_not_toggle_widget_state(
         ),
     )
 
-    page._apply_dev_params_to_manual_well_overrides(selected_names=["WELL-A"])
+    page._apply_dev_params_to_manual_well_overrides(well_names=["WELL-A"])
 
     assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] is False
 
@@ -4415,7 +4415,7 @@ def test_apply_dev_params_to_manual_well_overrides_sets_optional_build2_when_nee
     )
 
     applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
-        selected_names=["WELL-A"],
+        well_names=["WELL-A"],
     )
 
     assert applied_count == 1
@@ -4448,13 +4448,53 @@ def test_apply_dev_params_to_manual_well_overrides_reports_selected_wells_withou
     )
 
     applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
-        selected_names=["WELL-B", "WELL-A"],
+        well_names=["WELL-B", "WELL-A"],
     )
 
     assert applied_count == 1
     assert missing_names == ["WELL-B"]
     assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
         "WELL-A": page._manual_well_calc_profile_id_from_dev_summary("WELL-A")
+    }
+
+
+def test_apply_dev_params_to_manual_well_overrides_keeps_other_assignments_untouched(
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-b": {
+            "name": "Cfg B",
+            "values": {"dls_build_max": 0.6},
+            "source": "manual",
+        }
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-B": "cfg-b"
+    }
+    page.st.session_state["wt_imported_dev_params"] = (
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-A",
+            profile_label="J-профиль",
+            kop_md_m=980.0,
+            t1_md_m=2500.0,
+            t3_md_m=4200.0,
+            entry_inc_deg=87.0,
+            build1_dls_deg_per_30m=(2.4,),
+            horizontal_dls_deg_per_30m=(1.5,),
+        ),
+    )
+
+    applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
+        well_names=["WELL-A"],
+    )
+
+    assert applied_count == 1
+    assert missing_names == []
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
+        "WELL-B": "cfg-b",
+        "WELL-A": page._manual_well_calc_profile_id_from_dev_summary("WELL-A"),
     }
 
 
@@ -5050,7 +5090,7 @@ def test_render_manual_well_calc_overrides_disables_editor_when_toggle_is_off(
         "Импорт конфигураций": True,
         "Назначить выбранным": True,
         "Снять назначение": True,
-        "Взять общие": True,
+        "Вернуть дефолт": True,
         "Подтянуть из .dev": True,
         "Сохранить конфигурацию": True,
     }
@@ -5111,7 +5151,7 @@ def test_render_manual_well_calc_overrides_keeps_active_profile_pending_after_de
             return False
 
         def button(self, label, **kwargs):
-            return str(label) == "Подтянуть из .dev"
+            return False
 
         def download_button(self, *args, **kwargs):
             return False
@@ -5141,7 +5181,11 @@ def test_render_manual_well_calc_overrides_keeps_active_profile_pending_after_de
     monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
     monkeypatch.setattr(page.st, "text_input", _fake_text_input)
     monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
-    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        page.st,
+        "button",
+        lambda label, **kwargs: str(label) == "Подтянуть из .dev",
+    )
     monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
@@ -5168,6 +5212,86 @@ def test_render_manual_well_calc_overrides_keeps_active_profile_pending_after_de
         page._manual_well_calc_profile_name_key(profile_id)
         not in page.st.session_state
     )
+
+
+def test_render_manual_well_calc_overrides_enables_dev_apply_without_selection(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] = []
+    page.st.session_state["wt_imported_dev_params"] = (
+        SimpleNamespace(
+            well_name="WELL-A",
+            profile_label="BuildHoldBuild",
+            kop_md_m=1200.0,
+            entry_inc_deg=87.0,
+            build1_dls_deg_per_30m=(2.4,),
+            build2_dls_deg_per_30m=(),
+            horizontal_dls_deg_per_30m=(),
+        ),
+    )
+    captured: dict[str, object] = {"buttons": {}}
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            return False
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, options[0] if options else "")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, [])
+        return page.st.session_state[key]
+
+    def _fake_button(label, **kwargs):
+        captured["buttons"][str(label)] = bool(kwargs.get("disabled"))
+        return False
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "button", _fake_button)
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    assert captured["buttons"]["Подтянуть из .dev"] is False
 
 
 def test_render_manual_well_calc_overrides_skips_warning_when_json_import_succeeds(

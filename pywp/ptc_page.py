@@ -33,17 +33,32 @@ __all__ = ["run_page"]
 
 
 @st.fragment
+def _render_target_import_section_fragment() -> None:
+    render_target_import_section()
+
+
+@st.fragment
 def _render_pad_layout_section(records: list[object]) -> None:
     st.markdown("## 2. Кусты и расчёт устьев")
     wt._render_pad_layout_panel(records=records)
 
 
 @st.fragment
-def _render_records_section(records: list[object]) -> None:
+def _render_records_overview_section(records: list[object]) -> None:
     wt._render_records_overview(records=records)
+
+
+@st.fragment
+def _render_raw_records_section(records: list[object]) -> None:
     wt._render_raw_records_table(records=records)
 
 
+@st.fragment
+def _render_reference_section_fragment() -> None:
+    render_reference_section()
+
+
+@st.fragment
 def _render_results_section(
     *,
     records: list[object],
@@ -99,7 +114,7 @@ def run_page() -> None:
         max_content_width_px=760,
     )
 
-    render_target_import_section()
+    _render_target_import_section_fragment()
     edit_applied = st.session_state.pop("wt_edit_targets_applied", None)
     edit_applied_source = str(
         st.session_state.pop("wt_edit_targets_applied_source", "")
@@ -138,11 +153,12 @@ def run_page() -> None:
         st.warning("В источнике не найдено ни одной скважины.")
         return
 
-    _render_records_section(records=records)
+    _render_records_overview_section(records=records)
+    _render_raw_records_section(records=records)
 
     _render_pad_layout_section(records=records)
 
-    render_reference_section()
+    _render_reference_section_fragment()
     render_run_section(records=records)
 
     if st.session_state.get("wt_last_error"):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 from pywp import ptc_core as wt
 from pywp import ptc_reference_state as reference_state
@@ -25,6 +26,13 @@ def _reference_analysis_toggle_key(kind: str) -> str:
         str(kind),
         f"wt_show_reference_analysis::{str(kind)}",
     )
+
+
+def _rerun_fragment() -> None:
+    try:
+        st.rerun(scope="fragment")
+    except (TypeError, StreamlitAPIException):
+        st.rerun()
 
 
 def _reset_reference_analysis_visibility(kind: str) -> None:
@@ -97,7 +105,7 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
             use_container_width=True,
         ):
             st.session_state[folder_count_key] = folder_count + 1
-            st.rerun()
+            _rerun_fragment()
         st.caption(
             "Импортируются все `.dev` файлы из папок. "
             "Имя берется из файла без `.dev`, "
@@ -126,7 +134,7 @@ def _render_reference_kind_import_block(*, kind: str) -> None:
             use_container_width=True,
         ):
             st.session_state[path_count_key] = path_count + 1
-            st.rerun()
+            _rerun_fragment()
         st.caption(
             "Можно указать несколько файлов WELLTRACK и/или папок. "
             "Из папок импортируются только файлы с расширением `.INC` "

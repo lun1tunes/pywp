@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, MutableMapping
 
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 from pywp import ptc_core as wt
 from pywp import ptc_anticollision_params
@@ -46,6 +47,13 @@ _ANTI_COLLISION_PARALLEL_VALUES = {
 _ANTI_COLLISION_PARALLEL_LABEL_BY_VALUE = {
     value: label for label, value in _ANTI_COLLISION_PARALLEL_OPTIONS
 }
+
+
+def _rerun_fragment() -> None:
+    try:
+        st.rerun(scope="fragment")
+    except (TypeError, StreamlitAPIException):
+        st.rerun()
 
 
 def _calc_params_changed_after_last_run() -> bool:
@@ -636,7 +644,7 @@ def _render_anticollision_panel(
     if anti_collision_progress is not None:
         anti_collision_progress.empty()
     if run_requested and not show_visualization:
-        st.rerun()
+        _rerun_fragment()
     focus_pad_well_names = wt._focus_pad_well_names(
         records=records,
         focus_pad_id=focus_pad_id,
@@ -802,7 +810,7 @@ def _render_full_anticollision_recalc_button() -> bool:
     ):
         return False
     wt._reset_anticollision_view_state(clear_prepared=True)
-    st.rerun()
+    _rerun_fragment()
     return True
 
 

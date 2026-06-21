@@ -98,8 +98,7 @@ def _toggle_calc_params_panel() -> bool:
     return next_open
 
 
-@st.fragment
-def _render_calc_params_panel_fragment(
+def _render_calc_params_panel_body(
     *,
     extra_content: Callable[[], None] | None = None,
 ) -> TrajectoryConfig:
@@ -141,4 +140,4 @@ def render_calc_params_panel(
     *,
     extra_content: Callable[[], None] | None = None,
 ) -> TrajectoryConfig:
-    return _render_calc_params_panel_fragment(extra_content=extra_content)
+    return _render_calc_params_panel_body(extra_content=extra_content)

@@ -23,8 +23,17 @@ logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").set
 logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
+
+
+def _rerun_fragment() -> None:
+    try:
+        st.rerun(scope="fragment")
+    except (TypeError, StreamlitAPIException):
+        st.rerun()
+
 
 from pywp import TrajectoryConfig
 from pywp.actual_fund_analysis import (
@@ -4079,7 +4088,7 @@ def _manual_well_calc_profile_id_from_dev_summary(well_name: str) -> str:
 
 def _apply_dev_params_to_manual_well_overrides(
     *,
-    selected_names: list[str],
+    well_names: Iterable[str],
 ) -> tuple[int, list[str]]:
     summaries = tuple(st.session_state.get("wt_imported_dev_params", ()))
     summary_by_key = {
@@ -4092,7 +4101,7 @@ def _apply_dev_params_to_manual_well_overrides(
     applied_count = 0
     missing_names: list[str] = []
     first_profile_id = ""
-    for well_name in _unique_well_names(selected_names):
+    for well_name in _unique_well_names(well_names):
         summary = summary_by_key.get(well_name_key(well_name))
         if summary is None:
             missing_names.append(str(well_name))
@@ -4183,10 +4192,32 @@ def _render_manual_well_calc_overrides(
     )
     _consume_manual_well_calc_override_enabled()
     _consume_manual_well_calc_active_profile()
-    st.toggle(
-        "Использовать индивидуальные параметры",
-        key=WT_WELL_CALC_OVERRIDE_ENABLED_KEY,
+    available_name_keys = {well_name_key(name) for name in available_names}
+    imported_dev_target_names = _unique_well_names(
+        str(name)
+        for name in available_names
+        if well_name_key(name)
+        in {
+            well_name_key(item.well_name)
+            for item in tuple(st.session_state.get("wt_imported_dev_params", ()))
+            if str(item.well_name).strip()
+            and well_name_key(item.well_name) in available_name_keys
+        }
     )
+    toggle_cols = st.columns([2.2, 1.35, 2.1], gap="small")
+    with toggle_cols[0]:
+        st.toggle(
+            "Использовать индивидуальные параметры",
+            key=WT_WELL_CALC_OVERRIDE_ENABLED_KEY,
+        )
+    with toggle_cols[1]:
+        apply_dev_clicked = st.button(
+            "Подтянуть из .dev",
+            icon=":material/file_download:",
+            width="stretch",
+            disabled=not _manual_well_calc_override_enabled()
+            or not imported_dev_target_names,
+        )
     overrides_enabled = _manual_well_calc_override_enabled()
     feedback_message = str(
         st.session_state.pop(WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY, "")
@@ -4203,13 +4234,6 @@ def _render_manual_well_calc_overrides(
         active_profile_id=active_profile_id,
         records_by_name={str(record.name): record for record in records},
     )
-    available_name_keys = {well_name_key(name) for name in available_names}
-    imported_dev_names = {
-        str(item.well_name).strip()
-        for item in tuple(st.session_state.get("wt_imported_dev_params", ()))
-        if str(item.well_name).strip()
-        and well_name_key(item.well_name) in available_name_keys
-    }
     active_payload = dict(_manual_well_calc_profiles().get(active_profile_id, {}))
     profile_name_input_key = _manual_well_calc_profile_name_key(active_profile_id)
     last_name_input_profile_id = str(
@@ -4254,7 +4278,7 @@ def _render_manual_well_calc_overrides(
         profile_export_file_name = _manual_well_calc_profile_export_file_name(
             active_profile_id
         )
-        profile_action_cols = st.columns(4, gap="small")
+        profile_action_cols = st.columns(2, gap="small")
         create_profile_clicked = profile_action_cols[0].button(
             "Новая",
             icon=":material/add:",
@@ -4267,28 +4291,10 @@ def _render_manual_well_calc_overrides(
             width="stretch",
             disabled=not overrides_enabled or not active_profile_id,
         )
-        apply_dev_clicked = profile_action_cols[2].button(
-            "Подтянуть из .dev",
-            icon=":material/file_download:",
-            width="stretch",
-            disabled=not overrides_enabled
-            or not selected_names
-            or not imported_dev_names.intersection(set(selected_names)),
-        )
-        profile_action_cols[3].download_button(
-            "Экспорт JSON",
-            data=profile_export_json.encode("utf-8"),
-            file_name=profile_export_file_name,
-            mime="application/json",
-            width="stretch",
-            disabled=not overrides_enabled
-            or not active_profile_id
-            or not profile_export_json,
-        )
-        if imported_dev_names:
+        if imported_dev_target_names:
             st.caption(
-                "`.dev` создаст или обновит отдельные конфигурации только для "
-                "выбранных скважин, у которых найден одноимённый импорт."
+                "Будут созданы или обновлены отдельные конфигурации для всех "
+                "скважин текущего набора, загруженных через `.dev`."
             )
         uploaded_profile_files = st.file_uploader(
             "JSON конфигураций",
@@ -4297,11 +4303,22 @@ def _render_manual_well_calc_overrides(
             key=WT_WELL_CALC_PROFILE_IMPORT_UPLOAD_KEY,
             disabled=not overrides_enabled,
         )
-        import_profile_clicked = st.button(
+        profile_io_cols = st.columns(2, gap="small")
+        import_profile_clicked = profile_io_cols[0].button(
             "Импорт конфигураций",
             icon=":material/upload_file:",
             width="stretch",
             disabled=not overrides_enabled or not uploaded_profile_files,
+        )
+        profile_io_cols[1].download_button(
+            "Экспорт JSON",
+            data=profile_export_json.encode("utf-8"),
+            file_name=profile_export_file_name,
+            mime="application/json",
+            width="stretch",
+            disabled=not overrides_enabled
+            or not active_profile_id
+            or not profile_export_json,
         )
         st.multiselect(
             "Скважины для назначения",
@@ -4349,7 +4366,7 @@ def _render_manual_well_calc_overrides(
         )
         editor_action_cols = st.columns([1.0, 1.4, 3], gap="small")
         load_global_clicked = editor_action_cols[0].button(
-            "Взять общие",
+            "Вернуть дефолт",
             icon=":material/content_copy:",
             width="stretch",
             disabled=not overrides_enabled or not active_profile_id,
@@ -4373,7 +4390,7 @@ def _render_manual_well_calc_overrides(
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
             f'Создана конфигурация "{created_payload.get("name", created_profile_id)}".'
         )
-        st.rerun()
+        _rerun_fragment()
     if delete_profile_clicked:
         deleted_count, cleared_assignments = _delete_manual_well_calc_profile(
             active_profile_id
@@ -4384,10 +4401,10 @@ def _render_manual_well_calc_overrides(
                 "Конфигурация удалена. "
                 f"Скважин переведено на общие параметры: {cleared_assignments}."
             )
-            st.rerun()
+            _rerun_fragment()
     if apply_dev_clicked:
         applied_count, missing_names = _apply_dev_params_to_manual_well_overrides(
-            selected_names=selected_names,
+            well_names=imported_dev_target_names,
         )
         if applied_count > 0:
             _queue_manual_well_calc_override_enabled(True)
@@ -4396,7 +4413,7 @@ def _render_manual_well_calc_overrides(
             feedback += " Без .dev параметров: " + ", ".join(missing_names) + "."
         st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = feedback
-        st.rerun()
+        _rerun_fragment()
     if import_profile_clicked:
         if not uploaded_profile_files:
             st.warning("Загрузите один или несколько JSON файлов конфигураций.")
@@ -4430,7 +4447,7 @@ def _render_manual_well_calc_overrides(
                 if error_messages:
                     feedback += " Ошибки: " + " | ".join(error_messages)
                 st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = feedback
-                st.rerun()
+                _rerun_fragment()
             if error_messages:
                 st.warning(
                     "Не удалось импортировать конфигурации: "
@@ -4447,17 +4464,17 @@ def _render_manual_well_calc_overrides(
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
             f'Конфигурация "{profile_label}" назначена скважинам: {assigned_count}.'
         )
-        st.rerun()
+        _rerun_fragment()
     if clear_assignment_clicked:
         cleared_count = _clear_manual_well_profile_assignments(well_names=selected_names)
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
             f"Назначения сняты для скважин: {cleared_count}."
         )
-        st.rerun()
+        _rerun_fragment()
     if load_global_clicked:
         _set_manual_well_override_editor_from_config(base_config)
         st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
-        st.rerun()
+        _rerun_fragment()
     if save_profile_clicked:
         changed, resolved_name, changed_field_count = _apply_manual_well_override_editor(
             base_config=base_config,
@@ -4482,7 +4499,7 @@ def _render_manual_well_calc_overrides(
             st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
                 f'Конфигурация "{resolved_name}" уже совпадает с текущими значениями.'
             )
-        st.rerun()
+        _rerun_fragment()
     current_rows = _manual_well_override_rows(available_names=available_names)
     if current_rows:
         active_items = _manual_well_calc_override_items()
@@ -5664,7 +5681,7 @@ def _render_source_input() -> None:
                 st.session_state["wt_source_table_editor_nonce"] = (
                     int(st.session_state.get("wt_source_table_editor_nonce", 0)) + 1
                 )
-                st.rerun()
+                _rerun_fragment()
         source_table_df = _normalize_source_table_df_for_ui(
             st.session_state.get("wt_source_table_df", _empty_source_table_df())
         )
@@ -5899,6 +5916,7 @@ def _handle_import_actions(
                 state="complete",
                 expanded=False,
             )
+            st.rerun()
         except WelltrackParseError as exc:
             ptc_target_import.reset_failed_import_state(
                 st.session_state,
@@ -6069,7 +6087,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
 
         if select_all_clicked:
             st.session_state[preprocess_pending_names_key] = list(preprocess_all_names)
-            st.rerun()
+            _rerun_fragment()
         if add_pad_clicked:
             selected_pad_id = str(st.session_state.get(preprocess_pad_key, "")).strip()
             current_selected = [
@@ -6082,13 +6100,13 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                     *well_names_by_pad_id.get(selected_pad_id, ()),
                 ]
             )
-            st.rerun()
+            _rerun_fragment()
         if replace_with_pad_clicked:
             selected_pad_id = str(st.session_state.get(preprocess_pad_key, "")).strip()
             st.session_state[preprocess_pending_names_key] = list(
                 well_names_by_pad_id.get(selected_pad_id, ())
             )
-            st.rerun()
+            _rerun_fragment()
 
         preprocess_cols = st.columns(
             [2.4, 1.2, 2.4],
@@ -8205,7 +8223,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             config_map[selected_id] = selected_cfg
             st.session_state["wt_pad_configs"] = config_map
             st.session_state[fixed_editor_revision_key] = fixed_editor_revision + 1
-            st.rerun()
+            _rerun_fragment()
         selected_cfg["fixed_slots"] = fixed_slots
         config_map[selected_id] = selected_cfg
         st.session_state["wt_pad_configs"] = config_map

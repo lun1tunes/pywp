@@ -227,6 +227,14 @@ def test_ptc_page_wraps_pad_layout_section_in_fragment() -> None:
     assert "_render_pad_layout_section(records=records)" in source
 
 
+def test_ptc_page_wraps_target_import_section_in_fragment() -> None:
+    source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
+
+    assert "def _render_target_import_section_fragment() -> None:" in source
+    assert "render_target_import_section()" in source
+    assert "_render_target_import_section_fragment()" in source
+
+
 def test_ptc_core_contains_bulk_horizontal_length_preprocess_controls() -> None:
     source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
 
@@ -266,29 +274,65 @@ def test_ptc_anticollision_params_limit_multiselect_height_via_scoped_container(
     assert "overflow-y: auto;" in source
 
 
-def test_ptc_page_renders_reference_section_directly() -> None:
+def test_ptc_page_wraps_reference_section_in_fragment() -> None:
     source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
 
-    assert "def _render_reference_section_fragment() -> None:" not in source
+    assert "def _render_reference_section_fragment() -> None:" in source
     assert "render_reference_section()" in source
+    assert "_render_reference_section_fragment()" in source
 
 
-def test_ptc_page_wraps_records_section_in_fragment() -> None:
+def test_ptc_page_wraps_records_overview_section_in_fragment() -> None:
     source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
 
-    assert "def _render_records_section(records: list[object]) -> None:" in source
+    assert "def _render_records_overview_section(records: list[object]) -> None:" in source
     assert "wt._render_records_overview(records=records)" in source
+    assert "_render_records_overview_section(records=records)" in source
+
+
+def test_ptc_page_wraps_raw_records_section_in_fragment() -> None:
+    source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
+
+    assert "def _render_raw_records_section(records: list[object]) -> None:" in source
     assert "wt._render_raw_records_table(records=records)" in source
-    assert "_render_records_section(records=records)" in source
+    assert "_render_raw_records_section(records=records)" in source
 
 
 def test_ptc_page_extracts_results_section_helper() -> None:
     source = Path("pywp/ptc_page.py").read_text(encoding="utf-8")
 
     assert "def _render_results_section(" in source
+    assert "@st.fragment\ndef _render_results_section(" in source
     assert 'st.markdown("## 5. Результаты расчёта")' in source
     assert "render_success_tabs(" in source
     assert "_render_results_section(" in source
+
+
+def test_ptc_page_run_wraps_run_section_in_fragment() -> None:
+    source = Path("pywp/ptc_page_run.py").read_text(encoding="utf-8")
+
+    assert "@st.fragment\ndef render_run_section(*, records: list[object]) -> None:" in source
+    assert "def _rerun_app() -> None:" in source
+    assert "_rerun_app()" in source
+
+
+def test_ptc_fragment_sections_use_fragment_scoped_reruns_for_local_ui_updates() -> None:
+    core_source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
+    reference_source = Path("pywp/ptc_page_reference.py").read_text(encoding="utf-8")
+    run_source = Path("pywp/ptc_page_run.py").read_text(encoding="utf-8")
+    results_source = Path("pywp/ptc_page_results.py").read_text(encoding="utf-8")
+
+    assert 'st.rerun(scope="fragment")' in core_source
+    assert 'st.rerun(scope="fragment")' in reference_source
+    assert 'st.rerun(scope="fragment")' in run_source
+    assert 'st.rerun(scope="fragment")' in results_source
+
+
+def test_ptc_core_keeps_full_rerun_after_successful_target_import() -> None:
+    source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
+
+    assert "label=operation.success_label(elapsed)," in source
+    assert "st.rerun()" in source
 
 
 def test_ptc_page_renders_target_editor_when_all_results_failed() -> None:

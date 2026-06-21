@@ -4,6 +4,7 @@ import math
 from collections.abc import Mapping, MutableMapping
 
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 from pywp import ptc_core as wt
 from pywp import ptc_reference_state
@@ -30,6 +31,18 @@ from pywp.ptc_sidetrack_state import (
 __all__ = ["render_run_section"]
 
 
+def _rerun_fragment() -> None:
+    try:
+        st.rerun(scope="fragment")
+    except (TypeError, StreamlitAPIException):
+        st.rerun()
+
+
+def _rerun_app() -> None:
+    st.rerun()
+
+
+@st.fragment
 def render_run_section(*, records: list[object]) -> None:
     st.markdown("## 4. Расчёт траекторий")
     summary_rows = st.session_state.get("wt_summary_rows")
@@ -161,7 +174,7 @@ def render_run_section(*, records: list[object]) -> None:
 
     if select_all_clicked:
         st.session_state["wt_pending_selected_names"] = list(all_names)
-        st.rerun()
+        _rerun_fragment()
     if add_pad_clicked:
         selected_pad_id = str(
             st.session_state.get("wt_batch_select_pad_id", "")
@@ -177,7 +190,7 @@ def render_run_section(*, records: list[object]) -> None:
                 ]
             )
         )
-        st.rerun()
+        _rerun_fragment()
     if replace_with_pad_clicked:
         selected_pad_id = str(
             st.session_state.get("wt_batch_select_pad_id", "")
@@ -185,7 +198,7 @@ def render_run_section(*, records: list[object]) -> None:
         st.session_state["wt_pending_selected_names"] = list(
             well_names_by_pad_id.get(selected_pad_id, ())
         )
-        st.rerun()
+        _rerun_fragment()
 
     wt._run_batch_if_clicked(
         requests=[
@@ -208,6 +221,9 @@ def render_run_section(*, records: list[object]) -> None:
     ):
         st.session_state["wt_results_view_mode"] = "Все скважины"
         st.session_state["wt_results_all_view_mode"] = "Anti-collision"
+    if run_clicked and st.session_state.get("wt_selected_names"):
+        # Batch run updates diagnostics/results outside this fragment.
+        _rerun_app()
 
 
 def _render_sidetrack_window_params(
