@@ -1077,6 +1077,17 @@ def _segment_types_for_interval(
         if w.name == well_name:
             well = w
             break
+    def _display_segment_name(segment_name: str) -> str:
+        segment_upper = str(segment_name).upper()
+        if segment_upper != "IMPORTED" or well is None:
+            return segment_upper
+        well_kind = str(well.well_kind).strip().lower()
+        if well_kind == "actual":
+            return "FACT"
+        if well_kind == "approved":
+            return "PROJECT"
+        return segment_upper
+
     if well is None or well.stations is None or well.stations.empty:
         # Fallback to well_segments if stations not available
         segments: list[str] = []
@@ -1112,10 +1123,10 @@ def _segment_types_for_interval(
     seen: set[str] = set()
     unique_segments: list[str] = []
     for seg in segment_names:
-        seg_upper = seg.upper()
-        if seg_upper not in seen:
-            seen.add(seg_upper)
-            unique_segments.append(seg_upper)
+        display_name = _display_segment_name(seg)
+        if display_name not in seen:
+            seen.add(display_name)
+            unique_segments.append(display_name)
     return ", ".join(unique_segments)
 
 

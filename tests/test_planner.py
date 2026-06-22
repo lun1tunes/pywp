@@ -24,6 +24,7 @@ from pywp.models import (
 )
 from pywp.planner import PlanningError, TrajectoryPlanner
 from pywp.planner_types import CandidateOptimizationEvaluation, ProfileParameters
+from pywp.ptc_target_import_dev import parse_dev_target_file
 from pywp.uncertainty import DEFAULT_PLANNING_UNCERTAINTY_MODEL
 
 pytestmark = pytest.mark.integration
@@ -622,32 +623,111 @@ def test_planner_respects_explicit_separate_build2_limit() -> None:
     assert float(result.summary["build2_dls_selected_deg_per_30m"]) > 3.0 + 1e-3
 
 
-def test_planner_keeps_distinct_build1_and_build2_when_build1_limit_is_higher() -> None:
+def test_planner_respects_build2_limit_when_build1_limit_is_higher() -> None:
     record = parse_welltrack_text(
         Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
     )[0]
     surface, t1, t3 = welltrack_points_to_targets(record.points)
-    config = _fast_config(
+    split_config = _fast_config(
         kop_min_vertical_m=550.0,
         dls_build_max_deg_per_30m=5.4,
         dls_build2_max_deg_per_30m=3.0,
         turn_solver_max_restarts=0,
     )
+    control_config = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=3.0,
+        turn_solver_max_restarts=0,
+    )
 
-    result = TrajectoryPlanner().plan(
+    planner = TrajectoryPlanner()
+    control = planner.plan(
         surface=surface,
         t1=t1,
         t3=t3,
-        config=config,
+        config=control_config,
+    )
+    result = planner.plan(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        config=split_config,
     )
 
-    assert float(result.summary["distance_t1_m"]) <= config.lateral_tolerance_m
+    assert float(result.summary["distance_t1_m"]) <= split_config.lateral_tolerance_m
     assert float(result.summary["build1_dls_selected_deg_per_30m"]) <= 5.4 + 1e-6
     assert float(result.summary["build2_dls_selected_deg_per_30m"]) <= 3.0 + 1e-6
-    assert float(result.summary["build1_dls_selected_deg_per_30m"]) > float(
-        result.summary["build2_dls_selected_deg_per_30m"]
-    ) + 1e-3
-    assert str(result.summary["optimization_status"]) == "split_build_seed_selected"
+    assert float(result.summary["md_total_m"]) <= float(control.summary["md_total_m"]) + 1e-6
+
+
+def test_split_build_limits_do_not_worsen_md_vs_base_build2_limit_case() -> None:
+    records = parse_welltrack_text(Path("tests/test_data/WELLTRACKS4.INC").read_text())
+    record = next(item for item in records if str(item.name) == "well_02")
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    common_kwargs = dict(
+        kop_min_vertical_m=550.0,
+        dls_horizontal_max_deg_per_30m=1.5,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        offer_j_profile=False,
+        turn_solver_max_restarts=0,
+    )
+    control_config = _fast_config(
+        dls_build_max_deg_per_30m=1.8,
+        **common_kwargs,
+    )
+    split_config = _fast_config(
+        dls_build_max_deg_per_30m=2.4,
+        dls_build2_max_deg_per_30m=1.8,
+        **common_kwargs,
+    )
+
+    planner = TrajectoryPlanner()
+    control = planner.plan(surface=surface, t1=t1, t3=t3, config=control_config)
+    split = planner.plan(surface=surface, t1=t1, t3=t3, config=split_config)
+
+    assert float(split.summary["distance_t1_m"]) <= split_config.lateral_tolerance_m
+    assert float(split.summary["distance_t3_m"]) <= split_config.lateral_tolerance_m
+    assert float(split.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
+    assert float(split.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
+    assert float(split.summary["md_total_m"]) <= float(control.summary["md_total_m"]) + 1e-6
+
+
+def test_split_build_limits_keep_equal_build_baseline_for_welltrack4_well_08() -> None:
+    records = parse_welltrack_text(Path("tests/test_data/WELLTRACKS4.INC").read_text())
+    record = next(item for item in records if str(item.name) == "well_08")
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    common_kwargs = dict(
+        md_step_m=10.0,
+        md_step_control_m=2.0,
+        lateral_tolerance_m=30.0,
+        vertical_tolerance_m=2.0,
+        entry_inc_target_deg=86.0,
+        entry_inc_tolerance_deg=2.0,
+        dls_horizontal_max_deg_per_30m=1.5,
+        kop_min_vertical_m=550.0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        offer_j_profile=False,
+        turn_solver_max_restarts=0,
+    )
+    control_config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=1.8,
+        **common_kwargs,
+    )
+    split_config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=2.4,
+        dls_build2_max_deg_per_30m=1.8,
+        **common_kwargs,
+    )
+
+    planner = TrajectoryPlanner()
+    control = planner.plan(surface=surface, t1=t1, t3=t3, config=control_config)
+    split = planner.plan(surface=surface, t1=t1, t3=t3, config=split_config)
+
+    assert float(split.summary["distance_t1_m"]) <= split_config.lateral_tolerance_m
+    assert float(split.summary["distance_t3_m"]) <= split_config.lateral_tolerance_m
+    assert float(split.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
+    assert float(split.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
+    assert float(split.summary["md_total_m"]) <= float(control.summary["md_total_m"]) + 1e-6
 
 
 def test_zero_azimuth_turn_does_not_trigger_split_build_rescue(
@@ -675,6 +755,86 @@ def test_zero_azimuth_turn_does_not_trigger_split_build_rescue(
     )
 
     assert float(result.summary["distance_t1_m"]) <= config.lateral_tolerance_m
+
+
+def test_zero_azimuth_turn_respects_independent_build2_limit_for_dev_fixture() -> None:
+    parsed = parse_dev_target_file(
+        Path("tests/test_data/dev_target_import/build_hold_build_equal_pi_with_horizontal_pi.dev")
+    )
+    surface, t1, t3 = parsed.record.points
+    control_config = _fast_config(
+        md_step_m=30.0,
+        md_step_control_m=10.0,
+        entry_inc_target_deg=float(parsed.summary.entry_inc_deg),
+        max_inc_deg=90.0,
+        kop_min_vertical_m=float(parsed.summary.kop_md_m),
+        dls_build_max_deg_per_30m=1.8,
+        dls_horizontal_max_deg_per_30m=1.5,
+        turn_solver_max_restarts=0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        offer_j_profile=False,
+    )
+    split_config = _fast_config(
+        md_step_m=30.0,
+        md_step_control_m=10.0,
+        entry_inc_target_deg=float(parsed.summary.entry_inc_deg),
+        max_inc_deg=90.0,
+        kop_min_vertical_m=float(parsed.summary.kop_md_m),
+        dls_build_max_deg_per_30m=2.4,
+        dls_build2_max_deg_per_30m=1.8,
+        dls_horizontal_max_deg_per_30m=1.5,
+        turn_solver_max_restarts=0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        offer_j_profile=False,
+    )
+
+    planner = TrajectoryPlanner()
+    control = planner.plan(surface=surface, t1=t1, t3=t3, config=control_config)
+    split = planner.plan(surface=surface, t1=t1, t3=t3, config=split_config)
+
+    assert float(split.summary["distance_t1_m"]) <= split_config.lateral_tolerance_m
+    assert float(split.summary["distance_t3_m"]) <= split_config.lateral_tolerance_m
+    assert float(split.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
+    assert float(split.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
+    assert float(split.summary["build1_dls_selected_deg_per_30m"]) > float(
+        split.summary["build2_dls_selected_deg_per_30m"]
+    ) + 1e-3
+    assert float(split.summary["md_total_m"]) < float(control.summary["md_total_m"]) - 1e-3
+
+
+def test_zero_azimuth_turn_split_build_remains_feasible_with_fixed_kop() -> None:
+    parsed = parse_dev_target_file(
+        Path("tests/test_data/dev_target_import/build_hold_build_equal_pi_with_horizontal_pi.dev")
+    )
+    surface, t1, t3 = parsed.record.points
+    config = _fast_config(
+        md_step_m=30.0,
+        md_step_control_m=10.0,
+        entry_inc_target_deg=float(parsed.summary.entry_inc_deg),
+        max_inc_deg=90.0,
+        kop_min_vertical_m=float(parsed.summary.kop_md_m),
+        use_fixed_kop=True,
+        dls_build_max_deg_per_30m=2.4,
+        dls_build2_max_deg_per_30m=1.8,
+        dls_horizontal_max_deg_per_30m=1.5,
+        turn_solver_max_restarts=0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        offer_j_profile=False,
+    )
+
+    result = TrajectoryPlanner().plan(surface=surface, t1=t1, t3=t3, config=config)
+
+    assert float(result.summary["distance_t1_m"]) <= config.lateral_tolerance_m
+    assert float(result.summary["distance_t3_m"]) <= config.lateral_tolerance_m
+    assert float(result.summary["kop_md_m"]) == pytest.approx(
+        float(parsed.summary.kop_md_m),
+        abs=1e-6,
+    )
+    assert float(result.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
+    assert float(result.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
+    assert float(result.summary["build1_dls_selected_deg_per_30m"]) > float(
+        result.summary["build2_dls_selected_deg_per_30m"]
+    ) + 1e-3
 
 
 def test_post_entry_solver_keeps_boundary_case_within_numerical_tolerance() -> None:
@@ -2193,6 +2353,81 @@ def test_fixed_kop_mode_uses_configured_kop_instead_of_only_minimum_bound() -> N
     assert float(result_fixed.summary["kop_md_m"]) == pytest.approx(200.0, abs=1e-6)
     assert float(result_fixed.summary["distance_t1_m"]) <= config_fixed.pos_tolerance_m
     assert float(result_fixed.summary["distance_t3_m"]) <= config_fixed.pos_tolerance_m
+
+
+def test_turn_least_squares_probes_drop_fixed_kop_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    recorded_sizes: list[int] = []
+
+    def fake_least_squares(
+        *,
+        fun: object,
+        x0: np.ndarray,
+        bounds: tuple[np.ndarray, np.ndarray],
+        method: str,
+        jac: str,
+        x_scale: str,
+        ftol: float,
+        xtol: float,
+        gtol: float,
+        max_nfev: int,
+    ) -> SimpleNamespace:
+        recorded_sizes.append(int(np.asarray(x0, dtype=float).size))
+        return SimpleNamespace(success=False, x=np.asarray(x0, dtype=float))
+
+    monkeypatch.setattr(planner_module, "least_squares", fake_least_squares)
+
+    probes = planner_module._turn_least_squares_probes(
+        seed_vector=np.array([1.0, 550.0, 20.0, 120.0, 45.0], dtype=float),
+        fixed_components={1: 550.0},
+        bounds=((0.0, 1.0), (549.0, 551.0), (0.5, 85.0), (0.0, 500.0), (0.0, 360.0)),
+        profile_builder=lambda _values: None,
+        target_point=np.zeros(3, dtype=float),
+        config=_fast_config(),
+        max_nfev=20,
+    )
+
+    assert recorded_sizes == [4]
+    assert len(probes) == 1
+    assert float(probes[0][1]) == pytest.approx(550.0)
+
+
+def test_slsqp_search_probes_drop_fixed_kop_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    recorded_sizes: list[int] = []
+
+    def fake_minimize(
+        *,
+        fun: object,
+        x0: np.ndarray,
+        method: str,
+        bounds: list[tuple[float, float]],
+        constraints: list[dict[str, object]],
+        options: dict[str, object],
+    ) -> SimpleNamespace:
+        recorded_sizes.append(int(np.asarray(x0, dtype=float).size))
+        return SimpleNamespace(success=False, x=np.asarray(x0, dtype=float))
+
+    monkeypatch.setattr(planner_module, "minimize", fake_minimize)
+
+    probes = planner_module._slsqp_search_probes(
+        seed_vector=np.array([1.0, 550.0], dtype=float),
+        fixed_components={1: 550.0},
+        bounds=((0.0, 1.0), (549.0, 551.0)),
+        objective=lambda _values: 0.0,
+        constraint_functions=(lambda _values: 1.0,),
+        maxiter=20,
+    )
+
+    assert recorded_sizes == [1]
+    assert len(probes) == 1
+    assert float(probes[0][1]) == pytest.approx(550.0)
 
 
 def test_recover_turn_hold_inc_bounds_keep_boundary_value() -> None:

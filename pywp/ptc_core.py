@@ -3986,6 +3986,47 @@ def _apply_manual_well_override_editor(
     return changed, resolved_name, int(len(diff_values))
 
 
+def _rename_manual_well_calc_profile(
+    *,
+    profile_id: str,
+    profile_name: str,
+) -> tuple[bool, str]:
+    normalized_profile_id = str(profile_id).strip()
+    if not normalized_profile_id:
+        return False, ""
+    existing_payload = dict(_manual_well_calc_profiles().get(normalized_profile_id, {}))
+    if not existing_payload:
+        return False, ""
+    resolved_name = _store_manual_well_calc_profile(
+        profile_id=normalized_profile_id,
+        profile_name=profile_name,
+        values=existing_payload.get("values", {}),
+        source=str(existing_payload.get("source", "")).strip() or "Ручная настройка",
+        note=str(existing_payload.get("note", "")).strip(),
+    )
+    updated_payload = dict(_manual_well_calc_profiles().get(normalized_profile_id, {}))
+    return updated_payload != existing_payload, resolved_name
+
+
+def _handle_manual_well_calc_profile_name_change(profile_id: str) -> None:
+    normalized_profile_id = str(profile_id).strip()
+    if not normalized_profile_id or not _manual_well_calc_override_enabled():
+        return
+    changed, resolved_name = _rename_manual_well_calc_profile(
+        profile_id=normalized_profile_id,
+        profile_name=str(
+            st.session_state.get(
+                _manual_well_calc_profile_name_key(normalized_profile_id),
+                "",
+            )
+        ),
+    )
+    if changed:
+        st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+            f'Имя конфигурации обновлено: "{resolved_name}".'
+        )
+
+
 def _assign_manual_well_calc_profile_to_wells(
     *,
     profile_id: str,
@@ -4287,8 +4328,9 @@ def _render_manual_well_calc_overrides(
         active_payload = dict(_manual_well_calc_profiles().get(active_profile_id, {}))
         st.text_input(
             "Имя конфигурации",
-            value=str(active_payload.get("name", "")),
             key=_manual_well_calc_profile_name_key(active_profile_id),
+            on_change=_handle_manual_well_calc_profile_name_change,
+            args=(active_profile_id,),
             disabled=not overrides_enabled or not active_profile_id,
         )
         profile_export_json = _manual_well_calc_profile_export_json(active_profile_id)
@@ -4625,6 +4667,60 @@ def _format_prepared_override_scope(
     }
     for row in rows:
         row["Маневр"] = maneuver_by_well.get(str(row["Скважина"]), "—")
+    return rows
+
+
+def _format_selected_calc_config_scope(
+    *,
+    selected_names: Iterable[str],
+) -> list[dict[str, object]]:
+    ordered_names = list(
+        dict.fromkeys(
+            str(name).strip() for name in selected_names if str(name).strip()
+        )
+    )
+    if not ordered_names:
+        return []
+    manual_profiles = (
+        _manual_well_calc_profiles() if _manual_well_calc_override_enabled() else {}
+    )
+    manual_assignments = (
+        _manual_well_calc_profile_assignments()
+        if _manual_well_calc_override_enabled()
+        else {}
+    )
+    prepared_scope_by_well = {
+        str(row.get("Скважина", "")).strip(): row
+        for row in _format_prepared_override_scope(selected_names=ordered_names)
+        if str(row.get("Скважина", "")).strip()
+    }
+    rows: list[dict[str, object]] = []
+    for well_name in ordered_names:
+        profile_id = str(manual_assignments.get(well_name, "")).strip()
+        profile_payload = dict(manual_profiles.get(profile_id, {}))
+        config_name = (
+            str(profile_payload.get("name", "")).strip()
+            if profile_id
+            else "Общие параметры"
+        ) or "Общие параметры"
+        prepared_row = dict(prepared_scope_by_well.get(well_name, {}))
+        rows.append(
+            {
+                "Скважина": well_name,
+                "Конфигурация": config_name,
+                "Источник": (
+                    str(profile_payload.get("source", "")).strip()
+                    if profile_id
+                    else "Общие параметры"
+                )
+                or "Общие параметры",
+                "Локальный режим": str(
+                    prepared_row.get("Локальный режим", "Общий режим")
+                ).strip()
+                or "Общий режим",
+                "Маневр": str(prepared_row.get("Маневр", "—")).strip() or "—",
+            }
+        )
     return rows
 
 
@@ -8480,6 +8576,7 @@ def _batch_run_hooks() -> ptc_batch_run.BatchRunHooks:
         ensure_pad_configs=_ensure_pad_configs,
         build_pad_plan_map=_build_pad_plan_map,
         build_selected_override_configs=_build_selected_override_configs,
+        format_selected_calc_config_scope=_format_selected_calc_config_scope,
         build_selected_optimization_contexts=_build_selected_optimization_contexts,
         reference_wells_from_state=_reference_wells_from_state,
         reference_uncertainty_models_from_state=_reference_uncertainty_models_from_state,

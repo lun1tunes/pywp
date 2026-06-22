@@ -107,6 +107,8 @@ LATE_ANTI_COLLISION_KEEP_BUILD1_TOLERANCE_DEG_PER_30M = 0.05
 SPLIT_BUILD_RESCUE_MAX_STARTS = 48
 SPLIT_BUILD_RESCUE_MAX_CANDIDATES = 1
 SPLIT_BUILD_RESCUE_MAX_NFEV = 120
+FIXED_KOP_SPLIT_BUILD_RESCUE_MAX_STARTS = 16
+FIXED_KOP_SPLIT_BUILD_RESCUE_MAX_NFEV = 72
 DEEP_LOW_ANGLE_TURN_MAX_CANDIDATES = 8
 J_PROFILE_MD_COMPETITION_FACTOR = 1.005
 J_PROFILE_MD_COMPETITION_SLACK_M = 25.0
@@ -378,6 +380,106 @@ def _profile_zero_azimuth_turn_continuous(
         s_to_t1_m=geometry.s1_m,
         z_to_t1_m=geometry.z1_m - kop_vertical_m,
         kop_vertical_m=kop_vertical_m,
+        min_build_segment_m=float(config.min_structural_segment_m),
+        post_entry=post_entry,
+        min_hold_inc_deg=_hold_inc_lower_bound(config),
+    )
+
+
+def _zero_azimuth_split_inc_hold_bounds(
+    *,
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+    dls_build1_deg_per_30m: float,
+    dls_build2_deg_per_30m: float,
+) -> tuple[float, float] | None:
+    if (
+        dls_build1_deg_per_30m <= SMALL
+        or dls_build2_deg_per_30m <= SMALL
+        or geometry.inc_entry_deg <= 0.5 + SMALL
+    ):
+        return None
+    radius_build1_m = _radius_from_dls(dls_build1_deg_per_30m)
+    radius_build2_m = _radius_from_dls(dls_build2_deg_per_30m)
+    min_build_m = float(max(config.min_structural_segment_m, SMALL))
+    min_hold_inc_deg = _hold_inc_lower_bound(config)
+    lower_deg = max(
+        float(min_hold_inc_deg),
+        float(min_build_m / radius_build1_m * RAD2DEG),
+    )
+    upper_deg = min(
+        float(geometry.inc_entry_deg - 0.5),
+        float(geometry.inc_entry_deg - min_build_m / radius_build2_m * RAD2DEG),
+    )
+    return _recover_turn_hold_inc_bounds(
+        min_hold_inc_deg=lower_deg,
+        max_hold_inc_deg=upper_deg,
+    )
+
+
+def _build_zero_azimuth_split_profile(
+    *,
+    geometry: SectionGeometry,
+    config: TrajectoryConfig,
+    post_entry: PostEntrySection,
+    dls_build1_deg_per_30m: float,
+    dls_build2_deg_per_30m: float,
+    inc_hold_deg: float,
+) -> ProfileParameters | None:
+    bounds = _zero_azimuth_split_inc_hold_bounds(
+        geometry=geometry,
+        config=config,
+        dls_build1_deg_per_30m=dls_build1_deg_per_30m,
+        dls_build2_deg_per_30m=dls_build2_deg_per_30m,
+    )
+    if bounds is None:
+        return None
+    lower_inc_deg, upper_inc_deg = bounds
+    if inc_hold_deg < lower_inc_deg - SMALL or inc_hold_deg > upper_inc_deg + SMALL:
+        return None
+
+    hold_inc_rad = float(inc_hold_deg * DEG2RAD)
+    entry_inc_rad = float(geometry.inc_entry_deg * DEG2RAD)
+    sin_hold = float(np.sin(hold_inc_rad))
+    cos_hold = float(np.cos(hold_inc_rad))
+    if sin_hold <= SMALL:
+        return None
+
+    radius_build1_m = _radius_from_dls(dls_build1_deg_per_30m)
+    radius_build2_m = _radius_from_dls(dls_build2_deg_per_30m)
+    arc_section_s_m = float(
+        radius_build1_m * (1.0 - cos_hold)
+        + radius_build2_m * (cos_hold - np.cos(entry_inc_rad))
+    )
+    hold_length_m = float((geometry.s1_m - arc_section_s_m) / sin_hold)
+    if hold_length_m < -SMALL:
+        return None
+
+    z_to_t1_from_kop_m = float(
+        radius_build1_m * sin_hold
+        + radius_build2_m * (np.sin(entry_inc_rad) - sin_hold)
+        + max(hold_length_m, 0.0) * cos_hold
+    )
+    fixed_kop_m = _fixed_kop_vertical_target(config)
+    kop_vertical_m = (
+        float(fixed_kop_m)
+        if fixed_kop_m is not None
+        else float(geometry.z1_m - z_to_t1_from_kop_m)
+    )
+    if fixed_kop_m is None and not _kop_satisfies_config(
+        kop_vertical_m=kop_vertical_m,
+        config=config,
+    ):
+        return None
+
+    return _profile_same_direction_with_turn(
+        geometry=geometry,
+        dls_build1_deg_per_30m=dls_build1_deg_per_30m,
+        dls_build2_deg_per_30m=dls_build2_deg_per_30m,
+        kop_vertical_m=kop_vertical_m,
+        inc_hold_deg=float(inc_hold_deg),
+        hold_length_m=float(max(hold_length_m, 0.0)),
+        azimuth_hold_deg=float(geometry.azimuth_entry_deg),
         min_build_segment_m=float(config.min_structural_segment_m),
         post_entry=post_entry,
         min_hold_inc_deg=_hold_inc_lower_bound(config),
@@ -1105,9 +1207,11 @@ def _solve_turn_profile(
         config=config,
         upper_dls_deg_per_30m=build_dls_upper,
     )
+    separate_build_limits_requested = bool(
+        abs(build1_dls_upper - build2_dls_upper) > SMALL
+    )
     split_build_requested = bool(
-        not zero_azimuth_turn
-        and abs(build1_dls_upper - build2_dls_upper) > SMALL
+        not zero_azimuth_turn and separate_build_limits_requested
     )
     horizontal_dls = _resolve_horizontal_dls(config=config)
 
@@ -1143,6 +1247,7 @@ def _solve_turn_profile(
     inc_hold_min = _hold_inc_lower_bound(config)
     inc_hold_max = float(geometry.inc_entry_deg - 0.5)
     kop_min, kop_max = _turn_kop_bounds(geometry=geometry, config=config)
+    fixed_kop_vertical_m = _fixed_kop_vertical_target(config)
     hold_max = float(max(geometry.s1_m + geometry.z1_m, 1000.0))
 
     if inc_hold_max <= inc_hold_min + SMALL:
@@ -1178,7 +1283,7 @@ def _solve_turn_profile(
     )
     j_candidates_cache: list[ProfileParameters] | None = None
     j_profile_build_dls_upper = (
-        build1_dls_upper if split_build_requested else build_dls_upper
+        build1_dls_upper if separate_build_limits_requested else build_dls_upper
     )
     if _j_profile_preferred_before_optimization(config):
         _emit_progress(
@@ -1265,7 +1370,7 @@ def _solve_turn_profile(
         min_build_segment_m=float(config.min_structural_segment_m),
         post_entry=post_entry,
         split_build=False,
-        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+        fixed_kop_vertical_m=fixed_kop_vertical_m,
         min_hold_inc_deg=_hold_inc_lower_bound(config),
     )
 
@@ -1277,6 +1382,7 @@ def _solve_turn_profile(
         search_settings=search_settings,
         zero_azimuth_turn=zero_azimuth_turn,
         preferred_profiles=tuple(preferred_profiles),
+        fixed_kop_vertical_m=fixed_kop_vertical_m,
     )
     _emit_progress(
         progress_callback,
@@ -1294,6 +1400,11 @@ def _solve_turn_profile(
     best_miss_build_dls = float(build_dls_upper)
     profile_family_override: str | None = None
     ran_primary_split_search = False
+    fixed_search_components = _fixed_turn_search_components(
+        bounds=bounds,
+        split_build=False,
+        fixed_kop_vertical_m=fixed_kop_vertical_m,
+    )
     for preferred_profile in preferred_profiles:
         endpoint = np.array(
             _estimate_t1_endpoint_for_profile(preferred_profile), dtype=float
@@ -1320,6 +1431,34 @@ def _solve_turn_profile(
         if not _is_candidate_feasible(candidate=preferred_profile, config=config):
             continue
         candidates.append(preferred_profile)
+    if zero_azimuth_turn and separate_build_limits_requested:
+        _emit_progress(
+            progress_callback,
+            "Солвер: планарный поиск с независимыми BUILD1/BUILD2.",
+            0.26,
+        )
+        split_candidates, split_best = _collect_zero_azimuth_split_build_candidates(
+            geometry=geometry,
+            build_dls_lower_deg_per_30m=build_dls_lower,
+            build_dls_upper_deg_per_30m=build1_dls_upper,
+            build2_dls_upper_deg_per_30m=build2_dls_upper,
+            post_entry=post_entry,
+            target_point=target_point,
+            config=config,
+            search_settings=search_settings,
+        )
+        candidates.extend(split_candidates)
+        (
+            split_miss,
+            split_lateral_m,
+            split_vertical_m,
+            split_build_dls,
+        ) = split_best
+        if split_miss < best_miss - SMALL or abs(split_miss - best_miss) <= SMALL:
+            best_miss = split_miss
+            best_lateral_m = split_lateral_m
+            best_vertical_m = split_vertical_m
+            best_miss_build_dls = split_build_dls
     if split_build_requested:
         _emit_progress(
             progress_callback,
@@ -1422,33 +1561,17 @@ def _solve_turn_profile(
             0.55,
         )
 
-        lower = np.array([item[0] for item in bounds], dtype=float)
-        upper = np.array([item[1] for item in bounds], dtype=float)
         total_starts = len(seed_vectors)
         for index, seed in enumerate(seed_vectors, start=1):
-            clipped_seed = _clip_to_bounds(seed, bounds=bounds)
-            solution = least_squares(
-                fun=lambda values: _turn_residuals(
-                    values=np.asarray(values, dtype=float),
-                    profile_builder=profile_builder,
-                    target_point=target_point,
-                    config=config,
-                ),
-                x0=clipped_seed,
-                bounds=(lower, upper),
-                method="trf",
-                jac="2-point",
-                x_scale="jac",
-                ftol=1e-10,
-                xtol=1e-10,
-                gtol=1e-10,
+            probes = _turn_least_squares_probes(
+                seed_vector=seed,
+                fixed_components=fixed_search_components,
+                bounds=bounds,
+                profile_builder=profile_builder,
+                target_point=target_point,
+                config=config,
                 max_nfev=search_settings.local_max_nfev,
             )
-            probes = [clipped_seed]
-            if solution.success and np.all(np.isfinite(solution.x)):
-                probes.append(
-                    _clip_to_bounds(np.asarray(solution.x, dtype=float), bounds=bounds)
-                )
 
             for probe in probes:
                 candidate = profile_builder(probe)
@@ -1638,7 +1761,7 @@ def _solve_turn_profile(
             best_vertical_m = split_vertical_m
             best_miss_build_dls = split_build_dls
 
-    if not candidates and _fixed_kop_vertical_target(config) is not None:
+    if not candidates and fixed_kop_vertical_m is not None:
         _emit_progress(
             progress_callback,
             "Солвер: rescue-поиск с фиксированным KOP.",
@@ -1683,7 +1806,7 @@ def _solve_turn_profile(
             lower_dls_deg_per_30m=build_dls_lower,
             upper_dls_deg_per_30m=build_dls_upper,
             upper_build2_dls_deg_per_30m=(
-                build2_dls_upper if split_build_requested else None
+                build2_dls_upper if separate_build_limits_requested else None
             ),
             bounds=bounds,
             profile_builder=profile_builder,
@@ -1692,6 +1815,36 @@ def _solve_turn_profile(
             progress_callback=progress_callback,
             profile_family_override=profile_family_override,
         )
+        optimization_mode = str(config.optimization_mode)
+        if (
+            separate_build_limits_requested
+            and optimization_mode != OPTIMIZATION_ANTI_COLLISION_AVOIDANCE
+        ):
+            equal_build_upper_dls = float(min(build1_dls_upper, build2_dls_upper))
+            equal_build_config = config.validated_copy(
+                dls_build_max_deg_per_30m=equal_build_upper_dls,
+                dls_build2_max_deg_per_30m=None,
+            )
+            equal_build_result = _solve_turn_profile(
+                geometry=geometry,
+                config=equal_build_config,
+                surface=surface,
+                optimization_context=optimization_context,
+                zero_azimuth_turn=zero_azimuth_turn,
+                search_settings=search_settings,
+                progress_callback=None,
+            )
+
+            def _result_sort_key(result: TurnSolveResult) -> tuple[float, ...]:
+                if optimization_mode == OPTIMIZATION_NONE:
+                    return _default_candidate_sort_key(result.params)
+                return _optimization_candidate_sort_key(
+                    result.params,
+                    optimization_mode,
+                )
+
+            if _result_sort_key(equal_build_result) < _result_sort_key(selected_result):
+                return equal_build_result
         return selected_result
 
     diagnostics = _diagnose_same_direction_no_solution(
@@ -2414,6 +2567,7 @@ def _select_anti_collision_candidate(
             upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
             bounds=active_bounds,
             split_build=split_build,
+            fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
         )
     )
     optimization_seed_vectors = _dedupe_seed_vectors(seed_vectors)
@@ -2455,6 +2609,11 @@ def _select_anti_collision_candidate(
             :ANTI_COLLISION_MAX_STARTS
         ]
     runs_used = 0
+    fixed_search_components = _fixed_turn_search_components(
+        bounds=active_bounds,
+        split_build=split_build,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+    )
 
     eval_cache: dict[
         tuple[float, ...],
@@ -2586,16 +2745,13 @@ def _select_anti_collision_candidate(
             + 1e-4 * float(base_eval.md_total_m)
         )
 
-    constraints = [
-        {"type": "ineq", "fun": lambda values: evaluate(values)[0].t1_margin_m},
-        {"type": "ineq", "fun": lambda values: evaluate(values)[0].build1_margin_m},
-        {"type": "ineq", "fun": lambda values: evaluate(values)[0].build2_margin_m},
-        {"type": "ineq", "fun": lambda values: evaluate(values)[0].max_inc_margin_deg},
-        {
-            "type": "ineq",
-            "fun": lambda values: evaluate(values)[0].horizontal_dls_margin_deg_per_30m,
-        },
-    ]
+    constraint_functions = (
+        lambda values: evaluate(values)[0].t1_margin_m,
+        lambda values: evaluate(values)[0].build1_margin_m,
+        lambda values: evaluate(values)[0].build2_margin_m,
+        lambda values: evaluate(values)[0].max_inc_margin_deg,
+        lambda values: evaluate(values)[0].horizontal_dls_margin_deg_per_30m,
+    )
     maxiter = max(
         36, min(120, int(round(0.24 * float(search_settings.local_max_nfev))))
     )
@@ -2748,25 +2904,14 @@ def _select_anti_collision_candidate(
         for seed_vector in optimization_seed_vectors:
             seed = _clip_to_bounds(seed_vector, bounds=active_bounds)
             runs_used += 1
-            result = minimize(
-                fun=objective,
-                x0=seed,
-                method="SLSQP",
-                bounds=list(active_bounds),
-                constraints=constraints,
-                options={
-                    "maxiter": int(maxiter),
-                    "ftol": 1e-8,
-                    "disp": False,
-                },
+            probes = _slsqp_search_probes(
+                seed_vector=seed,
+                fixed_components=fixed_search_components,
+                bounds=active_bounds,
+                objective=objective,
+                constraint_functions=constraint_functions,
+                maxiter=maxiter,
             )
-            probes = [seed]
-            if np.all(np.isfinite(result.x)):
-                probes.append(
-                    _clip_to_bounds(
-                        np.asarray(result.x, dtype=float), bounds=active_bounds
-                    )
-                )
             for probe in probes:
                 base_eval, clearance = evaluate(probe)
                 if (
@@ -3036,6 +3181,7 @@ def _collect_optimization_seed_vectors(
     upper_build2_dls_deg_per_30m: float | None = None,
     bounds: tuple[tuple[float, float], ...],
     split_build: bool = False,
+    fixed_kop_vertical_m: float | None = None,
 ) -> list[np.ndarray]:
     if not candidates:
         return []
@@ -3175,6 +3321,20 @@ def _collect_optimization_seed_vectors(
                     ]
                 )
         seed_vectors.extend(lowered_variants)
+    fixed_components = _fixed_turn_search_components(
+        bounds=bounds,
+        split_build=split_build,
+        fixed_kop_vertical_m=fixed_kop_vertical_m,
+    )
+    if fixed_components:
+        seed_vectors = [
+            _apply_fixed_search_components_to_vector(
+                vector=np.asarray(seed, dtype=float),
+                bounds=bounds,
+                fixed_components=fixed_components,
+            )
+            for seed in seed_vectors
+        ]
     return _dedupe_seed_vectors(seed_vectors)
 
 
@@ -3188,62 +3348,15 @@ def _refine_profile_with_fixed_components(
     config: TrajectoryConfig,
     max_nfev: int,
 ) -> list[ProfileParameters]:
-    seed = _clip_to_bounds(np.asarray(seed_vector, dtype=float), bounds=bounds)
-    fixed = {int(index): float(value) for index, value in fixed_components.items()}
-    free_indices = [index for index in range(len(bounds)) if index not in fixed]
-    if not free_indices:
-        candidate = profile_builder(seed)
-        if candidate is not None:
-            endpoint = np.array(
-                _estimate_t1_endpoint_for_profile(candidate), dtype=float
-            )
-            _, _, _, lateral_m, vertical_m, _ = _target_miss_components(
-                endpoint, target_point
-            )
-            if _target_miss_within_tolerance(
-                lateral_m=lateral_m,
-                vertical_m=vertical_m,
-                config=config,
-            ) and _is_candidate_feasible(candidate, config):
-                return [candidate]
-        return []
-
-    lower = np.array([bounds[index][0] for index in free_indices], dtype=float)
-    upper = np.array([bounds[index][1] for index in free_indices], dtype=float)
-    x0 = np.array([seed[index] for index in free_indices], dtype=float)
-
-    def _compose(free_values: np.ndarray) -> np.ndarray:
-        full = seed.copy()
-        for index, value in fixed.items():
-            full[index] = float(value)
-        for free_index, value in zip(
-            free_indices, np.asarray(free_values, dtype=float)
-        ):
-            full[free_index] = float(value)
-        return _clip_to_bounds(full, bounds=bounds)
-
-    solution = least_squares(
-        fun=lambda free_values: _turn_residuals(
-            values=_compose(np.asarray(free_values, dtype=float)),
-            profile_builder=profile_builder,
-            target_point=target_point,
-            config=config,
-        ),
-        x0=x0,
-        bounds=(lower, upper),
-        method="trf",
-        jac="2-point",
-        x_scale="jac",
-        ftol=1e-10,
-        xtol=1e-10,
-        gtol=1e-10,
-        max_nfev=int(max(max_nfev, 20)),
+    probes = _turn_least_squares_probes(
+        seed_vector=seed_vector,
+        fixed_components=fixed_components,
+        bounds=bounds,
+        profile_builder=profile_builder,
+        target_point=target_point,
+        config=config,
+        max_nfev=max_nfev,
     )
-
-    probes = [_compose(x0)]
-    if bool(solution.success) and np.all(np.isfinite(solution.x)):
-        probes.append(_compose(np.asarray(solution.x, dtype=float)))
-
     refined: list[ProfileParameters] = []
     for probe in probes:
         candidate = profile_builder(probe)
@@ -3293,11 +3406,22 @@ def _boundary_refine_md_candidates(
     )
     build_upper = float(bounds[0][1])
     kop_lower = float(bounds[1][0])
-    boundary_specs = (
-        {0: build_upper},
-        {1: kop_lower},
-        {0: build_upper, 1: kop_lower},
+    fixed_components = _fixed_turn_search_components(
+        bounds=bounds,
+        split_build=False,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
     )
+    if fixed_components:
+        boundary_specs = (
+            {**fixed_components, 0: build_upper},
+            fixed_components,
+        )
+    else:
+        boundary_specs = (
+            {0: build_upper},
+            {1: kop_lower},
+            {0: build_upper, 1: kop_lower},
+        )
 
     refined: list[ProfileParameters] = []
     runs_used = 0
@@ -3338,6 +3462,13 @@ def _boundary_refine_kop_candidates(
     search_settings: TurnSearchSettings,
 ) -> tuple[list[ProfileParameters], int]:
     if not candidates:
+        return [], 0
+    fixed_components = _fixed_turn_search_components(
+        bounds=bounds,
+        split_build=False,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+    )
+    if fixed_components:
         return [], 0
 
     ranked = sorted(
@@ -3711,6 +3842,11 @@ def _two_dimensional_md_refine_candidates(
     runs_used = 0
     eval_cache: dict[tuple[float, float], CandidateOptimizationEvaluation] = {}
     fixed_kop_vertical_m = _fixed_kop_vertical_target(config)
+    fixed_search_components = _fixed_turn_search_components(
+        bounds=(bounds[0], bounds[1]),
+        split_build=False,
+        fixed_kop_vertical_m=fixed_kop_vertical_m,
+    )
 
     def evaluate(values: np.ndarray) -> CandidateOptimizationEvaluation:
         pair = tuple(np.round(np.asarray(values, dtype=float), decimals=10).tolist())
@@ -3757,64 +3893,31 @@ def _two_dimensional_md_refine_candidates(
         eval_cache[pair] = evaluation
         return evaluation
 
-    objective_bounds = [bounds[0], bounds[1]]
+    objective_bounds = (bounds[0], bounds[1])
+    constraint_functions = (
+        lambda values: evaluate(np.asarray(values, dtype=float)).t1_margin_m,
+        lambda values: evaluate(np.asarray(values, dtype=float)).build1_margin_m,
+        lambda values: evaluate(np.asarray(values, dtype=float)).build2_margin_m,
+        lambda values: evaluate(np.asarray(values, dtype=float)).max_inc_margin_deg,
+        lambda values: evaluate(
+            np.asarray(values, dtype=float)
+        ).horizontal_dls_margin_deg_per_30m,
+    )
     for seed in seed_vectors:
         seed_pair = _clip_to_bounds(
             np.asarray(seed, dtype=float), bounds=tuple(objective_bounds)
         )
         runs_used += 1
-        result = minimize(
-            fun=lambda values: float(
+        probes = _slsqp_search_probes(
+            seed_vector=seed_pair,
+            fixed_components=fixed_search_components,
+            bounds=objective_bounds,
+            objective=lambda values: float(
                 evaluate(np.asarray(values, dtype=float)).md_total_m
             ),
-            x0=seed_pair,
-            method="SLSQP",
-            bounds=list(objective_bounds),
-            constraints=[
-                {
-                    "type": "ineq",
-                    "fun": lambda values: evaluate(
-                        np.asarray(values, dtype=float)
-                    ).t1_margin_m,
-                },
-                {
-                    "type": "ineq",
-                    "fun": lambda values: evaluate(
-                        np.asarray(values, dtype=float)
-                    ).build1_margin_m,
-                },
-                {
-                    "type": "ineq",
-                    "fun": lambda values: evaluate(
-                        np.asarray(values, dtype=float)
-                    ).build2_margin_m,
-                },
-                {
-                    "type": "ineq",
-                    "fun": lambda values: evaluate(
-                        np.asarray(values, dtype=float)
-                    ).max_inc_margin_deg,
-                },
-                {
-                    "type": "ineq",
-                    "fun": lambda values: evaluate(
-                        np.asarray(values, dtype=float)
-                    ).horizontal_dls_margin_deg_per_30m,
-                },
-            ],
-            options={
-                "maxiter": MD_2D_REFINEMENT_MAXITER,
-                "ftol": 1e-8,
-                "disp": False,
-            },
+            constraint_functions=constraint_functions,
+            maxiter=MD_2D_REFINEMENT_MAXITER,
         )
-        probes = [seed_pair]
-        if bool(result.success) and np.all(np.isfinite(result.x)):
-            probes.append(
-                _clip_to_bounds(
-                    np.asarray(result.x, dtype=float), bounds=tuple(objective_bounds)
-                )
-            )
 
         for probe in probes:
             evaluation = evaluate(probe)
@@ -3842,9 +3945,7 @@ def _select_feasible_candidate(
     progress_callback: ProgressCallback | None = None,
     profile_family_override: str | None = None,
 ) -> TurnSolveResult:
-    split_build_active = bool(
-        not zero_azimuth_turn and upper_build2_dls_deg_per_30m is not None
-    )
+    split_build_active = bool(upper_build2_dls_deg_per_30m is not None)
     dedupe_bounds = (
         _split_build_optimization_bounds(bounds=bounds)
         if split_build_active
@@ -3864,17 +3965,17 @@ def _select_feasible_candidate(
 
     def _finalize(result: TurnSolveResult) -> TurnSolveResult:
         family = str(profile_family_override or "").strip()
-        if not family:
-            return result
-        current_family = str(
-            getattr(result.params, "profile_family", PROFILE_FAMILY_UNIFIED)
-        )
-        if current_family == family:
-            return result
-        return TurnSolveResult(
-            params=replace(result.params, profile_family=family),
-            optimization=result.optimization,
-        )
+        finalized = result
+        if family:
+            current_family = str(
+                getattr(finalized.params, "profile_family", PROFILE_FAMILY_UNIFIED)
+            )
+            if current_family != family:
+                finalized = TurnSolveResult(
+                    params=replace(finalized.params, profile_family=family),
+                    optimization=finalized.optimization,
+                )
+        return finalized
 
     optimization_mode = str(config.optimization_mode)
     analytic_j_candidates = [
@@ -3900,24 +4001,26 @@ def _select_feasible_candidate(
             config=config,
             mode=optimization_mode,
         )
-        return TurnSolveResult(
-            params=selected,
-            optimization=OptimizationOutcome(
-                mode=optimization_mode,
-                status="analytic_j_profile",
-                objective_value=objective_value,
-                theoretical_lower_bound=lower_bound,
-                absolute_gap_value=_optimization_absolute_gap(
+        return _finalize(
+            TurnSolveResult(
+                params=selected,
+                optimization=OptimizationOutcome(
+                    mode=optimization_mode,
+                    status="analytic_j_profile",
                     objective_value=objective_value,
                     theoretical_lower_bound=lower_bound,
+                    absolute_gap_value=_optimization_absolute_gap(
+                        objective_value=objective_value,
+                        theoretical_lower_bound=lower_bound,
+                    ),
+                    relative_gap_pct=_optimization_relative_gap_pct(
+                        objective_value=objective_value,
+                        theoretical_lower_bound=lower_bound,
+                    ),
+                    seeds_used=len(deduped_candidates),
+                    runs_used=0,
                 ),
-                relative_gap_pct=_optimization_relative_gap_pct(
-                    objective_value=objective_value,
-                    theoretical_lower_bound=lower_bound,
-                ),
-                seeds_used=len(deduped_candidates),
-                runs_used=0,
-            ),
+            )
         )
     if optimization_mode == OPTIMIZATION_ANTI_COLLISION_AVOIDANCE:
         if optimization_context is None:
@@ -3955,49 +4058,6 @@ def _select_feasible_candidate(
                 optimization_profile_builder=optimization_profile_builder,
                 split_build=True,
                 progress_callback=progress_callback,
-            )
-        )
-    if (
-        split_build_active
-        and optimization_mode == OPTIMIZATION_MINIMIZE_MD
-        and any(
-            _candidate_has_distinct_build_segments(candidate)
-            for candidate in deduped_candidates
-        )
-    ):
-        selected = min(
-            (
-                candidate
-                for candidate in deduped_candidates
-                if _candidate_has_distinct_build_segments(candidate)
-            ),
-            key=_default_candidate_sort_key,
-        )
-        objective_value = _optimization_objective_value(selected, optimization_mode)
-        lower_bound = _theoretical_objective_lower_bound(
-            geometry=geometry,
-            config=config,
-            mode=optimization_mode,
-        )
-        return _finalize(
-            TurnSolveResult(
-                params=selected,
-                optimization=OptimizationOutcome(
-                    mode=optimization_mode,
-                    status="split_build_seed_selected",
-                    objective_value=objective_value,
-                    theoretical_lower_bound=lower_bound,
-                    absolute_gap_value=_optimization_absolute_gap(
-                        objective_value=objective_value,
-                        theoretical_lower_bound=lower_bound,
-                    ),
-                    relative_gap_pct=_optimization_relative_gap_pct(
-                        objective_value=objective_value,
-                        theoretical_lower_bound=lower_bound,
-                    ),
-                    seeds_used=len(deduped_candidates),
-                    runs_used=0,
-                ),
             )
         )
     if optimization_mode == OPTIMIZATION_NONE:
@@ -4086,6 +4146,7 @@ def _select_feasible_candidate(
         upper_build2_dls_deg_per_30m=upper_build2_dls_deg_per_30m,
         bounds=optimization_bounds,
         split_build=True,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
     )
     if optimization_mode == OPTIMIZATION_MINIMIZE_MD:
         optimization_seed_vectors = optimization_seed_vectors[:MD_FULL_SLSQP_MAX_SEEDS]
@@ -4335,43 +4396,32 @@ def _select_feasible_candidate(
             return float(evaluation.kop_vertical_m)
         return float(evaluation.md_total_m)
 
-    constraints = [
-        {"type": "ineq", "fun": lambda values: evaluate(values).t1_margin_m},
-        {"type": "ineq", "fun": lambda values: evaluate(values).build1_margin_m},
-        {"type": "ineq", "fun": lambda values: evaluate(values).build2_margin_m},
-        {"type": "ineq", "fun": lambda values: evaluate(values).max_inc_margin_deg},
-        {
-            "type": "ineq",
-            "fun": lambda values: evaluate(values).horizontal_dls_margin_deg_per_30m,
-        },
-    ]
-
     maxiter = max(
         40, min(140, int(round(0.30 * float(search_settings.local_max_nfev))))
+    )
+    fixed_search_components = _fixed_turn_search_components(
+        bounds=optimization_bounds,
+        split_build=True,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+    )
+    constraint_functions = (
+        lambda values: evaluate(values).t1_margin_m,
+        lambda values: evaluate(values).build1_margin_m,
+        lambda values: evaluate(values).build2_margin_m,
+        lambda values: evaluate(values).max_inc_margin_deg,
+        lambda values: evaluate(values).horizontal_dls_margin_deg_per_30m,
     )
     for seed_vector in optimization_seed_vectors:
         seed = _clip_to_bounds(seed_vector, bounds=optimization_bounds)
         runs_used += 1
-        result = minimize(
-            fun=objective,
-            x0=seed,
-            method="SLSQP",
-            bounds=list(optimization_bounds),
-            constraints=constraints,
-            options={
-                "maxiter": int(maxiter),
-                "ftol": 1e-8,
-                "disp": False,
-            },
+        probes = _slsqp_search_probes(
+            seed_vector=seed,
+            fixed_components=fixed_search_components,
+            bounds=optimization_bounds,
+            objective=objective,
+            constraint_functions=constraint_functions,
+            maxiter=maxiter,
         )
-        probes = [seed]
-        if bool(result.success) and np.all(np.isfinite(result.x)):
-            probes.append(
-                _clip_to_bounds(
-                    np.asarray(result.x, dtype=float),
-                    bounds=optimization_bounds,
-                )
-            )
         for probe in probes:
             evaluation = evaluate(probe)
             if not evaluation.feasible or evaluation.candidate is None:
@@ -4441,6 +4491,7 @@ def _turn_seed_vectors(
     search_settings: TurnSearchSettings,
     zero_azimuth_turn: bool,
     preferred_profiles: tuple[ProfileParameters, ...] = (),
+    fixed_kop_vertical_m: float | None = None,
 ) -> list[np.ndarray]:
     build_unit_min, build_unit_max = bounds[0]
     kop_min, kop_max = bounds[1]
@@ -4532,6 +4583,20 @@ def _turn_seed_vectors(
         )
     lattice_points = int(max(search_settings.seed_lattice_points, 0))
     if lattice_points <= 0:
+        fixed_components = _fixed_turn_search_components(
+            bounds=bounds,
+            split_build=False,
+            fixed_kop_vertical_m=fixed_kop_vertical_m,
+        )
+        if fixed_components:
+            seed_vectors = [
+                _apply_fixed_search_components_to_vector(
+                    vector=np.asarray(seed, dtype=float),
+                    bounds=bounds,
+                    fixed_components=fixed_components,
+                )
+                for seed in seed_vectors
+            ]
         return _dedupe_seed_vectors(seed_vectors)
 
     hold_grid_max = float(
@@ -4608,6 +4673,20 @@ def _turn_seed_vectors(
             np.array([build_unit, kop_mid, inc_mid, hold_guess, az_mid], dtype=float)
             for build_unit in build_units
         )
+    fixed_components = _fixed_turn_search_components(
+        bounds=bounds,
+        split_build=False,
+        fixed_kop_vertical_m=fixed_kop_vertical_m,
+    )
+    if fixed_components:
+        seed_vectors = [
+            _apply_fixed_search_components_to_vector(
+                vector=np.asarray(seed, dtype=float),
+                bounds=bounds,
+                fixed_components=fixed_components,
+            )
+            for seed in seed_vectors
+        ]
     return _dedupe_seed_vectors(seed_vectors)
 
 
@@ -4781,6 +4860,168 @@ def _turn_scalar_cost(
     return float(miss * 1e6 + candidate.md_total_m)
 
 
+def _fixed_turn_search_components(
+    *,
+    bounds: tuple[tuple[float, float], ...],
+    split_build: bool,
+    fixed_kop_vertical_m: float | None,
+) -> dict[int, float]:
+    if fixed_kop_vertical_m is None:
+        return {}
+    kop_index = 2 if split_build else 1
+    if kop_index >= len(bounds):
+        return {}
+    lower, upper = bounds[kop_index]
+    return {
+        kop_index: float(
+            np.clip(float(fixed_kop_vertical_m), float(lower), float(upper))
+        )
+    }
+
+
+def _apply_fixed_search_components_to_vector(
+    *,
+    vector: np.ndarray,
+    bounds: tuple[tuple[float, float], ...],
+    fixed_components: dict[int, float],
+) -> np.ndarray:
+    normalized = _clip_to_bounds(np.asarray(vector, dtype=float), bounds=bounds)
+    for index, value in fixed_components.items():
+        lower, upper = bounds[int(index)]
+        normalized[int(index)] = float(
+            np.clip(float(value), float(lower), float(upper))
+        )
+    return normalized
+
+
+def _turn_least_squares_probes(
+    *,
+    seed_vector: np.ndarray,
+    fixed_components: dict[int, float],
+    bounds: tuple[tuple[float, float], ...],
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+    max_nfev: int,
+) -> list[np.ndarray]:
+    seed = _apply_fixed_search_components_to_vector(
+        vector=np.asarray(seed_vector, dtype=float),
+        bounds=bounds,
+        fixed_components=fixed_components,
+    )
+    fixed = {int(index): float(value) for index, value in fixed_components.items()}
+    free_indices = [index for index in range(len(bounds)) if index not in fixed]
+    if not free_indices:
+        return [seed]
+
+    lower = np.array([bounds[index][0] for index in free_indices], dtype=float)
+    upper = np.array([bounds[index][1] for index in free_indices], dtype=float)
+    x0 = np.array([seed[index] for index in free_indices], dtype=float)
+
+    def _compose(free_values: np.ndarray) -> np.ndarray:
+        full = seed.copy()
+        for index, value in fixed.items():
+            full[index] = float(value)
+        for free_index, value in zip(
+            free_indices, np.asarray(free_values, dtype=float)
+        ):
+            full[free_index] = float(value)
+        return _apply_fixed_search_components_to_vector(
+            vector=full,
+            bounds=bounds,
+            fixed_components=fixed,
+        )
+
+    solution = least_squares(
+        fun=lambda free_values: _turn_residuals(
+            values=_compose(np.asarray(free_values, dtype=float)),
+            profile_builder=profile_builder,
+            target_point=target_point,
+            config=config,
+        ),
+        x0=x0,
+        bounds=(lower, upper),
+        method="trf",
+        jac="2-point",
+        x_scale="jac",
+        ftol=1e-10,
+        xtol=1e-10,
+        gtol=1e-10,
+        max_nfev=int(max(max_nfev, 20)),
+    )
+
+    probes = [_compose(x0)]
+    if bool(solution.success) and np.all(np.isfinite(solution.x)):
+        probes.append(_compose(np.asarray(solution.x, dtype=float)))
+    return _dedupe_seed_vectors(probes)
+
+
+def _slsqp_search_probes(
+    *,
+    seed_vector: np.ndarray,
+    fixed_components: dict[int, float],
+    bounds: tuple[tuple[float, float], ...],
+    objective: Callable[[np.ndarray], float],
+    constraint_functions: tuple[Callable[[np.ndarray], float], ...],
+    maxiter: int,
+) -> list[np.ndarray]:
+    seed = _apply_fixed_search_components_to_vector(
+        vector=np.asarray(seed_vector, dtype=float),
+        bounds=bounds,
+        fixed_components=fixed_components,
+    )
+    fixed = {int(index): float(value) for index, value in fixed_components.items()}
+    free_indices = [index for index in range(len(bounds)) if index not in fixed]
+    if not free_indices:
+        return [seed]
+
+    reduced_bounds = [bounds[index] for index in free_indices]
+    reduced_seed = np.asarray([float(seed[index]) for index in free_indices], dtype=float)
+
+    def expand_reduced(values_reduced: np.ndarray) -> np.ndarray:
+        full = seed.copy()
+        for index, value in fixed.items():
+            full[index] = float(value)
+        for reduced_index, free_index in enumerate(free_indices):
+            full[free_index] = float(values_reduced[reduced_index])
+        return _apply_fixed_search_components_to_vector(
+            vector=full,
+            bounds=bounds,
+            fixed_components=fixed,
+        )
+
+    constraints = [
+        {
+            "type": "ineq",
+            "fun": (
+                lambda values_reduced, fn=constraint_fn: fn(
+                    expand_reduced(np.asarray(values_reduced, dtype=float))
+                )
+            ),
+        }
+        for constraint_fn in constraint_functions
+    ]
+    result = minimize(
+        fun=lambda values_reduced: objective(
+            expand_reduced(np.asarray(values_reduced, dtype=float))
+        ),
+        x0=reduced_seed,
+        method="SLSQP",
+        bounds=list(reduced_bounds),
+        constraints=constraints,
+        options={
+            "maxiter": int(maxiter),
+            "ftol": 1e-8,
+            "disp": False,
+        },
+    )
+
+    probes = [expand_reduced(reduced_seed)]
+    if bool(result.success) and np.all(np.isfinite(result.x)):
+        probes.append(expand_reduced(np.asarray(result.x, dtype=float)))
+    return _dedupe_seed_vectors(probes)
+
+
 def _split_build_rescue_seed_vectors(
     *,
     base_seed_vectors: list[np.ndarray],
@@ -4790,6 +5031,20 @@ def _split_build_rescue_seed_vectors(
     build_dls_upper_deg_per_30m: float,
 ) -> list[np.ndarray]:
     seeds: list[np.ndarray] = []
+    for seed in base_seed_vectors:
+        if len(seed) < 5:
+            continue
+        build_unit = float(seed[0])
+        rest = np.asarray(seed[1:], dtype=float)
+        seeds.extend(
+            [
+                np.r_[build_unit, build_unit, rest],
+                np.r_[1.0, build_unit, rest],
+                np.r_[build_unit, 1.0, rest],
+                np.r_[1.0, 0.8, rest],
+                np.r_[0.8, 1.0, rest],
+            ]
+        )
     build_units = _build_unit_seed_values(search_settings=search_settings)
     for seed in _deep_low_angle_turn_seed_vectors(
         geometry=geometry,
@@ -4806,22 +5061,244 @@ def _split_build_rescue_seed_vectors(
                 np.r_[build_unit, 1.0, rest],
             ]
         )
-
-    for seed in base_seed_vectors:
-        if len(seed) < 5:
-            continue
-        build_unit = float(seed[0])
-        rest = np.asarray(seed[1:], dtype=float)
-        seeds.extend(
-            [
-                np.r_[build_unit, build_unit, rest],
-                np.r_[1.0, build_unit, rest],
-                np.r_[build_unit, 1.0, rest],
-                np.r_[1.0, 0.8, rest],
-                np.r_[0.8, 1.0, rest],
-            ]
-        )
     return _dedupe_seed_vectors(seeds)[:SPLIT_BUILD_RESCUE_MAX_STARTS]
+
+
+def _collect_zero_azimuth_split_build_candidates(
+    *,
+    geometry: SectionGeometry,
+    build_dls_lower_deg_per_30m: float,
+    build_dls_upper_deg_per_30m: float,
+    build2_dls_upper_deg_per_30m: float | None,
+    post_entry: PostEntrySection,
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+    search_settings: TurnSearchSettings,
+) -> tuple[list[ProfileParameters], tuple[float, float, float, float]]:
+    resolved_build2_upper = (
+        float(build_dls_upper_deg_per_30m)
+        if build2_dls_upper_deg_per_30m is None
+        else float(build2_dls_upper_deg_per_30m)
+    )
+    if (
+        max(float(build_dls_upper_deg_per_30m), resolved_build2_upper)
+        <= build_dls_lower_deg_per_30m + SMALL
+    ):
+        return [], (
+            np.inf,
+            np.inf,
+            np.inf,
+            float(max(build_dls_upper_deg_per_30m, resolved_build2_upper)),
+        )
+
+    build1_values = list(
+        _preferred_build_dls_values(
+            lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
+            upper_dls_deg_per_30m=build_dls_upper_deg_per_30m,
+        )
+    )
+    build2_values = list(
+        _preferred_build_dls_values(
+            lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
+            upper_dls_deg_per_30m=resolved_build2_upper,
+        )
+    )
+    for unit_value in _build_unit_seed_values(search_settings):
+        build1_values.append(
+            _decode_build_dls_from_unit(
+                unit_value=float(unit_value),
+                lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
+                upper_dls_deg_per_30m=build_dls_upper_deg_per_30m,
+            )
+        )
+        build2_values.append(
+            _decode_build_dls_from_unit(
+                unit_value=float(unit_value),
+                lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
+                upper_dls_deg_per_30m=resolved_build2_upper,
+            )
+        )
+    build1_grid = _dedupe_scalar_values(
+        build1_values,
+        lower=build_dls_lower_deg_per_30m,
+        upper=build_dls_upper_deg_per_30m,
+    )
+    build2_grid = _dedupe_scalar_values(
+        build2_values,
+        lower=build_dls_lower_deg_per_30m,
+        upper=resolved_build2_upper,
+    )
+
+    def objective_base(candidate: ProfileParameters) -> float:
+        if (
+            _fixed_kop_vertical_target(config) is None
+            and str(config.optimization_mode) == OPTIMIZATION_MINIMIZE_KOP
+        ):
+            return float(candidate.kop_vertical_m)
+        return float(candidate.md_total_m)
+
+    candidates: list[ProfileParameters] = []
+    best_miss = np.inf
+    best_lateral_m = np.inf
+    best_vertical_m = np.inf
+    best_build_dls = float(max(build_dls_upper_deg_per_30m, resolved_build2_upper))
+    seen: set[tuple[float, float, float, float, float]] = set()
+
+    for build1_dls in build1_grid:
+        for build2_dls in build2_grid:
+            if abs(float(build1_dls) - float(build2_dls)) <= SMALL:
+                continue
+            inc_bounds = _zero_azimuth_split_inc_hold_bounds(
+                geometry=geometry,
+                config=config,
+                dls_build1_deg_per_30m=float(build1_dls),
+                dls_build2_deg_per_30m=float(build2_dls),
+            )
+            if inc_bounds is None:
+                continue
+            lower_inc_deg, upper_inc_deg = inc_bounds
+            theta_seeds = list(
+                _dedupe_scalar_values(
+                    [
+                        float(lower_inc_deg),
+                        float(upper_inc_deg),
+                        0.5 * float(lower_inc_deg + upper_inc_deg),
+                        *_axis_samples(
+                            float(lower_inc_deg),
+                            float(upper_inc_deg),
+                            max(3, 1 + 2 * int(search_settings.seed_lattice_points)),
+                        ).tolist(),
+                    ],
+                    lower=float(lower_inc_deg),
+                    upper=float(upper_inc_deg),
+                )
+            )
+            eval_cache: dict[
+                float, tuple[ProfileParameters | None, CandidateOptimizationEvaluation]
+            ] = {}
+
+            def evaluate_theta(
+                inc_hold_deg: float,
+            ) -> tuple[ProfileParameters | None, CandidateOptimizationEvaluation]:
+                key = round(float(inc_hold_deg), 8)
+                cached = eval_cache.get(key)
+                if cached is not None:
+                    return cached
+                candidate = _build_zero_azimuth_split_profile(
+                    geometry=geometry,
+                    config=config,
+                    post_entry=post_entry,
+                    dls_build1_deg_per_30m=float(build1_dls),
+                    dls_build2_deg_per_30m=float(build2_dls),
+                    inc_hold_deg=float(inc_hold_deg),
+                )
+                evaluation = _evaluate_profile_candidate(
+                    candidate=candidate,
+                    target_point=target_point,
+                    config=config,
+                )
+                eval_cache[key] = (candidate, evaluation)
+                return candidate, evaluation
+
+            def score_theta(inc_hold_deg: float) -> float:
+                candidate, evaluation = evaluate_theta(float(inc_hold_deg))
+                if candidate is None or evaluation.candidate is None:
+                    return 1e12
+                penalty = sum(
+                    max(-float(margin), 0.0) ** 2
+                    for margin in (
+                        evaluation.t1_margin_m,
+                        evaluation.build1_margin_m,
+                        evaluation.build2_margin_m,
+                        evaluation.max_inc_margin_deg,
+                        evaluation.horizontal_dls_margin_deg_per_30m,
+                    )
+                )
+                return float(objective_base(candidate) + 1e6 * penalty)
+
+            ranked_seed_values = sorted(
+                ((score_theta(seed), float(seed)) for seed in theta_seeds),
+                key=lambda item: (float(item[0]), float(item[1])),
+            )
+            probe_values = [seed for _score, seed in ranked_seed_values[:3]]
+            if abs(float(upper_inc_deg) - float(lower_inc_deg)) > SMALL:
+                maxiter = max(
+                    18,
+                    min(48, int(round(0.12 * float(search_settings.local_max_nfev)))),
+                )
+                for _score, seed in ranked_seed_values[:3]:
+                    result = minimize(
+                        fun=lambda values: score_theta(float(values[0])),
+                        x0=np.array([float(seed)], dtype=float),
+                        method="SLSQP",
+                        bounds=[(float(lower_inc_deg), float(upper_inc_deg))],
+                        options={
+                            "maxiter": int(maxiter),
+                            "ftol": 1e-8,
+                            "disp": False,
+                        },
+                    )
+                    if np.all(np.isfinite(result.x)):
+                        probe_values.append(float(result.x[0]))
+
+            for probe_value in _dedupe_scalar_values(
+                probe_values,
+                lower=float(lower_inc_deg),
+                upper=float(upper_inc_deg),
+            ):
+                candidate, evaluation = evaluate_theta(float(probe_value))
+                if candidate is None:
+                    continue
+                endpoint = np.array(
+                    _estimate_t1_endpoint_for_profile(candidate),
+                    dtype=float,
+                )
+                _, _, _, lateral_m, vertical_m, _ = _target_miss_components(
+                    endpoint,
+                    target_point,
+                )
+                miss = _normalized_target_miss(
+                    endpoint=endpoint,
+                    target_point=target_point,
+                    config=config,
+                )
+                if miss < best_miss - SMALL or abs(miss - best_miss) <= SMALL:
+                    best_miss = miss
+                    best_lateral_m = float(lateral_m)
+                    best_vertical_m = float(vertical_m)
+                    best_build_dls = float(
+                        max(
+                            candidate.dls_build1_deg_per_30m,
+                            candidate.dls_build2_deg_per_30m,
+                        )
+                    )
+                if not evaluation.feasible or evaluation.candidate is None:
+                    continue
+                key = (
+                    round(float(candidate.dls_build1_deg_per_30m), 6),
+                    round(float(candidate.dls_build2_deg_per_30m), 6),
+                    round(float(candidate.kop_vertical_m), 6),
+                    round(float(candidate.inc_hold_deg), 6),
+                    round(float(candidate.md_total_m), 6),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(candidate)
+
+    candidates.sort(
+        key=lambda candidate: (
+            _optimization_candidate_sort_key(candidate, str(config.optimization_mode)),
+            -float(candidate.dls_build1_deg_per_30m),
+            -float(candidate.dls_build2_deg_per_30m),
+        )
+    )
+    return candidates, (
+        float(best_miss),
+        float(best_lateral_m),
+        float(best_vertical_m),
+        float(best_build_dls),
+    )
 
 
 def _collect_split_build_turn_candidates(
@@ -4842,6 +5319,10 @@ def _collect_split_build_turn_candidates(
         float(build_dls_upper_deg_per_30m)
         if build2_dls_upper_deg_per_30m is None
         else float(build2_dls_upper_deg_per_30m)
+    )
+    fixed_kop_vertical_m = _fixed_kop_vertical_target(config)
+    explicit_split_limits = bool(
+        abs(float(build_dls_upper_deg_per_30m) - resolved_build2_upper) > SMALL
     )
     if zero_azimuth_turn:
         return [], (
@@ -4881,6 +5362,8 @@ def _collect_split_build_turn_candidates(
         search_settings=search_settings,
         build_dls_upper_deg_per_30m=build_dls_upper_deg_per_30m,
     )
+    if fixed_kop_vertical_m is not None and not explicit_split_limits:
+        seed_vectors = seed_vectors[:FIXED_KOP_SPLIT_BUILD_RESCUE_MAX_STARTS]
     if not seed_vectors:
         return [], (
             np.inf,
@@ -4889,13 +5372,15 @@ def _collect_split_build_turn_candidates(
             float(max(build_dls_upper_deg_per_30m, resolved_build2_upper)),
         )
 
-    lower = np.array([item[0] for item in split_bounds], dtype=float)
-    upper = np.array([item[1] for item in split_bounds], dtype=float)
     max_nfev = max(
-        80,
+        60 if fixed_kop_vertical_m is not None and not explicit_split_limits else 80,
         min(
             int(search_settings.local_max_nfev),
-            SPLIT_BUILD_RESCUE_MAX_NFEV,
+            (
+                FIXED_KOP_SPLIT_BUILD_RESCUE_MAX_NFEV
+                if fixed_kop_vertical_m is not None and not explicit_split_limits
+                else SPLIT_BUILD_RESCUE_MAX_NFEV
+            ),
         ),
     )
     candidates: list[ProfileParameters] = []
@@ -4904,37 +5389,22 @@ def _collect_split_build_turn_candidates(
     best_vertical_m = np.inf
     best_build_dls = float(max(build_dls_upper_deg_per_30m, resolved_build2_upper))
     seen: set[tuple[float, float, float, float, float]] = set()
+    fixed_search_components = _fixed_turn_search_components(
+        bounds=split_bounds,
+        split_build=True,
+        fixed_kop_vertical_m=fixed_kop_vertical_m,
+    )
 
     for seed in seed_vectors:
-        clipped_seed = _clip_to_bounds(
-            np.asarray(seed, dtype=float),
+        probes = _turn_least_squares_probes(
+            seed_vector=np.asarray(seed, dtype=float),
+            fixed_components=fixed_search_components,
             bounds=split_bounds,
-        )
-        solution = least_squares(
-            fun=lambda values: _turn_residuals(
-                values=np.asarray(values, dtype=float),
-                profile_builder=split_builder,
-                target_point=target_point,
-                config=config,
-            ),
-            x0=clipped_seed,
-            bounds=(lower, upper),
-            method="trf",
-            jac="2-point",
-            x_scale="jac",
-            ftol=1e-10,
-            xtol=1e-10,
-            gtol=1e-10,
+            profile_builder=split_builder,
+            target_point=target_point,
+            config=config,
             max_nfev=max_nfev,
         )
-        probes = [clipped_seed]
-        if bool(solution.success) and np.all(np.isfinite(solution.x)):
-            probes.append(
-                _clip_to_bounds(
-                    np.asarray(solution.x, dtype=float),
-                    bounds=split_bounds,
-                )
-            )
 
         for probe in probes:
             candidate = split_builder(probe)
@@ -5019,39 +5489,28 @@ def _collect_deep_low_angle_turn_candidates(
     if not seed_vectors:
         return [], (np.inf, np.inf, np.inf, float(build_dls_upper_deg_per_30m))
 
-    lower = np.array([item[0] for item in bounds], dtype=float)
-    upper = np.array([item[1] for item in bounds], dtype=float)
     max_nfev = max(80, min(int(search_settings.local_max_nfev), 160))
     candidates: list[ProfileParameters] = []
     best_miss = np.inf
     best_lateral_m = np.inf
     best_vertical_m = np.inf
     best_build_dls = float(build_dls_upper_deg_per_30m)
+    fixed_search_components = _fixed_turn_search_components(
+        bounds=bounds,
+        split_build=False,
+        fixed_kop_vertical_m=_fixed_kop_vertical_target(config),
+    )
 
     for seed in _dedupe_seed_vectors(seed_vectors):
-        clipped_seed = _clip_to_bounds(np.asarray(seed, dtype=float), bounds=bounds)
-        solution = least_squares(
-            fun=lambda values: _turn_residuals(
-                values=np.asarray(values, dtype=float),
-                profile_builder=profile_builder,
-                target_point=target_point,
-                config=config,
-            ),
-            x0=clipped_seed,
-            bounds=(lower, upper),
-            method="trf",
-            jac="2-point",
-            x_scale="jac",
-            ftol=1e-10,
-            xtol=1e-10,
-            gtol=1e-10,
+        probes = _turn_least_squares_probes(
+            seed_vector=np.asarray(seed, dtype=float),
+            fixed_components=fixed_search_components,
+            bounds=bounds,
+            profile_builder=profile_builder,
+            target_point=target_point,
+            config=config,
             max_nfev=max_nfev,
         )
-        probes = [clipped_seed]
-        if solution.success and np.all(np.isfinite(solution.x)):
-            probes.append(
-                _clip_to_bounds(np.asarray(solution.x, dtype=float), bounds=bounds)
-            )
 
         for probe in probes:
             candidate = profile_builder(probe)

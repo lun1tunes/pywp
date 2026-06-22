@@ -470,7 +470,11 @@ def test_run_batch_clears_stale_error_and_recommends_no_followup_after_all_ok(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        def evaluate(self, **_kwargs: object):
+        def evaluate(self, **kwargs: object):
+            progress_callback = kwargs.get("progress_callback")
+            if callable(progress_callback):
+                progress_callback(1, 2, "WELL-A")
+                progress_callback(2, 2, "WELL-B")
             return (
                 [
                     {"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""},
@@ -491,6 +495,7 @@ def test_run_batch_clears_stale_error_and_recommends_no_followup_after_all_ok(
         ensure_pad_configs=lambda **_kwargs: [object()],
         build_pad_plan_map=lambda _pads: {"pad": object()},
         build_selected_override_configs=lambda **_kwargs: {},
+        format_selected_calc_config_scope=lambda **_kwargs: [],
         build_selected_optimization_contexts=lambda **_kwargs: {},
         reference_wells_from_state=lambda: (),
         reference_uncertainty_models_from_state=lambda _reference_wells: {},
@@ -596,6 +601,7 @@ def _batch_run_hooks() -> ptc_batch_run.BatchRunHooks:
         ensure_pad_configs=lambda **_kwargs: [object()],
         build_pad_plan_map=lambda _pads: {"pad": object()},
         build_selected_override_configs=lambda **_kwargs: {},
+        format_selected_calc_config_scope=lambda **_kwargs: [],
         build_selected_optimization_contexts=lambda **_kwargs: {},
         reference_wells_from_state=lambda: (),
         reference_uncertainty_models_from_state=lambda _reference_wells: {},
@@ -608,3 +614,76 @@ def _batch_run_hooks() -> ptc_batch_run.BatchRunHooks:
         manual_override_signature=lambda: (False, ()),
         manual_override_signature_key="wt_last_well_calc_override_signature",
     )
+
+
+def test_run_batch_logs_calc_configuration_for_each_well(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeBatchPlanner:
+        last_evaluation_metadata = SimpleNamespace(
+            skipped_selected_names=(),
+            cluster_blocked=False,
+            cluster_resolved_early=False,
+            cluster_blocking_reason=None,
+        )
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def evaluate(self, **kwargs: object):
+            progress_callback = kwargs.get("progress_callback")
+            if callable(progress_callback):
+                progress_callback(1, 2, "WELL-A")
+                progress_callback(2, 2, "WELL-B")
+            return (
+                [
+                    {"Скважина": "WELL-A", "Статус": "OK", "Проблема": ""},
+                    {"Скважина": "WELL-B", "Статус": "OK", "Проблема": ""},
+                ],
+                [],
+            )
+
+    state: dict[str, object] = {
+        "wt_successes": [],
+        "wt_summary_rows": None,
+    }
+    fake_st = _FakeStreamlit(state)
+    monkeypatch.setattr(ptc_batch_run, "WelltrackBatchPlanner", FakeBatchPlanner)
+    hooks = _batch_run_hooks()
+    hooks = ptc_batch_run.BatchRunHooks(
+        **{
+            **hooks.__dict__,
+            "format_selected_calc_config_scope": lambda **_kwargs: [
+                {
+                    "Скважина": "WELL-A",
+                    "Конфигурация": "Общие параметры",
+                    "Локальный режим": "Общий режим",
+                },
+                {
+                    "Скважина": "WELL-B",
+                    "Конфигурация": "Config B",
+                    "Локальный режим": "Anti-collision",
+                },
+            ],
+        }
+    )
+
+    ptc_batch_run.run_batch_if_clicked(
+        requests=[
+            ptc_batch_run.BatchRunRequest(
+                selected_names=["WELL-A", "WELL-B"],
+                config=TrajectoryConfig(),
+                run_clicked=True,
+            )
+        ],
+        records=_records(),
+        hooks=hooks,
+        st_module=fake_st,
+    )
+
+    joined_log = "\n".join(str(line) for line in state["wt_last_run_log_lines"])
+    assert "Расчет скважины 1/2: WELL-A. Конфигурация: Общие параметры." in joined_log
+    assert (
+        "Расчет скважины 2/2: WELL-B. Конфигурация: Config B. "
+        "Локальный режим: Anti-collision."
+    ) in joined_log

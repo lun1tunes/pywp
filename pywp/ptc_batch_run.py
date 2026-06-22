@@ -86,6 +86,7 @@ class BatchRunHooks:
     ensure_pad_configs: Callable[..., list[Any]]
     build_pad_plan_map: Callable[[list[Any]], dict[str, Any]]
     build_selected_override_configs: Callable[..., dict[str, TrajectoryConfig]]
+    format_selected_calc_config_scope: Callable[..., list[dict[str, object]]]
     build_selected_optimization_contexts: Callable[..., dict[str, Any]]
     reference_wells_from_state: Callable[[], tuple[Any, ...]]
     reference_uncertainty_models_from_state: Callable[[tuple[Any, ...]], Mapping[str, Any]]
@@ -457,6 +458,14 @@ def run_batch_if_clicked(
     prepared_scope_rows = hooks.format_prepared_override_scope(
         selected_names=selected_names,
     )
+    calc_config_scope_rows = hooks.format_selected_calc_config_scope(
+        selected_names=selected_names,
+    )
+    calc_config_scope_by_well = {
+        str(row.get("Скважина", "")).strip(): dict(row)
+        for row in calc_config_scope_rows
+        if str(row.get("Скважина", "")).strip()
+    }
 
     try:
         with st_module.spinner(
@@ -587,7 +596,19 @@ def run_batch_if_clicked(
                     text=f"{index}/{total}: {name} · подготовка",
                 )
                 set_phase(f"Расчет скважины {index}/{total}: {name}")
-                append_log(f"Расчет скважины {index}/{total}: {name}.")
+                scope_row = calc_config_scope_by_well.get(str(name), {})
+                config_name = (
+                    str(scope_row.get("Конфигурация", "")).strip()
+                    or "Общие параметры"
+                )
+                local_mode = str(scope_row.get("Локальный режим", "")).strip()
+                message = (
+                    f"Расчет скважины {index}/{total}: {name}. "
+                    f"Конфигурация: {config_name}."
+                )
+                if local_mode and local_mode not in {"Общий режим", "—"}:
+                    message += f" Локальный режим: {local_mode}."
+                append_log(message)
 
             def on_solver_progress(
                 index: int,

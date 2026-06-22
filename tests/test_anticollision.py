@@ -3231,6 +3231,74 @@ def test_runtime_analysis_skips_reference_to_reference_pairs() -> None:
     assert ("APP-1", "FACT-1") not in compared_pairs
 
 
+def test_report_rows_use_fact_and_project_labels_for_imported_reference_segments() -> (
+    None
+):
+    calculated_well = build_anti_collision_well(
+        name="WELL-A",
+        color="#0B6E4F",
+        stations=_straight_stations(y_offset_m=0.0).assign(
+            segment=["HOLD", "HOLD", "HOLD"]
+        ),
+        surface=Point3D(0.0, 0.0, 0.0),
+        t1=Point3D(1000.0, 0.0, 0.0),
+        t3=Point3D(2000.0, 0.0, 0.0),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        include_display_geometry=False,
+    )
+    reference_actual = build_anti_collision_well(
+        name="FACT-1",
+        color="#6B7280",
+        stations=_straight_stations(y_offset_m=5.0).assign(
+            segment=["IMPORTED", "IMPORTED", "IMPORTED"]
+        ),
+        surface=Point3D(0.0, 5.0, 0.0),
+        t1=None,
+        t3=None,
+        azimuth_deg=90.0,
+        md_t1_m=None,
+        include_display_geometry=False,
+        well_kind="actual",
+        is_reference_only=True,
+    )
+    reference_approved = build_anti_collision_well(
+        name="APP-1",
+        color="#C62828",
+        stations=_straight_stations(y_offset_m=6.0).assign(
+            segment=["IMPORTED", "IMPORTED", "IMPORTED"]
+        ),
+        surface=Point3D(0.0, 6.0, 0.0),
+        t1=None,
+        t3=None,
+        azimuth_deg=90.0,
+        md_t1_m=None,
+        include_display_geometry=False,
+        well_kind="approved",
+        is_reference_only=True,
+    )
+
+    analysis = analyze_anti_collision(
+        [calculated_well, reference_actual, reference_approved],
+        build_overlap_geometry=False,
+    )
+
+    rows = anti_collision_report_rows(analysis)
+
+    def _segment_for_pair(other_well_name: str) -> str:
+        for row in rows:
+            pair = {str(row["Скважина A"]), str(row["Скважина B"])}
+            if pair == {"WELL-A", other_well_name}:
+                segments = {str(row["Участок A"]), str(row["Участок B"])}
+                return next(
+                    segment for segment in segments if segment in {"FACT", "PROJECT"}
+                )
+        raise AssertionError(f"Missing row for WELL-A and {other_well_name}")
+
+    assert _segment_for_pair("FACT-1") == "FACT"
+    assert _segment_for_pair("APP-1") == "PROJECT"
+
+
 def test_runtime_analysis_includes_dev_references_from_multiple_folders(
     tmp_path,
 ) -> None:

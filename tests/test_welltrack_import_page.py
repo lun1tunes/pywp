@@ -4519,6 +4519,31 @@ def test_manual_well_calc_profile_export_json_uses_profile_name() -> None:
     assert page._manual_well_calc_profile_export_file_name("cfg-1") == "Cfg _ 1.json"
 
 
+def test_handle_manual_well_calc_profile_name_change_updates_profile_name() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Config A",
+        values={},
+        source="Ручная настройка",
+    )
+    page.st.session_state[page._manual_well_calc_profile_name_key("cfg-1")] = (
+        "Renamed Config"
+    )
+
+    page._handle_manual_well_calc_profile_name_change("cfg-1")
+
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["cfg-1"]
+    assert payload["name"] == "Renamed Config"
+    assert "Renamed Config" in page.st.session_state[
+        page.WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY
+    ]
+
+
 def test_import_manual_well_calc_profile_json_bytes_creates_profile_by_name() -> None:
     page = wt_import_module
     page.st.session_state.clear()
