@@ -220,6 +220,7 @@ def _j_profile_preferred_before_optimization(config: TrajectoryConfig) -> bool:
 VARIABLE_J_MAX_STARTS = 10
 VARIABLE_J_MAX_NFEV = 100
 VARIABLE_J_TARGET_MISS_WEIGHT = 10.0
+VARIABLE_J_AZIMUTH_EXCESS_TOLERANCE_DEG = 5.0
 
 
 def _target_miss_components(
@@ -699,6 +700,66 @@ def _j_profile_can_compete(
     return bool(float(j_candidate.md_total_m) <= max_md + SMALL)
 
 
+def _azimuth_on_shortest_arc_deg(
+    azimuth_from_deg: float,
+    azimuth_to_deg: float,
+    progress: float,
+) -> float:
+    return float(
+        _normalize_azimuth_deg(
+            float(azimuth_from_deg)
+            + float(progress)
+            * _shortest_azimuth_delta_deg(
+                float(azimuth_from_deg),
+                float(azimuth_to_deg),
+            )
+        )
+    )
+
+
+def _azimuth_within_shortest_arc_deg(
+    azimuth_from_deg: float,
+    azimuth_candidate_deg: float,
+    azimuth_to_deg: float,
+    *,
+    tolerance_deg: float = 1e-6,
+) -> bool:
+    return bool(
+        _azimuth_shortest_arc_excess_deg(
+            azimuth_from_deg=float(azimuth_from_deg),
+            azimuth_candidate_deg=float(azimuth_candidate_deg),
+            azimuth_to_deg=float(azimuth_to_deg),
+        )
+        <= float(tolerance_deg)
+    )
+
+
+def _azimuth_shortest_arc_excess_deg(
+    azimuth_from_deg: float,
+    azimuth_candidate_deg: float,
+    azimuth_to_deg: float,
+) -> float:
+    total_delta = float(
+        _shortest_azimuth_delta_deg(
+            float(azimuth_from_deg),
+            float(azimuth_to_deg),
+        )
+    )
+    candidate_delta = float(
+        _shortest_azimuth_delta_deg(
+            float(azimuth_from_deg),
+            float(azimuth_candidate_deg),
+        )
+    )
+    if abs(total_delta) <= SMALL:
+        return float(abs(candidate_delta))
+    if abs(candidate_delta) <= SMALL:
+        return 0.0
+    if np.sign(candidate_delta) != np.sign(total_delta):
+        return float(abs(candidate_delta))
+    return float(max(abs(candidate_delta) - abs(total_delta), 0.0))
+
+
 def _candidate_within_md_postcheck(
     *,
     candidate: ProfileParameters,
@@ -718,7 +779,6 @@ def _variable_j_seed_vectors(
 ) -> list[np.ndarray]:
     az_surface = float(geometry.azimuth_surface_t1_deg)
     az_entry = float(geometry.azimuth_entry_deg)
-    az_mid = float(_mid_azimuth_deg(az_surface, az_entry))
     inc_entry = float(geometry.inc_entry_deg)
     dls_units = _dedupe_scalar_values(
         [
@@ -741,15 +801,8 @@ def _variable_j_seed_vectors(
     )
     azimuth_values = _dedupe_scalar_values(
         [
-            az_surface,
-            az_mid,
-            _normalize_azimuth_deg(
-                az_surface
-                - 0.5 * abs(_shortest_azimuth_delta_deg(az_surface, az_entry))
-            ),
-            _normalize_azimuth_deg(
-                az_entry + 0.5 * _shortest_azimuth_delta_deg(az_surface, az_entry)
-            ),
+            _azimuth_on_shortest_arc_deg(az_surface, az_entry, progress)
+            for progress in (0.0, 0.25, 0.5, 0.75, 1.0)
         ],
         lower=0.0,
         upper=360.0,
@@ -935,6 +988,12 @@ def _variable_j_build_endpoint(
     if inc_mid_deg <= SMALL or inc_mid_deg >= float(geometry.inc_entry_deg) - SMALL:
         return None
     if dls1 <= SMALL or dls2 <= SMALL:
+        return None
+    if _azimuth_shortest_arc_excess_deg(
+        float(geometry.azimuth_surface_t1_deg),
+        float(az_mid_deg),
+        float(geometry.azimuth_entry_deg),
+    ) > VARIABLE_J_AZIMUTH_EXCESS_TOLERANCE_DEG:
         return None
 
     length1_m = _build_length_from_dls(

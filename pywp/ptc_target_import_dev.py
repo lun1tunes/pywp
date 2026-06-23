@@ -34,7 +34,6 @@ __all__ = [
 ]
 
 _DEV_DLS_EPSILON_DEG_PER_30M = 0.05
-_DEV_INCL_EPSILON_DEG = 0.05
 _DEV_WELL_NAME_RE = re.compile(
     r"^\s*#\s*WELL NAME:\s*(.+?)\s*$",
     flags=re.IGNORECASE | re.MULTILINE,
@@ -137,8 +136,7 @@ def target_record_and_summary_from_dev_well(
     first_dynamic_index = int(groups[0][0])
     kop_index = max(first_dynamic_index - 1, 0)
     pre_entry_start, pre_entry_end = groups[pre_entry_group_index]
-    transition_index = _first_inclination_trend_change(rows, pre_entry_start, pre_entry_end)
-    t1_index = pre_entry_end if transition_index is None else transition_index - 1
+    t1_index = pre_entry_end
     if t1_index <= 0 or t1_index >= len(rows.index) - 1:
         raise WelltrackParseError(
             f".dev '{well.name}': не удалось надежно определить точку t1."
@@ -152,8 +150,6 @@ def target_record_and_summary_from_dev_well(
         build2_slice = rows.iloc[pre_entry_start : t1_index + 1]
 
     horizontal_parts: list[pd.DataFrame] = []
-    if transition_index is not None and transition_index <= pre_entry_end:
-        horizontal_parts.append(rows.iloc[transition_index : pre_entry_end + 1])
     for start, end in groups[pre_entry_group_index + 1 :]:
         horizontal_parts.append(rows.iloc[start : end + 1])
     horizontal_slice = (
@@ -204,7 +200,6 @@ def target_record_and_summary_from_dev_well(
             build1_dls=_stable_unique_dls(build1_slice),
             build2_dls=_stable_unique_dls(build2_slice),
             horizontal_dls=_stable_unique_dls(horizontal_slice),
-            transition_index=transition_index,
         ),
     )
     return record, summary
@@ -276,39 +271,6 @@ def _true_groups(mask: Sequence[bool]) -> list[tuple[int, int]]:
     return groups
 
 
-def _first_inclination_trend_change(
-    rows: pd.DataFrame,
-    start_index: int,
-    end_index: int,
-) -> int | None:
-    if end_index - start_index < 2:
-        return None
-    deltas = (
-        rows["INCL"].astype(float).diff().fillna(0.0).to_numpy(dtype=float)
-    )
-    initial_sign = 0
-    for index in range(start_index + 1, end_index + 1):
-        sign = _delta_sign(deltas[index])
-        if sign != 0:
-            initial_sign = sign
-            break
-    if initial_sign == 0:
-        return None
-    for index in range(start_index + 1, end_index + 1):
-        sign = _delta_sign(deltas[index])
-        if sign != 0 and sign != initial_sign:
-            return index
-    return None
-
-
-def _delta_sign(value: float) -> int:
-    if value > _DEV_INCL_EPSILON_DEG:
-        return 1
-    if value < -_DEV_INCL_EPSILON_DEG:
-        return -1
-    return 0
-
-
 def _stable_unique_dls(rows: pd.DataFrame) -> tuple[float, ...]:
     values: list[float] = []
     seen: set[float] = set()
@@ -338,7 +300,6 @@ def _summary_note(
     build1_dls: Sequence[float],
     build2_dls: Sequence[float],
     horizontal_dls: Sequence[float],
-    transition_index: int | None,
 ) -> str:
     notes: list[str] = []
     if len(build1_dls) > 1:
@@ -347,8 +308,6 @@ def _summary_note(
         notes.append("BUILD2 с переменным ПИ")
     if len(horizontal_dls) > 1:
         notes.append("HORIZONTAL с переменным ПИ")
-    if transition_index is not None:
-        notes.append("t1 определена по смене тренда INC")
     if str(profile_label) == "J-профиль" and build2_dls:
         notes.append("Второй BUILD не ожидается для J-профиля")
     return "; ".join(notes) if notes else "—"

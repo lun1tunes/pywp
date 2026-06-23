@@ -32,13 +32,16 @@ __all__ = [
     "BATCH_SUMMARY_DISPLAY_ORDER",
     "BATCH_SUMMARY_RENAME_COLUMNS",
     "BatchSummaryStatusCounts",
+    "DevExportFilePayload",
     "batch_summary_display_df",
     "batch_summary_status_counts",
     "build_batch_survey_csv",
+    "build_batch_survey_dev_files",
     "build_batch_survey_dev_7z",
     "build_batch_survey_dev_file",
     "build_batch_survey_dev_zip",
     "build_batch_target_csv",
+    "build_batch_target_dev_files",
     "build_batch_target_dev_7z",
     "build_batch_target_dev_file",
     "build_batch_target_welltrack",
@@ -112,6 +115,13 @@ class _SurveyExportContext:
     export_crs: CoordinateSystem
     should_transform: bool
     should_label_export_crs: bool
+
+
+@dataclass(frozen=True)
+class DevExportFilePayload:
+    well_name: str
+    file_name: str
+    data: bytes
 
 
 def build_batch_survey_csv(
@@ -337,43 +347,24 @@ def build_batch_survey_dev_7z(
     transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
 ) -> bytes:
     buffer = BytesIO()
-    used_names: set[str] = set()
-    file_count = 0
+    file_payloads = build_batch_survey_dev_files(
+        successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        reference_wells=reference_wells,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_stations_func=transform_stations_func,
+    )
+    if not file_payloads:
+        return b""
     with TemporaryDirectory() as temp_dir:
         temp_root = Path(temp_dir)
         with py7zr.SevenZipFile(buffer, mode="w") as archive:
-            for index, (success, stations) in enumerate(
-                _iter_prepared_success_stations(
-                    successes,
-                    target_crs=source_crs,
-                    auto_convert=False,
-                    source_crs=source_crs,
-                    csv_export_crs_func=csv_export_crs_func,
-                    transform_stations_func=transform_stations_func,
-                ),
-                start=1,
-            ):
-                if len(stations.index) < 2:
-                    continue
-                file_name = _unique_export_file_name(
-                    str(success.name),
-                    index=index,
-                    extension=".dev",
-                    used_names=used_names,
-                )
-                source_path = temp_root / file_name
-                source_path.write_text(
-                    _dev_export_text(
-                        success=success,
-                        stations=stations,
-                        reference_wells=reference_wells,
-                    ),
-                    encoding="utf-8",
-                )
-                archive.write(source_path, file_name)
-                file_count += 1
-    if file_count <= 0:
-        return b""
+            for file_payload in file_payloads:
+                source_path = temp_root / str(file_payload.file_name)
+                source_path.write_bytes(bytes(file_payload.data))
+                archive.write(source_path, str(file_payload.file_name))
     return buffer.getvalue()
 
 
@@ -384,34 +375,22 @@ def build_batch_target_dev_7z(
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> bytes:
-    del target_crs, auto_convert, source_crs
+    file_payloads = build_batch_target_dev_files(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+    )
+    if not file_payloads:
+        return b""
     buffer = BytesIO()
-    used_names: set[str] = set()
-    file_count = 0
     with TemporaryDirectory() as temp_dir:
         temp_root = Path(temp_dir)
         with py7zr.SevenZipFile(buffer, mode="w") as archive:
-            for index, (record, rows) in enumerate(
-                _iter_prepared_target_rows(records),
-                start=1,
-            ):
-                if rows.empty:
-                    continue
-                file_name = _unique_export_file_name(
-                    str(record.name),
-                    index=index,
-                    extension=".dev",
-                    used_names=used_names,
-                )
-                source_path = temp_root / file_name
-                source_path.write_text(
-                    _target_dev_export_text(record=record, rows=rows),
-                    encoding="utf-8",
-                )
-                archive.write(source_path, file_name)
-                file_count += 1
-    if file_count <= 0:
-        return b""
+            for file_payload in file_payloads:
+                source_path = temp_root / str(file_payload.file_name)
+                source_path.write_bytes(bytes(file_payload.data))
+                archive.write(source_path, str(file_payload.file_name))
     return buffer.getvalue()
 
 
@@ -446,24 +425,18 @@ def build_batch_survey_dev_file(
     csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
     transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
 ) -> bytes:
-    prepared = _iter_prepared_success_stations(
+    file_payloads = build_batch_survey_dev_files(
         successes,
-        target_crs=source_crs,
-        auto_convert=False,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
         source_crs=source_crs,
+        reference_wells=reference_wells,
         csv_export_crs_func=csv_export_crs_func,
         transform_stations_func=transform_stations_func,
     )
-    if len(prepared) != 1:
+    if len(file_payloads) != 1:
         return b""
-    success, stations = prepared[0]
-    if len(stations.index) < 2:
-        return b""
-    return _dev_export_text(
-        success=success,
-        stations=stations,
-        reference_wells=reference_wells,
-    ).encode("utf-8")
+    return bytes(file_payloads[0].data)
 
 
 def build_batch_target_dev_file(
@@ -473,14 +446,90 @@ def build_batch_target_dev_file(
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> bytes:
+    file_payloads = build_batch_target_dev_files(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+    )
+    if len(file_payloads) != 1:
+        return b""
+    return bytes(file_payloads[0].data)
+
+
+def build_batch_survey_dev_files(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
+    transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
+) -> tuple[DevExportFilePayload, ...]:
+    del target_crs, auto_convert
+    used_names: set[str] = set()
+    payloads: list[DevExportFilePayload] = []
+    for index, (success, stations) in enumerate(
+        _iter_prepared_success_stations(
+            successes,
+            target_crs=source_crs,
+            auto_convert=False,
+            source_crs=source_crs,
+            csv_export_crs_func=csv_export_crs_func,
+            transform_stations_func=transform_stations_func,
+        ),
+        start=1,
+    ):
+        if len(stations.index) < 2:
+            continue
+        file_name = _unique_export_file_name(
+            str(success.name),
+            index=index,
+            extension=".dev",
+            used_names=used_names,
+        )
+        payloads.append(
+            DevExportFilePayload(
+                well_name=str(success.name),
+                file_name=file_name,
+                data=_dev_export_text(
+                    success=success,
+                    stations=stations,
+                    reference_wells=reference_wells,
+                ).encode("utf-8"),
+            )
+        )
+    return tuple(payloads)
+
+
+def build_batch_target_dev_files(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> tuple[DevExportFilePayload, ...]:
     del target_crs, auto_convert, source_crs
-    prepared = _iter_prepared_target_rows(records)
-    if len(prepared) != 1:
-        return b""
-    record, rows = prepared[0]
-    if rows.empty:
-        return b""
-    return _target_dev_export_text(record=record, rows=rows).encode("utf-8")
+    used_names: set[str] = set()
+    payloads: list[DevExportFilePayload] = []
+    for index, (record, rows) in enumerate(_iter_prepared_target_rows(records), start=1):
+        if rows.empty:
+            continue
+        file_name = _unique_export_file_name(
+            str(record.name),
+            index=index,
+            extension=".dev",
+            used_names=used_names,
+        )
+        payloads.append(
+            DevExportFilePayload(
+                well_name=str(record.name),
+                file_name=file_name,
+                data=_target_dev_export_text(record=record, rows=rows).encode("utf-8"),
+            )
+        )
+    return tuple(payloads)
 
 
 def dev_export_file_name(name: str, *, fallback_index: int = 1) -> str:

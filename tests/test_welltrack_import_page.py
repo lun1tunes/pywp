@@ -4357,6 +4357,7 @@ def test_apply_dev_params_to_manual_well_overrides_sets_local_values() -> None:
     assert payload["name"] == "WELL-A"
     assert payload["source"] == "Импорт .dev"
     assert payload["values"]["kop_min_vertical"] == pytest.approx(980.0)
+    assert payload["values"]["use_fixed_kop"] is True
     assert payload["values"]["entry_inc_target"] == pytest.approx(87.0)
     assert payload["values"]["dls_build_max"] == pytest.approx(0.8)
     assert "dls_build2_enabled" not in payload["values"]
@@ -4424,6 +4425,7 @@ def test_apply_dev_params_to_manual_well_overrides_sets_optional_build2_when_nee
         "WELL-A"
     ]
     payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY][profile_id]
+    assert payload["values"]["use_fixed_kop"] is True
     assert payload["values"]["dls_build_max"] == pytest.approx(0.8)
     assert payload["values"]["dls_build2_enabled"] is True
     assert payload["values"]["dls_build2_max"] == pytest.approx(1.8)
@@ -6056,6 +6058,16 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
             page.st.session_state.get(kwargs.get("key"))
         ),
     )
+    monkeypatch.setattr(
+        page.st,
+        "text_input",
+        lambda _label, *args, **kwargs: page.st.session_state.setdefault(
+            kwargs.get("key"), ""
+        ),
+    )
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dialog", lambda *_args, **_kwargs: (lambda func: func))
     monkeypatch.setattr(page.st, "download_button", _fake_download_button)
 
     page._render_batch_summary(
@@ -6083,6 +6095,201 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
         .decode("utf-8")
         .startswith("# SURVEY FROM PYWP")
     )
+
+
+def test_batch_summary_dev_folder_export_writes_selected_files(monkeypatch, tmp_path) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+    ]
+    page.st.session_state["wt_survey_download_selected_names"] = ["WELL-A"]
+    page.st.session_state["wt_survey_download_format"] = ".dev (7z)"
+    captured: dict[str, object] = {"download_buttons": [], "success": []}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fake_download_button(label, *args, **kwargs):
+        captured["download_buttons"].append(str(label))
+        return False
+
+    def _fake_button(label, *args, **kwargs):
+        return str(label) == "Сохранить выбранные .dev"
+
+    def _fake_text_input(_label, *args, **kwargs):
+        key = kwargs.get("key")
+        page.st.session_state[key] = str(tmp_path)
+        return str(tmp_path)
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, *args, **kwargs: list(
+            page.st.session_state.get(kwargs.get("key"), [])
+        ),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "radio",
+        lambda _label, *args, **kwargs: str(
+            page.st.session_state.get(kwargs.get("key"))
+        ),
+    )
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "button", _fake_button)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dialog", lambda *_args, **_kwargs: (lambda func: func))
+    monkeypatch.setattr(
+        page.st,
+        "success",
+        lambda message, *args, **kwargs: captured["success"].append(str(message)),
+    )
+    monkeypatch.setattr(page.st, "download_button", _fake_download_button)
+
+    page._render_batch_summary(
+        [
+            {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+            {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+        ]
+    )
+
+    written = tmp_path / "WELL-A.dev"
+    assert written.exists()
+    assert written.read_text(encoding="utf-8").startswith("# SURVEY FROM PYWP")
+    assert page.st.session_state.get("wt_dev_export_pending") is None
+
+
+def test_batch_summary_dev_folder_export_requests_overwrite_confirmation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+    ]
+    page.st.session_state["wt_survey_download_selected_names"] = ["WELL-A"]
+    page.st.session_state["wt_survey_download_format"] = ".dev (7z)"
+    (tmp_path / "WELL-A.dev").write_text("old", encoding="utf-8")
+    captured: dict[str, object] = {"dialog_titles": [], "writes": []}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fake_button(label, *args, **kwargs):
+        label_text = str(label)
+        if label_text == "Сохранить выбранные .dev":
+            return True
+        return False
+
+    def _fake_text_input(_label, *args, **kwargs):
+        key = kwargs.get("key")
+        page.st.session_state[key] = str(tmp_path)
+        return str(tmp_path)
+
+    def _fake_dialog(title, *args, **kwargs):
+        captured["dialog_titles"].append(str(title))
+
+        def _decorator(func):
+            def _wrapped(*f_args, **f_kwargs):
+                return func(*f_args, **f_kwargs)
+
+            return _wrapped
+
+        return _decorator
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, *args, **kwargs: list(
+            page.st.session_state.get(kwargs.get("key"), [])
+        ),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "radio",
+        lambda _label, *args, **kwargs: str(
+            page.st.session_state.get(kwargs.get("key"))
+        ),
+    )
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "button", _fake_button)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dialog", _fake_dialog)
+    monkeypatch.setattr(
+        page.st,
+        "write",
+        lambda message, *args, **kwargs: captured["writes"].append(str(message)),
+    )
+    monkeypatch.setattr(page.st, "download_button", lambda *args, **kwargs: False)
+
+    page._render_batch_summary(
+        [
+            {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+            {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+        ]
+    )
+
+    pending = page.st.session_state.get("wt_dev_export_pending")
+    assert pending is not None
+    assert pending.conflict_file_names == ("WELL-A.dev",)
+    assert captured["dialog_titles"] == ["Сохранение .dev в папку"]
+    assert any("WELL-A (WELL-A.dev)" in line for line in captured["writes"])
+
+
+def test_batch_summary_dev_folder_export_rejects_drive_root() -> None:
+    panel = wt_import_module.ptc_batch_summary_panel
+
+    path, error_message = panel._validated_dev_export_directory("C:\\")
+
+    assert path is None
+    assert error_message == "На диски C: и D: выгрузка .dev файлов запрещена."
+
+
+def test_batch_summary_dev_folder_export_rejects_drive_d() -> None:
+    panel = wt_import_module.ptc_batch_summary_panel
+
+    path, error_message = panel._validated_dev_export_directory(r"D:\Exports\DEV")
+
+    assert path is None
+    assert error_message == "На диски C: и D: выгрузка .dev файлов запрещена."
 
 
 def test_batch_summary_can_export_target_points(monkeypatch) -> None:

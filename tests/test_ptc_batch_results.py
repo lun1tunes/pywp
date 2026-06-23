@@ -475,6 +475,42 @@ def test_build_batch_survey_dev_7z_exports_one_dev_file_per_well(tmp_path) -> No
     assert rows.iloc[1]["MD"] == pytest.approx(100.0)
 
 
+def test_build_batch_survey_dev_files_exports_named_payloads() -> None:
+    payloads = ptc_batch_results.build_batch_survey_dev_files(
+        [
+            _success(
+                name="WELL-A",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 100.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [30.0, 45.0],
+                        "Z_m": [-5.0, 95.0],
+                        "INC_deg": [0.0, 20.0],
+                        "AZI_deg": [0.0, 45.0],
+                        "DLS_deg_per_30m": [0.0, 1.5],
+                    }
+                ),
+            ),
+            _success(
+                name="WELL/B",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 100.0],
+                        "X_m": [1.0, 2.0],
+                        "Y_m": [3.0, 4.0],
+                        "Z_m": [5.0, 6.0],
+                    }
+                ),
+            ),
+        ]
+    )
+
+    assert [payload.file_name for payload in payloads] == ["WELL-A.dev", "WELL_B.dev"]
+    assert [payload.well_name for payload in payloads] == ["WELL-A", "WELL/B"]
+    assert bytes(payloads[0].data).decode("utf-8").startswith("# SURVEY FROM PYWP")
+
+
 def test_build_batch_survey_dev_file_exports_single_selected_well() -> None:
     payload = ptc_batch_results.build_batch_survey_dev_file(
         [

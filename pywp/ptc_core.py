@@ -4081,9 +4081,11 @@ def _delete_manual_well_calc_profile(profile_id: str) -> tuple[int, int]:
 def _dev_summary_override_values(
     summary: ptc_target_import.DevTargetImportSummary,
 ) -> dict[str, float | int | str | bool]:
+    entry_inc_target = min(max(float(summary.entry_inc_deg), 0.5), 89.0)
     values: dict[str, float | int | str | bool] = {
         "kop_min_vertical": float(summary.kop_md_m),
-        "entry_inc_target": float(summary.entry_inc_deg),
+        "use_fixed_kop": True,
+        "entry_inc_target": float(entry_inc_target),
     }
     build_dls_values = tuple(
         float(value)
@@ -8694,6 +8696,24 @@ def _build_batch_survey_dev_7z(
     )
 
 
+def _build_batch_survey_dev_files(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> tuple[ptc_batch_results.DevExportFilePayload, ...]:
+    return ptc_batch_results.build_batch_survey_dev_files(
+        successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        reference_wells=_reference_wells_from_state(),
+        csv_export_crs_func=csv_export_crs,
+        transform_stations_func=transform_stations_to_crs,
+    )
+
+
 def _build_batch_target_dev_7z(
     records: list[WelltrackRecord],
     *,
@@ -8702,6 +8722,21 @@ def _build_batch_target_dev_7z(
     source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> bytes:
     return ptc_batch_results.build_batch_target_dev_7z(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+    )
+
+
+def _build_batch_target_dev_files(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> tuple[ptc_batch_results.DevExportFilePayload, ...]:
+    return ptc_batch_results.build_batch_target_dev_files(
         records,
         target_crs=target_crs,
         auto_convert=auto_convert,
@@ -8761,10 +8796,12 @@ def _render_batch_summary(
         batch_summary_display_df_func=_batch_summary_display_df,
         build_batch_survey_csv_func=_build_batch_survey_csv,
         build_batch_survey_welltrack_func=_build_batch_survey_welltrack,
+        build_batch_survey_dev_files_func=_build_batch_survey_dev_files,
         build_batch_survey_dev_7z_func=_build_batch_survey_dev_7z,
         build_batch_survey_dev_file_func=_build_batch_survey_dev_file,
         build_batch_target_csv_func=_build_batch_target_csv,
         build_batch_target_welltrack_func=_build_batch_target_welltrack,
+        build_batch_target_dev_files_func=_build_batch_target_dev_files,
         build_batch_target_dev_7z_func=_build_batch_target_dev_7z,
         build_batch_target_dev_file_func=_build_batch_target_dev_file,
         render_small_note_func=render_small_note,

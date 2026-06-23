@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
+from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -23,6 +25,7 @@ __all__ = ["render_batch_summary"]
 
 BuildBatchSurveyCsvFunc = Callable[..., bytes]
 BuildBatchSurveyPayloadFunc = Callable[..., bytes]
+BuildBatchDevFilesFunc = Callable[..., tuple[ptc_batch_results.DevExportFilePayload, ...]]
 RenderSmallNoteFunc = Callable[[str], None]
 _SURVEY_DOWNLOAD_FORMAT_DEV = ".dev (7z)"
 _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP = ".dev (ZIP)"
@@ -31,6 +34,24 @@ _EXPORT_KIND_TRAJECTORIES = "Траектории"
 _EXPORT_KIND_TARGETS = "Цели"
 _EXPORT_KINDS = (_EXPORT_KIND_TRAJECTORIES, _EXPORT_KIND_TARGETS)
 _DOWNLOAD_AUTO_BUILD_ROW_LIMIT = 5000
+_WINDOWS_BLOCKED_DEV_EXPORT_DRIVES = frozenset({"c", "d"})
+_DEV_EXPORT_DIRECTORY_KEY = "wt_dev_export_directory"
+_DEV_EXPORT_PENDING_KEY = "wt_dev_export_pending"
+_DEV_EXPORT_FEEDBACK_KEY = "wt_dev_export_feedback"
+
+
+@dataclass(frozen=True)
+class _PendingDevExportRequest:
+    directory: str
+    files: tuple[ptc_batch_results.DevExportFilePayload, ...]
+    conflict_file_names: tuple[str, ...]
+    title: str
+
+
+@dataclass(frozen=True)
+class _DevExportFeedback:
+    level: str
+    message: str
 
 
 @dataclass(frozen=True)
@@ -69,6 +90,9 @@ def render_batch_summary(
     build_batch_survey_welltrack_func: BuildBatchSurveyPayloadFunc = (
         ptc_batch_results.build_batch_survey_welltrack
     ),
+    build_batch_survey_dev_files_func: BuildBatchDevFilesFunc = (
+        ptc_batch_results.build_batch_survey_dev_files
+    ),
     build_batch_survey_dev_7z_func: BuildBatchSurveyPayloadFunc = (
         ptc_batch_results.build_batch_survey_dev_7z
     ),
@@ -80,6 +104,9 @@ def render_batch_summary(
     ),
     build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc = (
         ptc_batch_results.build_batch_target_welltrack
+    ),
+    build_batch_target_dev_files_func: BuildBatchDevFilesFunc = (
+        ptc_batch_results.build_batch_target_dev_files
     ),
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc = (
         ptc_batch_results.build_batch_target_dev_7z
@@ -235,10 +262,12 @@ def render_batch_summary(
         source_crs=source_crs,
         build_batch_survey_csv_func=build_batch_survey_csv_func,
         build_batch_survey_welltrack_func=build_batch_survey_welltrack_func,
+        build_batch_survey_dev_files_func=build_batch_survey_dev_files_func,
         build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
         build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
         build_batch_target_csv_func=build_batch_target_csv_func,
         build_batch_target_welltrack_func=build_batch_target_welltrack_func,
+        build_batch_target_dev_files_func=build_batch_target_dev_files_func,
         build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
         build_batch_target_dev_file_func=build_batch_target_dev_file_func,
     )
@@ -254,10 +283,12 @@ def _render_survey_downloads(
     source_crs: CoordinateSystem,
     build_batch_survey_csv_func: BuildBatchSurveyCsvFunc,
     build_batch_survey_welltrack_func: BuildBatchSurveyPayloadFunc,
+    build_batch_survey_dev_files_func: BuildBatchDevFilesFunc,
     build_batch_survey_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_survey_dev_file_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
     build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_dev_files_func: BuildBatchDevFilesFunc,
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
 ) -> None:
@@ -300,6 +331,7 @@ def _render_survey_downloads(
             export_format=export_format,
             build_batch_target_csv_func=build_batch_target_csv_func,
             build_batch_target_welltrack_func=build_batch_target_welltrack_func,
+            build_batch_target_dev_files_func=build_batch_target_dev_files_func,
             build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
             build_batch_target_dev_file_func=build_batch_target_dev_file_func,
         )
@@ -424,6 +456,28 @@ def _render_survey_downloads(
             use_container_width=True,
             disabled=not selected_survey_data,
         )
+    if export_format == _SURVEY_DOWNLOAD_FORMAT_DEV:
+        _render_dev_directory_export_controls(
+            state=state,
+            st_module=st_module,
+            title="Сохранение .dev в папку",
+            build_all_files=lambda: build_batch_survey_dev_files_func(
+                successes,
+                target_crs=target_crs,
+                auto_convert=auto_convert,
+                source_crs=source_crs,
+            ),
+            build_selected_files=lambda: build_batch_survey_dev_files_func(
+                selected_successes,
+                target_crs=target_crs,
+                auto_convert=auto_convert,
+                source_crs=source_crs,
+            ),
+            save_all_label="Сохранить все .dev",
+            save_selected_label="Сохранить выбранные .dev",
+            disable_all=not successes,
+            disable_selected=not selected_successes,
+        )
 
 
 def _render_target_downloads(
@@ -436,6 +490,7 @@ def _render_target_downloads(
     export_format: str,
     build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
     build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
+    build_batch_target_dev_files_func: BuildBatchDevFilesFunc,
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
 ) -> None:
@@ -554,6 +609,28 @@ def _render_target_downloads(
             icon=":material/download:",
             use_container_width=True,
             disabled=not selected_target_data,
+        )
+    if export_format == _SURVEY_DOWNLOAD_FORMAT_DEV:
+        _render_dev_directory_export_controls(
+            state=state,
+            st_module=st_module,
+            title="Сохранение целей .dev в папку",
+            build_all_files=lambda: build_batch_target_dev_files_func(
+                records,
+                target_crs=target_crs,
+                auto_convert=auto_convert,
+                source_crs=source_crs,
+            ),
+            build_selected_files=lambda: build_batch_target_dev_files_func(
+                selected_records,
+                target_crs=target_crs,
+                auto_convert=auto_convert,
+                source_crs=source_crs,
+            ),
+            save_all_label="Сохранить все .dev",
+            save_selected_label="Сохранить выбранные .dev",
+            disable_all=not records,
+            disable_selected=not selected_records,
         )
 
 
@@ -850,6 +927,311 @@ def _selected_download_payload(
         export_config.selected_file_name,
         export_config.mime,
     )
+
+
+def _render_dev_directory_export_controls(
+    *,
+    state: MutableMapping[str, object],
+    st_module: Any,
+    title: str,
+    build_all_files: Callable[[], tuple[ptc_batch_results.DevExportFilePayload, ...]],
+    build_selected_files: Callable[
+        [], tuple[ptc_batch_results.DevExportFilePayload, ...]
+    ],
+    save_all_label: str,
+    save_selected_label: str,
+    disable_all: bool,
+    disable_selected: bool,
+) -> None:
+    st_module.caption("`.dev` файлы можно сохранить в папку без архива.")
+    st_module.text_input(
+        "Папка для .dev",
+        key=_DEV_EXPORT_DIRECTORY_KEY,
+        placeholder=r"E:\Exports\DEV",
+    )
+    action_cols = st_module.columns(2, gap="small")
+    with action_cols[0]:
+        save_all_clicked = st_module.button(
+            save_all_label,
+            icon=":material/folder_open:",
+            width="stretch",
+            disabled=bool(disable_all),
+        )
+    with action_cols[1]:
+        save_selected_clicked = st_module.button(
+            save_selected_label,
+            icon=":material/folder_open:",
+            width="stretch",
+            disabled=bool(disable_selected),
+        )
+    if save_all_clicked:
+        _start_dev_directory_export(
+            state=state,
+            build_files=build_all_files,
+            title=title,
+        )
+        _rerun_summary_fragment(st_module)
+    if save_selected_clicked:
+        _start_dev_directory_export(
+            state=state,
+            build_files=build_selected_files,
+            title=title,
+        )
+        _rerun_summary_fragment(st_module)
+    _show_dev_export_feedback(state=state, st_module=st_module)
+    _render_dev_export_overwrite_dialog(state=state, st_module=st_module)
+
+
+def _start_dev_directory_export(
+    *,
+    state: MutableMapping[str, object],
+    build_files: Callable[[], tuple[ptc_batch_results.DevExportFilePayload, ...]],
+    title: str,
+) -> None:
+    raw_directory = str(state.get(_DEV_EXPORT_DIRECTORY_KEY, "")).strip()
+    directory, error_message = _validated_dev_export_directory(raw_directory)
+    if error_message is not None or directory is None:
+        _set_dev_export_feedback(
+            state=state,
+            level="error",
+            message=error_message or "Не удалось определить папку для выгрузки.",
+        )
+        state.pop(_DEV_EXPORT_PENDING_KEY, None)
+        return
+
+    files = tuple(build_files())
+    if not files:
+        _set_dev_export_feedback(
+            state=state,
+            level="warning",
+            message="Нет .dev файлов для сохранения в выбранной выгрузке.",
+        )
+        state.pop(_DEV_EXPORT_PENDING_KEY, None)
+        return
+
+    conflict_file_names = tuple(
+        file_payload.file_name
+        for file_payload in files
+        if (directory / str(file_payload.file_name)).exists()
+    )
+    if conflict_file_names:
+        state[_DEV_EXPORT_PENDING_KEY] = _PendingDevExportRequest(
+            directory=str(directory),
+            files=files,
+            conflict_file_names=conflict_file_names,
+            title=title,
+        )
+        state.pop(_DEV_EXPORT_FEEDBACK_KEY, None)
+        return
+
+    try:
+        _write_dev_export_files(directory=directory, files=files, overwrite=True)
+    except OSError as exc:
+        _set_dev_export_feedback(
+            state=state,
+            level="error",
+            message=f"Не удалось сохранить .dev файлы: {exc}",
+        )
+        state.pop(_DEV_EXPORT_PENDING_KEY, None)
+        return
+    state.pop(_DEV_EXPORT_PENDING_KEY, None)
+    _set_dev_export_feedback(
+        state=state,
+        level="success",
+        message=f"Сохранено .dev файлов: {len(files)}. Папка: {directory}",
+    )
+
+
+def _render_dev_export_overwrite_dialog(
+    *,
+    state: MutableMapping[str, object],
+    st_module: Any,
+) -> None:
+    pending = state.get(_DEV_EXPORT_PENDING_KEY)
+    if not isinstance(pending, _PendingDevExportRequest):
+        return
+
+    conflict_names = tuple(str(name) for name in pending.conflict_file_names)
+    conflict_items = tuple(
+        file_payload
+        for file_payload in pending.files
+        if str(file_payload.file_name) in set(conflict_names)
+    )
+
+    def _render_content() -> None:
+        st_module.write("В папке уже есть .dev файлы с такими именами:")
+        for file_payload in conflict_items:
+            st_module.write(
+                f"- {file_payload.well_name} ({file_payload.file_name})"
+            )
+        action_cols = st_module.columns(2, gap="small")
+        with action_cols[0]:
+            confirm_clicked = st_module.button(
+                "Заменить файлы",
+                type="primary",
+                width="stretch",
+            )
+        with action_cols[1]:
+            cancel_clicked = st_module.button(
+                "Отмена",
+                width="stretch",
+            )
+        if confirm_clicked:
+            directory = Path(str(pending.directory))
+            try:
+                _write_dev_export_files(
+                    directory=directory,
+                    files=pending.files,
+                    overwrite=True,
+                )
+            except OSError as exc:
+                state.pop(_DEV_EXPORT_PENDING_KEY, None)
+                _set_dev_export_feedback(
+                    state=state,
+                    level="error",
+                    message=f"Не удалось заменить .dev файлы: {exc}",
+                )
+                _rerun_summary_fragment(st_module)
+                return
+            state.pop(_DEV_EXPORT_PENDING_KEY, None)
+            _set_dev_export_feedback(
+                state=state,
+                level="success",
+                message=(
+                    f"Сохранено .dev файлов: {len(pending.files)}. "
+                    f"Заменено: {len(conflict_items)}."
+                ),
+            )
+            _rerun_summary_fragment(st_module)
+        if cancel_clicked:
+            state.pop(_DEV_EXPORT_PENDING_KEY, None)
+            _set_dev_export_feedback(
+                state=state,
+                level="info",
+                message="Сохранение .dev файлов отменено.",
+            )
+            _rerun_summary_fragment(st_module)
+
+    dialog_factory = getattr(st_module, "dialog", None)
+    if callable(dialog_factory):
+        @dialog_factory(str(pending.title))
+        def _dialog() -> None:
+            _render_content()
+
+        _dialog()
+        return
+
+    st_module.warning(
+        "Нужна замена существующих .dev файлов. Подтвердите сохранение ниже."
+    )
+    _render_content()
+
+
+def _validated_dev_export_directory(raw_path: str) -> tuple[Path | None, str | None]:
+    path_text = str(raw_path).strip()
+    if not path_text:
+        return None, "Укажите папку для выгрузки .dev файлов."
+    windows_error = _windows_dev_export_directory_error(path_text)
+    if windows_error is not None:
+        return None, windows_error
+
+    path = Path(path_text).expanduser()
+    if path == Path(path.anchor or "/"):
+        return None, "Нельзя выгружать .dev файлы в корень диска."
+    if path.exists() and not path.is_dir():
+        return None, "Указанный путь уже существует и не является папкой."
+    return path, None
+
+
+def _windows_dev_export_directory_error(path_text: str) -> str | None:
+    normalized = str(path_text).strip().replace("/", "\\")
+    if not normalized:
+        return None
+    match = re.match(r"(?i)^([a-z]):(?:\\(.*))?$", normalized)
+    if match is None:
+        return None
+    drive_letter = str(match.group(1) or "").strip().lower()
+    if drive_letter in _WINDOWS_BLOCKED_DEV_EXPORT_DRIVES:
+        return "На диски C: и D: выгрузка .dev файлов запрещена."
+    tail = str(match.group(2) or "").strip("\\")
+    if not tail:
+        return "Нельзя выгружать .dev файлы в корень диска Windows."
+    first_component = tail.split("\\", 1)[0].strip().lower()
+    if first_component in {
+        "windows",
+        "program files",
+        "program files (x86)",
+        "programdata",
+    }:
+        return "В системные каталоги Windows выгрузка .dev файлов запрещена."
+    return None
+
+
+def _write_dev_export_files(
+    *,
+    directory: Path,
+    files: tuple[ptc_batch_results.DevExportFilePayload, ...],
+    overwrite: bool,
+) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for file_payload in files:
+        destination = directory / str(file_payload.file_name)
+        if destination.exists() and not overwrite:
+            raise FileExistsError(str(destination))
+        temp_path = destination.with_name(destination.name + ".pywp_tmp")
+        try:
+            temp_path.write_bytes(bytes(file_payload.data))
+            temp_path.replace(destination)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+
+def _set_dev_export_feedback(
+    *,
+    state: MutableMapping[str, object],
+    level: str,
+    message: str,
+) -> None:
+    state[_DEV_EXPORT_FEEDBACK_KEY] = _DevExportFeedback(
+        level=str(level),
+        message=str(message),
+    )
+
+
+def _show_dev_export_feedback(
+    *,
+    state: MutableMapping[str, object],
+    st_module: Any,
+) -> None:
+    feedback = state.get(_DEV_EXPORT_FEEDBACK_KEY)
+    if not isinstance(feedback, _DevExportFeedback):
+        return
+    level = str(feedback.level).strip().lower()
+    message = str(feedback.message)
+    if level == "success" and hasattr(st_module, "success"):
+        st_module.success(message)
+        return
+    if level == "warning" and hasattr(st_module, "warning"):
+        st_module.warning(message)
+        return
+    if level == "error" and hasattr(st_module, "error"):
+        st_module.error(message)
+        return
+    if level == "info" and hasattr(st_module, "info"):
+        st_module.info(message)
+        return
+    st_module.caption(message)
+
+
+def _rerun_summary_fragment(st_module: Any) -> None:
+    rerun = getattr(st_module, "rerun", None)
+    if not callable(rerun):
+        return
+    try:
+        rerun(scope="fragment")
+    except TypeError:
+        rerun()
 
 
 def _as_selection_list(value: object) -> list[object]:

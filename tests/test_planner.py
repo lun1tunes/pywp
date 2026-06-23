@@ -46,6 +46,23 @@ def _fast_config(**overrides: object) -> TrajectoryConfig:
     return TrajectoryConfig(**base)
 
 
+def _classic_j_reference_targets() -> tuple[Point3D, Point3D, Point3D]:
+    entry_inc_deg = 60.0
+    build_dls_deg_per_30m = 3.0
+    radius_m = 30.0 * 180.0 / np.pi / build_dls_deg_per_30m
+    build_lateral_m = radius_m * (1.0 - np.cos(np.radians(entry_inc_deg)))
+    build_vertical_m = radius_m * np.sin(np.radians(entry_inc_deg))
+    kop_vertical_m = 550.0
+    horizontal_step_m = 1000.0
+    t1_tvd_m = kop_vertical_m + build_vertical_m
+    t3_tvd_m = t1_tvd_m + horizontal_step_m / np.tan(np.radians(entry_inc_deg))
+
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(0.0, build_lateral_m, t1_tvd_m)
+    t3 = Point3D(0.0, build_lateral_m + horizontal_step_m, t3_tvd_m)
+    return surface, t1, t3
+
+
 def test_same_direction_reference_case_solves_with_minimum_kop() -> None:
     config = _fast_config(kop_min_vertical_m=550.0, offer_j_profile=False)
     result = TrajectoryPlanner().plan(
@@ -255,17 +272,8 @@ def test_classic_j_profile_uses_single_build_without_hold_or_second_build() -> N
 
     entry_inc_deg = 60.0
     build_dls_deg_per_30m = 3.0
-    radius_m = 30.0 * 180.0 / np.pi / build_dls_deg_per_30m
-    build_lateral_m = radius_m * (1.0 - np.cos(np.radians(entry_inc_deg)))
-    build_vertical_m = radius_m * np.sin(np.radians(entry_inc_deg))
     kop_vertical_m = 550.0
-    horizontal_step_m = 1000.0
-    t1_tvd_m = kop_vertical_m + build_vertical_m
-    t3_tvd_m = t1_tvd_m + horizontal_step_m / np.tan(np.radians(entry_inc_deg))
-
-    surface = Point3D(0.0, 0.0, 0.0)
-    t1 = Point3D(0.0, build_lateral_m, t1_tvd_m)
-    t3 = Point3D(0.0, build_lateral_m + horizontal_step_m, t3_tvd_m)
+    surface, t1, t3 = _classic_j_reference_targets()
     config = _fast_config(
         kop_min_vertical_m=kop_vertical_m,
         entry_inc_target_deg=entry_inc_deg,
@@ -375,6 +383,9 @@ def test_planner_applies_horizontal_dls_limit_to_post_entry_section() -> None:
 
 
 def test_variable_build_j_profile_handles_non_coplanar_entry_without_hold() -> None:
+    import pywp.planner as planner_module
+    from pywp.planner_geometry import _build_section_geometry, _horizontal_offset
+
     surface = Point3D(377899.9, 930000.4, -20.0)
     t1 = Point3D(377309.9, 929820.8, 3701.51)
     t3 = Point3D(376307.3, 929590.1, 3749.49)
@@ -407,9 +418,81 @@ def test_variable_build_j_profile_handles_non_coplanar_entry_without_hold() -> N
         "HORIZONTAL",
     ]
     assert float(result.stations["DLS_deg_per_30m"].max()) <= 3.0 + 1e-6
+    geometry = _build_section_geometry(surface=surface, t1=t1, t3=t3, config=config)
+    zero_azimuth_turn = bool(abs(float(geometry.t1_cross_m)) <= 1e-9)
+    params, _optimization, *_rest = planner_module._solve_turn_with_restarts(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        geometry=geometry,
+        horizontal_offset_t1_m=_horizontal_offset(surface, t1),
+        config=config,
+        optimization_context=None,
+        zero_azimuth_turn=zero_azimuth_turn,
+        progress_callback=None,
+    )
+    assert str(params.profile_family) == "j_profile"
+    assert len(params.build1_controls) >= 2
+    az_mid_deg = float(params.build1_controls[0][2])
+    azimuth_excess_deg = planner_module._azimuth_shortest_arc_excess_deg(
+        float(geometry.azimuth_surface_t1_deg),
+        az_mid_deg,
+        float(geometry.azimuth_entry_deg),
+    )
+    assert azimuth_excess_deg > 1e-6
+    assert azimuth_excess_deg <= (
+        planner_module.VARIABLE_J_AZIMUTH_EXCESS_TOLERANCE_DEG + 1e-6
+    )
 
 
-def test_offer_j_profile_prefers_simple_j_before_unified_when_feasible() -> None:
+@pytest.mark.parametrize(
+    "well_name",
+    [
+        "well_01",
+        "well_02",
+        "well_03",
+        "well_07",
+        "well_09",
+        "well_11",
+    ],
+)
+def test_reverse_variable_j_regression_cases_fall_back_to_unified_profile(
+    well_name: str,
+) -> None:
+    import pywp.planner as planner_module
+    from pywp.planner_geometry import _build_section_geometry, _horizontal_offset
+
+    record = next(
+        item
+        for item in parse_welltrack_text(Path("tests/test_data/WELLTRACKS4.INC").read_text())
+        if str(item.name) == well_name
+    )
+    surface, t1, t3 = welltrack_points_to_targets(record.points)
+    config = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=3.0,
+        optimization_mode="none",
+        turn_solver_max_restarts=0,
+        offer_j_profile=True,
+    )
+    geometry = _build_section_geometry(surface=surface, t1=t1, t3=t3, config=config)
+    zero_azimuth_turn = bool(abs(float(geometry.t1_cross_m)) <= 1e-9)
+
+    params, _optimization, *_rest = planner_module._solve_turn_with_restarts(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        geometry=geometry,
+        horizontal_offset_t1_m=_horizontal_offset(surface, t1),
+        config=config,
+        optimization_context=None,
+        zero_azimuth_turn=zero_azimuth_turn,
+        progress_callback=None,
+    )
+    assert str(params.profile_family) == "unified"
+
+
+def test_reverse_variable_j_candidate_falls_back_to_unified_when_relaxed_build_allows_it() -> None:
     record = parse_welltrack_text(
         Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
     )[0]
@@ -417,7 +500,7 @@ def test_offer_j_profile_prefers_simple_j_before_unified_when_feasible() -> None
     planner = TrajectoryPlanner()
     messages: list[str] = []
 
-    enabled = planner.plan(
+    result = planner.plan(
         surface=surface,
         t1=t1,
         t3=t3,
@@ -430,29 +513,12 @@ def test_offer_j_profile_prefers_simple_j_before_unified_when_feasible() -> None
         ),
         progress_callback=lambda message, _fraction: messages.append(message),
     )
-    disabled = planner.plan(
-        surface=surface,
-        t1=t1,
-        t3=t3,
-        config=_fast_config(
-            kop_min_vertical_m=550.0,
-            dls_build_max_deg_per_30m=6.0,
-            optimization_mode="none",
-            turn_solver_max_restarts=0,
-            offer_j_profile=False,
-        ),
+    assert str(result.summary["trajectory_type"]) == (
+        "Unified J Profile + Build + Azimuth Turn"
     )
-
-    assert str(enabled.summary["trajectory_type"]) == "J-образная траектория"
-    assert str(enabled.summary["trajectory_profile_family"]) == "j_profile"
-    assert list(enabled.stations["segment"].drop_duplicates()) == [
-        "VERTICAL",
-        "BUILD1",
-        "HORIZONTAL",
-    ]
-    assert str(disabled.summary["trajectory_profile_family"]) == "unified"
+    assert str(result.summary["trajectory_profile_family"]) == "unified"
     assert any("сначала проверяем classic J-профиль" in item for item in messages)
-    assert any("classic J-профиль принят" in item for item in messages)
+    assert not any("classic J-профиль принят" in item for item in messages)
 
 
 def test_minimize_md_keeps_shorter_unified_profile_over_feasible_j_profile() -> None:
@@ -475,11 +541,8 @@ def test_minimize_md_keeps_shorter_unified_profile_over_feasible_j_profile() -> 
     assert 67.0 <= float(result.summary["hold_inc_deg"]) <= 73.0
 
 
-def test_prefer_j_profile_policy_accepts_classic_j_before_md_optimization() -> None:
-    record = parse_welltrack_text(
-        Path("tests/test_data/WELLTRACKS4.INC").read_text(encoding="utf-8")
-    )[0]
-    surface, t1, t3 = welltrack_points_to_targets(record.points)
+def test_prefer_j_profile_policy_accepts_classic_j_reference_case() -> None:
+    surface, t1, t3 = _classic_j_reference_targets()
 
     result = TrajectoryPlanner().plan(
         surface=surface,
@@ -488,6 +551,8 @@ def test_prefer_j_profile_policy_accepts_classic_j_before_md_optimization() -> N
         config=_fast_config(
             kop_min_vertical_m=550.0,
             dls_build_max_deg_per_30m=3.0,
+            entry_inc_target_deg=60.0,
+            max_inc_deg=70.0,
             turn_solver_max_restarts=0,
             j_profile_policy=J_PROFILE_POLICY_PREFER,
         ),

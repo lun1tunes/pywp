@@ -250,6 +250,29 @@ def test_target_import_operation_parses_dev_trajectory_from_inline_text() -> Non
     assert summary.t1_md_m == pytest.approx(1595.0)
 
 
+def test_dev_target_import_keeps_full_build2_until_dls_drops_to_zero() -> None:
+    operation = target_import.build_target_import_operation(
+        target_import.WelltrackSourcePayload(
+            mode=target_import.WT_SOURCE_MODE_INLINE_TEXT,
+            source_format=target_import.WT_SOURCE_FORMAT_DEV_TRAJECTORY,
+            source_text=Path(
+                "tests/test_data/dev_target_import/build_hold_build_equal_pi_with_horizontal_pi.dev"
+            ).read_text(encoding="utf-8"),
+        )
+    )
+
+    parsed = operation.parse()
+
+    summary = parsed.dev_summaries[0]
+    assert summary.profile_label == "BUILD-HOLD-BUILD"
+    assert summary.t1_md_m == pytest.approx(2800.0)
+    assert summary.entry_inc_deg == pytest.approx(72.0)
+    assert summary.build1_dls_deg_per_30m == (2.4,)
+    assert summary.build2_dls_deg_per_30m == (2.4, 1.2)
+    assert summary.horizontal_dls_deg_per_30m == ()
+    assert "t1 определена по смене тренда INC" not in summary.note
+
+
 def test_target_import_operation_parses_dev_trajectory_directory() -> None:
     operation = target_import.build_target_import_operation(
         target_import.WelltrackSourcePayload(
