@@ -2483,7 +2483,8 @@ def test_dev_target_import_stores_read_parameters_and_target_points() -> None:
     assert len(imported_params) == 4
     assert len(imported_dev_wells) == 4
     assert imported_params[0].build1_dls_deg_per_30m == (2.4,)
-    assert imported_params[0].horizontal_dls_deg_per_30m == (1.2,)
+    assert imported_params[0].build2_dls_deg_per_30m == (2.4, 1.2)
+    assert imported_params[0].horizontal_dls_deg_per_30m == ()
     assert imported_params[-1].profile_label == "J-профиль"
     markdown_values = [str(widget.value) for widget in at.markdown]
     assert any("Прочитанные параметры .dev" in value for value in markdown_values)
@@ -4369,6 +4370,36 @@ def test_apply_dev_params_to_manual_well_overrides_sets_local_values() -> None:
         page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY]
         == profile_id
     )
+
+
+def test_apply_dev_params_to_manual_well_overrides_clamps_entry_inc_below_90() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_imported_dev_params"] = (
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-A",
+            profile_label="J-профиль",
+            kop_md_m=980.0,
+            t1_md_m=2500.0,
+            t3_md_m=4200.0,
+            entry_inc_deg=90.0,
+            build1_dls_deg_per_30m=(2.4,),
+            horizontal_dls_deg_per_30m=(1.5,),
+        ),
+    )
+
+    applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
+        well_names=["WELL-A"],
+    )
+
+    assert applied_count == 1
+    assert missing_names == []
+    profile_id = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY][
+        "WELL-A"
+    ]
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY][profile_id]
+    assert payload["values"]["entry_inc_target"] == pytest.approx(89.0)
 
 
 def test_apply_dev_params_to_manual_well_overrides_does_not_toggle_widget_state() -> (

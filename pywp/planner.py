@@ -106,6 +106,7 @@ LATE_ANTI_COLLISION_KEEP_KOP_TOLERANCE_M = 5.0
 LATE_ANTI_COLLISION_KEEP_BUILD1_TOLERANCE_DEG_PER_30M = 0.05
 SPLIT_BUILD_RESCUE_MAX_STARTS = 48
 SPLIT_BUILD_RESCUE_MAX_CANDIDATES = 1
+SPLIT_BUILD_MD_SHORTLIST_MAX_CANDIDATES = 8
 SPLIT_BUILD_RESCUE_MAX_NFEV = 120
 FIXED_KOP_SPLIT_BUILD_RESCUE_MAX_STARTS = 16
 FIXED_KOP_SPLIT_BUILD_RESCUE_MAX_NFEV = 72
@@ -5448,6 +5449,23 @@ def _collect_split_build_turn_candidates(
     best_vertical_m = np.inf
     best_build_dls = float(max(build_dls_upper_deg_per_30m, resolved_build2_upper))
     seen: set[tuple[float, float, float, float, float]] = set()
+    optimization_mode = str(config.optimization_mode)
+    exhaustive_md_shortlist = optimization_mode == OPTIMIZATION_MINIMIZE_MD
+    candidate_limit = (
+        SPLIT_BUILD_MD_SHORTLIST_MAX_CANDIDATES
+        if exhaustive_md_shortlist
+        else SPLIT_BUILD_RESCUE_MAX_CANDIDATES
+    )
+
+    def candidate_sort_key(
+        candidate: ProfileParameters,
+    ) -> tuple[tuple[float, float, float, float], float, float]:
+        return (
+            _optimization_candidate_sort_key(candidate, optimization_mode),
+            float(candidate.dls_build1_deg_per_30m),
+            float(candidate.dls_build2_deg_per_30m),
+        )
+
     fixed_search_components = _fixed_turn_search_components(
         bounds=split_bounds,
         split_build=True,
@@ -5511,16 +5529,13 @@ def _collect_split_build_turn_candidates(
                 continue
             seen.add(key)
             candidates.append(candidate)
-        if len(candidates) >= SPLIT_BUILD_RESCUE_MAX_CANDIDATES:
+            if exhaustive_md_shortlist and len(candidates) > candidate_limit:
+                candidates.sort(key=candidate_sort_key)
+                del candidates[candidate_limit:]
+        if (not exhaustive_md_shortlist) and len(candidates) >= candidate_limit:
             break
 
-    candidates.sort(
-        key=lambda candidate: (
-            _optimization_candidate_sort_key(candidate, str(config.optimization_mode)),
-            float(candidate.dls_build1_deg_per_30m),
-            float(candidate.dls_build2_deg_per_30m),
-        )
-    )
+    candidates.sort(key=candidate_sort_key)
     return candidates, (
         float(best_miss),
         float(best_lateral_m),

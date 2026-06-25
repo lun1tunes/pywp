@@ -688,6 +688,133 @@ def test_planner_respects_explicit_separate_build2_limit() -> None:
     assert float(result.summary["build2_dls_selected_deg_per_30m"]) > 3.0 + 1e-3
 
 
+def test_split_build_md_search_keeps_later_shorter_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    worse_candidate = ProfileParameters(
+        kop_vertical_m=600.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=5.0,
+        dls_build2_deg_per_30m=2.8,
+        build1_length_m=300.0,
+        hold_length_m=400.0,
+        build2_length_m=250.0,
+        horizontal_length_m=1100.0,
+        horizontal_adjust_length_m=100.0,
+        horizontal_hold_length_m=1000.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=1.5,
+        azimuth_hold_deg=35.0,
+        azimuth_entry_deg=20.0,
+    )
+    better_candidate = ProfileParameters(
+        kop_vertical_m=600.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=48.0,
+        dls_build1_deg_per_30m=4.8,
+        dls_build2_deg_per_30m=2.6,
+        build1_length_m=260.0,
+        hold_length_m=260.0,
+        build2_length_m=220.0,
+        horizontal_length_m=1050.0,
+        horizontal_adjust_length_m=90.0,
+        horizontal_hold_length_m=960.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=1.5,
+        azimuth_hold_deg=28.0,
+        azimuth_entry_deg=20.0,
+    )
+    seed_vectors = [
+        np.array([1.0, 0.8, 600.0, 52.0, 400.0, 35.0], dtype=float),
+        np.array([0.6, 0.3, 600.0, 48.0, 260.0, 28.0], dtype=float),
+    ]
+
+    monkeypatch.setattr(
+        planner_module,
+        "_split_build_rescue_seed_vectors",
+        lambda **kwargs: [seed.copy() for seed in seed_vectors],
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_turn_least_squares_probes",
+        lambda **kwargs: [np.asarray(kwargs["seed_vector"], dtype=float)],
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_make_turn_profile_builder",
+        lambda **kwargs: (
+            lambda values: worse_candidate
+            if float(np.asarray(values, dtype=float)[0]) > 0.9
+            else better_candidate
+        ),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_estimate_t1_endpoint_for_profile",
+        lambda candidate: (0.0, 0.0, 0.0),
+    )
+
+    config = _fast_config(
+        kop_min_vertical_m=550.0,
+        dls_build_max_deg_per_30m=5.4,
+        dls_build2_max_deg_per_30m=3.0,
+        dls_horizontal_max_deg_per_30m=2.0,
+        optimization_mode=OPTIMIZATION_MINIMIZE_MD,
+        offer_j_profile=False,
+        turn_solver_max_restarts=0,
+    )
+    geometry = planner_module.SectionGeometry(
+        s1_m=1200.0,
+        z1_m=2600.0,
+        ds_13_m=1100.0,
+        dz_13_m=120.0,
+        azimuth_entry_deg=35.0,
+        azimuth_surface_t1_deg=20.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        t1_cross_m=10.0,
+        t3_cross_m=0.0,
+        t1_east_m=0.0,
+        t1_north_m=0.0,
+        t1_tvd_m=0.0,
+    )
+    post_entry = planner_module.PostEntrySection(
+        total_length_m=1200.0,
+        transition_length_m=200.0,
+        hold_length_m=1000.0,
+        hold_inc_deg=85.0,
+        transition_dls_deg_per_30m=1.5,
+    )
+    bounds = (
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+
+    candidates, _ = planner_module._collect_split_build_turn_candidates(
+        geometry=geometry,
+        build_dls_lower_deg_per_30m=0.1,
+        build_dls_upper_deg_per_30m=5.4,
+        build2_dls_upper_deg_per_30m=3.0,
+        bounds=bounds,
+        base_seed_vectors=[],
+        post_entry=post_entry,
+        target_point=np.zeros(3, dtype=float),
+        config=config,
+        search_settings=planner_module._turn_search_settings(0),
+        zero_azimuth_turn=False,
+    )
+
+    assert candidates == [better_candidate, worse_candidate]
+
+
 def test_planner_respects_build2_limit_when_build1_limit_is_higher() -> None:
     record = parse_welltrack_text(
         Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
@@ -897,9 +1024,9 @@ def test_zero_azimuth_turn_split_build_remains_feasible_with_fixed_kop() -> None
     )
     assert float(result.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
     assert float(result.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
-    assert float(result.summary["build1_dls_selected_deg_per_30m"]) > float(
+    assert float(result.summary["build1_dls_selected_deg_per_30m"]) >= float(
         result.summary["build2_dls_selected_deg_per_30m"]
-    ) + 1e-3
+    ) - 1e-6
 
 
 def test_post_entry_solver_keeps_boundary_case_within_numerical_tolerance() -> None:

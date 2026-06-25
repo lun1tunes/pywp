@@ -6,6 +6,9 @@ import pandas as pd
 import pytest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.models import Point3D
+from pywp.ptc_target_import_dev import target_record_and_summary_from_dev_well
+from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp import ptc_target_import as target_import
 
 
@@ -271,6 +274,264 @@ def test_dev_target_import_keeps_full_build2_until_dls_drops_to_zero() -> None:
     assert summary.build2_dls_deg_per_30m == (2.4, 1.2)
     assert summary.horizontal_dls_deg_per_30m == ()
     assert "t1 определена по смене тренда INC" not in summary.note
+
+
+def test_dev_target_import_merges_short_zero_dls_gaps_inside_builds() -> None:
+    md_values = [float(index * 100) for index in range(21)]
+    incl_values = [
+        0.0,
+        0.0,
+        2.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        6.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        10.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        15.0,
+        18.0,
+        18.0,
+    ]
+    dls_values = [
+        0.0,
+        0.0,
+        1.2,
+        1.2,
+        0.0,
+        0.0,
+        0.0,
+        1.2,
+        1.2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.8,
+        1.8,
+        0.0,
+        0.0,
+        0.0,
+        1.8,
+        1.8,
+        0.0,
+    ]
+    stations = pd.DataFrame(
+        {
+            "MD_m": md_values,
+            "X_m": md_values,
+            "Y_m": [0.0] * len(md_values),
+            "Z_m": [0.0] * len(md_values),
+        }
+    )
+    dev_rows = pd.DataFrame(
+        {
+            "MD": md_values,
+            "X": md_values,
+            "Y": [0.0] * len(md_values),
+            "Z": [0.0] * len(md_values),
+            "INCL": incl_values,
+            "DLS": dls_values,
+        }
+    )
+    well = ImportedTrajectoryWell(
+        name="short-gap-builds",
+        kind="approved",
+        stations=stations,
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        azimuth_deg=90.0,
+        dev_export_rows=dev_rows,
+    )
+
+    _record, summary = target_record_and_summary_from_dev_well(well)
+
+    assert summary.profile_label == "BUILD-HOLD-BUILD"
+    assert summary.kop_md_m == pytest.approx(100.0)
+    assert summary.t1_md_m == pytest.approx(1900.0)
+    assert summary.entry_inc_deg == pytest.approx(18.0)
+    assert summary.build1_dls_deg_per_30m == (1.2,)
+    assert summary.build2_dls_deg_per_30m == (1.8,)
+    assert summary.horizontal_dls_deg_per_30m == ()
+
+
+def test_dev_target_import_uses_hold_plateau_to_merge_long_gaps_inside_builds() -> (
+    None
+):
+    md_values = [float(index * 100) for index in range(28)]
+    incl_values = [
+        0.0,
+        0.0,
+        2.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        6.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        10.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        14.0,
+        16.0,
+        16.0,
+        16.0,
+    ]
+    dls_values = [
+        0.0,
+        0.0,
+        1.2,
+        1.2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.2,
+        1.2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.8,
+        1.8,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.8,
+        1.8,
+        0.0,
+        0.0,
+    ]
+    stations = pd.DataFrame(
+        {
+            "MD_m": md_values,
+            "X_m": md_values,
+            "Y_m": [0.0] * len(md_values),
+            "Z_m": [0.0] * len(md_values),
+        }
+    )
+    dev_rows = pd.DataFrame(
+        {
+            "MD": md_values,
+            "X": md_values,
+            "Y": [0.0] * len(md_values),
+            "Z": [0.0] * len(md_values),
+            "INCL": incl_values,
+            "DLS": dls_values,
+        }
+    )
+    well = ImportedTrajectoryWell(
+        name="hold-plateau-builds",
+        kind="approved",
+        stations=stations,
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        azimuth_deg=90.0,
+        dev_export_rows=dev_rows,
+    )
+
+    _record, summary = target_record_and_summary_from_dev_well(well)
+
+    assert summary.profile_label == "BUILD-HOLD-BUILD"
+    assert summary.kop_md_m == pytest.approx(100.0)
+    assert summary.t1_md_m == pytest.approx(2500.0)
+    assert summary.entry_inc_deg == pytest.approx(16.0)
+    assert summary.build1_dls_deg_per_30m == (1.2,)
+    assert summary.build2_dls_deg_per_30m == (1.8,)
+    assert summary.horizontal_dls_deg_per_30m == ()
+
+
+def test_dev_target_import_keeps_j_profile_when_gap_is_not_a_hold() -> None:
+    md_values = [float(index * 100) for index in range(13)]
+    incl_values = [
+        0.0,
+        0.0,
+        2.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        6.0,
+        8.0,
+        10.0,
+        12.0,
+        12.0,
+        12.0,
+    ]
+    dls_values = [
+        0.0,
+        0.0,
+        1.2,
+        1.2,
+        0.0,
+        0.0,
+        0.0,
+        1.2,
+        1.2,
+        1.2,
+        1.2,
+        0.0,
+        0.0,
+    ]
+    stations = pd.DataFrame(
+        {
+            "MD_m": md_values,
+            "X_m": md_values,
+            "Y_m": [0.0] * len(md_values),
+            "Z_m": [0.0] * len(md_values),
+        }
+    )
+    dev_rows = pd.DataFrame(
+        {
+            "MD": md_values,
+            "X": md_values,
+            "Y": [0.0] * len(md_values),
+            "Z": [0.0] * len(md_values),
+            "INCL": incl_values,
+            "DLS": dls_values,
+        }
+    )
+    well = ImportedTrajectoryWell(
+        name="j-gap-not-hold",
+        kind="approved",
+        stations=stations,
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        azimuth_deg=90.0,
+        dev_export_rows=dev_rows,
+    )
+
+    _record, summary = target_record_and_summary_from_dev_well(well)
+
+    assert summary.profile_label == "J-профиль"
+    assert summary.kop_md_m == pytest.approx(100.0)
+    assert summary.t1_md_m == pytest.approx(1000.0)
+    assert summary.entry_inc_deg == pytest.approx(12.0)
+    assert summary.build1_dls_deg_per_30m == (1.2,)
+    assert summary.build2_dls_deg_per_30m == ()
+    assert summary.horizontal_dls_deg_per_30m == ()
 
 
 def test_target_import_operation_parses_dev_trajectory_directory() -> None:

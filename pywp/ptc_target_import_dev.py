@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+import numpy as np
 import pandas as pd
 
 from pywp.eclipse_welltrack import (
@@ -34,6 +35,10 @@ __all__ = [
 ]
 
 _DEV_DLS_EPSILON_DEG_PER_30M = 0.05
+_DEV_INCL_EPSILON_DEG = 0.05
+# BUILD1/BUILD2 can contain short or medium constant-INC pauses inside the same
+# section; the true BUILD-HOLD-BUILD split is anchored to the hold plateau.
+_DEV_HOLD_MIN_ROWS = 4
 _DEV_WELL_NAME_RE = re.compile(
     r"^\s*#\s*WELL NAME:\s*(.+?)\s*$",
     flags=re.IGNORECASE | re.MULTILINE,
@@ -119,44 +124,30 @@ def target_record_and_summary_from_dev_well(
             f".dev '{well.name}': требуется минимум 2 станции для импорта целей."
         )
     rows = _dev_analysis_rows(well)
-    dls_mask = rows["DLS"].abs().to_numpy(dtype=float) > _DEV_DLS_EPSILON_DEG_PER_30M
-    groups = _true_groups(dls_mask.tolist())
+    groups = _dev_activity_groups(rows)
     if not groups:
         raise WelltrackParseError(
-            f".dev '{well.name}': не найден ни один участок набора угла (DLS > 0)."
+            f".dev '{well.name}': не найден ни один участок изменения INC/DLS."
         )
 
     profile_label = "J-профиль" if len(groups) == 1 else "BUILD-HOLD-BUILD"
-    pre_entry_group_index = 0 if len(groups) == 1 else 1
-    if pre_entry_group_index >= len(groups):
-        raise WelltrackParseError(
-            f".dev '{well.name}': не удалось определить участок входа в пласт."
-        )
-
     first_dynamic_index = int(groups[0][0])
     kop_index = max(first_dynamic_index - 1, 0)
-    pre_entry_start, pre_entry_end = groups[pre_entry_group_index]
-    t1_index = pre_entry_end
+    build1_start, build1_end = groups[0]
+    build2_start, build2_end = groups[1] if len(groups) > 1 else (0, 0)
+    t1_index = build2_end if len(groups) > 1 else build1_end
     if t1_index <= 0 or t1_index >= len(rows.index) - 1:
         raise WelltrackParseError(
             f".dev '{well.name}': не удалось надежно определить точку t1."
         )
 
     if len(groups) == 1:
-        build1_slice = rows.iloc[groups[0][0] : t1_index + 1]
+        build1_slice = rows.iloc[build1_start : build1_end + 1]
         build2_slice = rows.iloc[0:0]
     else:
-        build1_slice = rows.iloc[groups[0][0] : groups[0][1] + 1]
-        build2_slice = rows.iloc[pre_entry_start : t1_index + 1]
-
-    horizontal_parts: list[pd.DataFrame] = []
-    for start, end in groups[pre_entry_group_index + 1 :]:
-        horizontal_parts.append(rows.iloc[start : end + 1])
-    horizontal_slice = (
-        pd.concat(horizontal_parts, ignore_index=True)
-        if horizontal_parts
-        else rows.iloc[0:0]
-    )
+        build1_slice = rows.iloc[build1_start : build1_end + 1]
+        build2_slice = rows.iloc[build2_start : build2_end + 1]
+    horizontal_slice = rows.iloc[t1_index + 1 :]
 
     surface_row = stations.iloc[0]
     t1_row = stations.iloc[t1_index]
@@ -269,6 +260,57 @@ def _true_groups(mask: Sequence[bool]) -> list[tuple[int, int]]:
     if start is not None:
         groups.append((start, len(mask) - 1))
     return groups
+
+
+def _dev_activity_groups(rows: pd.DataFrame) -> list[tuple[int, int]]:
+    incl_values = rows["INCL"].astype(float).to_numpy(dtype=float)
+    dls_values = rows["DLS"].abs().to_numpy(dtype=float)
+    incl_deltas = np.abs(np.diff(incl_values, prepend=incl_values[0]))
+    activity_mask = (
+        (incl_deltas > _DEV_INCL_EPSILON_DEG)
+        | (dls_values > _DEV_DLS_EPSILON_DEG_PER_30M)
+    )
+    raw_groups = _true_groups(activity_mask.tolist())
+    if not raw_groups:
+        return []
+    if len(raw_groups) == 1:
+        return raw_groups
+    hold_separator = _dev_hold_separator_index(rows, raw_groups)
+    if hold_separator is None:
+        return [(raw_groups[0][0], raw_groups[-1][1])]
+    return [
+        (raw_groups[0][0], raw_groups[hold_separator][1]),
+        (raw_groups[hold_separator + 1][0], raw_groups[-1][1]),
+    ]
+
+
+def _dev_hold_separator_index(
+    rows: pd.DataFrame,
+    groups: Sequence[tuple[int, int]],
+) -> int | None:
+    candidates: list[tuple[int, float, int]] = []
+    for group_index in range(len(groups) - 1):
+        gap_start = int(groups[group_index][1] + 1)
+        gap_end = int(groups[group_index + 1][0] - 1)
+        if gap_start > gap_end:
+            continue
+        gap_incl = rows["INCL"].iloc[gap_start : gap_end + 1].astype(float)
+        if gap_incl.empty:
+            continue
+        if float(gap_incl.max() - gap_incl.min()) > _DEV_INCL_EPSILON_DEG:
+            continue
+        gap_rows = int(gap_end - gap_start + 1)
+        if gap_rows < _DEV_HOLD_MIN_ROWS:
+            continue
+        gap_md = float(rows["MD"].iloc[gap_end] - rows["MD"].iloc[gap_start])
+        candidates.append((gap_rows, gap_md, group_index))
+    if not candidates:
+        return None
+    _gap_rows, _gap_md, separator_index = max(
+        candidates,
+        key=lambda item: (item[0], item[1]),
+    )
+    return int(separator_index)
 
 
 def _stable_unique_dls(rows: pd.DataFrame) -> tuple[float, ...]:
