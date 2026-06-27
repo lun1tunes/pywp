@@ -299,8 +299,16 @@
         padding: 6px 8px;
         border-radius: 8px;
         background: rgba(15, 23, 42, 0.02);
+        box-shadow: inset 0 0 0 1px transparent;
         cursor: pointer;
-        transition: background 0.15s ease;
+        transition: background 0.15s ease, box-shadow 0.15s ease;
+      }
+
+      .collision-item.is-related-legend-well {
+        background: rgba(37, 99, 235, 0.06);
+        box-shadow:
+          inset 0 0 0 2px rgba(37, 99, 235, 0.82),
+          0 0 0 1px rgba(37, 99, 235, 0.12);
       }
 
       .collision-item:hover {
@@ -1879,6 +1887,8 @@
           payload.focus_targets && typeof payload.focus_targets === "object"
             ? payload.focus_targets
             : {};
+        let legendWellNameKeys = new Set();
+        let selectedLegendWellNameKeys = new Set();
         let editWells = Array.isArray(payload.edit_wells) ? payload.edit_wells : [];
         let editChannelName = String(payload.edit_channel || "");
         const worldAxisFocusPadById = new Map();
@@ -1897,6 +1907,7 @@
             payload.focus_targets && typeof payload.focus_targets === "object"
               ? payload.focus_targets
               : {};
+          legendWellNameKeys.clear();
           worldAxisFocusPadById.clear();
           worldAxisPadFocusIds.length = 0;
           (Array.isArray(payload.legend_tree) ? payload.legend_tree : []).forEach((group) => {
@@ -1910,12 +1921,25 @@
             worldAxisFocusPadById.set(groupId, groupId);
             (Array.isArray(group && group.children) ? group.children : []).forEach((child) => {
               const childId = String((child && child.id) || "").trim();
+              if (childId.startsWith("well::")) {
+                const childWellKey = normalizedWellNameKey(childId.slice(6));
+                if (childWellKey) {
+                  legendWellNameKeys.add(childWellKey);
+                }
+              }
               if (childId) {
                 worldAxisFocusPadById.set(childId, groupId);
               }
             });
           });
           Object.keys(focusTargets).forEach((focusId) => {
+            const normalizedFocusId = String(focusId);
+            if (normalizedFocusId.startsWith("well::")) {
+              const focusWellKey = normalizedWellNameKey(normalizedFocusId.slice(6));
+              if (focusWellKey) {
+                legendWellNameKeys.add(focusWellKey);
+              }
+            }
             if (!String(focusId).startsWith("pad::")) {
               return;
             }
@@ -1937,6 +1961,10 @@
             if (!name) {
               return;
             }
+            const wellNameKey = normalizedWellNameKey(name);
+            if (wellNameKey) {
+              legendWellNameKeys.add(wellNameKey);
+            }
             editWellIndexByName.set(name, index);
             editWellIndexByName.set(`well::${name}`, index);
           });
@@ -1945,6 +1973,13 @@
             .map((well) => String((well && well.color) || "").trim().toLowerCase())
             .filter(Boolean)
             .forEach((colorKey) => editableWellColors.add(colorKey));
+          if (selectedLegendWellNameKeys.size > 0) {
+            selectedLegendWellNameKeys = new Set(
+              Array.from(selectedLegendWellNameKeys).filter((key) =>
+                legendWellNameKeys.has(key),
+              ),
+            );
+          }
         }
 
         syncPayloadCollections();
@@ -4727,6 +4762,81 @@
           return true;
         }
 
+        function normalizedWellNameKey(value) {
+          return String(value || "").trim().toLowerCase();
+        }
+
+        function sameStringSet(left, right) {
+          if (left.size !== right.size) {
+            return false;
+          }
+          for (const value of left) {
+            if (!right.has(value)) {
+              return false;
+            }
+          }
+          return true;
+        }
+
+        function legendWellNameKeysForItem(item, kind) {
+          if (kind === "pad") {
+            return new Set();
+          }
+          const editableIndex = editableIndexForLegendItem(item);
+          if (editableIndex !== null) {
+            const wellName = normalizedWellNameKey((editWells[editableIndex] || {}).name);
+            return wellName ? new Set([wellName]) : new Set();
+          }
+          const focusId = String((item && item.id) || "").trim();
+          if (focusId.startsWith("well::")) {
+            const wellName = normalizedWellNameKey(focusId.slice(6));
+            return wellName ? new Set([wellName]) : new Set();
+          }
+          const labelKey = normalizedWellNameKey(item && item.label);
+          if (labelKey && legendWellNameKeys.has(labelKey)) {
+            return new Set([labelKey]);
+          }
+          return new Set();
+        }
+
+        function collisionItemMatchesSelectedLegendWell(item) {
+          if (!item || selectedLegendWellNameKeys.size === 0) {
+            return false;
+          }
+          const wellAKey = normalizedWellNameKey(item.dataset.collisionWellA);
+          const wellBKey = normalizedWellNameKey(item.dataset.collisionWellB);
+          return (
+            (wellAKey && selectedLegendWellNameKeys.has(wellAKey)) ||
+            (wellBKey && selectedLegendWellNameKeys.has(wellBKey))
+          );
+        }
+
+        function syncSelectedCollisionHighlights() {
+          if (!collisionsPanelElement) {
+            return;
+          }
+          collisionsPanelElement.querySelectorAll(".collision-item").forEach((item) => {
+            item.classList.toggle(
+              "is-related-legend-well",
+              collisionItemMatchesSelectedLegendWell(item),
+            );
+          });
+        }
+
+        function setSelectedLegendWellNameKeys(keys) {
+          const nextKeys = new Set(
+            Array.from(keys || [])
+              .map((value) => normalizedWellNameKey(value))
+              .filter(Boolean),
+          );
+          if (sameStringSet(selectedLegendWellNameKeys, nextKeys)) {
+            syncSelectedCollisionHighlights();
+            return;
+          }
+          selectedLegendWellNameKeys = nextKeys;
+          syncSelectedCollisionHighlights();
+        }
+
         function createLegendSwatch(color, opacity, symbol) {
           const swatch = document.createElement("div");
           swatch.className = "legend-swatch";
@@ -4763,6 +4873,7 @@
           if (targetBounds || editableIndex !== null) {
             row.classList.add("is-focusable");
             row.addEventListener("click", () => {
+              setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, "well"));
               if (editableIndex !== null) {
                 selectEditWell(editableIndex, { focus: !editModeActive });
                 return;
@@ -4850,8 +4961,12 @@
             }
           }
           button.addEventListener("click", () => {
+            setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, kind));
             if (editableIndex !== null) {
               selectEditWell(editableIndex, { focus: !editModeActive });
+              return;
+            }
+            if (kind !== "well") {
               return;
             }
             const targetBounds = focusTargets[String(item.id || "")];
@@ -5070,6 +5185,8 @@
           collisions.forEach((collision) => {
             const item = document.createElement("div");
             item.className = "collision-item";
+            item.dataset.collisionWellA = normalizedWellNameKey(collision.well_a);
+            item.dataset.collisionWellB = normalizedWellNameKey(collision.well_b);
             const label = document.createElement("div");
             label.className = "collision-label";
             label.textContent = String(collision.label || "");
@@ -5151,6 +5268,7 @@
             body.appendChild(item);
           });
           collisionsPanelElement.appendChild(body);
+          syncSelectedCollisionHighlights();
         }
 
         function addLine(item) {
@@ -6025,6 +6143,21 @@
               `<div class="tooltip-kv"><strong>Сегмент:</strong> ${escapeHtml(hover.segment)}</div>`,
             );
           }
+          if (Number.isFinite(hover.x)) {
+            lines.push(
+              `<div class="tooltip-kv"><strong>X:</strong> <span class="tooltip-mono">${Number(hover.x).toFixed(2)} м</span></div>`,
+            );
+          }
+          if (Number.isFinite(hover.y)) {
+            lines.push(
+              `<div class="tooltip-kv"><strong>Y:</strong> <span class="tooltip-mono">${Number(hover.y).toFixed(2)} м</span></div>`,
+            );
+          }
+          if (Number.isFinite(hover.z)) {
+            lines.push(
+              `<div class="tooltip-kv"><strong>Z:</strong> <span class="tooltip-mono">${Number(hover.z).toFixed(2)} м</span></div>`,
+            );
+          }
           if (Number.isFinite(hover.md)) {
             lines.push(
               `<div class="tooltip-kv"><strong>MD:</strong> <span class="tooltip-mono">${Number(hover.md).toFixed(1)} м</span></div>`,
@@ -6051,6 +6184,29 @@
           tooltipElement.style.display = "none";
         }
 
+        function editHandleHoverData(handle) {
+          if (!handle) {
+            return {};
+          }
+          const well = editWells[handle.wellIndex] || {};
+          const point = Array.isArray(handle.dataPos) ? handle.dataPos : [];
+          const hover = {
+            name: String(well.name || ""),
+            point: String(handle.pointType || ""),
+            color: hexOrDefault(well.color, "#2563eb"),
+          };
+          if (Number.isFinite(point[0])) {
+            hover.x = Number(point[0]);
+          }
+          if (Number.isFinite(point[1])) {
+            hover.y = Number(point[1]);
+          }
+          if (Number.isFinite(point[2])) {
+            hover.z = Number(point[2]);
+          }
+          return hover;
+        }
+
         function updateTooltip(event) {
           if (interactionActive || !pointerScreen.inside || hoverTargets.length === 0) {
             hideTooltip();
@@ -6069,15 +6225,19 @@
             return;
           }
           const hoverObject = intersections[0].object;
+          const editHandleIndex = Number(hoverObject.userData.editHandleIndex);
           const indexedHoverItems = Array.isArray(hoverObject.userData.hoverItems)
             ? hoverObject.userData.hoverItems
             : null;
-          const hoverData = Object.assign(
-            {},
-            indexedHoverItems && Number.isInteger(intersections[0].index)
-              ? indexedHoverItems[intersections[0].index] || {}
-              : hoverObject.userData.hover || {},
-          );
+          const hoverData =
+            Number.isInteger(editHandleIndex) && editHandleIndex >= 0
+              ? editHandleHoverData(editHandles[editHandleIndex])
+              : Object.assign(
+                  {},
+                  indexedHoverItems && Number.isInteger(intersections[0].index)
+                    ? indexedHoverItems[intersections[0].index] || {}
+                    : hoverObject.userData.hover || {},
+                );
           hoverData.color = hexOrDefault(hoverData.color, "#64748b");
           const html = formatTooltip(hoverData);
           if (!html) {
@@ -7630,6 +7790,7 @@
               const pointLabel = String(pointEntry.label || pointEntry.pointType || `P${pointIndex + 1}`);
               const pointRole = String(pointEntry.pointType || "point");
               const point = copyEditPoint(pointEntry.position);
+              const handleIndex = editHandles.length;
               const pointMat = new THREE.MeshBasicMaterial({
                 color: color,
                 transparent: true,
@@ -7671,9 +7832,11 @@
               const pickMesh = new THREE.Mesh(handleGeometry, pickMaterial);
               pickMesh.position.copy(pointMesh.position);
               pickMesh.userData.lockViewerZGeometryScale = true;
+              pickMesh.userData.editHandleIndex = handleIndex;
               pickMesh.visible = false;
               pickMesh.renderOrder = 11;
               scene.add(pickMesh);
+              hoverTargets.push(pickMesh);
               editHandles.push({
                 mesh: pointMesh,
                 pickMesh: pickMesh,

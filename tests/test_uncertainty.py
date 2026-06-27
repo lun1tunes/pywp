@@ -621,6 +621,60 @@ def test_regression_overlay_ring_alignment_avoids_twist_for_build_to_hold_case()
         assert current_cost == pytest.approx(best_cost, abs=1e-9)
 
 
+def test_build2_uncertainty_rings_stay_centered_and_normal_to_trajectory() -> None:
+    result = TrajectoryPlanner().plan(
+        Point3D(0.0, 0.0, 0.0),
+        Point3D(334.0, 46.0, 3769.0),
+        Point3D(1464.0, 649.0, 3806.0),
+        TrajectoryConfig(),
+    )
+    overlay = build_uncertainty_overlay(
+        stations=result.stations,
+        surface=Point3D(0.0, 0.0, 0.0),
+        azimuth_deg=float(result.azimuth_deg),
+        required_md_m=(
+            float(result.summary["kop_md_m"]),
+            float(result.md_t1_m),
+            float(result.summary["md_total_m"]),
+        ),
+    )
+
+    build2_mask = result.stations["segment"].astype(str) == "BUILD2"
+    build2_md_start = float(result.stations.loc[build2_mask, "MD_m"].min())
+    build2_md_end = float(result.stations.loc[build2_mask, "MD_m"].max())
+    build2_samples = [
+        sample
+        for sample in overlay.samples
+        if build2_md_start - 1e-6 <= float(sample.md_m) <= build2_md_end + 1e-6
+    ]
+
+    assert build2_samples
+
+    station_md = result.stations["MD_m"].to_numpy(dtype=float)
+    station_inc = result.stations["INC_deg"].to_numpy(dtype=float)
+    station_azi_rad = np.unwrap(
+        np.deg2rad(result.stations["AZI_deg"].to_numpy(dtype=float))
+    )
+    for sample in build2_samples:
+        sample_md = float(sample.md_m)
+        sample_inc_deg = float(np.interp(sample_md, station_md, station_inc))
+        sample_azi_deg = float(
+            np.rad2deg(np.interp(sample_md, station_md, station_azi_rad)) % 360.0
+        )
+        tangent, _, _ = local_uncertainty_axes_xyz(
+            inc_deg=sample_inc_deg,
+            azi_deg=sample_azi_deg,
+        )
+        ring = np.asarray(sample.ring_xyz[:-1], dtype=float)
+        center = np.asarray(sample.center_xyz, dtype=float)
+        offsets = ring - center[None, :]
+        max_radius_m = float(np.max(np.linalg.norm(offsets, axis=1)))
+        tangent_projection_m = float(np.max(np.abs(offsets @ tangent)))
+
+        assert np.linalg.norm(np.mean(offsets, axis=0)) <= 1e-9
+        assert tangent_projection_m <= max(1e-9, max_radius_m * 1e-9)
+
+
 def test_open_closed_ring_drops_duplicate_endpoint() -> None:
     ring = np.array(
         [

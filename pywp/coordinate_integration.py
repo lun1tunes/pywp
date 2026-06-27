@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 
 from pywp.coordinate_systems import (
     CoordinateSystem,
@@ -96,6 +95,12 @@ _DEFAULT_INPUT_CRS_INDEX = next(
 )
 
 
+def _streamlit():
+    import streamlit as st
+
+    return st
+
+
 def _get_crs_index(
     crs: CoordinateSystem,
     options: list[tuple[str, CoordinateSystem]] = CRS_OPTIONS,
@@ -115,6 +120,7 @@ def render_crs_sidebar() -> CoordinateSystem:
     Returns:
         Selected coordinate system
     """
+    st = _streamlit()
     with st.sidebar:
         st.divider()
         st.markdown("### Система координат")
@@ -225,6 +231,7 @@ def render_crs_sidebar() -> CoordinateSystem:
 
 def get_input_crs() -> CoordinateSystem:
     """Get currently selected source/input CRS from session state."""
+    st = _streamlit()
     crs = st.session_state.get(CRS_INPUT_SELECTED_KEY, DEFAULT_CRS)
     if crs not in INPUT_CRS_LABEL_BY_VALUE:
         return DEFAULT_CRS
@@ -237,6 +244,7 @@ def get_selected_crs() -> CoordinateSystem:
     Returns:
         Selected CSV coordinate system (defaults to WGS84 UTM 43N)
     """
+    st = _streamlit()
     crs = st.session_state.get(CRS_SELECTED_KEY, DEFAULT_CSV_EXPORT_CRS)
     if crs not in CRS_LABEL_BY_VALUE:
         return DEFAULT_CSV_EXPORT_CRS
@@ -245,6 +253,7 @@ def get_selected_crs() -> CoordinateSystem:
 
 def should_auto_convert() -> bool:
     """Check if auto-convert is enabled."""
+    st = _streamlit()
     return st.session_state.get(CRS_AUTO_CONVERT_KEY, True)
 
 

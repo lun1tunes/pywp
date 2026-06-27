@@ -258,6 +258,19 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert "align-items: center;" in html
     assert "justify-content: center;" in html
     assert 'xmlns="http://www.w3.org/2000/svg"' in html
+
+
+def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert 'function editHandleHoverData(handle)' in html
+    assert '<strong>X:</strong>' in html
+    assert '<strong>Y:</strong>' in html
+    assert '<strong>Z:</strong>' in html
+    assert "pickMesh.userData.editHandleIndex = handleIndex;" in html
+    assert "hoverTargets.push(pickMesh);" in html
+    assert "const editHandleIndex = Number(hoverObject.userData.editHandleIndex);" in html
+    assert "? editHandleHoverData(editHandles[editHandleIndex])" in html
     assert "✋" not in html
     assert "X / East" in html
     assert "Y / North" in html
@@ -634,6 +647,29 @@ def test_viewer_template_contains_safe_custom_3d_controls() -> None:
     assert ">Anti-collision</button>" in html
     assert ">Легенда</button>" in html
     assert 'title.textContent = "Пересечения";' in html
+
+
+def test_viewer_template_highlights_collisions_for_selected_legend_well() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert ".collision-item.is-related-legend-well {" in html
+    assert "let selectedLegendWellNameKeys = new Set();" in html
+    assert "function legendWellNameKeysForItem(item, kind)" in html
+    assert "function syncSelectedCollisionHighlights()" in html
+    assert "function setSelectedLegendWellNameKeys(keys)" in html
+    assert 'setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, "well"));' in html
+    assert "setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, kind));" in html
+    assert "item.dataset.collisionWellA = normalizedWellNameKey(collision.well_a);" in html
+    assert "item.dataset.collisionWellB = normalizedWellNameKey(collision.well_b);" in html
+    assert 'item.classList.toggle(\n              "is-related-legend-well",' in html
+
+
+def test_viewer_template_does_not_focus_camera_for_pad_legend_clicks() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert 'if (kind !== "well") {\n              return;\n            }' in html
+    assert 'setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, kind));' in html
+    assert 'focusViewerTarget(targetBounds, String(item.id || ""));' in html
 
 
 def test_orbit_controls_use_expected_mouse_bindings() -> None:

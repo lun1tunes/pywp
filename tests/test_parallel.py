@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 from pywp import parallel
 
 
@@ -57,3 +61,40 @@ def test_process_pool_context_avoids_unavailable_stdin_fork(monkeypatch) -> None
         == "context:spawn"
     )
     assert calls == ["spawn"]
+
+
+def test_backend_worker_import_does_not_preload_streamlit() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (
+        "import sys; "
+        "import pywp.welltrack_batch; "
+        "print('streamlit' in sys.modules)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        cwd=repo_root,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "False"
+
+
+def test_top_level_default_crs_access_does_not_preload_streamlit() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (
+        "import sys; "
+        "import pywp; "
+        "_ = pywp.DEFAULT_CRS; "
+        "print('streamlit' in sys.modules)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        cwd=repo_root,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "False"
