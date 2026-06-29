@@ -11,9 +11,11 @@ import pandas as pd
 from pywp.eclipse_welltrack import (
     WelltrackRecord,
     WelltrackParseError,
+    decode_welltrack_bytes,
     parse_welltrack_points_table,
     parse_welltrack_text,
 )
+from pywp.path_utils import normalize_user_path_text
 from pywp.pilot_wells import visible_well_names
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ptc_target_import_dev import (
@@ -48,6 +50,7 @@ __all__ = [
     "build_target_import_operation",
     "clear_target_import_flow_state",
     "coerce_source_table_df_columns",
+    "dev_source_preview_well_names",
     "dev_target_import_summary_dataframe",
     "empty_source_table_df",
     "expand_single_column_source_table_df",
@@ -122,6 +125,7 @@ class WelltrackSourcePayload:
     source_path: str = ""
     source_files: tuple[tuple[str, bytes], ...] = ()
     table_rows: pd.DataFrame | None = None
+    dev_fixed_t1_inc_by_well: tuple[tuple[str, float], ...] = ()
 
 
 class TargetImportEmptySourceError(ValueError):
@@ -149,6 +153,7 @@ class TargetImportOperation:
     source_path: str = ""
     source_files: tuple[tuple[str, bytes], ...] = ()
     table_rows: pd.DataFrame | None = None
+    dev_fixed_t1_inc_by_well: tuple[tuple[str, float], ...] = ()
     parse_welltrack_text_func: Callable[[str], list[WelltrackRecord]] = (
         parse_welltrack_text
     )
@@ -167,6 +172,7 @@ class TargetImportOperation:
                 source_text=self.source_text,
                 source_path=self.source_path,
                 source_files=self.source_files,
+                fixed_t1_inc_by_well=dict(self.dev_fixed_t1_inc_by_well),
             )
         return TargetImportParseResult(
             records=tuple(self.parse_welltrack_text_func(str(self.source_text)))
@@ -251,9 +257,15 @@ def init_target_source_state_defaults(
     session_state.setdefault("wt_source_mode", WT_SOURCE_MODE_FILE_PATH)
     session_state.setdefault("wt_source_path", str(DEFAULT_WELLTRACK_PATH))
     session_state.setdefault("wt_source_inline", "")
-    session_state.setdefault("wt_source_upload_file", None)
+    if session_state.get("wt_source_upload_file") is None:
+        session_state.pop("wt_source_upload_file", None)
     session_state.setdefault("wt_source_dev_inline", "")
-    session_state.setdefault("wt_source_dev_upload_files", [])
+    raw_dev_upload_files = session_state.get("wt_source_dev_upload_files")
+    if raw_dev_upload_files in (None, []):
+        session_state.pop("wt_source_dev_upload_files", None)
+    session_state.setdefault("wt_source_dev_fixed_t1_enabled", False)
+    session_state.setdefault("wt_source_dev_fixed_t1_well_names", [])
+    session_state.setdefault("wt_source_dev_fixed_t1_inc_deg", 86.0)
     session_state.setdefault("wt_source_table_df", empty_source_table_df())
     session_state.setdefault("wt_source_table_editor_nonce", 0)
 
@@ -285,9 +297,9 @@ def build_target_import_operation(
         )
 
     if source_payload.source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY:
-        if source_payload.mode == WT_SOURCE_MODE_FILE_PATH and not str(
+        if source_payload.mode == WT_SOURCE_MODE_FILE_PATH and not normalize_user_path_text(
             source_payload.source_path
-        ).strip():
+        ):
             raise TargetImportEmptySourceError(
                 "Источник пустой. Укажите путь к .dev файлу или папке."
             )
@@ -315,6 +327,7 @@ def build_target_import_operation(
             source_text=str(source_payload.source_text),
             source_path=str(source_payload.source_path),
             source_files=tuple(source_payload.source_files),
+            dev_fixed_t1_inc_by_well=tuple(source_payload.dev_fixed_t1_inc_by_well),
             parse_welltrack_text_func=parse_welltrack_text_func,
         )
 
@@ -363,11 +376,13 @@ def store_imported_records(
     session_state["wt_well_calc_profile_assignments"] = {}
     session_state["wt_well_calc_active_profile_id"] = ""
     session_state["wt_well_calc_active_profile_id_pending"] = None
-    session_state["wt_well_calc_profile_import_upload"] = None
+    session_state.pop("wt_well_calc_profile_import_upload", None)
     session_state["wt_well_calc_override_selected_names"] = []
     session_state["wt_well_calc_override_selected_signature"] = ()
     session_state["wt_well_calc_override_feedback"] = ""
     session_state["wt_well_calc_override_name_input_active_profile_id"] = ""
+    session_state["wt_raw_records_edit_mode"] = False
+    session_state["wt_raw_records_editor_nonce"] = 0
     for key in list(session_state.keys()):
         if str(key).startswith("wt_well_calc_override_profile_name__"):
             session_state.pop(key, None)
@@ -405,11 +420,13 @@ def reset_failed_import_state(
     session_state["wt_well_calc_profile_assignments"] = {}
     session_state["wt_well_calc_active_profile_id"] = ""
     session_state["wt_well_calc_active_profile_id_pending"] = None
-    session_state["wt_well_calc_profile_import_upload"] = None
+    session_state.pop("wt_well_calc_profile_import_upload", None)
     session_state["wt_well_calc_override_selected_names"] = []
     session_state["wt_well_calc_override_selected_signature"] = ()
     session_state["wt_well_calc_override_feedback"] = ""
     session_state["wt_well_calc_override_name_input_active_profile_id"] = ""
+    session_state["wt_raw_records_edit_mode"] = False
+    session_state["wt_raw_records_editor_nonce"] = 0
     for key in list(session_state.keys()):
         if str(key).startswith("wt_well_calc_override_profile_name__"):
             session_state.pop(key, None)
@@ -441,11 +458,13 @@ def clear_target_import_flow_state(
     session_state["wt_well_calc_profile_assignments"] = {}
     session_state["wt_well_calc_active_profile_id"] = ""
     session_state["wt_well_calc_active_profile_id_pending"] = None
-    session_state["wt_well_calc_profile_import_upload"] = None
+    session_state.pop("wt_well_calc_profile_import_upload", None)
     session_state["wt_well_calc_override_selected_names"] = []
     session_state["wt_well_calc_override_selected_signature"] = ()
     session_state["wt_well_calc_override_feedback"] = ""
     session_state["wt_well_calc_override_name_input_active_profile_id"] = ""
+    session_state["wt_raw_records_edit_mode"] = False
+    session_state["wt_raw_records_editor_nonce"] = 0
     for key in list(session_state.keys()):
         if str(key).startswith("wt_well_calc_override_profile_name__"):
             session_state.pop(key, None)
@@ -527,24 +546,41 @@ def _parse_dev_target_payload(
     source_text: str,
     source_path: str,
     source_files: Sequence[tuple[str, bytes]],
+    fixed_t1_inc_by_well: dict[str, float] | None = None,
 ) -> TargetImportParseResult:
     parsed_wells = []
-    normalized_path = str(source_path).strip()
+    normalized_path = normalize_user_path_text(source_path)
     if normalized_path:
         path_obj = Path(normalized_path).expanduser()
         if not path_obj.exists():
             raise WelltrackParseError(f"Путь .dev не найден: `{path_obj}`.")
         if path_obj.is_dir():
-            parsed_wells.extend(parse_dev_target_directory(path_obj))
+            parsed_wells.extend(
+                parse_dev_target_directory(
+                    path_obj,
+                    fixed_t1_inc_by_well=fixed_t1_inc_by_well,
+                )
+            )
         else:
-            parsed_wells.append(parse_dev_target_file(path_obj))
+            parsed_wells.append(
+                parse_dev_target_file(
+                    path_obj,
+                    fixed_t1_inc_by_well=fixed_t1_inc_by_well,
+                )
+            )
     elif source_files:
-        parsed_wells.extend(parse_dev_target_payloads(tuple(source_files)))
+        parsed_wells.extend(
+            parse_dev_target_payloads(
+                tuple(source_files),
+                fixed_t1_inc_by_well=fixed_t1_inc_by_well,
+            )
+        )
     else:
         fallback_name = dev_trajectory_text_name(source_text)
         parsed_wells.extend(
             parse_dev_target_payloads(
-                ((f"{fallback_name}.dev", str(source_text).encode("utf-8")),)
+                ((f"{fallback_name}.dev", str(source_text).encode("utf-8")),),
+                fixed_t1_inc_by_well=fixed_t1_inc_by_well,
             )
         )
     return TargetImportParseResult(
@@ -552,3 +588,66 @@ def _parse_dev_target_payload(
         dev_summaries=tuple(item.summary for item in parsed_wells),
         imported_dev_wells=tuple(item.imported_well for item in parsed_wells),
     )
+
+def dev_source_preview_well_names(
+    *,
+    source_mode: str,
+    source_path: str = "",
+    source_files: Sequence[tuple[str, bytes]] = (),
+    source_text: str = "",
+) -> tuple[str, ...]:
+    mode = str(source_mode).strip()
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(raw_name: object) -> None:
+        normalized = str(raw_name).strip()
+        if not normalized:
+            return
+        key = normalized.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(normalized)
+
+    try:
+        if mode == WT_SOURCE_MODE_FILE_PATH:
+            normalized_path = normalize_user_path_text(source_path)
+            if not normalized_path:
+                return ()
+            path_obj = Path(normalized_path).expanduser()
+            if not path_obj.exists():
+                return ()
+            if path_obj.is_dir():
+                for child in sorted(
+                    path_obj.iterdir(),
+                    key=lambda item: item.name.casefold(),
+                ):
+                    if child.is_file() and child.suffix.lower() == ".dev":
+                        add_name(child.stem)
+                return tuple(names)
+            if path_obj.is_file():
+                add_name(path_obj.stem)
+                return tuple(names)
+            return ()
+
+        if mode == WT_SOURCE_MODE_UPLOAD:
+            for index, (file_name, raw_bytes) in enumerate(source_files, start=1):
+                text, _encoding = decode_welltrack_bytes(bytes(raw_bytes))
+                fallback_name = Path(str(file_name or f"dev_import_{index}")).stem
+                add_name(dev_trajectory_text_name(text, fallback_name=fallback_name))
+            return tuple(names)
+
+        if mode == WT_SOURCE_MODE_INLINE_TEXT and str(source_text).strip():
+            add_name(
+                dev_trajectory_text_name(
+                    str(source_text),
+                    fallback_name="dev_import_1",
+                )
+            )
+            return tuple(names)
+    except OSError:
+        return ()
+    except WelltrackParseError:
+        return ()
+    return ()

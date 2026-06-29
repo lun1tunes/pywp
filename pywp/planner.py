@@ -88,6 +88,9 @@ MD_2D_REFINEMENT_MAXITER = 20
 MD_FULL_SLSQP_MAX_SEEDS = 2
 MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE = 1e-6
 MD_BOUNDARY_EXTREMUM_KOP_TOLERANCE_M = 1e-3
+LOCAL_REFERENCE_RECOVERY_MAX_STARTS = 2
+LOCAL_REFERENCE_RECOVERY_MAX_NFEV = 40
+LOCAL_REFERENCE_RECOVERY_ACCEPT_SCORE_M = 1e-4
 ANTI_COLLISION_SF_TOLERANCE = 1e-3
 ANTI_COLLISION_OBJECTIVE_PENALTY = 1_000.0
 ANTI_COLLISION_KOP_PREFERENCE_WEIGHT = 0.25
@@ -3626,6 +3629,8 @@ def _recover_profile_from_build_and_kop(
     zero_azimuth_turn: bool,
     reference_candidates: tuple[ProfileParameters, ...] = (),
     min_hold_inc_deg: float = 0.5,
+    prefer_reference_seeds: bool = False,
+    max_nfev: int = 80,
 ) -> ProfileParameters | None:
     if zero_azimuth_turn:
         return _build_profile_from_effective_targets(
@@ -3646,6 +3651,8 @@ def _recover_profile_from_build_and_kop(
         post_entry=post_entry,
         reference_candidates=reference_candidates,
         min_hold_inc_deg=min_hold_inc_deg,
+        prefer_reference_seeds=prefer_reference_seeds,
+        max_nfev=max_nfev,
     )
 
 
@@ -3658,6 +3665,8 @@ def _recover_turn_profile_from_build_and_kop(
     post_entry: PostEntrySection,
     reference_candidates: tuple[ProfileParameters, ...] = (),
     min_hold_inc_deg: float = 0.5,
+    prefer_reference_seeds: bool = False,
+    max_nfev: int = 80,
 ) -> ProfileParameters | None:
     if build_dls_deg_per_30m <= SMALL or kop_vertical_m < 0.0:
         return None
@@ -3769,9 +3778,9 @@ def _recover_turn_profile_from_build_and_kop(
     az_seed_default = float(
         _mid_azimuth_deg(geometry.azimuth_surface_t1_deg, geometry.azimuth_entry_deg)
     )
-    seeds: list[np.ndarray] = []
+    reference_seeds: list[np.ndarray] = []
     for reference_candidate in reference_candidates:
-        seeds.append(
+        reference_seeds.append(
             np.array(
                 [
                     float(
@@ -3786,55 +3795,73 @@ def _recover_turn_profile_from_build_and_kop(
                 dtype=float,
             )
         )
-    seeds.extend(
-        [
-            np.array([inc_seed_default, az_seed_default], dtype=float),
-            np.array(
-                [inc_seed_default, float(geometry.azimuth_surface_t1_deg)], dtype=float
-            ),
-            np.array(
-                [inc_seed_default, float(geometry.azimuth_entry_deg)], dtype=float
-            ),
-        ]
-    )
+    default_seeds = [
+        np.array([inc_seed_default, az_seed_default], dtype=float),
+        np.array(
+            [inc_seed_default, float(geometry.azimuth_surface_t1_deg)], dtype=float
+        ),
+        np.array(
+            [inc_seed_default, float(geometry.azimuth_entry_deg)], dtype=float
+        ),
+    ]
 
     bounds_lower = np.array([min_hold_inc, 0.0], dtype=float)
     bounds_upper = np.array([max_hold_inc, 360.0], dtype=float)
     best_candidate: ProfileParameters | None = None
     best_score = np.inf
 
-    for seed in _dedupe_seed_vectors(seeds):
-        clipped_seed = np.clip(seed, bounds_lower, bounds_upper)
-        solution = least_squares(
-            fun=lambda values: residual(np.asarray(values, dtype=float)),
-            x0=clipped_seed,
-            bounds=(bounds_lower, bounds_upper),
-            method="trf",
-            jac="2-point",
-            x_scale="jac",
-            ftol=1e-10,
-            xtol=1e-10,
-            gtol=1e-10,
-            max_nfev=80,
+    def search_seed_group(seed_group: list[np.ndarray], *, max_nfev_limit: int) -> None:
+        nonlocal best_candidate, best_score
+        for seed in _dedupe_seed_vectors(seed_group):
+            clipped_seed = np.clip(seed, bounds_lower, bounds_upper)
+            solution = least_squares(
+                fun=lambda values: residual(np.asarray(values, dtype=float)),
+                x0=clipped_seed,
+                bounds=(bounds_lower, bounds_upper),
+                method="trf",
+                jac="2-point",
+                x_scale="jac",
+                ftol=1e-10,
+                xtol=1e-10,
+                gtol=1e-10,
+                max_nfev=int(max(max_nfev_limit, 20)),
+            )
+            probes = [clipped_seed]
+            if bool(solution.success) and np.all(np.isfinite(solution.x)):
+                probes.append(
+                    np.clip(np.asarray(solution.x, dtype=float), bounds_lower, bounds_upper)
+                )
+
+            for probe in probes:
+                candidate, perpendicular, hold_length_m = build_candidate(
+                    inc_hold_deg=float(probe[0]),
+                    azimuth_hold_deg=float(probe[1]),
+                )
+                if candidate is None or hold_length_m < -SMALL:
+                    continue
+                score = float(np.linalg.norm(perpendicular))
+                if score < best_score:
+                    best_score = score
+                    best_candidate = candidate
+
+    if prefer_reference_seeds and reference_seeds:
+        search_seed_group(
+            reference_seeds[:LOCAL_REFERENCE_RECOVERY_MAX_STARTS],
+            max_nfev_limit=min(int(max_nfev), LOCAL_REFERENCE_RECOVERY_MAX_NFEV),
         )
-        probes = [clipped_seed]
-        if bool(solution.success) and np.all(np.isfinite(solution.x)):
-            probes.append(
-                np.clip(np.asarray(solution.x, dtype=float), bounds_lower, bounds_upper)
-            )
+        if (
+            best_candidate is not None
+            and best_score <= LOCAL_REFERENCE_RECOVERY_ACCEPT_SCORE_M
+        ):
+            return best_candidate
 
-        for probe in probes:
-            candidate, perpendicular, hold_length_m = build_candidate(
-                inc_hold_deg=float(probe[0]),
-                azimuth_hold_deg=float(probe[1]),
-            )
-            if candidate is None or hold_length_m < -SMALL:
-                continue
-            score = float(np.linalg.norm(perpendicular))
-            if score < best_score:
-                best_score = score
-                best_candidate = candidate
-
+    search_seed_group(
+        [
+            *reference_seeds,
+            *default_seeds,
+        ],
+        max_nfev_limit=int(max_nfev),
+    )
     return best_candidate
 
 
@@ -3944,6 +3971,8 @@ def _two_dimensional_md_refine_candidates(
             zero_azimuth_turn=zero_azimuth_turn,
             reference_candidates=ordered_reference_candidates,
             min_hold_inc_deg=_hold_inc_lower_bound(config),
+            prefer_reference_seeds=True,
+            max_nfev=LOCAL_REFERENCE_RECOVERY_MAX_NFEV,
         )
         evaluation = _evaluate_profile_candidate(
             candidate=candidate,
@@ -4234,6 +4263,12 @@ def _select_feasible_candidate(
                 candidate, optimization_mode
             ),
         )
+        boundary_improved = bool(
+            _optimization_candidate_sort_key(
+                current_best_after_boundary, optimization_mode
+            )
+            < seed_sort_key
+        )
         current_best_objective = _optimization_objective_value(
             current_best_after_boundary,
             optimization_mode,
@@ -4243,12 +4278,6 @@ def _select_feasible_candidate(
             theoretical_lower_bound=lower_bound,
             mode=optimization_mode,
         ):
-            improved = bool(
-                _optimization_candidate_sort_key(
-                    current_best_after_boundary, optimization_mode
-                )
-                < seed_sort_key
-            )
             return _finalize(
                 TurnSolveResult(
                     params=current_best_after_boundary,
@@ -4256,7 +4285,7 @@ def _select_feasible_candidate(
                         mode=optimization_mode,
                         status=(
                             "within_md_theoretical_gap_after_boundary"
-                            if improved
+                            if boundary_improved
                             else "within_md_theoretical_gap"
                         ),
                         objective_value=current_best_objective,
@@ -4267,6 +4296,44 @@ def _select_feasible_candidate(
                         ),
                         relative_gap_pct=_optimization_relative_gap_pct(
                             objective_value=current_best_objective,
+                            theoretical_lower_bound=lower_bound,
+                        ),
+                        seeds_used=len(optimization_seed_vectors),
+                        runs_used=int(runs_used),
+                    ),
+                )
+            )
+        if _is_md_boundary_extremum_candidate(
+            candidate=current_best_after_boundary,
+            build_dls_upper_deg_per_30m=upper_dls_deg_per_30m,
+            build2_dls_upper_deg_per_30m=upper_build2_dls_deg_per_30m,
+            kop_lower_m=kop_lower_bound,
+        ):
+            selected_boundary_candidate = (
+                current_best_after_boundary if boundary_improved else best_seed
+            )
+            selected_boundary_objective = _optimization_objective_value(
+                selected_boundary_candidate,
+                optimization_mode,
+            )
+            return _finalize(
+                TurnSolveResult(
+                    params=selected_boundary_candidate,
+                    optimization=OptimizationOutcome(
+                        mode=optimization_mode,
+                        status=(
+                            "at_md_boundary_extremum"
+                            if boundary_improved
+                            else "seed_selected"
+                        ),
+                        objective_value=selected_boundary_objective,
+                        theoretical_lower_bound=lower_bound,
+                        absolute_gap_value=_optimization_absolute_gap(
+                            objective_value=selected_boundary_objective,
+                            theoretical_lower_bound=lower_bound,
+                        ),
+                        relative_gap_pct=_optimization_relative_gap_pct(
+                            objective_value=selected_boundary_objective,
                             theoretical_lower_bound=lower_bound,
                         ),
                         seeds_used=len(optimization_seed_vectors),
@@ -4310,22 +4377,31 @@ def _select_feasible_candidate(
                 )
                 < seed_sort_key
             )
+            selected_2d_candidate = (
+                current_best_after_2d if improved else best_seed
+            )
+            selected_2d_objective = _optimization_objective_value(
+                selected_2d_candidate,
+                optimization_mode,
+            )
             return _finalize(
                 TurnSolveResult(
-                    params=current_best_after_2d,
+                    params=selected_2d_candidate,
                     optimization=OptimizationOutcome(
                         mode=optimization_mode,
                         status=(
-                            "at_md_boundary_extremum" if improved else "seed_selected"
+                            "at_md_boundary_extremum"
+                            if improved
+                            else "seed_selected"
                         ),
-                        objective_value=current_best_objective,
+                        objective_value=selected_2d_objective,
                         theoretical_lower_bound=lower_bound,
                         absolute_gap_value=_optimization_absolute_gap(
-                            objective_value=current_best_objective,
+                            objective_value=selected_2d_objective,
                             theoretical_lower_bound=lower_bound,
                         ),
                         relative_gap_pct=_optimization_relative_gap_pct(
-                            objective_value=current_best_objective,
+                            objective_value=selected_2d_objective,
                             theoretical_lower_bound=lower_bound,
                         ),
                         seeds_used=len(optimization_seed_vectors),

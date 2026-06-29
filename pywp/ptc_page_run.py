@@ -30,6 +30,9 @@ from pywp.ptc_sidetrack_state import (
 
 __all__ = ["render_run_section"]
 
+_BATCH_AUTO_PARALLEL_DISABLED_MAX_WELLS = 3
+_BATCH_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS = 8
+
 
 def _rerun_fragment() -> None:
     try:
@@ -40,6 +43,29 @@ def _rerun_fragment() -> None:
 
 def _rerun_app() -> None:
     st.rerun()
+
+
+def _auto_batch_parallel_workers(selected_well_count: int) -> int:
+    well_count = int(max(selected_well_count, 0))
+    if well_count <= _BATCH_AUTO_PARALLEL_DISABLED_MAX_WELLS:
+        return 0
+    if well_count >= _BATCH_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS:
+        return 4
+    return 2
+
+
+def _auto_batch_parallel_caption(selected_well_count: int) -> str:
+    workers = _auto_batch_parallel_workers(selected_well_count)
+    well_count = int(max(selected_well_count, 0))
+    if workers <= 1:
+        return (
+            "Multiprocessing отключён автоматически: для текущего набора "
+            "быстрее последовательный расчёт."
+        )
+    return (
+        f"Multiprocessing: автоматически {workers} процесса "
+        f"для текущего набора ({well_count} скв.)."
+    )
 
 
 @st.fragment
@@ -128,22 +154,17 @@ def render_run_section(*, records: list[object]) -> None:
                     width="stretch",
                 )
 
-        _parallel_options = [
-            ("Без Multiprocessing", 0),
-            *((f"{n} процессов", n) for n in (2, 4)),
+        selected_names_for_parallel = [
+            str(name)
+            for name in st.session_state.get("wt_selected_names", [])
+            if str(name).strip()
         ]
-        _parallel_labels = [label for label, _ in _parallel_options]
-        _parallel_values = {label: value for label, value in _parallel_options}
-        _parallel_label = st.selectbox(
-            "Параллельный расчёт",
-            options=_parallel_labels,
-            index=0,
-            key="wt_parallel_workers_label_01_constructor",
-            help=(
-                "Число параллельных процессов. Ускоряет расчёт большого набора скважин."
-            ),
+        _parallel_workers = _auto_batch_parallel_workers(
+            len(selected_names_for_parallel)
         )
-        _parallel_workers = _parallel_values.get(str(_parallel_label), 0)
+        st.caption(
+            _auto_batch_parallel_caption(len(selected_names_for_parallel))
+        )
 
         run_clicked = st.form_submit_button(
             "Рассчитать траектории",

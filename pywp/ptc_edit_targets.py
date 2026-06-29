@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 import math
 
+import pandas as pd
+
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.pilot_wells import (
     is_pilot_name,
@@ -10,6 +12,7 @@ from pywp.pilot_wells import (
     parent_name_for_pilot,
     well_name_key,
 )
+from pywp import ptc_target_records
 from pywp.ptc_target_records import record_horizontal_length_preprocess_skip_reason
 from pywp.ptc_sidetrack_state import queue_editor_sidetrack_window_override
 
@@ -20,6 +23,7 @@ __all__ = [
     "handle_three_edit_event",
     "invalidate_results_for_edited_targets",
     "pending_edit_target_names",
+    "raw_records_editor_changes",
     "queue_all_wells_results_focus",
     "records_with_edit_targets",
     "unique_well_names",
@@ -280,6 +284,84 @@ def unique_well_names(names: Iterable[object]) -> list[str]:
         seen.add(name)
         result.append(name)
     return result
+
+
+def raw_records_editor_changes(
+    records: Iterable[WelltrackRecord],
+    edited_rows: object,
+) -> list[dict[str, object]]:
+    expected_df = ptc_target_records.raw_records_dataframe(list(records)).reset_index(
+        drop=True
+    )
+    edited_df = pd.DataFrame(edited_rows).reset_index(drop=True)
+    required_columns = ("Скважина", "Точка", "X, м", "Y, м", "Z, м")
+    missing_columns = [
+        column for column in required_columns if column not in edited_df.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            "В таблице текущих точек отсутствуют обязательные столбцы: "
+            + ", ".join(missing_columns)
+            + "."
+        )
+    if len(edited_df) != len(expected_df):
+        raise ValueError(
+            "В текущих точках нельзя добавлять или удалять строки. "
+            "Изменяйте только координаты X/Y/Z."
+        )
+
+    point_index_by_well: dict[str, int] = {}
+    changes_by_name: dict[str, list[dict[str, object]]] = {}
+    ordered_names: list[str] = []
+
+    for row_no, (_, expected_row) in enumerate(expected_df.iterrows(), start=1):
+        edited_row = edited_df.iloc[row_no - 1]
+        well_name = str(expected_row["Скважина"]).strip()
+        point_name = str(expected_row["Точка"]).strip()
+        if (
+            str(edited_row.get("Скважина", "")).strip() != well_name
+            or str(edited_row.get("Точка", "")).strip() != point_name
+        ):
+            raise ValueError(
+                "В текущих точках нельзя менять столбцы «Скважина» и «Точка»."
+            )
+        try:
+            x = float(edited_row["X, м"])
+            y = float(edited_row["Y, м"])
+            z = float(edited_row["Z, м"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Строка {row_no}: координаты X/Y/Z должны быть числами."
+            ) from exc
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            raise ValueError(
+                f"Строка {row_no}: координаты X/Y/Z должны быть конечными числами."
+            )
+
+        point_index = point_index_by_well.get(well_name, 0)
+        point_index_by_well[well_name] = point_index + 1
+
+        if (
+            math.isclose(float(expected_row["X, м"]), x, abs_tol=1e-9)
+            and math.isclose(float(expected_row["Y, м"]), y, abs_tol=1e-9)
+            and math.isclose(float(expected_row["Z, м"]), z, abs_tol=1e-9)
+        ):
+            continue
+
+        if well_name not in changes_by_name:
+            changes_by_name[well_name] = []
+            ordered_names.append(well_name)
+        changes_by_name[well_name].append(
+            {
+                "index": point_index,
+                "position": [x, y, z],
+            }
+        )
+
+    return [
+        {"name": well_name, "points": changes_by_name[well_name]}
+        for well_name in ordered_names
+    ]
 
 
 def _expanded_invalidated_names(

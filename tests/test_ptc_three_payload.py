@@ -1266,7 +1266,7 @@ def test_all_wells_three_payload_keeps_original_target_markers() -> None:
     assert label["position"] == [2000.0, 50.0, 1500.0]
 
 
-def test_all_wells_three_payload_marks_warning_wells_as_dashed() -> None:
+def test_all_wells_three_payload_keeps_warning_wells_solid() -> None:
     stations = pd.DataFrame(
         {
             "MD_m": [0.0, 1000.0, 2000.0],
@@ -1293,10 +1293,10 @@ def test_all_wells_three_payload_marks_warning_wells_as_dashed() -> None:
         item for item in payload["lines"] if str(item.get("name")) == "warning_well"
     )
 
-    assert line["dash"] == "dash"
+    assert line["dash"] == "solid"
 
 
-def test_all_wells_three_payload_marks_message_only_warning_wells_as_dashed() -> None:
+def test_all_wells_three_payload_keeps_message_only_warning_wells_solid() -> None:
     stations = pd.DataFrame(
         {
             "MD_m": [0.0, 1000.0, 2000.0],
@@ -1326,7 +1326,7 @@ def test_all_wells_three_payload_marks_message_only_warning_wells_as_dashed() ->
         if str(item.get("name")) == "warning_message_well"
     )
 
-    assert line["dash"] == "dash"
+    assert line["dash"] == "solid"
 
 
 def test_all_wells_three_payload_includes_multi_horizontal_target_pairs() -> None:

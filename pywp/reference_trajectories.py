@@ -19,6 +19,7 @@ from pywp.eclipse_welltrack import (
 )
 from pywp.mcm import add_dls
 from pywp.models import Point3D
+from pywp.path_utils import normalize_user_path_text
 from pywp.pydantic_base import FrozenArbitraryModel
 
 REFERENCE_WELL_ACTUAL = "actual"
@@ -371,7 +372,7 @@ def parse_reference_trajectory_dev_file(
     *,
     kind: str,
 ) -> ImportedTrajectoryWell:
-    source_path = Path(path).expanduser()
+    source_path = Path(normalize_user_path_text(path)).expanduser()
     try:
         raw = source_path.read_bytes()
     except OSError as exc:
@@ -393,9 +394,9 @@ def parse_reference_trajectory_dev_directories(
 ) -> list[ImportedTrajectoryWell]:
     normalized_kind = normalize_reference_well_kind(kind)
     source_dirs = [
-        Path(str(directory).strip()).expanduser()
+        Path(normalize_user_path_text(directory)).expanduser()
         for directory in directories
-        if str(directory).strip()
+        if normalize_user_path_text(directory)
     ]
     if not source_dirs:
         raise WelltrackParseError(

@@ -8,9 +8,11 @@ logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").set
 )
 logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
+import pandas as pd
 import streamlit as st
 
 from pywp import ptc_core as wt
+from pywp.ptc_batch_results import batch_summary_status_counts
 from pywp.coordinate_integration import (
     get_input_crs,
     get_selected_crs,
@@ -87,7 +89,26 @@ def _render_results_section(
         source_crs=input_crs,
     )
     if not successes:
-        st.warning("Все выбранные скважины завершились ошибками расчёта.")
+        status_counts = batch_summary_status_counts(
+            pd.DataFrame(list(summary_rows))
+        )
+        if status_counts.not_run_count and not status_counts.error_count:
+            pending_edit_names = wt._pending_edit_target_names()
+            if pending_edit_names:
+                st.info(
+                    "Точки целей изменены. Скважины требуют пересчёта: "
+                    + ", ".join(pending_edit_names)
+                    + "."
+                )
+            else:
+                st.info("Выбранные скважины пока не рассчитаны.")
+        elif status_counts.not_run_count:
+            st.warning(
+                "Нет успешных расчётов: часть скважин ещё не рассчитана, "
+                "часть завершилась ошибками."
+            )
+        else:
+            st.warning("Все выбранные скважины завершились ошибками расчёта.")
         render_failed_target_only_results(
             records=list(records),
             summary_rows=list(summary_rows),
@@ -134,6 +155,15 @@ def run_page() -> None:
             st.toast(
                 f"Длина ГС обновлена для {len(edit_applied)} скважин.",
                 icon=":material/straighten:",
+            )
+        elif edit_applied_source == "raw_records_table":
+            st.success(
+                f"Точки обновлены из таблицы: {', '.join(edit_applied)}. "
+                "Запустите пересчёт для обновления траекторий."
+            )
+            st.toast(
+                f"Точки обновлены из таблицы: {', '.join(edit_applied)}.",
+                icon=":material/edit:",
             )
         else:
             st.success(

@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -196,7 +196,6 @@ from pywp.welltrack_batch import (
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
     rebuild_optimization_context,
-    successful_well_has_md_warning,
 )
 from pywp.welltrack_quality import (
     detect_t1_t3_order_issues,
@@ -2455,7 +2454,6 @@ def _init_state() -> None:
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY, {})
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY, "")
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_PENDING_KEY, None)
-    st.session_state.setdefault(WT_WELL_CALC_PROFILE_IMPORT_UPLOAD_KEY, None)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_KEY, [])
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_PENDING_KEY, None)
     st.session_state.setdefault(WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY, ())
@@ -2698,7 +2696,7 @@ def _all_wells_plan_figure(
     }
     for index, item in enumerate(successes):
         line_color = color_map.get(str(item.name), _well_color(index))
-        line_dash = "dash" if successful_well_has_md_warning(item) else "solid"
+        line_dash = "solid"
         name = item.name
         stations = item.stations
         x_arrays.append(stations["X_m"].to_numpy(dtype=float))
@@ -3367,6 +3365,31 @@ def _normalized_calc_param_override_values(
 
 def _manual_well_calc_override_enabled() -> bool:
     return bool(st.session_state.get(WT_WELL_CALC_OVERRIDE_ENABLED_KEY, False))
+
+
+def _preserve_manual_well_calc_override_widget_state() -> None:
+    """Prevent Streamlit widget cleanup for per-well override controls.
+
+    These controls live inside the run-section fragment, while reference imports and
+    other actions can rerun different fragments. Without an explicit self-assignment,
+    Streamlit may drop widget-backed state like the override enabled toggle, which then
+    makes the last-run override signature look stale even though calc params did not
+    actually change.
+    """
+
+    keys_to_preserve = [
+        WT_WELL_CALC_OVERRIDE_ENABLED_KEY,
+        WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY,
+        WT_WELL_CALC_OVERRIDE_SELECTION_KEY,
+    ]
+    keys_to_preserve.extend(
+        str(key)
+        for key in tuple(st.session_state.keys())
+        if str(key).startswith("wt_well_calc_override_profile_name__")
+    )
+    for key in keys_to_preserve:
+        if key in st.session_state:
+            st.session_state[key] = st.session_state[key]
 
 
 def _queue_manual_well_calc_override_enabled(enabled: bool) -> None:
@@ -4238,6 +4261,7 @@ def _render_manual_well_calc_overrides(
     *,
     records: list[WelltrackRecord],
 ) -> None:
+    _preserve_manual_well_calc_override_widget_state()
     available_names = _unique_well_names(record.name for record in records)
     assignments = _manual_well_calc_profile_assignments(
         available_names=available_names
@@ -5536,6 +5560,20 @@ def _prepare_rerun_from_cluster(
 def _build_source_payload_from_state() -> _WelltrackSourcePayload:
     source_format = str(st.session_state.get("wt_source_format", "")).strip()
     source_mode = str(st.session_state.get("wt_source_mode", "")).strip()
+    fixed_t1_enabled = bool(
+        st.session_state.get("wt_source_dev_fixed_t1_enabled", False)
+    )
+    fixed_t1_inc_by_well = (
+        _dev_fixed_t1_inc_by_well_from_state(
+            selected_names=tuple(
+                str(name).strip()
+                for name in st.session_state.get("wt_source_dev_fixed_t1_well_names", [])
+                if str(name).strip()
+            )
+        )
+        if fixed_t1_enabled
+        else ()
+    )
 
     if source_format == WT_SOURCE_FORMAT_TARGET_TABLE:
         return _WelltrackSourcePayload(
@@ -5552,6 +5590,7 @@ def _build_source_payload_from_state() -> _WelltrackSourcePayload:
                 mode=source_mode,
                 source_format=source_format,
                 source_path=str(st.session_state.get("wt_source_path", "")).strip(),
+                dev_fixed_t1_inc_by_well=fixed_t1_inc_by_well,
             )
 
         if source_mode == WT_SOURCE_MODE_UPLOAD:
@@ -5569,6 +5608,7 @@ def _build_source_payload_from_state() -> _WelltrackSourcePayload:
                 mode=source_mode,
                 source_format=source_format,
                 source_files=payloads,
+                dev_fixed_t1_inc_by_well=fixed_t1_inc_by_well,
             )
 
         if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
@@ -5576,11 +5616,13 @@ def _build_source_payload_from_state() -> _WelltrackSourcePayload:
                 mode=source_mode,
                 source_format=source_format,
                 source_text=str(st.session_state.get("wt_source_dev_inline", "")),
+                dev_fixed_t1_inc_by_well=fixed_t1_inc_by_well,
             )
 
         return _WelltrackSourcePayload(
             mode=source_mode or WT_SOURCE_MODE_FILE_PATH,
             source_format=source_format,
+            dev_fixed_t1_inc_by_well=fixed_t1_inc_by_well,
         )
 
     if source_mode == WT_SOURCE_MODE_FILE_PATH:
@@ -5617,6 +5659,160 @@ def _build_source_payload_from_state() -> _WelltrackSourcePayload:
     return _WelltrackSourcePayload(
         mode=source_mode or WT_SOURCE_MODE_FILE_PATH,
         source_format=source_format or WT_SOURCE_FORMAT_WELLTRACK,
+    )
+
+
+def _dev_fixed_t1_input_key(well_name: str) -> str:
+    normalized_name = str(well_name).strip()
+    slug = re.sub(r"[^0-9A-Za-z_]+", "_", normalized_name).strip("_") or "well"
+    digest = hashlib.sha1(normalized_name.encode("utf-8")).hexdigest()[:12]
+    return f"wt_source_dev_fixed_t1_inc__{slug}__{digest}"
+
+
+def _dev_fixed_t1_legacy_default_inc_deg() -> float:
+    raw_value = st.session_state.get("wt_source_dev_fixed_t1_inc_deg", 86.0)
+    if isinstance(raw_value, (int, float)) and np.isfinite(float(raw_value)):
+        return float(min(max(float(raw_value), 0.5), 89.0))
+    return 86.0
+
+
+def _dev_fixed_t1_inc_by_well_from_state(
+    *,
+    selected_names: Sequence[str],
+) -> tuple[tuple[str, float], ...]:
+    default_inc_deg = _dev_fixed_t1_legacy_default_inc_deg()
+    values: list[tuple[str, float]] = []
+    for well_name in selected_names:
+        normalized_name = str(well_name).strip()
+        if not normalized_name:
+            continue
+        raw_value = st.session_state.get(
+            _dev_fixed_t1_input_key(normalized_name),
+            default_inc_deg,
+        )
+        threshold = (
+            float(raw_value)
+            if isinstance(raw_value, (int, float)) and np.isfinite(float(raw_value))
+            else default_inc_deg
+        )
+        values.append(
+            (
+                normalized_name,
+                float(min(max(threshold, 0.5), 89.0)),
+            )
+        )
+    return tuple(values)
+
+
+def _preview_dev_source_well_names_from_state() -> tuple[str, ...]:
+    source_mode = str(st.session_state.get("wt_source_mode", "")).strip()
+    source_path = str(st.session_state.get("wt_source_path", "")).strip()
+    source_text = str(st.session_state.get("wt_source_dev_inline", ""))
+    raw_files = st.session_state.get("wt_source_dev_upload_files") or []
+    uploaded_files = raw_files if isinstance(raw_files, list) else [raw_files]
+    payloads = tuple(
+        (
+            str(getattr(item, "name", f"dev_{index + 1}.dev")),
+            bytes(item.getvalue()),
+        )
+        for index, item in enumerate(uploaded_files)
+        if item is not None
+    )
+    return ptc_target_import.dev_source_preview_well_names(
+        source_mode=source_mode,
+        source_path=source_path,
+        source_files=payloads,
+        source_text=source_text,
+    )
+
+
+def _sync_dev_fixed_t1_selection_state(
+    available_names: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    normalized_names = tuple(
+        str(name).strip() for name in available_names if str(name).strip()
+    )
+    available_set = set(normalized_names)
+    current_selection = [
+        str(name).strip()
+        for name in st.session_state.get("wt_source_dev_fixed_t1_well_names", [])
+        if str(name).strip()
+    ]
+    filtered_selection = [
+        name for name in current_selection if name in available_set
+    ]
+    if filtered_selection != current_selection:
+        st.session_state["wt_source_dev_fixed_t1_well_names"] = filtered_selection
+    default_inc_deg = _dev_fixed_t1_legacy_default_inc_deg()
+    for well_name in filtered_selection:
+        input_key = _dev_fixed_t1_input_key(well_name)
+        raw_value = st.session_state.get(input_key, default_inc_deg)
+        raw_value_is_number = isinstance(raw_value, (int, float)) and np.isfinite(
+            float(raw_value)
+        )
+        normalized_value = (
+            float(raw_value) if raw_value_is_number else default_inc_deg
+        )
+        if (input_key not in st.session_state) or (
+            raw_value_is_number and abs(float(raw_value) - normalized_value) > 1e-9
+        ) or (not raw_value_is_number):
+            st.session_state[input_key] = float(min(max(normalized_value, 0.5), 89.0))
+    return normalized_names, tuple(filtered_selection)
+
+
+def _render_dev_fixed_t1_controls(*, available_names: Sequence[str]) -> None:
+    normalized_names, selected_names = _sync_dev_fixed_t1_selection_state(
+        available_names
+    )
+    enabled = st.toggle(
+        "t1 по фиксированному INC",
+        key="wt_source_dev_fixed_t1_enabled",
+    )
+    if not enabled:
+        return
+    control_cols = st.columns([3.2, 1.1], gap="small")
+    multiselect_col = control_cols[0] if len(control_cols) > 0 else st
+    threshold_col = control_cols[1] if len(control_cols) > 1 else st
+    getattr(multiselect_col, "multiselect", st.multiselect)(
+        "Скважины для режима t1 по INC",
+        options=list(normalized_names),
+        key="wt_source_dev_fixed_t1_well_names",
+        disabled=not normalized_names,
+    )
+    if not normalized_names:
+        st.caption("Список скважин появится после выбора источника `.dev`.")
+        return
+    selected_names = tuple(
+        str(name).strip()
+        for name in st.session_state.get("wt_source_dev_fixed_t1_well_names", [])
+        if str(name).strip()
+    )
+    if not selected_names:
+        st.caption("Выберите скважины, для которых `t1` нужно искать по фиксированному INC.")
+        return
+    st.caption("Для каждой выбранной скважины задайте свой порог `INC`.")
+    getattr(threshold_col, "caption", st.caption)("INC для t1, deg")
+    default_inc_deg = _dev_fixed_t1_legacy_default_inc_deg()
+    for well_name in selected_names:
+        input_key = _dev_fixed_t1_input_key(well_name)
+        if input_key not in st.session_state:
+            st.session_state[input_key] = default_inc_deg
+        row_cols = st.columns([3.2, 1.1], gap="small")
+        name_col = row_cols[0] if len(row_cols) > 0 else st
+        input_col = row_cols[1] if len(row_cols) > 1 else st
+        getattr(name_col, "markdown", st.markdown)(f"`{well_name}`")
+        getattr(input_col, "number_input", st.number_input)(
+            f"INC для t1: {well_name}",
+            min_value=0.5,
+            max_value=89.0,
+            step=0.5,
+            key=input_key,
+            label_visibility="collapsed",
+        )
+    st.caption(
+        "Для выбранных скважин `t1` берётся как первая точка участка `BUILD2` "
+        "с `INC` не ниже заданного значения. Дальше остаток траектории "
+        "читается как участок после `t1`."
     )
 
 
@@ -5665,6 +5861,27 @@ def _render_source_input() -> None:
         st.session_state["wt_source_mode"] = WT_SOURCE_MODE_TARGET_TABLE
 
     if source_mode == WT_SOURCE_MODE_FILE_PATH:
+        if source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY:
+            st.text_input(
+                "Путь к .dev файлу или папке",
+                key="wt_source_path",
+                placeholder="tests/test_data/dev_target_import",
+            )
+            st.caption(
+                "Поддерживаются классические J и BUILD/HOLD/BUILD траектории "
+                "без пилотов, ЗБС и многопластовых скважин."
+            )
+            _render_dev_fixed_t1_controls(
+                available_names=_preview_dev_source_well_names_from_state()
+            )
+            if st.button(
+                "Импорт целей",
+                type="primary",
+                icon=":material/upload_file:",
+                width="content",
+            ):
+                st.session_state["wt_source_parse_clicked"] = True
+            return
         with st.form("wt_source_path_form", clear_on_submit=False):
             st.text_input(
                 (
@@ -5695,6 +5912,25 @@ def _render_source_input() -> None:
         return
 
     if source_mode == WT_SOURCE_MODE_UPLOAD:
+        if source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY:
+            st.file_uploader(
+                ".dev файлы",
+                type=["dev", "txt"],
+                accept_multiple_files=True,
+                key="wt_source_dev_upload_files",
+            )
+            st.caption("Можно загрузить один или несколько `.dev` файлов.")
+            _render_dev_fixed_t1_controls(
+                available_names=_preview_dev_source_well_names_from_state()
+            )
+            if st.button(
+                "Импорт целей",
+                type="primary",
+                icon=":material/upload_file:",
+                width="content",
+            ):
+                st.session_state["wt_source_parse_clicked"] = True
+            return
         form_key = (
             "wt_source_upload_form"
             if source_format == WT_SOURCE_FORMAT_WELLTRACK
@@ -5728,6 +5964,32 @@ def _render_source_input() -> None:
         return
 
     if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
+        if source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY:
+            st.text_area(
+                "Текст .dev",
+                key="wt_source_dev_inline",
+                height=220,
+                placeholder=(
+                    "# SURVEY FROM PYWP\n"
+                    "# WELL NAME:                WELL-1\n"
+                    "MD X Y Z TVD DX DY AZIM_TN INCL DLS AZIM_GN\n"
+                ),
+            )
+            st.caption(
+                "Если в тексте есть строка `# WELL NAME: ...`, имя скважины "
+                "будет взято из неё."
+            )
+            _render_dev_fixed_t1_controls(
+                available_names=_preview_dev_source_well_names_from_state()
+            )
+            if st.button(
+                "Импорт целей",
+                type="primary",
+                icon=":material/upload_file:",
+                width="content",
+            ):
+                st.session_state["wt_source_parse_clicked"] = True
+            return
         form_key = (
             "wt_source_inline_form"
             if source_format == WT_SOURCE_FORMAT_WELLTRACK
@@ -5970,7 +6232,7 @@ def _set_import_pilot_fixed_slots(
 
 
 def _handle_import_actions(
-    source_payload: _WelltrackSourcePayload,
+    source_payload: _WelltrackSourcePayload | None,
     parse_clicked: bool,
     clear_clicked: bool,
     reset_params_clicked: bool,
@@ -5994,6 +6256,8 @@ def _handle_import_actions(
 
     if not parse_clicked:
         return
+    if source_payload is None:
+        source_payload = _build_source_payload_from_state()
 
     try:
         operation = ptc_target_import.build_target_import_operation(
@@ -7325,6 +7589,10 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
     needs_explicit_open = (
         point_count > WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT and not highlight_names
     )
+    edit_mode_key = "wt_raw_records_edit_mode"
+    editor_nonce_key = "wt_raw_records_editor_nonce"
+    st.session_state.setdefault(edit_mode_key, False)
+    st.session_state.setdefault(editor_nonce_key, 0)
     with st.expander(
         "Текущие точки скважин",
         expanded=bool(highlight_names),
@@ -7349,10 +7617,99 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                     "Расчёт использует полный импортированный набор данных."
                 )
                 return
+        raw_records_df = ptc_target_records.raw_records_dataframe(records)
+        if bool(st.session_state.get(edit_mode_key)):
+            st.caption(
+                "Можно менять координаты `X/Y/Z` и вставлять их из Excel. "
+                "Изменения применяются только после кнопки «Сохранить изменения»."
+            )
+            with st.form(
+                f"wt_raw_records_form_{int(st.session_state.get(editor_nonce_key, 0))}",
+                clear_on_submit=False,
+            ):
+                edited_table = st.data_editor(
+                    raw_records_df,
+                    key=(
+                        "wt_raw_records_editor_"
+                        f"{int(st.session_state.get(editor_nonce_key, 0))}"
+                    ),
+                    hide_index=True,
+                    num_rows="fixed",
+                    width="stretch",
+                    disabled=["Скважина", "Точка"],
+                    column_config={
+                        "Скважина": st.column_config.TextColumn("Скважина"),
+                        "Точка": st.column_config.TextColumn("Точка"),
+                        "X, м": st.column_config.NumberColumn("X, м"),
+                        "Y, м": st.column_config.NumberColumn("Y, м"),
+                        "Z, м": st.column_config.NumberColumn("Z, м"),
+                    },
+                )
+                action_cols = st.columns([1.35, 1.0, 4.0], gap="small")
+                save_submit_button = getattr(
+                    action_cols[0],
+                    "form_submit_button",
+                    st.form_submit_button,
+                )
+                cancel_submit_button = getattr(
+                    action_cols[1],
+                    "form_submit_button",
+                    st.form_submit_button,
+                )
+                save_clicked = save_submit_button(
+                    "Сохранить изменения",
+                    type="primary",
+                    icon=":material/save:",
+                    width="content",
+                )
+                cancel_clicked = cancel_submit_button(
+                    "Отмена",
+                    width="content",
+                )
+            if cancel_clicked:
+                st.session_state[edit_mode_key] = False
+                st.session_state[editor_nonce_key] = (
+                    int(st.session_state.get(editor_nonce_key, 0)) + 1
+                )
+                _rerun_fragment()
+            if save_clicked:
+                try:
+                    changes = ptc_edit_targets.raw_records_editor_changes(
+                        records,
+                        edited_table,
+                    )
+                except ValueError as exc:
+                    st.warning(str(exc))
+                else:
+                    if changes:
+                        _apply_edit_targets_changes(
+                            changes,
+                            source="raw_records_table",
+                        )
+                    st.session_state[edit_mode_key] = False
+                    st.session_state[editor_nonce_key] = (
+                        int(st.session_state.get(editor_nonce_key, 0)) + 1
+                    )
+                    st.rerun()
+            return
+
+        edit_clicked = st.button(
+            "Редактировать",
+            icon=":material/edit:",
+            width="content",
+        )
+        if edit_clicked:
+            st.session_state[edit_mode_key] = True
+            _rerun_fragment()
         if highlight_names:
             if highlight_source == "bulk_horizontal_length_preprocess":
                 st.success(
                     "Скорректированные точки `t3` подсвечены. "
+                    "Запустите расчёт для обновления траекторий."
+                )
+            elif highlight_source == "raw_records_table":
+                st.success(
+                    "Изменённые в таблице точки подсвечены. "
                     "Запустите расчёт для обновления траекторий."
                 )
             else:
@@ -7360,9 +7717,7 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                     "Изменённые в 3D-редакторе точки подсвечены. "
                     "Запустите расчёт для обновления траекторий."
                 )
-        raw_df = arrow_safe_text_dataframe(
-            ptc_target_records.raw_records_dataframe(records)
-        )
+        raw_df = arrow_safe_text_dataframe(raw_records_df)
         if highlight_names and not raw_df.empty:
             point_indices = raw_df.groupby("Скважина", sort=False).cumcount()
 

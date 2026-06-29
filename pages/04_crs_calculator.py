@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 logging.getLogger("streamlit").setLevel(logging.ERROR)
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(
@@ -27,7 +28,15 @@ from pywp.ui_theme import apply_page_style, render_hero
 _DEFAULT_OUTPUT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
 _DEFAULT_X = 600_010.6
 _DEFAULT_Y = 7_407_421.0
+_DEFAULT_WGS84_LON = 72.23553333333334
+_DEFAULT_WGS84_LAT = 71.17081666666667
+_DEFAULT_WGS84_DMS = "N 71 10 14.94; E 72 14 7.92"
 _BATCH_EDITOR_COLUMNS = ("X", "Y")
+_WGS84_INPUT_LABEL = "WGS84 (градусы)"
+_CALCULATOR_INPUT_CRS_OPTIONS = [
+    *INPUT_CRS_OPTIONS,
+    (_WGS84_INPUT_LABEL, CoordinateSystem.WGS84),
+]
 
 
 def _labels(options: list[tuple[str, CoordinateSystem]]) -> list[str]:
@@ -62,6 +71,52 @@ def _crs_display_name(crs: CoordinateSystem, *, output: bool) -> str:
 
 def _default_batch_editor_frame() -> pd.DataFrame:
     return pd.DataFrame([{column: None for column in _BATCH_EDITOR_COLUMNS}])
+
+
+def _parse_dms_component(text: str) -> tuple[str, float]:
+    tokens = re.findall(r"[NSEW]|[-+]?\d+(?:[.,]\d+)?", str(text).upper())
+    if len(tokens) != 4:
+        raise ValueError("ожидается формат вида `N 71 10 14.94`.")
+    direction = str(tokens[0])
+    if direction not in {"N", "S", "E", "W"}:
+        raise ValueError("неверное направление: используйте N/S/E/W.")
+    degrees = float(str(tokens[1]).replace(",", "."))
+    minutes = float(str(tokens[2]).replace(",", "."))
+    seconds = float(str(tokens[3]).replace(",", "."))
+    if degrees < 0.0:
+        raise ValueError("градусы должны быть неотрицательными.")
+    if minutes < 0.0 or minutes >= 60.0:
+        raise ValueError("минуты должны быть в диапазоне [0, 60).")
+    if seconds < 0.0 or seconds >= 60.0:
+        raise ValueError("секунды должны быть в диапазоне [0, 60).")
+    limit = 90.0 if direction in {"N", "S"} else 180.0
+    if degrees > limit:
+        raise ValueError(f"градусы для {direction} должны быть <= {limit:.0f}.")
+    if degrees == limit and (minutes > 0.0 or seconds > 0.0):
+        raise ValueError(
+            f"для {direction} при {limit:.0f}° минуты и секунды должны быть равны 0."
+        )
+    decimal = degrees + minutes / 60.0 + seconds / 3600.0
+    if direction in {"S", "W"}:
+        decimal *= -1.0
+    return direction, decimal
+
+
+def _parse_wgs84_dms_input(text: str) -> tuple[float, float]:
+    """Parse WGS84 DMS text and return calculator X/Y order: (longitude, latitude)."""
+    parts = [part.strip() for part in re.split(r"[;\n]+", str(text)) if part.strip()]
+    if len(parts) != 2:
+        raise ValueError(
+            "ожидаются две части через `;`: сначала широта, затем долгота."
+        )
+    parsed = dict(_parse_dms_component(part) for part in parts)
+    lat = parsed.get("N", parsed.get("S"))
+    lon = parsed.get("E", parsed.get("W"))
+    if lat is None or lon is None:
+        raise ValueError("нужны широта `N/S` и долгота `E/W`.")
+    x_lon_deg = float(lon)
+    y_lat_deg = float(lat)
+    return x_lon_deg, y_lat_deg
 
 
 def _normalize_batch_editor_frame(
@@ -169,13 +224,13 @@ def run_page() -> None:
         subtitle="Быстрая проверка пересчёта X/Y той же функцией, что используется в CSV-выгрузке.",
     )
 
-    input_labels = _labels(INPUT_CRS_OPTIONS)
+    input_labels = _labels(_CALCULATOR_INPUT_CRS_OPTIONS)
     output_labels = _labels(CSV_CRS_OPTIONS)
     c1, c2 = st.columns(2, gap="small")
     input_label = c1.selectbox(
         "Входная CRS",
         options=input_labels,
-        index=_index_for_crs(DEFAULT_CRS, INPUT_CRS_OPTIONS),
+        index=_index_for_crs(DEFAULT_CRS, _CALCULATOR_INPUT_CRS_OPTIONS),
         key="crs_calc_input_crs",
     )
     output_label = c2.selectbox(
@@ -185,7 +240,11 @@ def run_page() -> None:
         key="crs_calc_output_crs",
     )
 
-    input_crs = _crs_by_label(input_label, INPUT_CRS_OPTIONS, DEFAULT_CRS)
+    input_crs = _crs_by_label(
+        input_label,
+        _CALCULATOR_INPUT_CRS_OPTIONS,
+        DEFAULT_CRS,
+    )
     output_crs = _crs_by_label(output_label, CSV_CRS_OPTIONS, _DEFAULT_OUTPUT_CRS)
 
     can_transform = can_transform_crs(input_crs, output_crs)
@@ -197,46 +256,97 @@ def run_page() -> None:
     single_tab, batch_tab = st.tabs(["Одна точка", "Таблица точек"])
 
     with single_tab:
-        x_col, y_col = st.columns(2, gap="small")
-        x_in = x_col.number_input(
-            "X",
-            value=float(_DEFAULT_X),
-            step=1.0,
-            format="%.3f",
-            key="crs_calc_x",
-        )
-        y_in = y_col.number_input(
-            "Y",
-            value=float(_DEFAULT_Y),
-            step=1.0,
-            format="%.3f",
-            key="crs_calc_y",
-        )
-        x_out, y_out = transform_xy_to_crs(
-            float(x_in),
-            float(y_in),
-            input_crs,
-            output_crs,
-        )
-        st.dataframe(
-            _result_frame(
-                x_in=float(x_in),
-                y_in=float(y_in),
-                x_out=float(x_out),
-                y_out=float(y_out),
-                input_crs=input_crs,
-                output_crs=output_crs,
-            ),
-            hide_index=True,
-            width="stretch",
-        )
+        x_in: float | None = None
+        y_in: float | None = None
+        if input_crs.is_geographic():
+            input_mode = st.radio(
+                "Формат ввода WGS84",
+                options=["DMS", "Decimal"],
+                horizontal=True,
+                key="crs_calc_wgs84_input_mode",
+            )
+            if str(input_mode) == "DMS":
+                dms_value = st.text_input(
+                    "WGS84 DMS",
+                    value=_DEFAULT_WGS84_DMS,
+                    key="crs_calc_wgs84_dms",
+                    placeholder="N 71 10 14.94; E 72 14 7.92",
+                )
+                try:
+                    lon_deg, lat_deg = _parse_wgs84_dms_input(dms_value)
+                except ValueError as exc:
+                    st.warning(f"Не удалось разобрать WGS84 DMS: {exc}")
+                else:
+                    x_in = lon_deg
+                    y_in = lat_deg
+                    st.caption(
+                        "Распознано как "
+                        f"широта {lat_deg:.8f}°, долгота {lon_deg:.8f}°."
+                    )
+            else:
+                x_col, y_col = st.columns(2, gap="small")
+                x_in = x_col.number_input(
+                    "Долгота (E)",
+                    value=float(_DEFAULT_WGS84_LON),
+                    step=0.000001,
+                    format="%.8f",
+                    key="crs_calc_x",
+                )
+                y_in = y_col.number_input(
+                    "Широта (N)",
+                    value=float(_DEFAULT_WGS84_LAT),
+                    step=0.000001,
+                    format="%.8f",
+                    key="crs_calc_y",
+                )
+        else:
+            x_col, y_col = st.columns(2, gap="small")
+            x_in = x_col.number_input(
+                "X",
+                value=float(_DEFAULT_X),
+                step=1.0,
+                format="%.3f",
+                key="crs_calc_x",
+            )
+            y_in = y_col.number_input(
+                "Y",
+                value=float(_DEFAULT_Y),
+                step=1.0,
+                format="%.3f",
+                key="crs_calc_y",
+            )
+        if x_in is None or y_in is None:
+            st.info("Введите корректную точку WGS84, чтобы увидеть результат пересчёта.")
+        else:
+            x_out, y_out = transform_xy_to_crs(
+                float(x_in),
+                float(y_in),
+                input_crs,
+                output_crs,
+            )
+            st.dataframe(
+                _result_frame(
+                    x_in=float(x_in),
+                    y_in=float(y_in),
+                    x_out=float(x_out),
+                    y_out=float(y_out),
+                    input_crs=input_crs,
+                    output_crs=output_crs,
+                ),
+                hide_index=True,
+                width="stretch",
+            )
 
-        out_x_col, out_y_col = st.columns(2, gap="small")
-        out_x_col.metric("X output", _format_value(x_out, output_crs))
-        out_y_col.metric("Y output", _format_value(y_out, output_crs))
+            out_x_col, out_y_col = st.columns(2, gap="small")
+            out_x_col.metric("X output", _format_value(x_out, output_crs))
+            out_y_col.metric("Y output", _format_value(y_out, output_crs))
 
     with batch_tab:
         editor_format = "%.8f" if input_crs.is_geographic() else "%.3f"
+        if input_crs.is_geographic():
+            st.caption(
+                "Для таблицы WGS84 используйте decimal degrees: X = долгота, Y = широта."
+            )
         edited_points = st.data_editor(
             _default_batch_editor_frame(),
             key="crs_calc_batch_points",

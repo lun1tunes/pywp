@@ -284,3 +284,19 @@ def test_parse_reference_trajectory_dev_directories_deduplicates_same_folder(
     )
 
     assert [well.name for well in wells] == ["well_111"]
+
+
+def test_parse_reference_trajectory_dev_directories_accepts_quoted_folder_path(
+    tmp_path,
+) -> None:
+    folder = tmp_path / "actual"
+    folder.mkdir()
+    dev_text = "\n".join(["MD X Y Z", "0 0 0 0", "100 1 1 -100"])
+    (folder / "well_111.dev").write_text(dev_text, encoding="utf-8")
+
+    wells = parse_reference_trajectory_dev_directories(
+        [f'"{folder}"'],
+        kind=REFERENCE_WELL_ACTUAL,
+    )
+
+    assert [well.name for well in wells] == ["well_111"]

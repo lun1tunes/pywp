@@ -7,6 +7,7 @@ import pytest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import Point3D
+from pywp import ptc_target_import_dev as target_import_dev
 from pywp.ptc_target_import_dev import target_record_and_summary_from_dev_well
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp import ptc_target_import as target_import
@@ -24,7 +25,7 @@ def test_target_source_defaults_preserve_legacy_table_mode() -> None:
     assert session_state["wt_source_path"] == str(
         target_import.DEFAULT_WELLTRACK_PATH
     )
-    assert session_state["wt_source_upload_file"] is None
+    assert "wt_source_upload_file" not in session_state
     assert list(session_state["wt_source_table_df"].columns) == [
         "Wellname",
         "Point",
@@ -42,7 +43,22 @@ def test_target_source_defaults_normalize_unknown_format() -> None:
     assert session_state["wt_source_format"] == target_import.WT_SOURCE_FORMAT_WELLTRACK
     assert session_state["wt_source_mode"] == target_import.WT_SOURCE_MODE_FILE_PATH
     assert session_state["wt_source_dev_inline"] == ""
-    assert session_state["wt_source_dev_upload_files"] == []
+    assert "wt_source_dev_upload_files" not in session_state
+    assert session_state["wt_source_dev_fixed_t1_enabled"] is False
+    assert session_state["wt_source_dev_fixed_t1_well_names"] == []
+    assert session_state["wt_source_dev_fixed_t1_inc_deg"] == pytest.approx(86.0)
+
+
+def test_target_source_defaults_drop_legacy_upload_widget_state_keys() -> None:
+    session_state = {
+        "wt_source_upload_file": None,
+        "wt_source_dev_upload_files": [],
+    }
+
+    target_import.init_target_source_state_defaults(session_state)
+
+    assert "wt_source_upload_file" not in session_state
+    assert "wt_source_dev_upload_files" not in session_state
 
 
 def test_normalize_source_table_df_accepts_aliases_and_surface_names() -> None:
@@ -274,6 +290,121 @@ def test_dev_target_import_keeps_full_build2_until_dls_drops_to_zero() -> None:
     assert summary.build2_dls_deg_per_30m == (2.4, 1.2)
     assert summary.horizontal_dls_deg_per_30m == ()
     assert "t1 определена по смене тренда INC" not in summary.note
+
+
+def test_dev_target_import_can_place_t1_by_fixed_inc_inside_build2() -> None:
+    operation = target_import.build_target_import_operation(
+        target_import.WelltrackSourcePayload(
+            mode=target_import.WT_SOURCE_MODE_INLINE_TEXT,
+            source_format=target_import.WT_SOURCE_FORMAT_DEV_TRAJECTORY,
+            source_text=Path(
+                "tests/test_data/dev_target_import/build_hold_build_split_pi.dev"
+            ).read_text(encoding="utf-8"),
+            dev_fixed_t1_inc_by_well=(("build_hold_build_split_pi", 70.0),),
+        )
+    )
+
+    parsed = operation.parse()
+
+    assert [record.name for record in parsed.records] == ["build_hold_build_split_pi"]
+    summary = parsed.dev_summaries[0]
+    record = parsed.records[0]
+    assert summary.t1_md_m == pytest.approx(2860.0)
+    assert summary.entry_inc_deg == pytest.approx(71.7)
+    assert summary.build2_dls_deg_per_30m == (2.1,)
+    assert summary.horizontal_dls_deg_per_30m == (2.1,)
+    assert "t1 по INC >= 70.0 deg" in summary.note
+    assert float(record.points[1].md) == pytest.approx(2860.0)
+
+
+def test_dev_target_import_supports_individual_fixed_inc_thresholds_by_well() -> None:
+    operation = target_import.build_target_import_operation(
+        target_import.WelltrackSourcePayload(
+            mode=target_import.WT_SOURCE_MODE_FILE_PATH,
+            source_format=target_import.WT_SOURCE_FORMAT_DEV_TRAJECTORY,
+            source_path="tests/test_data/dev_target_import",
+            dev_fixed_t1_inc_by_well=(
+                ("build_hold_build_equal_pi_with_horizontal_pi", 75.0),
+                ("build_hold_build_split_pi", 70.0),
+            ),
+        )
+    )
+
+    parsed = operation.parse()
+    by_name = {summary.well_name: summary for summary in parsed.dev_summaries}
+
+    assert by_name["build_hold_build_equal_pi_with_horizontal_pi"].t1_md_m == pytest.approx(
+        2395.0
+    )
+    assert by_name["build_hold_build_equal_pi_with_horizontal_pi"].entry_inc_deg == pytest.approx(
+        75.6
+    )
+    assert by_name["build_hold_build_split_pi"].t1_md_m == pytest.approx(2860.0)
+    assert by_name["build_hold_build_split_pi"].entry_inc_deg == pytest.approx(71.7)
+    assert by_name["j_profile_constant_pi"].t1_md_m == pytest.approx(1550.0)
+
+
+def test_fixed_inc_t1_index_uses_positional_offset_for_non_range_index() -> None:
+    rows = pd.DataFrame(
+        {
+            "INCL": [62.0, 68.0, 71.7, 74.5],
+            "DLS": [2.1, 2.1, 2.1, 2.1],
+            "MD": [2740.0, 2800.0, 2860.0, 2920.0],
+        },
+        index=[10, 20, 30, 40],
+    )
+
+    t1_index = target_import_dev._fixed_inc_t1_index(
+        rows=rows,
+        well_name="TEST",
+        build2_start=0,
+        build2_end=3,
+        fixed_t1_inc_deg=70.0,
+    )
+
+    assert t1_index == 2
+
+
+def test_dev_source_preview_well_names_supports_directory_upload_and_inline() -> None:
+    inline_text = Path(
+        "tests/test_data/dev_target_import/j_profile_variable_pi.dev"
+    ).read_text(encoding="utf-8")
+
+    directory_names = target_import.dev_source_preview_well_names(
+        source_mode=target_import.WT_SOURCE_MODE_FILE_PATH,
+        source_path="tests/test_data/dev_target_import",
+    )
+    upload_names = target_import.dev_source_preview_well_names(
+        source_mode=target_import.WT_SOURCE_MODE_UPLOAD,
+        source_files=(
+            (
+                "any_name.dev",
+                inline_text.encode("utf-8"),
+            ),
+        ),
+    )
+    inline_names = target_import.dev_source_preview_well_names(
+        source_mode=target_import.WT_SOURCE_MODE_INLINE_TEXT,
+        source_text=inline_text,
+    )
+
+    assert directory_names == (
+        "build_hold_build_equal_pi_with_horizontal_pi",
+        "build_hold_build_split_pi",
+        "j_profile_constant_pi",
+        "j_profile_variable_pi",
+    )
+    assert upload_names == ("j_profile_variable_pi",)
+    assert inline_names == ("j_profile_variable_pi",)
+
+
+def test_dev_source_preview_well_names_accepts_quoted_directory_path() -> None:
+    directory_names = target_import.dev_source_preview_well_names(
+        source_mode=target_import.WT_SOURCE_MODE_FILE_PATH,
+        source_path='"tests/test_data/dev_target_import"',
+    )
+
+    assert "build_hold_build_equal_pi_with_horizontal_pi" in directory_names
 
 
 def test_dev_target_import_merges_short_zero_dls_gaps_inside_builds() -> None:
@@ -638,7 +769,7 @@ def test_store_imported_records_mutates_state_and_runs_callbacks() -> None:
     assert session_state["wt_well_calc_profile_assignments"] == {}
     assert session_state["wt_well_calc_active_profile_id"] == ""
     assert session_state["wt_well_calc_active_profile_id_pending"] is None
-    assert session_state["wt_well_calc_profile_import_upload"] is None
+    assert "wt_well_calc_profile_import_upload" not in session_state
     assert events == [
         "clear_t1_t3",
         "clear_pad",
@@ -693,6 +824,7 @@ def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:
         "wt_well_calc_overrides": {"TAB-01": {"values": {"dls_build_max": 0.8}}},
         "wt_well_calc_profile_assignments": {"TAB-01": "cfg-1"},
         "wt_well_calc_active_profile_id": "cfg-1",
+        "wt_well_calc_profile_import_upload": "stale-upload-value",
     }
     events: list[str] = []
 
@@ -712,7 +844,7 @@ def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:
     assert session_state["wt_well_calc_profile_assignments"] == {}
     assert session_state["wt_well_calc_active_profile_id"] == ""
     assert session_state["wt_well_calc_active_profile_id_pending"] is None
-    assert session_state["wt_well_calc_profile_import_upload"] is None
+    assert "wt_well_calc_profile_import_upload" not in session_state
     assert events == ["clear_t1_t3", "clear_pad"]
 
     target_import.clear_target_import_flow_state(
@@ -739,5 +871,5 @@ def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:
     assert session_state["wt_well_calc_profile_assignments"] == {}
     assert session_state["wt_well_calc_active_profile_id"] == ""
     assert session_state["wt_well_calc_active_profile_id_pending"] is None
-    assert session_state["wt_well_calc_profile_import_upload"] is None
+    assert "wt_well_calc_profile_import_upload" not in session_state
     assert events[-3:] == ["clear_t1_t3_again", "clear_pad_again", "clear_results"]

@@ -32,7 +32,7 @@ from pywp.uncertainty import (
     WellUncertaintyOverlay,
     build_uncertainty_tube_mesh,
 )
-from pywp.welltrack_batch import SuccessfulWellPlan, successful_well_has_md_warning
+from pywp.welltrack_batch import SuccessfulWellPlan
 
 __all__ = [
     "single_well_three_payload",
@@ -414,7 +414,7 @@ def all_wells_three_payload(
             name=well_name,
             color=color,
             width_role="line",
-            dash="dash" if successful_well_has_md_warning(success) else "solid",
+            dash="solid",
             hover_name=well_name,
             x_arrays=x_arrays,
             y_arrays=y_arrays,

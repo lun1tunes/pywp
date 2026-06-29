@@ -36,17 +36,8 @@ from pywp.welltrack_batch import successful_well_has_md_warning
 
 __all__ = ["render_failed_target_only_results", "render_success_tabs"]
 
-_ANTI_COLLISION_PARALLEL_OPTIONS: tuple[tuple[str, int], ...] = (
-    ("Без Multiprocessing", 0),
-    ("2 процессов", 2),
-    ("4 процессов", 4),
-)
-_ANTI_COLLISION_PARALLEL_VALUES = {
-    label: value for label, value in _ANTI_COLLISION_PARALLEL_OPTIONS
-}
-_ANTI_COLLISION_PARALLEL_LABEL_BY_VALUE = {
-    value: label for label, value in _ANTI_COLLISION_PARALLEL_OPTIONS
-}
+_ANTI_COLLISION_AUTO_PARALLEL_DISABLED_MAX_WELLS = 5
+_ANTI_COLLISION_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS = 12
 
 
 def _rerun_fragment() -> None:
@@ -78,37 +69,27 @@ def _calc_params_changed_after_last_run() -> bool:
     return tuple(stored_override_signature) != manual_override_signature()
 
 
-def _normalize_anticollision_parallel_workers(raw_value: object) -> int:
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError):
+def _auto_anticollision_parallel_workers(total_well_count: int) -> int:
+    well_count = int(max(total_well_count, 0))
+    if well_count <= _ANTI_COLLISION_AUTO_PARALLEL_DISABLED_MAX_WELLS:
         return 0
-    allowed_values = sorted(_ANTI_COLLISION_PARALLEL_LABEL_BY_VALUE.keys())
-    eligible_values = [candidate for candidate in allowed_values if candidate <= value]
-    return int(eligible_values[-1]) if eligible_values else 0
+    if well_count >= _ANTI_COLLISION_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS:
+        return 4
+    return 2
 
 
-def _render_anticollision_parallel_workers_selectbox() -> int:
-    workers_key = "wt_anticollision_parallel_workers"
-    label_key = "wt_anticollision_parallel_workers_label"
-    default_workers = _normalize_anticollision_parallel_workers(
-        st.session_state.get(
-            workers_key,
-            st.session_state.get("wt_last_parallel_workers", 0),
+def _auto_anticollision_parallel_caption(total_well_count: int) -> str:
+    workers = _auto_anticollision_parallel_workers(total_well_count)
+    well_count = int(max(total_well_count, 0))
+    if workers <= 1:
+        return (
+            "Multiprocessing для anti-collision отключён автоматически: "
+            "для текущего набора быстрее последовательный расчёт."
         )
+    return (
+        f"Multiprocessing для anti-collision: автоматически {workers} процесса "
+        f"для текущего набора ({well_count} скв.)."
     )
-    if str(st.session_state.get(label_key, "")) not in _ANTI_COLLISION_PARALLEL_VALUES:
-        st.session_state[label_key] = _ANTI_COLLISION_PARALLEL_LABEL_BY_VALUE[
-            default_workers
-        ]
-    selected_label = st.selectbox(
-        "Параллельный расчёт anti-collision",
-        options=[label for label, _value in _ANTI_COLLISION_PARALLEL_OPTIONS],
-        key=label_key,
-    )
-    selected_workers = int(_ANTI_COLLISION_PARALLEL_VALUES.get(str(selected_label), 0))
-    st.session_state[workers_key] = selected_workers
-    return selected_workers
 
 
 def _point_signature(point: object | None) -> tuple[float, float, float] | None:
@@ -545,7 +526,19 @@ def _render_anticollision_panel(
         )
     )
     st.session_state["wt_anticollision_uncertainty_preset"] = normalized_preset
-    anti_collision_parallel_workers = _render_anticollision_parallel_workers_selectbox()
+    anti_collision_parallel_workers = _auto_anticollision_parallel_workers(
+        len(successes) + len(resolved_reference_wells)
+    )
+    caption = getattr(st, "caption", None)
+    if callable(caption):
+        caption(
+            _auto_anticollision_parallel_caption(
+                len(successes) + len(resolved_reference_wells)
+            )
+        )
+    st.session_state["wt_anticollision_parallel_workers"] = int(
+        anti_collision_parallel_workers
+    )
     if resolved_reference_wells:
         ptc_anticollision_params.render_anticollision_params_block(
             reference_wells=resolved_reference_wells
@@ -1078,6 +1071,11 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
     records: list[object],
     summary_rows: list[dict[str, object]],
     focus_pad_well_names: list[str],
+    target_only_wells: list[object] | None = None,
+    name_to_color: dict[str, str] | None = None,
+    display_name_by_well_name: dict[str, str] | None = None,
+    reference_wells: tuple[object, ...] | None = None,
+    pilot_study_points_by_name: dict[str, tuple[Point3D, ...]] | None = None,
     show_visualization: bool = True,
     show_report: bool = True,
 ) -> bool:
@@ -1102,10 +1100,14 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
         clusters=visible_clusters,
         focus_pad_well_names=visible_focus_names,
     )
-    target_only_wells = wt._overview_target_only_wells(
-        records=list(records),
-        summary_rows=list(summary_rows),
-        successes=list(successes),
+    resolved_target_only_wells = (
+        list(target_only_wells)
+        if target_only_wells is not None
+        else wt._overview_target_only_wells(
+            records=list(records),
+            summary_rows=list(summary_rows),
+            successes=list(successes),
+        )
     )
     if show_visualization:
         _render_anticollision_visual_overview(
@@ -1120,7 +1122,11 @@ def _render_cached_anticollision_snapshot_for_pending_edits(
                 "Показан результат anti-collision до пересчёта. "
                 "Изменённые скважины скрыты; фонд и неизменённые скважины — для ориентира."
             ),
-            target_only_wells=target_only_wells,
+            target_only_wells=resolved_target_only_wells,
+            name_to_color=name_to_color,
+            display_name_by_well_name=display_name_by_well_name,
+            reference_wells=reference_wells,
+            pilot_study_points_by_name=pilot_study_points_by_name,
         )
 
     visible_recommendations = wt._recommendations_for_clusters(
@@ -1152,6 +1158,10 @@ def _render_anticollision_visual_overview(
     title: str | None,
     caption: str | None,
     target_only_wells: list[object] | None = None,
+    name_to_color: dict[str, str] | None = None,
+    display_name_by_well_name: dict[str, str] | None = None,
+    reference_wells: tuple[object, ...] | None = None,
+    pilot_study_points_by_name: dict[str, tuple[Point3D, ...]] | None = None,
 ) -> None:
     visible_focus_names = tuple(str(name) for name in focus_pad_well_names)
     focus_names = tuple(str(name) for name in focus_anticollision_well_names)
@@ -1164,32 +1174,54 @@ def _render_anticollision_visual_overview(
             successes=list(successes),
         )
     )
-    name_to_color = wt._well_color_map(list(records))
-    display_name_by_well_name = wt._well_label_display_names(list(records))
-    reference_wells = reference_state.reference_wells_from_state()
+    resolved_name_to_color = (
+        dict(name_to_color)
+        if name_to_color is not None
+        else wt._well_color_map(list(records))
+    )
+    resolved_display_name_by_well_name = (
+        dict(display_name_by_well_name)
+        if display_name_by_well_name is not None
+        else wt._well_label_display_names(list(records))
+    )
+    resolved_reference_wells = (
+        tuple(reference_wells)
+        if reference_wells is not None
+        else reference_state.reference_wells_from_state()
+    )
     if title:
         st.markdown(title)
     if caption:
         st.caption(caption)
 
-    pilot_study_points_by_name = _pilot_study_points_by_name(list(records))
+    resolved_pilot_study_points_by_name = (
+        dict(pilot_study_points_by_name)
+        if pilot_study_points_by_name is not None
+        else _pilot_study_points_by_name(list(records))
+    )
     anticollision_signature = (
         "anticollision_overview",
         id(analysis),
         int(len(getattr(analysis, "wells", ()) or ())),
         int(len(getattr(analysis, "corridors", ()) or ())),
         int(len(getattr(analysis, "zones", ()) or ())),
-        tuple(_reference_well_render_signature(well) for well in reference_wells),
         tuple(
-            sorted((str(name), str(color)) for name, color in name_to_color.items())
+            _reference_well_render_signature(well)
+            for well in resolved_reference_wells
+        ),
+        tuple(
+            sorted(
+                (str(name), str(color))
+                for name, color in resolved_name_to_color.items()
+            )
         ),
         tuple(
             sorted(
                 (str(name), str(label))
-                for name, label in display_name_by_well_name.items()
+                for name, label in resolved_display_name_by_well_name.items()
             )
         ),
-        _pilot_study_points_signature(pilot_study_points_by_name),
+        _pilot_study_points_signature(resolved_pilot_study_points_by_name),
         tuple(str(name) for name in (focus_names or visible_focus_names)),
         tuple(
             _target_only_render_signature(target_only)
@@ -1205,10 +1237,10 @@ def _render_anticollision_visual_overview(
             analysis,
             previous_successes_by_name={},
             target_only_wells=resolved_target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            display_name_by_well_name=display_name_by_well_name,
-            pilot_study_points_by_name=pilot_study_points_by_name,
+            reference_wells=resolved_reference_wells,
+            name_to_color=resolved_name_to_color,
+            display_name_by_well_name=resolved_display_name_by_well_name,
+            pilot_study_points_by_name=resolved_pilot_study_points_by_name,
             focus_well_names=focus_names or visible_focus_names,
             render_mode=wt.WT_3D_RENDER_DETAIL,
             show_sidetrack_relative_cones=False,
@@ -1233,7 +1265,7 @@ def _render_anticollision_visual_overview(
             analysis=analysis,
             successes=list(successes),
             target_only_wells=resolved_target_only_wells,
-            target_only_name_to_color=name_to_color,
+            target_only_name_to_color=resolved_name_to_color,
         ),
     )
     wt._render_three_payload(
@@ -1253,20 +1285,37 @@ def _render_target_edit_overview(
     empty_message: str,
     focus_pad_well_names: list[str] | None = None,
     show_focus_selector: bool = True,
+    target_only_wells: list[object] | None = None,
+    name_to_color: dict[str, str] | None = None,
+    display_name_by_well_name: dict[str, str] | None = None,
+    reference_wells: tuple[object, ...] | None = None,
+    pilot_study_points_by_name: dict[str, tuple[Point3D, ...]] | None = None,
 ) -> bool:
-    target_only_wells = wt._overview_target_only_wells(
-        records=list(records),
-        summary_rows=list(summary_rows),
-        successes=list(successes),
+    resolved_target_only_wells = (
+        list(target_only_wells)
+        if target_only_wells is not None
+        else wt._overview_target_only_wells(
+            records=list(records),
+            summary_rows=list(summary_rows),
+            successes=list(successes),
+        )
     )
-    if not successes and not target_only_wells:
+    if not successes and not resolved_target_only_wells:
         st.info(empty_message)
         return False
 
-    name_to_color = wt._well_color_map(list(records))
-    display_name_by_well_name = wt._well_label_display_names(list(records))
+    resolved_name_to_color = (
+        dict(name_to_color)
+        if name_to_color is not None
+        else wt._well_color_map(list(records))
+    )
+    resolved_display_name_by_well_name = (
+        dict(display_name_by_well_name)
+        if display_name_by_well_name is not None
+        else wt._well_label_display_names(list(records))
+    )
     st.markdown(title)
-    if target_only_wells:
+    if resolved_target_only_wells:
         st.caption(
             "Скважины без рассчитанной траектории показаны как исходные точки. "
             "Их можно выбрать в легенде 3D и подвинуть через редактор целей."
@@ -1307,26 +1356,40 @@ def _render_target_edit_overview(
             records=records,
             focus_pad_id=focus_pad_id,
         )
-    reference_wells = reference_state.reference_wells_from_state()
-    pilot_study_points_by_name = _pilot_study_points_by_name(list(records))
+    resolved_reference_wells = (
+        tuple(reference_wells)
+        if reference_wells is not None
+        else reference_state.reference_wells_from_state()
+    )
+    resolved_pilot_study_points_by_name = (
+        dict(pilot_study_points_by_name)
+        if pilot_study_points_by_name is not None
+        else _pilot_study_points_by_name(list(records))
+    )
     overview_signature = (
         "trajectory_overview",
         tuple(_success_render_signature(success) for success in successes),
         tuple(
             _target_only_render_signature(target_only)
-            for target_only in target_only_wells
+            for target_only in resolved_target_only_wells
         ),
-        tuple(_reference_well_render_signature(well) for well in reference_wells),
         tuple(
-            sorted((str(name), str(color)) for name, color in name_to_color.items())
+            _reference_well_render_signature(well)
+            for well in resolved_reference_wells
+        ),
+        tuple(
+            sorted(
+                (str(name), str(color))
+                for name, color in resolved_name_to_color.items()
+            )
         ),
         tuple(
             sorted(
                 (str(name), str(label))
-                for name, label in display_name_by_well_name.items()
+                for name, label in resolved_display_name_by_well_name.items()
             )
         ),
-        _pilot_study_points_signature(pilot_study_points_by_name),
+        _pilot_study_points_signature(resolved_pilot_study_points_by_name),
         tuple(str(name) for name in tuple(focus_pad_well_names)),
         str(wt.WT_3D_RENDER_FAST),
     )
@@ -1335,11 +1398,11 @@ def _render_target_edit_overview(
         signature=overview_signature,
         build_payload=lambda: wt._all_wells_three_payload(
             list(successes),
-            target_only_wells=target_only_wells,
-            reference_wells=reference_wells,
-            name_to_color=name_to_color,
-            display_name_by_well_name=display_name_by_well_name,
-            pilot_study_points_by_name=pilot_study_points_by_name,
+            target_only_wells=resolved_target_only_wells,
+            reference_wells=resolved_reference_wells,
+            name_to_color=resolved_name_to_color,
+            display_name_by_well_name=resolved_display_name_by_well_name,
+            pilot_study_points_by_name=resolved_pilot_study_points_by_name,
             focus_well_names=tuple(focus_pad_well_names),
             render_mode=wt.WT_3D_RENDER_FAST,
         ),
@@ -1360,8 +1423,8 @@ def _render_target_edit_overview(
         build_overrides=lambda: wt._trajectory_three_payload_overrides(
             records=list(records),
             successes=list(successes),
-            target_only_wells=target_only_wells,
-            name_to_color=name_to_color,
+            target_only_wells=resolved_target_only_wells,
+            name_to_color=resolved_name_to_color,
         ),
     )
     wt._render_three_payload(
@@ -1467,9 +1530,7 @@ def render_success_tabs(
                 if str(selected.md_postcheck_message).strip()
                 else ()
             ),
-            trajectory_line_dash=(
-                "dash" if successful_well_has_md_warning(selected) else "solid"
-            ),
+            trajectory_line_dash="solid",
             pilot_name=pilot_name,
             pilot_stations=pilot_stations,
             pilot_study_points=pilot_study_points,
@@ -1588,6 +1649,8 @@ def render_success_tabs(
         focus_pad_id=focus_pad_id,
     )
     reference_wells = reference_state.reference_wells_from_state()
+    display_name_by_well_name = wt._well_label_display_names(list(records))
+    pilot_study_points_by_name = _pilot_study_points_by_name(list(records))
     reference_uncertainty_models_by_name = (
         ptc_anticollision_params.reference_uncertainty_models_from_state(
             reference_wells
@@ -1622,6 +1685,11 @@ def render_success_tabs(
                 records=list(records),
                 summary_rows=list(summary_rows),
                 focus_pad_well_names=list(focus_pad_well_names),
+                target_only_wells=target_only_wells,
+                name_to_color=name_to_color,
+                display_name_by_well_name=display_name_by_well_name,
+                reference_wells=reference_wells,
+                pilot_study_points_by_name=pilot_study_points_by_name,
                 show_visualization=True,
                 show_report=False,
             )
@@ -1644,6 +1712,11 @@ def render_success_tabs(
             empty_message="Нет данных для 3D-обзора траекторий и целей.",
             focus_pad_well_names=list(focus_pad_well_names),
             show_focus_selector=False,
+            target_only_wells=target_only_wells,
+            name_to_color=name_to_color,
+            display_name_by_well_name=display_name_by_well_name,
+            reference_wells=reference_wells,
+            pilot_study_points_by_name=pilot_study_points_by_name,
         )
     elif current_anticollision_snapshot is not None:
         analysis, _recommendations, clusters = current_anticollision_snapshot
@@ -1666,6 +1739,10 @@ def render_success_tabs(
                 title="### Все скважины, конуса и пересечения",
                 caption=None,
                 target_only_wells=target_only_wells,
+                name_to_color=name_to_color,
+                display_name_by_well_name=display_name_by_well_name,
+                reference_wells=reference_wells,
+                pilot_study_points_by_name=pilot_study_points_by_name,
             )
         except Exception as exc:
             wt._store_anticollision_failure_state(exc)
@@ -1683,6 +1760,11 @@ def render_success_tabs(
             empty_message="Нет данных для 3D-обзора траекторий и целей.",
             focus_pad_well_names=list(focus_pad_well_names),
             show_focus_selector=False,
+            target_only_wells=target_only_wells,
+            name_to_color=name_to_color,
+            display_name_by_well_name=display_name_by_well_name,
+            reference_wells=reference_wells,
+            pilot_study_points_by_name=pilot_study_points_by_name,
         )
 
     _render_anticollision_panel(

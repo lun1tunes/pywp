@@ -6,6 +6,7 @@ from streamlit.testing.v1 import AppTest
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.ptc_page_run import (
     _SIDETRACK_MANUAL,
+    _auto_batch_parallel_workers,
     _sidetrack_kind_key,
     _sidetrack_mode_key,
     _sidetrack_parent_names,
@@ -50,6 +51,14 @@ def test_sidetrack_parent_names_detects_visible_parent_wells() -> None:
     records = _parent_with_pilot_records()
 
     assert _sidetrack_parent_names(records) == ["WELL-04"]
+
+
+def test_auto_batch_parallel_workers_uses_conservative_thresholds() -> None:
+    assert _auto_batch_parallel_workers(0) == 0
+    assert _auto_batch_parallel_workers(3) == 0
+    assert _auto_batch_parallel_workers(4) == 2
+    assert _auto_batch_parallel_workers(7) == 2
+    assert _auto_batch_parallel_workers(8) == 4
 
 
 def test_sidetrack_parent_names_includes_zbs_target_records() -> None:

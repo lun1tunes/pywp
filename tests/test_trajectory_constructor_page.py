@@ -6,6 +6,8 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from pywp import ptc_core
+from pywp import ptc_page_state
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import TrajectoryConfig
 from pywp.reference_trajectories import parse_reference_trajectory_table
@@ -145,11 +147,75 @@ def test_ptc_page_shows_user_facing_import_and_run_controls() -> None:
     assert "Очистить импорт" not in button_labels
 
 
-def test_ptc_page_limits_parallel_worker_options_to_four() -> None:
-    source = Path("pywp/ptc_page_run.py").read_text(encoding="utf-8")
+def test_ptc_page_uses_automatic_parallel_worker_selection() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_records"] = _records()
+    at.session_state["wt_records_original"] = _records()
 
-    assert "*((f\"{n} процессов\", n) for n in (2, 4))" in source
-    assert "*((f\"{n} процессов\", n) for n in (2, 4, 6, 8))" not in source
+    at.run(timeout=120)
+
+    selectbox_labels = {str(widget.label) for widget in at.selectbox}
+    assert "Параллельный расчёт" not in selectbox_labels
+    caption_values = [str(widget.value) for widget in at.caption]
+    assert any("Multiprocessing" in value for value in caption_values)
+
+
+def test_ptc_page_keeps_open_calc_params_panel_after_three_multi_edit_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted = False
+
+    def _fake_three_scene(_payload, **_kwargs):
+        nonlocal emitted
+        if emitted:
+            return None
+        emitted = True
+        return {
+            "type": "pywp:editTargets",
+            "nonce": "multi-edit-1",
+            "changes": [
+                {
+                    "name": "WELL-A",
+                    "points": [
+                        {"index": 1, "position": [610.0, 810.0, 2400.0]},
+                        {"index": 2, "position": [1510.0, 2010.0, 2500.0]},
+                    ],
+                },
+                {
+                    "name": "WELL-B",
+                    "points": [
+                        {"index": 1, "position": [630.0, 830.0, 2410.0]},
+                        {"index": 2, "position": [1530.0, 2030.0, 2510.0]},
+                    ],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(ptc_core, "render_local_three_scene", _fake_three_scene)
+
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+    ]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+    at.session_state[ptc_page_state.PTC_CALC_PARAMS_OPEN_KEY] = True
+
+    at.run(timeout=120)
+
+    assert not at.exception
+    button_labels = {str(widget.label) for widget in at.button}
+    assert "Скрыть" in button_labels
+    assert at.session_state[ptc_page_state.PTC_CALC_PARAMS_OPEN_KEY] is True
+    assert at.session_state["wt_edit_targets_pending_names"] == ["WELL-A", "WELL-B"]
 
 
 def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sections() -> None:
@@ -361,6 +427,33 @@ def test_ptc_page_renders_target_editor_when_all_results_failed() -> None:
     warning_values = [str(widget.value) for widget in at.warning]
     markdown_values = [str(widget.value) for widget in at.markdown]
     assert any(
+        "Все выбранные скважины завершились ошибками" in value
+        for value in warning_values
+    )
+    assert any("Исходные точки для правки" in value for value in markdown_values)
+
+
+def test_ptc_page_shows_recalc_info_when_all_results_are_not_run_after_target_edit() -> (
+    None
+):
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "Не рассчитана", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-B", "Статус": "Не рассчитана", "Проблема": "", "Точек": 3},
+    ]
+    at.session_state["wt_successes"] = []
+    at.session_state["wt_edit_targets_pending_names"] = ["WELL-A", "WELL-B"]
+
+    at.run(timeout=120)
+
+    info_values = [str(widget.value) for widget in at.info]
+    warning_values = [str(widget.value) for widget in at.warning]
+    markdown_values = [str(widget.value) for widget in at.markdown]
+    assert any("Скважины требуют пересчёта" in value for value in info_values)
+    assert not any(
         "Все выбранные скважины завершились ошибками" in value
         for value in warning_values
     )

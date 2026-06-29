@@ -12,6 +12,7 @@ import streamlit as st
 from pywp import ptc_batch_results
 from pywp.coordinate_integration import DEFAULT_CRS
 from pywp.coordinate_systems import CoordinateSystem
+from pywp.path_utils import normalize_user_path_text
 from pywp.pilot_wells import (
     is_pilot_name,
     parent_name_for_pilot,
@@ -1128,7 +1129,7 @@ def _render_dev_export_overwrite_dialog(
 
 
 def _validated_dev_export_directory(raw_path: str) -> tuple[Path | None, str | None]:
-    path_text = str(raw_path).strip()
+    path_text = normalize_user_path_text(raw_path)
     if not path_text:
         return None, "Укажите папку для выгрузки .dev файлов."
     windows_error = _windows_dev_export_directory_error(path_text)
@@ -1144,7 +1145,7 @@ def _validated_dev_export_directory(raw_path: str) -> tuple[Path | None, str | N
 
 
 def _windows_dev_export_directory_error(path_text: str) -> str | None:
-    normalized = str(path_text).strip().replace("/", "\\")
+    normalized = normalize_user_path_text(path_text).replace("/", "\\")
     if not normalized:
         return None
     match = re.match(r"(?i)^([a-z]):(?:\\(.*))?$", normalized)

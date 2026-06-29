@@ -359,41 +359,12 @@ def test_anticollision_panel_reruns_after_fresh_analysis_when_visual_is_external
     assert calls["progress_emptied"] is True
 
 
-def test_anticollision_parallel_workers_widget_uses_separate_state_and_clamps_legacy_value(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: dict[str, object] = {}
-
-    class FakeStreamlit:
-        session_state = {"wt_last_parallel_workers": 8}
-
-        def selectbox(
-            self,
-            label: str,
-            *,
-            options: list[str],
-            key: str,
-        ) -> str:
-            calls["label"] = str(label)
-            calls["options"] = list(options)
-            return str(self.session_state[key])
-
-    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
-
-    selected_workers = ptc_page_results._render_anticollision_parallel_workers_selectbox()
-
-    assert calls["label"] == "Параллельный расчёт anti-collision"
-    assert calls["options"] == [
-        "Без Multiprocessing",
-        "2 процессов",
-        "4 процессов",
-    ]
-    assert selected_workers == 4
-    assert ptc_page_results.st.session_state["wt_anticollision_parallel_workers"] == 4
-    assert (
-        ptc_page_results.st.session_state["wt_anticollision_parallel_workers_label"]
-        == "4 процессов"
-    )
+def test_auto_anticollision_parallel_workers_uses_conservative_thresholds() -> None:
+    assert ptc_page_results._auto_anticollision_parallel_workers(0) == 0
+    assert ptc_page_results._auto_anticollision_parallel_workers(5) == 0
+    assert ptc_page_results._auto_anticollision_parallel_workers(6) == 2
+    assert ptc_page_results._auto_anticollision_parallel_workers(11) == 2
+    assert ptc_page_results._auto_anticollision_parallel_workers(12) == 4
 
 
 def test_anticollision_panel_renders_settings_under_section_header(
@@ -409,18 +380,8 @@ def test_anticollision_panel_renders_settings_under_section_header(
         def markdown(self, message: str) -> None:
             calls.append(("markdown", str(message)))
 
-        def selectbox(
-            self,
-            label: str,
-            *,
-            options: list[str],
-            format_func=None,
-            key: str,
-        ) -> str:
-            calls.append(("selectbox", str(label)))
-            value = str(options[0])
-            self.session_state[key] = value
-            return value
+        def caption(self, message: str) -> None:
+            calls.append(("caption", str(message)))
 
         def button(self, label: str, **_kwargs: object) -> bool:
             calls.append(("button", str(label)))
@@ -479,7 +440,7 @@ def test_anticollision_panel_renders_settings_under_section_header(
 
     assert calls[:4] == [
         ("markdown", "### Anti-collision"),
-        ("selectbox", "Параллельный расчёт anti-collision"),
+        ("caption", "Multiprocessing для anti-collision отключён автоматически: для текущего набора быстрее последовательный расчёт."),
         ("params", "rendered"),
         ("button", "Расчёт пересечений"),
     ]
@@ -513,25 +474,14 @@ def test_anticollision_panel_uses_its_own_parallel_worker_setting(
 
     class FakeStreamlit:
         session_state = {
-            "wt_last_parallel_workers": 0,
             "wt_anticollision_uncertainty_preset": ptc_core.DEFAULT_UNCERTAINTY_PRESET,
-            "wt_anticollision_parallel_workers_label": "4 процессов",
         }
 
         def markdown(self, _message: str) -> None:
             pass
 
-        def selectbox(
-            self,
-            _label: str,
-            *,
-            options: list[str],
-            format_func=None,
-            key: str,
-        ) -> str:
-            if key not in self.session_state:
-                self.session_state[key] = str(options[0])
-            return str(self.session_state[key])
+        def caption(self, _message: str) -> None:
+            pass
 
         def button(self, label: str, **_kwargs: object) -> bool:
             return str(label) == "Расчёт пересечений"
@@ -606,7 +556,7 @@ def test_anticollision_panel_uses_its_own_parallel_worker_setting(
     )
 
     ptc_page_results._render_anticollision_panel(
-        successes=[object(), object()],
+        successes=[object()] * 12,
         records=[],
         summary_rows=[],
         focus_pad_id="",
@@ -968,6 +918,122 @@ def test_anticollision_visual_overview_reuses_cached_three_payload(
     assert calls["override_builds"] == 1
 
 
+def test_anticollision_visual_overview_uses_precomputed_render_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+    analysis = AntiCollisionAnalysis(
+        wells=(),
+        corridors=(),
+        well_segments=(),
+        zones=(),
+        pair_count=0,
+        overlapping_pair_count=0,
+        target_overlap_pair_count=0,
+        worst_separation_factor=None,
+    )
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def caption(self, _message: str) -> None:
+            pass
+
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_overview_target_only_wells",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("target_only_wells must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_well_color_map",
+        lambda _records: (_ for _ in ()).throw(
+            AssertionError("name_to_color must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_well_label_display_names",
+        lambda _records: (_ for _ in ()).throw(
+            AssertionError("display labels must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("reference wells must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_pilot_study_points_by_name",
+        lambda _records: (_ for _ in ()).throw(
+            AssertionError("pilot study points must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_anticollision_three_payload",
+        lambda *args, **kwargs: calls.setdefault("three_kwargs", kwargs) or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_anticollision_three_payload_overrides",
+        lambda **kwargs: calls.setdefault("override_kwargs", kwargs) or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_three_payload",
+        lambda **_kwargs: None,
+    )
+
+    target_only_wells = [SimpleNamespace(name="WELL-A")]
+    name_to_color = {"WELL-A": "#123456"}
+    display_name_by_well_name = {"WELL-A": "WELL-A"}
+    reference_wells = (SimpleNamespace(name="FACT-1", kind="fact", stations=pd.DataFrame()),)
+    pilot_study_points_by_name = {"WELL-A": ()}
+
+    ptc_page_results._render_anticollision_visual_overview(
+        analysis=analysis,
+        successes=[],
+        records=[],
+        summary_rows=[],
+        focus_pad_well_names=[],
+        focus_anticollision_well_names=[],
+        title="### Test",
+        caption=None,
+        target_only_wells=target_only_wells,
+        name_to_color=name_to_color,
+        display_name_by_well_name=display_name_by_well_name,
+        reference_wells=reference_wells,
+        pilot_study_points_by_name=pilot_study_points_by_name,
+    )
+
+    assert calls["three_kwargs"]["target_only_wells"] == target_only_wells
+    assert calls["three_kwargs"]["name_to_color"] == name_to_color
+    assert calls["three_kwargs"]["display_name_by_well_name"] == display_name_by_well_name
+    assert calls["three_kwargs"]["reference_wells"] == reference_wells
+    assert calls["three_kwargs"]["pilot_study_points_by_name"] == pilot_study_points_by_name
+    assert calls["override_kwargs"]["target_only_name_to_color"] == name_to_color
+
+
 def test_target_edit_overview_keeps_reference_wells(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1045,6 +1111,114 @@ def test_target_edit_overview_keeps_reference_wells(
     assert rendered is True
     assert calls["three_kwargs"]["reference_wells"] == reference_wells
     assert "plan_kwargs" not in calls
+
+
+def test_target_edit_overview_uses_precomputed_render_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        def info(self, _message: str) -> None:
+            pass
+
+        def markdown(self, _message: str) -> None:
+            pass
+
+        def caption(self, _message: str) -> None:
+            pass
+
+        def container(self) -> _DummyContainer:
+            return _DummyContainer()
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_overview_target_only_wells",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("target_only_wells must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_well_color_map",
+        lambda _records: (_ for _ in ()).throw(
+            AssertionError("name_to_color must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_well_label_display_names",
+        lambda _records: (_ for _ in ()).throw(
+            AssertionError("display labels must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.reference_state,
+        "reference_wells_from_state",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("reference wells must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_pilot_study_points_by_name",
+        lambda _records: (_ for _ in ()).throw(
+            AssertionError("pilot study points must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_all_wells_three_payload",
+        lambda *args, **kwargs: calls.setdefault("three_kwargs", kwargs) or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_trajectory_three_payload_overrides",
+        lambda **kwargs: calls.setdefault("override_kwargs", kwargs) or {},
+    )
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_render_three_payload",
+        lambda **_kwargs: None,
+    )
+
+    target_only_wells = [SimpleNamespace(name="WELL-A")]
+    name_to_color = {"WELL-A": "#123456"}
+    display_name_by_well_name = {"WELL-A": "WELL-A"}
+    reference_wells = (SimpleNamespace(name="FACT-1", kind="fact", stations=pd.DataFrame()),)
+    pilot_study_points_by_name = {"WELL-A": ()}
+
+    rendered = ptc_page_results._render_target_edit_overview(
+        successes=[],
+        records=[],
+        summary_rows=[],
+        title="### Test",
+        empty_message="empty",
+        focus_pad_well_names=[],
+        show_focus_selector=False,
+        target_only_wells=target_only_wells,
+        name_to_color=name_to_color,
+        display_name_by_well_name=display_name_by_well_name,
+        reference_wells=reference_wells,
+        pilot_study_points_by_name=pilot_study_points_by_name,
+    )
+
+    assert rendered is True
+    assert calls["three_kwargs"]["target_only_wells"] == target_only_wells
+    assert calls["three_kwargs"]["name_to_color"] == name_to_color
+    assert calls["three_kwargs"]["display_name_by_well_name"] == display_name_by_well_name
+    assert calls["three_kwargs"]["reference_wells"] == reference_wells
+    assert calls["three_kwargs"]["pilot_study_points_by_name"] == pilot_study_points_by_name
+    assert calls["override_kwargs"]["target_only_wells"] == target_only_wells
+    assert calls["override_kwargs"]["name_to_color"] == name_to_color
 
 
 def test_target_edit_overview_reuses_cached_three_payload(

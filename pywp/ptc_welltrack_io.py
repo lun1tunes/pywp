@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from pywp.eclipse_welltrack import decode_welltrack_bytes
+from pywp.path_utils import normalize_user_path_text
 
 __all__ = [
     "decode_welltrack_payload",
@@ -47,7 +48,7 @@ def read_welltrack_file(
     warning: MessageSink | None = None,
     error: MessageSink | None = None,
 ) -> str:
-    file_path_raw = str(path_text or "").strip()
+    file_path_raw = normalize_user_path_text(path_text)
     if not file_path_raw:
         _notify(warning, "Укажите путь к файлу WELLTRACK.")
         return ""
@@ -118,7 +119,7 @@ def _resolve_welltrack_source_files(
     resolved_files: list[Path] = []
     seen_paths: set[Path] = set()
     for raw_path in path_texts:
-        path_text = str(raw_path or "").strip()
+        path_text = normalize_user_path_text(raw_path)
         if not path_text:
             continue
         path = Path(path_text).expanduser()

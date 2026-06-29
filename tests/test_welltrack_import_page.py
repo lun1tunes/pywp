@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -1372,7 +1373,7 @@ def _successful_plan(
     )
 
 
-def test_all_wells_plan_figure_marks_message_only_warning_well_as_dashed() -> None:
+def test_all_wells_plan_figure_keeps_message_only_warning_well_solid() -> None:
     page = wt_import_module
 
     figure = page._all_wells_plan_figure(
@@ -1387,7 +1388,7 @@ def test_all_wells_plan_figure_marks_message_only_warning_well_as_dashed() -> No
 
     warning_trace = next(trace for trace in figure.data if str(trace.name) == "WELL-A")
 
-    assert str(warning_trace.line.dash) == "dash"
+    assert str(warning_trace.line.dash) == "solid"
 
 
 def _successful_plan_xy(
@@ -2490,6 +2491,65 @@ def test_dev_target_import_stores_read_parameters_and_target_points() -> None:
     assert any("Прочитанные параметры .dev" in value for value in markdown_values)
 
 
+def test_dev_target_import_supports_fixed_inc_t1_selection() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_source_format"] = ".dev траектория"
+    at.session_state["wt_source_mode"] = "Файл по пути"
+    at.session_state["wt_source_path"] = (
+        "tests/test_data/dev_target_import/build_hold_build_split_pi.dev"
+    )
+    at.session_state["wt_source_dev_fixed_t1_enabled"] = True
+    at.session_state["wt_source_dev_fixed_t1_well_names"] = [
+        "build_hold_build_split_pi"
+    ]
+    at.session_state[
+        wt_import_module._dev_fixed_t1_input_key("build_hold_build_split_pi")
+    ] = 70.0
+
+    at.run(timeout=120)
+    _click_button(at, "Импорт целей")
+    at.run(timeout=120)
+
+    records = at.session_state["wt_records"]
+    imported_params = at.session_state["wt_imported_dev_params"]
+
+    assert [record.name for record in records] == ["build_hold_build_split_pi"]
+    assert float(records[0].points[1].md) == pytest.approx(2860.0)
+    assert imported_params[0].t1_md_m == pytest.approx(2860.0)
+    assert imported_params[0].entry_inc_deg == pytest.approx(71.7)
+    assert imported_params[0].horizontal_dls_deg_per_30m == (2.1,)
+    assert "t1 по INC >= 70.0 deg" in str(imported_params[0].note)
+
+
+def test_dev_fixed_t1_input_keys_do_not_collide_for_similar_names() -> None:
+    page = wt_import_module
+
+    first_key = page._dev_fixed_t1_input_key("WELL-1")
+    second_key = page._dev_fixed_t1_input_key("WELL_1")
+
+    assert first_key != second_key
+
+
+def test_build_source_payload_keeps_individual_fixed_t1_thresholds_for_similar_names() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_source_format"] = page.WT_SOURCE_FORMAT_DEV_TRAJECTORY
+    page.st.session_state["wt_source_mode"] = page.WT_SOURCE_MODE_FILE_PATH
+    page.st.session_state["wt_source_dev_fixed_t1_enabled"] = True
+    page.st.session_state["wt_source_dev_fixed_t1_well_names"] = ["WELL-1", "WELL_1"]
+    page.st.session_state[page._dev_fixed_t1_input_key("WELL-1")] = 70.0
+    page.st.session_state[page._dev_fixed_t1_input_key("WELL_1")] = 82.5
+
+    payload = page._build_source_payload_from_state()
+
+    assert payload.dev_fixed_t1_inc_by_well == (
+        ("WELL-1", 70.0),
+        ("WELL_1", 82.5),
+    )
+
+
 def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface() -> (
     None
 ):
@@ -3401,6 +3461,28 @@ def test_dev_target_import_format_shows_dev_loading_methods() -> None:
     ]
 
 
+def test_welltrack_upload_mode_renders_without_widget_state_crash() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_source_format"] = "WELLTRACK"
+    at.session_state["wt_source_mode"] = "Загрузить файл"
+
+    at.run(timeout=120)
+
+    assert not at.exception
+    assert "Импорт целей" in {str(widget.label) for widget in at.button}
+
+
+def test_dev_upload_mode_renders_without_widget_state_crash() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_source_format"] = ".dev траектория"
+    at.session_state["wt_source_mode"] = "Загрузить файл"
+
+    at.run(timeout=120)
+
+    assert not at.exception
+    assert "Импорт целей" in {str(widget.label) for widget in at.button}
+
+
 def test_welltrack_import_accepts_tabular_point_editor_mode() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     at.session_state["wt_source_mode"] = "Вставить таблицу"
@@ -3652,12 +3734,12 @@ def test_welltrack_page_prompts_to_run_anticollision_for_successful_batch() -> N
     selectboxes_by_label = {str(widget.label): widget for widget in at.selectbox}
     selectbox_labels = list(selectboxes_by_label.keys())
     assert "Пресет неопределенности для anti-collision" not in selectbox_labels
-    assert "Параллельный расчёт anti-collision" in selectbox_labels
-    assert list(selectboxes_by_label["Параллельный расчёт anti-collision"].options) == [
-        "Без Multiprocessing",
-        "2 процессов",
-        "4 процессов",
-    ]
+    assert "Параллельный расчёт anti-collision" not in selectbox_labels
+    caption_values = [str(widget.value) for widget in at.caption]
+    assert any(
+        "Multiprocessing для anti-collision отключён автоматически" in value
+        for value in caption_values
+    )
 
 
 def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() -> None:
@@ -4005,6 +4087,146 @@ def test_render_raw_records_table_uses_preprocess_highlight_message(
         "Скорректированные точки `t3` подсвечены. "
         "Запустите расчёт для обновления траекторий."
     )
+
+
+def test_render_raw_records_table_keeps_coordinate_edits_pending_until_save(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_raw_records_edit_mode"] = True
+    page.st.session_state["wt_raw_records_editor_nonce"] = 0
+    records = list(_records()[:1])
+    edited_df = page.ptc_target_records.raw_records_dataframe(records)
+    edited_df.loc[0, "X, м"] = 10.0
+    captured: dict[str, object] = {}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def form_submit_button(self, label, **kwargs):
+            return False
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn(), _DummyColumn()),
+    )
+
+    def _fake_data_editor(frame, **kwargs):
+        captured["disabled"] = kwargs.get("disabled")
+        captured["num_rows"] = kwargs.get("num_rows")
+        return edited_df.copy()
+
+    monkeypatch.setattr(page.st, "data_editor", _fake_data_editor)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "TextColumn",
+        lambda *args, **kwargs: {"type": "text"},
+    )
+    monkeypatch.setattr(
+        page.st.column_config,
+        "NumberColumn",
+        lambda *args, **kwargs: {"type": "number"},
+    )
+    monkeypatch.setattr(
+        page,
+        "_apply_edit_targets_changes",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("changes must not apply before save")
+        ),
+    )
+
+    page._render_raw_records_table(records)
+
+    assert list(captured["disabled"]) == ["Скважина", "Точка"]
+    assert captured["num_rows"] == "fixed"
+    assert page.st.session_state["wt_raw_records_edit_mode"] is True
+    assert page.st.session_state["wt_raw_records_editor_nonce"] == 0
+
+
+def test_render_raw_records_table_applies_coordinate_edits_on_first_submit(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_raw_records_edit_mode"] = True
+    page.st.session_state["wt_raw_records_editor_nonce"] = 0
+    records = list(_records()[:1])
+    edited_df = page.ptc_target_records.raw_records_dataframe(records)
+    edited_df.loc[0, "X, м"] = 10.0
+    edited_df.loc[2, "Z, м"] = 2510.0
+    captured: dict[str, object] = {"rerun_called": False}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def form_submit_button(self, label, **kwargs):
+            return str(label) == "Сохранить изменения"
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn(), _DummyColumn()),
+    )
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: edited_df.copy())
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "rerun",
+        lambda *args, **kwargs: captured.__setitem__("rerun_called", True),
+    )
+    monkeypatch.setattr(
+        page.st.column_config,
+        "TextColumn",
+        lambda *args, **kwargs: {"type": "text"},
+    )
+    monkeypatch.setattr(
+        page.st.column_config,
+        "NumberColumn",
+        lambda *args, **kwargs: {"type": "number"},
+    )
+
+    def _fake_apply_edit_targets_changes(changes, *, source="3d"):
+        captured["changes"] = changes
+        captured["source"] = source
+        return ["WELL-A"]
+
+    monkeypatch.setattr(page, "_apply_edit_targets_changes", _fake_apply_edit_targets_changes)
+
+    page._render_raw_records_table(records)
+
+    assert captured["source"] == "raw_records_table"
+    assert captured["changes"] == [
+        {
+            "name": "WELL-A",
+            "points": [
+                {"index": 0, "position": [10.0, 0.0, 0.0]},
+                {"index": 2, "position": [1500.0, 2000.0, 2510.0]},
+            ],
+        }
+    ]
+    assert page.st.session_state["wt_raw_records_edit_mode"] is False
+    assert page.st.session_state["wt_raw_records_editor_nonce"] == 1
+    assert captured["rerun_called"] is True
 
 
 def test_apply_three_edit_targets_preserves_unchanged_results() -> None:
@@ -4906,6 +5128,44 @@ def test_manual_well_calc_override_signature_distinguishes_enabled_without_value
     page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
 
     assert page._manual_well_calc_override_signature() == (True, ())
+
+
+def test_preserve_manual_well_calc_override_widget_state_keeps_override_keys() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = "cfg-1"
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] = ["WELL-A"]
+    name_key = page._manual_well_calc_profile_name_key("cfg-1")
+    page.st.session_state[name_key] = "Cfg 1"
+
+    page._preserve_manual_well_calc_override_widget_state()
+
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] is True
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] == "cfg-1"
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] == ["WELL-A"]
+    assert page.st.session_state[name_key] == "Cfg 1"
+
+
+def test_render_manual_well_calc_overrides_preserves_widget_state_before_render(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        page,
+        "_preserve_manual_well_calc_override_widget_state",
+        lambda: calls.append("preserve"),
+    )
+    monkeypatch.setattr(page, "_unique_well_names", lambda names: [])
+
+    page._render_manual_well_calc_overrides(records=[])
+
+    assert calls == ["preserve"]
 
 
 def test_sync_manual_well_override_editor_selection_evaluates_kop_for_assigned_profile(
@@ -6321,6 +6581,17 @@ def test_batch_summary_dev_folder_export_rejects_drive_d() -> None:
 
     assert path is None
     assert error_message == "На диски C: и D: выгрузка .dev файлов запрещена."
+
+
+def test_batch_summary_dev_folder_export_accepts_quoted_directory_path(
+    tmp_path,
+) -> None:
+    panel = wt_import_module.ptc_batch_summary_panel
+
+    path, error_message = panel._validated_dev_export_directory(f'"{tmp_path / "dev"}"')
+
+    assert error_message is None
+    assert path == Path(tmp_path / "dev")
 
 
 def test_batch_summary_can_export_target_points(monkeypatch) -> None:

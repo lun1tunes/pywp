@@ -131,6 +131,63 @@ def test_records_with_edit_targets_updates_pilot_points_by_index() -> None:
     assert updated.points[2].md == pytest.approx(3.0)
 
 
+def test_raw_records_editor_changes_builds_indexed_updates_from_coordinate_edits() -> (
+    None
+):
+    records = [
+        _record("WELL-A"),
+        _record(
+            "WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=2.0),
+                WelltrackPoint(x=300.0, y=500.0, z=2400.0, md=3.0),
+            ),
+        ),
+    ]
+    edited_rows = [
+        {"Скважина": "WELL-A", "Точка": "S", "X, м": 10.0, "Y, м": 11.0, "Z, м": -5.0},
+        {"Скважина": "WELL-A", "Точка": "t1", "X, м": 600.0, "Y, м": 800.0, "Z, м": 2400.0},
+        {"Скважина": "WELL-A", "Точка": "t3", "X, м": 1510.0, "Y, м": 2010.0, "Z, м": 2510.0},
+        {"Скважина": "WELL-A_PL", "Точка": "S", "X, м": 0.0, "Y, м": 0.0, "Z, м": 0.0},
+        {"Скважина": "WELL-A_PL", "Точка": "PL1", "X, м": 110.0, "Y, м": 210.0, "Z, м": 1810.0},
+        {"Скважина": "WELL-A_PL", "Точка": "PL2", "X, м": 300.0, "Y, м": 500.0, "Z, м": 2400.0},
+    ]
+
+    changes = ptc_edit_targets.raw_records_editor_changes(records, edited_rows)
+
+    assert changes == [
+        {
+            "name": "WELL-A",
+            "points": [
+                {"index": 0, "position": [10.0, 11.0, -5.0]},
+                {"index": 2, "position": [1510.0, 2010.0, 2510.0]},
+            ],
+        },
+        {
+            "name": "WELL-A_PL",
+            "points": [
+                {"index": 1, "position": [110.0, 210.0, 1810.0]},
+            ],
+        },
+    ]
+
+
+def test_raw_records_editor_changes_rejects_structure_edits() -> None:
+    records = [_record("WELL-A")]
+    edited_rows = [
+        {"Скважина": "WELL-X", "Точка": "S", "X, м": 0.0, "Y, м": 0.0, "Z, м": 0.0},
+        {"Скважина": "WELL-A", "Точка": "t1", "X, м": 600.0, "Y, м": 800.0, "Z, м": 2400.0},
+        {"Скважина": "WELL-A", "Точка": "t3", "X, м": 1500.0, "Y, м": 2000.0, "Z, м": 2500.0},
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="нельзя менять столбцы «Скважина» и «Точка»",
+    ):
+        ptc_edit_targets.raw_records_editor_changes(records, edited_rows)
+
+
 def test_bulk_horizontal_length_changes_updates_t3_along_t1_t3_vector() -> None:
     record = _record()
 

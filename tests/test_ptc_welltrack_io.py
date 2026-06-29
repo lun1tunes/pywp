@@ -34,6 +34,20 @@ def test_read_welltrack_file_resolves_relative_path(tmp_path) -> None:
     assert "WELLTRACK 'A'" in text
 
 
+def test_read_welltrack_file_accepts_trailing_quote_in_path(tmp_path) -> None:
+    folder = tmp_path / "inputs"
+    folder.mkdir()
+    source_file = folder / "quoted.inc"
+    source_file.write_text(
+        "WELLTRACK 'Q'\n0 0 0 0\n/\n",
+        encoding="utf-8",
+    )
+
+    text = read_welltrack_file(f'{source_file}"')
+
+    assert "WELLTRACK 'Q'" in text
+
+
 def test_read_welltrack_file_reports_empty_path() -> None:
     warnings: list[str] = []
 

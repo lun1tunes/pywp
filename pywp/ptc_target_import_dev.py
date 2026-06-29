@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -74,23 +74,46 @@ def dev_trajectory_text_name(text: str, *, fallback_name: str = "dev_import_1") 
     return normalized or str(fallback_name)
 
 
-def parse_dev_target_file(path: str | Path) -> DevTargetImportParsedWell:
+def parse_dev_target_file(
+    path: str | Path,
+    *,
+    fixed_t1_inc_by_well: Mapping[str, float] | None = None,
+) -> DevTargetImportParsedWell:
     well = parse_reference_trajectory_dev_file(path, kind=REFERENCE_WELL_APPROVED)
-    return _parsed_dev_target_well(well)
+    return _parsed_dev_target_well(
+        well,
+        fixed_t1_inc_deg=_fixed_t1_inc_for_well(
+            str(well.name),
+            fixed_t1_inc_by_well,
+        ),
+    )
 
 
 def parse_dev_target_directory(
     path: str | Path,
+    *,
+    fixed_t1_inc_by_well: Mapping[str, float] | None = None,
 ) -> list[DevTargetImportParsedWell]:
     wells = parse_reference_trajectory_dev_directories(
         [path],
         kind=REFERENCE_WELL_APPROVED,
     )
-    return [_parsed_dev_target_well(well) for well in wells]
+    return [
+        _parsed_dev_target_well(
+            well,
+            fixed_t1_inc_deg=_fixed_t1_inc_for_well(
+                str(well.name),
+                fixed_t1_inc_by_well,
+            ),
+        )
+        for well in wells
+    ]
 
 
 def parse_dev_target_payloads(
     payloads: Sequence[tuple[str, bytes]],
+    *,
+    fixed_t1_inc_by_well: Mapping[str, float] | None = None,
 ) -> list[DevTargetImportParsedWell]:
     results: list[DevTargetImportParsedWell] = []
     for fallback_index, (file_name, raw_bytes) in enumerate(payloads, start=1):
@@ -102,12 +125,27 @@ def parse_dev_target_payloads(
             well_name=well_name,
             kind=REFERENCE_WELL_APPROVED,
         )
-        results.append(_parsed_dev_target_well(well))
+        results.append(
+            _parsed_dev_target_well(
+                well,
+                fixed_t1_inc_deg=_fixed_t1_inc_for_well(
+                    well_name,
+                    fixed_t1_inc_by_well,
+                ),
+            )
+        )
     return results
 
 
-def _parsed_dev_target_well(well: ImportedTrajectoryWell) -> DevTargetImportParsedWell:
-    record, summary = target_record_and_summary_from_dev_well(well)
+def _parsed_dev_target_well(
+    well: ImportedTrajectoryWell,
+    *,
+    fixed_t1_inc_deg: float | None = None,
+) -> DevTargetImportParsedWell:
+    record, summary = target_record_and_summary_from_dev_well(
+        well,
+        fixed_t1_inc_deg=fixed_t1_inc_deg,
+    )
     return DevTargetImportParsedWell(
         record=record,
         summary=summary,
@@ -117,6 +155,8 @@ def _parsed_dev_target_well(well: ImportedTrajectoryWell) -> DevTargetImportPars
 
 def target_record_and_summary_from_dev_well(
     well: ImportedTrajectoryWell,
+    *,
+    fixed_t1_inc_deg: float | None = None,
 ) -> tuple[WelltrackRecord, DevTargetImportSummary]:
     stations = pd.DataFrame(well.stations).reset_index(drop=True)
     if stations.empty or len(stations.index) < 2:
@@ -135,7 +175,21 @@ def target_record_and_summary_from_dev_well(
     kop_index = max(first_dynamic_index - 1, 0)
     build1_start, build1_end = groups[0]
     build2_start, build2_end = groups[1] if len(groups) > 1 else (0, 0)
-    t1_index = build2_end if len(groups) > 1 else build1_end
+    if fixed_t1_inc_deg is None:
+        t1_index = build2_end if len(groups) > 1 else build1_end
+    else:
+        if len(groups) <= 1:
+            raise WelltrackParseError(
+                f".dev '{well.name}': режим t1 по фиксированному INC доступен "
+                "только для BUILD-HOLD-BUILD траекторий с участком BUILD2."
+            )
+        t1_index = _fixed_inc_t1_index(
+            rows=rows,
+            well_name=str(well.name),
+            build2_start=build2_start,
+            build2_end=build2_end,
+            fixed_t1_inc_deg=float(fixed_t1_inc_deg),
+        )
     if t1_index <= 0 or t1_index >= len(rows.index) - 1:
         raise WelltrackParseError(
             f".dev '{well.name}': не удалось надежно определить точку t1."
@@ -146,7 +200,7 @@ def target_record_and_summary_from_dev_well(
         build2_slice = rows.iloc[0:0]
     else:
         build1_slice = rows.iloc[build1_start : build1_end + 1]
-        build2_slice = rows.iloc[build2_start : build2_end + 1]
+        build2_slice = rows.iloc[build2_start : t1_index + 1]
     horizontal_slice = rows.iloc[t1_index + 1 :]
 
     surface_row = stations.iloc[0]
@@ -191,9 +245,48 @@ def target_record_and_summary_from_dev_well(
             build1_dls=_stable_unique_dls(build1_slice),
             build2_dls=_stable_unique_dls(build2_slice),
             horizontal_dls=_stable_unique_dls(horizontal_slice),
+            fixed_t1_inc_deg=fixed_t1_inc_deg,
         ),
     )
     return record, summary
+
+
+def _fixed_t1_inc_for_well(
+    well_name: str,
+    fixed_t1_inc_by_well: Mapping[str, float] | None,
+) -> float | None:
+    if not fixed_t1_inc_by_well:
+        return None
+    raw_value = fixed_t1_inc_by_well.get(str(well_name))
+    if raw_value is None:
+        return None
+    value = float(raw_value)
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def _fixed_inc_t1_index(
+    *,
+    rows: pd.DataFrame,
+    well_name: str,
+    build2_start: int,
+    build2_end: int,
+    fixed_t1_inc_deg: float,
+) -> int:
+    build2_rows = rows.iloc[build2_start : build2_end + 1]
+    threshold = float(fixed_t1_inc_deg)
+    candidate_positions = np.flatnonzero(
+        build2_rows["INCL"].astype(float).to_numpy(dtype=float)
+        >= threshold - _DEV_INCL_EPSILON_DEG
+    )
+    if len(candidate_positions) == 0:
+        build2_max_inc = float(build2_rows["INCL"].astype(float).max())
+        raise WelltrackParseError(
+            f".dev '{well_name}': в BUILD2 не найдено точки с INC >= "
+            f"{threshold:.1f} deg. Максимальный INC BUILD2 = {build2_max_inc:.1f} deg."
+        )
+    return int(build2_start + int(candidate_positions[0]))
 
 
 def dev_target_import_summary_dataframe(
@@ -342,8 +435,11 @@ def _summary_note(
     build1_dls: Sequence[float],
     build2_dls: Sequence[float],
     horizontal_dls: Sequence[float],
+    fixed_t1_inc_deg: float | None = None,
 ) -> str:
     notes: list[str] = []
+    if fixed_t1_inc_deg is not None:
+        notes.append(f"t1 по INC >= {float(fixed_t1_inc_deg):.1f} deg")
     if len(build1_dls) > 1:
         notes.append("BUILD1 с переменным ПИ")
     if len(build2_dls) > 1:

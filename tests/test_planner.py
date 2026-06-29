@@ -2751,6 +2751,447 @@ def test_md_optimization_skips_full_slsqp_when_2d_stage_confirms_boundary_extrem
     )
 
 
+def test_md_boundary_extremum_without_improvement_keeps_seed_candidate(
+    monkeypatch,
+) -> None:
+    import pywp.planner as planner_module
+    from pywp.planner_types import PostEntrySection, SectionGeometry
+
+    seed_candidate = ProfileParameters(
+        kop_vertical_m=760.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=320.0,
+        hold_length_m=480.0,
+        build2_length_m=210.0,
+        horizontal_length_m=1200.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1090.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    worse_boundary_candidate = ProfileParameters(
+        kop_vertical_m=820.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=360.0,
+        hold_length_m=520.0,
+        build2_length_m=240.0,
+        horizontal_length_m=1260.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1150.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    geometry = SectionGeometry(
+        s1_m=1000.0,
+        z1_m=2400.0,
+        ds_13_m=1500.0,
+        dz_13_m=100.0,
+        azimuth_entry_deg=67.0,
+        azimuth_surface_t1_deg=42.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        t1_cross_m=0.0,
+        t3_cross_m=0.0,
+        t1_east_m=600.0,
+        t1_north_m=800.0,
+        t1_tvd_m=2400.0,
+    )
+    post_entry = PostEntrySection(
+        total_length_m=1200.0,
+        transition_length_m=110.0,
+        hold_length_m=1090.0,
+        hold_inc_deg=85.0,
+        transition_dls_deg_per_30m=2.0,
+    )
+    bounds = (
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+
+    monkeypatch.setattr(
+        planner_module,
+        "_theoretical_objective_lower_bound",
+        lambda **kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_optimization_target_reached",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_make_turn_profile_builder",
+        lambda **kwargs: (lambda values: seed_candidate),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_collect_optimization_seed_vectors",
+        lambda **kwargs: [np.array([0.5, 550.0, 50.0, 400.0, 30.0], dtype=float)],
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_boundary_refine_md_candidates",
+        lambda **kwargs: ([worse_boundary_candidate], 1),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_is_md_boundary_extremum_candidate",
+        lambda **kwargs: True,
+    )
+
+    result = planner_module._select_feasible_candidate(
+        candidates=[seed_candidate],
+        surface=Point3D(0.0, 0.0, 0.0),
+        geometry=geometry,
+        post_entry=post_entry,
+        config=_fast_config(optimization_mode=OPTIMIZATION_MINIMIZE_MD),
+        optimization_context=None,
+        zero_azimuth_turn=False,
+        lower_dls_deg_per_30m=0.1,
+        upper_dls_deg_per_30m=6.0,
+        bounds=bounds,
+        profile_builder=lambda values: seed_candidate,
+        target_point=np.zeros(3, dtype=float),
+        search_settings=planner_module._turn_search_settings(0),
+    )
+
+    assert result.params == seed_candidate
+    assert result.optimization.status == "seed_selected"
+    assert result.optimization.objective_value == pytest.approx(
+        float(seed_candidate.md_total_m)
+    )
+
+
+def test_md_2d_boundary_extremum_without_improvement_keeps_seed_candidate(
+    monkeypatch,
+) -> None:
+    import pywp.planner as planner_module
+    from pywp.planner_types import PostEntrySection, SectionGeometry
+
+    seed_candidate = ProfileParameters(
+        kop_vertical_m=760.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=320.0,
+        hold_length_m=480.0,
+        build2_length_m=210.0,
+        horizontal_length_m=1200.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1090.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    worse_boundary_candidate = ProfileParameters(
+        kop_vertical_m=820.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=360.0,
+        hold_length_m=520.0,
+        build2_length_m=240.0,
+        horizontal_length_m=1260.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1150.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    worse_2d_candidate = ProfileParameters(
+        kop_vertical_m=810.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=350.0,
+        hold_length_m=510.0,
+        build2_length_m=235.0,
+        horizontal_length_m=1250.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1140.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    geometry = SectionGeometry(
+        s1_m=1000.0,
+        z1_m=2400.0,
+        ds_13_m=1500.0,
+        dz_13_m=100.0,
+        azimuth_entry_deg=67.0,
+        azimuth_surface_t1_deg=42.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        t1_cross_m=0.0,
+        t3_cross_m=0.0,
+        t1_east_m=600.0,
+        t1_north_m=800.0,
+        t1_tvd_m=2400.0,
+    )
+    post_entry = PostEntrySection(
+        total_length_m=1200.0,
+        transition_length_m=110.0,
+        hold_length_m=1090.0,
+        hold_inc_deg=85.0,
+        transition_dls_deg_per_30m=2.0,
+    )
+    bounds = (
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+    extremum_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        planner_module,
+        "_theoretical_objective_lower_bound",
+        lambda **kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_optimization_target_reached",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_make_turn_profile_builder",
+        lambda **kwargs: (lambda values: seed_candidate),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_collect_optimization_seed_vectors",
+        lambda **kwargs: [np.array([0.5, 550.0, 50.0, 400.0, 30.0], dtype=float)],
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_boundary_refine_md_candidates",
+        lambda **kwargs: ([worse_boundary_candidate], 1),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_two_dimensional_md_refine_candidates",
+        lambda **kwargs: ([worse_2d_candidate], 1),
+    )
+
+    def fake_is_boundary_extremum_candidate(**kwargs) -> bool:
+        extremum_calls["count"] += 1
+        return extremum_calls["count"] == 2
+
+    monkeypatch.setattr(
+        planner_module,
+        "_is_md_boundary_extremum_candidate",
+        fake_is_boundary_extremum_candidate,
+    )
+
+    result = planner_module._select_feasible_candidate(
+        candidates=[seed_candidate],
+        surface=Point3D(0.0, 0.0, 0.0),
+        geometry=geometry,
+        post_entry=post_entry,
+        config=_fast_config(optimization_mode=OPTIMIZATION_MINIMIZE_MD),
+        optimization_context=None,
+        zero_azimuth_turn=False,
+        lower_dls_deg_per_30m=0.1,
+        upper_dls_deg_per_30m=6.0,
+        bounds=bounds,
+        profile_builder=lambda values: seed_candidate,
+        target_point=np.zeros(3, dtype=float),
+        search_settings=planner_module._turn_search_settings(0),
+    )
+
+    assert result.params == seed_candidate
+    assert result.optimization.status == "seed_selected"
+    assert result.optimization.objective_value == pytest.approx(
+        float(seed_candidate.md_total_m)
+    )
+
+
+def test_md_2d_refinement_runs_even_when_boundary_already_improved(
+    monkeypatch,
+) -> None:
+    import pywp.planner as planner_module
+    from pywp.planner_types import PostEntrySection, SectionGeometry
+
+    seed_candidate = ProfileParameters(
+        kop_vertical_m=760.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=320.0,
+        hold_length_m=480.0,
+        build2_length_m=210.0,
+        horizontal_length_m=1200.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1090.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    improved_boundary_candidate = ProfileParameters(
+        kop_vertical_m=730.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=300.0,
+        hold_length_m=450.0,
+        build2_length_m=190.0,
+        horizontal_length_m=1180.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1070.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    best_2d_candidate = ProfileParameters(
+        kop_vertical_m=700.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        inc_hold_deg=52.0,
+        dls_build1_deg_per_30m=3.2,
+        dls_build2_deg_per_30m=3.2,
+        build1_length_m=280.0,
+        hold_length_m=420.0,
+        build2_length_m=170.0,
+        horizontal_length_m=1160.0,
+        horizontal_adjust_length_m=110.0,
+        horizontal_hold_length_m=1050.0,
+        horizontal_inc_deg=85.0,
+        horizontal_dls_deg_per_30m=2.0,
+        azimuth_hold_deg=42.0,
+        azimuth_entry_deg=67.0,
+    )
+    geometry = SectionGeometry(
+        s1_m=1000.0,
+        z1_m=2400.0,
+        ds_13_m=1500.0,
+        dz_13_m=100.0,
+        azimuth_entry_deg=67.0,
+        azimuth_surface_t1_deg=42.0,
+        inc_entry_deg=86.0,
+        inc_required_t1_t3_deg=84.0,
+        t1_cross_m=0.0,
+        t3_cross_m=0.0,
+        t1_east_m=600.0,
+        t1_north_m=800.0,
+        t1_tvd_m=2400.0,
+    )
+    post_entry = PostEntrySection(
+        total_length_m=1200.0,
+        transition_length_m=110.0,
+        hold_length_m=1090.0,
+        hold_inc_deg=85.0,
+        transition_dls_deg_per_30m=2.0,
+    )
+    bounds = (
+        (0.0, 1.0),
+        (200.0, 1800.0),
+        (0.5, 85.5),
+        (0.0, 2500.0),
+        (0.0, 360.0),
+    )
+    refinement_calls = {"count": 0}
+    target_objective = 0.5 * (
+        float(improved_boundary_candidate.md_total_m)
+        + float(best_2d_candidate.md_total_m)
+    )
+
+    monkeypatch.setattr(
+        planner_module,
+        "_theoretical_objective_lower_bound",
+        lambda **kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_optimization_target_reached",
+        lambda objective_value, **kwargs: float(objective_value) <= target_objective,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_make_turn_profile_builder",
+        lambda **kwargs: (lambda values: seed_candidate),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_collect_optimization_seed_vectors",
+        lambda **kwargs: [np.array([0.5, 550.0, 50.0, 400.0, 30.0, 30.0], dtype=float)],
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_boundary_refine_md_candidates",
+        lambda **kwargs: ([improved_boundary_candidate], 1),
+    )
+
+    def _fake_two_dimensional_md_refine_candidates(**kwargs):
+        refinement_calls["count"] += 1
+        return [best_2d_candidate], 1
+
+    monkeypatch.setattr(
+        planner_module,
+        "_two_dimensional_md_refine_candidates",
+        _fake_two_dimensional_md_refine_candidates,
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_is_md_boundary_extremum_candidate",
+        lambda **kwargs: False,
+    )
+
+    result = planner_module._select_feasible_candidate(
+        candidates=[seed_candidate],
+        surface=Point3D(0.0, 0.0, 0.0),
+        geometry=geometry,
+        post_entry=post_entry,
+        config=_fast_config(optimization_mode=OPTIMIZATION_MINIMIZE_MD),
+        optimization_context=None,
+        zero_azimuth_turn=False,
+        lower_dls_deg_per_30m=0.1,
+        upper_dls_deg_per_30m=6.0,
+        bounds=bounds,
+        profile_builder=lambda values: seed_candidate,
+        target_point=np.zeros(3, dtype=float),
+        search_settings=planner_module._turn_search_settings(0),
+    )
+
+    assert refinement_calls["count"] == 1
+    assert result.params == best_2d_candidate
+    assert result.optimization.status == "within_md_theoretical_gap_after_2d"
+    assert result.optimization.objective_value == pytest.approx(
+        float(best_2d_candidate.md_total_m)
+    )
+
+
 def test_fixed_high_build_dls_reports_reverse_entry_geometry() -> None:
     config = _fast_config(
         dls_build_min_deg_per_30m=3.0,

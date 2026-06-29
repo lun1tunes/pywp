@@ -15,6 +15,28 @@ def test_crs_calculator_entrypoint_exists() -> None:
     assert callable(app.run_page)
 
 
+def test_parse_wgs84_dms_input_returns_x_lon_y_lat_order() -> None:
+    x_deg, y_deg = app._parse_wgs84_dms_input("N 71 10 14.94; E 72 14 7.92")
+
+    assert x_deg == pytest.approx(72.23553333333334)
+    assert y_deg == pytest.approx(71.17081666666667)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("N 90 0 1; E 72 0 0", "для N при 90° минуты и секунды должны быть равны 0"),
+        ("N 71 0 0; E 180 1 0", "для E при 180° минуты и секунды должны быть равны 0"),
+    ],
+)
+def test_parse_wgs84_dms_input_rejects_non_zero_minutes_seconds_at_limit(
+    text: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        app._parse_wgs84_dms_input(text)
+
+
 @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
 def test_crs_calculator_defaults_to_gk13n_to_wgs84_utm43() -> None:
     at = AppTest.from_file("pages/04_crs_calculator.py")
@@ -28,6 +50,17 @@ def test_crs_calculator_defaults_to_gk13n_to_wgs84_utm43() -> None:
     metric_values = {str(widget.label): str(widget.value) for widget in at.metric}
     assert metric_values["X output"] == "599911.696"
     assert metric_values["Y output"] == "7404416.769"
+
+
+def test_crs_calculator_input_options_include_wgs84_degrees() -> None:
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.run(timeout=60)
+
+    input_selectbox = next(
+        widget for widget in at.selectbox if str(widget.label) == "Входная CRS"
+    )
+
+    assert "WGS84 (градусы)" in list(input_selectbox.options)
 
 
 def test_crs_calculator_uses_shared_transform_function(monkeypatch) -> None:
@@ -59,6 +92,49 @@ def test_crs_calculator_uses_shared_transform_function(monkeypatch) -> None:
     metric_values = {str(widget.label): str(widget.value) for widget in at.metric}
     assert metric_values["X output"] == "1.250"
     assert metric_values["Y output"] == "2.500"
+
+
+def test_crs_calculator_uses_wgs84_dms_input_for_single_point(monkeypatch) -> None:
+    calls: list[tuple[float, float, CoordinateSystem, CoordinateSystem]] = []
+
+    def fake_transform(
+        x: float,
+        y: float,
+        from_crs: CoordinateSystem,
+        to_crs: CoordinateSystem,
+    ) -> tuple[float, float]:
+        calls.append((float(x), float(y), from_crs, to_crs))
+        return 510000.0, 7890000.0
+
+    monkeypatch.setattr(ci, "transform_xy_to_crs", fake_transform)
+    monkeypatch.setattr(ci, "can_transform_crs", lambda *_args: True)
+
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.run(timeout=60)
+
+    input_selectbox = next(
+        widget for widget in at.selectbox if str(widget.label) == "Входная CRS"
+    )
+    output_selectbox = next(
+        widget for widget in at.selectbox if str(widget.label) == "Выходная CRS"
+    )
+    input_selectbox.set_value("WGS84 (градусы)")
+    output_selectbox.set_value("ГК_13N_42")
+    at.run(timeout=60)
+
+    dms_input = next(widget for widget in at.text_input if str(widget.label) == "WGS84 DMS")
+    dms_input.set_value("N 71 10 14.94; E 72 14 7.92")
+    at.run(timeout=60)
+
+    assert calls
+    x_value, y_value, from_crs, to_crs = calls[-1]
+    assert x_value == pytest.approx(72.23553333333334)
+    assert y_value == pytest.approx(71.17081666666667)
+    assert from_crs == CoordinateSystem.WGS84
+    assert to_crs == CoordinateSystem.PULKOVO_1942_GK_13N
+    metric_values = {str(widget.label): str(widget.value) for widget in at.metric}
+    assert metric_values["X output"] == "510000.000"
+    assert metric_values["Y output"] == "7890000.000"
 
 
 def test_normalize_batch_editor_frame_filters_blank_and_incomplete_rows() -> None:
