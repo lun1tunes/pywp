@@ -1891,6 +1891,11 @@
         let selectedLegendWellNameKeys = new Set();
         let editWells = Array.isArray(payload.edit_wells) ? payload.edit_wells : [];
         let editChannelName = String(payload.edit_channel || "");
+        let selectedEditWellIndex = editWells.length > 0 ? 0 : null;
+        let selectedEditWellIndices = new Set(
+          Number.isInteger(selectedEditWellIndex) ? [selectedEditWellIndex] : [],
+        );
+        let editLegendSelectionAnchorIndex = selectedEditWellIndex;
         const worldAxisFocusPadById = new Map();
         const worldAxisPadFocusIds = [];
         const editWellIndexByName = new Map();
@@ -6825,11 +6830,6 @@
         let editRotateStartPreviewPoints = null;
         let editHasAnyChange = false;
         let editWarningDismissed = false;
-        let selectedEditWellIndex = editWells.length > 0 ? 0 : null;
-        let selectedEditWellIndices = new Set(
-          Number.isInteger(selectedEditWellIndex) ? [selectedEditWellIndex] : [],
-        );
-        let editLegendSelectionAnchorIndex = selectedEditWellIndex;
         let selectedEditHandleIndex = null;
         let editBroadcastChannel = null;
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
