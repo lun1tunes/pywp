@@ -353,7 +353,7 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "originalMesh.userData.lockViewerZGeometryScale = true;" in html
     assert "pickMesh.userData.lockViewerZGeometryScale = true;" in html
     assert "h.originalMesh.visible =" in html
-    assert "material.depthTest = applies && selectedWellDirty ? false : item.depthTest;" in html
+    assert "material.depthTest = applies && hasDirtySelectedWell ? false : item.depthTest;" in html
     assert 'id="edit-toolbox"' in html
     assert "editToolbox.classList.toggle" in html
     assert "function initEditToolboxDrag()" in html
@@ -399,7 +399,7 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "const targetPoints = pointEntries.filter" in html
     assert "change.points = targetPoints.map" in html
     assert 'editDragMoveScope === "pair"' in html
-    assert "updateWellEditTargets(wi, nextT1, nextT3)" in html
+    assert "updateWellEditTargets(" in html
     assert 'id="edit-undo-btn"' in html
     assert 'id="edit-redo-btn"' in html
     assert 'id="edit-reset-btn"' in html
@@ -429,7 +429,8 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "function worldUnitsPerPixelAt(displayPosition)" in html
     assert "function editHandleScale(displayPosition, pixelDiameter)" in html
     assert "camera.position.distanceTo(worldPosition)" in html
-    assert "h.mesh.scale.setScalar(editHandleScale(displayPosition, 16.0))" in html
+    assert "const meshScaleMultiplier = selectedHandle ? 1.28 : 1.0;" in html
+    assert "editHandleScale(displayPosition, 16.0) * meshScaleMultiplier" in html
     assert "pickMesh" in html
     assert "previewMesh" in html
     assert "function handleDeltaLength(handle)" in html
@@ -439,7 +440,7 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "window.parent.location" not in html
     assert "function editableIndexForBaseName(nameValue)" in html
     assert "registerEditableBaseMaterial(material, colorValue, nameValue)" in html
-    assert "itemWellIndex === selectedWellIndex" in html
+    assert "selectedIndices.has(itemWellIndex)" in html
     assert "basePoints: Array.isArray(well.base_points)" in html
     assert "warpedBaselineReplanPoints" in html
     assert "return endpointExact(warped, surface, t1, t3);" in html
@@ -654,6 +655,7 @@ def test_viewer_template_highlights_collisions_for_selected_legend_well() -> Non
 
     assert ".collision-item.is-related-legend-well {" in html
     assert "let selectedLegendWellNameKeys = new Set();" in html
+    assert "function currentCollisionHighlightWellNameKeys()" in html
     assert "function legendWellNameKeysForItem(item, kind)" in html
     assert "function syncSelectedCollisionHighlights()" in html
     assert "function setSelectedLegendWellNameKeys(keys)" in html
@@ -662,6 +664,24 @@ def test_viewer_template_highlights_collisions_for_selected_legend_well() -> Non
     assert "item.dataset.collisionWellA = normalizedWellNameKey(collision.well_a);" in html
     assert "item.dataset.collisionWellB = normalizedWellNameKey(collision.well_b);" in html
     assert 'item.classList.toggle(\n              "is-related-legend-well",' in html
+
+
+def test_viewer_template_supports_multiselect_edit_wells_from_legend() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "let selectedEditWellIndices = new Set(" in html
+    assert "let editLegendSelectionAnchorIndex = selectedEditWellIndex;" in html
+    assert "function legendEditableIndicesInOrder()" in html
+    assert "function legendEditableRangeIndices(anchorIndex, targetIndex)" in html
+    assert "function setSelectedEditWellSelection(indices, options)" in html
+    assert "function handleEditLegendSelection(editableIndex, event)" in html
+    assert "event && (event.ctrlKey || event.metaKey)" in html
+    assert "event && event.shiftKey" in html
+    assert "const preserveMultiSelection = Boolean(" in html
+    assert "if (preserveMultiSelection) {" in html
+    assert "selectedEditWellIndices = new Set(normalized);" in html
+    assert "selectedEditWellIndices.has(editableIndex)" in html
+    assert "selection.has(nodeIndex)" in html
 
 
 def test_viewer_template_does_not_focus_camera_for_pad_legend_clicks() -> None:
@@ -844,6 +864,37 @@ def test_three_viewer_pair_move_scope_shifts_only_target_points() -> None:
     assert 'return pointType === "t1" || pointType === "t3";' in html
     assert "position: editEntryMovesWithPairScope(entry)" in html
     assert ": copyEditPoint(entry.position)," in html
+
+
+def test_three_viewer_keyboard_arrows_move_selected_targets() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "const EDIT_KEYBOARD_STEP_M = 10.0;" in html
+    assert "function editKeyboardDeltaForKey(key, wellIndex)" in html
+    assert 'case "ArrowUp":' in html
+    assert 'case "ArrowDown":' in html
+    assert 'case "ArrowLeft":' in html
+    assert 'case "ArrowRight":' in html
+    assert "function applyKeyboardEditDelta(wellIndex, delta)" in html
+    assert "selectedEditHandleIndex = defaultEditHandleIndexForWell(selectedEditWellIndex);" in html
+    assert "window.addEventListener(\"keydown\", onEditKeyDown, true);" in html
+    assert "pushEditUndoState(wellIndex, previousState);" in html
+    assert "updateWellEditTargets(" in html
+    assert "updateWellEditPoints(wellIndex, nextPoints);" in html
+
+
+def test_three_viewer_synchronizes_selected_well_target_moves() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "let editDragHistoryStatesByWell = null;" in html
+    assert "function collectEditStates(indices)" in html
+    assert "function pushEditUndoStates(previousStates)" in html
+    assert "function synchronizedEditWellIndices(primaryWellIndex, pointRole, moveScope)" in html
+    assert "function applySynchronizedDeltaFromStates(baseStates, primaryWellIndex, handle, delta, moveScope)" in html
+    assert "function finalizeEditUpdates(wellIndices)" in html
+    assert "editDragHistoryStatesByWell = collectEditStates(" in html
+    assert "applySynchronizedDeltaFromStates(" in html
+    assert "pushEditUndoStates(previousStates);" in html
 
 
 def test_three_viewer_sidetrack_window_drag_snaps_by_cursor_ray() -> None:

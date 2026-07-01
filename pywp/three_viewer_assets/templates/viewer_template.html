@@ -1980,6 +1980,20 @@
               ),
             );
           }
+          selectedEditWellIndices = new Set(
+            normalizedEditWellSelection(
+              Array.from(selectedEditWellIndices || []),
+              editWells.length > 0 ? 0 : null,
+            ),
+          );
+          if (selectedEditWellIndices.size > 0) {
+            if (!selectedEditWellIndices.has(selectedEditWellIndex)) {
+              selectedEditWellIndex = selectedEditWellIndexArray()[0];
+            }
+          } else {
+            selectedEditWellIndex = null;
+            editLegendSelectionAnchorIndex = null;
+          }
         }
 
         syncPayloadCollections();
@@ -2275,13 +2289,26 @@
         }
 
         function setEditableBaseDimmed(dimmed, selectedWellIndex) {
-          const selectedWell = editWells[selectedWellIndex] || null;
-          const selectedColorKey = String((selectedWell && selectedWell.color) || "")
-            .trim()
-            .toLowerCase();
-          const selectedWellDirty = Boolean(
-            Number.isInteger(selectedWellIndex) && editDirtyFlags[selectedWellIndex]
+          const selectedIndices = new Set(
+            normalizedEditWellSelection(
+              selectedEditWellIndexArray(),
+              selectedWellIndex,
+            ),
           );
+          const selectedColorKeys = new Set();
+          let hasDirtySelectedWell = false;
+          selectedIndices.forEach((wellIndex) => {
+            const selectedWell = editWells[wellIndex] || null;
+            const colorKey = String((selectedWell && selectedWell.color) || "")
+              .trim()
+              .toLowerCase();
+            if (colorKey) {
+              selectedColorKeys.add(colorKey);
+            }
+            if (editDirtyFlags[wellIndex]) {
+              hasDirtySelectedWell = true;
+            }
+          });
           editableBaseMaterials.forEach((item) => {
             const material = item.material;
             const baseOpacity = Number.isFinite(Number(item.opacity))
@@ -2291,17 +2318,20 @@
             const applies =
               dimmed &&
               (
-                (Number.isInteger(itemWellIndex) && itemWellIndex === selectedWellIndex) ||
+                (Number.isInteger(itemWellIndex) && selectedIndices.has(itemWellIndex)) ||
                 (
                   !Number.isInteger(itemWellIndex) &&
-                  (!selectedColorKey || String(item.colorKey) === selectedColorKey)
+                  (
+                    selectedColorKeys.size === 0 ||
+                    selectedColorKeys.has(String(item.colorKey))
+                  )
                 )
               );
             material.transparent = applies || item.transparent || baseOpacity < 0.999;
             material.opacity = applies
-              ? Math.min(baseOpacity, selectedWellDirty ? 0.36 : 0.18)
+              ? Math.min(baseOpacity, hasDirtySelectedWell ? 0.36 : 0.18)
               : baseOpacity;
-            material.depthTest = applies && selectedWellDirty ? false : item.depthTest;
+            material.depthTest = applies && hasDirtySelectedWell ? false : item.depthTest;
             material.depthWrite = applies ? false : item.depthWrite;
             material.needsUpdate = true;
           });
@@ -4800,14 +4830,15 @@
         }
 
         function collisionItemMatchesSelectedLegendWell(item) {
-          if (!item || selectedLegendWellNameKeys.size === 0) {
+          const activeKeys = currentCollisionHighlightWellNameKeys();
+          if (!item || activeKeys.size === 0) {
             return false;
           }
           const wellAKey = normalizedWellNameKey(item.dataset.collisionWellA);
           const wellBKey = normalizedWellNameKey(item.dataset.collisionWellB);
           return (
-            (wellAKey && selectedLegendWellNameKeys.has(wellAKey)) ||
-            (wellBKey && selectedLegendWellNameKeys.has(wellBKey))
+            (wellAKey && activeKeys.has(wellAKey)) ||
+            (wellBKey && activeKeys.has(wellBKey))
           );
         }
 
@@ -4872,9 +4903,16 @@
           const targetBounds = focusTargets[String(item.id || "")];
           if (targetBounds || editableIndex !== null) {
             row.classList.add("is-focusable");
-            row.addEventListener("click", () => {
+            row.addEventListener("click", (event) => {
               setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, "well"));
               if (editableIndex !== null) {
+                const preserveMultiSelection = Boolean(
+                  editModeActive && event && (event.ctrlKey || event.metaKey || event.shiftKey),
+                );
+                handleEditLegendSelection(editableIndex, event);
+                if (preserveMultiSelection) {
+                  return;
+                }
                 selectEditWell(editableIndex, { focus: !editModeActive });
                 return;
               }
@@ -4917,11 +4955,12 @@
           if (!legendElement) {
             return;
           }
+          const selection = new Set(selectedEditWellIndexArray());
           legendElement.querySelectorAll("[data-edit-well-index]").forEach((node) => {
             const nodeIndex = Number(node.getAttribute("data-edit-well-index"));
             node.classList.toggle(
               "is-selected-edit",
-              Number.isInteger(nodeIndex) && nodeIndex === selectedEditWellIndex,
+              Number.isInteger(nodeIndex) && selection.has(nodeIndex),
             );
           });
         }
@@ -4956,13 +4995,20 @@
           if (editableIndex !== null) {
             button.classList.add("is-editable");
             button.dataset.editWellIndex = String(editableIndex);
-            if (editableIndex === selectedEditWellIndex) {
+            if (selectedEditWellIndices.has(editableIndex)) {
               button.classList.add("is-selected-edit");
             }
           }
-          button.addEventListener("click", () => {
+          button.addEventListener("click", (event) => {
             setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, kind));
             if (editableIndex !== null) {
+              const preserveMultiSelection = Boolean(
+                editModeActive && event && (event.ctrlKey || event.metaKey || event.shiftKey),
+              );
+              handleEditLegendSelection(editableIndex, event);
+              if (preserveMultiSelection) {
+                return;
+              }
               selectEditWell(editableIndex, { focus: !editModeActive });
               return;
             }
@@ -6768,6 +6814,7 @@
         let editDragPlaneZ = 0.0;
         let editDragPointerOffset = null;
         let editDragHistoryStartState = null;
+        let editDragHistoryStatesByWell = null;
         let editDragInputMode = "scene";
         let editRotateWellIndex = null;
         let editRotateStartAngle = 0.0;
@@ -6779,9 +6826,15 @@
         let editHasAnyChange = false;
         let editWarningDismissed = false;
         let selectedEditWellIndex = editWells.length > 0 ? 0 : null;
+        let selectedEditWellIndices = new Set(
+          Number.isInteger(selectedEditWellIndex) ? [selectedEditWellIndex] : [],
+        );
+        let editLegendSelectionAnchorIndex = selectedEditWellIndex;
+        let selectedEditHandleIndex = null;
         let editBroadcastChannel = null;
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
         const EDIT_DELTA_EPS_M = 0.005;
+        const EDIT_KEYBOARD_STEP_M = 10.0;
         const EDIT_DELTA_AXIS_COLORS = {
           x: "#16A34A",
           y: "#2563EB",
@@ -6820,6 +6873,14 @@
             Number((point && point[0]) || 0),
             Number((point && point[1]) || 0),
             Number((point && point[2]) || 0),
+          ];
+        }
+
+        function addDeltaToPoint(point, delta) {
+          return [
+            Number((point && point[0]) || 0) + Number((delta && delta[0]) || 0),
+            Number((point && point[1]) || 0) + Number((delta && delta[1]) || 0),
+            Number((point && point[2]) || 0) + Number((delta && delta[2]) || 0),
           ];
         }
 
@@ -6995,6 +7056,230 @@
             !sidetrackWindowEntryForWell(wellIndex) &&
             !editWellHasComplexExplicitPoints(wellIndex)
           );
+        }
+
+        function isValidEditWellIndex(index) {
+          return (
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index < editWells.length
+          );
+        }
+
+        function normalizedEditWellSelection(indices, fallbackIndex) {
+          const unique = [];
+          const seen = new Set();
+          (Array.isArray(indices) ? indices : []).forEach((value) => {
+            const index = Number(value);
+            if (!isValidEditWellIndex(index) || seen.has(index)) {
+              return;
+            }
+            seen.add(index);
+            unique.push(index);
+          });
+          if (unique.length > 0) {
+            return unique;
+          }
+          if (isValidEditWellIndex(fallbackIndex)) {
+            return [Number(fallbackIndex)];
+          }
+          if (editWells.length > 0) {
+            return [0];
+          }
+          return [];
+        }
+
+        function selectedEditWellIndexArray() {
+          return normalizedEditWellSelection(
+            Array.from(selectedEditWellIndices || []),
+            selectedEditWellIndex,
+          );
+        }
+
+        function legendEditableIndicesInOrder() {
+          if (!legendElement) {
+            return selectedEditWellIndexArray();
+          }
+          const indices = [];
+          legendElement.querySelectorAll("[data-edit-well-index]").forEach((node) => {
+            const index = Number(node.getAttribute("data-edit-well-index"));
+            if (isValidEditWellIndex(index) && !indices.includes(index)) {
+              indices.push(index);
+            }
+          });
+          return indices.length > 0 ? indices : selectedEditWellIndexArray();
+        }
+
+        function legendEditableRangeIndices(anchorIndex, targetIndex) {
+          if (!isValidEditWellIndex(targetIndex)) {
+            return [];
+          }
+          if (!isValidEditWellIndex(anchorIndex)) {
+            return [targetIndex];
+          }
+          const ordered = legendEditableIndicesInOrder();
+          const anchorPosition = ordered.indexOf(anchorIndex);
+          const targetPosition = ordered.indexOf(targetIndex);
+          if (anchorPosition < 0 || targetPosition < 0) {
+            return [targetIndex];
+          }
+          const start = Math.min(anchorPosition, targetPosition);
+          const end = Math.max(anchorPosition, targetPosition);
+          return ordered.slice(start, end + 1);
+        }
+
+        function editSelectionWellNameKeys(indices) {
+          const keys = new Set();
+          normalizedEditWellSelection(indices, null).forEach((wellIndex) => {
+            const well = editWells[wellIndex] || {};
+            const wellKey = normalizedWellNameKey(well.name);
+            if (wellKey) {
+              keys.add(wellKey);
+            }
+          });
+          return keys;
+        }
+
+        function currentCollisionHighlightWellNameKeys() {
+          if (editModeActive) {
+            const editKeys = editSelectionWellNameKeys(selectedEditWellIndexArray());
+            if (editKeys.size > 0) {
+              return editKeys;
+            }
+          }
+          return selectedLegendWellNameKeys;
+        }
+
+        function setSelectedEditWellSelection(indices, options) {
+          const requestedPrimaryIndex = Number(options && options.primaryIndex);
+          const fallbackIndex = isValidEditWellIndex(requestedPrimaryIndex)
+            ? requestedPrimaryIndex
+            : selectedEditWellIndex;
+          const normalized = normalizedEditWellSelection(indices, fallbackIndex);
+          selectedEditWellIndices = new Set(normalized);
+          if (normalized.length === 0) {
+            selectedEditWellIndex = null;
+            editLegendSelectionAnchorIndex = null;
+            selectedEditHandleIndex = null;
+          } else {
+            const nextPrimary = normalized.includes(requestedPrimaryIndex)
+              ? requestedPrimaryIndex
+              : normalized[normalized.length - 1];
+            selectedEditWellIndex = nextPrimary;
+            editLegendSelectionAnchorIndex = isValidEditWellIndex(
+              Number(options && options.anchorIndex),
+            )
+              ? Number(options && options.anchorIndex)
+              : nextPrimary;
+          }
+          syncSelectedEditHandle();
+          syncEditVisibility();
+          syncSelectedCollisionHighlights();
+          if (!options || options.render !== false) {
+            requestRender();
+          }
+        }
+
+        function handleEditLegendSelection(editableIndex, event) {
+          const index = Number(editableIndex);
+          if (!isValidEditWellIndex(index)) {
+            return;
+          }
+          const ctrlLike = Boolean(event && (event.ctrlKey || event.metaKey));
+          const shiftLike = Boolean(event && event.shiftKey);
+          if (!editModeActive || (!ctrlLike && !shiftLike)) {
+            setSelectedEditWellSelection([index], {
+              primaryIndex: index,
+              anchorIndex: index,
+              render: false,
+            });
+            return;
+          }
+          if (shiftLike) {
+            const anchorIndex = isValidEditWellIndex(editLegendSelectionAnchorIndex)
+              ? editLegendSelectionAnchorIndex
+              : selectedEditWellIndex;
+            const range = legendEditableRangeIndices(anchorIndex, index);
+            const nextSelection = ctrlLike
+              ? Array.from(new Set([...selectedEditWellIndexArray(), ...range]))
+              : range;
+            setSelectedEditWellSelection(nextSelection, {
+              primaryIndex: index,
+              anchorIndex: anchorIndex,
+              render: false,
+            });
+            return;
+          }
+          const nextSelection = new Set(selectedEditWellIndexArray());
+          if (nextSelection.has(index)) {
+            nextSelection.delete(index);
+          } else {
+            nextSelection.add(index);
+          }
+          if (nextSelection.size === 0) {
+            nextSelection.add(index);
+          }
+          const sortedSelection = Array.from(nextSelection).sort((left, right) => left - right);
+          const nextPrimary = nextSelection.has(index)
+            ? index
+            : nextSelection.has(selectedEditWellIndex)
+              ? selectedEditWellIndex
+              : sortedSelection[sortedSelection.length - 1];
+          setSelectedEditWellSelection(sortedSelection, {
+            primaryIndex: nextPrimary,
+            anchorIndex: index,
+            render: false,
+          });
+        }
+
+        function defaultEditHandleIndexForWell(wellIndex) {
+          if (!Number.isInteger(wellIndex)) {
+            return null;
+          }
+          let fallbackIndex = null;
+          let t1Index = null;
+          for (let index = 0; index < editHandles.length; index += 1) {
+            const handle = editHandles[index];
+            if (!handle || handle.wellIndex !== wellIndex) {
+              continue;
+            }
+            if (handle.pointRole === "sidetrack_window") {
+              continue;
+            }
+            if (fallbackIndex === null) {
+              fallbackIndex = index;
+            }
+            if (handle.pointRole === "t1" && t1Index === null) {
+              t1Index = index;
+            }
+            if (handle.pointRole === "t3") {
+              return index;
+            }
+          }
+          return t1Index !== null ? t1Index : fallbackIndex;
+        }
+
+        function selectedEditHandle() {
+          if (!Number.isInteger(selectedEditHandleIndex)) {
+            return null;
+          }
+          return editHandles[selectedEditHandleIndex] || null;
+        }
+
+        function syncSelectedEditHandle() {
+          if (!Number.isInteger(selectedEditWellIndex)) {
+            selectedEditHandleIndex = null;
+            return;
+          }
+          const handle = selectedEditHandle();
+          if (
+            handle &&
+            handle.wellIndex === selectedEditWellIndex &&
+            handle.pointRole !== "sidetrack_window"
+          ) {
+            return;
+          }
+          selectedEditHandleIndex = defaultEditHandleIndexForWell(selectedEditWellIndex);
         }
 
         function cloneEditState(wellIndex) {
@@ -7647,6 +7932,183 @@
           syncEditToolboxState();
         }
 
+        function collectEditStates(indices) {
+          const states = new Map();
+          normalizedEditWellSelection(indices, null).forEach((wellIndex) => {
+            states.set(wellIndex, cloneEditState(wellIndex));
+          });
+          return states;
+        }
+
+        function pushEditUndoStates(previousStates) {
+          if (!(previousStates instanceof Map)) {
+            return;
+          }
+          previousStates.forEach((previousState, wellIndex) => {
+            pushEditUndoState(wellIndex, previousState);
+          });
+        }
+
+        function pointEntryIndicesForSync(entries, pointLabel, pointRole) {
+          const safeEntries = Array.isArray(entries) ? entries : [];
+          const normalizedLabel = String(pointLabel || "");
+          const normalizedRole = String(pointRole || "");
+          const exactMatches = safeEntries
+            .map((entry, index) => ({ entry: entry, index: index }))
+            .filter(({ entry }) =>
+              String(entry && entry.pointType) === normalizedRole &&
+              String(entry && entry.label) === normalizedLabel,
+            )
+            .map(({ index }) => index);
+          if (exactMatches.length > 0) {
+            return exactMatches;
+          }
+          if (normalizedRole === "t1") {
+            const firstT1Index = safeEntries.findIndex(
+              (entry) => String(entry && entry.pointType) === "t1",
+            );
+            return firstT1Index >= 0 ? [firstT1Index] : [];
+          }
+          if (normalizedRole === "t3") {
+            for (let index = safeEntries.length - 1; index >= 0; index -= 1) {
+              if (String(safeEntries[index] && safeEntries[index].pointType) === "t3") {
+                return [index];
+              }
+            }
+          }
+          return [];
+        }
+
+        function applyPairDeltaFromState(wellIndex, baseState, delta) {
+          if (!baseState) {
+            return false;
+          }
+          if (Array.isArray(baseState.points) && baseState.points.length > 0) {
+            const nextPoints = copyEditPointEntries(baseState.points).map((entry) => ({
+              index: entry.index,
+              label: entry.label,
+              pointType: entry.pointType,
+              position: editEntryMovesWithPairScope(entry)
+                ? addDeltaToPoint(entry.position, delta)
+                : copyEditPoint(entry.position),
+              sidetrackWindow: entry.sidetrackWindow || null,
+            }));
+            updateWellEditPoints(wellIndex, nextPoints);
+            return true;
+          }
+          updateWellEditTargets(
+            wellIndex,
+            addDeltaToPoint(baseState.t1, delta),
+            addDeltaToPoint(baseState.t3, delta),
+          );
+          return true;
+        }
+
+        function applyPointDeltaFromState(wellIndex, baseState, pointLabel, pointRole, delta) {
+          if (!baseState) {
+            return false;
+          }
+          const normalizedRole = String(pointRole || "");
+          if (normalizedRole !== "t1" && normalizedRole !== "t3") {
+            return false;
+          }
+          if (Array.isArray(baseState.points) && baseState.points.length > 0) {
+            const nextPoints = copyEditPointEntries(baseState.points);
+            const pointIndices = pointEntryIndicesForSync(
+              nextPoints,
+              pointLabel,
+              normalizedRole,
+            );
+            if (pointIndices.length === 0) {
+              return false;
+            }
+            pointIndices.forEach((pointIndex) => {
+              nextPoints[pointIndex].position = addDeltaToPoint(
+                nextPoints[pointIndex].position,
+                delta,
+              );
+            });
+            updateWellEditPoints(wellIndex, nextPoints);
+            return true;
+          }
+          const nextT1 = copyEditPoint(baseState.t1);
+          const nextT3 = copyEditPoint(baseState.t3);
+          if (normalizedRole === "t1") {
+            nextT1[0] += Number(delta[0]) || 0.0;
+            nextT1[1] += Number(delta[1]) || 0.0;
+            nextT1[2] += Number(delta[2]) || 0.0;
+          } else {
+            nextT3[0] += Number(delta[0]) || 0.0;
+            nextT3[1] += Number(delta[1]) || 0.0;
+            nextT3[2] += Number(delta[2]) || 0.0;
+          }
+          updateWellEditTargets(wellIndex, nextT1, nextT3);
+          return true;
+        }
+
+        function synchronizedEditWellIndices(primaryWellIndex, pointRole, moveScope) {
+          if (!isValidEditWellIndex(primaryWellIndex)) {
+            return [];
+          }
+          const normalizedRole = String(pointRole || "");
+          const normalizedScope = String(moveScope || "");
+          if (
+            selectedEditWellIndices.size <= 1 ||
+            !selectedEditWellIndices.has(primaryWellIndex) ||
+            (
+              normalizedScope !== "pair" &&
+              normalizedRole !== "t1" &&
+              normalizedRole !== "t3"
+            )
+          ) {
+            return [primaryWellIndex];
+          }
+          return selectedEditWellIndexArray();
+        }
+
+        function applySynchronizedDeltaFromStates(baseStates, primaryWellIndex, handle, delta, moveScope) {
+          const primaryHandle = handle || {};
+          const affectedIndices = synchronizedEditWellIndices(
+            primaryWellIndex,
+            primaryHandle.pointRole,
+            moveScope,
+          );
+          const normalizedScope = String(moveScope || "");
+          const appliedIndices = [];
+          affectedIndices.forEach((wellIndex) => {
+            const baseState =
+              baseStates instanceof Map && baseStates.has(wellIndex)
+                ? baseStates.get(wellIndex)
+                : cloneEditState(wellIndex);
+            const applied =
+              normalizedScope === "pair"
+                ? applyPairDeltaFromState(wellIndex, baseState, delta)
+                : applyPointDeltaFromState(
+                    wellIndex,
+                    baseState,
+                    primaryHandle.pointType,
+                    primaryHandle.pointRole,
+                    delta,
+                  );
+            if (applied) {
+              appliedIndices.push(wellIndex);
+            }
+          });
+          return appliedIndices;
+        }
+
+        function finalizeEditUpdates(wellIndices) {
+          const uniqueIndices = normalizedEditWellSelection(wellIndices, null);
+          uniqueIndices.forEach((wellIndex) => {
+            editDirtyFlags[wellIndex] = isEditWellDirty(wellIndex);
+            rebuildPreviewTrajectory(wellIndex);
+          });
+          resetEditSaveButtonState();
+          syncEditVisibility();
+          showEditFeedback();
+          requestRender();
+        }
+
         function syncEditToolboxState() {
           if (!editUndoBtn || !editRedoBtn || !editResetBtn) {
             return;
@@ -7688,46 +8150,97 @@
 
         function undoSelectedEdit() {
           const wellIndex = selectedEditWellIndex;
+          const selectedIndices = selectedEditWellIndexArray();
           if (!Number.isInteger(wellIndex) || editUndoStacks[wellIndex].length === 0) {
             return;
           }
-          const previousState = editUndoStacks[wellIndex].pop();
-          editRedoStacks[wellIndex].push(cloneEditState(wellIndex));
-          if (editRedoStacks[wellIndex].length > 60) {
-            editRedoStacks[wellIndex].shift();
+          const appliedIndices = [];
+          selectedIndices.forEach((selectedIndex) => {
+            if (
+              !Number.isInteger(selectedIndex) ||
+              !Array.isArray(editUndoStacks[selectedIndex]) ||
+              editUndoStacks[selectedIndex].length === 0
+            ) {
+              return;
+            }
+            const previousState = editUndoStacks[selectedIndex].pop();
+            editRedoStacks[selectedIndex].push(cloneEditState(selectedIndex));
+            if (editRedoStacks[selectedIndex].length > 60) {
+              editRedoStacks[selectedIndex].shift();
+            }
+            if (previousState) {
+              applyEditState(selectedIndex, previousState);
+              appliedIndices.push(selectedIndex);
+            }
+          });
+          if (appliedIndices.length > 1) {
+            syncEditVisibility();
+            showEditFeedback();
+            requestRender();
           }
-          applyEditState(wellIndex, previousState);
         }
 
         function redoSelectedEdit() {
           const wellIndex = selectedEditWellIndex;
+          const selectedIndices = selectedEditWellIndexArray();
           if (!Number.isInteger(wellIndex) || editRedoStacks[wellIndex].length === 0) {
             return;
           }
-          const nextState = editRedoStacks[wellIndex].pop();
-          editUndoStacks[wellIndex].push(cloneEditState(wellIndex));
-          if (editUndoStacks[wellIndex].length > 60) {
-            editUndoStacks[wellIndex].shift();
+          const appliedIndices = [];
+          selectedIndices.forEach((selectedIndex) => {
+            if (
+              !Number.isInteger(selectedIndex) ||
+              !Array.isArray(editRedoStacks[selectedIndex]) ||
+              editRedoStacks[selectedIndex].length === 0
+            ) {
+              return;
+            }
+            const nextState = editRedoStacks[selectedIndex].pop();
+            editUndoStacks[selectedIndex].push(cloneEditState(selectedIndex));
+            if (editUndoStacks[selectedIndex].length > 60) {
+              editUndoStacks[selectedIndex].shift();
+            }
+            if (nextState) {
+              applyEditState(selectedIndex, nextState);
+              appliedIndices.push(selectedIndex);
+            }
+          });
+          if (appliedIndices.length > 1) {
+            syncEditVisibility();
+            showEditFeedback();
+            requestRender();
           }
-          applyEditState(wellIndex, nextState);
         }
 
         function resetSelectedEdit() {
           const wellIndex = selectedEditWellIndex;
-          if (!Number.isInteger(wellIndex) || !editDirtyFlags[wellIndex]) {
+          const selectedIndices = selectedEditWellIndexArray();
+          if (!Number.isInteger(wellIndex) || !selectedIndices.some((index) => editDirtyFlags[index])) {
             return;
           }
-          const currentState = cloneEditState(wellIndex);
-          const originalState = originalEditState(wellIndex);
-          if (editStatesEqual(currentState, originalState)) {
-            return;
+          const appliedIndices = [];
+          selectedIndices.forEach((selectedIndex) => {
+            if (!editDirtyFlags[selectedIndex]) {
+              return;
+            }
+            const currentState = cloneEditState(selectedIndex);
+            const originalState = originalEditState(selectedIndex);
+            if (editStatesEqual(currentState, originalState)) {
+              return;
+            }
+            editUndoStacks[selectedIndex].push(currentState);
+            if (editUndoStacks[selectedIndex].length > 60) {
+              editUndoStacks[selectedIndex].shift();
+            }
+            editRedoStacks[selectedIndex] = [];
+            applyEditState(selectedIndex, originalState);
+            appliedIndices.push(selectedIndex);
+          });
+          if (appliedIndices.length > 1) {
+            syncEditVisibility();
+            showEditFeedback();
+            requestRender();
           }
-          editUndoStacks[wellIndex].push(currentState);
-          if (editUndoStacks[wellIndex].length > 60) {
-            editUndoStacks[wellIndex].shift();
-          }
-          editRedoStacks[wellIndex] = [];
-          applyEditState(wellIndex, originalState);
         }
 
         function initEditHandles() {
@@ -7902,11 +8415,23 @@
         }
 
         function updateHandleScales() {
-          editHandles.forEach((h) => {
+          editHandles.forEach((h, handleIndex) => {
             const displayPosition = h.mesh ? h.mesh.position : displayPoint(h.dataPos);
-            h.mesh.scale.setScalar(editHandleScale(displayPosition, 16.0));
+            const selectedHandle =
+              editModeActive &&
+              editTransformMode === "move" &&
+              editMoveScope === "point" &&
+              Number.isInteger(selectedEditWellIndex) &&
+              h.wellIndex === selectedEditWellIndex &&
+              handleIndex === selectedEditHandleIndex;
+            const meshScaleMultiplier = selectedHandle ? 1.28 : 1.0;
+            h.mesh.scale.setScalar(
+              editHandleScale(displayPosition, 16.0) * meshScaleMultiplier
+            );
             if (h.pickMesh) {
-              h.pickMesh.scale.setScalar(editHandleScale(displayPosition, 30.0));
+              h.pickMesh.scale.setScalar(
+                editHandleScale(displayPosition, selectedHandle ? 34.0 : 30.0)
+              );
             }
             if (h.previewMesh) {
               h.previewMesh.scale.setScalar(editHandleScale(displayPosition, 10.0));
@@ -7979,15 +8504,25 @@
         }
 
         function syncEditVisibility() {
+          syncSelectedEditHandle();
           const selectedIndex = Number.isInteger(selectedEditWellIndex)
             ? selectedEditWellIndex
             : null;
-          editHandles.forEach((h) => {
+          editHandles.forEach((h, handleIndex) => {
             const visible =
               editModeActive &&
               selectedIndex !== null &&
               h.wellIndex === selectedIndex;
+            const selectedHandle =
+              visible &&
+              editTransformMode === "move" &&
+              editMoveScope === "point" &&
+              handleIndex === selectedEditHandleIndex;
             h.mesh.visible = visible;
+            if (h.mesh && h.mesh.material) {
+              h.mesh.material.opacity = selectedHandle ? 1.0 : 0.85;
+              h.mesh.material.needsUpdate = true;
+            }
             if (h.pickMesh) {
               h.pickMesh.visible = visible;
             }
@@ -8004,8 +8539,13 @@
                 visible &&
                 Boolean(editDirtyFlags[h.wellIndex]) &&
                 handleDeltaLength(h) > EDIT_DELTA_EPS_M;
+              if (h.originalMesh.material) {
+                h.originalMesh.material.opacity = selectedHandle ? 0.96 : 0.82;
+                h.originalMesh.material.needsUpdate = true;
+              }
             }
           });
+          updateHandleScales();
           setEditableBaseDimmed(editModeActive, selectedIndex);
           editLineObjects.forEach((lineObject, index) => {
             const isSelected = selectedIndex !== null && index === selectedIndex;
@@ -8030,7 +8570,14 @@
           if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= editWells.length) {
             return;
           }
+          if (!selectedEditWellIndices.has(nextIndex)) {
+            selectedEditWellIndices = new Set([nextIndex]);
+          }
           selectedEditWellIndex = nextIndex;
+          if (!isValidEditWellIndex(editLegendSelectionAnchorIndex)) {
+            editLegendSelectionAnchorIndex = nextIndex;
+          }
+          syncSelectedEditHandle();
           if (
             !editWellSupportsRotation(nextIndex) &&
             editTransformMode === "rotate"
@@ -8064,6 +8611,10 @@
           if (active && selectedEditWellIndex === null && editWells.length > 0) {
             selectedEditWellIndex = 0;
           }
+          if (active && selectedEditWellIndices.size === 0 && Number.isInteger(selectedEditWellIndex)) {
+            selectedEditWellIndices = new Set([selectedEditWellIndex]);
+          }
+          syncSelectedEditHandle();
           syncEditVisibility();
           if (!active) {
             editWarningDismissed = false;
@@ -8101,8 +8652,10 @@
             setEditTransformMode("move");
             return;
           }
+          syncSelectedEditHandle();
           syncEditRotationControls();
           syncEditToolboxState();
+          requestRender();
         }
 
         function setEditTransformMode(operation) {
@@ -8279,6 +8832,158 @@
             editModeActive && editHasAnyChange && !editWarningDismissed,
           );
           syncEditToolboxState();
+        }
+
+        function editStepBasisVectors(wellIndex) {
+          const t1 = editCurrentT1[wellIndex] || editOriginalT1[wellIndex] || [0, 0, 0];
+          const t3 = editCurrentT3[wellIndex] || editOriginalT3[wellIndex] || [0, 0, 0];
+          let dx = Number(t3[0]) - Number(t1[0]);
+          let dy = Number(t3[1]) - Number(t1[1]);
+          let dz = Number(t3[2]) - Number(t1[2]);
+          let length = Math.hypot(dx, dy, dz);
+          if (!(length > EDIT_DELTA_EPS_M)) {
+            dx = 1.0;
+            dy = 0.0;
+            dz = 0.0;
+            length = 1.0;
+          }
+          const forward = [dx / length, dy / length, dz / length];
+          const horizontalLength = Math.hypot(dx, dy);
+          const perpendicular =
+            horizontalLength > EDIT_DELTA_EPS_M
+              ? [-dy / horizontalLength, dx / horizontalLength, 0.0]
+              : [0.0, 1.0, 0.0];
+          return {
+            forward: forward,
+            backward: [-forward[0], -forward[1], -forward[2]],
+            left: perpendicular,
+            right: [-perpendicular[0], -perpendicular[1], 0.0],
+          };
+        }
+
+        function editKeyboardDeltaForKey(key, wellIndex) {
+          const basis = editStepBasisVectors(wellIndex);
+          let direction = null;
+          switch (String(key || "")) {
+            case "ArrowUp":
+              direction = basis.forward;
+              break;
+            case "ArrowDown":
+              direction = basis.backward;
+              break;
+            case "ArrowLeft":
+              direction = basis.left;
+              break;
+            case "ArrowRight":
+              direction = basis.right;
+              break;
+            default:
+              return null;
+          }
+          return direction.map((value) => value * EDIT_KEYBOARD_STEP_M);
+        }
+
+        function shouldHandleEditKeyboardEvent(event) {
+          if (
+            !editModeActive ||
+            editTransformMode !== "move" ||
+            !Number.isInteger(selectedEditWellIndex) ||
+            editDragHandle ||
+            Number.isInteger(editRotateWellIndex) ||
+            event.defaultPrevented ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey
+          ) {
+            return false;
+          }
+          const key = String(event.key || "");
+          if (
+            key !== "ArrowUp" &&
+            key !== "ArrowDown" &&
+            key !== "ArrowLeft" &&
+            key !== "ArrowRight"
+          ) {
+            return false;
+          }
+          const target = event.target;
+          if (!target || !(target instanceof Element)) {
+            return true;
+          }
+          if (target.isContentEditable) {
+            return false;
+          }
+          const tagName = String(target.tagName || "").toUpperCase();
+          return (
+            tagName !== "INPUT" &&
+            tagName !== "TEXTAREA" &&
+            tagName !== "SELECT" &&
+            tagName !== "BUTTON"
+          );
+        }
+
+        function applyKeyboardEditDelta(wellIndex, delta) {
+          if (
+            !Number.isInteger(wellIndex) ||
+            !Array.isArray(delta) ||
+            delta.length < 3
+          ) {
+            return false;
+          }
+          const dx = Number(delta[0]) || 0.0;
+          const dy = Number(delta[1]) || 0.0;
+          const dz = Number(delta[2]) || 0.0;
+          if (
+            Math.abs(dx) <= EDIT_DELTA_EPS_M &&
+            Math.abs(dy) <= EDIT_DELTA_EPS_M &&
+            Math.abs(dz) <= EDIT_DELTA_EPS_M
+          ) {
+            return false;
+          }
+          syncSelectedEditHandle();
+          const activeHandle = selectedEditHandle();
+          if (
+            editMoveScope !== "pair" &&
+            (
+              !activeHandle ||
+              activeHandle.wellIndex !== wellIndex ||
+              activeHandle.pointRole === "sidetrack_window"
+            )
+          ) {
+            return false;
+          }
+          const previousStates = collectEditStates(
+            synchronizedEditWellIndices(
+              wellIndex,
+              activeHandle ? activeHandle.pointRole : "t3",
+              editMoveScope,
+            ),
+          );
+          const appliedIndices = applySynchronizedDeltaFromStates(
+            previousStates,
+            wellIndex,
+            activeHandle || { pointType: "t3", pointRole: "t3" },
+            [dx, dy, dz],
+            editMoveScope,
+          );
+          if (appliedIndices.length === 0) {
+            return false;
+          }
+          finalizeEditUpdates(appliedIndices);
+          pushEditUndoStates(previousStates);
+          return true;
+        }
+
+        function onEditKeyDown(event) {
+          if (!shouldHandleEditKeyboardEvent(event)) {
+            return;
+          }
+          const delta = editKeyboardDeltaForKey(event.key, selectedEditWellIndex);
+          if (!delta || !applyKeyboardEditDelta(selectedEditWellIndex, delta)) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
         }
 
         function editAxisDirection() {
@@ -8659,6 +9364,7 @@
           if (!handle) {
             return false;
           }
+          selectedEditHandleIndex = editHandles.indexOf(handle);
           controls.enabled = false;
           interactionActive = true;
           hideTooltip();
@@ -8668,6 +9374,13 @@
           editDragPlane = "xy";
           editDragMoveScope =
             handle.pointRole === "sidetrack_window" ? "point" : editMoveScope;
+          editDragHistoryStatesByWell = collectEditStates(
+            synchronizedEditWellIndices(
+              handle.wellIndex,
+              handle.pointRole,
+              editDragMoveScope,
+            ),
+          );
           editDragInputMode = "minimap";
           editDragPlaneZ = editDragStartPosition.z;
           const planeHit = miniMapWorldAtEvent(event);
@@ -8679,6 +9392,7 @@
           try {
             renderer.domElement.setPointerCapture(event.pointerId);
           } catch (e) { /* ignore */ }
+          syncEditVisibility();
           return true;
         }
 
@@ -8722,6 +9436,9 @@
             (h) => h.mesh === hitMesh || h.pickMesh === hitMesh,
           );
           if (!handle) return;
+          selectedEditHandleIndex = Number(handle.pickMesh && handle.pickMesh.userData
+            ? handle.pickMesh.userData.editHandleIndex
+            : editHandles.indexOf(handle));
           if (editRotationModeEnabled()) {
             if (handle.pointRole !== "t3") {
               event.preventDefault();
@@ -8732,6 +9449,7 @@
               event.preventDefault();
               event.stopPropagation();
             }
+            syncEditVisibility();
             return;
           }
           event.preventDefault();
@@ -8745,6 +9463,13 @@
           editDragPlane = editPlane;
           editDragMoveScope =
             handle.pointRole === "sidetrack_window" ? "point" : editMoveScope;
+          editDragHistoryStatesByWell = collectEditStates(
+            synchronizedEditWellIndices(
+              handle.wellIndex,
+              handle.pointRole,
+              editDragMoveScope,
+            ),
+          );
           editDragInputMode = "scene";
           if (editDragPlane === "xy") {
             const planeHit = pointerPlaneIntersection(event, editDragStartPosition.z);
@@ -8768,6 +9493,7 @@
           try {
             renderer.domElement.setPointerCapture(event.pointerId);
           } catch (e) { /* ignore */ }
+          syncEditVisibility();
         }
 
         function onEditPointerMove(event) {
@@ -8816,71 +9542,98 @@
             dataY = sidetrackWindowUpdate.position[1];
             dataZ = sidetrackWindowUpdate.position[2];
           }
-          const currentEntries = copyEditPointEntries(editCurrentPoints[wi]);
           if (editDragMoveScope === "pair" && editDragHistoryStartState) {
             const historyPoints = copyEditPointEntries(editDragHistoryStartState.points);
             const startEntry = historyPoints[editDragHandle.pointIndex];
             const startPoint =
               startEntry && startEntry.position
                 ? startEntry.position
-                : editDragHistoryStartState[editDragHandle.pointType];
+                : editDragHandle.pointRole === "t1"
+                  ? editDragHistoryStartState.t1
+                  : editDragHistoryStartState.t3;
             if (!startPoint) {
               return;
             }
             const dx = dataX - startPoint[0];
             const dy = dataY - startPoint[1];
             const dz = dataZ - startPoint[2];
-            if (editWellHasExplicitPoints(wi)) {
-              const nextPoints = historyPoints.map((entry) => ({
-                index: entry.index,
-                label: entry.label,
-                pointType: entry.pointType,
-                position: editEntryMovesWithPairScope(entry)
-                  ? [
-                      entry.position[0] + dx,
-                      entry.position[1] + dy,
-                      entry.position[2] + dz,
-                    ]
-                  : copyEditPoint(entry.position),
-                sidetrackWindow: entry.sidetrackWindow || null,
-              }));
-              updateWellEditPoints(wi, nextPoints);
-            } else {
-              const nextT1 = copyEditPoint(editDragHistoryStartState.t1);
-              const nextT3 = copyEditPoint(editDragHistoryStartState.t3);
-              nextT1[0] += dx;
-              nextT1[1] += dy;
-              nextT1[2] += dz;
-              nextT3[0] += dx;
-              nextT3[1] += dy;
-              nextT3[2] += dz;
-              updateWellEditTargets(wi, nextT1, nextT3);
-            }
+            const appliedIndices = applySynchronizedDeltaFromStates(
+              editDragHistoryStatesByWell,
+              wi,
+              editDragHandle,
+              [dx, dy, dz],
+              editDragMoveScope,
+            );
+            finalizeEditUpdates(appliedIndices);
+            return;
           } else {
+            const currentEntries = copyEditPointEntries(editCurrentPoints[wi]);
             if (editWellHasExplicitPoints(wi)) {
-              const nextPoints = currentEntries;
-              const nextEntry = nextPoints[editDragHandle.pointIndex];
-              if (!nextEntry) {
+              if (editDragHandle.pointRole === "sidetrack_window") {
+                const nextPoints = currentEntries;
+                const nextEntry = nextPoints[editDragHandle.pointIndex];
+                if (!nextEntry) {
+                  return;
+                }
+                nextEntry.position = [dataX, dataY, dataZ];
+                if (sidetrackWindowUpdate) {
+                  nextEntry.sidetrackWindow = sidetrackWindowUpdate.sidetrackWindow;
+                }
+                updateWellEditPoints(wi, nextPoints);
+              } else {
+                const baseState =
+                  editDragHistoryStatesByWell instanceof Map &&
+                  editDragHistoryStatesByWell.has(wi)
+                    ? editDragHistoryStatesByWell.get(wi)
+                    : editDragHistoryStartState;
+                const startEntry = Array.isArray(baseState && baseState.points)
+                  ? baseState.points[editDragHandle.pointIndex]
+                  : null;
+                const startPoint =
+                  startEntry && startEntry.position
+                    ? startEntry.position
+                    : editDragHandle.pointRole === "t1"
+                      ? copyEditPoint(baseState.t1)
+                      : copyEditPoint(baseState.t3);
+                const dx = dataX - startPoint[0];
+                const dy = dataY - startPoint[1];
+                const dz = dataZ - startPoint[2];
+                const appliedIndices = applySynchronizedDeltaFromStates(
+                  editDragHistoryStatesByWell,
+                  wi,
+                  editDragHandle,
+                  [dx, dy, dz],
+                  editDragMoveScope,
+                );
+                if (appliedIndices.length > 0) {
+                  finalizeEditUpdates(appliedIndices);
+                  return;
+                }
+              }
+            } else {
+              const baseState =
+                editDragHistoryStatesByWell instanceof Map &&
+                editDragHistoryStatesByWell.has(wi)
+                  ? editDragHistoryStatesByWell.get(wi)
+                  : editDragHistoryStartState;
+              const startPoint =
+                editDragHandle.pointRole === "t1"
+                  ? copyEditPoint(baseState.t1)
+                  : copyEditPoint(baseState.t3);
+              const dx = dataX - startPoint[0];
+              const dy = dataY - startPoint[1];
+              const dz = dataZ - startPoint[2];
+              const appliedIndices = applySynchronizedDeltaFromStates(
+                editDragHistoryStatesByWell,
+                wi,
+                editDragHandle,
+                [dx, dy, dz],
+                editDragMoveScope,
+              );
+              if (appliedIndices.length > 0) {
+                finalizeEditUpdates(appliedIndices);
                 return;
               }
-              nextEntry.position = [dataX, dataY, dataZ];
-              if (sidetrackWindowUpdate) {
-                nextEntry.sidetrackWindow = sidetrackWindowUpdate.sidetrackWindow;
-              }
-              updateWellEditPoints(wi, nextPoints);
-            } else {
-              const nextT1 = copyEditPoint(editCurrentT1[wi]);
-              const nextT3 = copyEditPoint(editCurrentT3[wi]);
-              if (editDragHandle.pointRole === "t1") {
-                nextT1[0] = dataX;
-                nextT1[1] = dataY;
-                nextT1[2] = dataZ;
-              } else {
-                nextT3[0] = dataX;
-                nextT3[1] = dataY;
-                nextT3[2] = dataZ;
-              }
-              updateWellEditTargets(wi, nextT1, nextT3);
             }
           }
           editDirtyFlags[wi] = isEditWellDirty(wi);
@@ -8896,8 +9649,8 @@
             return;
           }
           if (!editDragHandle) return;
-          const wellIndex = editDragHandle.wellIndex;
-          pushEditUndoState(wellIndex, editDragHistoryStartState);
+          const previousStates = editDragHistoryStatesByWell;
+          pushEditUndoStates(previousStates);
           controls.enabled = true;
           editDragHandle = null;
           editDragAxisOrigin = null;
@@ -8907,6 +9660,7 @@
           editDragMoveScope = "point";
           editDragPointerOffset = null;
           editDragHistoryStartState = null;
+          editDragHistoryStatesByWell = null;
           editDragInputMode = "scene";
           interactionActive = false;
           try {
@@ -9167,6 +9921,7 @@
           editDragPlaneZ = 0.0;
           editDragPointerOffset = null;
           editDragHistoryStartState = null;
+          editDragHistoryStatesByWell = null;
           editDragInputMode = "scene";
           editRotateWellIndex = null;
           editRotateStartAngle = 0.0;
@@ -9178,6 +9933,11 @@
           editHasAnyChange = false;
           editWarningDismissed = false;
           selectedEditWellIndex = editWells.length > 0 ? 0 : null;
+          selectedEditWellIndices = new Set(
+            Number.isInteger(selectedEditWellIndex) ? [selectedEditWellIndex] : [],
+          );
+          editLegendSelectionAnchorIndex = selectedEditWellIndex;
+          selectedEditHandleIndex = null;
           editHandles.length = 0;
           editReplanners.length = 0;
           editLineObjects.length = 0;
@@ -9401,6 +10161,7 @@
           renderer.domElement.addEventListener("pointermove", onEditPointerMove, true);
           renderer.domElement.addEventListener("pointerup", onEditPointerUp, true);
           renderer.domElement.addEventListener("pointercancel", onEditPointerUp, true);
+          window.addEventListener("keydown", onEditKeyDown, true);
           window.addEventListener("beforeunload", () => {
             if (editBroadcastChannel) {
               editBroadcastChannel.close();

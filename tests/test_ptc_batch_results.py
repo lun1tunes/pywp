@@ -149,7 +149,21 @@ def test_build_batch_survey_csv_labels_transformed_geographic_coordinates() -> N
         return transformed
 
     payload = ptc_batch_results.build_batch_survey_csv(
-        [_success()],
+        [
+            _success(
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 125.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [20.0, 30.0],
+                        "Z_m": [-63.0, 62.0],
+                        "INC_deg": [0.0, 30.0],
+                        "AZI_deg": [0.0, 15.0],
+                        "DLS_deg_per_30m": [3.0, 3.0],
+                    }
+                )
+            )
+        ],
         target_crs=CoordinateSystem.WGS84,
         auto_convert=True,
         source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
@@ -162,6 +176,8 @@ def test_build_batch_survey_csv_labels_transformed_geographic_coordinates() -> N
     assert result["X_WGS_deg"].iloc[0] == pytest.approx(110.0)
     assert result["Y_WGS_deg"].iloc[0] == pytest.approx(220.0)
     assert result["PI_deg_per_10m"].iloc[0] == pytest.approx(1.0)
+    assert result["Z_m"].tolist() == pytest.approx([-63.0, 62.0])
+    assert result["TVD_m"].tolist() == pytest.approx([0.0, 125.0])
 
 
 def test_build_batch_survey_csv_returns_empty_payload_without_station_frames() -> None:
@@ -187,6 +203,41 @@ def test_build_batch_survey_csv_returns_empty_payload_without_station_frames() -
     )
     assert ptc_batch_results.build_batch_survey_dev_7z([_success()]) == b""
     assert ptc_batch_results.build_batch_survey_dev_file([_success()]) == b""
+
+
+def test_build_batch_survey_csv_keeps_legacy_export_callback_signature() -> None:
+    def fake_export(
+        frame: pd.DataFrame,
+        *,
+        xy_label_suffix: str = "",
+        xy_unit: str = "м",
+    ) -> pd.DataFrame:
+        assert xy_label_suffix == ""
+        assert xy_unit == "м"
+        return frame.rename(columns={"X_m": "X_export_m", "Y_m": "Y_export_m"})
+
+    payload = ptc_batch_results.build_batch_survey_csv(
+        [
+            _success(
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 50.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [20.0, 30.0],
+                        "Z_m": [-10.0, 40.0],
+                        "INC_deg": [0.0, 15.0],
+                        "AZI_deg": [0.0, 30.0],
+                    }
+                )
+            )
+        ],
+        survey_export_dataframe_func=fake_export,
+    )
+    result = pd.read_csv(BytesIO(payload), sep=",")
+
+    assert "X_export_m" in result.columns
+    assert "Y_export_m" in result.columns
+    assert result["TVD_m"].tolist() == pytest.approx([0.0, 50.0])
 
 
 def test_build_batch_target_csv_includes_input_and_output_coordinate_blocks() -> None:

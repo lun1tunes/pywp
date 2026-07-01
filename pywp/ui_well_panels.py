@@ -37,13 +37,33 @@ def _csv_crs_label(label_suffix: str) -> str:
     return re.sub(r"\W+", "_", label, flags=re.UNICODE).strip("_")
 
 
+def _with_export_tvd(display_df: pd.DataFrame) -> pd.DataFrame:
+    if display_df.empty or "Z_m" not in display_df.columns:
+        return display_df
+    z_values = pd.to_numeric(display_df["Z_m"], errors="coerce")
+    finite_mask = z_values.notna()
+    if not finite_mask.any():
+        return display_df
+    export_df = display_df.drop(columns=["TVD_m"], errors="ignore")
+    tvd_values = z_values - float(z_values.loc[finite_mask].iloc[0])
+    export_df.insert(
+        export_df.columns.get_loc("Z_m") + 1,
+        "TVD_m",
+        tvd_values,
+    )
+    return export_df
+
+
 def survey_export_dataframe(
     display_df: pd.DataFrame,
     *,
     xy_label_suffix: str = "",
     xy_unit: str = "м",
+    include_tvd: bool = False,
 ) -> pd.DataFrame:
     export_df = display_df.copy()
+    if include_tvd:
+        export_df = _with_export_tvd(export_df)
     unit_label = _csv_unit_label(xy_unit)
     crs_label = _csv_crs_label(xy_label_suffix)
     if not crs_label and unit_label == "m":
@@ -297,6 +317,7 @@ def render_survey_table_with_download(
                     else export_xy_label_suffix
                 ),
                 xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
+                include_tvd=True,
             )
         ),
         file_name=file_name,

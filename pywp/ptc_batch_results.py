@@ -25,7 +25,11 @@ from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.mcm import dogleg_angle_rad
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
-from pywp.ui_well_panels import survey_export_csv_bytes, survey_export_dataframe
+from pywp.ui_well_panels import (
+    _with_export_tvd,
+    survey_export_csv_bytes,
+    survey_export_dataframe,
+)
 from pywp.welltrack_batch import SuccessfulWellPlan
 
 __all__ = [
@@ -168,6 +172,9 @@ def build_batch_survey_csv(
                 xy_label_suffix=crs_display_suffix_func(export_context.export_crs),
                 xy_unit="deg" if export_context.export_crs.is_geographic() else "м",
             )
+        else:
+            stations = survey_export_dataframe_func(stations)
+        stations = _with_export_tvd(stations)
         frames.append(stations)
     if not frames:
         return b""

@@ -43,6 +43,23 @@ def test_survey_export_dataframe_keeps_default_meter_columns() -> None:
     assert list(result.columns) == ["X_m", "Y_m", "Z_m"]
 
 
+def test_survey_export_dataframe_can_add_tvd_relative_to_surface() -> None:
+    display_df = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0, 250.0],
+            "X_m": [10.0, 20.0, 30.0],
+            "Y_m": [20.0, 30.0, 40.0],
+            "Z_m": [-35.0, 65.0, 205.0],
+        }
+    )
+
+    result = survey_export_dataframe(display_df, include_tvd=True)
+
+    assert list(result.columns) == ["MD_m", "X_m", "Y_m", "Z_m", "TVD_m"]
+    assert result["Z_m"].tolist() == [-35.0, 65.0, 205.0]
+    assert result["TVD_m"].tolist() == [0.0, 100.0, 240.0]
+
+
 def test_survey_download_uses_export_stations_without_changing_display(
     monkeypatch,
 ) -> None:
@@ -80,10 +97,10 @@ def test_survey_download_uses_export_stations_without_changing_display(
         ),
         export_stations=pd.DataFrame(
             {
-                "MD_m": [0.0],
-                "X_m": [110.0],
-                "Y_m": [220.0],
-                "Z_m": [0.0],
+                "MD_m": [0.0, 125.0],
+                "X_m": [110.0, 180.0],
+                "Y_m": [220.0, 260.0],
+                "Z_m": [-63.0, 62.0],
             }
         ),
         export_xy_label_suffix=" (WGS)",
@@ -101,6 +118,8 @@ def test_survey_download_uses_export_stations_without_changing_display(
     assert "X_m" not in exported.columns
     assert exported["X_WGS_deg"].iloc[0] == 110.0
     assert exported["Y_WGS_deg"].iloc[0] == 220.0
+    assert exported["Z_m"].tolist() == [-63.0, 62.0]
+    assert exported["TVD_m"].tolist() == [0.0, 125.0]
 
 
 def test_trajectory_panel_uses_local_three_for_default_3d(monkeypatch) -> None:
