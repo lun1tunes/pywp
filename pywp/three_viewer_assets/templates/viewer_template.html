@@ -846,6 +846,7 @@
       #edit-plane-selector,
       #edit-operation-selector,
       #edit-scope-selector,
+      #edit-point-selector,
       .edit-toolbox-action-row {
         display: flex;
         gap: 4px;
@@ -853,7 +854,8 @@
 
       .plane-btn,
       .operation-btn,
-      .scope-btn {
+      .scope-btn,
+      .point-btn {
         flex: 1 1 0;
         border: 1px solid transparent;
         background: transparent;
@@ -868,13 +870,15 @@
 
       .plane-btn:hover,
       .operation-btn:hover,
-      .scope-btn:hover {
+      .scope-btn:hover,
+      .point-btn:hover {
         background: rgba(37,99,235,0.06);
       }
 
       .plane-btn.is-active,
       .operation-btn.is-active,
-      .scope-btn.is-active {
+      .scope-btn.is-active,
+      .point-btn.is-active {
         background: #2563eb;
         color: #ffffff;
         border-color: #1d4ed8;
@@ -882,7 +886,8 @@
 
       .plane-btn:disabled,
       .operation-btn:disabled,
-      .scope-btn:disabled {
+      .scope-btn:disabled,
+      .point-btn:disabled {
         cursor: default;
         opacity: 0.45;
       }
@@ -1621,6 +1626,13 @@
             <div id="edit-scope-selector">
               <button class="scope-btn is-active" data-scope="point" type="button">Одна</button>
               <button class="scope-btn" data-scope="pair" type="button">Все</button>
+            </div>
+          </div>
+          <div class="edit-toolbox-section">
+            <div class="edit-toolbox-label">Активная</div>
+            <div id="edit-point-selector">
+              <button class="point-btn" data-point-role="t1" type="button" title="Сделать t1 активной точкой">t1</button>
+              <button class="point-btn" data-point-role="t3" type="button" title="Сделать t3 активной точкой">t3</button>
             </div>
           </div>
           <div class="edit-toolbox-section">
@@ -4061,24 +4073,17 @@
           const xMax = Math.max(0.0, xyStep * xTickCount * xDirection);
           const yMin = Math.min(0.0, xyStep * yTickCount * yDirection);
           const yMax = Math.max(0.0, xyStep * yTickCount * yDirection);
-          const zMajorRawValues = worldAxisMajorRawZValues(planeRawZ, topRawZ, zStep);
-          const zTickSpecs = worldAxisMinorTickSpecs(
-            planeRawZ,
-            topRawZ,
-            zStep,
-            zMinorSubdivision,
-          );
           const signature = [
             xyStep.toFixed(6),
             zStep.toFixed(6),
             xTickCount,
             yTickCount,
-            zMajorRawValues.map((value) => Number(value).toFixed(3)).join(","),
-            zTickSpecs.map((item) => `${Number(item.rawZ).toFixed(3)}:${item.major ? 1 : 0}`).join(","),
             xyMinorSubdivision,
             zMinorSubdivision,
+            showXyStepLabels ? 1 : 0,
             worldAxisZScaleFactor().toFixed(3),
             planeRawZ.toFixed(3),
+            topRawZ.toFixed(3),
             dataNumber(activeBounds.min[0], 0).toFixed(3),
             dataNumber(activeBounds.min[1], 0).toFixed(3),
             dataNumber(activeBounds.min[2], 0).toFixed(3),
@@ -4095,6 +4100,17 @@
             x: Number(gridAnchorRaw.x) || 0,
             y: Number(gridAnchorRaw.y) || 0,
           };
+          if (worldAxisOverlay.signature === signature) {
+            updateWorldAxisLabelsPosition();
+            return;
+          }
+          const zMajorRawValues = worldAxisMajorRawZValues(planeRawZ, topRawZ, zStep);
+          const zTickSpecs = worldAxisMinorTickSpecs(
+            planeRawZ,
+            topRawZ,
+            zStep,
+            zMinorSubdivision,
+          );
           const labelSpecs = buildWorldAxisLabelSpecs(
             planeRawZ,
             topRawZ,
@@ -4105,12 +4121,6 @@
             zMajorRawValues,
             showXyStepLabels,
           );
-          if (worldAxisOverlay.signature === signature) {
-            worldAxisOverlay.labelSpecs = labelSpecs;
-            ensureWorldAxisLabels(labelSpecs.length);
-            updateWorldAxisLabelsPosition();
-            return;
-          }
           worldAxisOverlay.signature = signature;
           clearWorldAxisGeometry();
 
@@ -6760,6 +6770,7 @@
         const editToolbox = document.getElementById("edit-toolbox");
         const editPlaneSelector = document.getElementById("edit-plane-selector");
         const editScopeSelector = document.getElementById("edit-scope-selector");
+        const editPointSelector = document.getElementById("edit-point-selector");
         const editOperationSelector = document.getElementById("edit-operation-selector");
         const editUndoBtn = document.getElementById("edit-undo-btn");
         const editRedoBtn = document.getElementById("edit-redo-btn");
@@ -6772,6 +6783,7 @@
           editToolbox &&
           editPlaneSelector &&
           editScopeSelector &&
+          editPointSelector &&
           editOperationSelector &&
           editUndoBtn &&
           editRedoBtn &&
@@ -7280,6 +7292,61 @@
             return;
           }
           selectedEditHandleIndex = defaultEditHandleIndexForWell(selectedEditWellIndex);
+        }
+
+        function handleIndexForWellPointRole(wellIndex, pointRole) {
+          const normalizedRole = String(pointRole || "");
+          if (
+            !Number.isInteger(wellIndex) ||
+            (normalizedRole !== "t1" && normalizedRole !== "t3")
+          ) {
+            return null;
+          }
+          for (let index = 0; index < editHandles.length; index += 1) {
+            const handle = editHandles[index];
+            if (
+              handle &&
+              handle.wellIndex === wellIndex &&
+              handle.pointRole === normalizedRole
+            ) {
+              return index;
+            }
+          }
+          return null;
+        }
+
+        function selectedEditPointRole() {
+          const handle = selectedEditHandle();
+          const pointRole = String((handle && handle.pointRole) || "");
+          return pointRole === "t1" || pointRole === "t3" ? pointRole : "t3";
+        }
+
+        function setSelectedEditHandleByRole(pointRole) {
+          if (!Number.isInteger(selectedEditWellIndex)) {
+            return false;
+          }
+          const nextHandleIndex = handleIndexForWellPointRole(
+            selectedEditWellIndex,
+            pointRole,
+          );
+          if (!Number.isInteger(nextHandleIndex)) {
+            return false;
+          }
+          if (selectedEditHandleIndex === nextHandleIndex) {
+            syncEditToolboxState();
+            requestRender();
+            return true;
+          }
+          selectedEditHandleIndex = nextHandleIndex;
+          syncEditVisibility();
+          syncEditToolboxState();
+          requestRender();
+          return true;
+        }
+
+        function toggleSelectedEditHandleRole() {
+          const currentRole = selectedEditPointRole();
+          return setSelectedEditHandleByRole(currentRole === "t1" ? "t3" : "t1");
         }
 
         function cloneEditState(wellIndex) {
@@ -8110,7 +8177,7 @@
         }
 
         function syncEditToolboxState() {
-          if (!editUndoBtn || !editRedoBtn || !editResetBtn) {
+          if (!editUndoBtn || !editRedoBtn || !editResetBtn || !editPointSelector) {
             return;
           }
           const selectedIndex = Number.isInteger(selectedEditWellIndex)
@@ -8119,6 +8186,15 @@
           const hasSelection = selectedIndex !== null;
           const selectedSupportsRotation =
             hasSelection && editWellSupportsRotation(selectedIndex);
+          const activePointRole = selectedEditPointRole();
+          const canPickPoint =
+            editModeActive &&
+            hasSelection &&
+            editTransformMode === "move" &&
+            (
+              Number.isInteger(handleIndexForWellPointRole(selectedIndex, "t1")) ||
+              Number.isInteger(handleIndexForWellPointRole(selectedIndex, "t3"))
+            );
           editUndoBtn.disabled =
             !editModeActive ||
             !hasSelection ||
@@ -8138,6 +8214,13 @@
           });
           editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
             btn.disabled = !editModeActive || !hasSelection;
+          });
+          editPointSelector.querySelectorAll(".point-btn").forEach((btn) => {
+            const pointRole = String(btn.dataset.pointRole || "");
+            btn.disabled =
+              !canPickPoint ||
+              !Number.isInteger(handleIndexForWellPointRole(selectedIndex, pointRole));
+            btn.classList.toggle("is-active", pointRole === activePointRole);
           });
           editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {
             btn.disabled =
@@ -8917,8 +9000,37 @@
           return (
             tagName !== "INPUT" &&
             tagName !== "TEXTAREA" &&
-            tagName !== "SELECT" &&
-            tagName !== "BUTTON"
+            tagName !== "SELECT"
+          );
+        }
+
+        function shouldToggleSelectedEditPoint(event) {
+          if (
+            !editModeActive ||
+            editTransformMode !== "move" ||
+            !Number.isInteger(selectedEditWellIndex) ||
+            editDragHandle ||
+            Number.isInteger(editRotateWellIndex) ||
+            event.defaultPrevented ||
+            event.altKey ||
+            event.metaKey ||
+            event.repeat ||
+            String(event.key || "") !== "Control"
+          ) {
+            return false;
+          }
+          const target = event.target;
+          if (!target || !(target instanceof Element)) {
+            return true;
+          }
+          if (target.isContentEditable) {
+            return false;
+          }
+          const tagName = String(target.tagName || "").toUpperCase();
+          return (
+            tagName !== "INPUT" &&
+            tagName !== "TEXTAREA" &&
+            tagName !== "SELECT"
           );
         }
 
@@ -8975,6 +9087,11 @@
         }
 
         function onEditKeyDown(event) {
+          if (shouldToggleSelectedEditPoint(event) && toggleSelectedEditHandleRole()) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
           if (!shouldHandleEditKeyboardEvent(event)) {
             return;
           }
@@ -10146,6 +10263,12 @@
           editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
             btn.addEventListener("click", () => {
               setEditMoveScope(btn.dataset.scope);
+            });
+          });
+          editPointSelector.querySelectorAll(".point-btn").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              setSelectedEditHandleByRole(btn.dataset.pointRole);
+              btn.blur();
             });
           });
           editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {

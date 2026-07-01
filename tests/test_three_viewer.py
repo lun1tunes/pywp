@@ -870,12 +870,19 @@ def test_three_viewer_keyboard_arrows_move_selected_targets() -> None:
     html = three_viewer._viewer_template_with_libraries()
 
     assert "const EDIT_KEYBOARD_STEP_M = 10.0;" in html
+    assert 'const editPointSelector = document.getElementById("edit-point-selector");' in html
+    assert '<div id="edit-point-selector">' in html
+    assert 'data-point-role="t1"' in html
+    assert 'data-point-role="t3"' in html
     assert "function editKeyboardDeltaForKey(key, wellIndex)" in html
     assert 'case "ArrowUp":' in html
     assert 'case "ArrowDown":' in html
     assert 'case "ArrowLeft":' in html
     assert 'case "ArrowRight":' in html
+    assert 'String(event.key || "") !== "Control"' in html
+    assert "function toggleSelectedEditHandleRole()" in html
     assert "function applyKeyboardEditDelta(wellIndex, delta)" in html
+    assert "setSelectedEditHandleByRole(btn.dataset.pointRole);" in html
     assert "selectedEditHandleIndex = defaultEditHandleIndexForWell(selectedEditWellIndex);" in html
     assert "window.addEventListener(\"keydown\", onEditKeyDown, true);" in html
     assert "pushEditUndoState(wellIndex, previousState);" in html
