@@ -851,6 +851,7 @@ class WelltrackBatchPlanner:
                 pass
 
         summary_rows: list[dict[str, Any]] = []
+        evaluated_rows_by_name: dict[str, dict[str, Any]] = {}
         successes: list[SuccessfulWellPlan] = []
         total = len(selected_records)
         total_planned_steps = int(total)
@@ -977,9 +978,9 @@ class WelltrackBatchPlanner:
             if missing_pilot is not None:
                 row = self._base_row(record=record)
                 row["Статус"] = "Ошибка расчета"
-                row["Проблема"] = (
-                    f"Сначала рассчитайте пилот {missing_pilot.name}: "
-                    "без него нельзя построить боковой продуктивный ствол."
+                row["Проблема"] = self._missing_required_pilot_problem(
+                    pilot_record=missing_pilot,
+                    evaluated_rows_by_name=evaluated_rows_by_name,
                 )
                 success = None
             else:
@@ -1048,6 +1049,9 @@ class WelltrackBatchPlanner:
                             stage=attempted_stage,
                         )
             summary_rows.append(row)
+            row_name = str(row.get("Скважина", "")).strip()
+            if row_name:
+                evaluated_rows_by_name[row_name] = dict(row)
             if success is not None:
                 successes.append(success)
                 recalculated_success_by_name[str(success.name)] = success
@@ -1208,6 +1212,9 @@ class WelltrackBatchPlanner:
     ) -> tuple[list[dict[str, Any]], list[SuccessfulWellPlan]]:
         """Parallelize independent wells while preserving pilot -> sidetrack order."""
         selected_keys = {well_name_key(record.name) for record in selected_records}
+        selected_records_by_name = {
+            str(record.name): record for record in selected_records
+        }
         first_wave_records: list[WelltrackRecord] = []
         dependent_records: list[WelltrackRecord] = []
         for record in selected_records:
@@ -1301,15 +1308,29 @@ class WelltrackBatchPlanner:
             sidetrack_override = sidetrack_window_overrides_by_key.get(
                 well_name_key(record.name)
             )
-            row, success = self._evaluate_record(
+            missing_pilot = self._missing_required_pilot_success(
                 record=record,
-                config=well_config,
-                optimization_context=opt_ctx,
-                planner_progress_callback=planner_progress_callback,
+                selected_records_by_name=selected_records_by_name,
                 recalculated_success_by_name=success_by_name,
-                sidetrack_window_override=sidetrack_override,
-                actual_reference_wells_by_key=actual_reference_wells_by_key,
             )
+            if missing_pilot is not None:
+                row = self._base_row(record=record)
+                row["Статус"] = "Ошибка расчета"
+                row["Проблема"] = self._missing_required_pilot_problem(
+                    pilot_record=missing_pilot,
+                    evaluated_rows_by_name=rows_by_name,
+                )
+                success = None
+            else:
+                row, success = self._evaluate_record(
+                    record=record,
+                    config=well_config,
+                    optimization_context=opt_ctx,
+                    planner_progress_callback=planner_progress_callback,
+                    recalculated_success_by_name=success_by_name,
+                    sidetrack_window_override=sidetrack_override,
+                    actual_reference_wells_by_key=actual_reference_wells_by_key,
+                )
             rows_by_name[str(record.name)] = row
             if success is not None:
                 success_by_name[str(success.name)] = success
@@ -1764,6 +1785,39 @@ class WelltrackBatchPlanner:
             well_name_key(name) == pilot_key for name in recalculated_success_by_name
         )
         return None if has_pilot_success else pilot_record
+
+    @staticmethod
+    def _missing_required_pilot_problem(
+        *,
+        pilot_record: WelltrackRecord,
+        evaluated_rows_by_name: Mapping[str, Mapping[str, Any]],
+    ) -> str:
+        pilot_name = str(pilot_record.name).strip()
+        pilot_problem = ""
+        for name, row in evaluated_rows_by_name.items():
+            if well_name_key(name) != well_name_key(pilot_name):
+                continue
+            raw_problem = str(row.get("Проблема", "")).strip()
+            if raw_problem and raw_problem not in {
+                "—",
+                "OK",
+                "ОК",
+                "nan",
+                "NaN",
+                "None",
+                "<NA>",
+            }:
+                pilot_problem = raw_problem.rstrip(" .")
+                break
+        if pilot_problem:
+            return (
+                f"Пилот {pilot_name} не рассчитан: {pilot_problem}. "
+                "Без него нельзя построить боковой продуктивный ствол."
+            )
+        return (
+            f"Сначала рассчитайте пилот {pilot_name}: "
+            "без него нельзя построить боковой продуктивный ствол."
+        )
 
     def _runtime_override_for_next_record(
         self,

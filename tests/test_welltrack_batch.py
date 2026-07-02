@@ -3903,8 +3903,42 @@ def test_parent_with_failed_pilot_does_not_fallback_to_regular_well() -> None:
     by_name = {str(row["Скважина"]): row for row in rows}
     assert by_name["WELL-04_PL"]["Статус"] == "Ошибка расчета"
     assert by_name["WELL-04"]["Статус"] == "Ошибка расчета"
-    assert "Сначала рассчитайте пилот WELL-04_PL" in by_name["WELL-04"]["Проблема"]
-    assert "без него нельзя построить боковой продуктивный ствол" in by_name["WELL-04"]["Проблема"]
+    assert "Пилот WELL-04_PL не рассчитан:" in by_name["WELL-04"]["Проблема"]
+    assert str(by_name["WELL-04_PL"]["Проблема"]) in str(by_name["WELL-04"]["Проблема"])
+    assert "Без него нельзя построить боковой продуктивный ствол" in by_name["WELL-04"]["Проблема"]
+    assert not successes
+
+
+def test_parent_with_failed_pilot_does_not_fallback_in_partial_parallel_mode() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=2.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=3.0),
+        ),
+    )
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(kop_min_vertical_m=200.0),
+        parallel_workers=4,
+    )
+
+    by_name = {str(row["Скважина"]): row for row in rows}
+    assert by_name["WELL-04_PL"]["Статус"] == "Ошибка расчета"
+    assert by_name["WELL-04"]["Статус"] == "Ошибка расчета"
+    assert "Пилот WELL-04_PL не рассчитан:" in by_name["WELL-04"]["Проблема"]
+    assert str(by_name["WELL-04_PL"]["Проблема"]) in str(by_name["WELL-04"]["Проблема"])
     assert not successes
 
 
