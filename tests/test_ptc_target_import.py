@@ -595,6 +595,84 @@ def test_dev_target_import_uses_hold_plateau_to_merge_long_gaps_inside_builds() 
     assert summary.horizontal_dls_deg_per_30m == ()
 
 
+def test_dev_target_import_keeps_short_low_dls_tail_inside_build2() -> None:
+    md_values = [float(index * 10) for index in range(17)]
+    incl_values = [
+        0.0,
+        0.0,
+        0.4,
+        0.8,
+        1.2,
+        1.2,
+        1.2,
+        1.2,
+        1.2,
+        1.8,
+        2.4,
+        3.0,
+        3.01,
+        3.02,
+        3.03,
+        3.03,
+        3.03,
+    ]
+    dls_values = [
+        0.0,
+        0.0,
+        1.2,
+        1.2,
+        1.2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.8,
+        1.8,
+        1.8,
+        0.03,
+        0.03,
+        0.03,
+        0.0,
+        0.0,
+    ]
+    stations = pd.DataFrame(
+        {
+            "MD_m": md_values,
+            "X_m": md_values,
+            "Y_m": [0.0] * len(md_values),
+            "Z_m": [0.0] * len(md_values),
+        }
+    )
+    dev_rows = pd.DataFrame(
+        {
+            "MD": md_values,
+            "X": md_values,
+            "Y": [0.0] * len(md_values),
+            "Z": [0.0] * len(md_values),
+            "INCL": incl_values,
+            "DLS": dls_values,
+        }
+    )
+    well = ImportedTrajectoryWell(
+        name="short-low-dls-tail",
+        kind="approved",
+        stations=stations,
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        azimuth_deg=90.0,
+        dev_export_rows=dev_rows,
+    )
+
+    _record, summary = target_record_and_summary_from_dev_well(well)
+
+    assert summary.profile_label == "BUILD-HOLD-BUILD"
+    assert summary.kop_md_m == pytest.approx(10.0)
+    assert summary.t1_md_m == pytest.approx(140.0)
+    assert summary.entry_inc_deg == pytest.approx(3.03)
+    assert summary.build1_dls_deg_per_30m == (1.2,)
+    assert summary.build2_dls_deg_per_30m == (1.8,)
+    assert summary.horizontal_dls_deg_per_30m == ()
+
+
 def test_dev_target_import_keeps_j_profile_when_gap_is_not_a_hold() -> None:
     md_values = [float(index * 100) for index in range(13)]
     incl_values = [

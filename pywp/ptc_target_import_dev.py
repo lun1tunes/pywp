@@ -36,9 +36,11 @@ __all__ = [
 
 _DEV_DLS_EPSILON_DEG_PER_30M = 0.05
 _DEV_INCL_EPSILON_DEG = 0.05
+_DEV_RESIDUAL_DLS_MIN_DEG_PER_30M = 1e-3
 # BUILD1/BUILD2 can contain short or medium constant-INC pauses inside the same
 # section; the true BUILD-HOLD-BUILD split is anchored to the hold plateau.
 _DEV_HOLD_MIN_ROWS = 4
+_DEV_RESIDUAL_DLS_TAIL_MAX_ROWS = 4
 _DEV_WELL_NAME_RE = re.compile(
     r"^\s*#\s*WELL NAME:\s*(.+?)\s*$",
     flags=re.IGNORECASE | re.MULTILINE,
@@ -363,6 +365,13 @@ def _dev_activity_groups(rows: pd.DataFrame) -> list[tuple[int, int]]:
         (incl_deltas > _DEV_INCL_EPSILON_DEG)
         | (dls_values > _DEV_DLS_EPSILON_DEG_PER_30M)
     )
+    activity_mask = np.asarray(
+        _merge_short_residual_dls_runs(
+            activity_mask=activity_mask.tolist(),
+            dls_values=dls_values.tolist(),
+        ),
+        dtype=bool,
+    )
     raw_groups = _true_groups(activity_mask.tolist())
     if not raw_groups:
         return []
@@ -404,6 +413,31 @@ def _dev_hold_separator_index(
         key=lambda item: (item[0], item[1]),
     )
     return int(separator_index)
+
+
+def _merge_short_residual_dls_runs(
+    *,
+    activity_mask: Sequence[bool],
+    dls_values: Sequence[float],
+) -> list[bool]:
+    merged_mask = [bool(value) for value in activity_mask]
+    residual_mask = [
+        (not bool(is_active))
+        and _DEV_RESIDUAL_DLS_MIN_DEG_PER_30M
+        < abs(float(dls_value))
+        <= _DEV_DLS_EPSILON_DEG_PER_30M
+        for is_active, dls_value in zip(activity_mask, dls_values, strict=False)
+    ]
+    for start, end in _true_groups(residual_mask):
+        if int(end - start + 1) > _DEV_RESIDUAL_DLS_TAIL_MAX_ROWS:
+            continue
+        touches_active_left = start > 0 and merged_mask[start - 1]
+        touches_active_right = end + 1 < len(merged_mask) and merged_mask[end + 1]
+        if not touches_active_left and not touches_active_right:
+            continue
+        for index in range(start, end + 1):
+            merged_mask[index] = True
+    return merged_mask
 
 
 def _stable_unique_dls(rows: pd.DataFrame) -> tuple[float, ...]:
