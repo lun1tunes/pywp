@@ -37,6 +37,7 @@ _CALCULATOR_INPUT_CRS_OPTIONS = [
     *INPUT_CRS_OPTIONS,
     (_WGS84_INPUT_LABEL, CoordinateSystem.WGS84),
 ]
+_SWAP_CRS_BUTTON_LABEL = "⇄"
 
 
 def _labels(options: list[tuple[str, CoordinateSystem]]) -> list[str]:
@@ -56,6 +57,40 @@ def _index_for_crs(
     options: list[tuple[str, CoordinateSystem]],
 ) -> int:
     return next((idx for idx, (_label, item) in enumerate(options) if item == crs), 0)
+
+
+def _default_input_label() -> str:
+    return _labels(_CALCULATOR_INPUT_CRS_OPTIONS)[
+        _index_for_crs(DEFAULT_CRS, _CALCULATOR_INPUT_CRS_OPTIONS)
+    ]
+
+
+def _default_output_label() -> str:
+    return _labels(CSV_CRS_OPTIONS)[
+        _index_for_crs(_DEFAULT_OUTPUT_CRS, CSV_CRS_OPTIONS)
+    ]
+
+
+def _swap_crs_labels_supported(
+    input_label: str,
+    output_label: str,
+) -> bool:
+    input_labels = set(_labels(_CALCULATOR_INPUT_CRS_OPTIONS))
+    output_labels = set(_labels(CSV_CRS_OPTIONS))
+    return str(input_label) in output_labels and str(output_label) in input_labels
+
+
+def _swap_crs_selection_state() -> None:
+    input_label = str(
+        st.session_state.get("crs_calc_input_crs", _default_input_label())
+    )
+    output_label = str(
+        st.session_state.get("crs_calc_output_crs", _default_output_label())
+    )
+    if not _swap_crs_labels_supported(input_label, output_label):
+        return
+    st.session_state["crs_calc_input_crs"] = output_label
+    st.session_state["crs_calc_output_crs"] = input_label
 
 
 def _format_value(value: float, crs: CoordinateSystem) -> str:
@@ -226,12 +261,34 @@ def run_page() -> None:
 
     input_labels = _labels(_CALCULATOR_INPUT_CRS_OPTIONS)
     output_labels = _labels(CSV_CRS_OPTIONS)
-    c1, c2 = st.columns(2, gap="small")
+    current_input_label = str(
+        st.session_state.get("crs_calc_input_crs", _default_input_label())
+    )
+    current_output_label = str(
+        st.session_state.get("crs_calc_output_crs", _default_output_label())
+    )
+    can_swap_crs_labels = _swap_crs_labels_supported(
+        current_input_label,
+        current_output_label,
+    )
+    c1, c_swap, c2 = st.columns([1.0, 0.18, 1.0], gap="small", vertical_alignment="bottom")
     input_label = c1.selectbox(
         "Входная CRS",
         options=input_labels,
         index=_index_for_crs(DEFAULT_CRS, _CALCULATOR_INPUT_CRS_OPTIONS),
         key="crs_calc_input_crs",
+    )
+    c_swap.button(
+        _SWAP_CRS_BUTTON_LABEL,
+        key="crs_calc_swap_crs",
+        help=(
+            "Инвертировать входную и выходную CRS."
+            if can_swap_crs_labels
+            else "Инверсия доступна только для CRS, которые есть и во входном, и в выходном списке."
+        ),
+        disabled=not can_swap_crs_labels,
+        on_click=_swap_crs_selection_state,
+        width="stretch",
     )
     output_label = c2.selectbox(
         "Выходная CRS",

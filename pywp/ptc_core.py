@@ -4406,14 +4406,14 @@ def _render_manual_well_calc_overrides(
             or not active_profile_id
             or not profile_export_json,
         )
-        st.multiselect(
-            "Скважины для назначения",
-            options=available_names,
-            key=WT_WELL_CALC_OVERRIDE_SELECTION_KEY,
-            disabled=not overrides_enabled,
-        )
-        selected_names = _sync_manual_well_override_selection(
-            available_names=available_names
+        selected_names = _coerce_manual_well_override_selection(
+            st.multiselect(
+                "Скважины для назначения",
+                options=available_names,
+                key=WT_WELL_CALC_OVERRIDE_SELECTION_KEY,
+                disabled=not overrides_enabled,
+            ),
+            available_names=available_names,
         )
         assignment_cols = st.columns(3, gap="small")
         select_all_assignments_clicked = assignment_cols[0].button(
@@ -7586,21 +7586,38 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                 highlight_points[str(raw_name)] = indices
 
     point_count = sum(len(getattr(record, "points", ()) or ()) for record in records)
-    needs_explicit_open = (
-        point_count > WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT and not highlight_names
-    )
+    large_point_table = point_count > WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT
+    needs_explicit_open = large_point_table and not highlight_names
     edit_mode_key = "wt_raw_records_edit_mode"
     editor_nonce_key = "wt_raw_records_editor_nonce"
+    table_key = "wt_show_raw_records_table"
+    highlight_signature_key = "wt_show_raw_records_table_highlight_signature"
     st.session_state.setdefault(edit_mode_key, False)
     st.session_state.setdefault(editor_nonce_key, 0)
+    if large_point_table and highlight_names:
+        highlight_signature = (
+            tuple(sorted(highlight_names)),
+            tuple(
+                sorted(
+                    (name, tuple(sorted(indices)))
+                    for name, indices in highlight_points.items()
+                )
+            ),
+            highlight_source,
+        )
+        if st.session_state.get(highlight_signature_key) != highlight_signature:
+            st.session_state[table_key] = False
+            st.session_state[highlight_signature_key] = highlight_signature
+    else:
+        st.session_state[highlight_signature_key] = None
     with st.expander(
         "Текущие точки скважин",
         expanded=bool(highlight_names),
     ):
+        show_full_large_table = False
         if needs_explicit_open:
-            table_key = "wt_show_raw_records_table"
             st.session_state.setdefault(table_key, False)
-            show_raw_table = bool(
+            show_full_large_table = bool(
                 st.toggle(
                     "Показать полную таблицу точек",
                     key=table_key,
@@ -7611,13 +7628,43 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
                     ),
                 )
             )
-            if not show_raw_table:
+            if not show_full_large_table:
                 st.caption(
                     f"Таблица скрыта для ускорения страницы: {point_count} точек. "
                     "Расчёт использует полный импортированный набор данных."
                 )
                 return
-        raw_records_df = ptc_target_records.raw_records_dataframe(records)
+        elif large_point_table and highlight_names:
+            st.session_state.setdefault(table_key, False)
+            show_full_large_table = bool(
+                st.toggle(
+                    "Показать полную таблицу точек",
+                    key=table_key,
+                    help=(
+                        "После редактирования по умолчанию показываются только "
+                        "изменённые скважины, чтобы не блокировать страницу на "
+                        "больших наборах точек."
+                    ),
+                )
+            )
+
+        records_for_table = records
+        if large_point_table and highlight_names and not show_full_large_table:
+            records_for_table = [
+                record
+                for record in records
+                if str(record.name).strip() in highlight_names
+            ]
+            filtered_point_count = sum(
+                len(getattr(record, "points", ()) or ()) for record in records_for_table
+            )
+            st.caption(
+                "Для ускорения показаны только изменённые скважины: "
+                f"{len(records_for_table)} из {len(records)} "
+                f"({filtered_point_count} из {point_count} точек)."
+            )
+
+        raw_records_df = ptc_target_records.raw_records_dataframe(records_for_table)
         if bool(st.session_state.get(edit_mode_key)):
             st.caption(
                 "Можно менять координаты `X/Y/Z` и вставлять их из Excel. "
@@ -7675,7 +7722,7 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
             if save_clicked:
                 try:
                     changes = ptc_edit_targets.raw_records_editor_changes(
-                        records,
+                        records_for_table,
                         edited_table,
                     )
                 except ValueError as exc:

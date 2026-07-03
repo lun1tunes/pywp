@@ -359,12 +359,28 @@ def test_anticollision_panel_reruns_after_fresh_analysis_when_visual_is_external
     assert calls["progress_emptied"] is True
 
 
-def test_auto_anticollision_parallel_workers_uses_conservative_thresholds() -> None:
+def test_auto_anticollision_parallel_workers_uses_conservative_thresholds_on_linux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ptc_page_results.sys, "platform", "linux")
+
     assert ptc_page_results._auto_anticollision_parallel_workers(0) == 0
     assert ptc_page_results._auto_anticollision_parallel_workers(5) == 0
     assert ptc_page_results._auto_anticollision_parallel_workers(6) == 2
     assert ptc_page_results._auto_anticollision_parallel_workers(11) == 2
     assert ptc_page_results._auto_anticollision_parallel_workers(12) == 4
+
+
+def test_auto_anticollision_parallel_workers_delays_multiprocessing_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ptc_page_results.sys, "platform", "win32")
+
+    assert ptc_page_results._auto_anticollision_parallel_workers(0) == 0
+    assert ptc_page_results._auto_anticollision_parallel_workers(11) == 0
+    assert ptc_page_results._auto_anticollision_parallel_workers(12) == 2
+    assert ptc_page_results._auto_anticollision_parallel_workers(23) == 2
+    assert ptc_page_results._auto_anticollision_parallel_workers(24) == 4
 
 
 def test_anticollision_panel_renders_settings_under_section_header(

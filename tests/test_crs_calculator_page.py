@@ -63,6 +63,33 @@ def test_crs_calculator_input_options_include_wgs84_degrees() -> None:
     assert "WGS84 (градусы)" in list(input_selectbox.options)
 
 
+def test_crs_calculator_can_swap_default_crs_pair() -> None:
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.run(timeout=60)
+
+    swap_button = next(widget for widget in at.button if str(widget.label) == "⇄")
+    swap_button.click()
+    at.run(timeout=60)
+
+    select_values = {str(widget.label): widget.value for widget in at.selectbox}
+    assert select_values["Входная CRS"] == "WGS84 UTM 43N"
+    assert select_values["Выходная CRS"] == "ГК_13N_42"
+
+
+def test_crs_calculator_disables_swap_for_input_only_crs() -> None:
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.run(timeout=60)
+
+    input_selectbox = next(
+        widget for widget in at.selectbox if str(widget.label) == "Входная CRS"
+    )
+    input_selectbox.set_value("СК-42 Зона 6")
+    at.run(timeout=60)
+
+    swap_button = next(widget for widget in at.button if str(widget.label) == "⇄")
+    assert bool(swap_button.disabled) is True
+
+
 def test_crs_calculator_uses_shared_transform_function(monkeypatch) -> None:
     calls: list[tuple[float, float, CoordinateSystem, CoordinateSystem]] = []
 

@@ -3914,6 +3914,239 @@ def test_render_raw_records_table_skips_large_collapsed_table(monkeypatch) -> No
     assert "Таблица скрыта для ускорения страницы" in str(captured["caption"])
 
 
+def test_render_raw_records_table_limits_large_highlighted_view_to_changed_wells(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    page.st.session_state["wt_edit_targets_highlight_names"] = ["WELL-MH"]
+    page.st.session_state["wt_edit_targets_highlight_points"] = {"WELL-MH": [1, 2]}
+    page.st.session_state.pop("wt_show_raw_records_table", None)
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_expander(*args, **kwargs):
+        captured["expanded"] = bool(kwargs.get("expanded"))
+        return _DummyExpander()
+
+    large_record = WelltrackRecord(
+        name="WELL-LARGE",
+        points=tuple(
+            WelltrackPoint(x=float(index), y=0.0, z=float(index), md=float(index))
+            for index in range(page.WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT + 1)
+        ),
+    )
+    multi_record = WelltrackRecord(
+        name="WELL-MH",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=1.0),
+            WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=2.0),
+            WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=3.0),
+            WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=4.0),
+        ),
+    )
+
+    def _fake_raw_dataframe(records):
+        captured["record_names"] = [str(record.name) for record in records]
+        return page.ptc_target_records.raw_records_dataframe.__wrapped__(records)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(page.st, "expander", _fake_expander)
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        page.st,
+        "caption",
+        lambda message, *args, **kwargs: captured.setdefault("caption", str(message)),
+    )
+    monkeypatch.setattr(page.st, "success", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    original_raw_records_dataframe = page.ptc_target_records.raw_records_dataframe
+    monkeypatch.setattr(
+        page.ptc_target_records,
+        "raw_records_dataframe",
+        lambda records: (
+            captured.setdefault("record_names", [str(record.name) for record in records]),
+            original_raw_records_dataframe(records),
+        )[1],
+    )
+
+    page._render_raw_records_table([large_record, multi_record])
+
+    assert captured["expanded"] is True
+    assert captured["record_names"] == ["WELL-MH"]
+    assert "показаны только изменённые скважины" in str(captured["caption"]).lower()
+
+
+def test_render_raw_records_table_resets_large_full_table_toggle_for_new_highlight(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    page.st.session_state["wt_show_raw_records_table"] = True
+    page.st.session_state["wt_show_raw_records_table_highlight_signature"] = (
+        ("OLD-WELL",),
+        (),
+        "3d",
+    )
+    page.st.session_state["wt_edit_targets_highlight_names"] = ["WELL-MH"]
+    page.st.session_state["wt_edit_targets_highlight_points"] = {"WELL-MH": [1, 2]}
+    page.st.session_state["wt_edit_targets_last_source"] = "3d"
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    large_record = WelltrackRecord(
+        name="WELL-LARGE",
+        points=tuple(
+            WelltrackPoint(x=float(index), y=0.0, z=float(index), md=float(index))
+            for index in range(page.WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT + 1)
+        ),
+    )
+    multi_record = WelltrackRecord(
+        name="WELL-MH",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=1.0),
+            WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=2.0),
+            WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=3.0),
+            WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=4.0),
+        ),
+    )
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(
+        page.st,
+        "toggle",
+        lambda *args, **kwargs: bool(
+            page.st.session_state.get(kwargs.get("key", ""), False)
+        ),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "caption",
+        lambda message, *args, **kwargs: captured.setdefault("caption", str(message)),
+    )
+    monkeypatch.setattr(page.st, "success", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    original_raw_records_dataframe = page.ptc_target_records.raw_records_dataframe
+    monkeypatch.setattr(
+        page.ptc_target_records,
+        "raw_records_dataframe",
+        lambda records: (
+            captured.setdefault("record_names", [str(record.name) for record in records]),
+            original_raw_records_dataframe(records),
+        )[1],
+    )
+
+    page._render_raw_records_table([large_record, multi_record])
+
+    assert page.st.session_state["wt_show_raw_records_table"] is False
+    assert captured["record_names"] == ["WELL-MH"]
+
+
+def test_render_raw_records_table_applies_edits_for_filtered_large_highlighted_view(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_raw_records_edit_mode"] = True
+    page.st.session_state["wt_raw_records_editor_nonce"] = 0
+    page.st.session_state["wt_edit_targets_highlight_names"] = ["WELL-MH"]
+    page.st.session_state["wt_edit_targets_highlight_points"] = {"WELL-MH": [1, 2]}
+    records = [
+        WelltrackRecord(
+            name="WELL-LARGE",
+            points=tuple(
+                WelltrackPoint(x=float(index), y=0.0, z=float(index), md=float(index))
+                for index in range(page.WT_RAW_RECORDS_AUTO_RENDER_POINT_LIMIT + 1)
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-MH",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=2000.0, md=1.0),
+                WelltrackPoint(x=200.0, y=0.0, z=2000.0, md=2.0),
+                WelltrackPoint(x=300.0, y=0.0, z=2020.0, md=3.0),
+                WelltrackPoint(x=400.0, y=0.0, z=2020.0, md=4.0),
+            ),
+        ),
+    ]
+    filtered_records = [records[1]]
+    edited_df = page.ptc_target_records.raw_records_dataframe(filtered_records)
+    edited_df.loc[2, "Z, м"] = 2050.0
+    captured: dict[str, object] = {"rerun_called": False}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def form_submit_button(self, label, **kwargs):
+            return str(label) == "Сохранить изменения"
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn(), _DummyColumn()),
+    )
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: edited_df.copy())
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "rerun",
+        lambda *args, **kwargs: captured.__setitem__("rerun_called", True),
+    )
+    monkeypatch.setattr(
+        page.st.column_config,
+        "TextColumn",
+        lambda *args, **kwargs: {"type": "text"},
+    )
+    monkeypatch.setattr(
+        page.st.column_config,
+        "NumberColumn",
+        lambda *args, **kwargs: {"type": "number"},
+    )
+
+    def _fake_apply_edit_targets_changes(changes, *, source="3d"):
+        captured["changes"] = changes
+        captured["source"] = source
+        return ["WELL-MH"]
+
+    monkeypatch.setattr(page, "_apply_edit_targets_changes", _fake_apply_edit_targets_changes)
+
+    page._render_raw_records_table(records)
+
+    assert captured["source"] == "raw_records_table"
+    assert captured["changes"] == [
+        {
+            "name": "WELL-MH",
+            "points": [
+                {"index": 2, "position": [200.0, 0.0, 2050.0]},
+            ],
+        }
+    ]
+    assert page.st.session_state["wt_raw_records_edit_mode"] is False
+    assert page.st.session_state["wt_raw_records_editor_nonce"] == 1
+    assert captured["rerun_called"] is True
+
+
 def test_render_raw_records_table_hides_md_from_file_column(monkeypatch) -> None:
     page = wt_import_module
     captured: dict[str, object] = {}
@@ -5682,6 +5915,85 @@ def test_render_manual_well_calc_overrides_select_all_queues_full_assignment_sel
     assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] == [
         "WELL-A"
     ]
+
+
+def test_render_manual_well_calc_overrides_does_not_resync_selection_after_multiselect(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] = ["WELL-A"]
+    rendered_multiselect = False
+    sync_calls_after_multiselect = 0
+    original_sync = page._sync_manual_well_override_selection
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            return False
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, options[0] if options else "")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        nonlocal rendered_multiselect
+        rendered_multiselect = True
+        page.st.session_state.setdefault(key, ["WELL-A"])
+        return page.st.session_state[key]
+
+    def _guarded_sync(*args, **kwargs):
+        nonlocal sync_calls_after_multiselect
+        if rendered_multiselect:
+            sync_calls_after_multiselect += 1
+        return original_sync(*args, **kwargs)
+
+    monkeypatch.setattr(page, "_sync_manual_well_override_selection", _guarded_sync)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    assert rendered_multiselect is True
+    assert sync_calls_after_multiselect == 0
 
 
 def test_render_manual_well_calc_overrides_skips_warning_when_json_import_succeeds(

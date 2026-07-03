@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from collections.abc import Callable, Mapping, MutableMapping
+import sys
 
 import pandas as pd
 import streamlit as st
@@ -38,6 +39,8 @@ __all__ = ["render_failed_target_only_results", "render_success_tabs"]
 
 _ANTI_COLLISION_AUTO_PARALLEL_DISABLED_MAX_WELLS = 5
 _ANTI_COLLISION_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS = 12
+_ANTI_COLLISION_AUTO_PARALLEL_DISABLED_MAX_WELLS_WINDOWS = 11
+_ANTI_COLLISION_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS_WINDOWS = 24
 
 
 def _rerun_fragment() -> None:
@@ -70,10 +73,17 @@ def _calc_params_changed_after_last_run() -> bool:
 
 
 def _auto_anticollision_parallel_workers(total_well_count: int) -> int:
+    disabled_max_wells = _ANTI_COLLISION_AUTO_PARALLEL_DISABLED_MAX_WELLS
+    four_workers_min_wells = _ANTI_COLLISION_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS
+    if sys.platform.startswith("win"):
+        disabled_max_wells = _ANTI_COLLISION_AUTO_PARALLEL_DISABLED_MAX_WELLS_WINDOWS
+        four_workers_min_wells = (
+            _ANTI_COLLISION_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS_WINDOWS
+        )
     well_count = int(max(total_well_count, 0))
-    if well_count <= _ANTI_COLLISION_AUTO_PARALLEL_DISABLED_MAX_WELLS:
+    if well_count <= disabled_max_wells:
         return 0
-    if well_count >= _ANTI_COLLISION_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS:
+    if well_count >= four_workers_min_wells:
         return 4
     return 2
 
