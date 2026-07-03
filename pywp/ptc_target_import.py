@@ -24,8 +24,10 @@ from pywp.reference_trajectories import (
 )
 from pywp.ptc_target_import_dev import (
     DevTargetImportSummary,
+    dev_well_is_simple_target,
     dev_target_import_summary_dataframe,
     dev_trajectory_text_name,
+    target_record_from_simple_dev_well,
     target_record_and_summary_from_dev_well,
 )
 
@@ -565,7 +567,9 @@ def _parse_dev_target_payload(
     source_files: Sequence[tuple[str, bytes]],
     fixed_t1_inc_by_well: dict[str, float] | None = None,
 ) -> TargetImportParseResult:
-    parsed_wells: list[tuple[WelltrackRecord, DevTargetImportSummary, ImportedTrajectoryWell]] = []
+    parsed_wells: list[
+        tuple[WelltrackRecord, DevTargetImportSummary | None, ImportedTrajectoryWell]
+    ] = []
     failures: list[TargetImportFailure] = []
     normalized_path = normalize_user_path_text(source_path)
     if normalized_path:
@@ -623,7 +627,9 @@ def _parse_dev_target_payload(
         parsed_wells.append(parsed_item)
     return TargetImportParseResult(
         records=tuple(item[0] for item in parsed_wells),
-        dev_summaries=tuple(item[1] for item in parsed_wells),
+        dev_summaries=tuple(
+            item[1] for item in parsed_wells if item[1] is not None
+        ),
         imported_dev_wells=tuple(item[2] for item in parsed_wells),
         failures=tuple(failures),
     )
@@ -690,7 +696,8 @@ def _parse_dev_target_source_item(
     source_label: str,
     fixed_t1_inc_by_well: dict[str, float] | None,
 ) -> tuple[
-    tuple[WelltrackRecord, DevTargetImportSummary, ImportedTrajectoryWell] | None,
+    tuple[WelltrackRecord, DevTargetImportSummary | None, ImportedTrajectoryWell]
+    | None,
     TargetImportFailure | None,
 ]:
     fallback_name = Path(str(file_name or "dev_import")).stem
@@ -702,13 +709,17 @@ def _parse_dev_target_source_item(
             well_name=well_name,
             kind=REFERENCE_WELL_APPROVED,
         )
-        record, summary = target_record_and_summary_from_dev_well(
-            imported_well,
-            fixed_t1_inc_deg=_fixed_t1_inc_value_for_well(
-                str(imported_well.name),
-                fixed_t1_inc_by_well,
-            ),
-        )
+        if dev_well_is_simple_target(imported_well):
+            record = target_record_from_simple_dev_well(imported_well)
+            summary = None
+        else:
+            record, summary = target_record_and_summary_from_dev_well(
+                imported_well,
+                fixed_t1_inc_deg=_fixed_t1_inc_value_for_well(
+                    str(imported_well.name),
+                    fixed_t1_inc_by_well,
+                ),
+            )
     except (OSError, UnicodeError, ValueError, WelltrackParseError) as exc:
         problem = str(exc).strip() or "Не удалось импортировать .dev траекторию."
         return None, TargetImportFailure(

@@ -269,6 +269,58 @@ def test_target_import_operation_parses_dev_trajectory_from_inline_text() -> Non
     assert summary.t1_md_m == pytest.approx(1595.0)
 
 
+def test_target_import_operation_treats_three_point_dev_as_plain_target() -> None:
+    dev_text = "\n".join(
+        [
+            "# WELL NAME: THREE-POINT-DEV",
+            "0 0 0 0 0 0 0 0 12 1.2 0",
+            "2400 600 800 -2400 2400 600 800 45 72 2.4 45",
+            "3500 1500 2000 -2500 2500 900 1200 45 88 1.8 45",
+        ]
+    )
+    operation = target_import.build_target_import_operation(
+        target_import.WelltrackSourcePayload(
+            mode=target_import.WT_SOURCE_MODE_INLINE_TEXT,
+            source_format=target_import.WT_SOURCE_FORMAT_DEV_TRAJECTORY,
+            source_text=dev_text,
+        )
+    )
+
+    parsed = operation.parse()
+
+    assert [record.name for record in parsed.records] == ["THREE-POINT-DEV"]
+    assert parsed.dev_summaries == ()
+    assert [well.name for well in parsed.imported_dev_wells] == ["THREE-POINT-DEV"]
+    assert tuple(parsed.records[0].points) == (
+        WelltrackPoint(x=0.0, y=0.0, z=-0.0, md=0.0),
+        WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+        WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+    )
+
+
+def test_parse_dev_target_payloads_treats_three_point_dev_as_plain_target() -> None:
+    dev_text = "\n".join(
+        [
+            "# WELL NAME: THREE-POINT-DEV-LOWLEVEL",
+            "0 0 0 0 0 0 0 0 12 1.2 0",
+            "2400 600 800 -2400 2400 600 800 45 72 2.4 45",
+            "3500 1500 2000 -2500 2500 900 1200 45 88 1.8 45",
+        ]
+    ).encode("utf-8")
+
+    parsed = target_import_dev.parse_dev_target_payloads(
+        (("THREE-POINT-DEV-LOWLEVEL.dev", dev_text),)
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].summary is None
+    assert tuple(parsed[0].record.points) == (
+        WelltrackPoint(x=0.0, y=0.0, z=-0.0, md=0.0),
+        WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+        WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+    )
+
+
 def test_dev_target_import_keeps_full_build2_until_dls_drops_to_zero() -> None:
     operation = target_import.build_target_import_operation(
         target_import.WelltrackSourcePayload(

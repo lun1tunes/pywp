@@ -26,11 +26,13 @@ from pywp.ui_utils import dls_to_pi
 __all__ = [
     "DevTargetImportParsedWell",
     "DevTargetImportSummary",
+    "dev_well_is_simple_target",
     "dev_target_import_summary_dataframe",
     "dev_trajectory_text_name",
     "parse_dev_target_directory",
     "parse_dev_target_file",
     "parse_dev_target_payloads",
+    "target_record_from_simple_dev_well",
     "target_record_and_summary_from_dev_well",
 ]
 
@@ -67,7 +69,7 @@ class DevTargetImportSummary:
 @dataclass(frozen=True)
 class DevTargetImportParsedWell:
     record: WelltrackRecord
-    summary: DevTargetImportSummary
+    summary: DevTargetImportSummary | None
     imported_well: ImportedTrajectoryWell
 
 
@@ -147,15 +149,44 @@ def _parsed_dev_target_well(
     *,
     fixed_t1_inc_deg: float | None = None,
 ) -> DevTargetImportParsedWell:
-    record, summary = target_record_and_summary_from_dev_well(
-        well,
-        fixed_t1_inc_deg=fixed_t1_inc_deg,
-    )
+    if dev_well_is_simple_target(well):
+        record = target_record_from_simple_dev_well(well)
+        summary = None
+    else:
+        record, summary = target_record_and_summary_from_dev_well(
+            well,
+            fixed_t1_inc_deg=fixed_t1_inc_deg,
+        )
     return DevTargetImportParsedWell(
         record=record,
         summary=summary,
         imported_well=well,
     )
+
+
+def dev_well_is_simple_target(well: ImportedTrajectoryWell) -> bool:
+    stations = pd.DataFrame(well.stations).reset_index(drop=True)
+    return int(len(stations.index)) == 3
+
+
+def target_record_from_simple_dev_well(
+    well: ImportedTrajectoryWell,
+) -> WelltrackRecord:
+    stations = pd.DataFrame(well.stations).reset_index(drop=True)
+    if len(stations.index) != 3:
+        raise WelltrackParseError(
+            f".dev '{well.name}': для прямого импорта целей ожидаются ровно 3 станции."
+        )
+    points = tuple(
+        WelltrackPoint(
+            x=float(row["X_m"]),
+            y=float(row["Y_m"]),
+            z=float(row["Z_m"]),
+            md=float(row["MD_m"]),
+        )
+        for _, row in stations.iterrows()
+    )
+    return WelltrackRecord(name=str(well.name), points=points)
 
 
 def target_record_and_summary_from_dev_well(

@@ -6290,6 +6290,20 @@ def _handle_import_actions(
                 status.write(
                     "Прочитаны параметры траекторий .dev. Они показаны ниже в статусе загрузки целей."
                 )
+            simple_dev_target_names = sorted(
+                {
+                    str(well.name).strip()
+                    for well in parse_result.imported_dev_wells
+                    if len(pd.DataFrame(well.stations).index) == 3
+                    and str(well.name).strip()
+                }
+            )
+            if simple_dev_target_names:
+                st.session_state["wt_records_overview_expand_once"] = True
+                status.write(
+                    "`.dev` с тремя точками импортированы как обычные цели "
+                    "`S / t1 / t3`. Для них используются общие параметры расчёта."
+                )
             if parse_result.failures:
                 st.session_state["wt_records_overview_expand_once"] = True
                 status.write(
@@ -6634,6 +6648,28 @@ def _records_overview_dataframe(
         records,
         wellhead_z_tolerance_m=WT_IMPORT_WELLHEAD_Z_TOLERANCE_M,
     )
+    simple_dev_note_by_key = {
+        well_name_key(well.name): (
+            "Импорт из .dev: 3 точки `S / t1 / t3`, используются общие параметры расчёта."
+        )
+        for well in _imported_dev_target_wells_from_state()
+        if len(pd.DataFrame(well.stations).index) == 3
+        and str(well.name).strip()
+    }
+    if simple_dev_note_by_key and not base_df.empty:
+        base_df = base_df.copy()
+        for row_index, row in base_df.iterrows():
+            note = simple_dev_note_by_key.get(
+                well_name_key(str(row.get("Скважина", "")).strip())
+            )
+            if not note:
+                continue
+            current_note = str(row.get("Примечание", "")).strip()
+            base_df.at[row_index, "Примечание"] = (
+                note
+                if current_note in {"", "—"}
+                else f"{current_note}; {note}"
+            )
     raw_failures = st.session_state.get(ptc_target_import.TARGET_IMPORT_FAILURES_STATE_KEY, ())
     failure_rows: list[dict[str, object]] = []
     if isinstance(raw_failures, (list, tuple)):

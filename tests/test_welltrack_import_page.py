@@ -32,7 +32,7 @@ from pywp.anticollision_recommendations import (
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.mcm import compute_positions_min_curv
 from pywp.models import Point3D, TrajectoryConfig
-from pywp.reference_trajectories import parse_reference_trajectory_table
+from pywp.reference_trajectories import ImportedTrajectoryWell, parse_reference_trajectory_table
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp.ui_calc_params import (
     clear_kop_min_vertical_function,
@@ -608,6 +608,42 @@ def test_records_overview_appends_dev_import_failures_to_status_table(
     finally:
         page.st.session_state.clear()
         page._init_state()
+
+
+def test_records_overview_marks_three_point_dev_as_plain_target_note() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    record = WelltrackRecord(
+        name="THREE-POINT-DEV",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
+            WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
+        ),
+    )
+    page.st.session_state[page.ptc_target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY] = (
+        ImportedTrajectoryWell(
+            name="THREE-POINT-DEV",
+            kind="approved",
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [0.0, 2400.0, 3500.0],
+                    "X_m": [0.0, 600.0, 1500.0],
+                    "Y_m": [0.0, 800.0, 2000.0],
+                    "Z_m": [0.0, 2400.0, 2500.0],
+                }
+            ),
+            surface=Point3D(x=0.0, y=0.0, z=0.0),
+            azimuth_deg=45.0,
+        ),
+    )
+
+    overview_df = page._records_overview_dataframe([record])
+
+    assert list(overview_df["Скважина"]) == ["THREE-POINT-DEV"]
+    assert "3 точки" in str(overview_df.iloc[0]["Примечание"])
+    assert "общие параметры расчёта" in str(overview_df.iloc[0]["Примечание"])
 
 
 def test_records_overview_metrics_count_wells_and_pilots_separately(
