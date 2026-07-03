@@ -4105,6 +4105,8 @@ def _delete_manual_well_calc_profile(profile_id: str) -> tuple[int, int]:
 def _dev_summary_override_values(
     summary: ptc_target_import.DevTargetImportSummary,
 ) -> dict[str, float | int | str | bool]:
+    if bool(getattr(summary, "simple_target_only", False)):
+        return {}
     entry_inc_target = min(max(float(summary.entry_inc_deg), 0.5), 89.0)
     values: dict[str, float | int | str | bool] = {
         "kop_min_vertical": float(summary.kop_md_m),
@@ -4149,6 +4151,8 @@ def _dev_summary_override_values(
 def _dev_summary_uses_separate_build2(
     summary: ptc_target_import.DevTargetImportSummary,
 ) -> bool:
+    if bool(getattr(summary, "simple_target_only", False)):
+        return False
     if str(summary.profile_label).strip() == "J-профиль":
         return False
     build1_dls_values = tuple(
@@ -4179,6 +4183,7 @@ def _apply_dev_params_to_manual_well_overrides(
         well_name_key(summary.well_name): summary
         for summary in summaries
         if str(summary.well_name).strip()
+        and not bool(getattr(summary, "simple_target_only", False))
     }
     profiles = dict(_manual_well_calc_profiles())
     assignments = dict(_manual_well_calc_profile_assignments())
@@ -4286,6 +4291,7 @@ def _render_manual_well_calc_overrides(
             well_name_key(item.well_name)
             for item in tuple(st.session_state.get("wt_imported_dev_params", ()))
             if str(item.well_name).strip()
+            and not bool(getattr(item, "simple_target_only", False))
             and well_name_key(item.well_name) in available_name_keys
         }
     )
@@ -6285,7 +6291,12 @@ def _handle_import_actions(
                 source_kind=str(operation.source_kind),
             )
             status.write(operation.count_message(len(records)))
-            if parse_result.dev_summaries:
+            detailed_dev_param_summaries = tuple(
+                summary
+                for summary in parse_result.dev_summaries
+                if not bool(getattr(summary, "simple_target_only", False))
+            )
+            if detailed_dev_param_summaries:
                 st.session_state["wt_records_overview_expand_once"] = True
                 status.write(
                     "Прочитаны параметры траекторий .dev. Они показаны ниже в статусе загрузки целей."

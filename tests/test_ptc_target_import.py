@@ -269,6 +269,31 @@ def test_target_import_operation_parses_dev_trajectory_from_inline_text() -> Non
     assert summary.t1_md_m == pytest.approx(1595.0)
 
 
+def test_dev_trajectory_text_name_strips_trailing_dot_from_header_name() -> None:
+    dev_text = "\n".join(
+        [
+            "# WELL NAME: 9201.",
+            "0 0 0 0",
+            "100 10 20 -100",
+            "200 20 30 -200",
+        ]
+    )
+    operation = target_import.build_target_import_operation(
+        target_import.WelltrackSourcePayload(
+            mode=target_import.WT_SOURCE_MODE_INLINE_TEXT,
+            source_format=target_import.WT_SOURCE_FORMAT_DEV_TRAJECTORY,
+            source_text=dev_text,
+        )
+    )
+
+    parsed = operation.parse()
+
+    assert [record.name for record in parsed.records] == ["9201"]
+    assert len(parsed.dev_summaries) == 1
+    assert parsed.dev_summaries[0].simple_target_only is True
+    assert [well.name for well in parsed.imported_dev_wells] == ["9201"]
+
+
 def test_target_import_operation_treats_three_point_dev_as_plain_target() -> None:
     dev_text = "\n".join(
         [
@@ -289,7 +314,10 @@ def test_target_import_operation_treats_three_point_dev_as_plain_target() -> Non
     parsed = operation.parse()
 
     assert [record.name for record in parsed.records] == ["THREE-POINT-DEV"]
-    assert parsed.dev_summaries == ()
+    assert len(parsed.dev_summaries) == 1
+    assert parsed.dev_summaries[0].well_name == "THREE-POINT-DEV"
+    assert parsed.dev_summaries[0].simple_target_only is True
+    assert parsed.dev_summaries[0].profile_label == "3 точки S / t1 / t3"
     assert [well.name for well in parsed.imported_dev_wells] == ["THREE-POINT-DEV"]
     assert tuple(parsed.records[0].points) == (
         WelltrackPoint(x=0.0, y=0.0, z=-0.0, md=0.0),
@@ -313,7 +341,8 @@ def test_parse_dev_target_payloads_treats_three_point_dev_as_plain_target() -> N
     )
 
     assert len(parsed) == 1
-    assert parsed[0].summary is None
+    assert parsed[0].summary is not None
+    assert parsed[0].summary.simple_target_only is True
     assert tuple(parsed[0].record.points) == (
         WelltrackPoint(x=0.0, y=0.0, z=-0.0, md=0.0),
         WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),

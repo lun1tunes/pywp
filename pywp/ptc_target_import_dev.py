@@ -26,6 +26,7 @@ from pywp.ui_utils import dls_to_pi
 __all__ = [
     "DevTargetImportParsedWell",
     "DevTargetImportSummary",
+    "simple_target_dev_summary",
     "dev_well_is_simple_target",
     "dev_target_import_summary_dataframe",
     "dev_trajectory_text_name",
@@ -64,6 +65,7 @@ class DevTargetImportSummary:
     build2_dls_deg_per_30m: tuple[float, ...] = ()
     horizontal_dls_deg_per_30m: tuple[float, ...] = ()
     note: str = ""
+    simple_target_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,8 +78,17 @@ class DevTargetImportParsedWell:
 def dev_trajectory_text_name(text: str, *, fallback_name: str = "dev_import_1") -> str:
     match = _DEV_WELL_NAME_RE.search(str(text or ""))
     if match is None:
-        return str(fallback_name)
-    normalized = str(match.group(1)).strip()
+        return _normalize_dev_well_name(fallback_name, fallback_name=fallback_name)
+    return _normalize_dev_well_name(
+        match.group(1),
+        fallback_name=fallback_name,
+    )
+
+
+def _normalize_dev_well_name(raw_name: object, *, fallback_name: str) -> str:
+    normalized = str(raw_name or "").strip()
+    while normalized.endswith(".") and normalized[:-1].strip():
+        normalized = normalized[:-1].rstrip()
     return normalized or str(fallback_name)
 
 
@@ -151,7 +162,10 @@ def _parsed_dev_target_well(
 ) -> DevTargetImportParsedWell:
     if dev_well_is_simple_target(well):
         record = target_record_from_simple_dev_well(well)
-        summary = None
+        summary = simple_target_dev_summary(
+            well=well,
+            record=record,
+        )
     else:
         record, summary = target_record_and_summary_from_dev_well(
             well,
@@ -187,6 +201,28 @@ def target_record_from_simple_dev_well(
         for _, row in stations.iterrows()
     )
     return WelltrackRecord(name=str(well.name), points=points)
+
+
+def simple_target_dev_summary(
+    *,
+    well: ImportedTrajectoryWell,
+    record: WelltrackRecord,
+) -> DevTargetImportSummary:
+    points = tuple(record.points)
+    if len(points) != 3:
+        raise WelltrackParseError(
+            f".dev '{well.name}': для краткой сводки ожидаются точки S / t1 / t3."
+        )
+    return DevTargetImportSummary(
+        well_name=str(well.name),
+        profile_label="3 точки S / t1 / t3",
+        kop_md_m=float(points[0].md),
+        t1_md_m=float(points[1].md),
+        t3_md_m=float(points[2].md),
+        entry_inc_deg=float("nan"),
+        note="Импортировано как обычные цели из .dev. Используются общие параметры расчёта.",
+        simple_target_only=True,
+    )
 
 
 def target_record_and_summary_from_dev_well(
@@ -338,30 +374,58 @@ def dev_target_import_summary_dataframe(
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for summary in summaries:
+        is_simple_target = bool(getattr(summary, "simple_target_only", False))
         rows.append(
             {
                 "Скважина": str(summary.well_name),
                 "Профиль": str(summary.profile_label),
-                "KOP MD, м": float(summary.kop_md_m),
+                "KOP MD, м": (
+                    "—"
+                    if is_simple_target
+                    else _format_summary_float(summary.kop_md_m)
+                ),
                 "t1 MD, м": float(summary.t1_md_m),
                 "t3 MD, м": float(summary.t3_md_m),
-                "INC в t1, deg": float(summary.entry_inc_deg),
-                "BUILD1 PI, deg/10m": _format_value_list(
+                "INC в t1, deg": (
+                    "—"
+                    if is_simple_target
+                    else _format_summary_float(summary.entry_inc_deg)
+                ),
+                "BUILD1 PI, deg/10m": (
+                    "—"
+                    if is_simple_target
+                    else _format_value_list(
                     tuple(float(dls_to_pi(value)) for value in summary.build1_dls_deg_per_30m)
+                    )
                 ),
-                "BUILD2 PI, deg/10m": _format_value_list(
+                "BUILD2 PI, deg/10m": (
+                    "—"
+                    if is_simple_target
+                    else _format_value_list(
                     tuple(float(dls_to_pi(value)) for value in summary.build2_dls_deg_per_30m)
+                    )
                 ),
-                "HORIZONTAL PI, deg/10m": _format_value_list(
+                "HORIZONTAL PI, deg/10m": (
+                    "—"
+                    if is_simple_target
+                    else _format_value_list(
                     tuple(
                         float(dls_to_pi(value))
                         for value in summary.horizontal_dls_deg_per_30m
+                    )
                     )
                 ),
                 "Примечание": str(summary.note or "—"),
             }
         )
     return pd.DataFrame(rows)
+
+
+def _format_summary_float(value: float) -> float | str:
+    numeric = float(value)
+    if not np.isfinite(numeric):
+        return "—"
+    return numeric
 
 
 def _dev_analysis_rows(well: ImportedTrajectoryWell) -> pd.DataFrame:

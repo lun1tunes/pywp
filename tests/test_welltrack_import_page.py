@@ -5057,6 +5057,35 @@ def test_apply_dev_params_to_manual_well_overrides_reports_selected_wells_withou
     }
 
 
+def test_apply_dev_params_to_manual_well_overrides_ignores_simple_target_dev_rows() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_imported_dev_params"] = (
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-A",
+            profile_label="3 точки S / t1 / t3",
+            kop_md_m=0.0,
+            t1_md_m=2400.0,
+            t3_md_m=3500.0,
+            entry_inc_deg=float("nan"),
+            note="Импортировано как обычные цели из .dev.",
+            simple_target_only=True,
+        ),
+    )
+
+    applied_count, missing_names = page._apply_dev_params_to_manual_well_overrides(
+        well_names=["WELL-A"],
+    )
+
+    assert applied_count == 0
+    assert missing_names == ["WELL-A"]
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {}
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] == {}
+
+
 def test_apply_dev_params_to_manual_well_overrides_keeps_other_assignments_untouched(
 ) -> None:
     page = wt_import_module

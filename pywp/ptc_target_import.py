@@ -27,6 +27,7 @@ from pywp.ptc_target_import_dev import (
     dev_well_is_simple_target,
     dev_target_import_summary_dataframe,
     dev_trajectory_text_name,
+    simple_target_dev_summary,
     target_record_from_simple_dev_well,
     target_record_and_summary_from_dev_well,
 )
@@ -711,7 +712,10 @@ def _parse_dev_target_source_item(
         )
         if dev_well_is_simple_target(imported_well):
             record = target_record_from_simple_dev_well(imported_well)
-            summary = None
+            summary = simple_target_dev_summary(
+                well=imported_well,
+                record=record,
+            )
         else:
             record, summary = target_record_and_summary_from_dev_well(
                 imported_well,
