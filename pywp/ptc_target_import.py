@@ -17,14 +17,16 @@ from pywp.eclipse_welltrack import (
 )
 from pywp.path_utils import normalize_user_path_text
 from pywp.pilot_wells import visible_well_names
-from pywp.reference_trajectories import ImportedTrajectoryWell
+from pywp.reference_trajectories import (
+    ImportedTrajectoryWell,
+    REFERENCE_WELL_APPROVED,
+    parse_reference_trajectory_dev_text,
+)
 from pywp.ptc_target_import_dev import (
     DevTargetImportSummary,
     dev_target_import_summary_dataframe,
     dev_trajectory_text_name,
-    parse_dev_target_directory,
-    parse_dev_target_file,
-    parse_dev_target_payloads,
+    target_record_and_summary_from_dev_well,
 )
 
 __all__ = [
@@ -33,9 +35,11 @@ __all__ = [
     "DEFAULT_DEV_TRAJECTORY_PATH",
     "DevTargetImportSummary",
     "TargetImportEmptySourceError",
+    "TargetImportFailure",
     "TargetImportOperation",
     "TargetImportParseResult",
     "TargetImportStoreResult",
+    "TARGET_IMPORT_FAILURES_STATE_KEY",
     "WT_SOURCE_FORMAT_DEV_TRAJECTORY",
     "WT_SOURCE_FORMAT_OPTIONS",
     "WT_SOURCE_FORMAT_TARGET_TABLE",
@@ -85,6 +89,7 @@ AUTO_LAYOUT_APPLIED_MESSAGE = (
     "При необходимости можно нажать 'Вернуть исходные устья'."
 )
 IMPORTED_DEV_TARGET_WELLS_STATE_KEY = "wt_imported_dev_target_wells"
+TARGET_IMPORT_FAILURES_STATE_KEY = "wt_target_import_failures"
 _TARGET_IMPORT_KIND_TABLE = "target_table"
 _TARGET_IMPORT_KIND_WELLTRACK = "welltrack"
 WT_SOURCE_KIND_DEV_TRAJECTORY = "dev_trajectory"
@@ -137,6 +142,14 @@ class TargetImportParseResult:
     records: tuple[WelltrackRecord, ...]
     dev_summaries: tuple[DevTargetImportSummary, ...] = ()
     imported_dev_wells: tuple[ImportedTrajectoryWell, ...] = ()
+    failures: tuple["TargetImportFailure", ...] = ()
+
+
+@dataclass(frozen=True)
+class TargetImportFailure:
+    well_name: str
+    problem: str
+    source_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -354,6 +367,7 @@ def store_imported_records(
     records: Sequence[WelltrackRecord],
     dev_summaries: Sequence[DevTargetImportSummary] = (),
     imported_dev_wells: Sequence[ImportedTrajectoryWell] = (),
+    failures: Sequence[TargetImportFailure] = (),
     source_kind: str = _TARGET_IMPORT_KIND_WELLTRACK,
     loaded_at_text: str,
     clear_t1_t3_order_state: Callable[[], None],
@@ -371,6 +385,7 @@ def store_imported_records(
     session_state["wt_target_import_source_kind"] = str(source_kind)
     session_state["wt_imported_dev_params"] = tuple(dev_summaries)
     session_state[IMPORTED_DEV_TARGET_WELLS_STATE_KEY] = tuple(imported_dev_wells)
+    session_state[TARGET_IMPORT_FAILURES_STATE_KEY] = tuple(failures)
     session_state["wt_well_calc_overrides_enabled"] = False
     session_state["wt_well_calc_overrides"] = {}
     session_state["wt_well_calc_profile_assignments"] = {}
@@ -415,6 +430,7 @@ def reset_failed_import_state(
     session_state["wt_target_import_source_kind"] = ""
     session_state["wt_imported_dev_params"] = ()
     session_state[IMPORTED_DEV_TARGET_WELLS_STATE_KEY] = ()
+    session_state[TARGET_IMPORT_FAILURES_STATE_KEY] = ()
     session_state["wt_well_calc_overrides_enabled"] = False
     session_state["wt_well_calc_overrides"] = {}
     session_state["wt_well_calc_profile_assignments"] = {}
@@ -453,6 +469,7 @@ def clear_target_import_flow_state(
     session_state["wt_target_import_source_kind"] = ""
     session_state["wt_imported_dev_params"] = ()
     session_state[IMPORTED_DEV_TARGET_WELLS_STATE_KEY] = ()
+    session_state[TARGET_IMPORT_FAILURES_STATE_KEY] = ()
     session_state["wt_well_calc_overrides_enabled"] = False
     session_state["wt_well_calc_overrides"] = {}
     session_state["wt_well_calc_profile_assignments"] = {}
@@ -548,46 +565,158 @@ def _parse_dev_target_payload(
     source_files: Sequence[tuple[str, bytes]],
     fixed_t1_inc_by_well: dict[str, float] | None = None,
 ) -> TargetImportParseResult:
-    parsed_wells = []
+    parsed_wells: list[tuple[WelltrackRecord, DevTargetImportSummary, ImportedTrajectoryWell]] = []
+    failures: list[TargetImportFailure] = []
     normalized_path = normalize_user_path_text(source_path)
     if normalized_path:
         path_obj = Path(normalized_path).expanduser()
         if not path_obj.exists():
             raise WelltrackParseError(f"Путь .dev не найден: `{path_obj}`.")
         if path_obj.is_dir():
-            parsed_wells.extend(
-                parse_dev_target_directory(
-                    path_obj,
-                    fixed_t1_inc_by_well=fixed_t1_inc_by_well,
-                )
-            )
+            source_items, directory_failures = _dev_directory_source_items(path_obj)
+            failures.extend(directory_failures)
+            if not source_items:
+                raise WelltrackParseError(f"В папке `{path_obj}` не найдено .dev файлов.")
         else:
-            parsed_wells.append(
-                parse_dev_target_file(
-                    path_obj,
-                    fixed_t1_inc_by_well=fixed_t1_inc_by_well,
-                )
-            )
+            source_items = [(str(path_obj.name), path_obj.read_bytes(), str(path_obj))]
     elif source_files:
-        parsed_wells.extend(
-            parse_dev_target_payloads(
-                tuple(source_files),
-                fixed_t1_inc_by_well=fixed_t1_inc_by_well,
-            )
-        )
+        source_items = [
+            (str(file_name), bytes(raw_bytes), str(file_name))
+            for file_name, raw_bytes in tuple(source_files)
+        ]
     else:
         fallback_name = dev_trajectory_text_name(source_text)
-        parsed_wells.extend(
-            parse_dev_target_payloads(
-                ((f"{fallback_name}.dev", str(source_text).encode("utf-8")),),
-                fixed_t1_inc_by_well=fixed_t1_inc_by_well,
+        source_items = [
+            (
+                f"{fallback_name}.dev",
+                str(source_text).encode("utf-8"),
+                f"{fallback_name}.dev",
             )
+        ]
+
+    seen_success_keys: set[str] = set()
+    for file_name, raw_bytes, source_label in source_items:
+        parsed_item, failure = _parse_dev_target_source_item(
+            file_name=file_name,
+            raw_bytes=raw_bytes,
+            source_label=source_label,
+            fixed_t1_inc_by_well=fixed_t1_inc_by_well,
         )
+        if failure is not None:
+            failures.append(failure)
+            continue
+        assert parsed_item is not None
+        record, summary, imported_well = parsed_item
+        well_key = str(imported_well.name).strip().casefold()
+        if well_key in seen_success_keys:
+            failures.append(
+                TargetImportFailure(
+                    well_name=str(imported_well.name).strip() or Path(file_name).stem,
+                    source_label=str(source_label).strip() or str(file_name),
+                    problem=(
+                        "Найдено несколько .dev источников с одинаковым именем скважины."
+                    ),
+                )
+            )
+            continue
+        seen_success_keys.add(well_key)
+        parsed_wells.append(parsed_item)
     return TargetImportParseResult(
-        records=tuple(item.record for item in parsed_wells),
-        dev_summaries=tuple(item.summary for item in parsed_wells),
-        imported_dev_wells=tuple(item.imported_well for item in parsed_wells),
+        records=tuple(item[0] for item in parsed_wells),
+        dev_summaries=tuple(item[1] for item in parsed_wells),
+        imported_dev_wells=tuple(item[2] for item in parsed_wells),
+        failures=tuple(failures),
     )
+
+
+def _natural_source_name_sort_key(value: str) -> tuple[object, ...]:
+    parts = re.split(r"(\d+)", str(value).casefold())
+    key: list[object] = []
+    for part in parts:
+        if not part:
+            continue
+        key.append(int(part) if part.isdigit() else part)
+    return tuple(key)
+
+
+def _dev_directory_source_items(
+    path_obj: Path,
+) -> tuple[list[tuple[str, bytes, str]], list[TargetImportFailure]]:
+    dev_files = sorted(
+        (
+            child
+            for child in path_obj.iterdir()
+            if child.is_file() and child.suffix.lower() == ".dev"
+        ),
+        key=lambda item: _natural_source_name_sort_key(item.name),
+    )
+    source_items: list[tuple[str, bytes, str]] = []
+    failures: list[TargetImportFailure] = []
+    for dev_file in dev_files:
+        try:
+            raw_bytes = dev_file.read_bytes()
+        except OSError as exc:
+            failures.append(
+                TargetImportFailure(
+                    well_name=str(dev_file.stem),
+                    source_label=str(dev_file),
+                    problem=f"Не удалось прочитать .dev файл: {exc}",
+                )
+            )
+            continue
+        source_items.append((str(dev_file.name), raw_bytes, str(dev_file)))
+    return source_items, failures
+
+
+def _fixed_t1_inc_value_for_well(
+    well_name: str,
+    fixed_t1_inc_by_well: dict[str, float] | None,
+) -> float | None:
+    if not fixed_t1_inc_by_well:
+        return None
+    raw_value = fixed_t1_inc_by_well.get(str(well_name))
+    if raw_value is None:
+        return None
+    value = float(raw_value)
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def _parse_dev_target_source_item(
+    *,
+    file_name: str,
+    raw_bytes: bytes,
+    source_label: str,
+    fixed_t1_inc_by_well: dict[str, float] | None,
+) -> tuple[
+    tuple[WelltrackRecord, DevTargetImportSummary, ImportedTrajectoryWell] | None,
+    TargetImportFailure | None,
+]:
+    fallback_name = Path(str(file_name or "dev_import")).stem
+    try:
+        text, _encoding = decode_welltrack_bytes(bytes(raw_bytes))
+        well_name = dev_trajectory_text_name(text, fallback_name=fallback_name)
+        imported_well = parse_reference_trajectory_dev_text(
+            text,
+            well_name=well_name,
+            kind=REFERENCE_WELL_APPROVED,
+        )
+        record, summary = target_record_and_summary_from_dev_well(
+            imported_well,
+            fixed_t1_inc_deg=_fixed_t1_inc_value_for_well(
+                str(imported_well.name),
+                fixed_t1_inc_by_well,
+            ),
+        )
+    except (OSError, UnicodeError, ValueError, WelltrackParseError) as exc:
+        problem = str(exc).strip() or "Не удалось импортировать .dev траекторию."
+        return None, TargetImportFailure(
+            well_name=str(fallback_name),
+            source_label=str(source_label).strip() or str(file_name),
+            problem=problem,
+        )
+    return (record, summary, imported_well), None
 
 def dev_source_preview_well_names(
     *,

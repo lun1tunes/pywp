@@ -541,10 +541,81 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
     assert captured["expanded"] is True
 
 
+def test_records_overview_appends_dev_import_failures_to_status_table(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    captured: dict[str, object] = {}
+    try:
+        page.st.session_state[page.ptc_target_import.TARGET_IMPORT_FAILURES_STATE_KEY] = (
+            page.ptc_target_import.TargetImportFailure(
+                well_name="BROKEN-DEV",
+                problem="Не удалось надежно определить точку t1.",
+                source_label="BROKEN-DEV.dev",
+            ),
+        )
+
+        class _DummyColumn:
+            def metric(self, *args, **kwargs):
+                return None
+
+        class _DummyExpander:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def _fake_expander(label, *args, **kwargs):
+            captured["label"] = label
+            captured["expanded"] = kwargs.get("expanded")
+            return _DummyExpander()
+
+        def _fake_dataframe(frame, **kwargs):
+            captured["frame"] = frame.copy()
+
+        monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            page.st,
+            "columns",
+            lambda *args, **kwargs: (
+                _DummyColumn(),
+                _DummyColumn(),
+                _DummyColumn(),
+                _DummyColumn(),
+                _DummyColumn(),
+            ),
+        )
+        monkeypatch.setattr(page.st, "expander", _fake_expander)
+        monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+        monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+        monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+        monkeypatch.setattr(page.st, "number_input", lambda *args, **kwargs: None)
+        monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: False)
+        monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyExpander())
+
+        page._render_records_overview([_records()[0]])
+
+        assert captured["label"] == "Статус загрузки целей"
+        assert captured["expanded"] is True
+        assert list(captured["frame"]["Скважина"]) == ["WELL-A", "BROKEN-DEV"]
+        assert list(captured["frame"]["Статус"]) == ["✅", "❌"]
+        assert str(captured["frame"].iloc[-1]["Проблема"]) == (
+            "Не удалось надежно определить точку t1."
+        )
+    finally:
+        page.st.session_state.clear()
+        page._init_state()
+
+
 def test_records_overview_metrics_count_wells_and_pilots_separately(
     monkeypatch,
 ) -> None:
     page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
     captured: dict[str, object] = {"metrics": []}
     parent = WelltrackRecord(
         name="well_04",
@@ -608,6 +679,8 @@ def test_records_overview_metrics_count_multi_horizontal_wells(
     monkeypatch,
 ) -> None:
     page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
     captured: dict[str, object] = {"metrics": []}
     regular = _records()[0]
     multi_horizontal = WelltrackRecord(
@@ -667,6 +740,8 @@ def test_records_overview_metrics_count_multi_horizontal_zbs(
     monkeypatch,
 ) -> None:
     page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
     captured: dict[str, object] = {"metrics": []}
     zbs_multi = WelltrackRecord(
         name="9010_ZBS",

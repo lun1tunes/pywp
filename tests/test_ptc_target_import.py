@@ -673,6 +673,91 @@ def test_dev_target_import_keeps_short_low_dls_tail_inside_build2() -> None:
     assert summary.horizontal_dls_deg_per_30m == ()
 
 
+def test_dev_target_import_ignores_short_noise_groups_after_long_horizontal() -> None:
+    md_values = [float(index * 10) for index in range(133)]
+    incl_values = [0.0] * len(md_values)
+    dls_values = [0.0] * len(md_values)
+
+    build1_points = {
+        2: (0.6, 1.2),
+        3: (1.2, 1.2),
+        4: (1.8, 1.2),
+        5: (2.4, 1.2),
+    }
+    for index, (incl, dls) in build1_points.items():
+        incl_values[index] = incl
+        dls_values[index] = dls
+
+    for index in range(6, 12):
+        incl_values[index] = 2.4
+
+    build2_points = {
+        12: (3.2, 2.39),
+        13: (4.0, 2.39),
+        14: (4.7, 2.107),
+        15: (5.4, 2.107),
+    }
+    for index, (incl, dls) in build2_points.items():
+        incl_values[index] = incl
+        dls_values[index] = dls
+
+    for index in range(16, 46):
+        incl_values[index] = 5.4
+
+    for index in (46, 47):
+        incl_values[index] = 5.401
+        dls_values[index] = 0.00299
+    for index in range(48, 122):
+        incl_values[index] = 5.401
+
+    for index in (122, 123):
+        incl_values[index] = 5.402
+        dls_values[index] = 0.004242
+    for index in range(124, 131):
+        incl_values[index] = 5.402
+
+    incl_values[131] = 5.45
+    incl_values[132] = 5.52
+    dls_values[131] = 0.071414
+    dls_values[132] = 0.71414
+
+    stations = pd.DataFrame(
+        {
+            "MD_m": md_values,
+            "X_m": md_values,
+            "Y_m": [0.0] * len(md_values),
+            "Z_m": [0.0] * len(md_values),
+        }
+    )
+    dev_rows = pd.DataFrame(
+        {
+            "MD": md_values,
+            "X": md_values,
+            "Y": [0.0] * len(md_values),
+            "Z": [0.0] * len(md_values),
+            "INCL": incl_values,
+            "DLS": dls_values,
+        }
+    )
+    well = ImportedTrajectoryWell(
+        name="late-horizontal-noise",
+        kind="approved",
+        stations=stations,
+        surface=Point3D(x=0.0, y=0.0, z=0.0),
+        azimuth_deg=90.0,
+        dev_export_rows=dev_rows,
+    )
+
+    _record, summary = target_record_and_summary_from_dev_well(well)
+
+    assert summary.profile_label == "BUILD-HOLD-BUILD"
+    assert summary.t1_md_m == pytest.approx(150.0)
+    assert summary.entry_inc_deg == pytest.approx(5.4)
+    assert summary.build1_dls_deg_per_30m == (1.2,)
+    assert summary.build2_dls_deg_per_30m == (2.39, 2.107)
+    assert summary.horizontal_dls_deg_per_30m == ()
+
+
 def test_dev_target_import_keeps_j_profile_when_gap_is_not_a_hold() -> None:
     md_values = [float(index * 100) for index in range(13)]
     incl_values = [
@@ -767,6 +852,36 @@ def test_target_import_operation_parses_dev_trajectory_directory() -> None:
         "j_profile_constant_pi",
         "j_profile_variable_pi",
     ]
+
+
+def test_target_import_operation_keeps_dev_successes_and_collects_failures() -> None:
+    good_payload = Path(
+        "tests/test_data/dev_target_import/j_profile_constant_pi.dev"
+    ).read_bytes()
+    bad_payload = b"0 1 2 3 4\n"
+    operation = target_import.build_target_import_operation(
+        target_import.WelltrackSourcePayload(
+            mode=target_import.WT_SOURCE_MODE_UPLOAD,
+            source_format=target_import.WT_SOURCE_FORMAT_DEV_TRAJECTORY,
+            source_files=(
+                ("j_profile_constant_pi.dev", good_payload),
+                ("broken.dev", bad_payload),
+            ),
+        )
+    )
+
+    parsed = operation.parse()
+
+    assert [record.name for record in parsed.records] == ["j_profile_constant_pi"]
+    assert [summary.well_name for summary in parsed.dev_summaries] == [
+        "j_profile_constant_pi"
+    ]
+    assert [well.name for well in parsed.imported_dev_wells] == [
+        "j_profile_constant_pi"
+    ]
+    assert len(parsed.failures) == 1
+    assert parsed.failures[0].well_name == "broken"
+    assert "минимум 2 числовые станции" in parsed.failures[0].problem
 
 
 def test_dev_target_import_summary_dataframe_formats_pi_columns() -> None:

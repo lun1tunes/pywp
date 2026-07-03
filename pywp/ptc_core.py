@@ -2375,6 +2375,7 @@ def _init_state() -> None:
     st.session_state.setdefault("wt_target_import_source_kind", "")
     st.session_state.setdefault("wt_imported_dev_params", ())
     st.session_state.setdefault(ptc_target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY, ())
+    st.session_state.setdefault(ptc_target_import.TARGET_IMPORT_FAILURES_STATE_KEY, ())
     st.session_state.setdefault("wt_pad_configs", {})
     st.session_state.setdefault("wt_pad_detected_meta", {})
     st.session_state.setdefault("wt_pad_selected_id", "")
@@ -6108,6 +6109,7 @@ def _store_parsed_records_with_metadata(
     records: list[WelltrackRecord],
     dev_summaries: list[ptc_target_import.DevTargetImportSummary],
     imported_dev_wells: list[ImportedTrajectoryWell] | None = None,
+    import_failures: list[ptc_target_import.TargetImportFailure] | None = None,
     source_kind: str,
 ) -> bool:
     result = ptc_target_import.store_imported_records(
@@ -6115,6 +6117,7 @@ def _store_parsed_records_with_metadata(
         records=list(records),
         dev_summaries=list(dev_summaries),
         imported_dev_wells=list(imported_dev_wells or []),
+        failures=list(import_failures or []),
         source_kind=str(source_kind),
         loaded_at_text=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         clear_t1_t3_order_state=_clear_t1_t3_order_resolution_state,
@@ -6278,6 +6281,7 @@ def _handle_import_actions(
                 records=records,
                 dev_summaries=list(parse_result.dev_summaries),
                 imported_dev_wells=list(parse_result.imported_dev_wells),
+                import_failures=list(parse_result.failures),
                 source_kind=str(operation.source_kind),
             )
             status.write(operation.count_message(len(records)))
@@ -6285,6 +6289,11 @@ def _handle_import_actions(
                 st.session_state["wt_records_overview_expand_once"] = True
                 status.write(
                     "Прочитаны параметры траекторий .dev. Они показаны ниже в статусе загрузки целей."
+                )
+            if parse_result.failures:
+                st.session_state["wt_records_overview_expand_once"] = True
+                status.write(
+                    "Часть .dev скважин пропущена при импорте. Причины показаны ниже в статусе загрузки целей."
                 )
             if auto_layout_applied:
                 status.write(ptc_target_import.AUTO_LAYOUT_APPLIED_MESSAGE)
@@ -6621,9 +6630,39 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
 def _records_overview_dataframe(
     records: list[WelltrackRecord],
 ) -> pd.DataFrame:
-    return ptc_target_records.records_overview_dataframe(
+    base_df = ptc_target_records.records_overview_dataframe(
         records,
         wellhead_z_tolerance_m=WT_IMPORT_WELLHEAD_Z_TOLERANCE_M,
+    )
+    raw_failures = st.session_state.get(ptc_target_import.TARGET_IMPORT_FAILURES_STATE_KEY, ())
+    failure_rows: list[dict[str, object]] = []
+    if isinstance(raw_failures, (list, tuple)):
+        for item in raw_failures:
+            well_name = str(getattr(item, "well_name", "")).strip()
+            problem = str(getattr(item, "problem", "")).strip()
+            source_label = str(getattr(item, "source_label", "")).strip()
+            if not well_name and not problem:
+                continue
+            failure_rows.append(
+                {
+                    "Скважина": well_name or "—",
+                    "Точек": "—",
+                    "Отход t1, м": "—",
+                    "Длина ГС, м": "—",
+                    "Примечание": (
+                        f".dev: {source_label}"
+                        if source_label
+                        else "Ошибка импорта .dev"
+                    ),
+                    "Статус": "❌",
+                    "Проблема": problem or "Не удалось импортировать .dev траекторию.",
+                }
+            )
+    if not failure_rows:
+        return base_df
+    return pd.concat(
+        [base_df, pd.DataFrame(failure_rows, columns=list(base_df.columns))],
+        ignore_index=True,
     )
 
 

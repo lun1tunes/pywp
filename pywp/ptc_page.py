@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from pywp import ptc_core as wt
+from pywp import ptc_target_import
 from pywp.ptc_batch_results import batch_summary_status_counts
 from pywp.coordinate_integration import (
     get_input_crs,
@@ -176,10 +177,17 @@ def run_page() -> None:
                 icon=":material/edit:",
             )
     records = st.session_state.get("wt_records")
+    import_failures = tuple(
+        st.session_state.get(ptc_target_import.TARGET_IMPORT_FAILURES_STATE_KEY, ())
+    )
     if records is None:
         st.info("Загрузите цели и нажмите «Импорт целей».")
         return
     if not records:
+        if import_failures:
+            _render_records_overview_section(records=[])
+            st.warning("Ни одна скважина не импортирована. Причины показаны в статусе загрузки целей.")
+            return
         st.warning("В источнике не найдено ни одной скважины.")
         return
 

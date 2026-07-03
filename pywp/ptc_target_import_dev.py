@@ -41,6 +41,9 @@ _DEV_RESIDUAL_DLS_MIN_DEG_PER_30M = 1e-3
 # section; the true BUILD-HOLD-BUILD split is anchored to the hold plateau.
 _DEV_HOLD_MIN_ROWS = 4
 _DEV_RESIDUAL_DLS_TAIL_MAX_ROWS = 4
+_DEV_HORIZONTAL_NOISE_GAP_MIN_ROWS = 10
+_DEV_HORIZONTAL_NOISE_GAP_MIN_MD_M = 200.0
+_DEV_HORIZONTAL_NOISE_GROUP_MAX_ROWS = 4
 _DEV_WELL_NAME_RE = re.compile(
     r"^\s*#\s*WELL NAME:\s*(.+?)\s*$",
     flags=re.IGNORECASE | re.MULTILINE,
@@ -203,7 +206,11 @@ def target_record_and_summary_from_dev_well(
     else:
         build1_slice = rows.iloc[build1_start : build1_end + 1]
         build2_slice = rows.iloc[build2_start : t1_index + 1]
-    horizontal_slice = rows.iloc[t1_index + 1 :]
+    horizontal_slice = _horizontal_summary_slice(
+        rows=rows,
+        t1_index=t1_index,
+        groups=groups,
+    )
 
     surface_row = stations.iloc[0]
     t1_row = stations.iloc[t1_index]
@@ -232,6 +239,10 @@ def target_record_and_summary_from_dev_well(
         ),
     )
 
+    build1_dls = _stable_unique_dls(build1_slice)
+    build2_dls = _stable_unique_dls(build2_slice)
+    horizontal_dls = _stable_unique_dls(horizontal_slice)
+
     summary = DevTargetImportSummary(
         well_name=str(well.name),
         profile_label=profile_label,
@@ -239,14 +250,14 @@ def target_record_and_summary_from_dev_well(
         t1_md_m=float(rows["MD"].iloc[t1_index]),
         t3_md_m=float(rows["MD"].iloc[-1]),
         entry_inc_deg=float(rows["INCL"].iloc[t1_index]),
-        build1_dls_deg_per_30m=_stable_unique_dls(build1_slice),
-        build2_dls_deg_per_30m=_stable_unique_dls(build2_slice),
-        horizontal_dls_deg_per_30m=_stable_unique_dls(horizontal_slice),
+        build1_dls_deg_per_30m=build1_dls,
+        build2_dls_deg_per_30m=build2_dls,
+        horizontal_dls_deg_per_30m=horizontal_dls,
         note=_summary_note(
             profile_label=profile_label,
-            build1_dls=_stable_unique_dls(build1_slice),
-            build2_dls=_stable_unique_dls(build2_slice),
-            horizontal_dls=_stable_unique_dls(horizontal_slice),
+            build1_dls=build1_dls,
+            build2_dls=build2_dls,
+            horizontal_dls=horizontal_dls,
             fixed_t1_inc_deg=fixed_t1_inc_deg,
         ),
     )
@@ -372,7 +383,10 @@ def _dev_activity_groups(rows: pd.DataFrame) -> list[tuple[int, int]]:
         ),
         dtype=bool,
     )
-    raw_groups = _true_groups(activity_mask.tolist())
+    raw_groups = _trim_trailing_horizontal_noise_groups(
+        rows=rows,
+        groups=_true_groups(activity_mask.tolist()),
+    )
     if not raw_groups:
         return []
     if len(raw_groups) == 1:
@@ -384,6 +398,20 @@ def _dev_activity_groups(rows: pd.DataFrame) -> list[tuple[int, int]]:
         (raw_groups[0][0], raw_groups[hold_separator][1]),
         (raw_groups[hold_separator + 1][0], raw_groups[-1][1]),
     ]
+
+
+def _horizontal_summary_slice(
+    *,
+    rows: pd.DataFrame,
+    t1_index: int,
+    groups: Sequence[tuple[int, int]],
+) -> pd.DataFrame:
+    if not groups:
+        return rows.iloc[0:0]
+    last_meaningful_index = int(groups[-1][1])
+    if last_meaningful_index <= int(t1_index):
+        return rows.iloc[0:0]
+    return rows.iloc[int(t1_index) + 1 : last_meaningful_index + 1]
 
 
 def _dev_hold_separator_index(
@@ -438,6 +466,37 @@ def _merge_short_residual_dls_runs(
         for index in range(start, end + 1):
             merged_mask[index] = True
     return merged_mask
+
+
+def _trim_trailing_horizontal_noise_groups(
+    *,
+    rows: pd.DataFrame,
+    groups: Sequence[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    trimmed_groups = list(groups)
+    while len(trimmed_groups) >= 2:
+        penultimate_start, penultimate_end = trimmed_groups[-2]
+        last_start, last_end = trimmed_groups[-1]
+        gap_start = int(penultimate_end + 1)
+        gap_end = int(last_start - 1)
+        if gap_start > gap_end:
+            break
+        gap_rows = int(gap_end - gap_start + 1)
+        if gap_rows < _DEV_HORIZONTAL_NOISE_GAP_MIN_ROWS:
+            break
+        gap_md = float(rows["MD"].iloc[gap_end] - rows["MD"].iloc[gap_start])
+        if gap_md < _DEV_HORIZONTAL_NOISE_GAP_MIN_MD_M:
+            break
+        gap_incl = rows["INCL"].iloc[gap_start : gap_end + 1].astype(float)
+        if gap_incl.empty:
+            break
+        if float(gap_incl.max() - gap_incl.min()) > _DEV_INCL_EPSILON_DEG:
+            break
+        trailing_group_rows = int(last_end - last_start + 1)
+        if trailing_group_rows > _DEV_HORIZONTAL_NOISE_GROUP_MAX_ROWS:
+            break
+        trimmed_groups.pop()
+    return trimmed_groups
 
 
 def _stable_unique_dls(rows: pd.DataFrame) -> tuple[float, ...]:
