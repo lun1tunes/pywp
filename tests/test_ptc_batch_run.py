@@ -93,6 +93,47 @@ def test_sync_selection_state_hides_pilot_and_maps_old_pilot_selection_to_parent
     assert state["wt_selected_names"] == ["WELL-A"]
 
 
+def test_sync_selection_state_maps_old_pilot_selection_to_alt_branch_name() -> None:
+    records = [
+        WelltrackRecord(
+            name="WELL-A_2",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1000.0),
+                WelltrackPoint(x=200.0, y=0.0, z=1000.0, md=1200.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="WELL-A_PL",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=80.0, y=0.0, z=800.0, md=800.0),
+            ),
+        ),
+    ]
+    state: dict[str, object] = {"wt_selected_names": ["WELL-A_PL"]}
+
+    all_names, _recommended_names = ptc_batch_run.sync_selection_state(
+        state,
+        records=records,
+    )
+
+    assert all_names == ["WELL-A_2"]
+    assert state["wt_selected_names"] == ["WELL-A_2"]
+
+
+def test_pilot_key_for_visible_record_skips_zbs_records() -> None:
+    zbs = WelltrackRecord(
+        name="WELL-A_2",
+        points=(
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1200.0, md=2.0),
+        ),
+    )
+
+    assert ptc_batch_run._pilot_key_for_visible_record(zbs) is None
+
+
 def test_matched_zbs_parent_names_uses_actual_reference_wells() -> None:
     zbs = WelltrackRecord(
         name="9010_ZBS",
@@ -112,6 +153,24 @@ def test_matched_zbs_parent_names_uses_actual_reference_wells() -> None:
     )
 
     assert matches == [("9010_ZBS", "9010")]
+
+
+def test_matched_alt_branch_parent_names_use_actual_reference_wells() -> None:
+    sidetrack = WelltrackRecord(
+        name="9010_2",
+        points=(
+            WelltrackPoint(x=10.0, y=0.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1200.0, md=2.0),
+        ),
+    )
+
+    matches = ptc_batch_run._matched_zbs_parent_names(
+        records=[*_records(), sidetrack],
+        selected_names={"9010_2"},
+        reference_wells=(SimpleNamespace(name="9010", kind="actual"),),
+    )
+
+    assert matches == [("9010_2", "9010")]
 
 
 def test_batch_selection_status_rolls_pilot_row_into_parent_well() -> None:

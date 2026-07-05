@@ -229,6 +229,54 @@ def test_zbs_record_is_ready_with_t1_t3_without_surface() -> None:
     assert list(raw_df["Точка"]) == ["t1", "t3"]
 
 
+def test_alt_branch_record_with_surface_is_treated_as_regular_branch_with_pilot() -> None:
+    branch = _record(
+        "well_04_2",
+        points=(
+            WelltrackPoint(x=10.0, y=20.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1200.0, md=2.0),
+        ),
+    )
+    pilot = _record(
+        "well_04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=50.0, y=0.0, z=700.0, md=1.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([branch, pilot])
+    raw_df = target_records.raw_records_dataframe([branch, pilot])
+
+    assert list(overview_df["Скважина"]) == ["well_04_2"]
+    assert str(overview_df.iloc[0]["Примечание"]) == "Есть пилот"
+    assert list(raw_df.loc[raw_df["Скважина"].eq("well_04_2"), "Точка"]) == [
+        "S",
+        "t1",
+        "t3",
+    ]
+
+
+def test_alt_branch_record_without_surface_is_treated_as_fact_sidetrack() -> None:
+    source = _record(
+        "9010_2",
+        points=(
+            WelltrackPoint(x=10.0, y=20.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=110.0, y=220.0, z=1200.0, md=2.0),
+        ),
+    )
+
+    overview_df = target_records.records_overview_dataframe([source])
+    raw_df = target_records.raw_records_dataframe([source])
+
+    assert str(overview_df.iloc[0]["Проблема"]) == "—"
+    assert str(overview_df.iloc[0]["Примечание"]) == (
+        "Боковой ствол от факта: нужна скважина 9010"
+    )
+    assert list(raw_df["Точка"]) == ["t1", "t3"]
+
+
 def test_multi_horizontal_zbs_record_is_ready_and_labeled_by_levels() -> None:
     source = _record(
         "9010_ZBS",

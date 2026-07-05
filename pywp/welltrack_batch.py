@@ -14,7 +14,6 @@ from pydantic import field_validator
 
 from pywp.eclipse_welltrack import (
     WelltrackRecord,
-    welltrack_points_to_target_pairs,
 )
 from pywp.anticollision_optimization import (
     AntiCollisionReferencePath,
@@ -58,7 +57,7 @@ from pywp.pilot_wells import (
     is_zbs_record,
     order_records_with_pilots_first,
     parent_name_for_zbs,
-    pilot_name_key_for_parent,
+    pilot_name_key_for_record,
     select_sidetrack_window,
     well_name_key,
     zbs_target_points_to_pairs,
@@ -69,6 +68,7 @@ from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_A
 from pywp.solver_diagnostics import summarize_problem_ru
 from pywp.uncertainty import PlanningUncertaintyModel, fast_proxy_uncertainty_model
 from pywp.ui_utils import dls_to_pi
+from pywp.welltrack_targets import ordinary_record_target_layout, record_point_labels
 
 ProgressCallback = Callable[[int, int, str], None]
 SolverProgressCallback = Callable[[int, int, str, str, float], None]
@@ -328,6 +328,8 @@ class SuccessfulWellPlan(FrozenArbitraryModel):
     t1: Point3D
     t3: Point3D
     target_pairs: tuple[tuple[Point3D, Point3D], ...] = ()
+    target_points: tuple[Point3D, ...] = ()
+    target_labels: tuple[str, ...] = ()
     stations: pd.DataFrame
     summary: SummaryDict
     azimuth_deg: float
@@ -362,6 +364,26 @@ class SuccessfulWellPlan(FrozenArbitraryModel):
                 )
             )
         return tuple(pairs)
+
+    @field_validator("target_points", mode="before")
+    @classmethod
+    def _coerce_target_points(
+        cls,
+        value: object,
+    ) -> tuple[Point3D, ...]:
+        if value is None:
+            return ()
+        return tuple(coerce_model_like(point, Point3D) for point in tuple(value))
+
+    @field_validator("target_labels", mode="before")
+    @classmethod
+    def _coerce_target_labels(
+        cls,
+        value: object,
+    ) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        return tuple(str(label).strip() for label in tuple(value))
 
     @field_validator("config", mode="before")
     @classmethod
@@ -546,32 +568,45 @@ def _evaluate_record_standalone(
 
     base_row = WelltrackBatchPlanner._base_row(record=record)
     try:
-        surface, target_pairs = welltrack_points_to_target_pairs(record.points)
+        layout = ordinary_record_target_layout(record)
     except ValueError as exc:
         base_row["Статус"] = "Ошибка формата"
         base_row["Проблема"] = summarize_problem_ru(str(exc))
         return base_row, None
+    surface = layout.surface
+    target_pairs = layout.target_pairs
 
     try:
-        t1, t3 = target_pairs[0]
+        t1, t3 = layout.t1, layout.t3
         started = perf_counter()
         planner = TrajectoryPlanner()
-        plan_kwargs: dict[str, Any] = {
-            "surface": surface,
-            "t1": t1,
-            "t3": t3,
-            "config": config,
-        }
-        if optimization_context is not None:
-            plan_kwargs["optimization_context"] = optimization_context
-        result = planner.plan(**plan_kwargs)
+        if layout.target_sequence:
+            plan_kwargs = {
+                "surface": surface,
+                "targets": layout.target_sequence,
+                "config": config,
+            }
+            if optimization_context is not None:
+                plan_kwargs["optimization_context"] = optimization_context
+            result = planner.plan_multi_target(**plan_kwargs)
+            t3 = layout.final_target
+        else:
+            plan_kwargs = {
+                "surface": surface,
+                "t1": t1,
+                "t3": t3,
+                "config": config,
+            }
+            if optimization_context is not None:
+                plan_kwargs["optimization_context"] = optimization_context
+            result = planner.plan(**plan_kwargs)
         if len(target_pairs) > 1:
             result = extend_plan_with_multi_horizontal_targets(
                 base_result=result,
                 target_pairs=target_pairs,
                 config=config,
             )
-            t3 = target_pairs[-1][1]
+            t3 = layout.final_target
         runtime_s = float(perf_counter() - started)
     except (ValueError, PlanningError) as exc:
         base_row["Статус"] = "Ошибка расчета"
@@ -591,6 +626,8 @@ def _evaluate_record_standalone(
         t1=t1,
         t3=t3,
         target_pairs=target_pairs,
+        target_points=layout.target_points,
+        target_labels=layout.target_labels,
         stations=result.stations,
         summary=summary,
         azimuth_deg=result.azimuth_deg,
@@ -639,6 +676,11 @@ def _pilot_build_to_success(
         surface=pilot.surface,
         t1=pilot.first_target,
         t3=pilot.final_target,
+        target_points=tuple(
+            Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+            for point in tuple(record.points)
+        ),
+        target_labels=record_point_labels(record),
         stations=pilot.stations,
         summary=summary,
         azimuth_deg=float(pilot.azimuth_deg),
@@ -915,6 +957,7 @@ class WelltrackBatchPlanner:
                 remaining_selected_names=remaining_selected_names,
                 dynamic_cluster_context=dynamic_cluster_context,
                 recalculated_success_by_name=recalculated_success_by_name,
+                selected_records_by_name=selected_records_by_name,
                 prefer_trajectory_stage=dynamic_cluster_prefer_trajectory_stage,
             )
             if pruned_names:
@@ -1220,7 +1263,8 @@ class WelltrackBatchPlanner:
         for record in selected_records:
             depends_on_pilot = (
                 not is_pilot_record(record)
-                and pilot_name_key_for_parent(record.name) in selected_keys
+                and not is_zbs_record(record)
+                and pilot_name_key_for_record(record) in selected_keys
             )
             if depends_on_pilot:
                 dependent_records.append(record)
@@ -1643,8 +1687,8 @@ class WelltrackBatchPlanner:
         def append_with_pilot(record: WelltrackRecord) -> None:
             name = str(record.name)
             name_key = well_name_key(name)
-            if not is_pilot_record(record):
-                pilot = by_name.get(pilot_name_key_for_parent(name))
+            if not is_pilot_record(record) and not is_zbs_record(record):
+                pilot = by_name.get(pilot_name_key_for_record(record))
                 if pilot is not None and well_name_key(pilot.name) not in seen:
                     resolved.append(pilot)
                     seen.add(well_name_key(pilot.name))
@@ -1678,7 +1722,8 @@ class WelltrackBatchPlanner:
         names = {well_name_key(record.name) for record in records}
         return any(
             not is_pilot_record(record)
-            and pilot_name_key_for_parent(record.name) in names
+            and not is_zbs_record(record)
+            and pilot_name_key_for_record(record) in names
             for record in records
         )
 
@@ -1705,7 +1750,12 @@ class WelltrackBatchPlanner:
         )
         if runtime_override is not None:
             record_name = str(runtime_override["well_name"])
-            pilot_key = pilot_name_key_for_parent(record_name)
+            record_for_override = selected_records_by_name[record_name]
+            pilot_key = (
+                pilot_name_key_for_record(record_for_override)
+                if not is_zbs_record(record_for_override)
+                else ""
+            )
             pilot_name = next(
                 (
                     str(name)
@@ -1736,7 +1786,12 @@ class WelltrackBatchPlanner:
         next_name = (
             ordered_names[0] if ordered_names else str(remaining_selected_names[0])
         )
-        pilot_key = pilot_name_key_for_parent(next_name)
+        next_record = selected_records_by_name[next_name]
+        pilot_key = (
+            pilot_name_key_for_record(next_record)
+            if not is_zbs_record(next_record)
+            else ""
+        )
         pilot_name = next(
             (
                 str(name)
@@ -1768,9 +1823,9 @@ class WelltrackBatchPlanner:
         selected_records_by_name: Mapping[str, WelltrackRecord],
         recalculated_success_by_name: Mapping[str, SuccessfulWellPlan],
     ) -> WelltrackRecord | None:
-        if is_pilot_record(record):
+        if is_pilot_record(record) or is_zbs_record(record):
             return None
-        pilot_key = pilot_name_key_for_parent(record.name)
+        pilot_key = pilot_name_key_for_record(record)
         pilot_record = next(
             (
                 item
@@ -1869,6 +1924,7 @@ class WelltrackBatchPlanner:
         remaining_selected_names: list[str],
         dynamic_cluster_context: DynamicClusterExecutionContext | None,
         recalculated_success_by_name: dict[str, SuccessfulWellPlan],
+        selected_records_by_name: Mapping[str, WelltrackRecord],
         prefer_trajectory_stage: bool = False,
     ) -> tuple[DynamicClusterExecutionPlan | None, tuple[str, ...]]:
         if dynamic_cluster_context is None or not remaining_selected_names:
@@ -1899,6 +1955,7 @@ class WelltrackBatchPlanner:
             pruned_names = WelltrackBatchPlanner._include_pending_pilot_dependencies(
                 pruned_names=cluster_scoped_remaining,
                 remaining_selected_names=remaining_selected_names,
+                selected_records_by_name=selected_records_by_name,
             )
             blocking_reason = (
                 "Iterative cluster-aware execution не нашел актуальных шагов "
@@ -1925,6 +1982,7 @@ class WelltrackBatchPlanner:
             pruned_names = WelltrackBatchPlanner._include_pending_pilot_dependencies(
                 pruned_names=cluster_scoped_remaining,
                 remaining_selected_names=remaining_selected_names,
+                selected_records_by_name=selected_records_by_name,
             )
             for name in pruned_names:
                 if str(name) in remaining_selected_names:
@@ -1937,10 +1995,23 @@ class WelltrackBatchPlanner:
         *,
         pruned_names: tuple[str, ...],
         remaining_selected_names: list[str],
+        selected_records_by_name: Mapping[str, WelltrackRecord],
     ) -> tuple[str, ...]:
         result = [str(name) for name in pruned_names]
         result_keys = {well_name_key(name) for name in result}
-        pilot_keys = {pilot_name_key_for_parent(name) for name in result}
+        pilot_keys: set[str] = set()
+        for name in result:
+            record = next(
+                (
+                    item
+                    for item in selected_records_by_name.values()
+                    if well_name_key(item.name) == well_name_key(name)
+                ),
+                None,
+            )
+            if record is None or is_zbs_record(record):
+                continue
+            pilot_keys.add(pilot_name_key_for_record(record))
         for pending_name in remaining_selected_names:
             pending_key = well_name_key(pending_name)
             if pending_key in result_keys or pending_key not in pilot_keys:
@@ -2186,17 +2257,23 @@ class WelltrackBatchPlanner:
 
         row = self._base_row(record=record)
         try:
-            surface, target_pairs = welltrack_points_to_target_pairs(record.points)
+            layout = ordinary_record_target_layout(record)
         except ValueError as exc:
             row["Статус"] = "Ошибка формата"
             row["Проблема"] = summarize_problem_ru(str(exc))
             return row, None
+        surface = layout.surface
+        target_pairs = layout.target_pairs
 
         try:
-            t1, t3 = target_pairs[0]
+            t1, t3 = layout.t1, layout.t3
             success_surface = surface
             started = perf_counter()
-            pilot_key = pilot_name_key_for_parent(record.name)
+            pilot_key = (
+                pilot_name_key_for_record(record)
+                if not is_zbs_record(record)
+                else ""
+            )
             pilot_success = next(
                 (
                     success
@@ -2205,7 +2282,8 @@ class WelltrackBatchPlanner:
                 ),
                 None,
             )
-            if pilot_success is not None:
+            use_pilot_sidetrack = pilot_success is not None and not layout.target_sequence
+            if use_pilot_sidetrack:
                 window, sidetrack_result = select_sidetrack_window(
                     pilot_name=str(pilot_success.name),
                     parent_name=str(record.name),
@@ -2230,16 +2308,28 @@ class WelltrackBatchPlanner:
                 azimuth_deg = float(sidetrack.azimuth_deg)
                 success_surface = sidetrack.window.point
             else:
-                plan_kwargs: dict[str, Any] = {
-                    "surface": surface,
-                    "t1": t1,
-                    "t3": t3,
-                    "config": config,
-                    "progress_callback": planner_progress_callback,
-                }
+                if layout.target_sequence:
+                    plan_kwargs = {
+                        "surface": surface,
+                        "targets": layout.target_sequence,
+                        "config": config,
+                        "progress_callback": planner_progress_callback,
+                    }
+                else:
+                    plan_kwargs = {
+                        "surface": surface,
+                        "t1": t1,
+                        "t3": t3,
+                        "config": config,
+                        "progress_callback": planner_progress_callback,
+                    }
                 if optimization_context is not None:
                     plan_kwargs["optimization_context"] = optimization_context
-                result = self._planner.plan(**plan_kwargs)
+                if layout.target_sequence:
+                    result = self._planner.plan_multi_target(**plan_kwargs)
+                    t3 = layout.final_target
+                else:
+                    result = self._planner.plan(**plan_kwargs)
                 stations = result.stations
                 summary = dict(result.summary)
                 md_t1_m = float(result.md_t1_m)
@@ -2260,8 +2350,8 @@ class WelltrackBatchPlanner:
                 summary = dict(multi_result.summary)
                 md_t1_m = float(multi_result.md_t1_m)
                 azimuth_deg = float(multi_result.azimuth_deg)
-                t3 = target_pairs[-1][1]
-                if pilot_success is not None:
+                t3 = layout.final_target
+                if use_pilot_sidetrack:
                     complexity = str(summary.get("well_complexity", "")).strip()
                     if "многопласт" not in complexity.casefold():
                         complexity = (
@@ -2292,6 +2382,8 @@ class WelltrackBatchPlanner:
             t1=t1,
             t3=t3,
             target_pairs=target_pairs,
+            target_points=layout.target_points,
+            target_labels=layout.target_labels,
             stations=stations,
             summary=summary,
             azimuth_deg=azimuth_deg,
@@ -2401,6 +2493,11 @@ class WelltrackBatchPlanner:
             t1=t1,
             t3=final_t3,
             target_pairs=target_pairs,
+            target_points=tuple(
+                Point3D(x=float(point.x), y=float(point.y), z=float(point.z))
+                for point in tuple(record.points)
+            ),
+            target_labels=record_point_labels(record),
             stations=stations,
             summary=summary,
             azimuth_deg=azimuth_deg,

@@ -7,6 +7,9 @@ import pytest
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackParseError,
+    _ordered_table_multi_horizontal_point_names,
+    _ordered_table_points,
+    _ordered_table_zbs_multi_horizontal_point_names,
     decode_welltrack_bytes,
     parse_welltrack_points_table,
     parse_welltrack_text,
@@ -162,6 +165,46 @@ def test_parse_welltrack_points_table_accepts_multi_horizontal_zbs_rows() -> Non
     assert welltrack_multi_horizontal_level_count(records[0].points) == 0
 
 
+def test_ordered_table_zbs_multi_horizontal_rejects_surface_point() -> None:
+    with pytest.raises(WelltrackParseError, match="без S и обычных точек"):
+        _ordered_table_zbs_multi_horizontal_point_names(
+            {
+                "wellhead": WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                "1_t1": WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+                "1_t3": WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=2.0),
+            },
+            well_name="9010_ZBS",
+        )
+
+
+def test_ordered_table_multi_horizontal_rejects_arbitrary_extra_points() -> None:
+    with pytest.raises(WelltrackParseError, match="Лишние точки: PL1"):
+        _ordered_table_multi_horizontal_point_names(
+            {
+                "wellhead": WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                "1_t1": WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+                "1_t3": WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=2.0),
+                "pl1": WelltrackPoint(x=700.0, y=0.0, z=1020.0, md=3.0),
+            },
+            well_name="MULTI",
+        )
+
+
+def test_ordered_table_multi_horizontal_accepts_wellhead_and_target_pairs() -> None:
+    ordered = _ordered_table_multi_horizontal_point_names(
+        {
+            "wellhead": WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            "1_t1": WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+            "1_t3": WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=2.0),
+            "2_t1": WelltrackPoint(x=800.0, y=0.0, z=1020.0, md=3.0),
+            "2_t3": WelltrackPoint(x=1200.0, y=0.0, z=1020.0, md=4.0),
+        },
+        well_name="MULTI",
+    )
+
+    assert ordered == ("wellhead", "1_t1", "1_t3", "2_t1", "2_t3")
+
+
 def test_parse_welltrack_points_table_accepts_tabular_rows() -> None:
     records = parse_welltrack_points_table(
         [
@@ -177,7 +220,7 @@ def test_parse_welltrack_points_table_accepts_tabular_rows() -> None:
     assert [record.name for record in records] == ["WELL-A", "WELL-B"]
     assert records[0].points[0].md == pytest.approx(0.0)
     assert records[0].points[1].md == pytest.approx(1.0)
-    assert records[0].points[2].md == pytest.approx(2.0)
+    assert records[0].points[2].md == pytest.approx(3.0)
     assert records[1].points[0].x == pytest.approx(10.0)
     assert records[1].points[2].z == pytest.approx(2400.0)
 
@@ -222,8 +265,33 @@ def test_parse_welltrack_points_table_accepts_zbs_rows_without_surface() -> None
     )
 
     assert [record.name for record in records] == ["9010_ZBS"]
-    assert [point.md for point in records[0].points] == [1.0, 2.0]
+    assert [point.md for point in records[0].points] == [1.0, 3.0]
     assert records[0].points[0].x == pytest.approx(604606.04)
+
+
+def test_parse_welltrack_points_table_accepts_alt_branch_rows_without_surface() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "9010_2", "Point": "t1", "X": 604606.04, "Y": 7408871.93, "Z": 3791.81},
+            {"Wellname": "9010_2", "Point": "t3", "X": 603829.49, "Y": 7408056.91, "Z": 3791.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["9010_2"]
+    assert [point.md for point in records[0].points] == [1.0, 3.0]
+
+
+def test_parse_welltrack_points_table_accepts_alt_branch_with_surface_for_pilot_branch() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-A_2", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-A_2", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "WELL-A_2", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["WELL-A_2"]
+    assert [point.md for point in records[0].points] == [0.0, 1.0, 3.0]
 
 
 def test_parse_welltrack_points_table_rejects_zbs_surface_row() -> None:
@@ -270,6 +338,34 @@ def test_parse_welltrack_points_table_rejects_missing_required_points() -> None:
         )
 
 
+def test_parse_welltrack_points_table_accepts_target_sequence() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-A", "Point": "wellhead", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "WELL-A", "Point": "t2", "X": 900.0, "Y": 1200.0, "Z": 2450.0},
+            {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["WELL-A"]
+    assert [point.md for point in records[0].points] == [0.0, 1.0, 2.0, 3.0]
+    assert records[0].point_labels == ("S", "t1", "t2", "t3")
+
+
+def test_ordered_table_points_preserves_existing_md_values() -> None:
+    ordered = _ordered_table_points(
+        {
+            "wellhead": WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1000.0),
+            "t1": WelltrackPoint(x=10.0, y=20.0, z=30.0, md=2500.0),
+            "t3": WelltrackPoint(x=40.0, y=50.0, z=60.0, md=4000.0),
+        },
+        ("wellhead", "t1", "t3"),
+    )
+
+    assert [point.md for point in ordered] == [1000.0, 2500.0, 4000.0]
+
+
 def test_parse_welltrack_points_table_reports_surface_as_s_in_errors() -> None:
     with pytest.raises(WelltrackParseError, match="отсутствуют точки: S"):
         parse_welltrack_points_table(
@@ -281,7 +377,7 @@ def test_parse_welltrack_points_table_reports_surface_as_s_in_errors() -> None:
 
 
 def test_parse_welltrack_points_table_reports_expected_s_in_unsupported_point_error() -> None:
-    with pytest.raises(WelltrackParseError, match="Ожидается S, t1 или t3"):
+    with pytest.raises(WelltrackParseError, match="Ожидается S, t1, t2, t3"):
         parse_welltrack_points_table(
             [
                 {"Wellname": "WELL-A", "Point": "surface-head", "X": 0.0, "Y": 0.0, "Z": 0.0},

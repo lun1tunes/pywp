@@ -14,10 +14,11 @@ from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, TrajectoryConfig
 from pywp.pilot_wells import (
     SidetrackWindowOverride,
     is_pilot_name,
-    is_zbs_name,
+    is_zbs_record,
     parent_name_for_pilot,
     parent_name_for_zbs,
     pilot_name_key_for_parent,
+    pilot_name_key_for_record,
     sync_pilot_surfaces_to_parents,
     visible_well_names,
     well_name_key,
@@ -106,6 +107,13 @@ def sync_selection_state(
     records: list[WelltrackRecord],
 ) -> tuple[list[str], list[str]]:
     all_names = visible_well_names(records)
+    visible_name_by_pilot_key = {
+        pilot_key: str(record.name)
+        for record in records
+        if str(record.name) in all_names
+        for pilot_key in (_pilot_key_for_visible_record(record),)
+        if pilot_key is not None
+    }
     recommended_names = _visible_recommended_names(
         records=records,
         summary_rows=state.get("wt_summary_rows"),
@@ -115,11 +123,13 @@ def sync_selection_state(
         state["wt_selected_names"] = _coerce_visible_selection(
             pending_general,
             all_names=all_names,
+            visible_name_by_pilot_key=visible_name_by_pilot_key,
         )
 
     current = _coerce_visible_selection(
         state.get("wt_selected_names", []),
         all_names=all_names,
+        visible_name_by_pilot_key=visible_name_by_pilot_key,
     )
     if current != state.get("wt_selected_names", []):
         state["wt_selected_names"] = list(current)
@@ -133,7 +143,9 @@ def batch_selection_status(
     records: list[WelltrackRecord],
     summary_rows: list[dict[str, object]] | None,
 ) -> BatchSelectionStatus:
-    all_names = visible_well_names(records)
+    visible_records = [
+        record for record in records if not is_pilot_name(getattr(record, "name", ""))
+    ]
     rows_by_key = {
         well_name_key(row.get("Скважина", "")): row for row in (summary_rows or [])
     }
@@ -141,8 +153,8 @@ def batch_selection_status(
     warning_count = 0
     error_count = 0
     not_run_count = 0
-    for name in all_names:
-        state = _combined_visible_row_state(name=name, rows_by_key=rows_by_key)
+    for record in visible_records:
+        state = _combined_visible_row_state(record=record, rows_by_key=rows_by_key)
         if state == "ok":
             ok_count += 1
         elif state == "warning":
@@ -164,6 +176,7 @@ def _coerce_visible_selection(
     names: object,
     *,
     all_names: list[str],
+    visible_name_by_pilot_key: Mapping[str, str],
 ) -> list[str]:
     visible_by_key = {well_name_key(name): str(name) for name in all_names}
     coerced: list[str] = []
@@ -174,11 +187,19 @@ def _coerce_visible_selection(
         if name_key not in visible_by_key and is_pilot_name(name):
             name_key = well_name_key(parent_name_for_pilot(name))
         visible_name = visible_by_key.get(name_key)
+        if visible_name is None and is_pilot_name(name):
+            visible_name = visible_name_by_pilot_key.get(well_name_key(name))
         if visible_name is None or visible_name in seen:
             continue
         coerced.append(visible_name)
         seen.add(visible_name)
     return coerced
+
+
+def _pilot_key_for_visible_record(record: WelltrackRecord) -> str | None:
+    if is_zbs_record(record):
+        return None
+    return pilot_name_key_for_record(record)
 
 
 def _visible_recommended_names(
@@ -192,10 +213,16 @@ def _visible_recommended_names(
     )
     recommended_keys = {well_name_key(name) for name in raw_recommended}
     result: list[str] = []
-    for name in visible_well_names(records):
+    for record in records:
+        if is_pilot_name(record.name):
+            continue
+        name = str(record.name)
         if (
             well_name_key(name) in recommended_keys
-            or pilot_name_key_for_parent(name) in recommended_keys
+            or (
+                not is_zbs_record(record)
+                and pilot_name_key_for_record(record) in recommended_keys
+            )
         ):
             result.append(str(name))
     return result
@@ -203,14 +230,18 @@ def _visible_recommended_names(
 
 def _combined_visible_row_state(
     *,
-    name: str,
+    record: WelltrackRecord,
     rows_by_key: Mapping[str, dict[str, object]],
 ) -> str:
+    name = str(record.name)
+    pilot_row = None
+    if not is_zbs_record(record):
+        pilot_row = rows_by_key.get(pilot_name_key_for_record(record))
     rows = [
         row
         for row in (
             rows_by_key.get(well_name_key(name)),
-            rows_by_key.get(pilot_name_key_for_parent(name)),
+            pilot_row,
         )
         if row is not None
     ]
@@ -263,7 +294,7 @@ def _matched_zbs_parent_names(
     seen: set[str] = set()
     for record in records:
         record_name = str(record.name)
-        if not is_zbs_name(record_name):
+        if not is_zbs_record(record):
             continue
         if well_name_key(record_name) not in selected_keys:
             continue
@@ -286,7 +317,8 @@ def _has_selected_pilot_dependencies(
     return any(
         not is_pilot_name(record.name)
         and well_name_key(record.name) in selected_keys
-        and pilot_name_key_for_parent(record.name) in all_record_keys
+        and not is_zbs_record(record)
+        and pilot_name_key_for_record(record) in all_record_keys
         for record in records
     )
 

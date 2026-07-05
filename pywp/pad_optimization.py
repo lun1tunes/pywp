@@ -21,7 +21,6 @@ from pywp.anticollision import (
 )
 from pywp.eclipse_welltrack import (
     WelltrackRecord,
-    welltrack_points_to_target_pairs,
 )
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.models import TrajectoryConfig
@@ -36,6 +35,7 @@ from pywp.reference_trajectories import (
 )
 from pywp.uncertainty import PlanningUncertaintyModel
 from pywp.welltrack_batch import SuccessfulWellPlan
+from pywp.welltrack_targets import ordinary_record_target_layout
 
 # Zones where both wells are at MD below this threshold are treated as
 # "near-surface" and excluded from the scoring metric.  On shared-surface
@@ -99,26 +99,38 @@ def recalculate_well(
 ) -> SuccessfulWellPlan | None:
     start_t = perf_counter()
     try:
-        surface, target_pairs = welltrack_points_to_target_pairs(record.points)
-        t1, t3 = target_pairs[0]
+        layout = ordinary_record_target_layout(record)
     except (ValueError, IndexError):
         return None
+    surface = layout.surface
+    t1 = layout.t1
+    t3 = layout.t3
     planner = TrajectoryPlanner()
     try:
-        result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
-        if len(target_pairs) > 1:
-            result = extend_plan_with_multi_horizontal_targets(
-                base_result=result,
-                target_pairs=target_pairs,
+        if layout.target_sequence:
+            result = planner.plan_multi_target(
+                surface=surface,
+                targets=layout.target_sequence,
                 config=config,
             )
-            t3 = target_pairs[-1][1]
+            t3 = layout.final_target
+        else:
+            result = planner.plan(surface=surface, t1=t1, t3=t3, config=config)
+        if len(layout.target_pairs) > 1:
+            result = extend_plan_with_multi_horizontal_targets(
+                base_result=result,
+                target_pairs=layout.target_pairs,
+                config=config,
+            )
+            t3 = layout.final_target
         return SuccessfulWellPlan(
             name=record.name,
             surface=surface,
             t1=t1,
             t3=t3,
-            target_pairs=target_pairs,
+            target_pairs=layout.target_pairs,
+            target_points=layout.target_points,
+            target_labels=layout.target_labels,
             stations=result.stations,
             summary=result.summary,
             azimuth_deg=result.azimuth_deg,
@@ -634,9 +646,11 @@ def _swap_surfaces_and_recalculate(
     new_records = list(records)  # shallow copy — only replace swapped entries
     new_records[g_a] = WelltrackRecord(
         name=records[g_a].name, points=(pts_b[0], *pts_a[1:]),
+        point_labels=getattr(records[g_a], "point_labels", ()),
     )
     new_records[g_b] = WelltrackRecord(
         name=records[g_b].name, points=(pts_a[0], *pts_b[1:]),
+        point_labels=getattr(records[g_b], "point_labels", ()),
     )
 
     cfg_a = config_by_name.get(name_a)

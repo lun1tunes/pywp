@@ -11,7 +11,8 @@ from pywp import ptc_reference_state
 from pywp.pilot_wells import (
     SidetrackWindowOverride,
     is_pilot_name,
-    is_zbs_name,
+    is_zbs_record,
+    pilot_parent_key_for_record,
     parent_name_for_pilot,
     well_name_key,
 )
@@ -351,16 +352,18 @@ def _sidetrack_radio_state_kwargs(
 
 def _sidetrack_parent_names(records: list[object]) -> list[str]:
     parent_by_key = {
-        well_name_key(getattr(record, "name", "")): str(getattr(record, "name", ""))
+        pilot_parent_key_for_record(record): str(
+            getattr(record, "name", "")
+        )
         for record in records
         if not is_pilot_name(getattr(record, "name", ""))
-        and not is_zbs_name(getattr(record, "name", ""))
+        and not is_zbs_record(record)
     }
     parent_names: list[str] = []
     seen: set[str] = set()
     for record in records:
         record_name = str(getattr(record, "name", ""))
-        if not is_zbs_name(record_name):
+        if not is_zbs_record(record):
             continue
         record_key = well_name_key(record_name)
         if record_key in seen:

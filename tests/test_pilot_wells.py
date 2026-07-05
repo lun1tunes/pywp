@@ -10,11 +10,15 @@ from pywp.pilot_wells import (
     SidetrackWindowOverride,
     build_pilot_trajectory,
     combine_pilot_and_sidetrack,
+    is_zbs_record,
     is_pilot_name,
     order_records_with_pilots_first,
     parent_name_for_pilot,
+    parent_name_for_zbs,
     paired_pilot_parent_names,
+    pilot_parent_key_for_record,
     select_sidetrack_window,
+    sync_pilot_surfaces_to_parents,
 )
 from pywp.planner_types import PlanningError
 from pywp.sidetrack_solver import SidetrackPlanner, SidetrackStart
@@ -31,7 +35,97 @@ def test_pilot_name_helpers() -> None:
     assert parent_name_for_pilot("well_04_PL") == "well_04"
     assert paired_pilot_parent_names("well_04", "well_04_PL")
     assert paired_pilot_parent_names("well_04", "WELL_04_pl")
+    assert paired_pilot_parent_names("well_04_2", "well_04_PL")
     assert not paired_pilot_parent_names("well_04", "well_05_PL")
+
+
+def test_alt_branch_name_can_pair_with_pilot_without_being_zbs() -> None:
+    branch = WelltrackRecord(
+        name="well_04_2",
+        points=(
+            WelltrackPoint(x=10.0, y=20.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1200.0, md=2.0),
+        ),
+    )
+    pilot = WelltrackRecord(
+        name="well_04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=50.0, y=0.0, z=700.0, md=1.0),
+        ),
+    )
+
+    ordered = order_records_with_pilots_first([branch, pilot])
+    synced = sync_pilot_surfaces_to_parents([branch, pilot])
+
+    assert is_zbs_record(branch) is False
+    assert [record.name for record in ordered] == ["well_04_PL", "well_04_2"]
+    assert float(synced[1].points[0].x) == pytest.approx(10.0)
+    assert float(synced[1].points[0].y) == pytest.approx(20.0)
+
+
+def test_pilot_parent_key_for_record_accepts_plain_name_inputs() -> None:
+    branch = WelltrackRecord(
+        name="well_04_2",
+        points=(
+            WelltrackPoint(x=10.0, y=20.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1200.0, md=2.0),
+        ),
+    )
+    pilot = WelltrackRecord(
+        name="well_04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=50.0, y=0.0, z=700.0, md=1.0),
+        ),
+    )
+
+    assert pilot_parent_key_for_record(branch) == "well_04"
+    assert pilot_parent_key_for_record(branch.name) == "well_04"
+    assert pilot_parent_key_for_record(pilot) == "well_04"
+    assert pilot_parent_key_for_record(pilot.name) == "well_04"
+
+
+def test_alt_branch_name_without_surface_is_treated_as_fact_sidetrack() -> None:
+    sidetrack = WelltrackRecord(
+        name="9010_2",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=1500.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=1500.0, md=2.0),
+        ),
+    )
+
+    assert is_zbs_record(sidetrack) is True
+    assert parent_name_for_zbs("9010_2") == "9010"
+
+
+def test_shallow_alt_branch_without_surface_is_still_treated_as_fact_sidetrack() -> None:
+    sidetrack = WelltrackRecord(
+        name="9010_2",
+        points=(
+            WelltrackPoint(x=650.0, y=0.0, z=25.0, md=1.0),
+            WelltrackPoint(x=1200.0, y=0.0, z=30.0, md=2.0),
+        ),
+    )
+
+    assert is_zbs_record(sidetrack) is True
+
+
+def test_alt_branch_with_explicit_surface_label_is_not_zbs_even_with_even_point_count() -> None:
+    branch = WelltrackRecord(
+        name="well_04_2",
+        points=(
+            WelltrackPoint(x=10.0, y=20.0, z=180.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=350.0, y=0.0, z=1600.0, md=2.0),
+            WelltrackPoint(x=600.0, y=0.0, z=1800.0, md=3.0),
+        ),
+        point_labels=("S", "t1", "t2", "t3"),
+    )
+
+    assert is_zbs_record(branch) is False
 
 
 def test_order_records_with_pilots_first_uses_case_insensitive_suffix() -> None:

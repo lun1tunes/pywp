@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
@@ -31,8 +32,11 @@ from pywp.ui_utils import dls_to_pi
 
 PILOT_SUFFIX = "_PL"
 ZBS_SUFFIX = "_ZBS"
+ALT_BRANCH_SUFFIX = "_2"
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M = 50.0
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MAX_M = 100.0
+_SURFACE_POINT_LABELS = {"s", "surface", "wellhead", "well_head", "well head", "wh"}
+_ZBS_MULTI_HORIZONTAL_LABEL_RE = re.compile(r"^[1-9]\d*_t[13]$", flags=re.IGNORECASE)
 
 
 class PilotWindow(FrozenArbitraryModel):
@@ -110,6 +114,28 @@ def is_zbs_name(name: object) -> bool:
     return str(name).strip().upper().endswith(ZBS_SUFFIX)
 
 
+def is_alt_branch_name(name: object) -> bool:
+    return str(name).strip().upper().endswith(ALT_BRANCH_SUFFIX)
+
+
+def _record_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
+    labels = tuple(str(label).strip() for label in getattr(record, "point_labels", ()) or ())
+    if len(labels) != len(tuple(record.points)):
+        return ()
+    return labels
+
+
+def _is_surface_point_label(label: str) -> bool:
+    return str(label).strip().casefold() in _SURFACE_POINT_LABELS
+
+
+def _is_zbs_target_point_label(label: str) -> bool:
+    normalized = str(label).strip()
+    return normalized.casefold() in {"t1", "t3"} or (
+        _ZBS_MULTI_HORIZONTAL_LABEL_RE.match(normalized) is not None
+    )
+
+
 def parent_name_for_pilot(name: object) -> str:
     text = str(name).strip()
     if not is_pilot_name(text):
@@ -117,11 +143,25 @@ def parent_name_for_pilot(name: object) -> str:
     return text[: -len(PILOT_SUFFIX)]
 
 
+def pilot_parent_name_for_record(record: object) -> str:
+    raw_name = getattr(record, "name", record)
+    text = str(raw_name).strip()
+    if is_pilot_name(text):
+        return parent_name_for_pilot(text)
+    if is_alt_branch_name(text):
+        if hasattr(record, "points") and is_zbs_record(record):
+            return text
+        return text[: -len(ALT_BRANCH_SUFFIX)]
+    return text
+
+
 def parent_name_for_zbs(name: object) -> str:
     text = str(name).strip()
-    if not is_zbs_name(text):
-        return text
-    return text[: -len(ZBS_SUFFIX)]
+    if is_zbs_name(text):
+        return text[: -len(ZBS_SUFFIX)]
+    if is_alt_branch_name(text):
+        return text[: -len(ALT_BRANCH_SUFFIX)]
+    return text
 
 
 def pilot_name_for_parent(name: object) -> str:
@@ -132,8 +172,16 @@ def well_name_key(name: object) -> str:
     return str(name).strip().casefold()
 
 
+def pilot_parent_key_for_record(name: object) -> str:
+    return well_name_key(pilot_parent_name_for_record(name))
+
+
 def pilot_name_key_for_parent(name: object) -> str:
     return well_name_key(pilot_name_for_parent(name))
+
+
+def pilot_name_key_for_record(record: object) -> str:
+    return pilot_name_key_for_parent(pilot_parent_name_for_record(record))
 
 
 def is_pilot_record(record: WelltrackRecord) -> bool:
@@ -141,7 +189,24 @@ def is_pilot_record(record: WelltrackRecord) -> bool:
 
 
 def is_zbs_record(record: WelltrackRecord) -> bool:
-    return is_zbs_name(record.name)
+    if is_zbs_name(record.name):
+        return True
+    if not is_alt_branch_name(record.name):
+        return False
+    labels = _record_point_labels(record)
+    if labels:
+        if any(_is_surface_point_label(label) for label in labels):
+            return False
+        if all(_is_zbs_target_point_label(label) for label in labels):
+            return True
+        return False
+    points = tuple(record.points)
+    if len(points) < 2 or len(points) % 2 != 0:
+        return False
+    # Unlabelled `_2` imports are only distinguishable structurally:
+    # target-only sidetracks contain target pairs only, while surface-bearing
+    # branches include an extra wellhead point and therefore stay odd-sized.
+    return True
 
 
 def visible_well_records(
@@ -223,17 +288,17 @@ def sync_pilot_surfaces_to_parents(
     records: Iterable[WelltrackRecord],
 ) -> list[WelltrackRecord]:
     record_list = list(records)
-    parent_by_key = {
-        well_name_key(record.name): record
-        for record in record_list
-        if not is_pilot_record(record)
-    }
+    parent_by_key: dict[str, WelltrackRecord] = {}
+    for record in record_list:
+        if is_pilot_record(record) or is_zbs_record(record):
+            continue
+        parent_by_key.setdefault(pilot_parent_key_for_record(record), record)
     synced: list[WelltrackRecord] = []
     for record in record_list:
         if not is_pilot_record(record) or not record.points:
             synced.append(record)
             continue
-        parent = parent_by_key.get(well_name_key(parent_name_for_pilot(record.name)))
+        parent = parent_by_key.get(pilot_parent_key_for_record(record))
         if parent is None or not parent.points:
             synced.append(record)
             continue
@@ -252,6 +317,7 @@ def sync_pilot_surfaces_to_parents(
             WelltrackRecord(
                 name=record.name,
                 points=(synced_surface, *tuple(record.points[1:])),
+                point_labels=getattr(record, "point_labels", ()),
             )
         )
     return synced
@@ -274,10 +340,11 @@ def order_records_with_pilots_first(
             result.append(record)
             seen.add(name_key)
             continue
-        pilot = by_name.get(pilot_name_key_for_parent(name))
-        if pilot is not None and well_name_key(pilot.name) not in seen:
-            result.append(pilot)
-            seen.add(well_name_key(pilot.name))
+        if not is_zbs_record(record):
+            pilot = by_name.get(pilot_name_key_for_parent(pilot_parent_name_for_record(name)))
+            if pilot is not None and well_name_key(pilot.name) not in seen:
+                result.append(pilot)
+                seen.add(well_name_key(pilot.name))
         result.append(record)
         seen.add(name_key)
 
@@ -530,9 +597,9 @@ def paired_pilot_parent_names(name_a: object, name_b: object) -> bool:
     right = str(name_b).strip()
     return (
         is_pilot_name(left)
-        and well_name_key(parent_name_for_pilot(left)) == well_name_key(right)
+        and pilot_parent_key_for_record(left) == pilot_parent_key_for_record(right)
         or is_pilot_name(right)
-        and well_name_key(parent_name_for_pilot(right)) == well_name_key(left)
+        and pilot_parent_key_for_record(right) == pilot_parent_key_for_record(left)
     )
 
 

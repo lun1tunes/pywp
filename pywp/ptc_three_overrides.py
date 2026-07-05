@@ -21,7 +21,7 @@ from pywp.models import (
 from pywp import ptc_pad_state
 from pywp import ptc_target_records
 from pywp import ptc_three_payload
-from pywp.pilot_wells import is_zbs_name, well_name_key
+from pywp.pilot_wells import is_zbs_name, is_zbs_record, well_name_key
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.well_pad import WellPad
 from pywp.welltrack_batch import SuccessfulWellPlan
@@ -138,7 +138,7 @@ def legend_pad_label(pad: WellPad) -> str:
 def _record_surface_by_name(records: Iterable[WelltrackRecord]) -> dict[str, Point3D]:
     surface_by_name: dict[str, Point3D] = {}
     for record in records:
-        if is_zbs_name(record.name):
+        if is_zbs_record(record):
             continue
         if not ptc_target_records.record_first_point_is_surface_like(record):
             continue
@@ -155,11 +155,7 @@ def _record_surface_by_name(records: Iterable[WelltrackRecord]) -> dict[str, Poi
 
 
 def _pad_payload_records(records: Iterable[WelltrackRecord]) -> list[WelltrackRecord]:
-    return [
-        record
-        for record in records
-        if not is_zbs_name(record.name)
-    ]
+    return [record for record in records if not is_zbs_record(record)]
 
 
 def three_legend_tree_payload(
@@ -494,7 +490,7 @@ def build_edit_wells_payload(
             reference_well_by_key=reference_well_by_key,
         )
         has_sidetrack_metadata = _has_sidetrack_window_metadata(success)
-        is_zbs = is_zbs_name(success.name)
+        is_zbs = _success_uses_target_only_sidetrack_points(success)
         config = success.config
         base_points = _decimated_base_points(success)
         edit_points: list[dict[str, object]] = []
@@ -592,6 +588,16 @@ def _has_sidetrack_window_metadata(success: SuccessfulWellPlan) -> bool:
         trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}
         or "sidetrack_window_md_m" in summary
     )
+
+
+def _success_uses_target_only_sidetrack_points(success: SuccessfulWellPlan) -> bool:
+    summary = dict(getattr(success, "summary", {}) or {})
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    if trajectory_type == "FACT_SIDETRACK":
+        return True
+    if trajectory_type == "PILOT_SIDETRACK":
+        return False
+    return is_zbs_name(success.name)
 
 
 def build_target_only_edit_wells_payload(

@@ -123,6 +123,25 @@ def test_detect_t1_t3_order_issues_checks_zbs_from_parent_anchor() -> None:
     assert issues[0].delta_m == pytest.approx(700.0)
 
 
+def test_detect_t1_t3_order_issues_checks_alt_branch_sidetrack_from_parent_anchor() -> None:
+    source = WelltrackRecord(
+        name="9010_2",
+        points=(
+            WelltrackPoint(x=1200.0, y=0.0, z=2500.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=2500.0, md=2.0),
+        ),
+    )
+    parent_surface = WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0)
+
+    issues = detect_t1_t3_order_issues(
+        [source],
+        min_delta_m=0.1,
+        anchor_by_well_name={"9010": parent_surface},
+    )
+
+    assert [item.well_name for item in issues] == ["9010_2"]
+
+
 def test_detect_t1_t3_order_issues_skips_zbs_without_parent_anchor() -> None:
     source = WelltrackRecord(
         name="9010_ZBS",

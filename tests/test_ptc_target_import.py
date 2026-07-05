@@ -13,6 +13,18 @@ from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp import ptc_target_import as target_import
 
 
+def _inline_dev_text(
+    well_name: str,
+    rows: list[tuple[float, ...]],
+) -> str:
+    return "\n".join(
+        [
+            f"# WELL NAME: {well_name}",
+            *(" ".join(str(value) for value in row) for row in rows),
+        ]
+    )
+
+
 def test_target_source_defaults_preserve_legacy_table_mode() -> None:
     session_state = {"wt_source_mode": target_import.WT_SOURCE_MODE_TARGET_TABLE}
 
@@ -40,13 +52,31 @@ def test_target_source_defaults_normalize_unknown_format() -> None:
 
     target_import.init_target_source_state_defaults(session_state)
 
-    assert session_state["wt_source_format"] == target_import.WT_SOURCE_FORMAT_WELLTRACK
+    assert (
+        session_state["wt_source_format"]
+        == target_import.WT_SOURCE_FORMAT_TARGET_TABLE
+    )
     assert session_state["wt_source_mode"] == target_import.WT_SOURCE_MODE_FILE_PATH
     assert session_state["wt_source_dev_inline"] == ""
     assert "wt_source_dev_upload_files" not in session_state
     assert session_state["wt_source_dev_fixed_t1_enabled"] is False
     assert session_state["wt_source_dev_fixed_t1_well_names"] == []
     assert session_state["wt_source_dev_fixed_t1_inc_deg"] == pytest.approx(86.0)
+    assert session_state["wt_source_dev_fixed_t1_common_enabled"] is False
+    assert session_state["wt_source_dev_fixed_t1_common_inc_deg"] == pytest.approx(
+        86.0
+    )
+
+
+def test_target_source_defaults_infer_welltrack_from_prefilled_path_mode() -> None:
+    session_state = {
+        "wt_source_mode": target_import.WT_SOURCE_MODE_FILE_PATH,
+        "wt_source_path": "tests/test_data/WELLTRACKS2.INC",
+    }
+
+    target_import.init_target_source_state_defaults(session_state)
+
+    assert session_state["wt_source_format"] == target_import.WT_SOURCE_FORMAT_WELLTRACK
 
 
 def test_target_source_defaults_drop_legacy_upload_widget_state_keys() -> None:
@@ -324,6 +354,49 @@ def test_target_import_operation_treats_three_point_dev_as_plain_target() -> Non
         WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=2400.0),
         WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=3500.0),
     )
+
+
+def test_target_import_operation_parses_pilot_dev_with_pl_points() -> None:
+    dev_text = _inline_dev_text(
+        "WELL-04_PL",
+        [
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (300.0, 0.0, 0.0, -300.0, 300.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (600.0, 0.0, 0.0, -600.0, 600.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (900.0, 50.0, 0.0, -900.0, 900.0, 50.0, 0.0, 10.0, 20.0, 2.0, 10.0),
+            (1200.0, 100.0, 0.0, -1200.0, 1200.0, 100.0, 0.0, 10.0, 20.0, 2.0, 10.0),
+            (1500.0, 200.0, 0.0, -1500.0, 1500.0, 200.0, 0.0, 10.0, 20.0, 0.0, 10.0),
+            (1800.0, 300.0, 0.0, -1800.0, 1800.0, 300.0, 0.0, 10.0, 20.0, 0.0, 10.0),
+            (2100.0, 400.0, 0.0, -2100.0, 2100.0, 400.0, 0.0, 10.0, 20.0, 0.0, 10.0),
+            (2400.0, 500.0, 0.0, -2400.0, 2400.0, 500.0, 0.0, 10.0, 20.0, 0.0, 10.0),
+            (2700.0, 700.0, 0.0, -2600.0, 2600.0, 700.0, 0.0, 20.0, 40.0, 2.0, 20.0),
+            (3000.0, 900.0, 0.0, -2800.0, 2800.0, 900.0, 0.0, 20.0, 40.0, 2.0, 20.0),
+            (3300.0, 1100.0, 0.0, -3000.0, 3000.0, 1100.0, 0.0, 20.0, 40.0, 0.0, 20.0),
+        ],
+    )
+    operation = target_import.build_target_import_operation(
+        target_import.WelltrackSourcePayload(
+            mode=target_import.WT_SOURCE_MODE_INLINE_TEXT,
+            source_format=target_import.WT_SOURCE_FORMAT_DEV_TRAJECTORY,
+            source_text=dev_text,
+        )
+    )
+
+    parsed = operation.parse()
+
+    assert [record.name for record in parsed.records] == ["WELL-04_PL"]
+    assert len(parsed.dev_summaries) == 1
+    record = parsed.records[0]
+    assert record.point_labels == ("S", "PL1", "PL2")
+    assert [float(point.md) for point in record.points] == [0.0, 2400.0, 3300.0]
+    assert record.points[1].x == pytest.approx(500.0)
+    assert record.points[2].z == pytest.approx(3000.0)
+    summary = parsed.dev_summaries[0]
+    assert summary.profile_label == "Пилот"
+    assert summary.simple_target_only is True
+    assert summary.t1_md_m == pytest.approx(2400.0)
+    assert summary.t3_md_m == pytest.approx(3300.0)
+    assert "Сформировано точек PL: 2" in summary.note
 
 
 def test_parse_dev_target_payloads_treats_three_point_dev_as_plain_target() -> None:
@@ -975,16 +1048,17 @@ def test_dev_target_import_summary_dataframe_formats_pi_columns() -> None:
                 t1_md_m=2500.0,
                 t3_md_m=2980.0,
                 entry_inc_deg=84.0,
-                build1_dls_deg_per_30m=(2.4,),
+                build1_dls_deg_per_30m=(2.4, 1.8, 2.1),
                 build2_dls_deg_per_30m=(2.4,),
-                horizontal_dls_deg_per_30m=(1.2,),
+                horizontal_dls_deg_per_30m=(1.2, 0.6),
                 note="—",
             ),
         )
     )
 
-    assert summary_df.iloc[0]["BUILD1 PI, deg/10m"] == "0.80"
-    assert summary_df.iloc[0]["HORIZONTAL PI, deg/10m"] == "0.40"
+    assert summary_df.iloc[0]["BUILD1 PI, deg/10m"] == "0.60-0.80 (avg 0.70)"
+    assert summary_df.iloc[0]["BUILD2 PI, deg/10m"] == "0.80"
+    assert summary_df.iloc[0]["HORIZONTAL PI, deg/10m"] == "0.20-0.40 (avg 0.30)"
     assert "BUILD1 DLS, deg/30m" not in summary_df.columns
     assert "BUILD2 DLS, deg/30m" not in summary_df.columns
     assert "HORIZONTAL DLS, deg/30m" not in summary_df.columns

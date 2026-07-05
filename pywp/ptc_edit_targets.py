@@ -8,7 +8,8 @@ import pandas as pd
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.pilot_wells import (
     is_pilot_name,
-    is_zbs_name,
+    is_zbs_record,
+    pilot_parent_key_for_record,
     parent_name_for_pilot,
     well_name_key,
 )
@@ -69,7 +70,7 @@ def bulk_horizontal_length_changes(
         if (
             record_horizontal_length_preprocess_skip_reason(
                 record,
-                has_pilot=well_name_key(record.name) in pilot_parent_keys,
+                has_pilot=pilot_parent_key_for_record(record) in pilot_parent_keys,
             )
             != "—"
         ):
@@ -116,7 +117,7 @@ def _horizontal_length_pair_indices(
     record: WelltrackRecord,
 ) -> tuple[tuple[int, int], ...] | None:
     points = tuple(record.points)
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         if len(points) < 2 or len(points) % 2 != 0:
             return None
         return tuple((index, index + 1) for index in range(0, len(points), 2))
@@ -236,7 +237,11 @@ def records_with_edit_targets(
                 changed = True
             if changed:
                 updated_records.append(
-                    WelltrackRecord(name=record.name, points=tuple(old_points))
+                    WelltrackRecord(
+                        name=record.name,
+                        points=tuple(old_points),
+                        point_labels=getattr(record, "point_labels", ()),
+                    )
                 )
                 updated_names.append(record_name)
             else:
@@ -268,7 +273,11 @@ def records_with_edit_targets(
             ),
         )
         updated_records.append(
-            WelltrackRecord(name=record.name, points=new_points)
+            WelltrackRecord(
+                name=record.name,
+                points=new_points,
+                point_labels=getattr(record, "point_labels", ()),
+            )
         )
         updated_names.append(record_name)
     return updated_records, updated_names

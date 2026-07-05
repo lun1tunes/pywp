@@ -11,7 +11,7 @@ from pywp.reference_trajectories import (
     parse_reference_trajectory_dev_directories,
     parse_reference_trajectory_welltrack_text,
 )
-from pywp.pilot_wells import is_zbs_name, parent_name_for_zbs, well_name_key
+from pywp.pilot_wells import is_zbs_record, parent_name_for_zbs, well_name_key
 
 __all__ = ["render_reference_section"]
 
@@ -343,7 +343,7 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
     zbs_records = [
         record
         for record in records
-        if is_zbs_name(getattr(record, "name", ""))
+        if is_zbs_record(record)
     ]
     if not zbs_records:
         return

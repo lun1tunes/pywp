@@ -34,6 +34,14 @@ from pywp.models import (
     Point3D,
     TrajectoryConfig,
 )
+from pywp.multi_horizontal import (
+    _direction_angles_between,
+    _linear_hold_rows,
+    _row_state,
+    _row_state_from_payload,
+    _smooth_transition_rows,
+    _validate_extended_stations,
+)
 from pywp.planner_geometry import (
     _build_section_geometry,
     _dls_from_radius,
@@ -364,6 +372,224 @@ class TrajectoryPlanner:
             azimuth_deg=geometry.azimuth_entry_deg,
             md_t1_m=params.md_t1_m,
         )
+
+    def plan_multi_target(
+        self,
+        surface: Point3D,
+        targets: tuple[Point3D, ...] | list[Point3D],
+        config: TrajectoryConfig,
+        progress_callback: ProgressCallback | None = None,
+        optimization_context: AntiCollisionOptimizationContext | None = None,
+    ) -> PlannerResult:
+        ordered_targets = tuple(targets)
+        if len(ordered_targets) < 2:
+            raise PlanningError(
+                "Последовательность целей должна содержать как минимум две точки (t1 и t2)."
+            )
+        if len(ordered_targets) == 2:
+            return self.plan(
+                surface=surface,
+                t1=ordered_targets[0],
+                t3=ordered_targets[1],
+                config=config,
+                progress_callback=progress_callback,
+                optimization_context=optimization_context,
+            )
+
+        _emit_progress(
+            progress_callback,
+            "Планировщик: подготовка последовательности целей.",
+            0.02,
+        )
+        base_result = self.plan(
+            surface=surface,
+            t1=ordered_targets[0],
+            t3=ordered_targets[1],
+            config=config,
+            progress_callback=_scaled_progress_callback(
+                progress_callback=progress_callback,
+                start_fraction=0.04,
+                end_fraction=0.60,
+            ),
+            optimization_context=optimization_context,
+        )
+        stations = pd.DataFrame(base_result.stations).copy().reset_index(drop=True)
+        if stations.empty:
+            raise PlanningError("Последовательность целей: базовая траектория пуста.")
+        required_columns = {"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"}
+        missing_columns = required_columns.difference(stations.columns)
+        if missing_columns:
+            raise PlanningError(
+                "Последовательность целей: базовая траектория не содержит колонки "
+                f"{', '.join(sorted(missing_columns))}."
+            )
+
+        rows: list[dict[str, object]] = []
+        current = _row_state(stations.iloc[-1])
+        extension_targets = ordered_targets[2:]
+        extension_count = len(extension_targets)
+
+        for extension_index, target in enumerate(extension_targets, start=1):
+            label = f"t{extension_index + 2}"
+            segment_progress = 0.60 + 0.35 * (
+                float(extension_index - 1) / float(extension_count)
+            )
+            _emit_progress(
+                progress_callback,
+                f"Планировщик: проводка к {label}.",
+                segment_progress,
+            )
+            try:
+                current_point = _point3d_from_state(current)
+                is_final_target = extension_index == extension_count
+                if is_final_target:
+                    target_inc_deg, target_azi_deg = _direction_angles_between(
+                        current_point,
+                        target,
+                    )
+                else:
+                    next_target = extension_targets[extension_index]
+                    target_inc_deg, target_azi_deg = _direction_angles_between(
+                        target,
+                        next_target,
+                    )
+
+                direct_inc_deg, direct_azi_deg = _direction_angles_between(
+                    current_point,
+                    target,
+                )
+                start_matches_direct = (
+                    abs(float(current["inc_deg"]) - direct_inc_deg) <= 1e-3
+                    and abs(
+                        _shortest_azimuth_delta_deg(
+                            float(current["azi_deg"]),
+                            direct_azi_deg,
+                        )
+                    )
+                    <= 1e-3
+                )
+                end_matches_direct = (
+                    abs(float(target_inc_deg) - direct_inc_deg) <= 1e-3
+                    and abs(
+                        _shortest_azimuth_delta_deg(target_azi_deg, direct_azi_deg)
+                    )
+                    <= 1e-3
+                )
+                if start_matches_direct and end_matches_direct:
+                    segment_rows = _linear_hold_rows(
+                        current=current,
+                        target=target,
+                        inc_deg=direct_inc_deg,
+                        azi_deg=direct_azi_deg,
+                        segment_name=f"HORIZONTAL{extension_index + 1}",
+                        config=config,
+                    )
+                else:
+                    segment_rows = _smooth_transition_rows(
+                        current=current,
+                        target=target,
+                        target_inc_deg=target_inc_deg,
+                        target_azi_deg=target_azi_deg,
+                        segment_name=f"HORIZONTAL_BUILD{extension_index}",
+                        config=config,
+                    )
+            except PlanningError as exc:
+                raise _target_sequence_error(str(exc)) from exc
+            if not segment_rows:
+                raise PlanningError(
+                    f"Последовательность целей: не удалось построить участок к {label}."
+                )
+            rows.extend(segment_rows)
+            current = _row_state_from_payload(segment_rows[-1])
+
+        stations = pd.concat([stations, pd.DataFrame(rows)], ignore_index=True)
+        stations = add_dls(stations)
+        try:
+            _validate_extended_stations(
+                stations=stations,
+                final_target=ordered_targets[-1],
+                config=config,
+                post_t1_start_md_m=float(base_result.md_t1_m),
+            )
+        except PlanningError as exc:
+            raise _target_sequence_error(str(exc)) from exc
+
+        summary = dict(base_result.summary)
+        final_target = ordered_targets[-1]
+        max_dls = float(np.nanmax(stations["DLS_deg_per_30m"].to_numpy(dtype=float)))
+        max_inc = float(np.nanmax(stations["INC_deg"].to_numpy(dtype=float)))
+        md_total_m = float(stations["MD_m"].iloc[-1])
+        md_postcheck_limit_m = float(config.max_total_md_postcheck_m)
+        md_postcheck_excess_m = float(max(0.0, md_total_m - md_postcheck_limit_m))
+        final_azimuth_deg = float(stations["AZI_deg"].iloc[-1])
+        summary.update(
+            {
+                "trajectory_type": "Target sequence",
+                "target_sequence": "yes",
+                "target_sequence_point_count": int(len(ordered_targets)),
+                "horizontal_length_m": _target_sequence_length_m(ordered_targets),
+                "hold_azimuth_deg": final_azimuth_deg,
+                "max_inc_actual_deg": max_inc,
+                "max_dls_total_deg_per_30m": max_dls,
+                "md_total_m": md_total_m,
+                "md_postcheck_excess_m": md_postcheck_excess_m,
+                "md_postcheck_exceeded": (
+                    "yes" if md_postcheck_excess_m > 1e-6 else "no"
+                ),
+                "distance_t3_m": 0.0,
+                "lateral_distance_t3_m": 0.0,
+                "vertical_distance_t3_m": 0.0,
+                "distance_t3_control_m": 0.0,
+                "control_gap_t3_m": 0.0,
+                "t3_exact_x_m": float(final_target.x),
+                "t3_exact_y_m": float(final_target.y),
+                "t3_exact_z_m": float(final_target.z),
+                "t3_miss_dx_m": 0.0,
+                "t3_miss_dy_m": 0.0,
+                "t3_miss_dz_m": 0.0,
+            }
+        )
+        _emit_progress(progress_callback, "Планировщик: результат готов.", 1.00)
+        return PlannerResult(
+            stations=stations,
+            summary=summary,
+            azimuth_deg=final_azimuth_deg,
+            md_t1_m=float(base_result.md_t1_m),
+        )
+
+
+def _point3d_from_state(state: dict[str, float]) -> Point3D:
+    return Point3D(
+        x=float(state["x"]),
+        y=float(state["y"]),
+        z=float(state["z"]),
+    )
+
+
+def _target_sequence_error(message: str) -> PlanningError:
+    text = str(message).strip()
+    prefix = "Многопластовая скважина:"
+    if text.startswith(prefix):
+        text = text[len(prefix) :].strip()
+    return PlanningError(f"Последовательность целей: {text}")
+
+
+def _target_sequence_length_m(targets: tuple[Point3D, ...]) -> float:
+    return float(
+        sum(
+            np.linalg.norm(
+                np.array(
+                    [
+                        float(right.x) - float(left.x),
+                        float(right.y) - float(left.y),
+                        float(right.z) - float(left.z),
+                    ],
+                    dtype=float,
+                )
+            )
+            for left, right in zip(targets, targets[1:], strict=False)
+        )
+    )
 
 
 def _profile_zero_azimuth_turn_continuous(

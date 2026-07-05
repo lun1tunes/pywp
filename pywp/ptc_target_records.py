@@ -6,19 +6,25 @@ import pandas as pd
 
 from pywp.eclipse_welltrack import (
     WelltrackRecord,
-    welltrack_multi_horizontal_level_count,
     welltrack_points_to_target_pairs,
 )
 from pywp.pilot_wells import (
-    is_zbs_name,
+    is_zbs_record,
     is_pilot_record,
     parent_name_for_pilot,
     parent_name_for_zbs,
-    pilot_name_key_for_parent,
+    pilot_parent_key_for_record,
+    pilot_name_key_for_record,
     pilot_record_problem_text,
     well_name_key,
     zbs_target_points_to_pairs,
     zbs_multi_horizontal_level_count,
+)
+from pywp.welltrack_targets import (
+    record_is_ordinary_target_sequence,
+    record_multi_horizontal_level_count,
+    record_point_labels,
+    target_sequence_points_from_record,
 )
 
 __all__ = [
@@ -71,13 +77,15 @@ def records_overview_dataframe(
                 "Длина ГС, м": _record_t1_t3_length_m(record),
                 "Примечание": _record_note(
                     record,
-                    has_pilot=pilot_name_key_for_parent(record.name) in record_names,
+                    has_pilot=pilot_name_key_for_record(record) in record_names,
                 ),
                 "Статус": (
                     "✅"
                     if _record_overview_problem_text(
                         record,
-                        pilot=pilot_by_parent_key.get(well_name_key(record.name)),
+                        pilot=pilot_by_parent_key.get(
+                            pilot_parent_key_for_record(record)
+                        ),
                         wellhead_z_tolerance_m=wellhead_z_tolerance_m,
                     )
                     == "—"
@@ -85,7 +93,9 @@ def records_overview_dataframe(
                 ),
                 "Проблема": _record_overview_problem_text(
                     record,
-                    pilot=pilot_by_parent_key.get(well_name_key(record.name)),
+                    pilot=pilot_by_parent_key.get(
+                        pilot_parent_key_for_record(record)
+                    ),
                     wellhead_z_tolerance_m=wellhead_z_tolerance_m,
                 ),
             }
@@ -100,18 +110,20 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
 
     raw_rows: list[dict[str, object]] = []
     for record in records:
-        is_pilot = is_pilot_record(record)
-        is_zbs = is_zbs_name(record.name)
-        multi_level_count = _record_multi_horizontal_level_count(record)
+        labels = record_point_labels(record)
         for index, point in enumerate(record.points, start=1):
             raw_rows.append(
                 {
                     "Скважина": record.name,
-                    "Точка": _point_label(
-                        index,
-                        is_pilot=is_pilot,
-                        is_zbs=is_zbs,
-                        multi_level_count=multi_level_count,
+                    "Точка": (
+                        str(labels[index - 1])
+                        if index <= len(labels)
+                        else _point_label(
+                            index,
+                            is_pilot=is_pilot_record(record),
+                            is_zbs=is_zbs_record(record),
+                            multi_level_count=_record_multi_horizontal_level_count(record),
+                        )
                     ),
                     "X, м": float(point.x),
                     "Y, м": float(point.y),
@@ -122,13 +134,13 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
 
 
 def record_target_point_count(record: WelltrackRecord) -> int:
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         return int(len(tuple(record.points)))
     return int(max(len(tuple(record.points)) - 1, 0))
 
 
 def _record_t1_offset_m(record: WelltrackRecord) -> float | None:
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         return None
     points = tuple(record.points)
     if len(points) < 2:
@@ -146,7 +158,7 @@ def _record_t1_offset_m(record: WelltrackRecord) -> float | None:
 
 def _record_t1_t3_length_m(record: WelltrackRecord) -> float | None:
     points = tuple(record.points)
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         if (
             len(points) < 2
             or len(points) % 2 != 0
@@ -172,6 +184,17 @@ def _record_t1_t3_length_m(record: WelltrackRecord) -> float | None:
         return None
     if not all(_point_has_finite_xyz(point) for point in points[1:]):
         return None
+    sequence_points = target_sequence_points_from_record(record)
+    if len(sequence_points) >= 2:
+        return float(
+            sum(
+                math.dist(
+                    (float(left.x), float(left.y), float(left.z)),
+                    (float(right.x), float(right.y), float(right.z)),
+                )
+                for left, right in zip(sequence_points, sequence_points[1:], strict=False)
+            )
+        )
     try:
         _, target_pairs = welltrack_points_to_target_pairs(points)
     except ValueError:
@@ -198,7 +221,7 @@ def record_has_surface_like_point(
     *,
     wellhead_z_tolerance_m: float = DEFAULT_WELLHEAD_Z_TOLERANCE_M,
 ) -> bool:
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         return bool(tuple(record.points))
     return any(
         abs(float(point.z)) <= float(wellhead_z_tolerance_m)
@@ -211,7 +234,7 @@ def record_first_point_is_surface_like(
     *,
     wellhead_z_tolerance_m: float = DEFAULT_WELLHEAD_Z_TOLERANCE_M,
 ) -> bool:
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         return bool(tuple(record.points))
     points = tuple(record.points)
     if not points:
@@ -235,7 +258,7 @@ def record_import_problem_text(
     points = tuple(record.points)
     problems: list[str] = []
     target_count = record_target_point_count(record)
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         if not points:
             problems.append("Нет точек WELLTRACK.")
         else:
@@ -279,7 +302,11 @@ def record_import_problem_text(
             problems.append("Не хватает точек `t1` и `t3`.")
         else:
             problems.append("Не хватает одной из точек `t1/t3`.")
-    elif target_count > 2 and not is_pilot_record(record):
+    elif (
+        target_count > 2
+        and not is_pilot_record(record)
+        and not record_is_ordinary_target_sequence(record)
+    ):
         if target_count % 2 != 0:
             problems.append(
                 "Для многопластовой скважины после `S` ожидаются полные пары "
@@ -364,7 +391,7 @@ def _point_label(
 
 def _record_note(record: WelltrackRecord, *, has_pilot: bool) -> str:
     notes: list[str] = []
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         notes.append(
             f"Боковой ствол от факта: нужна скважина {parent_name_for_zbs(record.name)}"
         )
@@ -377,9 +404,9 @@ def _record_note(record: WelltrackRecord, *, has_pilot: bool) -> str:
 
 
 def _record_multi_horizontal_level_count(record: WelltrackRecord) -> int:
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         return zbs_multi_horizontal_level_count(tuple(record.points))
-    return welltrack_multi_horizontal_level_count(record.points)
+    return record_multi_horizontal_level_count(record)
 
 
 def record_horizontal_length_preprocess_skip_reason(

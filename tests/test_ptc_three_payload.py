@@ -127,8 +127,8 @@ def test_optimize_three_payload_preserves_zero_opacity() -> None:
     assert optimized["meshes"][0]["opacity"] == 0.0
 
 
-def test_optimize_three_payload_reserves_slots_for_reference_labels() -> None:
-    regular_labels = [
+def test_optimize_three_payload_limits_total_labels_even_with_many_well_labels() -> None:
+    well_labels = [
         {
             "text": f"WELL-{index}",
             "position": [float(index), 0.0, 0.0],
@@ -155,15 +155,110 @@ def test_optimize_three_payload_reserves_slots_for_reference_labels() -> None:
         "lines": [],
         "points": [],
         "meshes": [],
-        "labels": [*regular_labels, *reference_labels],
+        "labels": [*well_labels, *reference_labels],
         "legend": [],
     }
 
     optimized = ptc_three_payload.optimize_three_payload(payload)
 
     assert len(optimized["labels"]) == ptc_three_payload.WT_THREE_MAX_LABELS
-    label_texts = {str(item.get("text")) for item in optimized["labels"]}
-    assert {"FACT-1", "APP-1"}.issubset(label_texts)
+    assert sum(
+        1 for item in optimized["labels"] if item.get("role") == "reference_label"
+    ) == len(reference_labels)
+    assert sum(
+        1 for item in optimized["labels"] if item.get("role") == "well_label"
+    ) == (
+        ptc_three_payload.WT_THREE_MAX_LABELS - len(reference_labels)
+    )
+
+
+def test_optimize_three_payload_limits_only_auxiliary_labels() -> None:
+    payload = {
+        "lines": [],
+        "points": [],
+        "meshes": [],
+        "labels": [
+            {
+                "text": "WELL-A",
+                "position": [0.0, 0.0, 0.0],
+                "color": "#111111",
+                "role": "well_label",
+            },
+            *[
+                {
+                    "text": f"aux-{index}",
+                    "position": [float(index), 0.0, 0.0],
+                    "color": "#222222",
+                    "role": "pilot_point_label",
+                }
+                for index in range(ptc_three_payload.WT_THREE_MAX_LABELS + 10)
+            ],
+            {
+                "text": "FACT-1",
+                "position": [1000.0, 0.0, 0.0],
+                "color": "#374151",
+                "role": "reference_label",
+            },
+        ],
+        "legend": [],
+    }
+
+    optimized = ptc_three_payload.optimize_three_payload(payload)
+
+    assert len(optimized["labels"]) == ptc_three_payload.WT_THREE_MAX_LABELS
+    label_texts = [str(item.get("text")) for item in optimized["labels"]]
+    assert "WELL-A" in label_texts
+    assert "FACT-1" in label_texts
+    assert f"aux-{ptc_three_payload.WT_THREE_MAX_LABELS - 3}" in label_texts
+    assert f"aux-{ptc_three_payload.WT_THREE_MAX_LABELS - 2}" not in label_texts
+
+
+def test_optimize_three_payload_caps_reference_labels() -> None:
+    payload = {
+        "lines": [],
+        "points": [],
+        "meshes": [],
+        "labels": [
+            *[
+                {
+                    "text": f"WELL-{index}",
+                    "position": [float(index), 0.0, 0.0],
+                    "color": "#111111",
+                    "role": "well_label",
+                }
+                for index in range(5)
+            ],
+            *[
+                {
+                    "text": f"REF-{index}",
+                    "position": [1000.0 + float(index), 0.0, 0.0],
+                    "color": "#374151",
+                    "role": "reference_label",
+                }
+                for index in range(ptc_three_payload.WT_THREE_MAX_REFERENCE_LABELS + 8)
+            ],
+            *[
+                {
+                    "text": f"aux-{index}",
+                    "position": [2000.0 + float(index), 0.0, 0.0],
+                    "color": "#222222",
+                    "role": "pilot_point_label",
+                }
+                for index in range(50)
+            ],
+        ],
+        "legend": [],
+    }
+
+    optimized = ptc_three_payload.optimize_three_payload(payload)
+
+    assert len(optimized["labels"]) == ptc_three_payload.WT_THREE_MAX_LABELS
+    assert sum(
+        1 for item in optimized["labels"] if item.get("role") == "reference_label"
+    ) == ptc_three_payload.WT_THREE_MAX_REFERENCE_LABELS
+    assert sum(
+        1 for item in optimized["labels"] if item.get("role") == "well_label"
+    ) == 5
 
 
 def test_optimize_three_payload_keeps_named_wells_separate() -> None:

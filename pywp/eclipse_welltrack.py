@@ -4,7 +4,7 @@ import math
 import re
 from typing import Callable, Iterable, Literal, Mapping
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pywp.models import Point3D
 from pywp.pydantic_base import FrozenModel, coerce_model_like
 
@@ -26,6 +26,7 @@ _TABLE_POINT_ALIASES: dict[str, str] = {
     "end": "t3",
 }
 _TABLE_PILOT_POINT_RE = re.compile(r"^(?:pl|p)([1-9]\d*)$", flags=re.IGNORECASE)
+_TABLE_TARGET_SEQUENCE_POINT_RE = re.compile(r"^t([1-9]\d*)$", flags=re.IGNORECASE)
 _TABLE_MULTI_HORIZONTAL_POINT_RE = re.compile(
     r"^([1-9]\d*)_t([13])$",
     flags=re.IGNORECASE,
@@ -37,6 +38,7 @@ _TABLE_POINT_DISPLAY_LABELS: dict[str, str] = {
     "t3": "t3",
 }
 _TABLE_ZBS_SUFFIX = "_ZBS"
+_TABLE_ALT_BRANCH_SUFFIX = "_2"
 
 
 class WelltrackParseError(ValueError):
@@ -53,6 +55,7 @@ class WelltrackPoint(FrozenModel):
 class WelltrackRecord(FrozenModel):
     name: str
     points: tuple[WelltrackPoint, ...]
+    point_labels: tuple[str, ...] = ()
 
     @field_validator("points", mode="before")
     @classmethod
@@ -66,6 +69,27 @@ class WelltrackRecord(FrozenModel):
             coerce_model_like(point, WelltrackPoint)
             for point in tuple(value)
         )
+
+    @field_validator("point_labels", mode="before")
+    @classmethod
+    def _coerce_point_labels(
+        cls,
+        value: object,
+    ) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        labels = tuple(str(item).strip() for item in tuple(value))
+        if any(not label for label in labels):
+            raise ValueError("point_labels entries must be non-empty strings.")
+        return labels
+
+    @model_validator(mode="after")
+    def _validate_point_labels(self) -> "WelltrackRecord":
+        if self.point_labels and len(self.point_labels) != len(self.points):
+            raise ValueError(
+                "point_labels length must match the number of points when provided."
+            )
+        return self
 
 
 def decode_welltrack_bytes(
@@ -220,19 +244,57 @@ def parse_welltrack_points_table(
                 points_by_name,
                 well_name=well_name,
             )
-            ordered_points = tuple(points_by_name[name] for name in ordered_names)
+            ordered_points = _ordered_table_points(points_by_name, ordered_names)
             _validate_record_md(points=list(ordered_points), well_name=well_name)
-            records.append(WelltrackRecord(name=well_name, points=ordered_points))
+            records.append(
+                WelltrackRecord(
+                    name=well_name,
+                    points=ordered_points,
+                    point_labels=tuple(
+                        _table_point_display_name(name) for name in ordered_names
+                    ),
+                )
+            )
             continue
 
-        if _is_table_zbs_well_name(well_name):
+        if _is_table_zbs_well_name(well_name) and (
+            not _is_table_alt_branch_well_name(well_name)
+            or "wellhead" not in points_by_name
+        ):
             ordered_names = _ordered_table_zbs_point_names(
                 points_by_name,
                 well_name=well_name,
             )
-            ordered_points = tuple(points_by_name[name] for name in ordered_names)
+            ordered_points = _ordered_table_points(points_by_name, ordered_names)
             _validate_record_md(points=list(ordered_points), well_name=well_name)
-            records.append(WelltrackRecord(name=well_name, points=ordered_points))
+            records.append(
+                WelltrackRecord(
+                    name=well_name,
+                    points=ordered_points,
+                    point_labels=tuple(
+                        _table_point_display_name(name) for name in ordered_names
+                    ),
+                )
+            )
+            continue
+
+        target_sequence_names = _ordered_table_target_sequence_point_names(
+            points_by_name,
+            well_name=well_name,
+        )
+        if target_sequence_names is not None:
+            ordered_points = _ordered_table_points(points_by_name, target_sequence_names)
+            _validate_record_md(points=list(ordered_points), well_name=well_name)
+            records.append(
+                WelltrackRecord(
+                    name=well_name,
+                    points=ordered_points,
+                    point_labels=tuple(
+                        _table_point_display_name(name)
+                        for name in target_sequence_names
+                    ),
+                )
+            )
             continue
 
         if _has_multi_horizontal_table_points(points_by_name):
@@ -240,9 +302,17 @@ def parse_welltrack_points_table(
                 points_by_name,
                 well_name=well_name,
             )
-            ordered_points = tuple(points_by_name[name] for name in ordered_names)
+            ordered_points = _ordered_table_points(points_by_name, ordered_names)
             _validate_record_md(points=list(ordered_points), well_name=well_name)
-            records.append(WelltrackRecord(name=well_name, points=ordered_points))
+            records.append(
+                WelltrackRecord(
+                    name=well_name,
+                    points=ordered_points,
+                    point_labels=tuple(
+                        _table_point_display_name(name) for name in ordered_names
+                    ),
+                )
+            )
             continue
 
         missing = [name for name in _TABLE_POINT_ORDER if name not in points_by_name]
@@ -252,11 +322,34 @@ def parse_welltrack_points_table(
                 f"'{well_name}' отсутствуют точки: "
                 f"{', '.join(_table_point_display_name(name) for name in missing)}."
             )
-        ordered_points = tuple(points_by_name[name] for name in _TABLE_POINT_ORDER)
+        ordered_points = _ordered_table_points(points_by_name, _TABLE_POINT_ORDER)
         _validate_record_md(points=list(ordered_points), well_name=well_name)
-        records.append(WelltrackRecord(name=well_name, points=ordered_points))
+        records.append(
+            WelltrackRecord(
+                name=well_name,
+                points=ordered_points,
+                point_labels=tuple(
+                    _table_point_display_name(name) for name in _TABLE_POINT_ORDER
+                ),
+            )
+        )
 
     return records
+
+
+def _ordered_table_points(
+    points_by_name: Mapping[str, WelltrackPoint],
+    ordered_names: Iterable[str],
+) -> tuple[WelltrackPoint, ...]:
+    return tuple(
+        WelltrackPoint(
+            x=points_by_name[name].x,
+            y=points_by_name[name].y,
+            z=points_by_name[name].z,
+            md=float(points_by_name[name].md),
+        )
+        for name in tuple(str(name) for name in ordered_names)
+    )
 
 
 def welltrack_points_to_targets(
@@ -421,6 +514,9 @@ def _normalize_table_point_name(
     point_name = _TABLE_POINT_ALIASES.get(normalized)
     if point_name is not None:
         return point_name
+    target_sequence_match = _TABLE_TARGET_SEQUENCE_POINT_RE.match(normalized)
+    if target_sequence_match is not None:
+        return f"t{int(target_sequence_match.group(1))}"
     multi_match = _TABLE_MULTI_HORIZONTAL_POINT_RE.match(normalized)
     if multi_match is not None:
         return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
@@ -428,12 +524,13 @@ def _normalize_table_point_name(
         raise WelltrackParseError(
             "Табличный WELLTRACK: unsupported Point="
             f"{value!r} в строке {row_no}. "
-            "Ожидается S, t1 или t3; для многопластовой скважины используйте "
-            "пары 1_t1, 1_t3, 2_t1, 2_t3, ... "
+            "Ожидается S, t1, t2, t3, ...; для многопластовой скважины "
+            "используйте пары 1_t1, 1_t3, 2_t1, 2_t3, ... "
             "Для пилота используйте имя wellname_PL и точки S, PL1, PL2, ... "
             "Для бокового ствола от факта используйте имя fact_well_name_ZBS "
-            "и точки t1, t3 без S; для многопластового ZBS используйте "
-            "1_t1, 1_t3, 2_t1, 2_t3, ... без S."
+            "или fact_well_name_2 и точки t1, t3 без S; для многопластового "
+            "бокового ствола используйте 1_t1, 1_t3, 2_t1, 2_t3, ... без S. "
+            "Если wellname_2 задан как ствол от пилота, добавьте обычную точку S."
         )
 
 
@@ -441,6 +538,9 @@ def _table_point_display_name(point_name: str) -> str:
     pilot_match = _TABLE_PILOT_POINT_RE.match(str(point_name))
     if pilot_match is not None:
         return f"PL{int(pilot_match.group(1))}"
+    target_sequence_match = _TABLE_TARGET_SEQUENCE_POINT_RE.match(str(point_name))
+    if target_sequence_match is not None:
+        return f"t{int(target_sequence_match.group(1))}"
     multi_match = _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name))
     if multi_match is not None:
         return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
@@ -451,6 +551,9 @@ def _table_point_md_index(point_name: str) -> float:
     pilot_match = _TABLE_PILOT_POINT_RE.match(str(point_name))
     if pilot_match is not None:
         return float(int(pilot_match.group(1)))
+    target_sequence_match = _TABLE_TARGET_SEQUENCE_POINT_RE.match(str(point_name))
+    if target_sequence_match is not None:
+        return float(int(target_sequence_match.group(1)))
     multi_match = _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name))
     if multi_match is not None:
         level = int(multi_match.group(1))
@@ -464,7 +567,12 @@ def _is_table_pilot_well_name(well_name: object) -> bool:
 
 
 def _is_table_zbs_well_name(well_name: object) -> bool:
-    return str(well_name).strip().upper().endswith(_TABLE_ZBS_SUFFIX)
+    label = str(well_name).strip().upper()
+    return label.endswith(_TABLE_ZBS_SUFFIX) or label.endswith(_TABLE_ALT_BRANCH_SUFFIX)
+
+
+def _is_table_alt_branch_well_name(well_name: object) -> bool:
+    return str(well_name).strip().upper().endswith(_TABLE_ALT_BRANCH_SUFFIX)
 
 
 def _ordered_table_pilot_point_names(
@@ -539,7 +647,8 @@ def _ordered_table_zbs_multi_horizontal_point_names(
     forbidden = sorted(
         _table_point_display_name(point_name)
         for point_name in points_by_name
-        if point_name in {"wellhead", "t1", "t3"}
+        if point_name == "wellhead"
+        or _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name)) is None
     )
     if forbidden:
         raise WelltrackParseError(
@@ -585,6 +694,55 @@ def _has_multi_horizontal_table_points(
     )
 
 
+def _ordered_table_target_sequence_point_names(
+    points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+) -> tuple[str, ...] | None:
+    if "wellhead" not in points_by_name:
+        return None
+    target_indices = sorted(
+        int(match.group(1))
+        for point_name in points_by_name
+        if (match := _TABLE_TARGET_SEQUENCE_POINT_RE.match(str(point_name))) is not None
+    )
+    if not target_indices:
+        return None
+    if _has_multi_horizontal_table_points(points_by_name):
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для скважины "
+            f"'{well_name}' нельзя смешивать последовательность t1/t2/t3/... "
+            "c многопластовыми парами N_t1/N_t3."
+        )
+    if target_indices == [1, 3] and len(points_by_name) == 3:
+        return None
+    if len(target_indices) < 2:
+        return None
+    max_index = int(target_indices[-1])
+    expected_indices = list(range(1, max_index + 1))
+    missing = [index for index in expected_indices if index not in target_indices]
+    if missing:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для скважины "
+            f"'{well_name}' отсутствуют точки последовательности: "
+            f"{', '.join(f't{index}' for index in missing)}."
+        )
+    allowed = {"wellhead", *(f"t{index}" for index in expected_indices)}
+    extra = sorted(
+        _table_point_display_name(point_name)
+        for point_name in points_by_name
+        if point_name not in allowed
+    )
+    if extra:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для скважины "
+            f"'{well_name}' используйте либо S/t1/t3, либо полную последовательность "
+            "S/t1/t2/t3/... без посторонних точек. "
+            f"Лишние точки: {', '.join(extra)}."
+        )
+    return ("wellhead", *(f"t{index}" for index in expected_indices))
+
+
 def _ordered_table_multi_horizontal_point_names(
     points_by_name: Mapping[str, WelltrackPoint],
     *,
@@ -595,16 +753,17 @@ def _ordered_table_multi_horizontal_point_names(
             "Табличный WELLTRACK: для скважины "
             f"'{well_name}' отсутствуют точки: S."
         )
-    legacy_points = sorted(
-        point_name
+    forbidden = sorted(
+        _table_point_display_name(point_name)
         for point_name in points_by_name
-        if point_name in {"t1", "t3"}
+        if point_name != "wellhead"
+        and _TABLE_MULTI_HORIZONTAL_POINT_RE.match(str(point_name)) is None
     )
-    if legacy_points:
+    if forbidden:
         raise WelltrackParseError(
             "Табличный WELLTRACK: для многопластовой скважины "
             f"'{well_name}' используйте только пары 1_t1/1_t3, 2_t1/2_t3, ... "
-            f"без обычных точек {', '.join(legacy_points)}."
+            f"без других точек. Лишние точки: {', '.join(forbidden)}."
         )
     levels = sorted(
         int(match.group(1))

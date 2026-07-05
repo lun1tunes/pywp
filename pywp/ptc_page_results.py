@@ -25,7 +25,13 @@ from pywp.coordinate_integration import (
     transform_stations_to_crs,
 )
 from pywp.models import Point3D
-from pywp.pilot_wells import is_pilot_name, pilot_name_key_for_parent, well_name_key
+from pywp.pilot_wells import (
+    is_pilot_name,
+    is_zbs_record,
+    pilot_name_key_for_parent,
+    pilot_name_key_for_record,
+    well_name_key,
+)
 from pywp.ui_well_result import (
     SingleWellResultView,
     render_key_metrics,
@@ -373,8 +379,11 @@ def _pilot_success_for_parent(
     parent_success: object,
     successes: list[object],
 ) -> object | None:
+    summary = getattr(parent_success, "summary", {}) or {}
+    if str(summary.get("trajectory_type", "")).strip().upper() == "FACT_SIDETRACK":
+        return None
     parent_name = getattr(parent_success, "name", "")
-    expected_names = {pilot_name_key_for_parent(parent_name)}
+    expected_names = {pilot_name_key_for_record(parent_success)}
     summary = getattr(parent_success, "summary", {}) or {}
     pilot_name = str(
         summary.get("pilot_well_name", "") if hasattr(summary, "get") else ""
@@ -398,7 +407,21 @@ def _pilot_record_for_parent(
     pilot_name: object | None,
     records: list[object],
 ) -> object | None:
-    expected_names = {pilot_name_key_for_parent(parent_name)}
+    parent_record = next(
+        (
+            record
+            for record in records
+            if well_name_key(getattr(record, "name", "")) == well_name_key(parent_name)
+        ),
+        None,
+    )
+    if parent_record is not None and is_zbs_record(parent_record):
+        return None
+    expected_names = {
+        pilot_name_key_for_record(parent_record)
+        if parent_record is not None
+        else pilot_name_key_for_parent(parent_name)
+    }
     if pilot_name:
         expected_names.add(well_name_key(pilot_name))
     return next(

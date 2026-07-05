@@ -7,11 +7,14 @@ from typing import Iterable
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
-    welltrack_multi_horizontal_level_count,
 )
 from pywp.models import Point3D
-from pywp.pilot_wells import is_zbs_name, parent_name_for_zbs, well_name_key
+from pywp.pilot_wells import is_zbs_record, parent_name_for_zbs, well_name_key
 from pywp.pydantic_base import FrozenModel
+from pywp.welltrack_targets import (
+    record_is_ordinary_target_sequence,
+    record_multi_horizontal_level_count,
+)
 
 
 class T1T3OrderIssue(FrozenModel):
@@ -38,7 +41,7 @@ def detect_t1_t3_order_issues(
 
     for record in records:
         points = tuple(record.points)
-        is_zbs = is_zbs_name(record.name)
+        is_zbs = is_zbs_record(record)
         if is_zbs:
             if len(points) < 2 or len(points) % 2 != 0:
                 continue
@@ -65,7 +68,10 @@ def detect_t1_t3_order_issues(
         else:
             if len(points) < 3:
                 continue
-            if welltrack_multi_horizontal_level_count(points) > 1:
+            if (
+                record_multi_horizontal_level_count(record) > 1
+                or record_is_ordinary_target_sequence(record)
+            ):
                 continue
             surface = points[0]
             t1 = points[1]
@@ -113,7 +119,7 @@ def swap_t1_t3_for_wells(
     for record in records:
         points = tuple(record.points)
         name = str(record.name)
-        if is_zbs_name(record.name):
+        if is_zbs_record(record):
             if name in well_names and len(points) >= 2 and len(points) % 2 == 0:
                 anchor = anchor_by_key.get(well_name_key(name))
                 if anchor is None:
@@ -125,14 +131,23 @@ def swap_t1_t3_for_wells(
                     anchor=anchor,
                     min_delta_m=min_delta,
                 )
-                updated.append(WelltrackRecord(name=name, points=updated_points))
+                updated.append(
+                    WelltrackRecord(
+                        name=name,
+                        points=updated_points,
+                        point_labels=getattr(record, "point_labels", ()),
+                    )
+                )
                 continue
             updated.append(record)
             continue
         if len(points) < 3 or name not in well_names:
             updated.append(record)
             continue
-        if welltrack_multi_horizontal_level_count(points) > 1:
+        if (
+            record_multi_horizontal_level_count(record) > 1
+            or record_is_ordinary_target_sequence(record)
+        ):
             updated.append(record)
             continue
 
@@ -150,7 +165,13 @@ def swap_t1_t3_for_wells(
             md=float(p2.md),
         )
         updated_points = (p0, swapped_t1, swapped_t3, *points[3:])
-        updated.append(WelltrackRecord(name=name, points=updated_points))
+        updated.append(
+            WelltrackRecord(
+                name=name,
+                points=updated_points,
+                point_labels=getattr(record, "point_labels", ()),
+            )
+        )
 
     return updated
 

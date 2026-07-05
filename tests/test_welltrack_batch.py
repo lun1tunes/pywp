@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from pywp import ptc_pad_state
 from pywp import ptc_edit_targets
+from pywp import ptc_target_import_dev
 from pywp.anticollision_optimization import (
     AntiCollisionClearanceEvaluation,
     AntiCollisionOptimizationContext,
@@ -92,6 +93,18 @@ def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
     }
     base.update(overrides)
     return TrajectoryConfig(**base)
+
+
+def _inline_dev_text(
+    well_name: str,
+    rows: list[tuple[float, ...]],
+) -> str:
+    return "\n".join(
+        [
+            f"# WELL NAME: {well_name}",
+            *(" ".join(str(value) for value in row) for row in rows),
+        ]
+    )
 
 
 def _records_with_import_auto_pad_layout(
@@ -3671,6 +3684,91 @@ def test_parent_selection_calculates_pilot_before_sidetrack() -> None:
     assert by_name["WELL-04"].summary["trajectory_type"] == "PILOT_SIDETRACK"
     assert by_name["WELL-04"].summary["pilot_well_name"] == "WELL-04_PL"
     assert by_name["WELL-04"].md_t1_m > by_name["WELL-04_PL"].md_t1_m
+
+
+def test_pilot_dev_import_enables_parent_pilot_sidetrack() -> None:
+    parsed = ptc_target_import_dev.parse_dev_target_payloads(
+        (
+            (
+                "WELL-04.dev",
+                _inline_dev_text(
+                    "WELL-04",
+                    [
+                        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                        (
+                            2400.0,
+                            800.0,
+                            0.0,
+                            -2200.0,
+                            2200.0,
+                            800.0,
+                            0.0,
+                            90.0,
+                            72.0,
+                            2.4,
+                            90.0,
+                        ),
+                        (
+                            3500.0,
+                            1800.0,
+                            0.0,
+                            -2200.0,
+                            2200.0,
+                            1800.0,
+                            0.0,
+                            90.0,
+                            88.0,
+                            1.8,
+                            90.0,
+                        ),
+                    ],
+                ).encode("utf-8"),
+            ),
+            (
+                "WELL-04_PL.dev",
+                _inline_dev_text(
+                    "WELL-04_PL",
+                    [
+                        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                        (800.0, 0.0, 0.0, -800.0, 800.0, 0.0, 0.0, 0.0, 15.0, 1.5, 0.0),
+                        (
+                            1400.0,
+                            200.0,
+                            0.0,
+                            -1300.0,
+                            1300.0,
+                            200.0,
+                            0.0,
+                            90.0,
+                            45.0,
+                            2.4,
+                            90.0,
+                        ),
+                    ],
+                ).encode("utf-8"),
+            ),
+        )
+    )
+    records = [item.record for item in parsed]
+    pilot_record = next(
+        record for record in records if str(record.name) == "WELL-04_PL"
+    )
+
+    rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    assert pilot_record.point_labels == ("S", "PL1", "PL2")
+    assert [row["Скважина"] for row in rows] == ["WELL-04_PL", "WELL-04"]
+    by_name = {success.name: success for success in successes}
+    assert by_name["WELL-04"].summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert by_name["WELL-04"].summary["pilot_well_name"] == "WELL-04_PL"
 
 
 def test_batch_planner_applies_manual_sidetrack_window_override() -> None:

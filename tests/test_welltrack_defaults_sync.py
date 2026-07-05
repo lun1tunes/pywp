@@ -82,6 +82,9 @@ def _open_calc_params_panel(at: AppTest) -> None:
 
 
 def _import_targets(at: AppTest) -> None:
+    at.session_state["wt_source_format"] = "WELLTRACK"
+    at.session_state["wt_source_mode"] = "Файл по пути"
+    at.run()
     import_buttons = [button for button in at.button if button.label == "Импорт целей"]
     assert import_buttons, "Кнопка импорта целей не найдена."
     import_buttons[0].click()

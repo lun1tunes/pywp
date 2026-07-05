@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
@@ -19,6 +20,7 @@ from pywp.models import (
     OPTIMIZATION_MINIMIZE_MD,
     TURN_SOLVER_DE_HYBRID,
     TURN_SOLVER_LEAST_SQUARES,
+    PlannerResult,
     Point3D,
     TrajectoryConfig,
 )
@@ -61,6 +63,186 @@ def _classic_j_reference_targets() -> tuple[Point3D, Point3D, Point3D]:
     t1 = Point3D(0.0, build_lateral_m, t1_tvd_m)
     t3 = Point3D(0.0, build_lateral_m + horizontal_step_m, t3_tvd_m)
     return surface, t1, t3
+
+
+def test_plan_multi_target_delegates_to_plan_for_two_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planner = TrajectoryPlanner()
+    surface = Point3D(0.0, 0.0, 0.0)
+    targets = (
+        Point3D(600.0, 800.0, 2400.0),
+        Point3D(1500.0, 2000.0, 2500.0),
+    )
+    config = _fast_config()
+    expected = PlannerResult(
+        stations=pd.DataFrame({"MD_m": [0.0]}),
+        summary={"trajectory_type": "delegated"},
+        azimuth_deg=12.0,
+        md_t1_m=345.0,
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_plan(
+        self: TrajectoryPlanner,
+        *,
+        surface: Point3D,
+        t1: Point3D,
+        t3: Point3D,
+        config: TrajectoryConfig,
+        progress_callback: object = None,
+        optimization_context: object = None,
+    ) -> PlannerResult:
+        captured["surface"] = surface
+        captured["t1"] = t1
+        captured["t3"] = t3
+        captured["config"] = config
+        captured["optimization_context"] = optimization_context
+        return expected
+
+    monkeypatch.setattr(TrajectoryPlanner, "plan", _fake_plan)
+
+    result = planner.plan_multi_target(
+        surface=surface,
+        targets=targets,
+        config=config,
+    )
+
+    assert result is expected
+    assert captured["surface"] == surface
+    assert captured["t1"] == targets[0]
+    assert captured["t3"] == targets[1]
+    assert captured["config"] == config
+
+
+def test_plan_multi_target_extends_base_plan_to_final_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    planner = TrajectoryPlanner()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(100.0, 0.0, 200.0)
+    t2 = Point3D(200.0, 0.0, 300.0)
+    t3 = Point3D(260.0, 50.0, 330.0)
+    config = _fast_config(max_total_md_postcheck_m=5000.0)
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0, 250.0],
+                "INC_deg": [0.0, 70.0, 86.0],
+                "AZI_deg": [0.0, 0.0, 0.0],
+                "X_m": [surface.x, t1.x, t2.x],
+                "Y_m": [surface.y, t1.y, t2.y],
+                "Z_m": [surface.z, t1.z, t2.z],
+                "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+                "DLS_deg_per_30m": [0.0, 1.0, 1.5],
+            }
+        ),
+        summary={
+            "trajectory_type": "Unified J Profile + Build + Azimuth Turn",
+            "horizontal_length_m": 150.0,
+            "max_total_md_postcheck_m": 5000.0,
+            "md_total_m": 250.0,
+            "md_postcheck_excess_m": 0.0,
+            "md_postcheck_exceeded": "no",
+        },
+        azimuth_deg=0.0,
+        md_t1_m=100.0,
+    )
+    validation_call: dict[str, object] = {}
+
+    def _fake_plan(
+        self: TrajectoryPlanner,
+        *,
+        surface: Point3D,
+        t1: Point3D,
+        t3: Point3D,
+        config: TrajectoryConfig,
+        progress_callback: object = None,
+        optimization_context: object = None,
+    ) -> PlannerResult:
+        return base_result
+
+    def _fake_smooth_transition_rows(**kwargs: object) -> list[dict[str, object]]:
+        assert kwargs["segment_name"] == "HORIZONTAL_BUILD1"
+        return [
+            {
+                "MD_m": 340.0,
+                "INC_deg": 87.0,
+                "AZI_deg": 10.0,
+                "X_m": 230.0,
+                "Y_m": 20.0,
+                "Z_m": 315.0,
+                "segment": "HORIZONTAL_BUILD1",
+                "DLS_deg_per_30m": 1.8,
+            },
+            {
+                "MD_m": 430.0,
+                "INC_deg": 88.0,
+                "AZI_deg": 15.0,
+                "X_m": t3.x,
+                "Y_m": t3.y,
+                "Z_m": t3.z,
+                "segment": "HORIZONTAL_BUILD1",
+                "DLS_deg_per_30m": 2.1,
+            },
+        ]
+
+    def _fake_add_dls(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        if "DLS_deg_per_30m" not in out.columns:
+            out["DLS_deg_per_30m"] = 0.0
+        out["DLS_deg_per_30m"] = out["DLS_deg_per_30m"].fillna(0.0)
+        return out
+
+    def _fake_validate_extended_stations(
+        *,
+        stations: pd.DataFrame,
+        final_target: Point3D,
+        config: TrajectoryConfig,
+        post_t1_start_md_m: float,
+    ) -> None:
+        validation_call["stations"] = stations.copy()
+        validation_call["final_target"] = final_target
+        validation_call["post_t1_start_md_m"] = post_t1_start_md_m
+
+    monkeypatch.setattr(TrajectoryPlanner, "plan", _fake_plan)
+    monkeypatch.setattr(
+        planner_module,
+        "_smooth_transition_rows",
+        _fake_smooth_transition_rows,
+    )
+    monkeypatch.setattr(planner_module, "add_dls", _fake_add_dls)
+    monkeypatch.setattr(
+        planner_module,
+        "_validate_extended_stations",
+        _fake_validate_extended_stations,
+    )
+
+    result = planner.plan_multi_target(
+        surface=surface,
+        targets=(t1, t2, t3),
+        config=config,
+    )
+
+    assert len(result.stations) == 5
+    assert str(result.summary["trajectory_type"]) == "Target sequence"
+    assert str(result.summary["target_sequence"]) == "yes"
+    assert int(result.summary["target_sequence_point_count"]) == 3
+    assert float(result.summary["t3_exact_x_m"]) == pytest.approx(t3.x)
+    assert float(result.summary["t3_exact_y_m"]) == pytest.approx(t3.y)
+    assert float(result.summary["t3_exact_z_m"]) == pytest.approx(t3.z)
+    assert float(result.summary["distance_t3_m"]) == pytest.approx(0.0)
+    assert float(result.summary["max_dls_total_deg_per_30m"]) == pytest.approx(2.1)
+    assert float(result.summary["md_total_m"]) == pytest.approx(430.0)
+    assert result.azimuth_deg == pytest.approx(15.0)
+    assert validation_call["final_target"] == t3
+    assert float(validation_call["post_t1_start_md_m"]) == pytest.approx(100.0)
+    assert float(result.summary["horizontal_length_m"]) == pytest.approx(
+        np.linalg.norm(np.array([t2.x - t1.x, t2.y - t1.y, t2.z - t1.z]))
+        + np.linalg.norm(np.array([t3.x - t2.x, t3.y - t2.y, t3.z - t2.z]))
+    )
 
 
 def test_same_direction_reference_case_solves_with_minimum_kop() -> None:

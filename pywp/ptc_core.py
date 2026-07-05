@@ -109,22 +109,26 @@ from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
     parse_welltrack_text,
-    welltrack_multi_horizontal_level_count,
     welltrack_points_to_target_pairs,
 )
 from pywp.models import Point3D
 from pywp.models import J_PROFILE_POLICY_PREFER
 from pywp.pilot_wells import (
     is_pilot_name,
-    is_zbs_name,
+    is_zbs_record,
     parent_name_for_zbs,
     parent_name_for_pilot,
-    pilot_name_key_for_parent,
+    pilot_parent_key_for_record,
+    pilot_name_key_for_record,
     sync_pilot_surfaces_to_parents,
     visible_well_records,
     well_name_key,
-    zbs_multi_horizontal_level_count,
     zbs_target_points_to_pairs,
+)
+from pywp.welltrack_targets import (
+    ordinary_record_target_layout,
+    record_multi_horizontal_level_count,
+    record_point_labels,
 )
 from pywp.planner_config import optimization_display_label
 from pywp.plot_axes import (
@@ -183,7 +187,6 @@ from pywp.uncertainty import (
     uncertainty_ribbon_polygon,
 )
 from pywp.well_pad import (
-    PAD_WELL_AUTO_ORDER_PROJECTION,
     PAD_SURFACE_ANCHOR_CENTER,
     PAD_SURFACE_ANCHOR_FIRST,
     PadLayoutPlan,
@@ -428,14 +431,28 @@ def _well_color_map(records: list[WelltrackRecord]) -> dict[str, str]:
         color_map[name] = _well_color(fallback_index)
         fallback_index += 1
     name_by_key = {well_name_key(record.name): str(record.name) for record in records}
+    parent_name_by_family_key: dict[str, str] = {}
+    for record in records:
+        if is_pilot_name(record.name):
+            continue
+        parent_name_by_family_key.setdefault(
+            pilot_parent_key_for_record(record),
+            str(record.name),
+        )
     for record in records:
         name = str(record.name)
         if is_pilot_name(name):
-            parent_name = name_by_key.get(well_name_key(parent_name_for_pilot(name)))
+            parent_name = parent_name_by_family_key.get(
+                pilot_parent_key_for_record(name)
+            )
             if parent_name is not None and parent_name in color_map:
                 color_map[name] = color_map[parent_name]
             continue
-        pilot_name = name_by_key.get(pilot_name_key_for_parent(name))
+        pilot_name = (
+            None
+            if is_zbs_record(record)
+            else name_by_key.get(pilot_name_key_for_record(record))
+        )
         if pilot_name is not None:
             color_map[pilot_name] = color_map[name]
     return color_map
@@ -484,7 +501,7 @@ def _target_only_well_from_record(
     )
     if not target_points:
         return None
-    if is_zbs_name(record.name):
+    if is_zbs_record(record):
         surface = target_points[0]
         try:
             target_pairs = zbs_target_points_to_pairs(tuple(record.points))
@@ -498,10 +515,15 @@ def _target_only_well_from_record(
             t1 = t3 = target_points[0]
     else:
         try:
-            surface, target_pairs = welltrack_points_to_target_pairs(record.points)
+            layout = ordinary_record_target_layout(record)
         except ValueError:
             surface = target_points[0]
             target_pairs = ()
+        else:
+            surface = layout.surface
+            target_pairs = layout.target_pairs
+            t1 = layout.t1
+            t3 = layout.final_target
         if target_pairs:
             t1, t3 = target_pairs[0][0], target_pairs[-1][1]
         elif len(target_points) >= 2:
@@ -516,7 +538,7 @@ def _target_only_well_from_record(
         t3=t3,
         target_pairs=target_pairs,
         target_points=target_points,
-        target_labels=_record_target_point_labels(record),
+        target_labels=record_point_labels(record),
         status=str(status).strip(),
         problem=str(problem).strip(),
     )
@@ -567,29 +589,7 @@ def _overview_target_only_wells(
 
 
 def _record_target_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
-    point_count = len(tuple(record.points))
-    if point_count <= 0:
-        return ()
-    if is_pilot_name(record.name):
-        return ("S", *(f"PL{index}" for index in range(1, point_count)))
-    if is_zbs_name(record.name):
-        if point_count == 2:
-            return ("t1", "t3")
-        if point_count >= 4 and point_count % 2 == 0:
-            labels: list[str] = []
-            for level_index in range(1, point_count // 2 + 1):
-                labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
-            return tuple(labels)
-        return tuple(f"P{index + 1}" for index in range(point_count))
-    target_count = point_count - 1
-    if target_count >= 4 and target_count % 2 == 0:
-        labels = ["S"]
-        for level_index in range(1, target_count // 2 + 1):
-            labels.extend([f"{level_index}_t1", f"{level_index}_t3"])
-        return tuple(labels)
-    if point_count == 3:
-        return ("S", "t1", "t3")
-    return ("S", *(f"P{index}" for index in range(1, point_count)))
+    return record_point_labels(record)
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -3664,6 +3664,66 @@ def _sync_manual_well_override_selection(
     return current
 
 
+def _manual_well_names_for_profile_ids(
+    *,
+    profile_ids: Iterable[str],
+    available_names: Iterable[str] | None = None,
+) -> list[str]:
+    normalized_profile_ids = {
+        str(profile_id).strip()
+        for profile_id in profile_ids
+        if str(profile_id).strip()
+    }
+    if not normalized_profile_ids:
+        return []
+    normalized_available_names = (
+        _unique_well_names(available_names) if available_names is not None else None
+    )
+    assignments = _manual_well_calc_profile_assignments(
+        available_names=normalized_available_names
+    )
+    ordered_names = (
+        normalized_available_names
+        if normalized_available_names is not None
+        else _unique_well_names(assignments.keys())
+    )
+    return [
+        str(well_name)
+        for well_name in ordered_names
+        if assignments.get(str(well_name)) in normalized_profile_ids
+    ]
+
+
+def _queue_batch_selection_additions(
+    *,
+    well_names: Iterable[str],
+    available_names: Iterable[str],
+) -> list[str]:
+    normalized_available_names = _unique_well_names(available_names)
+    if not normalized_available_names:
+        return []
+    current_source = st.session_state.get("wt_pending_selected_names")
+    if current_source is None:
+        current_source = st.session_state.get("wt_selected_names", [])
+    current_selection = _coerce_manual_well_override_selection(
+        current_source,
+        available_names=normalized_available_names,
+    )
+    additions = _coerce_manual_well_override_selection(
+        well_names,
+        available_names=normalized_available_names,
+    )
+    if not additions:
+        return current_selection
+    merged_selection = _coerce_manual_well_override_selection(
+        [*current_selection, *additions],
+        available_names=normalized_available_names,
+    )
+    if merged_selection != current_selection:
+        st.session_state["wt_pending_selected_names"] = list(merged_selection)
+    return merged_selection
+
+
 def _set_manual_well_override_editor_from_config(
     config: TrajectoryConfig,
 ) -> None:
@@ -3763,11 +3823,113 @@ def _manual_well_override_diff_values(
 ) -> dict[str, float | int | str | bool]:
     base_values = calc_param_state_values_from_config(base_config)
     override_values = calc_param_state_values_from_config(override_config)
-    return {
-        suffix: override_values[suffix]
-        for suffix in base_values
-        if override_values[suffix] != base_values[suffix]
+    return _manual_well_override_delta_values(
+        reference_values=base_values,
+        target_values=override_values,
+    )
+
+
+def _manual_well_override_changed_values(
+    *,
+    current_config: TrajectoryConfig,
+    editor_config: TrajectoryConfig,
+) -> dict[str, float | int | str | bool]:
+    current_values = calc_param_state_values_from_config(current_config)
+    editor_values = calc_param_state_values_from_config(editor_config)
+    return _manual_well_override_delta_values(
+        reference_values=current_values,
+        target_values=editor_values,
+    )
+
+
+def _manual_well_override_delta_values(
+    *,
+    reference_values: Mapping[str, float | int | str | bool],
+    target_values: Mapping[str, float | int | str | bool],
+) -> dict[str, float | int | str | bool]:
+    delta_values: dict[str, float | int | str | bool] = {}
+    paired_optional_fields = (
+        ("dls_build2_enabled", "dls_build2_max"),
+        ("min_hold_inc_enabled", "min_hold_inc"),
+    )
+    optional_field_suffixes = {
+        suffix
+        for enabled_suffix, value_suffix in paired_optional_fields
+        for suffix in (enabled_suffix, value_suffix)
     }
+    for suffix, target_value in target_values.items():
+        if suffix in optional_field_suffixes:
+            continue
+        if target_value != reference_values.get(suffix):
+            delta_values[suffix] = target_value
+    for enabled_suffix, value_suffix in paired_optional_fields:
+        reference_enabled = bool(reference_values.get(enabled_suffix, False))
+        target_enabled = bool(target_values.get(enabled_suffix, False))
+        if reference_enabled != target_enabled:
+            delta_values[enabled_suffix] = target_enabled
+            if target_enabled:
+                delta_values[value_suffix] = target_values[value_suffix]
+            continue
+        if target_enabled and target_values.get(value_suffix) != reference_values.get(
+            value_suffix
+        ):
+            delta_values[value_suffix] = target_values[value_suffix]
+    return delta_values
+
+
+def _manual_well_override_changed_field_count_from_values(
+    *,
+    reference_values: Mapping[str, float | int | str | bool],
+    target_values: Mapping[str, float | int | str | bool],
+) -> int:
+    changed_fields: set[str] = set()
+    paired_optional_fields = (
+        ("dls_build2_enabled", "dls_build2_max", "dls_build2"),
+        ("min_hold_inc_enabled", "min_hold_inc", "min_hold_inc"),
+    )
+    optional_field_suffixes = {
+        suffix
+        for enabled_suffix, value_suffix, _field_name in paired_optional_fields
+        for suffix in (enabled_suffix, value_suffix)
+    }
+    for suffix, target_value in target_values.items():
+        if suffix in optional_field_suffixes:
+            continue
+        if target_value != reference_values.get(suffix):
+            changed_fields.add(suffix)
+    for enabled_suffix, value_suffix, field_name in paired_optional_fields:
+        reference_enabled = bool(reference_values.get(enabled_suffix, False))
+        target_enabled = bool(target_values.get(enabled_suffix, False))
+        if reference_enabled != target_enabled:
+            changed_fields.add(field_name)
+            continue
+        if target_enabled and target_values.get(value_suffix) != reference_values.get(
+            value_suffix
+        ):
+            changed_fields.add(field_name)
+    return int(len(changed_fields))
+
+
+def _manual_well_override_diff_field_count(
+    *,
+    base_config: TrajectoryConfig,
+    override_config: TrajectoryConfig,
+) -> int:
+    return _manual_well_override_changed_field_count_from_values(
+        reference_values=calc_param_state_values_from_config(base_config),
+        target_values=calc_param_state_values_from_config(override_config),
+    )
+
+
+def _manual_well_override_changed_field_count(
+    *,
+    current_config: TrajectoryConfig,
+    editor_config: TrajectoryConfig,
+) -> int:
+    return _manual_well_override_changed_field_count_from_values(
+        reference_values=calc_param_state_values_from_config(current_config),
+        target_values=calc_param_state_values_from_config(editor_config),
+    )
 
 
 def _new_manual_well_calc_profile_id() -> str:
@@ -3937,11 +4099,12 @@ def _import_manual_well_calc_profile_json_bytes(
 
 def _import_manual_well_calc_profile_json_payloads(
     payloads: Iterable[tuple[str, bytes]],
-) -> tuple[int, int, list[str], str]:
+) -> tuple[int, int, list[str], str, tuple[str, ...]]:
     imported_count = 0
     updated_count = 0
     error_messages: list[str] = []
     last_profile_id = ""
+    touched_profile_ids: list[str] = []
     for file_name, raw_bytes in payloads:
         normalized_name = str(file_name).strip() or "configuration.json"
         try:
@@ -3954,9 +4117,16 @@ def _import_manual_well_calc_profile_json_payloads(
         imported_count += 1
         updated_count += int(updated_existing)
         last_profile_id = str(profile_id)
+        touched_profile_ids.append(str(profile_id))
     if last_profile_id:
         _queue_manual_well_calc_active_profile(last_profile_id)
-    return imported_count, updated_count, error_messages, last_profile_id
+    return (
+        imported_count,
+        updated_count,
+        error_messages,
+        last_profile_id,
+        tuple(_unique_well_names(touched_profile_ids)),
+    )
 
 
 def _create_manual_well_calc_profile() -> str:
@@ -3996,6 +4166,10 @@ def _apply_manual_well_override_editor(
         base_config=base_config,
         override_config=editor_config,
     )
+    changed_field_count = _manual_well_override_diff_field_count(
+        base_config=base_config,
+        override_config=editor_config,
+    )
     resolved_name = _store_manual_well_calc_profile(
         profile_id=active_profile_id,
         profile_name=profile_name,
@@ -4007,7 +4181,83 @@ def _apply_manual_well_override_editor(
     )
     updated_payload = dict(_manual_well_calc_profiles().get(active_profile_id, {}))
     changed = updated_payload != existing_payload
-    return changed, resolved_name, int(len(diff_values))
+    return changed, resolved_name, int(changed_field_count)
+
+
+def _apply_manual_well_override_editor_to_all_profiles(
+    *,
+    base_config: TrajectoryConfig,
+    active_profile_id: str,
+    profile_name: str,
+    records_by_name: Mapping[str, WelltrackRecord] | None = None,
+) -> tuple[bool, str, int, int]:
+    normalized_profile_id = str(active_profile_id).strip()
+    if not normalized_profile_id:
+        return False, "", 0, 0
+    profiles = _manual_well_calc_profiles()
+    if normalized_profile_id not in profiles:
+        return False, "", 0, 0
+    active_effective_config = build_config_from_values(
+        _effective_manual_well_profile_values(
+            base_config=base_config,
+            profile_id=normalized_profile_id,
+            records_by_name=records_by_name,
+        )
+    )
+    editor_config = WT_WELL_OVERRIDE_EDITOR.build_config()
+    changed_values = _manual_well_override_changed_values(
+        current_config=active_effective_config,
+        editor_config=editor_config,
+    )
+    changed_field_count = _manual_well_override_changed_field_count(
+        current_config=active_effective_config,
+        editor_config=editor_config,
+    )
+    changed, resolved_name, _changed_field_count = _apply_manual_well_override_editor(
+        base_config=base_config,
+        active_profile_id=normalized_profile_id,
+        profile_name=profile_name,
+    )
+    updated_profile_count = int(changed)
+    if not changed_values:
+        return changed, resolved_name, 0, updated_profile_count
+    current_profiles = dict(_manual_well_calc_profiles())
+    for profile_id, existing_payload_raw in current_profiles.items():
+        normalized_target_profile_id = str(profile_id).strip()
+        if not normalized_target_profile_id or normalized_target_profile_id == normalized_profile_id:
+            continue
+        existing_payload = dict(existing_payload_raw)
+        target_effective_values = _effective_manual_well_profile_values(
+            base_config=base_config,
+            profile_id=normalized_target_profile_id,
+            records_by_name=records_by_name,
+        )
+        target_effective_values.update(changed_values)
+        merged_config = build_config_from_values(target_effective_values)
+        diff_values = _manual_well_override_diff_values(
+            base_config=base_config,
+            override_config=merged_config,
+        )
+        _store_manual_well_calc_profile(
+            profile_id=normalized_target_profile_id,
+            profile_name=str(
+                existing_payload.get("name", normalized_target_profile_id)
+            ).strip()
+            or str(normalized_target_profile_id),
+            values=diff_values,
+            source=_manual_well_calc_profile_save_source(
+                str(existing_payload.get("source", "")).strip()
+            ),
+            note=str(existing_payload.get("note", "")).strip(),
+        )
+        updated_payload = dict(
+            _manual_well_calc_profiles().get(normalized_target_profile_id, {})
+        )
+        if updated_payload != existing_payload:
+            updated_profile_count += 1
+    return bool(updated_profile_count), resolved_name, int(changed_field_count), int(
+        updated_profile_count
+    )
 
 
 def _rename_manual_well_calc_profile(
@@ -4217,6 +4467,66 @@ def _apply_dev_params_to_manual_well_overrides(
     return applied_count, missing_names
 
 
+def _imported_dev_param_well_names(
+    *,
+    available_names: Iterable[str],
+    summaries: Iterable[object] | None = None,
+) -> list[str]:
+    normalized_available_names = _unique_well_names(available_names)
+    if not normalized_available_names:
+        return []
+    summary_source = (
+        tuple(st.session_state.get("wt_imported_dev_params", ()))
+        if summaries is None
+        else tuple(summaries)
+    )
+    eligible_keys = {
+        well_name_key(getattr(summary, "well_name", ""))
+        for summary in summary_source
+        if str(getattr(summary, "well_name", "")).strip()
+        and not bool(getattr(summary, "simple_target_only", False))
+    }
+    if not eligible_keys:
+        return []
+    return [
+        str(well_name)
+        for well_name in normalized_available_names
+        if well_name_key(well_name) in eligible_keys
+    ]
+
+
+def _auto_apply_imported_dev_param_overrides(
+    *,
+    records: Iterable[WelltrackRecord],
+    dev_summaries: Iterable[object],
+) -> int:
+    available_names = _unique_well_names(record.name for record in records)
+    imported_dev_target_names = _imported_dev_param_well_names(
+        available_names=available_names,
+        summaries=dev_summaries,
+    )
+    if not imported_dev_target_names:
+        return 0
+    applied_count, missing_names = _apply_dev_params_to_manual_well_overrides(
+        well_names=imported_dev_target_names,
+    )
+    if applied_count <= 0:
+        return 0
+    st.session_state[WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    _queue_batch_selection_additions(
+        well_names=imported_dev_target_names,
+        available_names=available_names,
+    )
+    feedback = (
+        "После импорта автоматически созданы или обновлены "
+        f"конфигурации из .dev: {applied_count}."
+    )
+    if missing_names:
+        feedback += " Без .dev параметров: " + ", ".join(missing_names) + "."
+    st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = feedback
+    return applied_count
+
+
 def _manual_well_override_rows(
     *,
     available_names: list[str],
@@ -4282,18 +4592,8 @@ def _render_manual_well_calc_overrides(
     )
     _consume_manual_well_calc_override_enabled()
     _consume_manual_well_calc_active_profile()
-    available_name_keys = {well_name_key(name) for name in available_names}
-    imported_dev_target_names = _unique_well_names(
-        str(name)
-        for name in available_names
-        if well_name_key(name)
-        in {
-            well_name_key(item.well_name)
-            for item in tuple(st.session_state.get("wt_imported_dev_params", ()))
-            if str(item.well_name).strip()
-            and not bool(getattr(item, "simple_target_only", False))
-            and well_name_key(item.well_name) in available_name_keys
-        }
+    imported_dev_target_names = _imported_dev_param_well_names(
+        available_names=available_names,
     )
     toggle_cols = st.columns([2.2, 1.35, 2.1], gap="small")
     with toggle_cols[0]:
@@ -4320,10 +4620,11 @@ def _render_manual_well_calc_overrides(
     )
     option_ids = _manual_well_calc_profile_option_ids()
     active_profile_id = _manual_well_calc_active_profile_id()
+    records_by_name = {str(record.name): record for record in records}
     _sync_manual_well_override_editor_selection(
         base_config=base_config,
         active_profile_id=active_profile_id,
-        records_by_name={str(record.name): record for record in records},
+        records_by_name=records_by_name,
     )
     active_payload = dict(_manual_well_calc_profiles().get(active_profile_id, {}))
     profile_name_input_key = _manual_well_calc_profile_name_key(active_profile_id)
@@ -4463,7 +4764,7 @@ def _render_manual_well_calc_overrides(
             title="Параметры конфигурации",
             disabled=not overrides_enabled or not active_profile_id,
         )
-        editor_action_cols = st.columns([1.0, 1.4, 3], gap="small")
+        editor_action_cols = st.columns([1.0, 1.2, 1.9, 1.6], gap="small")
         load_global_clicked = editor_action_cols[0].button(
             "Вернуть дефолт",
             icon=":material/content_copy:",
@@ -4474,6 +4775,12 @@ def _render_manual_well_calc_overrides(
             "Сохранить конфигурацию",
             type="primary",
             icon=":material/save:",
+            width="stretch",
+            disabled=not overrides_enabled or not active_profile_id,
+        )
+        save_all_profiles_clicked = editor_action_cols[2].button(
+            "Применить для всех и сохранить",
+            icon=":material/publish:",
             width="stretch",
             disabled=not overrides_enabled or not active_profile_id,
         )
@@ -4491,10 +4798,18 @@ def _render_manual_well_calc_overrides(
         )
         _rerun_fragment()
     if delete_profile_clicked:
+        affected_well_names = _manual_well_names_for_profile_ids(
+            profile_ids=[active_profile_id],
+            available_names=available_names,
+        )
         deleted_count, cleared_assignments = _delete_manual_well_calc_profile(
             active_profile_id
         )
         if deleted_count > 0:
+            _queue_batch_selection_additions(
+                well_names=affected_well_names,
+                available_names=available_names,
+            )
             st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
             st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
                 "Конфигурация удалена. "
@@ -4507,6 +4822,10 @@ def _render_manual_well_calc_overrides(
         )
         if applied_count > 0:
             _queue_manual_well_calc_override_enabled(True)
+            _queue_batch_selection_additions(
+                well_names=imported_dev_target_names,
+                available_names=available_names,
+            )
         feedback = f"Конфигурации из .dev созданы или обновлены: {applied_count}."
         if missing_names:
             feedback += " Без .dev параметров: " + ", ".join(missing_names) + "."
@@ -4517,7 +4836,13 @@ def _render_manual_well_calc_overrides(
         if not uploaded_profile_files:
             st.warning("Загрузите один или несколько JSON файлов конфигураций.")
         else:
-            imported_count, updated_count, error_messages, last_profile_id = (
+            (
+                imported_count,
+                updated_count,
+                error_messages,
+                last_profile_id,
+                touched_profile_ids,
+            ) = (
                 _import_manual_well_calc_profile_json_payloads(
                     (
                         (str(item.name or "configuration.json"), item.getvalue())
@@ -4527,6 +4852,13 @@ def _render_manual_well_calc_overrides(
             )
             if imported_count > 0:
                 _queue_manual_well_calc_override_enabled(True)
+                _queue_batch_selection_additions(
+                    well_names=_manual_well_names_for_profile_ids(
+                        profile_ids=touched_profile_ids,
+                        available_names=available_names,
+                    ),
+                    available_names=available_names,
+                )
                 st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
                 created_count = int(imported_count - updated_count)
                 feedback = (
@@ -4552,6 +4884,11 @@ def _render_manual_well_calc_overrides(
             profile_id=active_profile_id,
             well_names=selected_names,
         )
+        if assigned_count > 0:
+            _queue_batch_selection_additions(
+                well_names=selected_names,
+                available_names=available_names,
+            )
         profile_label = str(active_payload.get("name", active_profile_id)).strip() or str(
             active_profile_id
         )
@@ -4561,6 +4898,11 @@ def _render_manual_well_calc_overrides(
         _rerun_fragment()
     if clear_assignment_clicked:
         cleared_count = _clear_manual_well_profile_assignments(well_names=selected_names)
+        if cleared_count > 0:
+            _queue_batch_selection_additions(
+                well_names=selected_names,
+                available_names=available_names,
+            )
         st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
             f"Назначения сняты для скважин: {cleared_count}."
         )
@@ -4580,11 +4922,63 @@ def _render_manual_well_calc_overrides(
                 )
             ),
         )
+        if changed:
+            _queue_batch_selection_additions(
+                well_names=_manual_well_names_for_profile_ids(
+                    profile_ids=[active_profile_id],
+                    available_names=available_names,
+                ),
+                available_names=available_names,
+            )
         st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
         if changed:
             st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
                 f'Конфигурация "{resolved_name}" сохранена. '
                 f"Изменённых полей: {changed_field_count}."
+            )
+        else:
+            st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+                f'Конфигурация "{resolved_name}" уже совпадает с текущими значениями.'
+            )
+        _rerun_fragment()
+    if save_all_profiles_clicked:
+        changed, resolved_name, changed_field_count, updated_profile_count = (
+            _apply_manual_well_override_editor_to_all_profiles(
+                base_config=base_config,
+                active_profile_id=active_profile_id,
+                profile_name=str(
+                    st.session_state.get(
+                        _manual_well_calc_profile_name_key(active_profile_id),
+                        active_payload.get("name", active_profile_id),
+                    )
+                ),
+                records_by_name=records_by_name,
+            )
+        )
+        if changed:
+            affected_profile_ids = (
+                _manual_well_calc_profile_option_ids()
+                if changed_field_count > 0
+                else [active_profile_id]
+            )
+            _queue_batch_selection_additions(
+                well_names=_manual_well_names_for_profile_ids(
+                    profile_ids=affected_profile_ids,
+                    available_names=available_names,
+                ),
+                available_names=available_names,
+            )
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
+        if changed_field_count > 0:
+            st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+                f'Конфигурация "{resolved_name}" сохранена и применена ко всем '
+                f"конфигурациям. Изменённых полей: {changed_field_count}. "
+                f"Обновлено конфигураций: {updated_profile_count}."
+            )
+        elif changed:
+            st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
+                f'Конфигурация "{resolved_name}" сохранена. '
+                "Изменённых полей для применения ко всем конфигурациям нет."
             )
         else:
             st.session_state[WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY] = (
@@ -4759,11 +5153,10 @@ def _format_selected_calc_config_scope(
 
 def _welltrack_record_entry_tvd_m(record: WelltrackRecord) -> float | None:
     try:
-        _, target_pairs = welltrack_points_to_target_pairs(record.points)
+        layout = ordinary_record_target_layout(record)
     except ValueError:
         return None
-    t1, _ = target_pairs[0]
-    return float(t1.z)
+    return float(layout.t1.z)
 
 
 def _evaluated_kop_min_vertical_for_record(
@@ -5565,7 +5958,9 @@ def _prepare_rerun_from_cluster(
 
 
 def _build_source_payload_from_state() -> _WelltrackSourcePayload:
-    source_format = str(st.session_state.get("wt_source_format", "")).strip()
+    source_format = ptc_target_import.normalized_target_source_format(
+        st.session_state
+    )
     source_mode = str(st.session_state.get("wt_source_mode", "")).strip()
     fixed_t1_enabled = bool(
         st.session_state.get("wt_source_dev_fixed_t1_enabled", False)
@@ -5665,7 +6060,7 @@ def _build_source_payload_from_state() -> _WelltrackSourcePayload:
 
     return _WelltrackSourcePayload(
         mode=source_mode or WT_SOURCE_MODE_FILE_PATH,
-        source_format=source_format or WT_SOURCE_FORMAT_WELLTRACK,
+        source_format=source_format or WT_SOURCE_FORMAT_TARGET_TABLE,
     )
 
 
@@ -5676,18 +6071,32 @@ def _dev_fixed_t1_input_key(well_name: str) -> str:
     return f"wt_source_dev_fixed_t1_inc__{slug}__{digest}"
 
 
-def _dev_fixed_t1_legacy_default_inc_deg() -> float:
-    raw_value = st.session_state.get("wt_source_dev_fixed_t1_inc_deg", 86.0)
+def _dev_fixed_t1_default_inc_deg() -> float:
+    return 86.0
+
+
+def _dev_fixed_t1_common_inc_deg() -> float:
+    raw_value = st.session_state.get(
+        "wt_source_dev_fixed_t1_common_inc_deg",
+        _dev_fixed_t1_default_inc_deg(),
+    )
     if isinstance(raw_value, (int, float)) and np.isfinite(float(raw_value)):
         return float(min(max(float(raw_value), 0.5), 89.0))
-    return 86.0
+    return _dev_fixed_t1_default_inc_deg()
 
 
 def _dev_fixed_t1_inc_by_well_from_state(
     *,
     selected_names: Sequence[str],
 ) -> tuple[tuple[str, float], ...]:
-    default_inc_deg = _dev_fixed_t1_legacy_default_inc_deg()
+    if bool(st.session_state.get("wt_source_dev_fixed_t1_common_enabled", False)):
+        common_threshold = _dev_fixed_t1_common_inc_deg()
+        return tuple(
+            (str(well_name).strip(), float(common_threshold))
+            for well_name in selected_names
+            if str(well_name).strip()
+        )
+    default_inc_deg = _dev_fixed_t1_default_inc_deg()
     values: list[tuple[str, float]] = []
     for well_name in selected_names:
         normalized_name = str(well_name).strip()
@@ -5740,6 +6149,16 @@ def _sync_dev_fixed_t1_selection_state(
         str(name).strip() for name in available_names if str(name).strip()
     )
     available_set = set(normalized_names)
+    pending_selection = st.session_state.pop(
+        "wt_source_dev_fixed_t1_pending_well_names",
+        None,
+    )
+    if pending_selection is not None:
+        st.session_state["wt_source_dev_fixed_t1_well_names"] = [
+            str(name).strip()
+            for name in pending_selection
+            if str(name).strip() in available_set
+        ]
     current_selection = [
         str(name).strip()
         for name in st.session_state.get("wt_source_dev_fixed_t1_well_names", [])
@@ -5750,7 +6169,7 @@ def _sync_dev_fixed_t1_selection_state(
     ]
     if filtered_selection != current_selection:
         st.session_state["wt_source_dev_fixed_t1_well_names"] = filtered_selection
-    default_inc_deg = _dev_fixed_t1_legacy_default_inc_deg()
+    default_inc_deg = _dev_fixed_t1_default_inc_deg()
     for well_name in filtered_selection:
         input_key = _dev_fixed_t1_input_key(well_name)
         raw_value = st.session_state.get(input_key, default_inc_deg)
@@ -5777,15 +6196,27 @@ def _render_dev_fixed_t1_controls(*, available_names: Sequence[str]) -> None:
     )
     if not enabled:
         return
-    control_cols = st.columns([3.2, 1.1], gap="small")
-    multiselect_col = control_cols[0] if len(control_cols) > 0 else st
-    threshold_col = control_cols[1] if len(control_cols) > 1 else st
+    selection_cols = st.columns([3.2, 1.0], gap="small", vertical_alignment="bottom")
+    multiselect_col = selection_cols[0] if len(selection_cols) > 0 else st
+    select_all_col = selection_cols[1] if len(selection_cols) > 1 else st
     getattr(multiselect_col, "multiselect", st.multiselect)(
         "Скважины для режима t1 по INC",
         options=list(normalized_names),
         key="wt_source_dev_fixed_t1_well_names",
         disabled=not normalized_names,
     )
+    select_all_clicked = getattr(select_all_col, "button", st.button)(
+        "Выбрать все",
+        key="wt_source_dev_fixed_t1_select_all",
+        icon=":material/done_all:",
+        width="stretch",
+        disabled=not normalized_names,
+    )
+    if select_all_clicked:
+        st.session_state["wt_source_dev_fixed_t1_pending_well_names"] = list(
+            normalized_names
+        )
+        _rerun_fragment()
     if not normalized_names:
         st.caption("Список скважин появится после выбора источника `.dev`.")
         return
@@ -5797,25 +6228,47 @@ def _render_dev_fixed_t1_controls(*, available_names: Sequence[str]) -> None:
     if not selected_names:
         st.caption("Выберите скважины, для которых `t1` нужно искать по фиксированному INC.")
         return
-    st.caption("Для каждой выбранной скважины задайте свой порог `INC`.")
-    getattr(threshold_col, "caption", st.caption)("INC для t1, deg")
-    default_inc_deg = _dev_fixed_t1_legacy_default_inc_deg()
-    for well_name in selected_names:
-        input_key = _dev_fixed_t1_input_key(well_name)
-        if input_key not in st.session_state:
-            st.session_state[input_key] = default_inc_deg
-        row_cols = st.columns([3.2, 1.1], gap="small")
-        name_col = row_cols[0] if len(row_cols) > 0 else st
-        input_col = row_cols[1] if len(row_cols) > 1 else st
-        getattr(name_col, "markdown", st.markdown)(f"`{well_name}`")
-        getattr(input_col, "number_input", st.number_input)(
-            f"INC для t1: {well_name}",
+    common_enabled = st.toggle(
+        "Общее значение для выбранных скважин",
+        key="wt_source_dev_fixed_t1_common_enabled",
+        disabled=not selected_names,
+    )
+    if common_enabled:
+        st.caption("Один порог `INC` будет применён ко всем выбранным скважинам.")
+        st.number_input(
+            "Общий INC для t1, deg",
             min_value=0.5,
             max_value=89.0,
             step=0.5,
-            key=input_key,
-            label_visibility="collapsed",
+            key="wt_source_dev_fixed_t1_common_inc_deg",
         )
+    else:
+        header_cols = st.columns([3.2, 1.1], gap="small")
+        threshold_col = header_cols[1] if len(header_cols) > 1 else st
+        st.caption("Для каждой выбранной скважины задайте свой порог `INC`.")
+        getattr(threshold_col, "caption", st.caption)("INC для t1, deg")
+    default_inc_deg = _dev_fixed_t1_default_inc_deg()
+    if common_enabled:
+        st.caption(
+            "Индивидуальные значения сохраняются, но пока используется общий порог."
+        )
+    else:
+        for well_name in selected_names:
+            input_key = _dev_fixed_t1_input_key(well_name)
+            if input_key not in st.session_state:
+                st.session_state[input_key] = default_inc_deg
+            row_cols = st.columns([3.2, 1.1], gap="small")
+            name_col = row_cols[0] if len(row_cols) > 0 else st
+            input_col = row_cols[1] if len(row_cols) > 1 else st
+            getattr(name_col, "markdown", st.markdown)(f"`{well_name}`")
+            getattr(input_col, "number_input", st.number_input)(
+                f"INC для t1: {well_name}",
+                min_value=0.5,
+                max_value=89.0,
+                step=0.5,
+                key=input_key,
+                label_visibility="collapsed",
+            )
     st.caption(
         "Для выбранных скважин `t1` берётся как первая точка участка `BUILD2` "
         "с `INC` не ниже заданного значения. Дальше остаток траектории "
@@ -5827,7 +6280,9 @@ def _render_source_input() -> None:
     if str(st.session_state.get("wt_source_format", "")).strip() not in set(
         WT_SOURCE_FORMAT_OPTIONS
     ):
-        st.session_state["wt_source_format"] = WT_SOURCE_FORMAT_WELLTRACK
+        st.session_state["wt_source_format"] = ptc_target_import.normalized_target_source_format(
+            st.session_state
+        )
 
     source_format = st.radio(
         "Формат импорта",
@@ -6044,14 +6499,50 @@ def _render_source_input() -> None:
                 "Вставьте из Excel: `Wellname`, `Point`, `X`, `Y`, `Z`. "
                 "Обычная скважина: `S`, `t1`, `t3`."
             )
-            with st.expander("Пилоты, ЗБС и многопластовые", expanded=False):
-                st.caption(
-                    "Пилот: `well_PL` с точками `S`, `PL1`, `PL2`, … "
+            with st.expander(
+                "Как задавать скважины с пилотом, ЗБС и многопластовые скважины",
+                expanded=False,
+            ):
+                st.markdown(
+                    "Пилот\n"
+                    "```text\n"
+                    "Wellname     Point\n"
+                    "well_01_PL   S\n"
+                    "well_01_PL   PL1\n"
+                    "well_01_PL   PL2\n"
+                    "```\n"
                     "Имя `well` должно совпадать с основной скважиной. "
-                    "ЗБС от факта: `fact_well_ZBS` с `t1`, `t3` без `S`; "
-                    "`fact_well` должно совпадать с именем загруженной "
-                    "фактической скважины. "
-                    "Многопласт: `1_t1`, `1_t3`, `2_t1`, `2_t3`, … в одном `Wellname`."
+                    "Имя `well_01_PL` должно совпадать с основной скважиной `well_01`.\n\n"
+                    "ЗБС от фактической скважины\n"
+                    "```text\n"
+                    "Wellname      Point\n"
+                    "fact_01_ZBS   t1\n"
+                    "fact_01_ZBS   t3\n"
+                    "```\n"
+                    "Можно также использовать имя `fact_01_2`.\n"
+                    "`fact_well` должно совпадать с именем загруженной фактической скважины. "
+                    "Для ЗБС точка `S` не нужна. Имя `fact_01` должно совпадать "
+                    "с уже загруженной фактической скважиной.\n\n"
+                    "Ствол от пилота\n"
+                    "```text\n"
+                    "Wellname    Point\n"
+                    "well_01_2   S\n"
+                    "well_01_2   t1\n"
+                    "well_01_2   t3\n"
+                    "```\n"
+                    "Если продуктивный ствол назван как `well_01_2`, он будет связан "
+                    "с пилотом `well_01_PL` так же, как обычная скважина `well_01`.\n\n"
+                    "Многопластовая скважина\n"
+                    "```text\n"
+                    "Wellname    Point\n"
+                    "well_multi  S\n"
+                    "well_multi  1_t1\n"
+                    "well_multi  1_t3\n"
+                    "well_multi  2_t1\n"
+                    "well_multi  2_t3\n"
+                    "```\n"
+                    "Все точки идут в одном `Wellname`, а пласты различаются "
+                    "по номерам: `1_t1`, `1_t3`, `2_t1`, `2_t3`, ...\n"
                 )
         with clear_col:
             if st.button(
@@ -6153,26 +6644,12 @@ def _auto_apply_pad_layout_if_shared_surface(
     }
     if not auto_layout_pad_ids:
         return False
-    plan_map: dict[str, PadLayoutPlan] = {}
-    for pad in pads:
-        pad_id = str(pad.pad_id)
-        if pad_id not in auto_layout_pad_ids:
-            continue
-        cfg = _pad_config_for_ui(pad)
-        plan_map[pad_id] = PadLayoutPlan(
-            pad_id=pad_id,
-            first_surface_x=float(cfg["first_surface_x"]),
-            first_surface_y=float(cfg["first_surface_y"]),
-            first_surface_z=float(cfg["first_surface_z"]),
-            spacing_m=float(max(cfg["spacing_m"], 0.0)),
-            nds_azimuth_deg=float(cfg["nds_azimuth_deg"]) % 360.0,
-            surface_anchor_mode=str(
-                cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
-            ),
-            fixed_slots=_pad_fixed_slots_from_config(pad=pad, config=cfg),
-            auto_order_mode=PAD_WELL_AUTO_ORDER_PROJECTION,
-        )
-    if not any(str(pad_id) in auto_layout_pad_ids for pad_id in plan_map):
+    plan_map = {
+        str(pad_id): plan
+        for pad_id, plan in _build_pad_plan_map(pads).items()
+        if str(pad_id) in auto_layout_pad_ids
+    }
+    if not plan_map:
         return False
     updated_records = sync_pilot_surfaces_to_parents(
         apply_pad_layout(
@@ -6213,7 +6690,7 @@ def _set_import_pilot_fixed_slots(
         pilot_parent_names = [
             str(well.name)
             for well in pad.wells
-            if well_name_key(well.name) in pilot_parent_keys
+            if pilot_parent_key_for_record(well) in pilot_parent_keys
         ]
         if not pilot_parent_names:
             continue
@@ -6283,17 +6760,24 @@ def _handle_import_actions(
             status.write(operation.progress_message)
             parse_result = operation.parse()
             records = list(parse_result.records)
+            dev_summaries = list(parse_result.dev_summaries)
+            imported_dev_wells = list(parse_result.imported_dev_wells)
+            import_failures = list(parse_result.failures)
             auto_layout_applied = _store_parsed_records_with_metadata(
                 records=records,
-                dev_summaries=list(parse_result.dev_summaries),
-                imported_dev_wells=list(parse_result.imported_dev_wells),
-                import_failures=list(parse_result.failures),
+                dev_summaries=dev_summaries,
+                imported_dev_wells=imported_dev_wells,
+                import_failures=import_failures,
                 source_kind=str(operation.source_kind),
+            )
+            auto_applied_dev_configs = _auto_apply_imported_dev_param_overrides(
+                records=records,
+                dev_summaries=dev_summaries,
             )
             status.write(operation.count_message(len(records)))
             detailed_dev_param_summaries = tuple(
                 summary
-                for summary in parse_result.dev_summaries
+                for summary in dev_summaries
                 if not bool(getattr(summary, "simple_target_only", False))
             )
             if detailed_dev_param_summaries:
@@ -6301,10 +6785,15 @@ def _handle_import_actions(
                 status.write(
                     "Прочитаны параметры траекторий .dev. Они показаны ниже в статусе загрузки целей."
                 )
+            if auto_applied_dev_configs > 0:
+                status.write(
+                    "Индивидуальные параметры из .dev применены автоматически "
+                    f"для {auto_applied_dev_configs} скважин."
+                )
             simple_dev_target_names = sorted(
                 {
                     str(well.name).strip()
-                    for well in parse_result.imported_dev_wells
+                    for well in imported_dev_wells
                     if len(pd.DataFrame(well.stations).index) == 3
                     and str(well.name).strip()
                 }
@@ -6315,7 +6804,7 @@ def _handle_import_actions(
                     "`.dev` с тремя точками импортированы как обычные цели "
                     "`S / t1 / t3`. Для них используются общие параметры расчёта."
                 )
-            if parse_result.failures:
+            if import_failures:
                 st.session_state["wt_records_overview_expand_once"] = True
                 status.write(
                     "Часть .dev скважин пропущена при импорте. Причины показаны ниже в статусе загрузки целей."
@@ -6346,23 +6835,17 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     overview_expand_once = bool(st.session_state.pop("wt_records_overview_expand_once", False))
     well_count = int(
         sum(
-            not is_pilot_name(record.name) and not is_zbs_name(record.name)
+            not is_pilot_name(record.name) and not is_zbs_record(record)
             for record in records
         )
     )
     pilot_count = int(sum(is_pilot_name(record.name) for record in records))
-    zbs_records = [record for record in records if is_zbs_name(record.name)]
+    zbs_records = [record for record in records if is_zbs_record(record)]
     zbs_count = int(len(zbs_records))
     multi_horizontal_count = int(
         sum(
             not is_pilot_name(record.name)
-            and (
-                welltrack_multi_horizontal_level_count(tuple(record.points)) > 1
-                or (
-                    is_zbs_name(record.name)
-                    and zbs_multi_horizontal_level_count(tuple(record.points)) > 1
-                )
-            )
+            and record_multi_horizontal_level_count(record) > 1
             for record in records
         )
     )
@@ -6371,7 +6854,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
     x2.metric("Пилотов", f"{pilot_count}")
     x3.metric("Боковых стволов", f"{zbs_count}")
     x4.metric("Многопластовых скважин", f"{multi_horizontal_count}")
-    x5.metric("Проблем", f"{problem_count}")
+    x5.metric("Ошибки импорта", f"{problem_count}")
     if zbs_records:
         parent_names = sorted(
             {
@@ -6395,12 +6878,25 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
         expanded=bool(problem_count > 0 or overview_expand_once),
     ):
         imported_dev_params = tuple(st.session_state.get("wt_imported_dev_params", ()))
+        has_manual_assignments = bool(
+            _manual_well_calc_override_enabled()
+            and _manual_well_calc_profile_assignments(
+                available_names=_unique_well_names(record.name for record in records)
+            )
+        )
         if imported_dev_params:
             st.markdown("#### Прочитанные параметры .dev")
-            st.caption(
-                "Параметры показаны для контроля. Расчёт ниже пока использует "
-                "настройки из блока параметров расчёта."
-            )
+            if has_manual_assignments:
+                st.caption(
+                    "Параметры показаны для контроля. Для назначенных скважин "
+                    "они уже применяются через индивидуальные конфигурации, "
+                    "остальные используют общие параметры расчёта."
+                )
+            else:
+                st.caption(
+                    "Параметры показаны для контроля. Расчёт ниже пока "
+                    "использует настройки из блока параметров расчёта."
+                )
             st.dataframe(
                 ptc_target_import.dev_target_import_summary_dataframe(
                     imported_dev_params
@@ -6409,6 +6905,50 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                 width="stretch",
             )
             st.markdown("")
+        st.dataframe(
+            arrow_safe_text_dataframe(parsed_df),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Скважина": st.column_config.TextColumn("Скважина", width="medium"),
+                "Точек": st.column_config.NumberColumn(
+                    "Точек",
+                    format="%d",
+                    width="small",
+                    help="Считаются только целевые точки `t1/t3`, без устья `S`.",
+                ),
+                "Отход t1, м": st.column_config.NumberColumn(
+                    "Отход t1, м",
+                    format="%.2f",
+                    width="small",
+                    help="Горизонтальное расстояние от устья `S` до точки `t1`.",
+                ),
+                "Длина ГС, м": st.column_config.NumberColumn(
+                    "Длина ГС, м",
+                    format="%.2f",
+                    width="small",
+                    help="Пространственное расстояние между точками `t1` и `t3`.",
+                ),
+                "Примечание": st.column_config.TextColumn(
+                    "Примечание",
+                    width="small",
+                ),
+                "Статус": st.column_config.TextColumn(
+                    "Статус",
+                    width="small",
+                    help="`✅` — импорт готов к расчёту; `❌` — проверьте колонку 'Проблема'.",
+                ),
+                "Проблема": st.column_config.TextColumn(
+                    "Проблема",
+                    width="large",
+                    help=(
+                        "Показывает вероятные проблемы импорта: нет точки `S`, не хватает "
+                        "t1/t3, неверный порядок точек или лишние точки."
+                    ),
+                ),
+            },
+        )
+
         preprocess_length_key = "wt_preprocess_horizontal_length_m"
         preprocess_feedback_key = "wt_preprocess_feedback_info"
         preprocess_selected_names_key = "wt_preprocess_selected_names"
@@ -6527,10 +7067,8 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
         )
         preprocess_length_col = preprocess_cols[0] if len(preprocess_cols) > 0 else st
         preprocess_action_col = preprocess_cols[1] if len(preprocess_cols) > 1 else st
-        preprocess_hint_col = preprocess_cols[2] if len(preprocess_cols) > 2 else st
         length_input = getattr(preprocess_length_col, "number_input", st.number_input)
         action_button = getattr(preprocess_action_col, "button", st.button)
-        hint_caption = getattr(preprocess_hint_col, "caption", st.caption)
         length_input(
             "Новая длина ГС, м",
             key=preprocess_length_key,
@@ -6548,7 +7086,6 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
             width="stretch",
             disabled=not preprocess_all_names,
         )
-        hint_caption("По умолчанию: 1500 м. Шаг изменения: 100 м.")
         if apply_horizontal_length_clicked:
             selected_preprocess_names = _coerce_preprocess_selection(
                 st.session_state.get(preprocess_selected_names_key, []),
@@ -6605,51 +7142,6 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                         st.session_state["wt_records_overview_expand_once"] = True
                         if updated_names:
                             st.rerun()
-
-        st.divider()
-        st.dataframe(
-            arrow_safe_text_dataframe(parsed_df),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Скважина": st.column_config.TextColumn("Скважина", width="medium"),
-                "Точек": st.column_config.NumberColumn(
-                    "Точек",
-                    format="%d",
-                    width="small",
-                    help="Считаются только целевые точки `t1/t3`, без устья `S`.",
-                ),
-                "Отход t1, м": st.column_config.NumberColumn(
-                    "Отход t1, м",
-                    format="%.2f",
-                    width="small",
-                    help="Горизонтальное расстояние от устья `S` до точки `t1`.",
-                ),
-                "Длина ГС, м": st.column_config.NumberColumn(
-                    "Длина ГС, м",
-                    format="%.2f",
-                    width="small",
-                    help="Пространственное расстояние между точками `t1` и `t3`.",
-                ),
-                "Примечание": st.column_config.TextColumn(
-                    "Примечание",
-                    width="small",
-                ),
-                "Статус": st.column_config.TextColumn(
-                    "Статус",
-                    width="small",
-                    help="`✅` — импорт готов к расчёту; `❌` — проверьте колонку 'Проблема'.",
-                ),
-                "Проблема": st.column_config.TextColumn(
-                    "Проблема",
-                    width="large",
-                    help=(
-                        "Показывает вероятные проблемы импорта: нет точки `S`, не хватает "
-                        "t1/t3, неверный порядок точек или лишние точки."
-                    ),
-                ),
-            },
-        )
 
 
 def _records_overview_dataframe(
@@ -8050,7 +8542,7 @@ def _t1_t3_order_anchor_by_well_name(
     zbs_records = [
         record
         for record in record_list
-        if is_zbs_name(record.name) and len(record.points) >= 2
+        if is_zbs_record(record) and len(record.points) >= 2
     ]
     if not zbs_records:
         return {}
@@ -8064,7 +8556,7 @@ def _t1_t3_order_anchor_by_well_name(
         parent_key = well_name_key(record.name)
         if (
             is_pilot_name(record.name)
-            or is_zbs_name(record.name)
+            or is_zbs_record(record)
             or not record.points
             or parent_key not in zbs_parent_keys
         ):
@@ -8971,7 +9463,7 @@ def _sync_preprocess_selection_state(
         and not is_pilot_name(record.name)
         and ptc_target_records.record_horizontal_length_preprocess_skip_reason(
             record,
-            has_pilot=well_name_key(record.name) in pilot_parent_keys,
+            has_pilot=pilot_parent_key_for_record(record) in pilot_parent_keys,
         )
         == "—"
     )
@@ -9006,7 +9498,7 @@ def _preprocess_excluded_records_message(
             continue
         reason = ptc_target_records.record_horizontal_length_preprocess_skip_reason(
             record,
-            has_pilot=well_name_key(record.name) in pilot_parent_keys,
+            has_pilot=pilot_parent_key_for_record(record) in pilot_parent_keys,
         )
         if reason == "—":
             continue

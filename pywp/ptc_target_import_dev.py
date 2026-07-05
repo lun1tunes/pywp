@@ -21,6 +21,7 @@ from pywp.reference_trajectories import (
     parse_reference_trajectory_dev_file,
     parse_reference_trajectory_dev_text,
 )
+from pywp.pilot_wells import is_pilot_name
 from pywp.ui_utils import dls_to_pi
 
 __all__ = [
@@ -179,6 +180,8 @@ def _parsed_dev_target_well(
 
 
 def dev_well_is_simple_target(well: ImportedTrajectoryWell) -> bool:
+    if is_pilot_name(well.name):
+        return False
     stations = pd.DataFrame(well.stations).reset_index(drop=True)
     return int(len(stations.index)) == 3
 
@@ -200,7 +203,11 @@ def target_record_from_simple_dev_well(
         )
         for _, row in stations.iterrows()
     )
-    return WelltrackRecord(name=str(well.name), points=points)
+    return WelltrackRecord(
+        name=str(well.name),
+        points=points,
+        point_labels=("S", "t1", "t3"),
+    )
 
 
 def simple_target_dev_summary(
@@ -230,6 +237,8 @@ def target_record_and_summary_from_dev_well(
     *,
     fixed_t1_inc_deg: float | None = None,
 ) -> tuple[WelltrackRecord, DevTargetImportSummary]:
+    if is_pilot_name(well.name):
+        return _pilot_record_and_summary_from_dev_well(well)
     stations = pd.DataFrame(well.stations).reset_index(drop=True)
     if stations.empty or len(stations.index) < 2:
         raise WelltrackParseError(
@@ -304,6 +313,7 @@ def target_record_and_summary_from_dev_well(
                 md=float(rows["MD"].iloc[-1]),
             ),
         ),
+        point_labels=("S", "t1", "t3"),
     )
 
     build1_dls = _stable_unique_dls(build1_slice)
@@ -327,6 +337,74 @@ def target_record_and_summary_from_dev_well(
             horizontal_dls=horizontal_dls,
             fixed_t1_inc_deg=fixed_t1_inc_deg,
         ),
+    )
+    return record, summary
+
+
+def _pilot_record_and_summary_from_dev_well(
+    well: ImportedTrajectoryWell,
+) -> tuple[WelltrackRecord, DevTargetImportSummary]:
+    stations = pd.DataFrame(well.stations).reset_index(drop=True)
+    if stations.empty or len(stations.index) < 2:
+        raise WelltrackParseError(
+            f".dev '{well.name}': для импорта пилота нужны минимум 2 станции."
+        )
+    rows = _dev_analysis_rows(well)
+    study_point_indices = (
+        tuple(range(1, len(stations.index)))
+        if len(stations.index) <= 3
+        else _pilot_study_point_indices_from_dev_rows(rows)
+    )
+    if not study_point_indices:
+        study_point_indices = (len(stations.index) - 1,)
+    if any(
+        int(index) <= 0 or int(index) >= len(stations.index)
+        for index in study_point_indices
+    ):
+        raise WelltrackParseError(
+            f".dev '{well.name}': не удалось надежно определить точки PL."
+        )
+
+    points = [
+        WelltrackPoint(
+            x=float(stations.iloc[0]["X_m"]),
+            y=float(stations.iloc[0]["Y_m"]),
+            z=float(stations.iloc[0]["Z_m"]),
+            md=float(rows["MD"].iloc[0]),
+        )
+    ]
+    point_labels = ["S"]
+    for point_number, point_index in enumerate(study_point_indices, start=1):
+        station_row = stations.iloc[int(point_index)]
+        points.append(
+            WelltrackPoint(
+                x=float(station_row["X_m"]),
+                y=float(station_row["Y_m"]),
+                z=float(station_row["Z_m"]),
+                md=float(rows["MD"].iloc[int(point_index)]),
+            )
+        )
+        point_labels.append(f"PL{int(point_number)}")
+
+    record = WelltrackRecord(
+        name=str(well.name),
+        points=tuple(points),
+        point_labels=tuple(point_labels),
+    )
+    first_target_index = int(study_point_indices[0])
+    final_target_index = int(study_point_indices[-1])
+    summary = DevTargetImportSummary(
+        well_name=str(well.name),
+        profile_label="Пилот",
+        kop_md_m=float(rows["MD"].iloc[0]),
+        t1_md_m=float(rows["MD"].iloc[first_target_index]),
+        t3_md_m=float(rows["MD"].iloc[final_target_index]),
+        entry_inc_deg=float(rows["INCL"].iloc[first_target_index]),
+        note=(
+            "Импортировано как пилот из .dev. "
+            f"Сформировано точек PL: {len(study_point_indices)}."
+        ),
+        simple_target_only=True,
     )
     return record, summary
 
@@ -380,14 +458,12 @@ def dev_target_import_summary_dataframe(
                 "Скважина": str(summary.well_name),
                 "Профиль": str(summary.profile_label),
                 "KOP MD, м": (
-                    "—"
-                    if is_simple_target
-                    else _format_summary_float(summary.kop_md_m)
+                    np.nan if is_simple_target else _format_summary_float(summary.kop_md_m)
                 ),
                 "t1 MD, м": float(summary.t1_md_m),
                 "t3 MD, м": float(summary.t3_md_m),
                 "INC в t1, deg": (
-                    "—"
+                    np.nan
                     if is_simple_target
                     else _format_summary_float(summary.entry_inc_deg)
                 ),
@@ -395,36 +471,45 @@ def dev_target_import_summary_dataframe(
                     "—"
                     if is_simple_target
                     else _format_value_list(
-                    tuple(float(dls_to_pi(value)) for value in summary.build1_dls_deg_per_30m)
+                        tuple(
+                            float(dls_to_pi(value))
+                            for value in summary.build1_dls_deg_per_30m
+                        )
                     )
                 ),
                 "BUILD2 PI, deg/10m": (
                     "—"
                     if is_simple_target
                     else _format_value_list(
-                    tuple(float(dls_to_pi(value)) for value in summary.build2_dls_deg_per_30m)
+                        tuple(
+                            float(dls_to_pi(value))
+                            for value in summary.build2_dls_deg_per_30m
+                        )
                     )
                 ),
                 "HORIZONTAL PI, deg/10m": (
                     "—"
                     if is_simple_target
                     else _format_value_list(
-                    tuple(
-                        float(dls_to_pi(value))
-                        for value in summary.horizontal_dls_deg_per_30m
-                    )
+                        tuple(
+                            float(dls_to_pi(value))
+                            for value in summary.horizontal_dls_deg_per_30m
+                        )
                     )
                 ),
                 "Примечание": str(summary.note or "—"),
             }
         )
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    for column in ("KOP MD, м", "t1 MD, м", "t3 MD, м", "INC в t1, deg"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Float64")
+    return frame
 
 
-def _format_summary_float(value: float) -> float | str:
+def _format_summary_float(value: float) -> float:
     numeric = float(value)
     if not np.isfinite(numeric):
-        return "—"
+        return float("nan")
     return numeric
 
 
@@ -464,6 +549,21 @@ def _true_groups(mask: Sequence[bool]) -> list[tuple[int, int]]:
 
 
 def _dev_activity_groups(rows: pd.DataFrame) -> list[tuple[int, int]]:
+    raw_groups = _dev_raw_activity_groups(rows)
+    if not raw_groups:
+        return []
+    if len(raw_groups) == 1:
+        return raw_groups
+    hold_separator = _dev_hold_separator_index(rows, raw_groups)
+    if hold_separator is None:
+        return [(raw_groups[0][0], raw_groups[-1][1])]
+    return [
+        (raw_groups[0][0], raw_groups[hold_separator][1]),
+        (raw_groups[hold_separator + 1][0], raw_groups[-1][1]),
+    ]
+
+
+def _dev_raw_activity_groups(rows: pd.DataFrame) -> list[tuple[int, int]]:
     incl_values = rows["INCL"].astype(float).to_numpy(dtype=float)
     dls_values = rows["DLS"].abs().to_numpy(dtype=float)
     incl_deltas = np.abs(np.diff(incl_values, prepend=incl_values[0]))
@@ -482,17 +582,37 @@ def _dev_activity_groups(rows: pd.DataFrame) -> list[tuple[int, int]]:
         rows=rows,
         groups=_true_groups(activity_mask.tolist()),
     )
-    if not raw_groups:
-        return []
-    if len(raw_groups) == 1:
-        return raw_groups
-    hold_separator = _dev_hold_separator_index(rows, raw_groups)
-    if hold_separator is None:
-        return [(raw_groups[0][0], raw_groups[-1][1])]
-    return [
-        (raw_groups[0][0], raw_groups[hold_separator][1]),
-        (raw_groups[hold_separator + 1][0], raw_groups[-1][1]),
-    ]
+    return raw_groups
+
+
+def _pilot_study_point_indices_from_dev_rows(rows: pd.DataFrame) -> tuple[int, ...]:
+    raw_groups = _dev_raw_activity_groups(rows)
+    point_indices: list[int] = []
+    for group_index in range(len(raw_groups) - 1):
+        gap_start = int(raw_groups[group_index][1] + 1)
+        gap_end = int(raw_groups[group_index + 1][0] - 1)
+        if gap_start > gap_end:
+            continue
+        gap_rows = int(gap_end - gap_start + 1)
+        if gap_rows < _DEV_HOLD_MIN_ROWS:
+            continue
+        gap_incl = rows["INCL"].iloc[gap_start : gap_end + 1].astype(float)
+        if gap_incl.empty:
+            continue
+        if float(gap_incl.max() - gap_incl.min()) > _DEV_INCL_EPSILON_DEG:
+            continue
+        point_indices.append(gap_end)
+    final_index = int(len(rows.index) - 1)
+    if final_index > 0:
+        point_indices.append(final_index)
+
+    unique_indices: list[int] = []
+    for index in point_indices:
+        normalized_index = int(index)
+        if normalized_index <= 0 or normalized_index in unique_indices:
+            continue
+        unique_indices.append(normalized_index)
+    return tuple(unique_indices)
 
 
 def _horizontal_summary_slice(
@@ -610,11 +730,12 @@ def _format_value_list(values: Sequence[float]) -> str:
     normalized = tuple(float(value) for value in values)
     if not normalized:
         return "—"
-    if len(normalized) == 1:
-        return f"{normalized[0]:.2f}"
-    joined = " / ".join(f"{value:.2f}" for value in normalized)
+    min_value = min(normalized)
+    max_value = max(normalized)
     avg = sum(normalized) / float(len(normalized))
-    return f"{joined} (avg {avg:.2f})"
+    if len(normalized) == 1 or abs(max_value - min_value) <= 1e-9:
+        return f"{avg:.2f}"
+    return f"{min_value:.2f}-{max_value:.2f} (avg {avg:.2f})"
 
 
 def _summary_note(

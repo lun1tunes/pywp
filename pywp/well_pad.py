@@ -10,10 +10,10 @@ from pywp.constants import SMALL
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
-    welltrack_points_to_target_pairs,
 )
 from pywp.models import Point3D
 from pywp.pydantic_base import FrozenModel
+from pywp.welltrack_targets import ordinary_record_target_layout
 
 _EPS = SMALL
 _PCA_AXIS_DOMINANCE_RATIO_MIN = 1.05
@@ -371,6 +371,7 @@ def apply_pad_layout(
                 updated_records[record_index] = WelltrackRecord(
                     name=str(source_record.name),
                     points=(new_surface, *source_record.points[1:]),
+                    point_labels=getattr(source_record, "point_labels", ()),
                 )
             continue
 
@@ -411,6 +412,7 @@ def apply_pad_layout(
             updated_records[record_index] = WelltrackRecord(
                 name=str(source_record.name),
                 points=(new_surface, *source_record.points[1:]),
+                point_labels=getattr(source_record, "point_labels", ()),
             )
 
     return updated_records
@@ -430,9 +432,8 @@ def _surface_key(
 def _well_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
     if len(record.points) >= 3:
         try:
-            _, target_pairs = welltrack_points_to_target_pairs(tuple(record.points))
-            pair_t1, pair_t3 = target_pairs[0]
-            target_points = (pair_t1, pair_t3)
+            layout = ordinary_record_target_layout(record)
+            target_points = (layout.t1, layout.final_target)
             return (
                 float(np.mean([point.x for point in target_points])),
                 float(np.mean([point.y for point in target_points])),
@@ -447,10 +448,9 @@ def _well_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
 def _well_target_axis_xy(record: WelltrackRecord) -> tuple[float, float]:
     if len(record.points) >= 3:
         try:
-            _, target_pairs = welltrack_points_to_target_pairs(tuple(record.points))
-            pair_t1, pair_t3 = target_pairs[0]
-            dx = float(pair_t3.x) - float(pair_t1.x)
-            dy = float(pair_t3.y) - float(pair_t1.y)
+            layout = ordinary_record_target_layout(record)
+            dx = float(layout.final_target.x) - float(layout.t1.x)
+            dy = float(layout.final_target.y) - float(layout.t1.y)
             norm = float(math.hypot(dx, dy))
             if norm > _EPS:
                 return float(dx / norm), float(dy / norm)

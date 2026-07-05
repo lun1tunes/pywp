@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from typing import TypeVar
 
 import numpy as np
 
@@ -17,6 +18,8 @@ __all__ = [
     "optimize_three_payload",
     "raw_bounds_from_xyz_arrays",
 ]
+
+_T = TypeVar("_T")
 
 WT_THREE_MAX_HOVER_POINTS_PER_TRACE = 96
 WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = 72
@@ -51,6 +54,17 @@ def decimate_hover_payload(
     )
 
 
+def _sample_items_evenly(items: list[_T], limit: int) -> list[_T]:
+    if limit <= 0:
+        return []
+    if len(items) <= limit:
+        return list(items)
+    indices = np.unique(
+        np.linspace(0, len(items) - 1, num=int(limit), dtype=int)
+    ).tolist()
+    return [items[index] for index in indices]
+
+
 def optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
     optimized = dict(payload)
     optimized["lines"] = merge_three_line_payloads(payload.get("lines") or [])
@@ -58,36 +72,54 @@ def optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
     optimized["meshes"] = merge_three_mesh_payloads(payload.get("meshes") or [])
 
     labels = list(payload.get("labels") or [])
+    indexed_labels = list(enumerate(labels))
     reference_labels = [
-        item
-        for item in labels
-        if str(item.get("role") or "") == "reference_label"
+        entry
+        for entry in indexed_labels
+        if str(entry[1].get("role") or "") == "reference_label"
     ]
-    other_labels = [
-        item
-        for item in labels
-        if str(item.get("role") or "") != "reference_label"
+    non_reference_labels = [
+        entry
+        for entry in indexed_labels
+        if str(entry[1].get("role") or "") != "reference_label"
     ]
-    if len(reference_labels) > WT_THREE_MAX_REFERENCE_LABELS:
-        indices = np.unique(
-            np.linspace(
-                0,
-                len(reference_labels) - 1,
-                num=WT_THREE_MAX_REFERENCE_LABELS,
-                dtype=int,
-            )
-        ).tolist()
-        reference_labels = [reference_labels[index] for index in indices]
+    selected_reference_labels = _sample_items_evenly(
+        reference_labels,
+        int(WT_THREE_MAX_REFERENCE_LABELS),
+    )
 
-    if reference_labels:
-        remaining_other_label_slots = max(
-            int(WT_THREE_MAX_LABELS) - len(reference_labels),
-            0,
+    remaining_non_reference_slots = max(
+        int(WT_THREE_MAX_LABELS) - len(selected_reference_labels),
+        0,
+    )
+    prioritized_well_labels = [
+        entry
+        for entry in non_reference_labels
+        if str(entry[1].get("role") or "") == "well_label"
+    ]
+    auxiliary_labels = [
+        entry
+        for entry in non_reference_labels
+        if str(entry[1].get("role") or "") != "well_label"
+    ]
+    selected_well_labels = _sample_items_evenly(
+        prioritized_well_labels,
+        remaining_non_reference_slots,
+    )
+    remaining_auxiliary_slots = max(
+        remaining_non_reference_slots - len(selected_well_labels),
+        0,
+    )
+    selected_auxiliary_labels = auxiliary_labels[:remaining_auxiliary_slots]
+    selected_indices = {
+        index
+        for index, _ in (
+            [*selected_reference_labels, *selected_well_labels, *selected_auxiliary_labels]
         )
-        labels = other_labels[:remaining_other_label_slots] + reference_labels
-    else:
-        labels = other_labels[:WT_THREE_MAX_LABELS]
-    optimized["labels"] = labels
+    }
+    optimized["labels"] = [
+        item for index, item in indexed_labels if index in selected_indices
+    ]
     optimized["legend"] = list(payload.get("legend") or [])
     return optimized
 

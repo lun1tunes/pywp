@@ -29,9 +29,14 @@ from pywp.anticollision_recommendations import (
     build_anti_collision_recommendation_clusters,
     build_anti_collision_recommendations,
 )
-from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.eclipse_welltrack import (
+    WelltrackPoint,
+    WelltrackRecord,
+    parse_welltrack_text,
+)
 from pywp.mcm import compute_positions_min_curv
 from pywp.models import Point3D, TrajectoryConfig
+from pywp.pilot_wells import sync_pilot_surfaces_to_parents
 from pywp.reference_trajectories import ImportedTrajectoryWell, parse_reference_trajectory_table
 from pywp.three_config import DEFAULT_THREE_CAMERA
 from pywp.ui_calc_params import (
@@ -44,6 +49,7 @@ from pywp.uncertainty import (
     UNCERTAINTY_PRESET_MWD_UNKNOWN_MAGNETIC,
     planning_uncertainty_model_for_preset,
 )
+from pywp.well_pad import apply_pad_layout
 from pywp.welltrack_batch import SuccessfulWellPlan, WelltrackBatchPlanner
 
 pytestmark = pytest.mark.integration
@@ -472,7 +478,7 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
         ("Пилотов", "0"),
         ("Боковых стволов", "0"),
         ("Многопластовых скважин", "0"),
-        ("Проблем", "0"),
+        ("Ошибки импорта", "0"),
     ]
     assert list(captured["frame"].columns) == [
         "Скважина",
@@ -707,7 +713,72 @@ def test_records_overview_metrics_count_wells_and_pilots_separately(
         ("Пилотов", "1"),
         ("Боковых стволов", "0"),
         ("Многопластовых скважин", "0"),
-        ("Проблем", "0"),
+        ("Ошибки импорта", "0"),
+    ]
+
+
+def test_records_overview_metrics_keep_surface_alt_branch_as_regular_well(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    captured: dict[str, object] = {"metrics": []}
+    branch = WelltrackRecord(
+        name="well_04_2",
+        points=(
+            WelltrackPoint(x=10.0, y=20.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=300.0, y=0.0, z=1200.0, md=2.0),
+        ),
+    )
+    pilot = WelltrackRecord(
+        name="well_04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=50.0, y=0.0, z=800.0, md=1.0),
+        ),
+    )
+
+    class _DummyColumn:
+        def metric(self, label, value, *args, **kwargs):
+            captured["metrics"].append((label, value))
+            return None
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda *args, **kwargs: (
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+            _DummyColumn(),
+        ),
+    )
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "number_input", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "form_submit_button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "form", lambda *args, **kwargs: _DummyExpander())
+
+    page._render_records_overview([branch, pilot])
+
+    assert captured["metrics"] == [
+        ("Скважин", "1"),
+        ("Пилотов", "1"),
+        ("Боковых стволов", "0"),
+        ("Многопластовых скважин", "0"),
+        ("Ошибки импорта", "0"),
     ]
 
 
@@ -768,7 +839,7 @@ def test_records_overview_metrics_count_multi_horizontal_wells(
         ("Пилотов", "0"),
         ("Боковых стволов", "0"),
         ("Многопластовых скважин", "1"),
-        ("Проблем", "0"),
+        ("Ошибки импорта", "0"),
     ]
 
 
@@ -828,7 +899,7 @@ def test_records_overview_metrics_count_multi_horizontal_zbs(
         ("Пилотов", "0"),
         ("Боковых стволов", "1"),
         ("Многопластовых скважин", "1"),
-        ("Проблем", "0"),
+        ("Ошибки импорта", "0"),
     ]
 
 
@@ -2598,6 +2669,17 @@ def test_dev_target_import_stores_read_parameters_and_target_points() -> None:
     assert imported_params[0].build2_dls_deg_per_30m == (2.4, 1.2)
     assert imported_params[0].horizontal_dls_deg_per_30m == ()
     assert imported_params[-1].profile_label == "J-профиль"
+    assert at.session_state[wt_import_module.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] is True
+    assert at.session_state[wt_import_module.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
+        name: wt_import_module._manual_well_calc_profile_id_from_dev_summary(name)
+        for name in [record.name for record in records]
+    }
+    assert {
+        payload["source"]
+        for payload in at.session_state[
+            wt_import_module.WT_WELL_CALC_OVERRIDE_STATE_KEY
+        ].values()
+    } == {"Импорт .dev"}
     markdown_values = [str(widget.value) for widget in at.markdown]
     assert any("Прочитанные параметры .dev" in value for value in markdown_values)
 
@@ -2661,6 +2743,162 @@ def test_build_source_payload_keeps_individual_fixed_t1_thresholds_for_similar_n
     )
 
 
+def test_sync_dev_fixed_t1_selection_uses_hard_default_for_new_wells() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_source_dev_fixed_t1_well_names"] = ["WELL-A", "WELL-B"]
+    page.st.session_state["wt_source_dev_fixed_t1_inc_deg"] = 0.5
+
+    normalized_names, selected_names = page._sync_dev_fixed_t1_selection_state(
+        ["WELL-A", "WELL-B", "WELL-C"]
+    )
+
+    assert normalized_names == ("WELL-A", "WELL-B", "WELL-C")
+    assert selected_names == ("WELL-A", "WELL-B")
+    assert page.st.session_state[page._dev_fixed_t1_input_key("WELL-A")] == pytest.approx(
+        86.0
+    )
+    assert page.st.session_state[page._dev_fixed_t1_input_key("WELL-B")] == pytest.approx(
+        86.0
+    )
+
+
+def test_build_source_payload_ignores_legacy_fixed_t1_default_for_missing_well_keys() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_source_format"] = page.WT_SOURCE_FORMAT_DEV_TRAJECTORY
+    page.st.session_state["wt_source_mode"] = page.WT_SOURCE_MODE_FILE_PATH
+    page.st.session_state["wt_source_dev_fixed_t1_enabled"] = True
+    page.st.session_state["wt_source_dev_fixed_t1_well_names"] = ["WELL-A"]
+    page.st.session_state["wt_source_dev_fixed_t1_inc_deg"] = 0.5
+
+    payload = page._build_source_payload_from_state()
+
+    assert payload.dev_fixed_t1_inc_by_well == (("WELL-A", 86.0),)
+
+
+def test_build_source_payload_uses_common_fixed_t1_threshold_for_selected_wells() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_source_format"] = page.WT_SOURCE_FORMAT_DEV_TRAJECTORY
+    page.st.session_state["wt_source_mode"] = page.WT_SOURCE_MODE_FILE_PATH
+    page.st.session_state["wt_source_dev_fixed_t1_enabled"] = True
+    page.st.session_state["wt_source_dev_fixed_t1_common_enabled"] = True
+    page.st.session_state["wt_source_dev_fixed_t1_common_inc_deg"] = 82.5
+    page.st.session_state["wt_source_dev_fixed_t1_well_names"] = ["WELL-1", "WELL_1"]
+    page.st.session_state[page._dev_fixed_t1_input_key("WELL-1")] = 70.0
+    page.st.session_state[page._dev_fixed_t1_input_key("WELL_1")] = 88.0
+
+    payload = page._build_source_payload_from_state()
+
+    assert payload.dev_fixed_t1_inc_by_well == (
+        ("WELL-1", 82.5),
+        ("WELL_1", 82.5),
+    )
+
+
+def test_build_source_payload_defaults_invalid_source_format_to_target_table() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_source_format"] = "legacy-invalid"
+    page.st.session_state["wt_source_mode"] = page.WT_SOURCE_MODE_TARGET_TABLE
+    page.st.session_state["wt_source_table_df"] = pd.DataFrame(
+        [{"Wellname": "TAB-01", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0}]
+    )
+
+    payload = page._build_source_payload_from_state()
+
+    assert payload.source_format == page.WT_SOURCE_FORMAT_TARGET_TABLE
+    assert payload.mode == page.WT_SOURCE_MODE_TARGET_TABLE
+    assert list(payload.table_rows["Wellname"]) == ["TAB-01"]
+
+
+def test_build_source_payload_infers_welltrack_for_invalid_format_with_prefilled_path() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_source_format"] = "legacy-invalid"
+    page.st.session_state["wt_source_mode"] = page.WT_SOURCE_MODE_FILE_PATH
+    page.st.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS2.INC"
+
+    payload = page._build_source_payload_from_state()
+
+    assert payload.source_format == page.WT_SOURCE_FORMAT_WELLTRACK
+    assert payload.mode == page.WT_SOURCE_MODE_FILE_PATH
+    assert "WELLTRACK" in payload.source_text
+
+
+def test_sync_dev_fixed_t1_selection_uses_pending_names() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_source_dev_fixed_t1_pending_well_names"] = [
+        "WELL-A",
+        "WELL-B",
+    ]
+
+    normalized_names, selected_names = page._sync_dev_fixed_t1_selection_state(
+        ["WELL-A", "WELL-B", "WELL-C"]
+    )
+
+    assert normalized_names == ("WELL-A", "WELL-B", "WELL-C")
+    assert selected_names == ("WELL-A", "WELL-B")
+    assert page.st.session_state["wt_source_dev_fixed_t1_well_names"] == [
+        "WELL-A",
+        "WELL-B",
+    ]
+    assert "wt_source_dev_fixed_t1_pending_well_names" not in page.st.session_state
+
+
+def test_render_dev_fixed_t1_controls_select_all_queues_pending_selection(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    rerun_calls: list[str] = []
+
+    class _DummyColumn:
+        def button(self, label, **kwargs):
+            return str(label) == "Выбрать все"
+
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda spec, *args, **kwargs: tuple(
+            _DummyColumn()
+            for _ in range(int(spec) if isinstance(spec, int) else len(spec))
+        ),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "toggle",
+        lambda _label, key, **kwargs: key == "wt_source_dev_fixed_t1_enabled",
+    )
+    monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, options, key, **kwargs: page.st.session_state.setdefault(
+            key, []
+        ),
+    )
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "number_input", lambda *args, **kwargs: 86.0)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page, "_rerun_fragment", lambda: rerun_calls.append("rerun"))
+
+    page._render_dev_fixed_t1_controls(available_names=["WELL-A", "WELL-B"])
+
+    assert page.st.session_state["wt_source_dev_fixed_t1_pending_well_names"] == [
+        "WELL-A",
+        "WELL-B",
+    ]
+    assert rerun_calls == ["rerun"]
+
+
 def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface() -> (
     None
 ):
@@ -2678,6 +2916,53 @@ def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface(
     assert updated_surfaces[2] != updated_surfaces[3]
     assert page.st.session_state["wt_pad_auto_applied_on_import"] is True
     assert page.st.session_state["wt_pad_last_applied_at"] != ""
+
+
+def test_auto_pad_layout_uses_canonical_pad_plan_map_for_imported_multihorizontal_data() -> (
+    None
+):
+    page = wt_import_module
+    records = parse_welltrack_text(
+        Path("tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    page._init_state()
+    pads = page._ensure_pad_configs(list(records))
+    page._set_import_pilot_fixed_slots(records=list(records), pads=pads)
+    expected_records = sync_pilot_surfaces_to_parents(
+        apply_pad_layout(
+            records=list(records),
+            pads=pads,
+            plan_by_pad_id=page._build_pad_plan_map(pads),
+        )
+    )
+    expected_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
+        for record in expected_records
+        if record.points
+    }
+
+    page._init_state()
+    applied = page._auto_apply_pad_layout_if_shared_surface(list(records))
+
+    assert applied is True
+    actual_records = page.st.session_state["wt_records"]
+    actual_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
+        for record in actual_records
+        if record.points
+    }
+    assert actual_surfaces == expected_surfaces
 
 
 def test_fresh_import_prefills_pilot_parent_as_first_fixed_slot() -> None:
@@ -3532,16 +3817,12 @@ def test_welltrack_import_source_selector_splits_format_and_welltrack_method() -
 
     radios_by_label = {str(widget.label): widget for widget in at.radio}
     assert list(radios_by_label["Формат импорта"].options) == [
+        "Таблица с точками целей",
         "WELLTRACK",
         ".dev траектория",
-        "Таблица с точками целей",
     ]
-    assert radios_by_label["Формат импорта"].value == "WELLTRACK"
-    assert list(radios_by_label["Способ загрузки WELLTRACK"].options) == [
-        "Файл по пути",
-        "Загрузить файл",
-        "Вставить текст",
-    ]
+    assert radios_by_label["Формат импорта"].value == "Таблица с точками целей"
+    assert set(radios_by_label) == {"Формат импорта"}
 
 
 def test_welltrack_import_target_table_format_hides_welltrack_method() -> None:
@@ -3554,7 +3835,7 @@ def test_welltrack_import_target_table_format_hides_welltrack_method() -> None:
     assert radio_labels == {"Формат импорта"}
     assert [str(widget.label) for widget in at.expander] == [
         "Таблица точек целей",
-        "Пилоты, ЗБС и многопластовые",
+        "Как задавать скважины с пилотом, ЗБС и многопластовые скважины",
     ]
 
 
@@ -5126,6 +5407,54 @@ def test_apply_dev_params_to_manual_well_overrides_keeps_other_assignments_untou
     }
 
 
+def test_auto_apply_imported_dev_param_overrides_enables_configs_and_skips_simple_targets() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_selected_names"] = ["WELL-C"]
+    summaries = (
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-A",
+            profile_label="J-профиль",
+            kop_md_m=980.0,
+            t1_md_m=2500.0,
+            t3_md_m=4200.0,
+            entry_inc_deg=87.0,
+            build1_dls_deg_per_30m=(2.4,),
+            horizontal_dls_deg_per_30m=(1.5,),
+        ),
+        page.ptc_target_import.DevTargetImportSummary(
+            well_name="WELL-B",
+            profile_label="3 точки S / t1 / t3",
+            kop_md_m=0.0,
+            t1_md_m=2400.0,
+            t3_md_m=3500.0,
+            entry_inc_deg=float("nan"),
+            note="Импортировано как обычные цели из .dev.",
+            simple_target_only=True,
+        ),
+    )
+    page.st.session_state["wt_imported_dev_params"] = summaries
+
+    applied_count = page._auto_apply_imported_dev_param_overrides(
+        records=_records(),
+        dev_summaries=summaries,
+    )
+
+    assert applied_count == 1
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] is True
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
+        "WELL-A": page._manual_well_calc_profile_id_from_dev_summary("WELL-A")
+    }
+    assert page.st.session_state["wt_pending_selected_names"] == ["WELL-C", "WELL-A"]
+    assert (
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY]
+        == "После импорта автоматически созданы или обновлены конфигурации из .dev: 1."
+    )
+
+
 def test_manual_well_calc_profile_export_json_uses_profile_name() -> None:
     page = wt_import_module
     page.st.session_state.clear()
@@ -5243,7 +5572,7 @@ def test_import_manual_well_calc_profile_json_payloads_imports_multiple_files() 
     page.st.session_state.clear()
     page._init_state()
 
-    imported_count, updated_count, error_messages, last_profile_id = (
+    imported_count, updated_count, error_messages, last_profile_id, touched_profile_ids = (
         page._import_manual_well_calc_profile_json_payloads(
             [
                 (
@@ -5278,6 +5607,9 @@ def test_import_manual_well_calc_profile_json_payloads_imports_multiple_files() 
     assert updated_count == 0
     assert error_messages == []
     assert last_profile_id
+    assert set(touched_profile_ids) == set(
+        page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY].keys()
+    )
     profiles = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]
     assert {payload["name"] for payload in profiles.values()} == {"Cfg A", "Cfg B"}
     assert (
@@ -5291,7 +5623,7 @@ def test_import_manual_well_calc_profile_json_payloads_collects_errors() -> None
     page.st.session_state.clear()
     page._init_state()
 
-    imported_count, updated_count, error_messages, last_profile_id = (
+    imported_count, updated_count, error_messages, last_profile_id, touched_profile_ids = (
         page._import_manual_well_calc_profile_json_payloads(
             [
                 ("bad.json", b"{not-json}"),
@@ -5316,6 +5648,7 @@ def test_import_manual_well_calc_profile_json_payloads_collects_errors() -> None
     assert len(error_messages) == 1
     assert "bad.json" in error_messages[0]
     assert last_profile_id
+    assert touched_profile_ids == (last_profile_id,)
 
 
 def test_consume_manual_well_override_enabled_applies_pending_state() -> None:
@@ -5519,6 +5852,48 @@ def test_preserve_manual_well_calc_override_widget_state_keeps_override_keys() -
     assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] == "cfg-1"
     assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] == ["WELL-A"]
     assert page.st.session_state[name_key] == "Cfg 1"
+
+
+def test_manual_well_names_for_profile_ids_returns_wells_in_available_order() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY] = {
+        "cfg-1": {"name": "Cfg 1", "values": {}, "source": "manual"},
+        "cfg-2": {"name": "Cfg 2", "values": {}, "source": "manual"},
+    }
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-B": "cfg-2",
+        "WELL-A": "cfg-1",
+        "WELL-C": "cfg-1",
+    }
+
+    assigned_names = page._manual_well_names_for_profile_ids(
+        profile_ids=["cfg-1"],
+        available_names=["WELL-C", "WELL-A", "WELL-B"],
+    )
+
+    assert assigned_names == ["WELL-C", "WELL-A"]
+
+
+def test_queue_batch_selection_additions_merges_with_current_selection() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_selected_names"] = ["WELL-A"]
+
+    queued_names = page._queue_batch_selection_additions(
+        well_names=["WELL-C", "WELL-B", "WELL-A"],
+        available_names=["WELL-A", "WELL-B", "WELL-C"],
+    )
+
+    assert queued_names == ["WELL-A", "WELL-C", "WELL-B"]
+    assert page.st.session_state["wt_pending_selected_names"] == [
+        "WELL-A",
+        "WELL-C",
+        "WELL-B",
+    ]
+    assert page.st.session_state["wt_selected_names"] == ["WELL-A"]
 
 
 def test_render_manual_well_calc_overrides_preserves_widget_state_before_render(
@@ -5785,6 +6160,7 @@ def test_render_manual_well_calc_overrides_disables_editor_when_toggle_is_off(
         "Вернуть дефолт": True,
         "Подтянуть из .dev": True,
         "Сохранить конфигурацию": True,
+        "Применить для всех и сохранить": True,
     }
     assert captured["download_buttons"] == {"Экспорт": True}
     assert any(
@@ -5820,6 +6196,7 @@ def test_render_manual_well_calc_overrides_keeps_active_profile_pending_after_de
     page = wt_import_module
     page.st.session_state.clear()
     page._init_state()
+    page.st.session_state["wt_selected_names"] = ["WELL-C"]
     page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
     page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = "missing"
     page.st.session_state[page.WT_WELL_CALC_OVERRIDE_SELECTION_KEY] = ["WELL-A"]
@@ -5904,6 +6281,7 @@ def test_render_manual_well_calc_overrides_keeps_active_profile_pending_after_de
         page._manual_well_calc_profile_name_key(profile_id)
         not in page.st.session_state
     )
+    assert page.st.session_state["wt_pending_selected_names"] == ["WELL-C", "WELL-A"]
 
 
 def test_render_manual_well_calc_overrides_enables_dev_apply_without_selection(
@@ -5984,6 +6362,176 @@ def test_render_manual_well_calc_overrides_enables_dev_apply_without_selection(
     page._render_manual_well_calc_overrides(records=_records())
 
     assert captured["buttons"]["Подтянуть из .dev"] is False
+
+
+def test_render_manual_well_calc_overrides_assign_adds_wells_to_batch_selection(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_selected_names"] = ["WELL-A"]
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = "cfg-1"
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Config A",
+        values={"dls_build_max": 0.7},
+        source="Ручная настройка",
+    )
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            return str(label) == "Назначить выбранным"
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, "cfg-1")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(label, options, key, **kwargs):
+        if str(label) == "Скважины для назначения":
+            page.st.session_state[key] = ["WELL-B"]
+            return page.st.session_state[key]
+        page.st.session_state.setdefault(key, [])
+        return page.st.session_state[key]
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    assert page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] == {
+        "WELL-B": "cfg-1"
+    }
+    assert page.st.session_state["wt_pending_selected_names"] == ["WELL-A", "WELL-B"]
+
+
+def test_render_manual_well_calc_overrides_save_adds_assigned_wells_to_batch_selection(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state["wt_selected_names"] = ["WELL-A"]
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = "cfg-1"
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Config A",
+        values={},
+        source="Ручная настройка",
+    )
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ASSIGNMENTS_KEY] = {
+        "WELL-B": "cfg-1"
+    }
+    base_config = page.WT_CALC_PARAMS.build_config()
+    editor_values = page.calc_param_state_values_from_config(base_config)
+    editor_values["entry_inc_target"] = float(editor_values["entry_inc_target"]) + 1.0
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            return str(label) == "Сохранить конфигурацию"
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, "cfg-1")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, [])
+        return page.st.session_state[key]
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page,
+        "WT_WELL_OVERRIDE_EDITOR",
+        SimpleNamespace(
+            prefix=page.WT_WELL_OVERRIDE_EDITOR.prefix,
+            build_config=lambda: page.build_config_from_values(editor_values),
+        ),
+    )
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    assert page.st.session_state["wt_pending_selected_names"] == ["WELL-A", "WELL-B"]
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["cfg-1"]
+    assert payload["values"]["entry_inc_target"] == pytest.approx(
+        editor_values["entry_inc_target"]
+    )
 
 
 def test_render_manual_well_calc_overrides_select_all_queues_full_assignment_selection(
@@ -6303,6 +6851,195 @@ def test_render_manual_well_calc_overrides_saves_renamed_profile(
     assert "Renamed Config" in page.st.session_state[
         page.WT_WELL_CALC_OVERRIDE_FEEDBACK_KEY
     ]
+
+
+def test_apply_manual_well_override_editor_to_all_profiles_updates_only_changed_fields(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    base_config = page.WT_CALC_PARAMS.build_config()
+    base_values = page.calc_param_state_values_from_config(base_config)
+    profile_a_values = {
+        "dls_build_max": float(base_values["dls_build_max"]) + 0.1,
+        "entry_inc_target": 84.0,
+    }
+    profile_b_values = {
+        "dls_horizontal_max": float(base_values["dls_horizontal_max"]) + 0.2,
+    }
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Config A",
+        values=profile_a_values,
+        source="Ручная настройка",
+    )
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-2",
+        profile_name="Config B",
+        values=profile_b_values,
+        source="Ручная настройка",
+    )
+    effective_values = page._effective_manual_well_profile_values(
+        base_config=base_config,
+        profile_id="cfg-1",
+    )
+    editor_values = dict(effective_values)
+    editor_values["entry_inc_target"] = float(effective_values["entry_inc_target"]) + 1.0
+    monkeypatch.setattr(
+        page,
+        "WT_WELL_OVERRIDE_EDITOR",
+        SimpleNamespace(
+            build_config=lambda: page.build_config_from_values(editor_values),
+        ),
+    )
+
+    changed, resolved_name, changed_field_count, updated_profile_count = (
+        page._apply_manual_well_override_editor_to_all_profiles(
+            base_config=base_config,
+            active_profile_id="cfg-1",
+            profile_name="Config A",
+        )
+    )
+
+    assert changed is True
+    assert resolved_name == "Config A"
+    assert changed_field_count == 1
+    assert updated_profile_count == 2
+
+    profiles = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]
+    assert profiles["cfg-1"]["values"]["dls_build_max"] == pytest.approx(
+        profile_a_values["dls_build_max"]
+    )
+    assert profiles["cfg-1"]["values"]["entry_inc_target"] == pytest.approx(
+        editor_values["entry_inc_target"]
+    )
+    assert profiles["cfg-2"]["values"]["dls_horizontal_max"] == pytest.approx(
+        profile_b_values["dls_horizontal_max"]
+    )
+    assert profiles["cfg-2"]["values"]["entry_inc_target"] == pytest.approx(
+        editor_values["entry_inc_target"]
+    )
+    assert "dls_build_max" not in profiles["cfg-2"]["values"]
+
+
+def test_apply_manual_well_override_editor_to_all_profiles_counts_shared_build_limit_as_one_field(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    base_config = page.WT_CALC_PARAMS.build_config()
+    base_values = page.calc_param_state_values_from_config(base_config)
+    profile_a_values = {
+        "dls_build_max": float(base_values["dls_build_max"]) + 0.2,
+    }
+    profile_b_values = {
+        "dls_build_max": float(base_values["dls_build_max"]) + 0.1,
+        "dls_build2_enabled": True,
+        "dls_build2_max": float(base_values["dls_build_max"]) + 0.6,
+    }
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Config A",
+        values=profile_a_values,
+        source="Ручная настройка",
+    )
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-2",
+        profile_name="Config B",
+        values=profile_b_values,
+        source="Ручная настройка",
+    )
+    effective_values = page._effective_manual_well_profile_values(
+        base_config=base_config,
+        profile_id="cfg-1",
+    )
+    editor_values = dict(effective_values)
+    editor_values["dls_build_max"] = float(effective_values["dls_build_max"]) + 0.3
+    monkeypatch.setattr(
+        page,
+        "WT_WELL_OVERRIDE_EDITOR",
+        SimpleNamespace(
+            build_config=lambda: page.build_config_from_values(editor_values),
+        ),
+    )
+
+    changed, resolved_name, changed_field_count, updated_profile_count = (
+        page._apply_manual_well_override_editor_to_all_profiles(
+            base_config=base_config,
+            active_profile_id="cfg-1",
+            profile_name="Config A",
+        )
+    )
+
+    assert changed is True
+    assert resolved_name == "Config A"
+    assert changed_field_count == 1
+    assert updated_profile_count == 2
+
+    profiles = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]
+    assert profiles["cfg-1"]["values"]["dls_build_max"] == pytest.approx(
+        editor_values["dls_build_max"]
+    )
+    assert profiles["cfg-2"]["values"]["dls_build_max"] == pytest.approx(
+        editor_values["dls_build_max"]
+    )
+    assert profiles["cfg-2"]["values"]["dls_build2_enabled"] is True
+    assert profiles["cfg-2"]["values"]["dls_build2_max"] == pytest.approx(
+        profile_b_values["dls_build2_max"]
+    )
+
+
+def test_apply_manual_well_override_editor_to_all_profiles_counts_shared_build_limit_plus_extra_field(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    base_config = page.WT_CALC_PARAMS.build_config()
+    base_values = page.calc_param_state_values_from_config(base_config)
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Config A",
+        values={"dls_build_max": float(base_values["dls_build_max"]) + 0.2},
+        source="Ручная настройка",
+    )
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-2",
+        profile_name="Config B",
+        values={"entry_inc_target": 84.0},
+        source="Ручная настройка",
+    )
+    effective_values = page._effective_manual_well_profile_values(
+        base_config=base_config,
+        profile_id="cfg-1",
+    )
+    editor_values = dict(effective_values)
+    editor_values["dls_build_max"] = float(effective_values["dls_build_max"]) + 0.3
+    editor_values["entry_inc_target"] = float(
+        effective_values["entry_inc_target"]
+    ) + 1.0
+    monkeypatch.setattr(
+        page,
+        "WT_WELL_OVERRIDE_EDITOR",
+        SimpleNamespace(
+            build_config=lambda: page.build_config_from_values(editor_values),
+        ),
+    )
+
+    changed, resolved_name, changed_field_count, updated_profile_count = (
+        page._apply_manual_well_override_editor_to_all_profiles(
+            base_config=base_config,
+            active_profile_id="cfg-1",
+            profile_name="Config A",
+        )
+    )
+
+    assert changed is True
+    assert resolved_name == "Config A"
+    assert changed_field_count == 2
+    assert updated_profile_count == 2
 
 
 def test_focus_all_wells_anticollision_results_sets_result_view_state() -> None:

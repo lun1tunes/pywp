@@ -62,6 +62,7 @@ __all__ = [
     "empty_source_table_df",
     "expand_single_column_source_table_df",
     "init_target_source_state_defaults",
+    "normalized_target_source_format",
     "normalize_source_table_df_for_ui",
     "reset_failed_import_state",
     "store_imported_records",
@@ -73,9 +74,9 @@ WT_SOURCE_FORMAT_WELLTRACK = "WELLTRACK"
 WT_SOURCE_FORMAT_DEV_TRAJECTORY = ".dev траектория"
 WT_SOURCE_FORMAT_TARGET_TABLE = "Таблица с точками целей"
 WT_SOURCE_FORMAT_OPTIONS: tuple[str, ...] = (
+    WT_SOURCE_FORMAT_TARGET_TABLE,
     WT_SOURCE_FORMAT_WELLTRACK,
     WT_SOURCE_FORMAT_DEV_TRAJECTORY,
-    WT_SOURCE_FORMAT_TARGET_TABLE,
 )
 WT_SOURCE_MODE_FILE_PATH = "Файл по пути"
 WT_SOURCE_MODE_UPLOAD = "Загрузить файл"
@@ -254,22 +255,60 @@ def _normalize_source_table_point_value(value: object) -> object:
     return value
 
 
+def normalized_target_source_format(
+    session_state: MutableMapping[str, object],
+) -> str:
+    raw_format = str(session_state.get("wt_source_format", "")).strip()
+    if raw_format in set(WT_SOURCE_FORMAT_OPTIONS):
+        return raw_format
+
+    source_mode = str(session_state.get("wt_source_mode", "")).strip()
+    source_path = normalize_user_path_text(str(session_state.get("wt_source_path", "")))
+    source_inline = str(session_state.get("wt_source_inline", "")).strip()
+    source_dev_inline = str(session_state.get("wt_source_dev_inline", "")).strip()
+    source_upload = session_state.get("wt_source_upload_file")
+    raw_dev_uploads = session_state.get("wt_source_dev_upload_files")
+    dev_uploads = (
+        raw_dev_uploads
+        if isinstance(raw_dev_uploads, list)
+        else [raw_dev_uploads] if raw_dev_uploads is not None else []
+    )
+    has_dev_uploads = any(item is not None for item in dev_uploads)
+
+    if source_mode == WT_SOURCE_MODE_TARGET_TABLE:
+        return WT_SOURCE_FORMAT_TARGET_TABLE
+    if source_mode == WT_SOURCE_MODE_UPLOAD:
+        if has_dev_uploads and source_upload is None:
+            return WT_SOURCE_FORMAT_DEV_TRAJECTORY
+        if source_upload is not None:
+            return WT_SOURCE_FORMAT_WELLTRACK
+    if source_mode == WT_SOURCE_MODE_INLINE_TEXT:
+        if source_dev_inline and not source_inline:
+            return WT_SOURCE_FORMAT_DEV_TRAJECTORY
+        if source_inline:
+            return WT_SOURCE_FORMAT_WELLTRACK
+    if source_mode == WT_SOURCE_MODE_FILE_PATH and source_path:
+        if source_path.casefold().endswith(".dev"):
+            return WT_SOURCE_FORMAT_DEV_TRAJECTORY
+        return WT_SOURCE_FORMAT_WELLTRACK
+    return WT_SOURCE_FORMAT_TARGET_TABLE
+
+
 def init_target_source_state_defaults(
     session_state: MutableMapping[str, object],
 ) -> None:
     """Initialize target-source session state without overwriting user input."""
 
     if "wt_source_format" not in session_state:
-        session_state["wt_source_format"] = (
-            WT_SOURCE_FORMAT_TARGET_TABLE
-            if str(session_state.get("wt_source_mode", "")).strip()
-            == WT_SOURCE_MODE_TARGET_TABLE
-            else WT_SOURCE_FORMAT_WELLTRACK
+        session_state["wt_source_format"] = normalized_target_source_format(
+            session_state
         )
     if str(session_state.get("wt_source_format", "")).strip() not in set(
         WT_SOURCE_FORMAT_OPTIONS
     ):
-        session_state["wt_source_format"] = WT_SOURCE_FORMAT_WELLTRACK
+        session_state["wt_source_format"] = normalized_target_source_format(
+            session_state
+        )
     session_state.setdefault("wt_source_mode", WT_SOURCE_MODE_FILE_PATH)
     session_state.setdefault("wt_source_path", str(DEFAULT_WELLTRACK_PATH))
     session_state.setdefault("wt_source_inline", "")
@@ -282,6 +321,8 @@ def init_target_source_state_defaults(
     session_state.setdefault("wt_source_dev_fixed_t1_enabled", False)
     session_state.setdefault("wt_source_dev_fixed_t1_well_names", [])
     session_state.setdefault("wt_source_dev_fixed_t1_inc_deg", 86.0)
+    session_state.setdefault("wt_source_dev_fixed_t1_common_enabled", False)
+    session_state.setdefault("wt_source_dev_fixed_t1_common_inc_deg", 86.0)
     session_state.setdefault("wt_source_table_df", empty_source_table_df())
     session_state.setdefault("wt_source_table_editor_nonce", 0)
 

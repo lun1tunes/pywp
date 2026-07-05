@@ -254,10 +254,7 @@ def _result_frame(
 def run_page() -> None:
     st.set_page_config(page_title="CRS calculator", layout="wide")
     apply_page_style(max_width_px=1100)
-    render_hero(
-        title="CRS calculator",
-        subtitle="Быстрая проверка пересчёта X/Y той же функцией, что используется в CSV-выгрузке.",
-    )
+    render_hero(title="CRS calculator")
 
     input_labels = _labels(_CALCULATOR_INPUT_CRS_OPTIONS)
     output_labels = _labels(CSV_CRS_OPTIONS)
@@ -281,11 +278,6 @@ def run_page() -> None:
     c_swap.button(
         _SWAP_CRS_BUTTON_LABEL,
         key="crs_calc_swap_crs",
-        help=(
-            "Инвертировать входную и выходную CRS."
-            if can_swap_crs_labels
-            else "Инверсия доступна только для CRS, которые есть и во входном, и в выходном списке."
-        ),
         disabled=not can_swap_crs_labels,
         on_click=_swap_crs_selection_state,
         width="stretch",
