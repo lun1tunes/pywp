@@ -149,6 +149,22 @@ def test_raw_records_dataframe_labels_extra_points_without_md_column() -> None:
     assert "MD (из файла), м" not in list(raw_df.columns)
 
 
+def test_raw_records_dataframe_discards_incomplete_explicit_point_labels() -> None:
+    source = _record(
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=1.0, y=2.0, z=3.0, md=10.0),
+            WelltrackPoint(x=4.0, y=5.0, z=6.0, md=20.0),
+            WelltrackPoint(x=7.0, y=8.0, z=9.0, md=30.0),
+            WelltrackPoint(x=10.0, y=11.0, z=12.0, md=40.0),
+        ),
+    ).model_copy(update={"point_labels": ("S", "t1")})
+
+    raw_df = target_records.raw_records_dataframe([source])
+
+    assert list(raw_df["Точка"]) == ["S", "1_t1", "1_t3", "2_t1", "2_t3"]
+
+
 def test_multi_horizontal_records_are_ready_and_labeled_by_levels() -> None:
     source = _record(
         "MULTI",

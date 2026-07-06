@@ -95,8 +95,19 @@ class PadSurfaceAssignment:
     source_well_name: str = ""
 
 
+@dataclass(frozen=True)
+class _PadDetectionRecord:
+    record_index: int
+    record: WelltrackRecord
+    cluster_surface_xyz: tuple[float, float, float]
+    source_surface_xyz: tuple[float, float, float]
+    source_surface_defined: bool
+    inferred_pad_group_key: str = ""
+
+
 _PAD_COMPONENT_EDGE_RE = re.compile(r"^[\s_\-]+|[\s_\-]+$")
 _TRAILING_DIGITS_RE = re.compile(r"^(.*?)(\d+)$")
+_TRAILING_GROUP_TOKEN_RE = re.compile(r"^(.*?)[_\-]([A-Za-z0-9]+)$")
 
 
 def pad_config_defaults(pad: WellPad) -> dict[str, object]:
@@ -280,12 +291,99 @@ def source_surface_xyz(
     return float(surface.x), float(surface.y), float(surface.z)
 
 
+def _degenerate_three_point_surface_cluster_xyz(
+    record: WelltrackRecord,
+) -> tuple[float, float, float] | None:
+    points = tuple(record.points)
+    if len(points) != 3:
+        return None
+    surface_xyz = source_surface_xyz(record)
+    if surface_xyz is None:
+        return None
+    try:
+        layout = ordinary_record_target_layout(record)
+    except (TypeError, ValueError):
+        return None
+    if (
+        abs(float(surface_xyz[0]) - float(layout.t1.x)) > SMALL
+        or abs(float(surface_xyz[1]) - float(layout.t1.y)) > SMALL
+    ):
+        return None
+    if (
+        abs(float(layout.final_target.x) - float(layout.t1.x)) <= SMALL
+        and abs(float(layout.final_target.y) - float(layout.t1.y)) <= SMALL
+    ):
+        return None
+    return float(layout.t1.x), float(layout.t1.y), float(surface_xyz[2])
+
+
+def _inferred_pad_group_key(name: str) -> str:
+    trimmed = _trim_pad_component(str(name))
+    if not trimmed:
+        return ""
+    reduced = _reduced_well_name_for_pad(trimmed)
+    if reduced != trimmed:
+        return str(reduced).casefold()
+    match = _TRAILING_GROUP_TOKEN_RE.fullmatch(trimmed)
+    if match is None:
+        return ""
+    prefix, suffix = match.groups()
+    normalized_prefix = _trim_pad_component(prefix)
+    if not normalized_prefix:
+        return ""
+    suffix_text = str(suffix)
+    if (
+        suffix_text.isdigit()
+        or len(suffix_text) == 1
+        or normalized_prefix[-1].isdigit()
+    ):
+        return str(normalized_prefix).casefold()
+    return ""
+
+
+def _pad_detection_records(
+    records: list[WelltrackRecord],
+) -> list[_PadDetectionRecord]:
+    prepared: list[_PadDetectionRecord] = []
+    for record_index, record in enumerate(records):
+        surface_xyz = source_surface_xyz(record)
+        if surface_xyz is None:
+            continue
+        degenerate_cluster_xyz = _degenerate_three_point_surface_cluster_xyz(record)
+        if degenerate_cluster_xyz is not None:
+            prepared.append(
+                _PadDetectionRecord(
+                    record_index=int(record_index),
+                    record=record,
+                    cluster_surface_xyz=degenerate_cluster_xyz,
+                    source_surface_xyz=surface_xyz,
+                    source_surface_defined=False,
+                    inferred_pad_group_key=_inferred_pad_group_key(str(record.name)),
+                )
+            )
+            continue
+        prepared.append(
+            _PadDetectionRecord(
+                record_index=int(record_index),
+                record=record,
+                cluster_surface_xyz=surface_xyz,
+                source_surface_xyz=surface_xyz,
+                source_surface_defined=True,
+            )
+        )
+    return prepared
+
+
 def record_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
     points = tuple(record.points)
     if len(points) >= 3:
         try:
             layout = ordinary_record_target_layout(record)
-            target_points = (layout.t1, layout.final_target)
+            target_points = (
+                layout.target_pairs[0]
+                if layout.target_pairs
+                else (layout.t1, layout.final_target)
+            )
             return (
                 float(np.mean([point.x for point in target_points])),
                 float(np.mean([point.y for point in target_points])),
@@ -364,49 +462,51 @@ def inferred_surface_spacing_m(
 def detect_ui_pads(
     records: list[WelltrackRecord],
 ) -> tuple[list[WellPad], dict[str, DetectedPadUiMeta]]:
-    indexed_records = [
-        (index, record, source_surface_xyz(record))
-        for index, record in enumerate(records)
-    ]
-    indexed_records = [
-        (index, record, surface_xyz)
-        for index, record, surface_xyz in indexed_records
-        if surface_xyz is not None
-    ]
+    indexed_records = _pad_detection_records(records)
     if not indexed_records:
         return [], {}
 
     adjacency: dict[int, set[int]] = {
-        index: set() for index, _, _ in indexed_records
+        entry.record_index: set() for entry in indexed_records
     }
-    for left_pos, (left_index, _, left_surface) in enumerate(indexed_records):
-        for right_index, _, right_surface in indexed_records[left_pos + 1 :]:
+    for left_pos, left_entry in enumerate(indexed_records):
+        for right_entry in indexed_records[left_pos + 1 :]:
+            if (
+                (
+                    not left_entry.source_surface_defined
+                    or not right_entry.source_surface_defined
+                )
+                and left_entry.inferred_pad_group_key
+                and left_entry.inferred_pad_group_key
+                == right_entry.inferred_pad_group_key
+            ):
+                adjacency[left_entry.record_index].add(right_entry.record_index)
+                adjacency[right_entry.record_index].add(left_entry.record_index)
+                continue
             distance_xy = float(
                 np.hypot(
-                    float(left_surface[0]) - float(right_surface[0]),
-                    float(left_surface[1]) - float(right_surface[1]),
+                    float(left_entry.cluster_surface_xyz[0])
+                    - float(right_entry.cluster_surface_xyz[0]),
+                    float(left_entry.cluster_surface_xyz[1])
+                    - float(right_entry.cluster_surface_xyz[1]),
                 )
             )
             if distance_xy <= WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M + SMALL:
-                adjacency[left_index].add(right_index)
-                adjacency[right_index].add(left_index)
+                adjacency[left_entry.record_index].add(right_entry.record_index)
+                adjacency[right_entry.record_index].add(left_entry.record_index)
 
     by_index = {
-        index: (index, record, surface_xyz)
-        for index, record, surface_xyz in indexed_records
+        entry.record_index: entry for entry in indexed_records
     }
-    clusters: list[
-        list[tuple[int, WelltrackRecord, tuple[float, float, float]]]
-    ] = []
+    clusters: list[list[_PadDetectionRecord]] = []
     visited: set[int] = set()
-    for index, _, _ in indexed_records:
+    for entry in indexed_records:
+        index = int(entry.record_index)
         if index in visited:
             continue
         queue = [index]
         visited.add(index)
-        cluster: list[
-            tuple[int, WelltrackRecord, tuple[float, float, float]]
-        ] = []
+        cluster: list[_PadDetectionRecord] = []
         while queue:
             current = queue.pop()
             cluster.append(by_index[current])
@@ -422,11 +522,11 @@ def detect_ui_pads(
             float,
             float,
             float,
-            list[tuple[int, WelltrackRecord, tuple[float, float, float]]],
+            list[_PadDetectionRecord],
         ]
     ] = []
     for cluster in clusters:
-        surface_xyzs = [surface_xyz for _, _, surface_xyz in cluster]
+        surface_xyzs = [entry.cluster_surface_xyz for entry in cluster]
         center_x = float(np.mean([item[0] for item in surface_xyzs]))
         center_y = float(np.mean([item[1] for item in surface_xyzs]))
         center_z = float(np.mean([item[2] for item in surface_xyzs]))
@@ -443,13 +543,13 @@ def detect_ui_pads(
         surface_xyzs: list[tuple[float, float, float]] = []
         surface_slot_rows: list[tuple[str, float, float, float]] = []
         unique_surface_keys: set[tuple[int, int, int]] = set()
-        for record_index, record, surface_xyz in cluster:
-            midpoint_x, midpoint_y, midpoint_z = record_midpoint_xyz(record)
-            target_axis_x, target_axis_y = record_target_axis_xy(record)
+        for entry in cluster:
+            midpoint_x, midpoint_y, midpoint_z = record_midpoint_xyz(entry.record)
+            target_axis_x, target_axis_y = record_target_axis_xy(entry.record)
             wells.append(
                 PadWell(
-                    name=str(record.name),
-                    record_index=int(record_index),
+                    name=str(entry.record.name),
+                    record_index=int(entry.record_index),
                     midpoint_x=float(midpoint_x),
                     midpoint_y=float(midpoint_y),
                     midpoint_z=float(midpoint_z),
@@ -457,24 +557,28 @@ def detect_ui_pads(
                     target_axis_y=float(target_axis_y),
                 )
             )
-            surface_xyzs.append(surface_xyz)
-            surface_slot_rows.append(
-                (
-                    str(record.name),
-                    float(surface_xyz[0]),
-                    float(surface_xyz[1]),
-                    float(surface_xyz[2]),
+            surface_xyzs.append(entry.cluster_surface_xyz)
+            if entry.source_surface_defined:
+                source_surface = entry.source_surface_xyz
+                surface_slot_rows.append(
+                    (
+                        str(entry.record.name),
+                        float(source_surface[0]),
+                        float(source_surface[1]),
+                        float(source_surface[2]),
+                    )
                 )
-            )
-            unique_surface_keys.add(
-                (
-                    round(float(surface_xyz[0]), 6),
-                    round(float(surface_xyz[1]), 6),
-                    round(float(surface_xyz[2]), 6),
+                unique_surface_keys.add(
+                    (
+                        round(float(source_surface[0]), 6),
+                        round(float(source_surface[1]), 6),
+                        round(float(source_surface[2]), 6),
+                    )
                 )
-            )
         pad_id, auto_name_notice = resolved_pad_names[index - 1]
-        source_surfaces_defined = len(unique_surface_keys) > 1
+        source_surfaces_defined = (
+            len(surface_slot_rows) == len(cluster) and len(unique_surface_keys) > 1
+        )
         auto_nds = estimate_surface_pad_axis_deg(surface_xyzs)
         if abs(float(auto_nds)) <= SMALL:
             auto_nds = estimate_pad_nds_azimuth_deg(
@@ -502,7 +606,7 @@ def detect_ui_pads(
             source_surface_x_m=float(center_x),
             source_surface_y_m=float(center_y),
             source_surface_z_m=float(center_z),
-            source_surface_count=len(surface_xyzs),
+            source_surface_count=len(surface_slot_rows),
             source_surface_slots=tuple(
                 sorted(
                     surface_slot_rows,
@@ -1003,13 +1107,13 @@ def _resolved_auto_pad_names(
             float,
             float,
             float,
-            list[tuple[int, WelltrackRecord, tuple[float, float, float]]],
+            list[_PadDetectionRecord],
         ]
     ],
 ) -> list[tuple[str, str]]:
     proposed: list[tuple[str, bool, int]] = []
     for cluster_index, (_x, _y, _z, cluster) in enumerate(prepared, start=1):
-        well_names = [str(record.name) for _, record, _surface_xyz in cluster]
+        well_names = [str(entry.record.name) for entry in cluster]
         component = _pad_name_component_for_cluster(well_names)
         if component:
             proposed.append((_format_auto_pad_name(component), False, cluster_index))

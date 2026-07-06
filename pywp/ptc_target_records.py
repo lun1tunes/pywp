@@ -110,14 +110,23 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
 
     raw_rows: list[dict[str, object]] = []
     for record in records:
-        labels = record_point_labels(record)
+        point_count = len(tuple(record.points))
+        explicit_labels = tuple(
+            str(label).strip()
+            for label in (getattr(record, "point_labels", ()) or ())
+        )
+        use_explicit_labels = (
+            bool(explicit_labels)
+            and len(explicit_labels) == point_count
+            and all(explicit_labels)
+        )
         for index, point in enumerate(record.points, start=1):
             raw_rows.append(
                 {
                     "Скважина": record.name,
                     "Точка": (
-                        str(labels[index - 1])
-                        if index <= len(labels)
+                        str(explicit_labels[index - 1])
+                        if use_explicit_labels
                         else _point_label(
                             index,
                             is_pilot=is_pilot_record(record),

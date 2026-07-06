@@ -433,7 +433,11 @@ def _well_midpoint_xyz(record: WelltrackRecord) -> tuple[float, float, float]:
     if len(record.points) >= 3:
         try:
             layout = ordinary_record_target_layout(record)
-            target_points = (layout.t1, layout.final_target)
+            target_points = (
+                layout.target_pairs[0]
+                if layout.target_pairs
+                else (layout.t1, layout.final_target)
+            )
             return (
                 float(np.mean([point.x for point in target_points])),
                 float(np.mean([point.y for point in target_points])),

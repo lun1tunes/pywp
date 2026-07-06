@@ -164,6 +164,35 @@ def _multi_pad_records() -> list[WelltrackRecord]:
     ]
 
 
+def _degenerate_surface_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="9201",
+            points=(
+                WelltrackPoint(x=1000.0, y=800.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1000.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1900.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9202",
+            points=(
+                WelltrackPoint(x=1600.0, y=900.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1600.0, y=900.0, z=2350.0, md=2350.0),
+                WelltrackPoint(x=2500.0, y=2100.0, z=2450.0, md=3450.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9203",
+            points=(
+                WelltrackPoint(x=2200.0, y=1000.0, z=0.0, md=0.0),
+                WelltrackPoint(x=2200.0, y=1000.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=3100.0, y=2200.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
 def _prepositioned_pad_records() -> list[WelltrackRecord]:
     return [
         WelltrackRecord(
@@ -2914,6 +2943,45 @@ def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface(
     assert len(set(updated_surfaces)) == 4
     assert updated_surfaces[0] != updated_surfaces[1]
     assert updated_surfaces[2] != updated_surfaces[3]
+    assert page.st.session_state["wt_pad_auto_applied_on_import"] is True
+    assert page.st.session_state["wt_pad_last_applied_at"] != ""
+
+
+def test_auto_pad_layout_applies_for_degenerate_three_point_surface_records() -> None:
+    page = wt_import_module
+    page._init_state()
+
+    records = _degenerate_surface_pad_records()
+    original_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
+        for record in records
+    }
+
+    applied = page._auto_apply_pad_layout_if_shared_surface(list(records))
+
+    assert applied is True
+    pads = page._ensure_pad_configs(list(records))
+    pad_id = str(pads[0].pad_id)
+    metadata = page.st.session_state["wt_pad_detected_meta"]
+    assert [len(pad.wells) for pad in pads] == [3]
+    assert bool(metadata[pad_id].source_surfaces_defined) is False
+
+    updated_records = page.st.session_state["wt_records"]
+    updated_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
+        for record in updated_records
+    }
+    assert updated_surfaces != original_surfaces
+    assert len(set(updated_surfaces.values())) == 3
+    assert {value[2] for value in updated_surfaces.values()} == {0.0}
     assert page.st.session_state["wt_pad_auto_applied_on_import"] is True
     assert page.st.session_state["wt_pad_last_applied_at"] != ""
 

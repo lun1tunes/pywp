@@ -164,6 +164,35 @@ def _named_records(
     ]
 
 
+def _degenerate_surface_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="9201",
+            points=(
+                WelltrackPoint(x=1000.0, y=800.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1000.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1900.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9202",
+            points=(
+                WelltrackPoint(x=1600.0, y=900.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1600.0, y=900.0, z=2350.0, md=2350.0),
+                WelltrackPoint(x=2500.0, y=2100.0, z=2450.0, md=3450.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9203",
+            points=(
+                WelltrackPoint(x=2200.0, y=1000.0, z=0.0, md=0.0),
+                WelltrackPoint(x=2200.0, y=1000.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=3100.0, y=2200.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
 def test_pad_config_defaults_to_center_anchor_mode() -> None:
     pads = detect_well_pads(_records())
 
@@ -196,6 +225,17 @@ def test_detect_ui_pads_marks_source_defined_surfaces() -> None:
     assert [len(pad.wells) for pad in pads] == [3]
     assert bool(metadata[str(pads[0].pad_id)].source_surfaces_defined) is True
     assert metadata[str(pads[0].pad_id)].source_surface_count == 3
+
+
+def test_detect_ui_pads_groups_degenerate_three_point_surfaces_by_pad_name() -> None:
+    pads, metadata = ptc_pad_state.detect_ui_pads(_degenerate_surface_records())
+
+    assert [len(pad.wells) for pad in pads] == [3]
+    assert [str(pad.pad_id) for pad in pads] == ["Pad 92"]
+    assert math.isclose(float(pads[0].surface.x), 1600.0)
+    assert math.isclose(float(pads[0].surface.y), 900.0)
+    assert bool(metadata[str(pads[0].pad_id)].source_surfaces_defined) is False
+    assert metadata[str(pads[0].pad_id)].source_surface_count == 0
 
 
 def test_detect_ui_pads_uses_common_numeric_prefix_for_auto_name() -> None:
