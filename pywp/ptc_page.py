@@ -29,7 +29,7 @@ from pywp.ptc_page_results import (
 from pywp.ptc_page_run import render_run_section
 from pywp.ptc_page_state import force_ptc_defaults
 from pywp.solver_diagnostics_ui import render_solver_diagnostics
-from pywp.ui_theme import apply_page_style, render_hero, render_small_note
+from pywp.ui_theme import apply_page_style, render_small_note
 from pywp.ui_well_panels import render_run_log_panel
 
 __all__ = ["run_page"]
@@ -129,12 +129,6 @@ def run_page() -> None:
 
     render_crs_sidebar()
     apply_page_style(max_width_px=1700)
-    render_hero(
-        title="PTC",
-        subtitle="Конструктор прототипа траекторий",
-        centered=True,
-        max_content_width_px=760,
-    )
 
     _render_target_import_section_fragment()
     edit_applied = st.session_state.pop("wt_edit_targets_applied", None)

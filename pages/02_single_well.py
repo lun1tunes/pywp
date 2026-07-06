@@ -43,7 +43,7 @@ from pywp.three_viewer import render_local_three_scene
 from pywp.ui_calc_params import (
     CalcParamBinding,
 )
-from pywp.ui_theme import apply_page_style, render_hero, render_small_note
+from pywp.ui_theme import apply_page_style, render_small_note
 from pywp.ui_utils import (
     arrow_safe_text_dataframe,
     format_run_log_line,
@@ -1508,7 +1508,6 @@ def run_app() -> None:
 
     _init_state()
     apply_page_style(max_width_px=1680)
-    render_hero(title="Планировщик траектории скважины")
     _render_template_controls()
     build_clicked = _render_input_form()
 

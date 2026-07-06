@@ -3,9 +3,7 @@ from __future__ import annotations
 import pywp.ui_theme as ui_theme
 
 
-def test_render_hero_supports_centered_variant_with_constrained_width(
-    monkeypatch,
-) -> None:
+def test_render_small_note_wraps_text_in_note_container(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def _fake_markdown(body: str, *, unsafe_allow_html: bool = False) -> None:
@@ -14,16 +12,8 @@ def test_render_hero_supports_centered_variant_with_constrained_width(
 
     monkeypatch.setattr(ui_theme.st, "markdown", _fake_markdown)
 
-    ui_theme.render_hero(
-        title="PTC",
-        subtitle="Конструктор прототипа траекторий",
-        centered=True,
-        max_content_width_px=760,
-    )
+    ui_theme.render_small_note("Короткая подсказка")
 
     body = str(captured["body"])
-    assert 'class="pywp-hero pywp-hero--centered"' in body
-    assert "--pywp-hero-content-max-width: 760px;" in body
-    assert "<h2>PTC</h2>" in body
-    assert "<p>Конструктор прототипа траекторий</p>" in body
+    assert "<div class='pywp-small-note'>Короткая подсказка</div>" == body
     assert bool(captured["unsafe"]) is True

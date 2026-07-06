@@ -21,7 +21,7 @@ from pywp.classification import (
     reference_table_rows,
     trajectory_type_label,
 )
-from pywp.ui_theme import apply_page_style, render_hero, render_small_note
+from pywp.ui_theme import apply_page_style, render_small_note
 from pywp.ui_utils import arrow_safe_text_dataframe
 
 
@@ -97,10 +97,6 @@ def _classification_result_frame(
 def run_page() -> None:
     st.set_page_config(page_title="Классификация скважин", layout="wide")
     apply_page_style(max_width_px=1500)
-    render_hero(
-        title="Классификация сложности скважин",
-        subtitle="Базовая таблица порогов и линейная интерполяция по фактической ГВ t1.",
-    )
 
     st.markdown("### Базовая таблица")
     st.dataframe(_reference_frame(), width="stretch", hide_index=True)

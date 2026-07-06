@@ -23,7 +23,7 @@ from pywp.coordinate_integration import (
     transform_xy_to_crs,
 )
 from pywp.coordinate_systems import CoordinateSystem
-from pywp.ui_theme import apply_page_style, render_hero
+from pywp.ui_theme import apply_page_style
 
 _DEFAULT_OUTPUT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
 _DEFAULT_X = 600_010.6
@@ -254,7 +254,6 @@ def _result_frame(
 def run_page() -> None:
     st.set_page_config(page_title="CRS calculator", layout="wide")
     apply_page_style(max_width_px=1100)
-    render_hero(title="CRS calculator")
 
     input_labels = _labels(_CALCULATOR_INPUT_CRS_OPTIONS)
     output_labels = _labels(CSV_CRS_OPTIONS)
