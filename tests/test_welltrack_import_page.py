@@ -11273,6 +11273,25 @@ def test_all_wells_three_payload_preserves_overview_labels_and_legend() -> None:
     ]
 
 
+def test_all_wells_three_payload_keeps_all_calculated_labels_for_large_dev_like_batch() -> None:
+    page = wt_import_module
+    successes = [
+        _successful_plan(name=f"WELL-{index:03d}", y_offset_m=float(index) * 15.0)
+        for index in range(96)
+    ]
+
+    payload = page._all_wells_three_payload(
+        successes,
+        reference_wells=_reference_wells(),
+        render_mode=page.WT_3D_RENDER_DETAIL,
+    )
+
+    label_texts = {str(item["text"]) for item in payload["labels"]}
+
+    for success in successes:
+        assert str(success.name) in label_texts
+
+
 def test_three_legend_tree_stays_calculated_only_when_reference_pad_labels_exist() -> (
     None
 ):

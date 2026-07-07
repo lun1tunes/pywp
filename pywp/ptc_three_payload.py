@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import TypeVar
 
 import numpy as np
 
@@ -19,12 +18,11 @@ __all__ = [
     "raw_bounds_from_xyz_arrays",
 ]
 
-_T = TypeVar("_T")
-
 WT_THREE_MAX_HOVER_POINTS_PER_TRACE = 96
 WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = 72
 WT_THREE_MAX_LABELS = 48
 WT_THREE_MAX_REFERENCE_LABELS = 12
+_PRIMARY_LABEL_ROLES = frozenset({"well_label", "reference_label"})
 
 
 def _float_or_default(value: object, default: float) -> float:
@@ -54,17 +52,6 @@ def decimate_hover_payload(
     )
 
 
-def _sample_items_evenly(items: list[_T], limit: int) -> list[_T]:
-    if limit <= 0:
-        return []
-    if len(items) <= limit:
-        return list(items)
-    indices = np.unique(
-        np.linspace(0, len(items) - 1, num=int(limit), dtype=int)
-    ).tolist()
-    return [items[index] for index in indices]
-
-
 def optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
     optimized = dict(payload)
     optimized["lines"] = merge_three_line_payloads(payload.get("lines") or [])
@@ -73,48 +60,21 @@ def optimize_three_payload(payload: dict[str, object]) -> dict[str, object]:
 
     labels = list(payload.get("labels") or [])
     indexed_labels = list(enumerate(labels))
-    reference_labels = [
+    primary_labels = [
         entry
         for entry in indexed_labels
-        if str(entry[1].get("role") or "") == "reference_label"
-    ]
-    non_reference_labels = [
-        entry
-        for entry in indexed_labels
-        if str(entry[1].get("role") or "") != "reference_label"
-    ]
-    selected_reference_labels = _sample_items_evenly(
-        reference_labels,
-        int(WT_THREE_MAX_REFERENCE_LABELS),
-    )
-
-    remaining_non_reference_slots = max(
-        int(WT_THREE_MAX_LABELS) - len(selected_reference_labels),
-        0,
-    )
-    prioritized_well_labels = [
-        entry
-        for entry in non_reference_labels
-        if str(entry[1].get("role") or "") == "well_label"
+        if str(entry[1].get("role") or "") in _PRIMARY_LABEL_ROLES
     ]
     auxiliary_labels = [
         entry
-        for entry in non_reference_labels
-        if str(entry[1].get("role") or "") != "well_label"
+        for entry in indexed_labels
+        if str(entry[1].get("role") or "") not in _PRIMARY_LABEL_ROLES
     ]
-    selected_well_labels = _sample_items_evenly(
-        prioritized_well_labels,
-        remaining_non_reference_slots,
-    )
-    remaining_auxiliary_slots = max(
-        remaining_non_reference_slots - len(selected_well_labels),
-        0,
-    )
-    selected_auxiliary_labels = auxiliary_labels[:remaining_auxiliary_slots]
+    selected_auxiliary_labels = auxiliary_labels[: int(WT_THREE_MAX_LABELS)]
     selected_indices = {
         index
         for index, _ in (
-            [*selected_reference_labels, *selected_well_labels, *selected_auxiliary_labels]
+            [*primary_labels, *selected_auxiliary_labels]
         )
     }
     optimized["labels"] = [
