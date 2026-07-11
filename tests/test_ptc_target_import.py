@@ -1159,6 +1159,61 @@ def test_store_imported_records_keeps_pilot_internal_to_parent_selection() -> No
     assert session_state["wt_selected_names"] == ["WELL-04"]
 
 
+def test_simple_dev_target_well_names_from_state_normalizes_duplicates_and_skips_pilot() -> (
+    None
+):
+    session_state = {
+        target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY: (
+            ImportedTrajectoryWell(
+                name="  SIMPLE-01  ",
+                kind="approved",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 1000.0, 1500.0],
+                        "X_m": [0.0, 100.0, 200.0],
+                        "Y_m": [0.0, 100.0, 200.0],
+                        "Z_m": [0.0, 1000.0, 1000.0],
+                    }
+                ),
+                surface=Point3D(x=0.0, y=0.0, z=0.0),
+                azimuth_deg=45.0,
+            ),
+            ImportedTrajectoryWell(
+                name="simple-01",
+                kind="approved",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 1000.0, 1500.0],
+                        "X_m": [0.0, 100.0, 200.0],
+                        "Y_m": [0.0, 100.0, 200.0],
+                        "Z_m": [0.0, 1000.0, 1000.0],
+                    }
+                ),
+                surface=Point3D(x=0.0, y=0.0, z=0.0),
+                azimuth_deg=45.0,
+            ),
+            ImportedTrajectoryWell(
+                name="SIMPLE-01_PL",
+                kind="approved",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 1000.0, 1500.0],
+                        "X_m": [0.0, 100.0, 200.0],
+                        "Y_m": [0.0, 100.0, 200.0],
+                        "Z_m": [0.0, 1000.0, 1000.0],
+                    }
+                ),
+                surface=Point3D(x=0.0, y=0.0, z=0.0),
+                azimuth_deg=45.0,
+            ),
+        )
+    }
+
+    assert target_import.simple_dev_target_well_names_from_state(session_state) == (
+        "SIMPLE-01",
+    )
+
+
 def test_failed_and_clear_import_state_helpers_reset_expected_keys() -> None:
     session_state: dict[str, object] = {
         "wt_records": ["old"],

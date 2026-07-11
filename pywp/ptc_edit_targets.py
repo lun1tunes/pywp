@@ -5,6 +5,7 @@ import math
 
 import pandas as pd
 
+from pywp import ptc_target_import
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.pilot_wells import (
     is_pilot_name,
@@ -190,7 +191,47 @@ def _sidetrack_window_change(value: object) -> dict[str, object] | None:
 def records_with_edit_targets(
     records: Iterable[WelltrackRecord],
     change_map: Mapping[str, Mapping[str, object]],
+    *,
+    keep_surface_above_t1_names: Iterable[object] = (),
 ) -> tuple[list[WelltrackRecord], list[str]]:
+    keep_surface_above_t1_name_keys = {
+        well_name_key(str(name))
+        for name in keep_surface_above_t1_names
+        if str(name).strip()
+    }
+
+    def _surface_should_follow_t1_xy(
+        *,
+        record_name: str,
+        original_points: tuple[WelltrackPoint, ...],
+        changed_point_indices: set[int],
+    ) -> bool:
+        if well_name_key(record_name) not in keep_surface_above_t1_name_keys:
+            return False
+        if (
+            len(original_points) != 3
+            or 0 in changed_point_indices
+            or 1 not in changed_point_indices
+        ):
+            return False
+        surface_point = original_points[0]
+        t1_point = original_points[1]
+        return (
+            math.isclose(float(surface_point.x), float(t1_point.x), abs_tol=1e-9)
+            and math.isclose(float(surface_point.y), float(t1_point.y), abs_tol=1e-9)
+        )
+
+    def _synced_surface_point(
+        surface_point: WelltrackPoint,
+        t1_point: WelltrackPoint,
+    ) -> WelltrackPoint:
+        return WelltrackPoint(
+            x=float(t1_point.x),
+            y=float(t1_point.y),
+            z=float(surface_point.z),
+            md=float(surface_point.md),
+        )
+
     updated_records: list[WelltrackRecord] = []
     updated_names: list[str] = []
     for record in records:
@@ -201,8 +242,10 @@ def records_with_edit_targets(
         delta = change_map[record_name]
         raw_points = delta.get("points")
         if isinstance(raw_points, list):
-            old_points = list(record.points)
+            original_points = tuple(record.points)
+            old_points = list(original_points)
             changed = False
+            changed_point_indices: set[int] = set()
             for raw_entry in raw_points:
                 if not isinstance(raw_entry, Mapping):
                     continue
@@ -235,7 +278,14 @@ def records_with_edit_targets(
                     md=float(old_point.md),
                 )
                 changed = True
+                changed_point_indices.add(point_index)
             if changed:
+                if _surface_should_follow_t1_xy(
+                    record_name=record_name,
+                    original_points=original_points,
+                    changed_point_indices=changed_point_indices,
+                ):
+                    old_points[0] = _synced_surface_point(old_points[0], old_points[1])
                 updated_records.append(
                     WelltrackRecord(
                         name=record.name,
@@ -256,20 +306,35 @@ def records_with_edit_targets(
         if len(record.points) != 3:
             updated_records.append(record)
             continue
-        old_points = record.points
+        original_points = tuple(record.points)
+        synced_surface = original_points[0]
+        if _surface_should_follow_t1_xy(
+            record_name=record_name,
+            original_points=original_points,
+            changed_point_indices={1, 2},
+        ):
+            synced_surface = _synced_surface_point(
+                original_points[0],
+                WelltrackPoint(
+                    x=float(new_t1[0]),
+                    y=float(new_t1[1]),
+                    z=float(new_t1[2]),
+                    md=float(original_points[1].md),
+                ),
+            )
         new_points = (
-            old_points[0],
+            synced_surface,
             WelltrackPoint(
                 x=float(new_t1[0]),
                 y=float(new_t1[1]),
                 z=float(new_t1[2]),
-                md=float(old_points[1].md),
+                md=float(original_points[1].md),
             ),
             WelltrackPoint(
                 x=float(new_t3[0]),
                 y=float(new_t3[1]),
                 z=float(new_t3[2]),
-                md=float(old_points[2].md),
+                md=float(original_points[2].md),
             ),
         )
         updated_records.append(
@@ -529,6 +594,9 @@ def apply_edit_targets_changes(
     records = session_state.get("wt_records")
     if not records:
         return []
+    keep_surface_above_t1_names = ptc_target_import.simple_dev_target_well_names_from_state(
+        session_state
+    )
     change_map: dict[str, dict[str, object]] = {}
     sidetrack_window_map: dict[str, dict[str, object]] = {}
     for entry in changes:
@@ -577,6 +645,7 @@ def apply_edit_targets_changes(
         updated_records, updated_target_names = records_with_edit_targets(
             records=records,  # type: ignore[arg-type]
             change_map=change_map,
+            keep_surface_above_t1_names=keep_surface_above_t1_names,
         )
     sidetrack_window_names: list[str] = []
     for name, window_change in sidetrack_window_map.items():
@@ -602,6 +671,7 @@ def apply_edit_targets_changes(
         updated_original_records, _ = records_with_edit_targets(
             records=original_records,  # type: ignore[arg-type]
             change_map=effective_change_map,
+            keep_surface_above_t1_names=keep_surface_above_t1_names,
         )
         session_state["wt_records_original"] = updated_original_records
 

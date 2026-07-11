@@ -5,7 +5,9 @@ import math
 import pandas as pd
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.models import Point3D
 from pywp import ptc_pad_state
+from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.well_pad import detect_well_pads
 
 
@@ -204,6 +206,20 @@ def test_pad_config_defaults_to_center_anchor_mode() -> None:
     )
 
 
+def test_pad_layout_details_open_defaults_to_false() -> None:
+    assert ptc_pad_state.pad_layout_details_open({}) is False
+
+
+def test_toggle_pad_layout_details_open_flips_state() -> None:
+    state: dict[str, object] = {}
+
+    assert ptc_pad_state.toggle_pad_layout_details_open(state) is True
+    assert state[ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] is True
+
+    assert ptc_pad_state.toggle_pad_layout_details_open(state) is False
+    assert state[ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] is False
+
+
 def test_record_midpoint_xyz_uses_first_multi_horizontal_interval() -> None:
     record = WelltrackRecord(
         name="MULTI",
@@ -236,6 +252,67 @@ def test_detect_ui_pads_groups_degenerate_three_point_surfaces_by_pad_name() -> 
     assert math.isclose(float(pads[0].surface.y), 900.0)
     assert bool(metadata[str(pads[0].pad_id)].source_surfaces_defined) is False
     assert metadata[str(pads[0].pad_id)].source_surface_count == 0
+
+
+def test_ensure_pad_configs_recovers_simple_dev_clusters_after_t1_edit() -> None:
+    edited_records = [
+        WelltrackRecord(
+            name=str(record.name),
+            points=(
+                record.points[0],
+                WelltrackPoint(
+                    x=float(record.points[1].x) + 120.0,
+                    y=float(record.points[1].y) + 80.0,
+                    z=float(record.points[1].z),
+                    md=float(record.points[1].md),
+                ),
+                WelltrackPoint(
+                    x=float(record.points[2].x) + 120.0,
+                    y=float(record.points[2].y) + 80.0,
+                    z=float(record.points[2].z),
+                    md=float(record.points[2].md),
+                ),
+            ),
+        )
+        for record in _degenerate_surface_records()
+    ]
+    pads_without_state, _ = ptc_pad_state.detect_ui_pads(edited_records)
+    session_state: dict[str, object] = {
+        "wt_imported_dev_target_wells": tuple(
+            ImportedTrajectoryWell(
+                name=str(record.name),
+                kind="approved",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [point.md for point in record.points],
+                        "X_m": [point.x for point in record.points],
+                        "Y_m": [point.y for point in record.points],
+                        "Z_m": [point.z for point in record.points],
+                    }
+                ),
+                surface=Point3D(
+                    x=float(record.points[0].x),
+                    y=float(record.points[0].y),
+                    z=float(record.points[0].z),
+                ),
+                azimuth_deg=45.0,
+            )
+            for record in edited_records
+        )
+    }
+
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=edited_records)
+    metadata = session_state["wt_pad_detected_meta"]
+
+    assert [len(pad.wells) for pad in pads_without_state] == [1, 1, 1]
+    assert [str(pad.pad_id) for pad in pads_without_state] == [
+        "Pad 92",
+        "Pad 92A",
+        "Pad 92B",
+    ]
+    assert [len(pad.wells) for pad in pads] == [3]
+    assert [str(pad.pad_id) for pad in pads] == ["Pad 92"]
+    assert bool(metadata["Pad 92"].source_surfaces_defined) is False
 
 
 def test_detect_ui_pads_uses_common_numeric_prefix_for_auto_name() -> None:

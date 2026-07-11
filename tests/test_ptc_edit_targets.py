@@ -3,10 +3,13 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from pywp import ptc_edit_targets
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.models import Point3D
+from pywp.reference_trajectories import ImportedTrajectoryWell
 
 
 def _record(
@@ -479,6 +482,75 @@ def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> 
     assert updated_record.points[0].z == pytest.approx(-10.0)
     assert updated_record.points[4].x == pytest.approx(410.0)
     assert updated_original.points[4].y == pytest.approx(20.0)
+
+
+def test_apply_edit_targets_changes_preserves_laid_out_dev_surface_in_records_but_keeps_original_stick() -> (
+    None
+):
+    current_record = WelltrackRecord(
+        name="9201",
+        points=(
+            WelltrackPoint(x=1400.0, y=950.0, z=0.0, md=0.0),
+            WelltrackPoint(x=1000.0, y=800.0, z=2400.0, md=2400.0),
+            WelltrackPoint(x=1900.0, y=2000.0, z=2500.0, md=3500.0),
+        ),
+    )
+    original_record = WelltrackRecord(
+        name="9201",
+        points=(
+            WelltrackPoint(x=1000.0, y=800.0, z=0.0, md=0.0),
+            WelltrackPoint(x=1000.0, y=800.0, z=2400.0, md=2400.0),
+            WelltrackPoint(x=1900.0, y=2000.0, z=2500.0, md=3500.0),
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [current_record],
+        "wt_records_original": [original_record],
+        "wt_successes": [SimpleNamespace(name="9201")],
+        "wt_summary_rows": [{"Скважина": "9201", "Статус": "OK", "Проблема": ""}],
+        "wt_imported_dev_target_wells": (
+            ImportedTrajectoryWell(
+                name="9201",
+                kind="approved",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 2400.0, 3500.0],
+                        "X_m": [1000.0, 1000.0, 1900.0],
+                        "Y_m": [800.0, 800.0, 2000.0],
+                        "Z_m": [0.0, 2400.0, 2500.0],
+                    }
+                ),
+                surface=Point3D(x=1000.0, y=800.0, z=0.0),
+                azimuth_deg=45.0,
+            ),
+        ),
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "9201",
+                "t1": [1110.0, 910.0, 2405.0],
+                "t3": [2010.0, 2110.0, 2505.0],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["9201"]
+    updated_record = session_state["wt_records"][0]
+    updated_original = session_state["wt_records_original"][0]
+    assert updated_record.points[0].x == pytest.approx(1400.0)
+    assert updated_record.points[0].y == pytest.approx(950.0)
+    assert updated_record.points[1].x == pytest.approx(1110.0)
+    assert updated_record.points[1].y == pytest.approx(910.0)
+    assert updated_original.points[0].x == pytest.approx(1110.0)
+    assert updated_original.points[0].y == pytest.approx(910.0)
+    assert updated_original.points[0].z == pytest.approx(0.0)
+    assert updated_original.points[1].x == pytest.approx(1110.0)
+    assert updated_original.points[1].y == pytest.approx(910.0)
 
 
 def test_apply_edit_targets_changes_accepts_sidetrack_multi_horizontal_indices() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, MutableMapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -16,7 +16,7 @@ from pywp.eclipse_welltrack import (
     parse_welltrack_text,
 )
 from pywp.path_utils import normalize_user_path_text
-from pywp.pilot_wells import visible_well_names
+from pywp.pilot_wells import is_pilot_name, visible_well_names, well_name_key
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
     REFERENCE_WELL_APPROVED,
@@ -65,6 +65,7 @@ __all__ = [
     "normalized_target_source_format",
     "normalize_source_table_df_for_ui",
     "reset_failed_import_state",
+    "simple_dev_target_well_names_from_state",
     "store_imported_records",
 ]
 
@@ -211,6 +212,37 @@ class TargetImportStoreResult:
 
     well_names: tuple[str, ...]
     auto_layout_applied: bool
+
+
+def simple_dev_target_well_names_from_state(
+    session_state: Mapping[str, object],
+) -> tuple[str, ...]:
+    raw_items = tuple(
+        session_state.get(IMPORTED_DEV_TARGET_WELLS_STATE_KEY, ()) or ()
+    )
+    names: list[str] = []
+    seen_keys: set[str] = set()
+    for item in raw_items:
+        name = str(getattr(item, "name", "")).strip()
+        if not name or is_pilot_name(name):
+            continue
+        normalized_name_key = well_name_key(name)
+        if normalized_name_key in seen_keys:
+            continue
+        is_simple_target = False
+        if isinstance(item, ImportedTrajectoryWell):
+            is_simple_target = dev_well_is_simple_target(item)
+        else:
+            stations = getattr(item, "stations", None)
+            try:
+                is_simple_target = int(len(pd.DataFrame(stations).index)) == 3
+            except (TypeError, ValueError):
+                is_simple_target = False
+        if not is_simple_target:
+            continue
+        seen_keys.add(normalized_name_key)
+        names.append(name)
+    return tuple(names)
 
 
 def empty_source_table_df() -> pd.DataFrame:

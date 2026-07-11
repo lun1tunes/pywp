@@ -147,7 +147,7 @@ def render_crs_sidebar() -> CoordinateSystem:
         if st.session_state.get(CRS_INPUT_SELECTBOX_KEY) not in input_option_labels:
             st.session_state.pop(CRS_INPUT_SELECTBOX_KEY, None)
         selected_input_label = st.selectbox(
-            "Входная CRS",
+            "Входная",
             options=input_option_labels,
             index=_get_crs_index(
                 current_input_crs,
@@ -170,14 +170,14 @@ def render_crs_sidebar() -> CoordinateSystem:
             st.session_state.pop(CRS_SELECTBOX_KEY, None)
 
         selected_csv_label = st.selectbox(
-            "CRS CSV-выгрузки",
+            "Доп. в выгрузке",
             options=csv_option_labels,
             index=_get_crs_index(current_csv_crs, CSV_CRS_OPTIONS),
             key=CRS_SELECTBOX_KEY,
             help=(
-                "Выбранная здесь CRS применяется только к CSV-выгрузкам "
-                "инклинометрии. Для географических CRS X/Y в CSV будут "
-                "выгружены как долгота/широта в градусах."
+                "В CSV будут добавлены дополнительные X/Y-столбцы в выбранной "
+                "системе координат. Для географических систем это долгота/широта "
+                "в градусах."
             ),
         )
 
@@ -188,43 +188,21 @@ def render_crs_sidebar() -> CoordinateSystem:
         )
         st.session_state[CRS_SELECTED_KEY] = selected_csv_crs
 
-        # Auto-convert toggle
-        if CRS_AUTO_CONVERT_KEY not in st.session_state:
-            st.session_state[CRS_AUTO_CONVERT_KEY] = True
-
-        auto_convert_enabled = st.toggle(
-            "Пересчитывать координаты в CSV",
-            key=CRS_AUTO_CONVERT_KEY,
-            help=(
-                "Если включено, X/Y в CSV пересчитываются из входной CRS "
-                "в выбранную CRS CSV-выгрузки."
-            ),
-        )
+        # Additional export CRS columns are always enabled.
+        st.session_state[CRS_AUTO_CONVERT_KEY] = True
         csv_crs = csv_export_crs(
             selected_csv_crs,
             input_crs,
-            auto_convert=bool(auto_convert_enabled),
+            auto_convert=True,
         )
         if (
-            bool(auto_convert_enabled)
-            and selected_csv_crs != input_crs
+            selected_csv_crs != input_crs
             and csv_crs != selected_csv_crs
         ):
             st.caption(
-                "CSV останется во входной CRS: для выбранной CRS нет прямого "
-                "преобразования."
+                "Доп. столбцы останутся во входной системе: для выбранной системы "
+                "нет прямого преобразования."
             )
-
-        # Show conversion path explicitly.
-        csv_crs_label = CRS_LABEL_BY_VALUE.get(csv_crs, str(csv_crs))
-        if not bool(auto_convert_enabled):
-            csv_crs_label = f"{csv_crs_label} (пересчёт выключен)"
-        st.caption(
-            "**Входная:** "
-            f"{INPUT_CRS_LABEL_BY_VALUE.get(input_crs, str(input_crs))} → "
-            "**CSV:** "
-            f"{csv_crs_label}"
-        )
 
         return selected_csv_crs
 
@@ -252,7 +230,7 @@ def get_selected_crs() -> CoordinateSystem:
 
 
 def should_auto_convert() -> bool:
-    """Check if auto-convert is enabled."""
+    """Additional export CRS columns are always enabled."""
     st = _streamlit()
     return st.session_state.get(CRS_AUTO_CONVERT_KEY, True)
 

@@ -9,8 +9,10 @@ import numpy as np
 import pandas as pd
 
 from pywp.constants import SMALL
+from pywp import ptc_target_import
 from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.models import Point3D
+from pywp.pilot_wells import well_name_key
 from pywp.welltrack_targets import ordinary_record_target_layout
 from pywp.well_pad import (
     DEFAULT_PAD_WELL_AUTO_ORDER_MODE,
@@ -35,6 +37,7 @@ __all__ = [
     "PAD_SURFACE_ANCHOR_FIRST",
     "WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M",
     "WT_PAD_FOCUS_ALL",
+    "WT_PAD_LAYOUT_DETAILS_OPEN_KEY",
     "DetectedPadUiMeta",
     "PadSurfaceAssignment",
     "WT_PAD_APPLY_AUTO_ORDER_KEY",
@@ -53,6 +56,7 @@ __all__ = [
     "pad_config_defaults",
     "pad_config_for_ui",
     "pad_display_label",
+    "pad_layout_details_open",
     "pad_fixed_slots_editor_rows",
     "pad_fixed_slots_from_config",
     "pad_fixed_slots_from_editor",
@@ -62,6 +66,7 @@ __all__ = [
     "record_midpoint_xyz",
     "resolved_pad_nds_azimuth_deg",
     "source_surface_xyz",
+    "toggle_pad_layout_details_open",
 ]
 
 DEFAULT_PAD_SPACING_M = 40.0
@@ -69,6 +74,7 @@ DEFAULT_PAD_SURFACE_ANCHOR_MODE = PAD_SURFACE_ANCHOR_CENTER
 WT_IMPORTED_PAD_SURFACE_CHAIN_DISTANCE_M = 400.0
 WT_PAD_FOCUS_ALL = "__all_pads__"
 WT_PAD_AUTO_ORDER_BY_TARGET_DEPTH_KEY = "wt_pad_auto_order_by_target_depth"
+WT_PAD_LAYOUT_DETAILS_OPEN_KEY = "wt_pad_layout_details_open"
 WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY = "allow_source_surface_edit"
 WT_PAD_APPLY_AUTO_ORDER_KEY = "apply_auto_order"
 
@@ -108,6 +114,17 @@ class _PadDetectionRecord:
 _PAD_COMPONENT_EDGE_RE = re.compile(r"^[\s_\-]+|[\s_\-]+$")
 _TRAILING_DIGITS_RE = re.compile(r"^(.*?)(\d+)$")
 _TRAILING_GROUP_TOKEN_RE = re.compile(r"^(.*?)[_\-]([A-Za-z0-9]+)$")
+
+
+def pad_layout_details_open(session_state: Mapping[str, object]) -> bool:
+    raw_value = session_state.get(WT_PAD_LAYOUT_DETAILS_OPEN_KEY)
+    return False if raw_value is None else bool(raw_value)
+
+
+def toggle_pad_layout_details_open(session_state: MutableMapping[str, object]) -> bool:
+    next_open = not pad_layout_details_open(session_state)
+    session_state[WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = next_open
+    return next_open
 
 
 def pad_config_defaults(pad: WellPad) -> dict[str, object]:
@@ -293,6 +310,8 @@ def source_surface_xyz(
 
 def _degenerate_three_point_surface_cluster_xyz(
     record: WelltrackRecord,
+    *,
+    allow_surface_offset: bool = False,
 ) -> tuple[float, float, float] | None:
     points = tuple(record.points)
     if len(points) != 3:
@@ -304,7 +323,7 @@ def _degenerate_three_point_surface_cluster_xyz(
         layout = ordinary_record_target_layout(record)
     except (TypeError, ValueError):
         return None
-    if (
+    if not allow_surface_offset and (
         abs(float(surface_xyz[0]) - float(layout.t1.x)) > SMALL
         or abs(float(surface_xyz[1]) - float(layout.t1.y)) > SMALL
     ):
@@ -343,13 +362,28 @@ def _inferred_pad_group_key(name: str) -> str:
 
 def _pad_detection_records(
     records: list[WelltrackRecord],
+    *,
+    remembered_degenerate_well_names: tuple[str, ...] = (),
 ) -> list[_PadDetectionRecord]:
+    remembered_name_keys = {
+        well_name_key(str(name))
+        for name in remembered_degenerate_well_names
+        if str(name).strip()
+    }
     prepared: list[_PadDetectionRecord] = []
     for record_index, record in enumerate(records):
         surface_xyz = source_surface_xyz(record)
         if surface_xyz is None:
             continue
         degenerate_cluster_xyz = _degenerate_three_point_surface_cluster_xyz(record)
+        if (
+            degenerate_cluster_xyz is None
+            and well_name_key(str(record.name)) in remembered_name_keys
+        ):
+            degenerate_cluster_xyz = _degenerate_three_point_surface_cluster_xyz(
+                record,
+                allow_surface_offset=True,
+            )
         if degenerate_cluster_xyz is not None:
             prepared.append(
                 _PadDetectionRecord(
@@ -461,8 +495,13 @@ def inferred_surface_spacing_m(
 
 def detect_ui_pads(
     records: list[WelltrackRecord],
+    *,
+    remembered_degenerate_well_names: tuple[str, ...] = (),
 ) -> tuple[list[WellPad], dict[str, DetectedPadUiMeta]]:
-    indexed_records = _pad_detection_records(records)
+    indexed_records = _pad_detection_records(
+        records,
+        remembered_degenerate_well_names=remembered_degenerate_well_names,
+    )
     if not indexed_records:
         return [], {}
 
@@ -977,7 +1016,12 @@ def ensure_pad_configs(
     *,
     base_records: list[WelltrackRecord],
 ) -> list[WellPad]:
-    pads, metadata = detect_ui_pads(base_records)
+    pads, metadata = detect_ui_pads(
+        base_records,
+        remembered_degenerate_well_names=ptc_target_import.simple_dev_target_well_names_from_state(
+            session_state
+        ),
+    )
     existing_raw = session_state.get("wt_pad_configs", {})
     existing = existing_raw if isinstance(existing_raw, Mapping) else {}
     merged: dict[str, dict[str, object]] = {}
@@ -1092,7 +1136,12 @@ def project_pads_for_ui(
         if isinstance(base_records, list) and base_records
         else list(records)
     )
-    pads, metadata = detect_ui_pads(source_records)
+    pads, metadata = detect_ui_pads(
+        source_records,
+        remembered_degenerate_well_names=ptc_target_import.simple_dev_target_well_names_from_state(
+            session_state
+        ),
+    )
     session_state["wt_pad_detected_meta"] = metadata
     return pads
 

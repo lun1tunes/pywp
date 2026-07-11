@@ -19,6 +19,36 @@ _REFERENCE_ANALYSIS_TOGGLE_KEYS = {
     wt.REFERENCE_WELL_ACTUAL: "wt_show_actual_fund_analysis",
     wt.REFERENCE_WELL_APPROVED: "wt_show_approved_fund_analysis",
 }
+_REFERENCE_SOURCE_OPTIONS = (
+    "Загрузить .dev",
+    "Путь к WELLTRACK",
+    "Загрузить WELLTRACK",
+)
+_REFERENCE_FUND_OPTIONS = (
+    wt.REFERENCE_WELL_ACTUAL,
+    wt.REFERENCE_WELL_APPROVED,
+)
+_REFERENCE_FUND_LABELS = {
+    wt.REFERENCE_WELL_ACTUAL: "Фактический",
+    wt.REFERENCE_WELL_APPROVED: "Утверждённый проектный",
+}
+_REFERENCE_IMPORT_MODE_KEY = "ptc_reference_import_source_mode"
+_REFERENCE_IMPORT_MIGRATED_KEY = "ptc_reference_import_state_migrated"
+_REFERENCE_UPLOAD_NONCE_KEY = "ptc_reference_upload_nonce"
+_REFERENCE_PENDING_LEGACY_DEV_ROWS_KEY = (
+    "ptc_reference_pending_legacy_dev_rows"
+)
+_REFERENCE_PENDING_LEGACY_WELLTRACK_ROWS_KEY = (
+    "ptc_reference_pending_legacy_welltrack_rows"
+)
+_REFERENCE_DEV_SOURCE_COUNT_KEY = "wt_reference_import_dev_source_count"
+_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY = (
+    "wt_reference_import_welltrack_source_count"
+)
+_REFERENCE_DEV_SOURCE_HELP = (
+    "Импортируются все `.dev` файлы из папок. "
+    "Имя берётся из файла без `.dev`, координаты - из колонок `MD X Y Z`."
+)
 
 
 def _reference_analysis_toggle_key(kind: str) -> str:
@@ -51,207 +81,699 @@ def _clear_reference_import_state(kind: str) -> None:
     )
 
 
-def _render_reference_kind_import_block(*, kind: str) -> None:
-    title = reference_state.reference_kind_title(kind)
-    state_mode_key = f"ptc_reference_source_mode::{kind}"
-    source_options = [
-        "Загрузить .dev",
-        "Путь к WELLTRACK",
-        "Загрузить WELLTRACK",
-    ]
-    if state_mode_key not in st.session_state:
-        legacy_mode = str(
+def _normalize_reference_import_mode_state() -> str:
+    mode = str(
+        st.session_state.get(
+            _REFERENCE_IMPORT_MODE_KEY,
+            _REFERENCE_SOURCE_OPTIONS[0],
+        )
+    ).strip()
+    if mode not in _REFERENCE_SOURCE_OPTIONS:
+        mode = _REFERENCE_SOURCE_OPTIONS[0]
+    st.session_state[_REFERENCE_IMPORT_MODE_KEY] = mode
+    return mode
+
+
+def _reference_import_mode() -> str:
+    mode = str(
+        st.session_state.get(
+            _REFERENCE_IMPORT_MODE_KEY,
+            _REFERENCE_SOURCE_OPTIONS[0],
+        )
+    ).strip()
+    if mode not in _REFERENCE_SOURCE_OPTIONS:
+        mode = _REFERENCE_SOURCE_OPTIONS[0]
+    for kind in _REFERENCE_FUND_OPTIONS:
+        st.session_state[reference_state.reference_source_mode_key(kind)] = mode
+        st.session_state[f"ptc_reference_source_mode::{kind}"] = mode
+    return mode
+
+
+def _reference_dev_source_path_key(index: int) -> str:
+    return f"wt_reference_import_dev_source_path_{int(index)}"
+
+
+def _reference_dev_source_kind_key(index: int) -> str:
+    return f"wt_reference_import_dev_source_kind_{int(index)}"
+
+
+def _reference_welltrack_source_path_key(index: int) -> str:
+    return f"wt_reference_import_welltrack_source_path_{int(index)}"
+
+
+def _reference_welltrack_source_kind_key(index: int) -> str:
+    return f"wt_reference_import_welltrack_source_kind_{int(index)}"
+
+
+def _reference_upload_kind_key(index: int) -> str:
+    return f"wt_reference_import_upload_kind_{int(index)}"
+
+
+def _reference_upload_widget_key() -> str:
+    nonce = int(st.session_state.get(_REFERENCE_UPLOAD_NONCE_KEY, 0) or 0)
+    return f"ptc_reference_upload_files::{nonce}"
+
+
+def _normalize_reference_fund_kind(value: object) -> str:
+    return (
+        wt.REFERENCE_WELL_APPROVED
+        if str(value) == wt.REFERENCE_WELL_APPROVED
+        else wt.REFERENCE_WELL_ACTUAL
+    )
+
+
+def _reference_fund_label(kind: str) -> str:
+    return _REFERENCE_FUND_LABELS.get(
+        str(kind),
+        _REFERENCE_FUND_LABELS[wt.REFERENCE_WELL_ACTUAL],
+    )
+
+
+def _normalize_count(count_key: str) -> int:
+    try:
+        count = int(st.session_state.get(count_key, 1))
+    except (TypeError, ValueError):
+        count = 1
+    count = max(1, count)
+    st.session_state[count_key] = count
+    return count
+
+
+def _dev_source_rows_present() -> bool:
+    count = _normalize_count(_REFERENCE_DEV_SOURCE_COUNT_KEY)
+    return count > 1 or any(
+        str(st.session_state.get(_reference_dev_source_path_key(index), "")).strip()
+        for index in range(count)
+    )
+
+
+def _welltrack_source_rows_present() -> bool:
+    count = _normalize_count(_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY)
+    return count > 1 or any(
+        str(
             st.session_state.get(
-                reference_state.reference_source_mode_key(kind),
+                _reference_welltrack_source_path_key(index),
                 "",
             )
         ).strip()
-        st.session_state[state_mode_key] = (
-            legacy_mode if legacy_mode in source_options else "Загрузить .dev"
-        )
-    if str(st.session_state.get(state_mode_key, "")).strip() not in set(
-        source_options
-    ):
-        st.session_state[state_mode_key] = "Загрузить .dev"
-    mode = st.radio(
-        f"Источник для {title.lower()}",
-        options=source_options,
-        key=state_mode_key,
-        horizontal=True,
-        label_visibility="collapsed",
+        for index in range(count)
     )
-    st.session_state[reference_state.reference_source_mode_key(kind)] = mode
-    uploaded_file = None
-    if mode == "Загрузить .dev":
-        folder_count_key = reference_state.reference_dev_folder_count_key(kind)
-        try:
-            folder_count = int(st.session_state.get(folder_count_key, 1))
-        except (TypeError, ValueError):
-            folder_count = 1
-        folder_count = max(1, folder_count)
-        st.session_state[folder_count_key] = folder_count
-        for index in range(folder_count):
-            st.text_input(
-                "Папка с .dev файлами"
-                if index == 0
-                else f"Папка с .dev файлами #{index + 1}",
-                key=reference_state.reference_dev_folder_path_key(kind, index),
-                placeholder="tests/test_data/dev_fact",
-            )
-        if st.button(
-            "Добавить ещё папку",
-            key=f"ptc_reference_{kind}_add_dev_folder",
-            icon=":material/create_new_folder:",
-            use_container_width=True,
-        ):
-            st.session_state[folder_count_key] = folder_count + 1
-            _rerun_fragment()
-        st.caption(
-            "Импортируются все `.dev` файлы из папок. "
-            "Имя берется из файла без `.dev`, "
-            "координаты - из колонок `MD X Y Z`."
+
+
+def _set_reference_dev_rows(rows: list[tuple[str, str]]) -> None:
+    row_count = max(1, len(rows))
+    st.session_state[_REFERENCE_DEV_SOURCE_COUNT_KEY] = row_count
+    for index in range(row_count):
+        path, kind = rows[index] if index < len(rows) else ("", wt.REFERENCE_WELL_ACTUAL)
+        st.session_state[_reference_dev_source_path_key(index)] = str(path).strip()
+        st.session_state[_reference_dev_source_kind_key(index)] = (
+            _normalize_reference_fund_kind(kind)
         )
-    elif mode == "Путь к WELLTRACK":
-        path_count_key = reference_state.reference_welltrack_path_count_key(kind)
-        try:
-            path_count = int(st.session_state.get(path_count_key, 1))
-        except (TypeError, ValueError):
-            path_count = 1
-        path_count = max(1, path_count)
-        st.session_state[path_count_key] = path_count
-        for index in range(path_count):
-            st.text_input(
-                "Путь к WELLTRACK или папке"
-                if index == 0
-                else f"Путь к WELLTRACK или папке #{index + 1}",
-                key=reference_state.reference_welltrack_path_entry_key(kind, index),
-                placeholder="tests/test_data/WELLTRACKS3.INC",
+
+
+def _set_reference_welltrack_rows(rows: list[tuple[str, str]]) -> None:
+    row_count = max(1, len(rows))
+    st.session_state[_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY] = row_count
+    for index in range(row_count):
+        path, kind = rows[index] if index < len(rows) else ("", wt.REFERENCE_WELL_ACTUAL)
+        st.session_state[_reference_welltrack_source_path_key(index)] = (
+            str(path).strip()
+        )
+        st.session_state[_reference_welltrack_source_kind_key(index)] = (
+            _normalize_reference_fund_kind(kind)
+        )
+
+
+def _reference_dev_rows() -> tuple[tuple[str, str], ...]:
+    rows: list[tuple[str, str]] = []
+    source_count = _normalize_count(_REFERENCE_DEV_SOURCE_COUNT_KEY)
+    for index in range(source_count):
+        source_path = str(
+            st.session_state.get(_reference_dev_source_path_key(index), "")
+        ).strip()
+        if not source_path:
+            continue
+        rows.append(
+            (
+                source_path,
+                _normalize_reference_fund_kind(
+                    st.session_state.get(_reference_dev_source_kind_key(index))
+                ),
             )
-        if st.button(
-            "Добавить ещё путь",
-            key=f"ptc_reference_{kind}_add_welltrack_path",
-            icon=":material/note_add:",
-            use_container_width=True,
-        ):
-            st.session_state[path_count_key] = path_count + 1
-            _rerun_fragment()
-        st.caption(
-            "Можно указать несколько файлов WELLTRACK и/или папок. "
-            "Из папок импортируются только файлы с расширением `.INC` "
-            "без учета регистра."
+        )
+    return tuple(rows)
+
+
+def _reference_welltrack_rows() -> tuple[tuple[str, str], ...]:
+    rows: list[tuple[str, str]] = []
+    source_count = _normalize_count(_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY)
+    for index in range(source_count):
+        source_path = str(
+            st.session_state.get(
+                _reference_welltrack_source_path_key(index),
+                "",
+            )
+        ).strip()
+        if not source_path:
+            continue
+        rows.append(
+            (
+                source_path,
+                _normalize_reference_fund_kind(
+                    st.session_state.get(
+                        _reference_welltrack_source_kind_key(index)
+                    )
+                ),
+            )
+        )
+    return tuple(rows)
+
+
+def _clear_pending_legacy_reference_rows() -> None:
+    st.session_state[_REFERENCE_PENDING_LEGACY_DEV_ROWS_KEY] = ()
+    st.session_state[_REFERENCE_PENDING_LEGACY_WELLTRACK_ROWS_KEY] = ()
+
+
+def _migrate_legacy_reference_import_state() -> None:
+    if bool(st.session_state.get(_REFERENCE_IMPORT_MIGRATED_KEY)):
+        return
+
+    legacy_dev_rows: list[tuple[str, str]] = []
+    legacy_welltrack_rows: list[tuple[str, str]] = []
+    legacy_upload_selected = False
+    for kind in _REFERENCE_FUND_OPTIONS:
+        legacy_mode = str(
+            st.session_state.get(
+                f"ptc_reference_source_mode::{kind}",
+                st.session_state.get(
+                    reference_state.reference_source_mode_key(kind),
+                    "",
+                ),
+            )
+        ).strip()
+        if legacy_mode == "Путь к WELLTRACK":
+            legacy_welltrack_rows.extend(
+                (path, kind)
+                for path in reference_state.reference_welltrack_paths(kind)
+                if str(path).strip()
+            )
+        elif legacy_mode == "Загрузить WELLTRACK":
+            legacy_upload_selected = True
+        else:
+            legacy_dev_rows.extend(
+                (path, kind)
+                for path in reference_state.reference_dev_folder_paths(kind)
+                if str(path).strip()
+            )
+
+    if legacy_dev_rows and not _dev_source_rows_present():
+        _set_reference_dev_rows(legacy_dev_rows)
+    if legacy_welltrack_rows and not _welltrack_source_rows_present():
+        _set_reference_welltrack_rows(legacy_welltrack_rows)
+
+    if legacy_dev_rows and legacy_welltrack_rows:
+        st.session_state[_REFERENCE_PENDING_LEGACY_DEV_ROWS_KEY] = tuple(
+            (str(path).strip(), _normalize_reference_fund_kind(kind))
+            for path, kind in legacy_dev_rows
+            if str(path).strip()
+        )
+        st.session_state[_REFERENCE_PENDING_LEGACY_WELLTRACK_ROWS_KEY] = tuple(
+            (str(path).strip(), _normalize_reference_fund_kind(kind))
+            for path, kind in legacy_welltrack_rows
+            if str(path).strip()
         )
     else:
-        uploaded_file = st.file_uploader(
-            f"WELLTRACK файл для {title.lower()}",
-            type=["inc", "txt", "data", "ecl"],
-            key=f"ptc_reference_{kind}_welltrack_file",
+        _clear_pending_legacy_reference_rows()
+
+    if _REFERENCE_IMPORT_MODE_KEY not in st.session_state:
+        if legacy_upload_selected:
+            st.session_state[_REFERENCE_IMPORT_MODE_KEY] = "Загрузить WELLTRACK"
+        elif legacy_welltrack_rows and not legacy_dev_rows:
+            st.session_state[_REFERENCE_IMPORT_MODE_KEY] = "Путь к WELLTRACK"
+        elif legacy_dev_rows:
+            st.session_state[_REFERENCE_IMPORT_MODE_KEY] = "Загрузить .dev"
+        else:
+            st.session_state[_REFERENCE_IMPORT_MODE_KEY] = _REFERENCE_SOURCE_OPTIONS[0]
+    st.session_state[_REFERENCE_IMPORT_MIGRATED_KEY] = True
+
+
+def _ensure_reference_import_state() -> None:
+    st.session_state.setdefault(_REFERENCE_UPLOAD_NONCE_KEY, 0)
+    st.session_state.setdefault(_REFERENCE_DEV_SOURCE_COUNT_KEY, 1)
+    st.session_state.setdefault(_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY, 1)
+    st.session_state.setdefault(_reference_dev_source_path_key(0), "")
+    st.session_state.setdefault(
+        _reference_dev_source_kind_key(0),
+        wt.REFERENCE_WELL_ACTUAL,
+    )
+    st.session_state.setdefault(_reference_welltrack_source_path_key(0), "")
+    st.session_state.setdefault(
+        _reference_welltrack_source_kind_key(0),
+        wt.REFERENCE_WELL_ACTUAL,
+    )
+    _migrate_legacy_reference_import_state()
+    st.session_state.setdefault(
+        _REFERENCE_IMPORT_MODE_KEY,
+        _REFERENCE_SOURCE_OPTIONS[0],
+    )
+    _normalize_reference_import_mode_state()
+    _reference_import_mode()
+
+
+def _render_reference_kind_header(container: object) -> None:
+    container.markdown(
+        (
+            "<div style='text-align: center; font-size: 0.875rem; "
+            "opacity: 0.7;'>Тип фонда</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_reference_source_header(*, source_label: str = "Источник") -> None:
+    source_col, kind_col = st.columns(
+        (0.6, 0.4),
+        gap="small",
+        vertical_alignment="center",
+    )
+    source_col.caption(source_label)
+    _render_reference_kind_header(kind_col)
+
+
+def _render_reference_fund_switch(*, key: str) -> str:
+    normalized_kind = _normalize_reference_fund_kind(st.session_state.get(key))
+    st.session_state[key] = normalized_kind
+    return str(
+        st.radio(
+            "Тип фонда",
+            options=_REFERENCE_FUND_OPTIONS,
+            key=key,
+            format_func=_reference_fund_label,
+            horizontal=True,
+            label_visibility="collapsed",
         )
+    )
+
+
+def _render_reference_dev_source_inputs() -> None:
+    source_count = _normalize_count(_REFERENCE_DEV_SOURCE_COUNT_KEY)
+    _render_reference_source_header(source_label="Папка с .dev файлами")
+    for index in range(source_count):
+        source_col, kind_col = st.columns(
+            (0.6, 0.4),
+            gap="small",
+            vertical_alignment="center",
+        )
+        source_col.text_input(
+            "Папка с .dev файлами"
+            if index == 0
+            else f"Папка с .dev файлами #{index + 1}",
+            key=_reference_dev_source_path_key(index),
+            placeholder="tests/test_data/dev_fact",
+            help=_REFERENCE_DEV_SOURCE_HELP,
+            label_visibility="collapsed",
+        )
+        with kind_col:
+            _render_reference_fund_switch(
+                key=_reference_dev_source_kind_key(index),
+            )
+    if st.button(
+        "Добавить папку",
+        key="ptc_reference_add_dev_source",
+        icon=":material/create_new_folder:",
+        use_container_width=True,
+    ):
+        st.session_state[_REFERENCE_DEV_SOURCE_COUNT_KEY] = source_count + 1
+        _rerun_fragment()
+
+
+def _render_reference_welltrack_source_inputs() -> None:
+    source_count = _normalize_count(_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY)
+    _render_reference_source_header()
+    for index in range(source_count):
+        source_col, kind_col = st.columns(
+            (0.6, 0.4),
+            gap="small",
+            vertical_alignment="center",
+        )
+        source_col.text_input(
+            f"Путь к WELLTRACK или папке #{index + 1}",
+            key=_reference_welltrack_source_path_key(index),
+            placeholder="tests/test_data/WELLTRACKS3.INC",
+            label_visibility="collapsed",
+        )
+        with kind_col:
+            _render_reference_fund_switch(
+                key=_reference_welltrack_source_kind_key(index),
+            )
+    if st.button(
+        "Добавить путь",
+        key="ptc_reference_add_welltrack_source",
+        icon=":material/note_add:",
+        use_container_width=True,
+    ):
+        st.session_state[_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY] = source_count + 1
+        _rerun_fragment()
+    st.caption(
+        "Можно указать несколько файлов WELLTRACK и/или папок. "
+        "Из папок импортируются только файлы с расширением `.INC` без учёта регистра."
+    )
+
+
+def _uploaded_source_label(uploaded_file: object) -> str:
+    file_name = str(getattr(uploaded_file, "name", "uploaded"))
+    size = getattr(uploaded_file, "size", None)
+    if size in (None, ""):
+        return file_name
+    return f"{file_name} ({int(size)} B)"
+
+
+def _render_reference_upload_inputs() -> list[object]:
+    uploaded_files = list(
+        st.file_uploader(
+            "WELLTRACK файлы",
+            type=["inc", "txt", "data", "ecl"],
+            accept_multiple_files=True,
+            key=_reference_upload_widget_key(),
+        )
+        or []
+    )
+    if uploaded_files:
+        _render_reference_source_header()
+        for index, uploaded_file in enumerate(uploaded_files):
+            source_col, kind_col = st.columns(
+                (0.6, 0.4),
+                gap="small",
+                vertical_alignment="center",
+            )
+            source_col.caption(_uploaded_source_label(uploaded_file))
+            with kind_col:
+                _render_reference_fund_switch(
+                    key=_reference_upload_kind_key(index),
+                )
+    else:
+        st.caption("Добавьте один или несколько WELLTRACK файлов.")
+    return uploaded_files
+
+
+def _reference_dev_sources_by_kind() -> dict[str, list[str]]:
+    sources_by_kind = {kind: [] for kind in _REFERENCE_FUND_OPTIONS}
+    for source_path, kind in _reference_dev_rows():
+        sources_by_kind[kind].append(source_path)
+    return sources_by_kind
+
+
+def _reference_welltrack_sources_by_kind() -> dict[str, list[str]]:
+    sources_by_kind = {kind: [] for kind in _REFERENCE_FUND_OPTIONS}
+    for source_path, kind in _reference_welltrack_rows():
+        sources_by_kind[kind].append(source_path)
+    return sources_by_kind
+
+
+def _reference_uploaded_sources_by_kind(
+    uploaded_files: list[object],
+) -> dict[str, list[object]]:
+    sources_by_kind: dict[str, list[object]] = {
+        kind: [] for kind in _REFERENCE_FUND_OPTIONS
+    }
+    for index, uploaded_file in enumerate(uploaded_files):
+        kind = _normalize_reference_fund_kind(
+            st.session_state.get(_reference_upload_kind_key(index))
+        )
+        sources_by_kind[kind].append(uploaded_file)
+    return sources_by_kind
+
+
+def _reference_sources_by_kind_from_rows(
+    rows: tuple[tuple[str, str], ...],
+) -> dict[str, list[str]]:
+    sources_by_kind = {kind: [] for kind in _REFERENCE_FUND_OPTIONS}
+    for source_path, kind in rows:
+        normalized_path = str(source_path).strip()
+        if not normalized_path:
+            continue
+        sources_by_kind[_normalize_reference_fund_kind(kind)].append(
+            normalized_path
+        )
+    return sources_by_kind
+
+
+def _pending_mixed_legacy_reference_sources() -> (
+    tuple[dict[str, list[str]], dict[str, list[str]]] | None
+):
+    pending_dev_rows = tuple(
+        st.session_state.get(_REFERENCE_PENDING_LEGACY_DEV_ROWS_KEY) or ()
+    )
+    pending_welltrack_rows = tuple(
+        st.session_state.get(_REFERENCE_PENDING_LEGACY_WELLTRACK_ROWS_KEY) or ()
+    )
+    if not pending_dev_rows or not pending_welltrack_rows:
+        return None
+    if _reference_dev_rows() != pending_dev_rows:
+        return None
+    if _reference_welltrack_rows() != pending_welltrack_rows:
+        return None
+    return (
+        _reference_sources_by_kind_from_rows(pending_dev_rows),
+        _reference_sources_by_kind_from_rows(pending_welltrack_rows),
+    )
+
+
+def _parse_reference_sources(
+    *,
+    mode: str,
+    uploaded_files: list[object],
+) -> dict[str, tuple[object, ...]]:
+    parsed_by_kind: dict[str, tuple[object, ...]] = {
+        kind: () for kind in _REFERENCE_FUND_OPTIONS
+    }
+    pending_mixed_sources = _pending_mixed_legacy_reference_sources()
+    if pending_mixed_sources is not None:
+        parsed_lists_by_kind: dict[str, list[object]] = {
+            kind: [] for kind in _REFERENCE_FUND_OPTIONS
+        }
+        dev_sources_by_kind, welltrack_sources_by_kind = pending_mixed_sources
+        for kind, source_paths in dev_sources_by_kind.items():
+            if not source_paths:
+                continue
+            parsed_lists_by_kind[kind].extend(
+                parse_reference_trajectory_dev_directories(
+                    source_paths,
+                    kind=kind,
+                )
+            )
+        for kind, source_paths in welltrack_sources_by_kind.items():
+            if not source_paths:
+                continue
+            payload = ptc_welltrack_io.read_welltrack_sources(
+                source_paths,
+                info=st.info,
+                warning=st.warning,
+                error=st.error,
+            )
+            parsed_lists_by_kind[kind].extend(
+                parse_reference_trajectory_welltrack_text(
+                    payload,
+                    kind=kind,
+                )
+            )
+        return {
+            kind: tuple(parsed_lists_by_kind[kind])
+            for kind in _REFERENCE_FUND_OPTIONS
+        }
+
+    if mode == "Загрузить .dev":
+        sources_by_kind = _reference_dev_sources_by_kind()
+        if not any(sources_by_kind.values()):
+            raise wt.WelltrackParseError(
+                "Укажите хотя бы одну папку с `.dev` файлами."
+            )
+        for kind, source_paths in sources_by_kind.items():
+            if not source_paths:
+                continue
+            parsed_by_kind[kind] = tuple(
+                parse_reference_trajectory_dev_directories(
+                    source_paths,
+                    kind=kind,
+                )
+            )
+        return parsed_by_kind
+
+    if mode == "Путь к WELLTRACK":
+        sources_by_kind = _reference_welltrack_sources_by_kind()
+        if not any(sources_by_kind.values()):
+            raise wt.WelltrackParseError(
+                "Укажите хотя бы один путь к WELLTRACK файлу или папке."
+            )
+        for kind, source_paths in sources_by_kind.items():
+            if not source_paths:
+                continue
+            payload = ptc_welltrack_io.read_welltrack_sources(
+                source_paths,
+                info=st.info,
+                warning=st.warning,
+                error=st.error,
+            )
+            parsed_by_kind[kind] = tuple(
+                parse_reference_trajectory_welltrack_text(
+                    payload,
+                    kind=kind,
+                )
+            )
+        return parsed_by_kind
+
+    if mode == "Загрузить WELLTRACK":
+        if not uploaded_files:
+            raise wt.WelltrackParseError(
+                "Загрузите хотя бы один WELLTRACK файл."
+            )
+        for kind, files_for_kind in _reference_uploaded_sources_by_kind(
+            uploaded_files
+        ).items():
+            if not files_for_kind:
+                continue
+            payload = "\n\n".join(
+                ptc_welltrack_io.decode_welltrack_payload(
+                    getattr(uploaded_file, "getvalue", lambda: b"")(),
+                    source_label=(
+                        f"WELLTRACK `{getattr(uploaded_file, 'name', 'uploaded')}`"
+                    ),
+                    info=st.info,
+                    warning=st.warning,
+                )
+                for uploaded_file in files_for_kind
+            )
+            parsed_by_kind[kind] = tuple(
+                parse_reference_trajectory_welltrack_text(
+                    payload,
+                    kind=kind,
+                )
+            )
+        return parsed_by_kind
+
+    raise wt.WelltrackParseError(
+        f"Неподдерживаемый режим импорта фонда: {mode!r}."
+    )
+
+
+def _clear_combined_reference_import_state() -> None:
+    _clear_reference_import_state(wt.REFERENCE_WELL_ACTUAL)
+    _clear_reference_import_state(wt.REFERENCE_WELL_APPROVED)
+    _clear_pending_legacy_reference_rows()
+    source_count = _normalize_count(_REFERENCE_DEV_SOURCE_COUNT_KEY)
+    for index in range(source_count):
+        st.session_state[_reference_dev_source_path_key(index)] = ""
+        st.session_state[_reference_dev_source_kind_key(index)] = (
+            wt.REFERENCE_WELL_ACTUAL
+        )
+    st.session_state[_REFERENCE_DEV_SOURCE_COUNT_KEY] = 1
+    path_count = _normalize_count(_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY)
+    for index in range(path_count):
+        st.session_state[_reference_welltrack_source_path_key(index)] = ""
+        st.session_state[_reference_welltrack_source_kind_key(index)] = (
+            wt.REFERENCE_WELL_ACTUAL
+        )
+    st.session_state[_REFERENCE_WELLTRACK_SOURCE_COUNT_KEY] = 1
+    st.session_state[_REFERENCE_IMPORT_MODE_KEY] = _REFERENCE_SOURCE_OPTIONS[0]
+    st.session_state[_REFERENCE_UPLOAD_NONCE_KEY] = (
+        int(st.session_state.get(_REFERENCE_UPLOAD_NONCE_KEY, 0) or 0) + 1
+    )
+    for kind in _REFERENCE_FUND_OPTIONS:
+        st.session_state[reference_state.reference_source_mode_key(kind)] = (
+            _REFERENCE_SOURCE_OPTIONS[0]
+        )
+        st.session_state[f"ptc_reference_source_mode::{kind}"] = (
+            _REFERENCE_SOURCE_OPTIONS[0]
+        )
+
+
+def _render_combined_reference_import_block() -> None:
+    _ensure_reference_import_state()
+    mode = st.radio(
+        "Источник данных",
+        options=_REFERENCE_SOURCE_OPTIONS,
+        key=_REFERENCE_IMPORT_MODE_KEY,
+        horizontal=True,
+    )
+    _reference_import_mode()
+
+    uploaded_files: list[object] = []
+    if mode == "Загрузить .dev":
+        _render_reference_dev_source_inputs()
+    elif mode == "Путь к WELLTRACK":
+        _render_reference_welltrack_source_inputs()
+    else:
+        uploaded_files = _render_reference_upload_inputs()
 
     action_col, clear_col = st.columns(2, gap="small")
     import_clicked = action_col.button(
-        f"Загрузить {title.lower()}",
-        key=f"ptc_reference_import_{kind}",
+        "Загрузить фонд",
+        key="ptc_reference_import_combined",
         type="primary",
         icon=":material/upload_file:",
         use_container_width=True,
     )
     clear_col.button(
-        f"Очистить {title.lower()}",
-        key=f"ptc_reference_clear_{kind}",
+        "Очистить фонд",
+        key="ptc_reference_clear_combined",
         icon=":material/delete:",
         use_container_width=True,
-        on_click=_clear_reference_import_state,
-        kwargs={"kind": kind},
+        on_click=_clear_combined_reference_import_state,
     )
 
     if import_clicked:
-        with st.status(f"Импорт {title.lower()}...", expanded=True) as status:
+        with st.status("Импорт фонда...", expanded=True) as status:
             try:
-                if mode == "Загрузить .dev":
-                    parsed = parse_reference_trajectory_dev_directories(
-                        reference_state.reference_dev_folder_paths(kind),
-                        kind=kind,
-                    )
-                elif mode == "Путь к WELLTRACK":
-                    parsed = parse_reference_trajectory_welltrack_text(
-                        ptc_welltrack_io.read_welltrack_sources(
-                            reference_state.reference_welltrack_paths(kind),
-                            info=st.info,
-                            warning=st.warning,
-                            error=st.error,
-                        ),
-                        kind=kind,
-                    )
-                else:
-                    payload = (
-                        b""
-                        if uploaded_file is None
-                        else uploaded_file.getvalue()
-                    )
-                    parsed = parse_reference_trajectory_welltrack_text(
-                        ptc_welltrack_io.decode_welltrack_payload(
-                            payload,
-                            source_label=(
-                                f"WELLTRACK `{getattr(uploaded_file, 'name', 'uploaded')}`"
-                            ),
-                            info=st.info,
-                            warning=st.warning,
-                        ),
-                        kind=kind,
-                    )
-                reference_state.set_reference_wells_for_kind(
-                    kind=kind,
-                    wells=parsed,
+                parsed_by_kind = _parse_reference_sources(
+                    mode=mode,
+                    uploaded_files=uploaded_files,
                 )
-                _after_reference_data_change(kind)
-                status.write(f"Загружено скважин: {len(parsed)}.")
+                for kind in _REFERENCE_FUND_OPTIONS:
+                    reference_state.set_reference_wells_for_kind(
+                        kind=kind,
+                        wells=parsed_by_kind[kind],
+                    )
+                    _after_reference_data_change(kind)
+                actual_count = len(parsed_by_kind[wt.REFERENCE_WELL_ACTUAL])
+                approved_count = len(parsed_by_kind[wt.REFERENCE_WELL_APPROVED])
+                status.write(f"Фактических скважин: {actual_count}.")
+                status.write(
+                    "Утверждённых проектных скважин: "
+                    f"{approved_count}."
+                )
                 status.update(
-                    label=f"{title} импортированы",
+                    label="Фонд импортирован",
                     state="complete",
                     expanded=False,
                 )
+                _clear_pending_legacy_reference_rows()
                 st.rerun()
             except wt.WelltrackParseError as exc:
                 status.write(str(exc))
                 status.update(
-                    label=f"Ошибка импорта: {title.lower()}",
+                    label="Ошибка импорта фонда",
                     state="error",
                     expanded=True,
                 )
 
-    current_wells = tuple(reference_state.reference_kind_wells(kind))
-    if current_wells:
-        st.caption(f"Загружено {len(current_wells)} скважин.")
-    else:
-        st.caption("Скважины этого типа не загружены.")
+    actual_loaded = len(
+        reference_state.reference_kind_wells(wt.REFERENCE_WELL_ACTUAL)
+    )
+    approved_loaded = len(
+        reference_state.reference_kind_wells(wt.REFERENCE_WELL_APPROVED)
+    )
+    st.caption(
+        "Сейчас загружено: "
+        f"{actual_loaded} фактических, {approved_loaded} утверждённых проектных."
+    )
 
 
 def render_reference_section() -> None:
-    st.markdown("## 3. Загрузка фактического фонда")
-    st.caption(
-        "Загрузите фактический или утверждённый проектный фонд из `.dev` или WELLTRACK."
-    )
-    c1, c2 = st.columns(2, gap="medium")
-    with c1:
-        st.markdown("### Фактический фонд")
-        _render_reference_kind_import_block(kind=wt.REFERENCE_WELL_ACTUAL)
-    with c2:
-        st.markdown("### Утверждённый проектный фонд")
-        _render_reference_kind_import_block(kind=wt.REFERENCE_WELL_APPROVED)
+    st.markdown("## 3. Загрузка фактического и проектного фонда")
+    _render_combined_reference_import_block()
 
     reference_wells = tuple(reference_state.reference_wells_from_state())
     if reference_wells:
-        m1, m2, m3 = st.columns(3, gap="small")
-        m1.metric("Доп. скважин", f"{len(reference_wells)}")
-        m2.metric(
-            "Фактических",
-            f"{sum(1 for item in reference_wells if str(item.kind) == wt.REFERENCE_WELL_ACTUAL)}",
-        )
-        m3.metric(
-            "Проектных утверждённых",
-            f"{sum(1 for item in reference_wells if str(item.kind) == wt.REFERENCE_WELL_APPROVED)}",
-        )
-
         with st.expander(
             "Список загруженных фактических/ проектных скважин",
             expanded=False,
@@ -294,11 +816,6 @@ def render_reference_section() -> None:
         if show_actual_analysis:
             analyses = wt._actual_fund_analyses(actual_wells)
             wt._render_actual_fund_analysis_panel(analyses=analyses)
-        else:
-            st.caption(
-                "Анализ фактического фонда скрыт до явного открытия. "
-                "Это ускоряет обновление страницы после расчёта траекторий."
-            )
 
     approved_wells = tuple(
         reference_state.reference_kind_wells(wt.REFERENCE_WELL_APPROVED)

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
 from pywp import ptc_core
+from pywp import ptc_page_reference
 from pywp import ptc_page_state
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.models import TrajectoryConfig
@@ -331,6 +333,15 @@ def test_ptc_core_keeps_auto_order_guardrails_for_source_defined_wellheads() -> 
     assert "исходная привязка скважин сохраняется" in source
 
 
+def test_ptc_core_uses_stateful_pad_layout_details_panel() -> None:
+    source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
+
+    assert 'key="wt_pad_layout_details_toggle"' in source
+    assert "Скрыть настройки выбранного куста" in source
+    assert "Настроить положение куста, НДС и расстояние между устьями." in source
+    assert "ptc_pad_state.pad_layout_details_open(st.session_state)" in source
+
+
 def test_ptc_anticollision_params_limit_multiselect_height_via_scoped_container() -> None:
     source = Path("pywp/ptc_anticollision_params.py").read_text(encoding="utf-8")
 
@@ -392,6 +403,153 @@ def test_ptc_fragment_sections_use_fragment_scoped_reruns_for_local_ui_updates()
     assert 'st.rerun(scope="fragment")' in reference_source
     assert 'st.rerun(scope="fragment")' in run_source
     assert 'st.rerun(scope="fragment")' in results_source
+
+
+def test_parse_reference_sources_requires_explicit_uploaded_welltrack_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = ptc_page_reference
+    page.st.session_state.clear()
+    uploaded_file = SimpleNamespace(
+        name="uploaded.inc",
+        getvalue=lambda: b"WELLTRACK",
+    )
+    decode_calls: list[str] = []
+
+    monkeypatch.setattr(
+        page,
+        "_pending_mixed_legacy_reference_sources",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        page,
+        "_reference_uploaded_sources_by_kind",
+        lambda _uploaded_files: {
+            page._REFERENCE_FUND_OPTIONS[0]: [uploaded_file],
+            page._REFERENCE_FUND_OPTIONS[1]: [],
+        },
+    )
+    monkeypatch.setattr(
+        page.ptc_welltrack_io,
+        "decode_welltrack_payload",
+        lambda *_args, **_kwargs: decode_calls.append("decode") or "decoded",
+    )
+    monkeypatch.setattr(
+        page,
+        "parse_reference_trajectory_welltrack_text",
+        lambda *_args, **_kwargs: ("parsed",),
+    )
+
+    with pytest.raises(
+        ptc_core.WelltrackParseError,
+        match="Неподдерживаемый режим импорта фонда",
+    ):
+        page._parse_reference_sources(
+            mode="Неизвестный режим",
+            uploaded_files=[uploaded_file],
+        )
+
+    assert decode_calls == []
+
+
+def test_parse_reference_sources_handles_uploaded_welltrack_only_for_explicit_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = ptc_page_reference
+    page.st.session_state.clear()
+    uploaded_file = SimpleNamespace(
+        name="uploaded.inc",
+        getvalue=lambda: b"WELLTRACK",
+    )
+
+    monkeypatch.setattr(
+        page,
+        "_pending_mixed_legacy_reference_sources",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        page,
+        "_reference_uploaded_sources_by_kind",
+        lambda _uploaded_files: {
+            page._REFERENCE_FUND_OPTIONS[0]: [uploaded_file],
+            page._REFERENCE_FUND_OPTIONS[1]: [],
+        },
+    )
+    monkeypatch.setattr(
+        page.ptc_welltrack_io,
+        "decode_welltrack_payload",
+        lambda *_args, **_kwargs: "decoded",
+    )
+    monkeypatch.setattr(
+        page,
+        "parse_reference_trajectory_welltrack_text",
+        lambda payload, *, kind: (f"{kind}:{payload}",),
+    )
+
+    parsed = page._parse_reference_sources(
+        mode="Загрузить WELLTRACK",
+        uploaded_files=[uploaded_file],
+    )
+
+    assert parsed[page._REFERENCE_FUND_OPTIONS[0]] == ("actual:decoded",)
+    assert parsed[page._REFERENCE_FUND_OPTIONS[1]] == ()
+
+
+def test_reference_import_migration_preserves_legacy_uploaded_welltrack_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = ptc_page_reference
+    page.st.session_state.clear()
+    actual_kind, approved_kind = page._REFERENCE_FUND_OPTIONS
+    page.st.session_state[page.reference_state.reference_source_mode_key(actual_kind)] = (
+        "Загрузить WELLTRACK"
+    )
+    page.st.session_state[
+        page.reference_state.reference_source_mode_key(approved_kind)
+    ] = "Путь к WELLTRACK"
+    page.st.session_state[
+        page.reference_state.reference_welltrack_path_key(approved_kind)
+    ] = "/tmp/approved.inc"
+
+    original_dev_paths = page.reference_state.reference_dev_folder_paths
+
+    def _dev_paths(kind: str) -> tuple[str, ...]:
+        if kind == actual_kind:
+            raise AssertionError("legacy upload mode should not read .dev paths")
+        return original_dev_paths(kind)
+
+    monkeypatch.setattr(
+        page.reference_state,
+        "reference_dev_folder_paths",
+        _dev_paths,
+    )
+
+    page._migrate_legacy_reference_import_state()
+
+    assert (
+        str(page.st.session_state[page._REFERENCE_IMPORT_MODE_KEY])
+        == "Загрузить WELLTRACK"
+    )
+    assert (
+        str(page.st.session_state[page._reference_welltrack_source_path_key(0)])
+        == "/tmp/approved.inc"
+    )
+
+
+def test_reference_import_migration_defaults_to_uploaded_welltrack_mode() -> None:
+    page = ptc_page_reference
+    page.st.session_state.clear()
+    actual_kind = page._REFERENCE_FUND_OPTIONS[0]
+    page.st.session_state[page.reference_state.reference_source_mode_key(actual_kind)] = (
+        "Загрузить WELLTRACK"
+    )
+
+    page._migrate_legacy_reference_import_state()
+
+    assert (
+        str(page.st.session_state[page._REFERENCE_IMPORT_MODE_KEY])
+        == "Загрузить WELLTRACK"
+    )
 
 
 def test_ptc_core_keeps_full_rerun_after_successful_target_import() -> None:

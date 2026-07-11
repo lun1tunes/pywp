@@ -5027,9 +5027,6 @@
               selectEditWell(editableIndex, { focus: !editModeActive });
               return;
             }
-            if (kind !== "well") {
-              return;
-            }
             const targetBounds = focusTargets[String(item.id || "")];
             if (targetBounds && !editModeActive) {
               focusViewerTarget(targetBounds, String(item.id || ""));
@@ -9809,7 +9806,7 @@
           // Collect changes
           const changes = [];
           editWells.forEach((well, idx) => {
-            if (!editDirtyFlags[idx]) return;
+            if (!isEditWellDirty(idx)) return;
             if (editWellHasExplicitPoints(idx)) {
               const pointEntries = (editCurrentPoints[idx] || []);
               const originalEntries = editOriginalPoints[idx] || [];

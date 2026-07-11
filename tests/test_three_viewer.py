@@ -684,11 +684,11 @@ def test_viewer_template_supports_multiselect_edit_wells_from_legend() -> None:
     assert "selection.has(nodeIndex)" in html
 
 
-def test_viewer_template_does_not_focus_camera_for_pad_legend_clicks() -> None:
+def test_viewer_template_focuses_camera_for_pad_legend_clicks() -> None:
     html = three_viewer._viewer_template_with_libraries()
 
-    assert 'if (kind !== "well") {\n              return;\n            }' in html
     assert 'setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, kind));' in html
+    assert 'const targetBounds = focusTargets[String(item.id || "")];' in html
     assert 'focusViewerTarget(targetBounds, String(item.id || ""));' in html
 
 
@@ -902,6 +902,13 @@ def test_three_viewer_synchronizes_selected_well_target_moves() -> None:
     assert "editDragHistoryStatesByWell = collectEditStates(" in html
     assert "applySynchronizedDeltaFromStates(" in html
     assert "pushEditUndoStates(previousStates);" in html
+
+
+def test_three_viewer_save_collects_actual_multiselect_diffs() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "if (!isEditWellDirty(idx)) return;" in html
+    assert "if (!editDirtyFlags[idx]) return;" not in html
 
 
 def test_three_viewer_sidetrack_window_drag_snaps_by_cursor_ray() -> None:

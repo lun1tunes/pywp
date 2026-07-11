@@ -1452,8 +1452,8 @@ def test_welltrack_page_defaults_csv_crs_to_wgs84_utm43() -> None:
     at.run(timeout=120)
 
     select_values = {str(widget.label): widget.value for widget in at.selectbox}
-    assert select_values["Входная CRS"] == "ГК_13N_42"
-    assert select_values["CRS CSV-выгрузки"] == "WGS84 UTM 43N"
+    assert select_values["Входная"] == "ГК_13N_42"
+    assert select_values["Доп. в выгрузке"] == "WGS84 UTM 43N"
 
 
 def test_welltrack_page_limits_csv_crs_options() -> None:
@@ -1462,11 +1462,23 @@ def test_welltrack_page_limits_csv_crs_options() -> None:
     at.run(timeout=120)
 
     selectboxes_by_label = {str(widget.label): widget for widget in at.selectbox}
-    assert list(selectboxes_by_label["CRS CSV-выгрузки"].options) == [
+    assert list(selectboxes_by_label["Доп. в выгрузке"].options) == [
         "ГК_13N_42",
         "WGS84 UTM 43N",
         "WGS84 (градусы)",
     ]
+
+
+def test_welltrack_page_hides_crs_toggle_and_conversion_signature() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+
+    at.run(timeout=120)
+
+    toggle_labels = {str(widget.label) for widget in at.toggle}
+    caption_values = [str(widget.value) for widget in at.caption]
+
+    assert "Пересчитывать координаты в CSV" not in toggle_labels
+    assert not any("**Входная:**" in value and "**CSV:**" in value for value in caption_values)
 
 
 def test_welltrack_page_keeps_t1_t3_order_panel_visible_when_no_issues() -> None:
@@ -2241,8 +2253,6 @@ def test_reference_trajectory_text_import_populates_reference_wells_state(
         ),
         encoding="utf-8",
     )
-    at.session_state["ptc_reference_source_mode::actual"] = "Путь к WELLTRACK"
-    at.session_state["wt_reference_actual_welltrack_path"] = str(actual_path)
     approved_path = tmp_path / "approved_wells.inc"
     approved_path.write_text(
         "\n".join(
@@ -2256,13 +2266,19 @@ def test_reference_trajectory_text_import_populates_reference_wells_state(
         ),
         encoding="utf-8",
     )
-    at.session_state["ptc_reference_source_mode::approved"] = "Путь к WELLTRACK"
-    at.session_state["wt_reference_approved_welltrack_path"] = str(approved_path)
+    at.session_state["ptc_reference_import_source_mode"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_import_welltrack_source_count"] = 2
+    at.session_state["wt_reference_import_welltrack_source_path_0"] = str(
+        actual_path
+    )
+    at.session_state["wt_reference_import_welltrack_source_kind_0"] = "actual"
+    at.session_state["wt_reference_import_welltrack_source_path_1"] = str(
+        approved_path
+    )
+    at.session_state["wt_reference_import_welltrack_source_kind_1"] = "approved"
 
     at.run()
-    _click_button(at, "Загрузить фактические скважины")
-    at.run()
-    _click_button(at, "Загрузить проектные утвержденные скважины")
+    _click_button(at, "Загрузить фонд")
     at.run()
 
     reference_wells = tuple(at.session_state["wt_reference_wells"])
@@ -2290,16 +2306,126 @@ def test_reference_trajectory_welltrack_path_import_populates_reference_wells_st
         ),
         encoding="utf-8",
     )
-    at.session_state["wt_reference_approved_source_mode"] = "Путь к WELLTRACK"
-    at.session_state["wt_reference_approved_welltrack_path"] = str(welltrack_path)
+    at.session_state["ptc_reference_import_source_mode"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_import_welltrack_source_path_0"] = str(
+        welltrack_path
+    )
+    at.session_state["wt_reference_import_welltrack_source_kind_0"] = "approved"
 
     at.run()
-    _click_button(at, "Загрузить проектные утвержденные скважины")
+    _click_button(at, "Загрузить фонд")
     at.run(timeout=120)
 
     approved_wells = tuple(at.session_state["wt_reference_approved_wells"])
     assert len(approved_wells) == 1
     assert str(approved_wells[0].name) == "APP-1"
+
+
+def test_reference_import_migrates_mixed_legacy_sources_without_dropping_welltrack(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    actual_folder = tmp_path / "legacy_dev_actual"
+    actual_folder.mkdir()
+    (actual_folder / "fact_legacy.dev").write_text(
+        "\n".join(
+            [
+                "MD X Y Z",
+                "0 606207.5 7409801.6 40.9",
+                "100 606208.5 7409803.6 -59.1",
+                "250 606220.5 7409810.6 -209.1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    approved_path = tmp_path / "legacy_approved.inc"
+    approved_path.write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'APP-LEGACY'",
+                "0 0 -35 0",
+                "900 850 -35 250",
+                "1850 1750 -35 350",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    at.session_state["wt_reference_actual_source_mode"] = "Загрузить .dev"
+    at.session_state["wt_reference_actual_dev_folder_count"] = 1
+    at.session_state["wt_reference_actual_dev_folder_path_0"] = str(actual_folder)
+    at.session_state["wt_reference_approved_source_mode"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_approved_welltrack_path_count"] = 1
+    at.session_state["wt_reference_approved_welltrack_path"] = str(approved_path)
+
+    at.run(timeout=120)
+
+    assert str(at.session_state["ptc_reference_import_source_mode"]) == "Загрузить .dev"
+    assert str(at.session_state["wt_reference_import_dev_source_path_0"]) == str(
+        actual_folder
+    )
+    assert str(
+        at.session_state["wt_reference_import_welltrack_source_path_0"]
+    ) == str(approved_path)
+
+    _click_button(at, "Загрузить фонд")
+    at.run(timeout=120)
+
+    actual_wells = tuple(at.session_state["wt_reference_actual_wells"])
+    approved_wells = tuple(at.session_state["wt_reference_approved_wells"])
+
+    assert [str(item.name) for item in actual_wells] == ["fact_legacy"]
+    assert [str(item.name) for item in approved_wells] == ["APP-LEGACY"]
+    assert tuple(at.session_state["ptc_reference_pending_legacy_dev_rows"]) == ()
+    assert (
+        tuple(at.session_state["ptc_reference_pending_legacy_welltrack_rows"])
+        == ()
+    )
+
+
+def test_reference_import_migrates_welltrack_only_legacy_mode(
+    tmp_path,
+) -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+
+    actual_path = tmp_path / "legacy_actual.inc"
+    actual_path.write_text(
+        "\n".join(
+            [
+                "WELLTRACK 'FACT-LEGACY'",
+                "0 0 25 0",
+                "950 900 25 300",
+                "1900 1800 25 400",
+                "/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    at.session_state["wt_reference_actual_source_mode"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_actual_welltrack_path_count"] = 1
+    at.session_state["wt_reference_actual_welltrack_path"] = str(actual_path)
+
+    at.run(timeout=120)
+
+    assert (
+        str(at.session_state["ptc_reference_import_source_mode"])
+        == "Путь к WELLTRACK"
+    )
+
+    _click_button(at, "Загрузить фонд")
+    at.run(timeout=120)
+
+    actual_wells = tuple(at.session_state["wt_reference_actual_wells"])
+    assert [str(item.name) for item in actual_wells] == ["FACT-LEGACY"]
 
 
 def test_reference_trajectory_welltrack_path_import_supports_multiple_paths_and_folder(
@@ -2349,13 +2475,17 @@ def test_reference_trajectory_welltrack_path_import_supports_multiple_paths_and_
         encoding="utf-8",
     )
     (folder / "ignore_me.txt").write_text("skip", encoding="utf-8")
-    at.session_state["ptc_reference_source_mode::actual"] = "Путь к WELLTRACK"
-    at.session_state["wt_reference_actual_welltrack_path_count"] = 2
-    at.session_state["wt_reference_actual_welltrack_path"] = str(direct_file)
-    at.session_state["wt_reference_actual_welltrack_path_1"] = str(folder)
+    at.session_state["ptc_reference_import_source_mode"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_import_welltrack_source_count"] = 2
+    at.session_state["wt_reference_import_welltrack_source_path_0"] = str(
+        direct_file
+    )
+    at.session_state["wt_reference_import_welltrack_source_kind_0"] = "actual"
+    at.session_state["wt_reference_import_welltrack_source_path_1"] = str(folder)
+    at.session_state["wt_reference_import_welltrack_source_kind_1"] = "actual"
 
     at.run(timeout=120)
-    _click_button(at, "Загрузить фактические скважины")
+    _click_button(at, "Загрузить фонд")
     at.run(timeout=120)
 
     actual_wells = tuple(at.session_state["wt_reference_actual_wells"])
@@ -2388,12 +2518,14 @@ def test_reference_trajectory_dev_folder_import_is_default_and_uses_file_names(
     )
     (folder_a / "well_111.dev").write_text(dev_text, encoding="utf-8")
     (folder_b / "well_222.dev").write_text(dev_text, encoding="utf-8")
-    at.session_state["wt_reference_actual_dev_folder_count"] = 2
-    at.session_state["wt_reference_actual_dev_folder_path_0"] = str(folder_a)
-    at.session_state["wt_reference_actual_dev_folder_path_1"] = str(folder_b)
+    at.session_state["wt_reference_import_dev_source_count"] = 2
+    at.session_state["wt_reference_import_dev_source_path_0"] = str(folder_a)
+    at.session_state["wt_reference_import_dev_source_kind_0"] = "actual"
+    at.session_state["wt_reference_import_dev_source_path_1"] = str(folder_b)
+    at.session_state["wt_reference_import_dev_source_kind_1"] = "actual"
 
     at.run(timeout=120)
-    _click_button(at, "Загрузить фактические скважины")
+    _click_button(at, "Загрузить фонд")
     at.run(timeout=120)
 
     actual_wells = tuple(at.session_state["wt_reference_actual_wells"])
@@ -2425,13 +2557,18 @@ def test_reference_trajectory_dev_import_keeps_actual_and_approved_kinds(
     )
     (actual_folder / "well_same.dev").write_text(dev_text, encoding="utf-8")
     (approved_folder / "well_same.dev").write_text(dev_text, encoding="utf-8")
-    at.session_state["wt_reference_actual_dev_folder_path_0"] = str(actual_folder)
-    at.session_state["wt_reference_approved_dev_folder_path_0"] = str(approved_folder)
+    at.session_state["wt_reference_import_dev_source_count"] = 2
+    at.session_state["wt_reference_import_dev_source_path_0"] = str(
+        actual_folder
+    )
+    at.session_state["wt_reference_import_dev_source_kind_0"] = "actual"
+    at.session_state["wt_reference_import_dev_source_path_1"] = str(
+        approved_folder
+    )
+    at.session_state["wt_reference_import_dev_source_kind_1"] = "approved"
 
     at.run(timeout=120)
-    _click_button(at, "Загрузить фактические скважины")
-    at.run(timeout=120)
-    _click_button(at, "Загрузить проектные утвержденные скважины")
+    _click_button(at, "Загрузить фонд")
     at.run(timeout=120)
 
     reference_wells = tuple(at.session_state["wt_reference_wells"])
@@ -2505,19 +2642,20 @@ def test_reference_dev_clear_button_resets_paths_without_widget_state_error(
     folder_b.mkdir()
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
-    at.session_state["ptc_reference_source_mode::actual"] = "Загрузить .dev"
-    at.session_state["wt_reference_actual_dev_folder_count"] = 2
-    at.session_state["wt_reference_actual_dev_folder_path_0"] = str(folder_a)
-    at.session_state["wt_reference_actual_dev_folder_path_1"] = str(folder_b)
+    at.session_state["wt_reference_import_dev_source_count"] = 2
+    at.session_state["wt_reference_import_dev_source_path_0"] = str(folder_a)
+    at.session_state["wt_reference_import_dev_source_kind_0"] = "actual"
+    at.session_state["wt_reference_import_dev_source_path_1"] = str(folder_b)
+    at.session_state["wt_reference_import_dev_source_kind_1"] = "approved"
 
     at.run(timeout=120)
-    _click_button(at, "Очистить фактические скважины")
+    _click_button(at, "Очистить фонд")
     at.run(timeout=120)
 
     assert not at.exception
-    assert int(at.session_state["wt_reference_actual_dev_folder_count"]) == 1
-    assert str(at.session_state["wt_reference_actual_dev_folder_path_0"]) == ""
-    assert str(at.session_state["wt_reference_actual_dev_folder_path_1"]) == ""
+    assert int(at.session_state["wt_reference_import_dev_source_count"]) == 1
+    assert str(at.session_state["wt_reference_import_dev_source_path_0"]) == ""
+    assert str(at.session_state["wt_reference_import_dev_source_path_1"]) == ""
 
 
 def test_reference_welltrack_clear_button_resets_path_without_widget_state_error(
@@ -2540,19 +2678,23 @@ def test_reference_welltrack_clear_button_resets_path_without_widget_state_error
     )
     at.session_state["wt_records"] = records
     at.session_state["wt_records_original"] = records
-    at.session_state["ptc_reference_source_mode::actual"] = "Путь к WELLTRACK"
-    at.session_state["wt_reference_actual_welltrack_path_count"] = 2
-    at.session_state["wt_reference_actual_welltrack_path"] = str(welltrack_path)
-    at.session_state["wt_reference_actual_welltrack_path_1"] = str(tmp_path)
+    at.session_state["ptc_reference_import_source_mode"] = "Путь к WELLTRACK"
+    at.session_state["wt_reference_import_welltrack_source_count"] = 2
+    at.session_state["wt_reference_import_welltrack_source_path_0"] = str(
+        welltrack_path
+    )
+    at.session_state["wt_reference_import_welltrack_source_kind_0"] = "actual"
+    at.session_state["wt_reference_import_welltrack_source_path_1"] = str(tmp_path)
+    at.session_state["wt_reference_import_welltrack_source_kind_1"] = "approved"
 
     at.run(timeout=120)
-    _click_button(at, "Очистить фактические скважины")
+    _click_button(at, "Очистить фонд")
     at.run(timeout=120)
 
     assert not at.exception
-    assert int(at.session_state["wt_reference_actual_welltrack_path_count"]) == 1
-    assert str(at.session_state["wt_reference_actual_welltrack_path"]) == ""
-    assert str(at.session_state["wt_reference_actual_welltrack_path_1"]) == ""
+    assert int(at.session_state["wt_reference_import_welltrack_source_count"]) == 1
+    assert str(at.session_state["wt_reference_import_welltrack_source_path_0"]) == ""
+    assert str(at.session_state["wt_reference_import_welltrack_source_path_1"]) == ""
 
 
 def test_welltrack_page_focuses_follow_up_selection_on_unresolved_wells() -> None:
@@ -3154,6 +3296,7 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     captured: dict[str, object] = {
         "expander_labels": [],
         "number_columns": [],
@@ -3241,6 +3384,7 @@ def test_pad_layout_preview_hides_midpoint_anchor_and_surface_z_columns(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     captured: dict[str, object] = {"preview_columns": None}
 
     class _DummyContext:
@@ -3295,9 +3439,133 @@ def test_pad_layout_preview_hides_midpoint_anchor_and_surface_z_columns(
     ]
 
 
+def test_pad_layout_can_hide_selected_pad_details(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = False
+    captured: dict[str, object] = {
+        "button_labels": [],
+        "selectbox_labels": [],
+        "toggle_labels": [],
+        "data_editor_calls": 0,
+    }
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        captured["selectbox_labels"].append(str(label))
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        captured["toggle_labels"].append(str(label))
+        return False
+
+    def _fake_button(label, *args, **kwargs):
+        captured["button_labels"].append(str(label))
+        return False
+
+    def _fake_data_editor(*args, **kwargs):
+        captured["data_editor_calls"] = int(captured["data_editor_calls"]) + 1
+        return None
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "button", _fake_button)
+    monkeypatch.setattr(page.st, "data_editor", _fake_data_editor)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "success", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+
+    page._render_pad_layout_panel(list(_records()))
+
+    assert (
+        "Настроить положение куста, НДС и расстояние между устьями."
+        in captured["button_labels"]
+    )
+    assert captured["selectbox_labels"] == []
+    assert captured["toggle_labels"] == ["Авто-порядок по глубине целевого пласта"]
+    assert captured["data_editor_calls"] == 0
+
+
+def test_pad_layout_hides_selected_pad_details_by_default(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    captured: dict[str, object] = {
+        "button_labels": [],
+        "selectbox_labels": [],
+        "toggle_labels": [],
+        "data_editor_calls": 0,
+    }
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        captured["selectbox_labels"].append(str(label))
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        captured["toggle_labels"].append(str(label))
+        return False
+
+    def _fake_button(label, *args, **kwargs):
+        captured["button_labels"].append(str(label))
+        return False
+
+    def _fake_data_editor(*args, **kwargs):
+        captured["data_editor_calls"] = int(captured["data_editor_calls"]) + 1
+        return None
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "button", _fake_button)
+    monkeypatch.setattr(page.st, "data_editor", _fake_data_editor)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "success", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+
+    page._render_pad_layout_panel(list(_records()))
+
+    assert (
+        "Настроить положение куста, НДС и расстояние между устьями."
+        in captured["button_labels"]
+    )
+    assert captured["selectbox_labels"] == []
+    assert captured["toggle_labels"] == ["Авто-порядок по глубине целевого пласта"]
+    assert captured["data_editor_calls"] == 0
+
+
 def test_pad_layout_clear_fixed_slots_resets_editor_key(monkeypatch) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     records = list(_records())
     pads = page._ensure_pad_configs(records)
     pad_id = str(pads[0].pad_id)
@@ -3404,6 +3672,7 @@ def test_pad_layout_offers_toggle_to_edit_source_defined_positions(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     records = list(_prepositioned_pad_records())
     captured: dict[str, object] = {"toggle_labels": []}
 
@@ -3470,6 +3739,7 @@ def test_pad_layout_unlocks_source_defined_inputs_when_editing_enabled(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     records = list(_prepositioned_pad_records())
     captured: dict[str, object] = {
         "number_inputs": [],
@@ -3548,6 +3818,7 @@ def test_pad_layout_disables_apply_auto_order_until_source_editing_is_enabled(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     records = list(_prepositioned_pad_records())
     captured: dict[str, object] = {"toggle_state": {}}
 
@@ -3608,9 +3879,92 @@ def test_pad_layout_disables_apply_auto_order_until_source_editing_is_enabled(
     assert captured["toggle_state"]["Применить авто-порядок"] is True
 
 
+def test_detect_ui_pads_uses_imported_simple_dev_state_after_t1_edit() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    records = [
+        WelltrackRecord(
+            name="9201",
+            points=(
+                WelltrackPoint(x=1000.0, y=800.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1120.0, y=880.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=2020.0, y=2080.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9202",
+            points=(
+                WelltrackPoint(x=1600.0, y=900.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1720.0, y=980.0, z=2350.0, md=2350.0),
+                WelltrackPoint(x=2620.0, y=2180.0, z=2450.0, md=3450.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9203",
+            points=(
+                WelltrackPoint(x=2200.0, y=1000.0, z=0.0, md=0.0),
+                WelltrackPoint(x=2320.0, y=1080.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=3220.0, y=2280.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+    page.st.session_state[page.ptc_target_import.IMPORTED_DEV_TARGET_WELLS_STATE_KEY] = (
+        ImportedTrajectoryWell(
+            name="9201",
+            kind="approved",
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [0.0, 2400.0, 3500.0],
+                    "X_m": [1000.0, 1000.0, 1900.0],
+                    "Y_m": [800.0, 800.0, 2000.0],
+                    "Z_m": [0.0, 2400.0, 2500.0],
+                }
+            ),
+            surface=Point3D(x=1000.0, y=800.0, z=0.0),
+            azimuth_deg=45.0,
+        ),
+        ImportedTrajectoryWell(
+            name="9202",
+            kind="approved",
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [0.0, 2350.0, 3450.0],
+                    "X_m": [1600.0, 1600.0, 2500.0],
+                    "Y_m": [900.0, 900.0, 2100.0],
+                    "Z_m": [0.0, 2350.0, 2450.0],
+                }
+            ),
+            surface=Point3D(x=1600.0, y=900.0, z=0.0),
+            azimuth_deg=45.0,
+        ),
+        ImportedTrajectoryWell(
+            name="9203",
+            kind="approved",
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [0.0, 2300.0, 3400.0],
+                    "X_m": [2200.0, 2200.0, 3100.0],
+                    "Y_m": [1000.0, 1000.0, 2200.0],
+                    "Z_m": [0.0, 2300.0, 2400.0],
+                }
+            ),
+            surface=Point3D(x=2200.0, y=1000.0, z=0.0),
+            azimuth_deg=45.0,
+        ),
+    )
+
+    pads, metadata = page._detect_ui_pads(records)
+
+    assert [len(pad.wells) for pad in pads] == [3]
+    assert [str(pad.pad_id) for pad in pads] == ["Pad 92"]
+    assert bool(metadata["Pad 92"].source_surfaces_defined) is False
+
+
 def test_pad_layout_keeps_user_nds_value_for_source_defined_pad(monkeypatch) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     records = list(_prepositioned_pad_records())
     pads = page._detect_ui_pads(records)[0]
     pad_id = str(pads[0].pad_id)
@@ -3679,6 +4033,7 @@ def test_pad_layout_resets_source_defined_widgets_when_editing_is_disabled(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     records = list(_prepositioned_pad_records())
     pads = page._ensure_pad_configs(records)
     pad_id = str(pads[0].pad_id)
@@ -3785,6 +4140,7 @@ def test_pad_layout_preview_applies_auto_order_only_after_explicit_toggle(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     records = list(_prepositioned_depth_order_pad_records())
     page.st.session_state["wt_pad_auto_order_by_target_depth"] = True
     captured_frames: list[pd.DataFrame] = []
@@ -5778,7 +6134,8 @@ def test_sync_manual_well_override_editor_selection_tolerates_none_signature() -
     signature = page.st.session_state[
         page.WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY
     ]
-    assert signature[0] == "cfg-1"
+    assert signature[0] == "profile"
+    assert signature[1] == "cfg-1"
 
 
 def test_manual_well_calc_profile_assignments_persists_normalized_raw_values() -> None:
@@ -6600,6 +6957,127 @@ def test_render_manual_well_calc_overrides_save_adds_assigned_wells_to_batch_sel
     assert payload["values"]["entry_inc_target"] == pytest.approx(
         editor_values["entry_inc_target"]
     )
+
+
+def test_render_manual_well_calc_overrides_load_default_persists_until_save(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ENABLED_KEY] = True
+    page.st.session_state[page.WT_WELL_CALC_OVERRIDE_ACTIVE_PROFILE_KEY] = "cfg-1"
+    base_config = page.WT_CALC_PARAMS.build_config()
+    base_values = page.calc_param_state_values_from_config(base_config)
+    page._store_manual_well_calc_profile(
+        profile_id="cfg-1",
+        profile_name="Config A",
+        values={"entry_inc_target": float(base_values["entry_inc_target"]) + 1.0},
+        source="Ручная настройка",
+    )
+    stage = {"value": "reset"}
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def button(self, label, **kwargs):
+            if stage["value"] == "reset":
+                return str(label) == "Вернуть дефолт"
+            if stage["value"] == "save":
+                return str(label) == "Сохранить конфигурацию"
+            return False
+
+        def download_button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_toggle(_label, key, **kwargs):
+        return page.st.session_state.get(key, False)
+
+    def _fake_selectbox(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, "cfg-1")
+        return page.st.session_state[key]
+
+    def _fake_text_input(_label, value="", key=None, **kwargs):
+        if key is not None and key not in page.st.session_state:
+            page.st.session_state[key] = value
+        return page.st.session_state.get(key, value)
+
+    def _fake_multiselect(_label, options, key, **kwargs):
+        page.st.session_state.setdefault(key, [])
+        return page.st.session_state[key]
+
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "file_uploader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page,
+        "_build_config_form",
+        lambda *args, **kwargs: TrajectoryConfig(),
+    )
+
+    page._render_manual_well_calc_overrides(records=_records())
+
+    stage["value"] = "idle"
+    page._render_manual_well_calc_overrides(records=_records())
+
+    editor_config = page.WT_WELL_OVERRIDE_EDITOR.build_config()
+    assert float(editor_config.entry_inc_target_deg) == pytest.approx(
+        float(base_values["entry_inc_target"])
+    )
+    profile_values = page._effective_manual_well_profile_values(
+        base_config=base_config,
+        profile_id="cfg-1",
+        records_by_name={str(record.name): record for record in _records()},
+    )
+    profile_signature = page._manual_well_override_selection_signature(
+        active_profile_id="cfg-1",
+        values=profile_values,
+    )
+    base_signature = page._manual_well_override_selection_signature(
+        active_profile_id="cfg-1",
+        values=base_values,
+        source="base",
+    )
+    assert (
+        tuple(
+            page.st.session_state[
+                page.WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY
+            ]
+        )
+        == base_signature
+    )
+    assert (
+        tuple(
+            page.st.session_state[
+                page.WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY
+            ]
+        )
+        != profile_signature
+    )
+
+    stage["value"] = "save"
+    page._render_manual_well_calc_overrides(records=_records())
+
+    payload = page.st.session_state[page.WT_WELL_CALC_OVERRIDE_STATE_KEY]["cfg-1"]
+    assert payload["values"] == {}
 
 
 def test_render_manual_well_calc_overrides_select_all_queues_full_assignment_selection(

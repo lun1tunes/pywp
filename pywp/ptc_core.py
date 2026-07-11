@@ -3777,12 +3777,28 @@ def _effective_manual_well_profile_values(
     return values
 
 
+def _manual_well_override_selection_signature(
+    *,
+    active_profile_id: str,
+    values: Mapping[str, float | int | str | bool],
+    source: str = "profile",
+) -> tuple[object, ...]:
+    signature_source = "base" if str(source).strip() == "base" else "profile"
+    return (
+        signature_source,
+        str(active_profile_id),
+        WT_CALC_PARAMS.state_signature(),
+        tuple((suffix, values[suffix]) for suffix in sorted(values)),
+    )
+
+
 def _sync_manual_well_override_editor_selection(
     *,
     base_config: TrajectoryConfig,
     active_profile_id: str,
     records_by_name: Mapping[str, WelltrackRecord] | None = None,
 ) -> None:
+    base_values = calc_param_state_values_from_config(base_config)
     effective_values = (
         _effective_manual_well_profile_values(
             base_config=base_config,
@@ -3790,12 +3806,16 @@ def _sync_manual_well_override_editor_selection(
             records_by_name=records_by_name,
         )
         if active_profile_id
-        else calc_param_state_values_from_config(base_config)
+        else base_values
     )
-    selection_signature = (
-        str(active_profile_id),
-        WT_CALC_PARAMS.state_signature(),
-        tuple((suffix, effective_values[suffix]) for suffix in sorted(effective_values)),
+    selection_signature = _manual_well_override_selection_signature(
+        active_profile_id=active_profile_id,
+        values=effective_values,
+    )
+    base_loaded_signature = _manual_well_override_selection_signature(
+        active_profile_id=active_profile_id,
+        values=base_values,
+        source="base",
     )
     stored_signature = st.session_state.get(
         WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY,
@@ -3803,7 +3823,10 @@ def _sync_manual_well_override_editor_selection(
     )
     if not isinstance(stored_signature, (list, tuple)):
         stored_signature = ()
-    if tuple(stored_signature) == selection_signature:
+    if tuple(stored_signature) in (
+        selection_signature,
+        base_loaded_signature,
+    ):
         return
     editor_config = (
         build_config_from_values(effective_values)
@@ -4908,8 +4931,15 @@ def _render_manual_well_calc_overrides(
         )
         _rerun_fragment()
     if load_global_clicked:
+        base_values = calc_param_state_values_from_config(base_config)
         _set_manual_well_override_editor_from_config(base_config)
-        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = ()
+        st.session_state[WT_WELL_CALC_OVERRIDE_SELECTION_SIGNATURE_KEY] = (
+            _manual_well_override_selection_signature(
+                active_profile_id=active_profile_id,
+                values=base_values,
+                source="base",
+            )
+        )
         _rerun_fragment()
     if save_profile_clicked:
         changed, resolved_name, changed_field_count = _apply_manual_well_override_editor(
@@ -6665,6 +6695,7 @@ def _auto_apply_pad_layout_if_shared_surface(
         "%Y-%m-%d %H:%M:%S"
     )
     st.session_state["wt_pad_auto_applied_on_import"] = True
+    st.session_state[ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
     return True
 
 
@@ -8757,7 +8788,12 @@ def _inferred_surface_spacing_m(
 def _detect_ui_pads(
     records: list[WelltrackRecord],
 ) -> tuple[list[WellPad], dict[str, _DetectedPadUiMeta]]:
-    return ptc_pad_state.detect_ui_pads(records)
+    return ptc_pad_state.detect_ui_pads(
+        records,
+        remembered_degenerate_well_names=ptc_target_import.simple_dev_target_well_names_from_state(
+            st.session_state
+        ),
+    )
 
 
 def _ensure_pad_configs(base_records: list[WelltrackRecord]) -> list[WellPad]:
@@ -8910,6 +8946,10 @@ def _anticollision_focus_well_names(
     )
 
 
+def _toggle_pad_layout_details_panel() -> bool:
+    return ptc_pad_state.toggle_pad_layout_details_open(st.session_state)
+
+
 def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
     base_records = st.session_state.get("wt_records_original")
     if base_records is None:
@@ -8979,8 +9019,52 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         )
 
         pad_ids = [str(pad.pad_id) for pad in pads]
-        st.selectbox("Выберите куст", options=pad_ids, key="wt_pad_selected_id")
         selected_id = str(st.session_state.get("wt_pad_selected_id", pad_ids[0]))
+        if selected_id not in pad_ids:
+            selected_id = pad_ids[0]
+            st.session_state["wt_pad_selected_id"] = selected_id
+
+        details_open = ptc_pad_state.pad_layout_details_open(st.session_state)
+        st.button(
+            (
+                "Скрыть настройки выбранного куста"
+                if details_open
+                else "Настроить положение куста, НДС и расстояние между устьями."
+            ),
+            key="wt_pad_layout_details_toggle",
+            icon=(
+                ":material/expand_less:"
+                if details_open
+                else ":material/expand_more:"
+            ),
+            width="content",
+            on_click=_toggle_pad_layout_details_panel,
+        )
+        details_open = ptc_pad_state.pad_layout_details_open(st.session_state)
+        summary_selected_pad_meta = pad_metadata.get(selected_id)
+        if not details_open:
+            summary_source_surfaces_defined = bool(
+                getattr(summary_selected_pad_meta, "source_surfaces_defined", False)
+            )
+            summary_auto_name_notice = str(
+                getattr(summary_selected_pad_meta, "auto_name_notice", "")
+            ).strip()
+            if summary_auto_name_notice:
+                st.info(summary_auto_name_notice)
+            if summary_source_surfaces_defined:
+                st.info(
+                    "Устья заданы в исходных данных. Чтобы менять координаты — "
+                    "откройте настройки куста и включите редактирование позиций."
+                )
+                st.info(
+                    "Исходная привязка скважин к позициям сохраняется, пока вы явно "
+                    "не включите редактирование и 'Применить авто-порядок'."
+                )
+            return
+
+        selected_id = str(
+            st.selectbox("Выберите куст", options=pad_ids, key="wt_pad_selected_id")
+        )
         selected_pad = next(
             (pad for pad in pads if str(pad.pad_id) == selected_id), pads[0]
         )
