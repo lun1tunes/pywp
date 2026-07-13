@@ -252,7 +252,7 @@ def _result_frame(
 
 
 def run_page() -> None:
-    st.set_page_config(page_title="CRS calculator", layout="wide")
+    st.set_page_config(page_title="Калькулятор CRS", layout="wide")
     apply_page_style(max_width_px=1100)
 
     input_labels = _labels(_CALCULATOR_INPUT_CRS_OPTIONS)

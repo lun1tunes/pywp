@@ -123,7 +123,7 @@ def _render_results_section(
 
 
 def run_page() -> None:
-    st.set_page_config(page_title="PTC", layout="wide")
+    st.set_page_config(page_title="КПТ", layout="wide")
     wt._init_state()
     force_ptc_defaults()
 
