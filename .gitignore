@@ -212,3 +212,4 @@ logo_variants/
 !tests/test_data/dev_target_import/*.dev
 *.jpg
 *.csv
+let.txt
