@@ -457,6 +457,7 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
 ) -> None:
     page = wt_import_module
     captured: dict[str, object] = {}
+    expander_calls: list[tuple[str, object]] = []
 
     class _DummyColumn:
         def metric(self, label, value, *args, **kwargs):
@@ -471,8 +472,7 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
             return False
 
     def _fake_expander(label, *args, **kwargs):
-        captured["label"] = label
-        captured["expanded"] = kwargs.get("expanded")
+        expander_calls.append((str(label), kwargs.get("expanded")))
         return _DummyExpander()
 
     def _fake_dataframe(frame, **kwargs):
@@ -500,8 +500,8 @@ def test_records_overview_table_uses_collapsed_status_expander_without_problems(
 
     page._render_records_overview([_records()[0]])
 
-    assert captured["label"] == "Статус загрузки целей"
-    assert captured["expanded"] is False
+    assert ("Статус загрузки целей", False) in expander_calls
+    assert ("Изменить длину ГС", False) in expander_calls
     assert captured["metrics"] == [
         ("Скважин", "1"),
         ("Пилотов", "0"),
@@ -526,6 +526,7 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
 ) -> None:
     page = wt_import_module
     captured: dict[str, object] = {}
+    expander_calls: list[tuple[str, object]] = []
     incomplete = WelltrackRecord(
         name="WELL-X",
         points=(
@@ -546,8 +547,7 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
             return False
 
     def _fake_expander(label, *args, **kwargs):
-        captured["label"] = label
-        captured["expanded"] = kwargs.get("expanded")
+        expander_calls.append((str(label), kwargs.get("expanded")))
         return _DummyExpander()
 
     monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
@@ -572,8 +572,8 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
 
     page._render_records_overview([_records()[0], incomplete])
 
-    assert captured["label"] == "Статус загрузки целей"
-    assert captured["expanded"] is True
+    assert ("Статус загрузки целей", True) in expander_calls
+    assert ("Изменить длину ГС", False) in expander_calls
 
 
 def test_records_overview_appends_dev_import_failures_to_status_table(
@@ -583,6 +583,7 @@ def test_records_overview_appends_dev_import_failures_to_status_table(
     page.st.session_state.clear()
     page._init_state()
     captured: dict[str, object] = {}
+    expander_calls: list[tuple[str, object]] = []
     try:
         page.st.session_state[page.ptc_target_import.TARGET_IMPORT_FAILURES_STATE_KEY] = (
             page.ptc_target_import.TargetImportFailure(
@@ -604,8 +605,7 @@ def test_records_overview_appends_dev_import_failures_to_status_table(
                 return False
 
         def _fake_expander(label, *args, **kwargs):
-            captured["label"] = label
-            captured["expanded"] = kwargs.get("expanded")
+            expander_calls.append((str(label), kwargs.get("expanded")))
             return _DummyExpander()
 
         def _fake_dataframe(frame, **kwargs):
@@ -633,8 +633,8 @@ def test_records_overview_appends_dev_import_failures_to_status_table(
 
         page._render_records_overview([_records()[0]])
 
-        assert captured["label"] == "Статус загрузки целей"
-        assert captured["expanded"] is True
+        assert ("Статус загрузки целей", True) in expander_calls
+        assert ("Изменить длину ГС", False) in expander_calls
         assert list(captured["frame"]["Скважина"]) == ["WELL-A", "BROKEN-DEV"]
         assert list(captured["frame"]["Статус"]) == ["✅", "❌"]
         assert str(captured["frame"].iloc[-1]["Проблема"]) == (
@@ -4240,13 +4240,16 @@ def test_welltrack_import_source_selector_splits_format_and_welltrack_method() -
     at.run(timeout=120)
 
     radios_by_label = {str(widget.label): widget for widget in at.radio}
-    assert list(radios_by_label["Формат импорта"].options) == [
+    assert list(radios_by_label["Выберите формат импорта:"].options) == [
         "Таблица с точками целей",
         "WELLTRACK",
         ".dev траектория",
     ]
-    assert radios_by_label["Формат импорта"].value == "Таблица с точками целей"
-    assert set(radios_by_label) == {"Формат импорта"}
+    assert radios_by_label["Выберите формат импорта:"].value == "Таблица с точками целей"
+    assert set(radios_by_label) == {"Выберите формат импорта:"}
+    assert "**Выберите формат импорта:**" in {
+        str(widget.value) for widget in at.markdown
+    }
 
 
 def test_welltrack_import_target_table_format_hides_welltrack_method() -> None:
@@ -4256,7 +4259,7 @@ def test_welltrack_import_target_table_format_hides_welltrack_method() -> None:
     at.run(timeout=120)
 
     radio_labels = {str(widget.label) for widget in at.radio}
-    assert radio_labels == {"Формат импорта"}
+    assert radio_labels == {"Выберите формат импорта:"}
     assert [str(widget.label) for widget in at.expander] == [
         "Таблица точек целей",
         "Как задавать скважины с пилотом, ЗБС и многопластовые скважины",

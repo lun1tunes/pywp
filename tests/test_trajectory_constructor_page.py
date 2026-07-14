@@ -328,9 +328,9 @@ def test_ptc_core_keeps_auto_order_guardrails_for_source_defined_wellheads() -> 
     source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
 
     assert "начинает переставлять скважины только после включения" in source
-    assert "локального тумблера " in source
+    assert "переключателя " in source
     assert "'Применить авто-порядок'" in source
-    assert "исходная привязка скважин сохраняется" in source
+    assert "Исходная привязка скважин к позициям сохраняется" in source
 
 
 def test_ptc_core_uses_stateful_pad_layout_details_panel() -> None:

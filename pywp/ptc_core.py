@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import colorsys
 import hashlib
+from html import escape
 import json
 import logging
 import re
@@ -6221,7 +6222,7 @@ def _render_dev_fixed_t1_controls(*, available_names: Sequence[str]) -> None:
         available_names
     )
     enabled = st.toggle(
-        "t1 по фиксированному INC",
+        "определять `t1` по фиксированному INC (зенитному углу входа в пласт)",
         key="wt_source_dev_fixed_t1_enabled",
     )
     if not enabled:
@@ -6256,7 +6257,9 @@ def _render_dev_fixed_t1_controls(*, available_names: Sequence[str]) -> None:
         if str(name).strip()
     )
     if not selected_names:
-        st.caption("Выберите скважины, для которых `t1` нужно искать по фиксированному INC.")
+        st.caption(
+            "Выберите скважины, для которых `t1` нужно определять по фиксированному INC."
+        )
         return
     common_enabled = st.toggle(
         "Общее значение для выбранных скважин",
@@ -6306,6 +6309,211 @@ def _render_dev_fixed_t1_controls(*, available_names: Sequence[str]) -> None:
     )
 
 
+def _render_target_table_help() -> None:
+    st.html(
+        """
+        <style>
+        .pywp-target-help-table-wrap {
+            display: inline-block;
+            max-width: 100%;
+        }
+        .pywp-target-help-table {
+            width: auto;
+            border-collapse: collapse;
+            table-layout: auto;
+            font-size: 0.88rem;
+            line-height: 1.25;
+        }
+        .pywp-target-help-table th,
+        .pywp-target-help-table td {
+            padding: 0.16rem 0.5rem;
+            border-bottom: 1px solid #E3EAF2;
+            white-space: nowrap;
+            text-align: left;
+        }
+        .pywp-target-help-table th {
+            color: #5F6F80;
+            font-size: 0.79rem;
+            font-weight: 600;
+        }
+        .pywp-target-help-table tr:last-child td {
+            border-bottom: none;
+        }
+        .pywp-target-help-table .pywp-target-help-coord {
+            color: #7A8794;
+            font-size: 0.76rem;
+        }
+        </style>
+        """,
+        width="content",
+    )
+
+    def _render_example(
+        title: str,
+        rows: list[dict[str, str]],
+        description: str,
+    ) -> None:
+        columns = ("Wellname", "Point", "X", "Y", "Z")
+        header_html = "".join(
+            f"<th class=\"{'pywp-target-help-coord' if column in {'X', 'Y', 'Z'} else ''}\">{escape(column)}</th>"
+            for column in columns
+        )
+        rows_html = "".join(
+            "<tr>"
+            + "".join(
+                f"<td class=\"{'pywp-target-help-coord' if column in {'X', 'Y', 'Z'} else ''}\">{escape(str(row.get(column, '')))}</td>"
+                for column in columns
+            )
+            + "</tr>"
+            for row in rows
+        )
+        st.markdown(f"#### {title}")
+        st.html(
+            (
+                "<div class='pywp-target-help-table-wrap'>"
+                "<table class='pywp-target-help-table'>"
+                f"<thead><tr>{header_html}</tr></thead>"
+                f"<tbody>{rows_html}</tbody>"
+                "</table>"
+                "</div>"
+            ),
+            width="content",
+        )
+        st.caption(description)
+
+    st.markdown("Ниже показаны типовые примеры для различных типов скважин.")
+
+    _render_example(
+        "Обычная скважина",
+        [
+            {"Wellname": "well_01", "Point": "S", "X": "Xs", "Y": "Ys", "Z": "Zs"},
+            {"Wellname": "well_01", "Point": "t1", "X": "X1", "Y": "Y1", "Z": "Z1"},
+            {"Wellname": "well_01", "Point": "t3", "X": "X3", "Y": "Y3", "Z": "Z3"},
+        ],
+        "Базовый вариант: одна скважина, точка `S`, вход в пласт `t1` и конечная цель `t3`.",
+    )
+    _render_example(
+        "Скважина с последовательностью целей",
+        [
+            {"Wellname": "well_01", "Point": "S", "X": "Xs", "Y": "Ys", "Z": "Zs"},
+            {"Wellname": "well_01", "Point": "t1", "X": "X1", "Y": "Y1", "Z": "Z1"},
+            {"Wellname": "well_01", "Point": "t2", "X": "X2", "Y": "Y2", "Z": "Z2"},
+            {"Wellname": "well_01", "Point": "t3", "X": "X3", "Y": "Y3", "Z": "Z3"},
+            {"Wellname": "well_01", "Point": "t4", "X": "X4", "Y": "Y4", "Z": "Z4"},
+        ],
+        "Если одна скважина должна последовательно пройти через несколько целей, используйте одно и то же имя и задавайте точки подряд: `t1`, `t2`, `t3`, ... без пропусков.",
+    )
+    _render_example(
+        "Пилот",
+        [
+            {
+                "Wellname": "well_01_PL",
+                "Point": "S",
+                "X": "Xs",
+                "Y": "Ys",
+                "Z": "Zs",
+            },
+            {
+                "Wellname": "well_01_PL",
+                "Point": "PL1",
+                "X": "Xpl1",
+                "Y": "Ypl1",
+                "Z": "Zpl1",
+            },
+            {
+                "Wellname": "well_01_PL",
+                "Point": "PL2",
+                "X": "Xpl2",
+                "Y": "Ypl2",
+                "Z": "Zpl2",
+            },
+        ],
+        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL`. Например, пилот `well_01_PL` будет связан с основной скважиной `well_01`.",
+    )
+    _render_example(
+        "ЗБС от фактической скважины",
+        [
+            {
+                "Wellname": "fact_01_ZBS",
+                "Point": "t1",
+                "X": "X1",
+                "Y": "Y1",
+                "Z": "Z1",
+            },
+            {
+                "Wellname": "fact_01_ZBS",
+                "Point": "t3",
+                "X": "X3",
+                "Y": "Y3",
+                "Z": "Z3",
+            },
+        ],
+        "Можно также использовать имя `fact_01_2`. Точку `S` для такого ЗБС указывать не нужно: система берёт старт из уже загруженной фактической скважины. Имя `fact_well` должно совпадать с именем загруженной фактической скважины.",
+    )
+    _render_example(
+        "Ствол от пилота",
+        [
+            {
+                "Wellname": "well_01_2",
+                "Point": "S",
+                "X": "Xs",
+                "Y": "Ys",
+                "Z": "Zs",
+            },
+            {
+                "Wellname": "well_01_2",
+                "Point": "t1",
+                "X": "X1",
+                "Y": "Y1",
+                "Z": "Z1",
+            },
+            {
+                "Wellname": "well_01_2",
+                "Point": "t3",
+                "X": "X3",
+                "Y": "Y3",
+                "Z": "Z3",
+            },
+        ],
+        "Если проектный ствол назван `well_01_2`, система свяжет его с пилотом `well_01_PL`. В этом случае точка `S` нужна, потому что это отдельная проектная траектория. Имя `well` должно совпадать с основной скважиной.",
+    )
+    _render_example(
+        "Многопластовая скважина",
+        [
+            {"Wellname": "well_02", "Point": "S", "X": "Xs", "Y": "Ys", "Z": "Zs"},
+            {
+                "Wellname": "well_02",
+                "Point": "1_t1",
+                "X": "X1_1",
+                "Y": "Y1_1",
+                "Z": "Z1_1",
+            },
+            {
+                "Wellname": "well_02",
+                "Point": "1_t3",
+                "X": "X1_3",
+                "Y": "Y1_3",
+                "Z": "Z1_3",
+            },
+            {
+                "Wellname": "well_02",
+                "Point": "2_t1",
+                "X": "X2_1",
+                "Y": "Y2_1",
+                "Z": "Z2_1",
+            },
+            {
+                "Wellname": "well_02",
+                "Point": "2_t3",
+                "X": "X2_3",
+                "Y": "Y2_3",
+                "Z": "Z2_3",
+            },
+        ],
+        "Многопластовая скважина задаётся следующей последовательностью точек: `S`, `1_t1`, `1_t3`, `2_t1`, `2_t3`, ... . Каждая пара `N_t1` / `N_t3` описывает отдельный участок ГС.",
+    )
+
+
 def _render_source_input() -> None:
     if str(st.session_state.get("wt_source_format", "")).strip() not in set(
         WT_SOURCE_FORMAT_OPTIONS
@@ -6314,12 +6522,19 @@ def _render_source_input() -> None:
             st.session_state
         )
 
-    source_format = st.radio(
-        "Формат импорта",
-        options=list(WT_SOURCE_FORMAT_OPTIONS),
-        horizontal=True,
-        key="wt_source_format",
+    format_label_col, format_radio_col = st.columns(
+        [0.9, 4.7], gap="small", vertical_alignment="center"
     )
+    with format_label_col:
+        st.markdown("**Выберите формат импорта:**")
+    with format_radio_col:
+        source_format = st.radio(
+            "Выберите формат импорта:",
+            options=list(WT_SOURCE_FORMAT_OPTIONS),
+            horizontal=True,
+            key="wt_source_format",
+            label_visibility="collapsed",
+        )
     current_source_path = str(st.session_state.get("wt_source_path", "")).strip()
     if (
         source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY
@@ -6359,10 +6574,6 @@ def _render_source_input() -> None:
                 key="wt_source_path",
                 placeholder="tests/test_data/dev_target_import",
             )
-            st.caption(
-                "Поддерживаются классические J и BUILD/HOLD/BUILD траектории "
-                "без пилотов, ЗБС и многопластовых скважин."
-            )
             _render_dev_fixed_t1_controls(
                 available_names=_preview_dev_source_well_names_from_state()
             )
@@ -6388,11 +6599,6 @@ def _render_source_input() -> None:
                     else "tests/test_data/dev_target_import"
                 ),
             )
-            if source_format == WT_SOURCE_FORMAT_DEV_TRAJECTORY:
-                st.caption(
-                    "Поддерживаются классические J и BUILD/HOLD/BUILD траектории "
-                    "без пилотов, ЗБС и многопластовых скважин."
-                )
             parse_clicked = st.form_submit_button(
                 "Импорт целей",
                 type="primary",
@@ -6521,102 +6727,16 @@ def _render_source_input() -> None:
         return
 
     with st.expander("Таблица точек целей", expanded=True):
-        note_col, clear_col = st.columns(
-            [5.0, 1.2], gap="small", vertical_alignment="bottom"
+        st.caption(
+            "Вставьте из Excel колонки `Wellname`, `Point`, `X`, `Y`, `Z`. "
+            "В колонке `Point`: `S` - устье скважины; обычная скважина - `S`, `t1`, `t3` "
+            "(две точки в пласте); несколько точек - `S`, `t1`, `t2`, `t3`, ... ."
         )
-        with note_col:
-            st.caption(
-                "Вставьте из Excel: `Wellname`, `Point`, `X`, `Y`, `Z`. "
-                "Обычная скважина: `S`, `t1`, `t3` или последовательность "
-                "`S`, `t1`, `t2`, `t3`, ... ."
-            )
-            with st.expander(
-                "Как задавать скважины с пилотом, ЗБС и многопластовые скважины",
-                expanded=False,
-            ):
-                st.markdown(
-                    "Ниже показаны типовые схемы заполнения колонок `Wellname` "
-                    "и `Point`.\n\n"
-                    "**Обычная скважина**\n"
-                    "```text\n"
-                    "Wellname   Point\n"
-                    "well_01    S\n"
-                    "well_01    t1\n"
-                    "well_01    t3\n"
-                    "```\n"
-                    "Базовый вариант: одна скважина, точка `S`, вход в пласт `t1` "
-                    "и конечная цель `t3`.\n\n"
-                    "**Скважина с последовательностью целей**\n"
-                    "```text\n"
-                    "Wellname   Point\n"
-                    "well_01    S\n"
-                    "well_01    t1\n"
-                    "well_01    t2\n"
-                    "well_01    t3\n"
-                    "well_01    t4\n"
-                    "```\n"
-                    "Если одна скважина должна последовательно пройти через несколько "
-                    "целей, используйте одно и то же имя и задавайте точки подряд: "
-                    "`t1`, `t2`, `t3`, ... без пропусков. Специальная приписка в имени "
-                    "не нужна.\n\n"
-                    "**Пилот**\n"
-                    "```text\n"
-                    "Wellname     Point\n"
-                    "well_01_PL   S\n"
-                    "well_01_PL   PL1\n"
-                    "well_01_PL   PL2\n"
-                    "```\n"
-                    "Пилот задаётся отдельной записью с тем же базовым именем и "
-                    "суффиксом `_PL`. Например, пилот `well_01_PL` будет связан "
-                    "с основной скважиной `well_01`.\n\n"
-                    "**ЗБС от фактической скважины**\n"
-                    "```text\n"
-                    "Wellname      Point\n"
-                    "fact_01_ZBS   t1\n"
-                    "fact_01_ZBS   t3\n"
-                    "```\n"
-                    "Можно также использовать имя `fact_01_2`. Точку `S` для такого "
-                    "ЗБС указывать не нужно: система берёт старт из уже загруженной "
-                    "фактической скважины. Имя до суффикса должно совпадать с именем "
-                    "этой фактической скважины.\n\n"
-                    "**Ствол от пилота**\n"
-                    "```text\n"
-                    "Wellname    Point\n"
-                    "well_01_2   S\n"
-                    "well_01_2   t1\n"
-                    "well_01_2   t3\n"
-                    "```\n"
-                    "Если проектный ствол назван `well_01_2`, система свяжет его "
-                    "с пилотом `well_01_PL`. В этом случае точка `S` нужна, потому что "
-                    "это отдельная проектная траектория.\n\n"
-                    "**Многопластовая скважина**\n"
-                    "```text\n"
-                    "Wellname    Point\n"
-                    "well_02     S\n"
-                    "well_02     1_t1\n"
-                    "well_02     1_t3\n"
-                    "well_02     2_t1\n"
-                    "well_02     2_t3\n"
-                    "```\n"
-                    "Используйте обычное имя скважины, например `well_02`, а номер "
-                    "пласта задавайте в точке: `1_t1`, `1_t3`, `2_t1`, `2_t3`, ... . "
-                    "Каждая пара `N_t1` / `N_t3` описывает свой пласт.\n\n"
-                    "`t1`, `t2`, `t3`, ... - это последовательность целей одной "
-                    "траектории. `1_t1`, `1_t3`, `2_t1`, `2_t3`, ... - это пары целей "
-                    "для разных пластов. Эти два формата не нужно смешивать."
-                )
-        with clear_col:
-            if st.button(
-                "Очистить",
-                key="wt_source_table_clear",
-                icon=":material/delete:",
-                width="stretch",
-            ):
-                st.session_state["wt_source_table_df"] = _empty_source_table_df()
-                st.session_state["wt_source_table_editor_nonce"] = (
-                    int(st.session_state.get("wt_source_table_editor_nonce", 0)) + 1
-                )
-                _rerun_fragment()
+        with st.expander(
+            "Как задавать скважины с пилотом, ЗБС и многопластовые скважины",
+            expanded=False,
+        ):
+            _render_target_table_help()
         source_table_df = _normalize_source_table_df_for_ui(
             st.session_state.get("wt_source_table_df", _empty_source_table_df())
         )
@@ -6635,9 +6755,15 @@ def _render_source_input() -> None:
                     "Z": st.column_config.NumberColumn("Z"),
                 },
             )
-            action_cols = st.columns([1.0, 4.4], gap="small")
+            action_cols = st.columns([1.15, 3.3, 1.15], gap="small")
+            parse_action_col = action_cols[0] if len(action_cols) > 0 else st
+            clear_action_col = (
+                action_cols[2]
+                if len(action_cols) > 2
+                else (action_cols[1] if len(action_cols) > 1 else st)
+            )
             parse_submit_button = getattr(
-                action_cols[0],
+                parse_action_col,
                 "form_submit_button",
                 st.form_submit_button,
             )
@@ -6645,9 +6771,25 @@ def _render_source_input() -> None:
                 "Импорт целей",
                 type="primary",
                 icon=":material/upload_file:",
-                width="content",
+                width="stretch",
             )
-        if parse_table_clicked:
+            clear_submit_button = getattr(
+                clear_action_col,
+                "form_submit_button",
+                st.form_submit_button,
+            )
+            clear_table_clicked = clear_submit_button(
+                "Очистить",
+                icon=":material/delete:",
+                width="stretch",
+            )
+        if clear_table_clicked and not parse_table_clicked:
+            st.session_state["wt_source_table_df"] = _empty_source_table_df()
+            st.session_state["wt_source_table_editor_nonce"] = (
+                int(st.session_state.get("wt_source_table_editor_nonce", 0)) + 1
+            )
+            _rerun_fragment()
+        elif parse_table_clicked:
             st.session_state["wt_source_table_df"] = _normalize_source_table_df_for_ui(
                 pd.DataFrame(edited_table)
             )
@@ -6948,13 +7090,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
         )
         if imported_dev_params:
             st.markdown("#### Прочитанные параметры .dev")
-            if has_manual_assignments:
-                st.caption(
-                    "Параметры показаны для контроля. Для назначенных скважин "
-                    "они уже применяются через индивидуальные конфигурации, "
-                    "остальные используют общие параметры расчёта."
-                )
-            else:
+            if not has_manual_assignments:
                 st.caption(
                     "Параметры показаны для контроля. Расчёт ниже пока "
                     "использует настройки из блока параметров расчёта."
@@ -7010,34 +7146,39 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                 ),
             },
         )
+    _render_bulk_horizontal_length_preprocess(records=records)
 
-        preprocess_length_key = "wt_preprocess_horizontal_length_m"
-        preprocess_feedback_key = "wt_preprocess_feedback_info"
-        preprocess_selected_names_key = "wt_preprocess_selected_names"
-        preprocess_pending_names_key = "wt_preprocess_pending_selected_names"
-        preprocess_pad_key = "wt_preprocess_select_pad_id"
-        raw_preprocess_length = st.session_state.get(preprocess_length_key)
-        if not isinstance(raw_preprocess_length, (int, float)) or not np.isfinite(
-            float(raw_preprocess_length)
-        ) or float(raw_preprocess_length) <= 0.0:
-            st.session_state[preprocess_length_key] = 1500.0
-        preprocess_all_names = _sync_preprocess_selection_state(
-            records=records,
-            selected_names_key=preprocess_selected_names_key,
-            pending_names_key=preprocess_pending_names_key,
-        )
-        pads, _, well_names_by_pad_id = _pad_membership(records)
-        pad_ids = [str(pad.pad_id) for pad in pads]
-        if (
-            pad_ids
-            and str(st.session_state.get(preprocess_pad_key, "")).strip()
-            not in pad_ids
-        ):
-            st.session_state[preprocess_pad_key] = pad_ids[0]
 
-        st.markdown("#### Изменить длину ГС")
+def _render_bulk_horizontal_length_preprocess(
+    *,
+    records: list[WelltrackRecord],
+) -> None:
+    preprocess_length_key = "wt_preprocess_horizontal_length_m"
+    preprocess_feedback_key = "wt_preprocess_feedback_info"
+    preprocess_selected_names_key = "wt_preprocess_selected_names"
+    preprocess_pending_names_key = "wt_preprocess_pending_selected_names"
+    preprocess_pad_key = "wt_preprocess_select_pad_id"
+    raw_preprocess_length = st.session_state.get(preprocess_length_key)
+    if not isinstance(raw_preprocess_length, (int, float)) or not np.isfinite(
+        float(raw_preprocess_length)
+    ) or float(raw_preprocess_length) <= 0.0:
+        st.session_state[preprocess_length_key] = 1500.0
+    preprocess_all_names = _sync_preprocess_selection_state(
+        records=records,
+        selected_names_key=preprocess_selected_names_key,
+        pending_names_key=preprocess_pending_names_key,
+    )
+    pads, _, well_names_by_pad_id = _pad_membership(records)
+    pad_ids = [str(pad.pad_id) for pad in pads]
+    if (
+        pad_ids
+        and str(st.session_state.get(preprocess_pad_key, "")).strip() not in pad_ids
+    ):
+        st.session_state[preprocess_pad_key] = pad_ids[0]
+
+    with st.expander("Изменить длину ГС", expanded=False):
         st.caption(
-            "Массово меняет только `t3`: удлиняет или срезает ГС вдоль линии `t1 → t3`."
+            "Эта опция удлиняет или срезает ГС вдоль линии `t1 -> t3`."
         )
         feedback_message = str(st.session_state.pop(preprocess_feedback_key, "")).strip()
         if feedback_message:
@@ -7078,11 +7219,7 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
                 "Куст для изменения ГС",
                 options=pad_ids,
                 format_func=lambda value: _pad_display_label(
-                    next(
-                        pad
-                        for pad in pads
-                        if str(pad.pad_id) == str(value)
-                    )
+                    next(pad for pad in pads if str(pad.pad_id) == str(value))
                 ),
                 key=preprocess_pad_key,
             )
@@ -7155,55 +7292,55 @@ def _render_records_overview(records: list[WelltrackRecord]) -> None:
             )
             if not selected_preprocess_names:
                 st.warning("Выберите хотя бы одну скважину.")
-            else:
-                selected_keys = {
-                    well_name_key(name) for name in selected_preprocess_names
-                }
-                excluded_message = _preprocess_excluded_records_message(records)
-                st.session_state[preprocess_feedback_key] = excluded_message
-                selected_records = [
-                    record
-                    for record in records
-                    if not is_pilot_name(record.name)
-                    and well_name_key(record.name) in selected_keys
-                ]
-                try:
-                    horizontal_length_changes, skipped_names = _bulk_horizontal_length_changes(
-                        records=selected_records,
-                        target_length_m=float(
-                            st.session_state.get(preprocess_length_key, 0.0)
-                        ),
+                return
+            selected_keys = {
+                well_name_key(name) for name in selected_preprocess_names
+            }
+            excluded_message = _preprocess_excluded_records_message(records)
+            st.session_state[preprocess_feedback_key] = excluded_message
+            selected_records = [
+                record
+                for record in records
+                if not is_pilot_name(record.name)
+                and well_name_key(record.name) in selected_keys
+            ]
+            try:
+                horizontal_length_changes, skipped_names = _bulk_horizontal_length_changes(
+                    records=selected_records,
+                    target_length_m=float(
+                        st.session_state.get(preprocess_length_key, 0.0)
+                    ),
+                )
+            except ValueError as exc:
+                st.warning(str(exc))
+                return
+            if not horizontal_length_changes:
+                if skipped_names:
+                    skipped_text = ", ".join(skipped_names[:6])
+                    skipped_suffix = "..." if len(skipped_names) > 6 else ""
+                    st.warning(
+                        "Не удалось скорректировать длину ГС для: "
+                        f"{skipped_text}{skipped_suffix}."
                     )
-                except ValueError as exc:
-                    st.warning(str(exc))
                 else:
-                    if not horizontal_length_changes:
-                        if skipped_names:
-                            skipped_text = ", ".join(skipped_names[:6])
-                            skipped_suffix = "..." if len(skipped_names) > 6 else ""
-                            st.warning(
-                                "Не удалось скорректировать длину ГС для: "
-                                f"{skipped_text}{skipped_suffix}."
-                            )
-                        else:
-                            st.info(
-                                "Все доступные `t3` уже соответствуют заданной длине ГС."
-                            )
-                    else:
-                        updated_names = _apply_edit_targets_changes(
-                            horizontal_length_changes,
-                            source="bulk_horizontal_length_preprocess",
-                        )
-                        _clear_t1_t3_order_resolution_state()
-                        skipped_note = ""
-                        if skipped_names:
-                            skipped_text = ", ".join(skipped_names[:6])
-                            skipped_suffix = "..." if len(skipped_names) > 6 else ""
-                            skipped_note = f"Пропущено: {skipped_text}{skipped_suffix}."
-                        st.session_state["wt_edit_targets_applied_note"] = skipped_note
-                        st.session_state["wt_records_overview_expand_once"] = True
-                        if updated_names:
-                            st.rerun()
+                    st.info(
+                        "Все доступные `t3` уже соответствуют заданной длине ГС."
+                    )
+                return
+            updated_names = _apply_edit_targets_changes(
+                horizontal_length_changes,
+                source="bulk_horizontal_length_preprocess",
+            )
+            _clear_t1_t3_order_resolution_state()
+            skipped_note = ""
+            if skipped_names:
+                skipped_text = ", ".join(skipped_names[:6])
+                skipped_suffix = "..." if len(skipped_names) > 6 else ""
+                skipped_note = f"Пропущено: {skipped_text}{skipped_suffix}."
+            st.session_state["wt_edit_targets_applied_note"] = skipped_note
+            st.session_state["wt_records_overview_expand_once"] = True
+            if updated_names:
+                st.rerun()
 
 
 def _records_overview_dataframe(
@@ -9006,17 +9143,10 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "Включено: скважины на кусте упорядочиваются от более глубоких целей "
                 "к менее глубоким. Для кустов с уже заданными устьями этот режим "
                 "начинает переставлять скважины только после включения "
-                "редактирования позиций куста и локального тумблера "
-                "'Применить авто-порядок'. Фиксированные позиции в таблице ниже "
-                "имеют приоритет."
+                "редактирования позиций куста и переключателя "
+                "'Применить авто-порядок' для этого куста. Фиксированные позиции "
+                "в таблице ниже имеют приоритет."
             ),
-        )
-        st.caption(
-            "Авто-порядок: "
-            f"{ptc_pad_state.pad_auto_order_mode_label(st.session_state)}. "
-            "Для кустов с заданными устьями исходная привязка скважин сохраняется, "
-            "пока вы явно не включите редактирование и локальное применение "
-            "авто-порядка."
         )
         pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
         pad_rows = []

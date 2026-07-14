@@ -689,12 +689,19 @@ def _clear_combined_reference_import_state() -> None:
 
 def _render_combined_reference_import_block() -> None:
     _ensure_reference_import_state()
-    mode = st.radio(
-        "Источник данных",
-        options=_REFERENCE_SOURCE_OPTIONS,
-        key=_REFERENCE_IMPORT_MODE_KEY,
-        horizontal=True,
+    mode_label_col, mode_radio_col = st.columns(
+        [0.9, 4.7], gap="small", vertical_alignment="center"
     )
+    with mode_label_col:
+        st.markdown("**Источник данных:**")
+    with mode_radio_col:
+        mode = st.radio(
+            "Источник данных",
+            options=_REFERENCE_SOURCE_OPTIONS,
+            key=_REFERENCE_IMPORT_MODE_KEY,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
     _reference_import_mode()
 
     uploaded_files: list[object] = []
