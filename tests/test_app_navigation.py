@@ -27,7 +27,7 @@ def test_build_pages_sets_expected_titles_and_paths() -> None:
         ),
         app.NavigationPageSpec(
             script_path="pages/04_crs_calculator.py",
-            title="Калькулятор CRS",
+            title="Калькулятор СК",
             url_path="crs_calculator",
             visible_in_sidebar=True,
         ),
@@ -49,7 +49,7 @@ def test_app_sidebar_shows_only_kpt_and_crs_links() -> None:
     at.run(timeout=120)
 
     assert not at.exception
-    assert _sidebar_page_link_labels(at) == ["КПТ", "Калькулятор CRS"]
+    assert _sidebar_page_link_labels(at) == ["КПТ", "Калькулятор СК"]
 
 
 def test_hidden_pages_remain_switchable_from_app_router() -> None:
@@ -63,8 +63,8 @@ def test_hidden_pages_remain_switchable_from_app_router() -> None:
 
     assert not single_well.exception
     assert not well_classification.exception
-    assert _sidebar_page_link_labels(single_well) == ["КПТ", "Калькулятор CRS"]
+    assert _sidebar_page_link_labels(single_well) == ["КПТ", "Калькулятор СК"]
     assert _sidebar_page_link_labels(well_classification) == [
         "КПТ",
-        "Калькулятор CRS",
+        "Калькулятор СК",
     ]

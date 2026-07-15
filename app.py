@@ -35,7 +35,7 @@ NAVIGATION_PAGE_SPECS: tuple[NavigationPageSpec, ...] = (
     ),
     NavigationPageSpec(
         script_path="pages/04_crs_calculator.py",
-        title="Калькулятор CRS",
+        title="Калькулятор СК",
         url_path="crs_calculator",
         visible_in_sidebar=True,
     ),

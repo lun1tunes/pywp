@@ -123,7 +123,7 @@ def render_crs_sidebar() -> CoordinateSystem:
     st = _streamlit()
     with st.sidebar:
         st.divider()
-        st.markdown("### Система координат")
+        st.markdown("### Система координат (СК)")
 
         # Initialize with defaults if not set.
         if CRS_INPUT_SELECTED_KEY not in st.session_state:
