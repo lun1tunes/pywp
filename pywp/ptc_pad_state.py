@@ -403,6 +403,7 @@ def _pad_detection_records(
                 cluster_surface_xyz=surface_xyz,
                 source_surface_xyz=surface_xyz,
                 source_surface_defined=True,
+                inferred_pad_group_key=_inferred_pad_group_key(str(record.name)),
             )
         )
     return prepared
@@ -580,6 +581,7 @@ def detect_ui_pads(
     ):
         wells: list[PadWell] = []
         surface_xyzs: list[tuple[float, float, float]] = []
+        source_defined_surface_xyzs: list[tuple[float, float, float]] = []
         surface_slot_rows: list[tuple[str, float, float, float]] = []
         unique_surface_keys: set[tuple[int, int, int]] = set()
         for entry in cluster:
@@ -599,6 +601,7 @@ def detect_ui_pads(
             surface_xyzs.append(entry.cluster_surface_xyz)
             if entry.source_surface_defined:
                 source_surface = entry.source_surface_xyz
+                source_defined_surface_xyzs.append(source_surface)
                 surface_slot_rows.append(
                     (
                         str(entry.record.name),
@@ -618,7 +621,14 @@ def detect_ui_pads(
         source_surfaces_defined = (
             len(surface_slot_rows) == len(cluster) and len(unique_surface_keys) > 1
         )
-        auto_nds = estimate_surface_pad_axis_deg(surface_xyzs)
+        layout_surface_xyzs = (
+            source_defined_surface_xyzs if source_defined_surface_xyzs else surface_xyzs
+        )
+        if layout_surface_xyzs:
+            center_x = float(np.mean([item[0] for item in layout_surface_xyzs]))
+            center_y = float(np.mean([item[1] for item in layout_surface_xyzs]))
+            center_z = float(np.mean([item[2] for item in layout_surface_xyzs]))
+        auto_nds = estimate_surface_pad_axis_deg(layout_surface_xyzs)
         if abs(float(auto_nds)) <= SMALL:
             auto_nds = estimate_pad_nds_azimuth_deg(
                 wells=tuple(wells),
@@ -639,7 +649,7 @@ def detect_ui_pads(
         metadata[pad_id] = DetectedPadUiMeta(
             source_surfaces_defined=bool(source_surfaces_defined),
             inferred_spacing_m=inferred_surface_spacing_m(
-                surface_xyzs=surface_xyzs,
+                surface_xyzs=layout_surface_xyzs,
                 nds_azimuth_deg=float(auto_nds),
             ),
             source_surface_x_m=float(center_x),
@@ -727,11 +737,35 @@ def _source_defined_pad_basis(
             str(item[0]),
         )
     )
-    ordered_projections = [float(item[4]) for item in slot_rows]
+    slot_index_by_name = {
+        str(name): int(index)
+        for index, name in enumerate(
+            sorted(
+                (str(well.name) for well in pad.wells),
+                key=well_name_natural_sort_key,
+            )
+        )
+    }
+    known_rows_by_slot = sorted(
+        (
+            (
+                int(slot_index_by_name[str(well_name)]),
+                float(projection),
+            )
+            for well_name, _x_value, _y_value, _z_value, projection, _cross_projection in slot_rows
+            if str(well_name) in slot_index_by_name
+        ),
+        key=lambda item: int(item[0]),
+    )
     spacing_candidates = [
-        float(right - left)
-        for left, right in zip(ordered_projections, ordered_projections[1:], strict=False)
-        if float(right - left) > 1e-6
+        float((right_projection - left_projection) / (right_index - left_index))
+        for (left_index, left_projection), (right_index, right_projection) in zip(
+            known_rows_by_slot,
+            known_rows_by_slot[1:],
+            strict=False,
+        )
+        if int(right_index - left_index) > 0
+        and float(right_projection - left_projection) > 1e-6
     ]
     spacing_ref_m = (
         float(np.median(np.asarray(spacing_candidates, dtype=float)))
@@ -766,6 +800,185 @@ def _source_defined_pad_basis(
         "center_anchor_projection": float(center_projection),
         "center_anchor_cross_projection": float(center_cross_projection),
     }
+
+
+def _uses_source_surface_basis(
+    pad: WellPad,
+    pad_meta: object,
+    basis: Mapping[str, object] | None,
+) -> bool:
+    if basis is None or not isinstance(pad_meta, DetectedPadUiMeta):
+        return False
+    if bool(pad_meta.source_surfaces_defined):
+        return True
+    source_surface_count = int(getattr(pad_meta, "source_surface_count", 0) or 0)
+    return 0 < source_surface_count < int(len(pad.wells))
+
+
+def _preserves_source_surface_slots(pad_meta: object) -> bool:
+    return isinstance(pad_meta, DetectedPadUiMeta) and bool(
+        pad_meta.source_surfaces_defined
+    )
+
+
+def _expanded_source_slot_rows(
+    *,
+    pad: WellPad,
+    basis: Mapping[str, object],
+    spacing_fallback_m: float,
+) -> tuple[tuple[str, float, float, float, float, float], ...]:
+    raw_slot_rows = tuple(basis.get("slots", ()))
+    if not raw_slot_rows:
+        return ()
+
+    ordered_names = [
+        str(well.name)
+        for well in sorted(
+            pad.wells,
+            key=lambda well: well_name_natural_sort_key(str(well.name)),
+        )
+    ]
+    if not ordered_names:
+        return ()
+
+    slot_row_by_name = {
+        str(slot_name): (
+            float(x_value),
+            float(y_value),
+            float(z_value),
+            float(projection),
+            float(cross_projection),
+        )
+        for slot_name, x_value, y_value, z_value, projection, cross_projection in raw_slot_rows
+    }
+    known_rows: list[tuple[int, float, float, float]] = []
+    for slot_index, well_name in enumerate(ordered_names):
+        row = slot_row_by_name.get(str(well_name))
+        if row is None:
+            continue
+        known_rows.append(
+            (
+                int(slot_index),
+                float(row[2]),
+                float(row[3]),
+                float(row[4]),
+            )
+        )
+    if not known_rows:
+        return ()
+
+    axis_deg = float(basis.get("axis_deg", 0.0)) % 360.0
+    angle_rad = np.deg2rad(axis_deg)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    vx = float(-uy)
+    vy = float(ux)
+
+    spacing_m = float(max(float(spacing_fallback_m), 0.0))
+    if spacing_m <= SMALL:
+        spacing_m = float(max(float(basis.get("spacing_ref_m", 0.0)), 0.0))
+    if spacing_m <= SMALL:
+        spacing_m = float(DEFAULT_PAD_SPACING_M)
+
+    def _step_between(
+        left: tuple[int, float, float, float],
+        right: tuple[int, float, float, float],
+    ) -> tuple[float, float, float]:
+        left_index, left_z, left_projection, left_cross = left
+        right_index, right_z, right_projection, right_cross = right
+        span = int(right_index - left_index)
+        if span <= 0:
+            return (float(spacing_m), 0.0, 0.0)
+        return (
+            float((right_z - left_z) / span),
+            float((right_projection - left_projection) / span),
+            float((right_cross - left_cross) / span),
+        )
+
+    first_known = known_rows[0]
+    last_known = known_rows[-1]
+    first_step = (
+        _step_between(known_rows[0], known_rows[1])
+        if len(known_rows) > 1
+        else (0.0, float(spacing_m), 0.0)
+    )
+    last_step = (
+        _step_between(known_rows[-2], known_rows[-1])
+        if len(known_rows) > 1
+        else (0.0, float(spacing_m), 0.0)
+    )
+
+    expanded: list[tuple[str, float, float, float, float, float]] = []
+    for slot_index, well_name in enumerate(ordered_names):
+        exact_row = slot_row_by_name.get(str(well_name))
+        if exact_row is not None:
+            x_value, y_value, z_value, projection, cross_projection = exact_row
+            expanded.append(
+                (
+                    str(well_name),
+                    float(x_value),
+                    float(y_value),
+                    float(z_value),
+                    float(projection),
+                    float(cross_projection),
+                )
+            )
+            continue
+
+        left_known = next(
+            (
+                item
+                for item in reversed(known_rows)
+                if int(item[0]) < int(slot_index)
+            ),
+            None,
+        )
+        right_known = next(
+            (
+                item
+                for item in known_rows
+                if int(item[0]) > int(slot_index)
+            ),
+            None,
+        )
+        if left_known is not None and right_known is not None:
+            left_index, left_z, left_projection, left_cross = left_known
+            right_index, right_z, right_projection, right_cross = right_known
+            span = float(right_index - left_index)
+            ratio = float((slot_index - left_index) / span) if span > 0.0 else 0.0
+            z_value = float(left_z + ratio * (right_z - left_z))
+            projection = float(
+                left_projection + ratio * (right_projection - left_projection)
+            )
+            cross_projection = float(
+                left_cross + ratio * (right_cross - left_cross)
+            )
+        elif left_known is not None:
+            left_index, left_z, left_projection, left_cross = left_known
+            delta = int(slot_index - left_index)
+            z_value = float(left_z + delta * float(last_step[0]))
+            projection = float(left_projection + delta * float(last_step[1]))
+            cross_projection = float(left_cross + delta * float(last_step[2]))
+        else:
+            right_index, right_z, right_projection, right_cross = (
+                right_known if right_known is not None else first_known
+            )
+            delta = int(right_index - slot_index)
+            z_value = float(right_z - delta * float(first_step[0]))
+            projection = float(right_projection - delta * float(first_step[1]))
+            cross_projection = float(right_cross - delta * float(first_step[2]))
+
+        expanded.append(
+            (
+                str(well_name),
+                float(projection * ux + cross_projection * vx),
+                float(projection * uy + cross_projection * vy),
+                float(z_value),
+                float(projection),
+                float(cross_projection),
+            )
+        )
+    return tuple(expanded)
 
 
 def pad_anchor_defaults(
@@ -803,13 +1016,13 @@ def _pad_effective_auto_order_mode(
     config: Mapping[str, object],
     pad_meta: object,
 ) -> str:
-    if (
-        isinstance(pad_meta, DetectedPadUiMeta)
-        and bool(pad_meta.source_surfaces_defined)
-        and (
-            not bool(config.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False))
-            or not bool(config.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False))
-        )
+    if _uses_source_surface_basis(
+        pad,
+        pad_meta,
+        _source_defined_pad_basis(pad, pad_meta),
+    ) and (
+        not bool(config.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False))
+        or not bool(config.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False))
     ):
         return PAD_WELL_AUTO_ORDER_PROJECTION
     return pad_auto_order_mode(session_state)
@@ -844,19 +1057,21 @@ def pad_surface_assignments(
     fixed_slots = pad_fixed_slots_from_config(pad=pad, config=cfg)
     basis = _source_defined_pad_basis(pad, pad_meta)
 
-    if (
-        basis is not None
-        and isinstance(pad_meta, DetectedPadUiMeta)
-        and bool(pad_meta.source_surfaces_defined)
-    ):
-        slot_rows = tuple(
-            basis.get("slots", ())
+    if _uses_source_surface_basis(pad, pad_meta, basis):
+        slot_rows = _expanded_source_slot_rows(
+            pad=pad,
+            basis=basis,
+            spacing_fallback_m=float(cfg["spacing_m"]),
         )
+        if not slot_rows:
+            slot_rows = tuple(basis.get("slots", ()))
         base_order_names = [
             str(slot_name)
             for slot_name, *_rest in slot_rows
         ]
-        if not bool(cfg.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False)):
+        if _preserves_source_surface_slots(pad_meta) and not bool(
+            cfg.get(WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY, False)
+        ):
             ordered_names = _apply_fixed_slots_to_ordered_names(
                 base_order_names,
                 fixed_slots=fixed_slots,
@@ -1427,30 +1642,29 @@ def _pad_defaults_for_metadata(
     pad: WellPad,
     pad_meta: object,
 ) -> dict[str, object]:
-    if isinstance(pad_meta, DetectedPadUiMeta) and bool(
-        pad_meta.source_surfaces_defined
-    ):
-        basis = _source_defined_pad_basis(pad, pad_meta)
+    basis = _source_defined_pad_basis(pad, pad_meta)
+    if _uses_source_surface_basis(pad, pad_meta, basis):
+        defaults = pad_config_defaults(pad)
         center_xyz = (
             basis["center_anchor_xyz"]
-            if basis is not None
+            if isinstance(basis.get("center_anchor_xyz"), tuple)
             else (
-                float(pad_meta.source_surface_x_m),
-                float(pad_meta.source_surface_y_m),
-                float(pad_meta.source_surface_z_m),
+                float(getattr(pad_meta, "source_surface_x_m", pad.surface.x)),
+                float(getattr(pad_meta, "source_surface_y_m", pad.surface.y)),
+                float(getattr(pad_meta, "source_surface_z_m", pad.surface.z)),
             )
         )
         return {
             "spacing_m": float(
                 max(
-                    basis["spacing_ref_m"]
-                    if basis is not None
-                    else pad_meta.inferred_spacing_m,
+                    float(basis.get("spacing_ref_m", 0.0))
+                    if float(basis.get("spacing_ref_m", 0.0)) > SMALL
+                    else float(defaults["spacing_m"]),
                     0.0,
                 )
             ),
             "nds_azimuth_deg": float(
-                basis["axis_deg"] if basis is not None else pad.auto_nds_azimuth_deg
+                float(basis.get("axis_deg", defaults["nds_azimuth_deg"]))
             )
             % 360.0,
             "first_surface_x": float(center_xyz[0]),

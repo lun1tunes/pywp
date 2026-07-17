@@ -195,6 +195,35 @@ def _degenerate_surface_records() -> list[WelltrackRecord]:
     ]
 
 
+def _mixed_surface_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="9201",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1000.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1900.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9202",
+            points=(
+                WelltrackPoint(x=1600.0, y=900.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1600.0, y=900.0, z=2350.0, md=2350.0),
+                WelltrackPoint(x=2500.0, y=2100.0, z=2450.0, md=3450.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9203",
+            points=(
+                WelltrackPoint(x=80.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=2200.0, y=1000.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=3100.0, y=2200.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
 def test_pad_config_defaults_to_center_anchor_mode() -> None:
     pads = detect_well_pads(_records())
 
@@ -252,6 +281,17 @@ def test_detect_ui_pads_groups_degenerate_three_point_surfaces_by_pad_name() -> 
     assert math.isclose(float(pads[0].surface.y), 900.0)
     assert bool(metadata[str(pads[0].pad_id)].source_surfaces_defined) is False
     assert metadata[str(pads[0].pad_id)].source_surface_count == 0
+
+
+def test_detect_ui_pads_keeps_mixed_source_and_degenerate_records_in_one_pad() -> None:
+    pads, metadata = ptc_pad_state.detect_ui_pads(_mixed_surface_records())
+
+    assert [len(pad.wells) for pad in pads] == [3]
+    assert [str(pad.pad_id) for pad in pads] == ["Pad 92"]
+    assert math.isclose(float(pads[0].surface.x), 40.0)
+    assert math.isclose(float(pads[0].surface.y), 0.0)
+    assert bool(metadata["Pad 92"].source_surfaces_defined) is False
+    assert metadata["Pad 92"].source_surface_count == 2
 
 
 def test_ensure_pad_configs_recovers_simple_dev_clusters_after_t1_edit() -> None:
@@ -313,6 +353,70 @@ def test_ensure_pad_configs_recovers_simple_dev_clusters_after_t1_edit() -> None
     assert [len(pad.wells) for pad in pads] == [3]
     assert [str(pad.pad_id) for pad in pads] == ["Pad 92"]
     assert bool(metadata["Pad 92"].source_surfaces_defined) is False
+
+
+def test_pad_surface_assignments_fill_degenerate_slots_from_partial_source_surfaces() -> (
+    None
+):
+    session_state: dict[str, object] = {}
+    pads = ptc_pad_state.ensure_pad_configs(
+        session_state,
+        base_records=_mixed_surface_records(),
+    )
+
+    assignments = ptc_pad_state.pad_surface_assignments(
+        session_state,
+        pad=pads[0],
+    )
+    by_name = {str(item.well_name): item for item in assignments}
+
+    assert math.isclose(by_name["9201"].surface_x_m, 0.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9201"].surface_y_m, 0.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9202"].surface_x_m, 40.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9202"].surface_y_m, 0.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9203"].surface_x_m, 80.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9203"].surface_y_m, 0.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(
+        float(
+            ptc_pad_state.pad_config_for_ui(session_state, pads[0])["spacing_m"]
+        ),
+        40.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+
+
+def test_partial_source_surface_basis_still_honors_updated_pad_config() -> None:
+    session_state: dict[str, object] = {}
+    pads = ptc_pad_state.ensure_pad_configs(
+        session_state,
+        base_records=_mixed_surface_records(),
+    )
+
+    assignments = ptc_pad_state.pad_surface_assignments(
+        session_state,
+        pad=pads[0],
+        config={
+            **ptc_pad_state.pad_config_for_ui(session_state, pads[0]),
+            "surface_anchor_mode": ptc_pad_state.PAD_SURFACE_ANCHOR_FIRST,
+            "first_surface_x": 10.0,
+            "first_surface_y": 20.0,
+            "first_surface_z": 5.0,
+            "spacing_m": 60.0,
+            "nds_azimuth_deg": 90.0,
+        },
+    )
+    by_name = {str(item.well_name): item for item in assignments}
+
+    assert math.isclose(by_name["9201"].surface_x_m, 10.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9201"].surface_y_m, 20.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9201"].surface_z_m, 5.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9202"].surface_x_m, 70.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9202"].surface_y_m, 20.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9202"].surface_z_m, 5.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9203"].surface_x_m, 130.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9203"].surface_y_m, 20.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(by_name["9203"].surface_z_m, 5.0, rel_tol=0.0, abs_tol=1e-9)
 
 
 def test_detect_ui_pads_uses_common_numeric_prefix_for_auto_name() -> None:

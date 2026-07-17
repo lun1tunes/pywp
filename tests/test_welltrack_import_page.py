@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -186,6 +187,35 @@ def _degenerate_surface_pad_records() -> list[WelltrackRecord]:
             name="9203",
             points=(
                 WelltrackPoint(x=2200.0, y=1000.0, z=0.0, md=0.0),
+                WelltrackPoint(x=2200.0, y=1000.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=3100.0, y=2200.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
+def _mixed_surface_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="9201",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1000.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1900.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9202",
+            points=(
+                WelltrackPoint(x=1600.0, y=900.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1600.0, y=900.0, z=2350.0, md=2350.0),
+                WelltrackPoint(x=2500.0, y=2100.0, z=2450.0, md=3450.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9203",
+            points=(
+                WelltrackPoint(x=80.0, y=0.0, z=0.0, md=0.0),
                 WelltrackPoint(x=2200.0, y=1000.0, z=2300.0, md=2300.0),
                 WelltrackPoint(x=3100.0, y=2200.0, z=2400.0, md=3400.0),
             ),
@@ -3126,6 +3156,91 @@ def test_auto_pad_layout_applies_for_degenerate_three_point_surface_records() ->
     assert {value[2] for value in updated_surfaces.values()} == {0.0}
     assert page.st.session_state["wt_pad_auto_applied_on_import"] is True
     assert page.st.session_state["wt_pad_last_applied_at"] != ""
+
+
+def test_auto_pad_layout_uses_loaded_surfaces_for_mixed_dev_pad() -> None:
+    page = wt_import_module
+    page._init_state()
+    page._clear_pad_state()
+    page.st.session_state["wt_pad_auto_order_by_target_depth"] = False
+
+    records = _mixed_surface_pad_records()
+    applied = page._auto_apply_pad_layout_if_shared_surface(list(records))
+
+    assert applied is True
+    updated_records = page.st.session_state["wt_records"]
+    updated_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
+        for record in updated_records
+    }
+    for well_name, expected_xyz in {
+        "9201": (0.0, 0.0, 0.0),
+        "9202": (40.0, 0.0, 0.0),
+        "9203": (80.0, 0.0, 0.0),
+    }.items():
+        actual_xyz = updated_surfaces[well_name]
+        assert all(
+            math.isclose(actual_value, expected_value, rel_tol=0.0, abs_tol=1e-9)
+            for actual_value, expected_value in zip(
+                actual_xyz,
+                expected_xyz,
+                strict=True,
+            )
+        )
+
+
+def test_mixed_dev_pad_manual_plan_respects_updated_pad_geometry() -> None:
+    page = wt_import_module
+    page._init_state()
+    page._clear_pad_state()
+    page.st.session_state["wt_pad_auto_order_by_target_depth"] = False
+
+    records = _mixed_surface_pad_records()
+    pads = page._ensure_pad_configs(list(records))
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_configs"][pad_id].update(
+        {
+            "surface_anchor_mode": page.ptc_pad_state.PAD_SURFACE_ANCHOR_FIRST,
+            "first_surface_x": 10.0,
+            "first_surface_y": 20.0,
+            "first_surface_z": 5.0,
+            "spacing_m": 60.0,
+            "nds_azimuth_deg": 90.0,
+        }
+    )
+
+    plan_map = page._build_pad_plan_map(pads)
+    updated_records = apply_pad_layout(
+        records=list(records),
+        pads=pads,
+        plan_by_pad_id=plan_map,
+    )
+    updated_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
+        for record in updated_records
+    }
+    for well_name, expected_xyz in {
+        "9201": (10.0, 20.0, 5.0),
+        "9202": (70.0, 20.0, 5.0),
+        "9203": (130.0, 20.0, 5.0),
+    }.items():
+        actual_xyz = updated_surfaces[well_name]
+        assert all(
+            math.isclose(actual_value, expected_value, rel_tol=0.0, abs_tol=1e-9)
+            for actual_value, expected_value in zip(
+                actual_xyz,
+                expected_xyz,
+                strict=True,
+            )
+        )
 
 
 def test_auto_pad_layout_uses_canonical_pad_plan_map_for_imported_multihorizontal_data() -> (
