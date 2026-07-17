@@ -327,10 +327,10 @@ def test_ptc_core_keeps_explicit_pilot_and_zbs_name_matching_guidance() -> None:
 def test_ptc_core_keeps_auto_order_guardrails_for_source_defined_wellheads() -> None:
     source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
 
-    assert "начинает переставлять скважины только после включения" in source
-    assert "переключателя " in source
-    assert "'Применить авто-порядок'" in source
-    assert "Исходная привязка скважин к позициям сохраняется" in source
+    assert "Разрешить редактирование позиций куста" in source
+    assert "Применить авто-порядок" in source
+    assert "disabled=not allow_source_surface_edit" in source
+    assert "source_surfaces_defined and not allow_source_surface_edit" in source
 
 
 def test_ptc_core_uses_stateful_pad_layout_details_panel() -> None:

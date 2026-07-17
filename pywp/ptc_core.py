@@ -9129,24 +9129,9 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
 
     with st.container(border=True):
         _render_t1_t3_order_panel(records=records, border=False)
-        if bool(st.session_state.get("wt_pad_auto_applied_on_import", False)):
-            st.info(
-                "После импорта исходные устья скважин совпадали, "
-                "поэтому текущие координаты устьев были автоматически скорректированы. "
-                "Если нужно вернуться к исходным устьям, нажмите "
-                "'Вернуть исходные устья'."
-            )
         st.toggle(
             "Авто-порядок по глубине целевого пласта",
             key="wt_pad_auto_order_by_target_depth",
-            help=(
-                "Включено: скважины на кусте упорядочиваются от более глубоких целей "
-                "к менее глубоким. Для кустов с уже заданными устьями этот режим "
-                "начинает переставлять скважины только после включения "
-                "редактирования позиций куста и переключателя "
-                "'Применить авто-порядок' для этого куста. Фиксированные позиции "
-                "в таблице ниже имеют приоритет."
-            ),
         )
         pad_metadata = dict(st.session_state.get("wt_pad_detected_meta", {}))
         pad_rows = []
@@ -9185,6 +9170,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             selected_id = pad_ids[0]
             st.session_state["wt_pad_selected_id"] = selected_id
 
+        summary_selected_pad_meta = pad_metadata.get(selected_id)
         details_open = ptc_pad_state.pad_layout_details_open(st.session_state)
         st.button(
             (
@@ -9202,25 +9188,12 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             on_click=_toggle_pad_layout_details_panel,
         )
         details_open = ptc_pad_state.pad_layout_details_open(st.session_state)
-        summary_selected_pad_meta = pad_metadata.get(selected_id)
         if not details_open:
-            summary_source_surfaces_defined = bool(
-                getattr(summary_selected_pad_meta, "source_surfaces_defined", False)
-            )
             summary_auto_name_notice = str(
                 getattr(summary_selected_pad_meta, "auto_name_notice", "")
             ).strip()
             if summary_auto_name_notice:
                 st.info(summary_auto_name_notice)
-            if summary_source_surfaces_defined:
-                st.info(
-                    "Устья заданы в исходных данных. Чтобы менять координаты — "
-                    "откройте настройки куста и включите редактирование позиций."
-                )
-                st.info(
-                    "Исходная привязка скважин к позициям сохраняется, пока вы явно "
-                    "не включите редактирование и 'Применить авто-порядок'."
-                )
             return
 
         selected_id = str(
@@ -9297,32 +9270,15 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         allow_source_surface_edit = False
         apply_auto_order = False
         if source_surfaces_defined:
-            st.info(
-                "Устья заданы в исходных данных. Чтобы менять координаты — "
-                "включите редактирование позиций куста. Исходная привязка "
-                "скважин к позициям сохраняется, пока вы явно не включите "
-                "редактирование и 'Применить авто-порядок'."
-            )
             allow_source_surface_edit = st.toggle(
                 "Разрешить редактирование позиций куста",
                 key=widget_keys["allow_source_surface_edit"],
-                help=(
-                    "Позволяет вручную переопределить исходно заданные устья этого "
-                    "куста. Изменения применятся после нажатия "
-                    "'Рассчитать устья скважин'."
-                ),
             )
             if not allow_source_surface_edit:
                 st.session_state[widget_keys["apply_auto_order"]] = False
             apply_auto_order = st.toggle(
                 "Применить авто-порядок",
                 key=widget_keys["apply_auto_order"],
-                help=(
-                    "Переставляет скважины по текущему глобальному правилу "
-                    "авто-порядка поверх сохранённых позиций куста. Когда "
-                    "тумблер выключен, используется исходная привязка скважин "
-                    "к импортированным позициям."
-                ),
                 disabled=not allow_source_surface_edit,
             )
         surface_controls_disabled = bool(
@@ -9350,10 +9306,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
         anchor_center = st.toggle(
             "Координата куста = центр расстановки",
             key=widget_keys["surface_anchor_center"],
-            help=(
-                "Включено: введённые координаты устьев принимаются как центр куста. "
-                "Выключено: координаты устьев задают первую скважину на кусте."
-            ),
             disabled=surface_controls_disabled,
         )
         anchor_mode = (
@@ -9445,7 +9397,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             min_value=0.0,
             step=5.0,
             key=widget_keys["spacing_m"],
-            help="Шаг по кусту между соседними устьями скважин.",
             disabled=surface_controls_disabled,
         )
         nds_azimuth_deg = p2.number_input(
@@ -9454,7 +9405,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             max_value=360.0,
             step=10.0,
             key=widget_keys["nds_azimuth_deg"],
-            help="Направление движения станка по кусту.",
             disabled=surface_controls_disabled,
         )
         first_surface_x = p3.number_input(
@@ -9531,7 +9481,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                     "Позиция",
                     options=list(range(1, int(len(selected_pad.wells)) + 1)),
                     required=False,
-                    help="Номер слота на кусте, начиная с 1.",
                 ),
                 "Скважина": st.column_config.SelectboxColumn(
                     "Скважина",
@@ -9540,7 +9489,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                         key=well_name_natural_sort_key,
                     ),
                     required=False,
-                    help="Скважина, которую нужно закрепить в этой позиции.",
                 ),
             },
         )
@@ -9621,10 +9569,6 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             type="primary",
             icon=":material/tune:",
             width="stretch",
-            help=(
-                "Обновляет координаты первой точки S для скважин по выбранным "
-                "параметрам кустов. Последующие расчеты будут использовать новые устья."
-            ),
             disabled=surface_controls_disabled,
         )
         reset_clicked = a2.button(
@@ -9638,7 +9582,7 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
             plan_map = _build_pad_plan_map(pads)
             updated_records = sync_pilot_surfaces_to_parents(
                 apply_pad_layout(
-                    records=list(base_records),
+                    records=list(records),
                     pads=pads,
                     plan_by_pad_id=plan_map,
                 )

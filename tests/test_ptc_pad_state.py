@@ -224,6 +224,43 @@ def _mixed_surface_records() -> list[WelltrackRecord]:
     ]
 
 
+def _irregular_mixed_surface_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="9301",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1000.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1900.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9302",
+            points=(
+                WelltrackPoint(x=40.0, y=6.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1040.0, y=806.0, z=2350.0, md=2350.0),
+                WelltrackPoint(x=1940.0, y=2006.0, z=2450.0, md=3450.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9303",
+            points=(
+                WelltrackPoint(x=80.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=80.0, y=0.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=980.0, y=1200.0, z=2400.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9304",
+            points=(
+                WelltrackPoint(x=120.0, y=-6.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1120.0, y=794.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=2020.0, y=1994.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
 def test_pad_config_defaults_to_center_anchor_mode() -> None:
     pads = detect_well_pads(_records())
 
@@ -417,6 +454,87 @@ def test_partial_source_surface_basis_still_honors_updated_pad_config() -> None:
     assert math.isclose(by_name["9203"].surface_x_m, 130.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(by_name["9203"].surface_y_m, 20.0, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(by_name["9203"].surface_z_m, 5.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_partial_source_surface_defaults_build_uniform_slot_line() -> None:
+    session_state: dict[str, object] = {}
+    pads = ptc_pad_state.ensure_pad_configs(
+        session_state,
+        base_records=_irregular_mixed_surface_records(),
+    )
+
+    pad = pads[0]
+    cfg = ptc_pad_state.pad_config_for_ui(session_state, pad)
+    assignments = ptc_pad_state.pad_surface_assignments(session_state, pad=pad)
+    angle_rad = math.radians(float(cfg["nds_azimuth_deg"]))
+    ux = math.sin(angle_rad)
+    uy = math.cos(angle_rad)
+    vx = -uy
+    vy = ux
+    center_slot_index = 0.5 * float(max(len(assignments) - 1, 0))
+
+    for assignment in assignments:
+        slot_offset = float(assignment.slot_index - 1) - center_slot_index
+        dx = float(assignment.surface_x_m) - float(cfg["first_surface_x"])
+        dy = float(assignment.surface_y_m) - float(cfg["first_surface_y"])
+        projection = dx * ux + dy * uy
+        cross_projection = dx * vx + dy * vy
+        assert math.isclose(
+            projection,
+            slot_offset * float(cfg["spacing_m"]),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert math.isclose(cross_projection, 0.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_partial_source_surface_basis_rebuilds_uniform_slots_after_pad_edit() -> None:
+    session_state: dict[str, object] = {}
+    pads = ptc_pad_state.ensure_pad_configs(
+        session_state,
+        base_records=_irregular_mixed_surface_records(),
+    )
+
+    assignments = ptc_pad_state.pad_surface_assignments(
+        session_state,
+        pad=pads[0],
+        config={
+            **ptc_pad_state.pad_config_for_ui(session_state, pads[0]),
+            "surface_anchor_mode": ptc_pad_state.PAD_SURFACE_ANCHOR_FIRST,
+            "first_surface_x": 10.0,
+            "first_surface_y": 20.0,
+            "first_surface_z": 5.0,
+            "spacing_m": 60.0,
+            "nds_azimuth_deg": 90.0,
+        },
+    )
+    by_name = {str(item.well_name): item for item in assignments}
+
+    for well_name, expected_xyz in {
+        "9301": (10.0, 20.0, 5.0),
+        "9302": (70.0, 20.0, 5.0),
+        "9303": (130.0, 20.0, 5.0),
+        "9304": (190.0, 20.0, 5.0),
+    }.items():
+        assignment = by_name[well_name]
+        assert math.isclose(
+            assignment.surface_x_m,
+            expected_xyz[0],
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert math.isclose(
+            assignment.surface_y_m,
+            expected_xyz[1],
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert math.isclose(
+            assignment.surface_z_m,
+            expected_xyz[2],
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
 
 
 def test_detect_ui_pads_uses_common_numeric_prefix_for_auto_name() -> None:

@@ -223,6 +223,43 @@ def _mixed_surface_pad_records() -> list[WelltrackRecord]:
     ]
 
 
+def _irregular_mixed_surface_pad_records() -> list[WelltrackRecord]:
+    return [
+        WelltrackRecord(
+            name="9301",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1000.0, y=800.0, z=2400.0, md=2400.0),
+                WelltrackPoint(x=1900.0, y=2000.0, z=2500.0, md=3500.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9302",
+            points=(
+                WelltrackPoint(x=40.0, y=6.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1040.0, y=806.0, z=2350.0, md=2350.0),
+                WelltrackPoint(x=1940.0, y=2006.0, z=2450.0, md=3450.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9303",
+            points=(
+                WelltrackPoint(x=80.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=80.0, y=0.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=980.0, y=1200.0, z=2400.0, md=3400.0),
+            ),
+        ),
+        WelltrackRecord(
+            name="9304",
+            points=(
+                WelltrackPoint(x=120.0, y=-6.0, z=0.0, md=0.0),
+                WelltrackPoint(x=1120.0, y=794.0, z=2300.0, md=2300.0),
+                WelltrackPoint(x=2020.0, y=1994.0, z=2400.0, md=3400.0),
+            ),
+        ),
+    ]
+
+
 def _prepositioned_pad_records() -> list[WelltrackRecord]:
     return [
         WelltrackRecord(
@@ -2830,7 +2867,7 @@ def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_res
     assert len(set(current_surfaces)) > 1
     assert at.session_state["wt_pad_last_applied_at"] != ""
     assert at.session_state["wt_pad_auto_applied_on_import"] is True
-    assert any(
+    assert not any(
         "автоматически скорректированы" in str(widget.value).lower()
         for widget in at.info
     )
@@ -3243,6 +3280,99 @@ def test_mixed_dev_pad_manual_plan_respects_updated_pad_geometry() -> None:
         )
 
 
+def test_auto_pad_layout_canonicalizes_irregular_mixed_dev_pad() -> None:
+    page = wt_import_module
+    page._init_state()
+    page._clear_pad_state()
+    page.st.session_state["wt_pad_auto_order_by_target_depth"] = False
+
+    records = _irregular_mixed_surface_pad_records()
+    applied = page._auto_apply_pad_layout_if_shared_surface(list(records))
+
+    assert applied is True
+    pads = page._ensure_pad_configs(list(records))
+    pad_id = str(pads[0].pad_id)
+    cfg = page.st.session_state["wt_pad_configs"][pad_id]
+    updated_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+        )
+        for record in page.st.session_state["wt_records"]
+    }
+    angle_rad = math.radians(float(cfg["nds_azimuth_deg"]))
+    ux = math.sin(angle_rad)
+    uy = math.cos(angle_rad)
+    vx = -uy
+    vy = ux
+    center_slot_index = 0.5 * float(max(len(updated_surfaces) - 1, 0))
+
+    for slot_index, well_name in enumerate(sorted(updated_surfaces), start=1):
+        x_value, y_value = updated_surfaces[well_name]
+        dx = float(x_value) - float(cfg["first_surface_x"])
+        dy = float(y_value) - float(cfg["first_surface_y"])
+        projection = dx * ux + dy * uy
+        cross_projection = dx * vx + dy * vy
+        assert math.isclose(
+            projection,
+            (float(slot_index - 1) - center_slot_index) * float(cfg["spacing_m"]),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert math.isclose(cross_projection, 0.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_irregular_mixed_dev_pad_manual_plan_rebuilds_uniform_slots() -> None:
+    page = wt_import_module
+    page._init_state()
+    page._clear_pad_state()
+    page.st.session_state["wt_pad_auto_order_by_target_depth"] = False
+
+    records = _irregular_mixed_surface_pad_records()
+    pads = page._ensure_pad_configs(list(records))
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_configs"][pad_id].update(
+        {
+            "surface_anchor_mode": page.ptc_pad_state.PAD_SURFACE_ANCHOR_FIRST,
+            "first_surface_x": 10.0,
+            "first_surface_y": 20.0,
+            "first_surface_z": 5.0,
+            "spacing_m": 60.0,
+            "nds_azimuth_deg": 90.0,
+        }
+    )
+
+    plan_map = page._build_pad_plan_map(pads)
+    updated_records = apply_pad_layout(
+        records=list(records),
+        pads=pads,
+        plan_by_pad_id=plan_map,
+    )
+    updated_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
+        for record in updated_records
+    }
+    for well_name, expected_xyz in {
+        "9301": (10.0, 20.0, 5.0),
+        "9302": (70.0, 20.0, 5.0),
+        "9303": (130.0, 20.0, 5.0),
+        "9304": (190.0, 20.0, 5.0),
+    }.items():
+        actual_xyz = updated_surfaces[well_name]
+        assert all(
+            math.isclose(actual_value, expected_value, rel_tol=0.0, abs_tol=1e-9)
+            for actual_value, expected_value in zip(
+                actual_xyz,
+                expected_xyz,
+                strict=True,
+            )
+        )
+
+
 def test_auto_pad_layout_uses_canonical_pad_plan_map_for_imported_multihorizontal_data() -> (
     None
 ):
@@ -3485,9 +3615,14 @@ def test_pad_layout_fixed_position_column_uses_slot_selectbox(
     position_selectbox = next(
         item for item in captured["selectbox_columns"] if item["label"] == "Позиция"
     )
+    well_selectbox = next(
+        item for item in captured["selectbox_columns"] if item["label"] == "Скважина"
+    )
 
     assert position_column["type"] == "selectbox"
     assert position_selectbox["kwargs"]["options"] == [1, 2, 3]
+    assert "help" not in position_selectbox["kwargs"]
+    assert "help" not in well_selectbox["kwargs"]
     assert "Позиция" not in captured["number_columns"]
     assert captured["expander_labels"] == [
         "Порядок бурения и координаты устьев на кусте"
@@ -3552,6 +3687,414 @@ def test_pad_layout_preview_hides_midpoint_anchor_and_surface_z_columns(
         "Новое S X, м",
         "Новое S Y, м",
     ]
+
+
+def test_pad_layout_preview_smoke_rebuilds_uniform_slots_for_irregular_mixed_pad(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
+    records = list(_irregular_mixed_surface_pad_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_selected_id"] = pad_id
+    page.st.session_state[f"wt_pad_cfg_spacing_m_{pad_id}"] = 60.0
+    page.st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = 90.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = 10.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = 20.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = 5.0
+    page.st.session_state[f"wt_pad_cfg_surface_anchor_center_{pad_id}"] = False
+    captured: dict[str, object] = {"preview": None}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummyColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, False)
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_dataframe(data, *args, **kwargs):
+        if isinstance(data, pd.DataFrame) and "Порядок" in data.columns:
+            captured["preview"] = data.copy()
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", _fake_dataframe)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    preview = captured["preview"]
+    assert isinstance(preview, pd.DataFrame)
+    assert list(preview["Скважина"]) == ["9301", "9302", "9303", "9304"]
+    assert list(preview["Новое S X, м"]) == [10.0, 70.0, 130.0, 190.0]
+    assert all(
+        math.isclose(float(value), 20.0, rel_tol=0.0, abs_tol=1e-9)
+        for value in preview["Новое S Y, м"]
+    )
+
+
+def test_pad_layout_apply_button_smoke_updates_irregular_mixed_pad_records(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
+    records = list(_irregular_mixed_surface_pad_records())
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_selected_id"] = pad_id
+    page.st.session_state[f"wt_pad_cfg_spacing_m_{pad_id}"] = 60.0
+    page.st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = 90.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = 10.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = 20.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = 5.0
+    page.st.session_state[f"wt_pad_cfg_surface_anchor_center_{pad_id}"] = False
+    captured: dict[str, object] = {"rerun_called": False, "toast": []}
+    columns_call_count = 0
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _InputColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    class _ApplyButtonColumn(_InputColumn):
+        def button(self, label, *args, **kwargs):
+            return str(label) == "Рассчитать устья скважин"
+
+    class _ResetButtonColumn(_InputColumn):
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        nonlocal columns_call_count
+        columns_call_count += 1
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        if columns_call_count == 1:
+            return tuple(_InputColumn() for _ in range(count))
+        return (_ApplyButtonColumn(), _ResetButtonColumn())
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, False)
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "toast",
+        lambda message, *args, **kwargs: captured["toast"].append(str(message)),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "rerun",
+        lambda *args, **kwargs: captured.__setitem__("rerun_called", True),
+    )
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(records)
+
+    updated_surfaces = {
+        str(record.name): (
+            float(record.points[0].x),
+            float(record.points[0].y),
+            float(record.points[0].z),
+        )
+        for record in page.st.session_state["wt_records"]
+    }
+    for well_name, expected_xyz in {
+        "9301": (10.0, 20.0, 5.0),
+        "9302": (70.0, 20.0, 5.0),
+        "9303": (130.0, 20.0, 5.0),
+        "9304": (190.0, 20.0, 5.0),
+    }.items():
+        actual_xyz = updated_surfaces[well_name]
+        assert all(
+            math.isclose(actual_value, expected_value, rel_tol=0.0, abs_tol=1e-9)
+            for actual_value, expected_value in zip(
+                actual_xyz,
+                expected_xyz,
+                strict=True,
+            )
+        )
+    assert page.st.session_state["wt_pad_auto_applied_on_import"] is False
+    assert page.st.session_state["wt_pad_last_applied_at"] != ""
+    assert captured["rerun_called"] is True
+    assert captured["toast"] == ["Координаты устьев обновлены по параметрам кустов."]
+
+
+def test_pad_layout_apply_button_updates_current_records_instead_of_original(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page._init_state()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
+    original_records = list(_irregular_mixed_surface_pad_records())
+    current_records: list[WelltrackRecord] = []
+    for record in original_records:
+        if str(record.name) != "9302":
+            current_records.append(record)
+            continue
+        current_records.append(
+            WelltrackRecord(
+                name=record.name,
+                points=(
+                    record.points[0],
+                    WelltrackPoint(
+                        x=777.0,
+                        y=888.0,
+                        z=float(record.points[1].z) + 12.0,
+                        md=float(record.points[1].md),
+                    ),
+                    *record.points[2:],
+                ),
+            )
+        )
+    page.st.session_state["wt_records_original"] = list(original_records)
+    page.st.session_state["wt_records"] = list(current_records)
+    pads = page._ensure_pad_configs(original_records)
+    pad_id = str(pads[0].pad_id)
+    page.st.session_state["wt_pad_selected_id"] = pad_id
+    page.st.session_state[f"wt_pad_cfg_spacing_m_{pad_id}"] = 60.0
+    page.st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = 90.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = 10.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = 20.0
+    page.st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = 5.0
+    page.st.session_state[f"wt_pad_cfg_surface_anchor_center_{pad_id}"] = False
+    columns_call_count = 0
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _InputColumn:
+        def number_input(self, *args, **kwargs):
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, *args, **kwargs):
+            return False
+
+    class _ApplyButtonColumn(_InputColumn):
+        def button(self, label, *args, **kwargs):
+            return str(label) == "Рассчитать устья скважин"
+
+    class _ResetButtonColumn(_InputColumn):
+        def button(self, *args, **kwargs):
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        nonlocal columns_call_count
+        columns_call_count += 1
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        if columns_call_count == 1:
+            return tuple(_InputColumn() for _ in range(count))
+        return (_ApplyButtonColumn(), _ResetButtonColumn())
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, False)
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "toast", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(current_records)
+
+    updated_by_name = {
+        str(record.name): record for record in page.st.session_state["wt_records"]
+    }
+    assert float(updated_by_name["9302"].points[0].x) == pytest.approx(70.0)
+    assert float(updated_by_name["9302"].points[0].y) == pytest.approx(20.0)
+    assert float(updated_by_name["9302"].points[0].z) == pytest.approx(5.0)
+    assert float(updated_by_name["9302"].points[1].x) == pytest.approx(777.0)
+    assert float(updated_by_name["9302"].points[1].y) == pytest.approx(888.0)
+    assert float(updated_by_name["9302"].points[1].z) == pytest.approx(
+        float(original_records[1].points[1].z) + 12.0
+    )
+
+
+def test_pad_layout_controls_do_not_attach_help_tooltips(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
+    captured: dict[str, object] = {
+        "toggle_kwargs": {},
+        "number_input_kwargs": {},
+        "button_kwargs": {},
+    }
+    column_call_count = 0
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _InputColumn:
+        def number_input(self, label, *args, **kwargs):
+            captured["number_input_kwargs"][str(label)] = dict(kwargs)
+            key = kwargs.get("key")
+            return page.st.session_state.get(key, 0.0)
+
+        def button(self, label, *args, **kwargs):
+            captured["button_kwargs"][str(label)] = dict(kwargs)
+            return False
+
+    def _fake_columns(spec, *args, **kwargs):
+        nonlocal column_call_count
+        column_call_count += 1
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        if column_call_count in {1, 2}:
+            return tuple(_InputColumn() for _ in range(count))
+        return tuple(_InputColumn() for _ in range(count))
+
+    def _fake_selectbox(label, options, *args, **kwargs):
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, options[0])
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    def _fake_toggle(label, *args, **kwargs):
+        captured["toggle_kwargs"][str(label)] = dict(kwargs)
+        key = kwargs.get("key")
+        value = page.st.session_state.get(key, False)
+        if key is not None:
+            page.st.session_state[key] = value
+        return value
+
+    monkeypatch.setattr(page.st, "container", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "selectbox", _fake_selectbox)
+    monkeypatch.setattr(page.st, "toggle", _fake_toggle)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "data_editor", lambda frame, **kwargs: frame)
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st.column_config,
+        "SelectboxColumn",
+        lambda label, *args, **kwargs: {"label": str(label), **kwargs},
+    )
+
+    page._render_pad_layout_panel(list(_records()))
+
+    assert "help" not in captured["toggle_kwargs"]["Авто-порядок по глубине целевого пласта"]
+    assert "help" not in captured["toggle_kwargs"]["Координата куста = центр расстановки"]
+    assert "help" not in captured["number_input_kwargs"]["Расстояние между устьями, м"]
+    assert "help" not in captured["number_input_kwargs"]["НДС (азимут), deg"]
+    assert "help" not in captured["button_kwargs"]["Рассчитать устья скважин"]
 
 
 def test_pad_layout_can_hide_selected_pad_details(monkeypatch) -> None:
@@ -3762,7 +4305,7 @@ def test_pad_layout_clear_fixed_slots_resets_editor_key(monkeypatch) -> None:
     assert captured["editor_lengths"][-1] == 0
 
 
-def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference() -> (
+def test_welltrack_page_keeps_prepositioned_surface_pad_quiet_by_default() -> (
     None
 ):
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
@@ -3772,11 +4315,11 @@ def test_welltrack_page_marks_prepositioned_surface_pad_as_read_only_reference()
 
     at.run(timeout=120)
 
-    assert any(
+    assert not any(
         "Устья заданы в исходных данных" in str(widget.value)
         for widget in at.info
     )
-    assert any(
+    assert not any(
         "Исходная привязка скважин к позициям сохраняется" in str(widget.value)
         for widget in at.info
     )

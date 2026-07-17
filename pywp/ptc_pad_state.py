@@ -821,6 +821,167 @@ def _preserves_source_surface_slots(pad_meta: object) -> bool:
     )
 
 
+def _partial_source_surface_layout(
+    *,
+    pad: WellPad,
+    basis: Mapping[str, object],
+) -> dict[str, object] | None:
+    raw_slot_rows = tuple(basis.get("slots", ()))
+    if not raw_slot_rows:
+        return None
+
+    ordered_slot_names = tuple(
+        str(well.name)
+        for well in sorted(
+            pad.wells,
+            key=lambda well: well_name_natural_sort_key(str(well.name)),
+        )
+    )
+    if not ordered_slot_names:
+        return None
+
+    slot_row_by_name = {
+        str(slot_name): (
+            float(x_value),
+            float(y_value),
+            float(z_value),
+            float(projection),
+            float(cross_projection),
+        )
+        for slot_name, x_value, y_value, z_value, projection, cross_projection in raw_slot_rows
+    }
+    known_rows: list[tuple[int, float, float, float]] = []
+    for slot_index, well_name in enumerate(ordered_slot_names):
+        row = slot_row_by_name.get(str(well_name))
+        if row is None:
+            continue
+        known_rows.append(
+            (
+                int(slot_index),
+                float(row[2]),
+                float(row[3]),
+                float(row[4]),
+            )
+        )
+    if not known_rows:
+        return None
+
+    axis_deg = float(basis.get("axis_deg", pad.auto_nds_azimuth_deg)) % 360.0
+    spacing_ref_m = float(max(float(basis.get("spacing_ref_m", 0.0)), 0.0))
+    if spacing_ref_m <= SMALL:
+        spacing_ref_m = float(DEFAULT_PAD_SPACING_M)
+
+    z_step_candidates = [
+        float((right_z - left_z) / (right_index - left_index))
+        for (left_index, left_z, _left_projection, _left_cross), (
+            right_index,
+            right_z,
+            _right_projection,
+            _right_cross,
+        ) in zip(known_rows, known_rows[1:], strict=False)
+        if int(right_index - left_index) > 0
+    ]
+    z_step_m = (
+        float(np.median(np.asarray(z_step_candidates, dtype=float)))
+        if z_step_candidates
+        else 0.0
+    )
+    projection_origin_candidates = [
+        float(projection - slot_index * spacing_ref_m)
+        for slot_index, _z_value, projection, _cross_projection in known_rows
+    ]
+    projection_origin = (
+        float(np.median(np.asarray(projection_origin_candidates, dtype=float)))
+        if projection_origin_candidates
+        else float(known_rows[0][2])
+    )
+    cross_projection_values = [
+        float(cross_projection)
+        for _slot_index, _z_value, _projection, cross_projection in known_rows
+    ]
+    cross_projection_ref = (
+        float(np.median(np.asarray(cross_projection_values, dtype=float)))
+        if cross_projection_values
+        else 0.0
+    )
+    z_origin_candidates = [
+        float(z_value - slot_index * z_step_m)
+        for slot_index, z_value, _projection, _cross_projection in known_rows
+    ]
+    z_origin = (
+        float(np.median(np.asarray(z_origin_candidates, dtype=float)))
+        if z_origin_candidates
+        else float(known_rows[0][1])
+    )
+
+    angle_rad = np.deg2rad(axis_deg)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    vx = float(-uy)
+    vy = float(ux)
+
+    def _slot_xyz(slot_position: float) -> tuple[float, float, float]:
+        projection = float(projection_origin + slot_position * spacing_ref_m)
+        z_value = float(z_origin + slot_position * z_step_m)
+        return (
+            float(projection * ux + cross_projection_ref * vx),
+            float(projection * uy + cross_projection_ref * vy),
+            float(z_value),
+        )
+
+    center_slot_position = 0.5 * float(max(len(ordered_slot_names) - 1, 0))
+    return {
+        "axis_deg": float(axis_deg),
+        "spacing_ref_m": float(spacing_ref_m),
+        "z_step_m": float(z_step_m),
+        "ordered_slot_names": ordered_slot_names,
+        "first_anchor_xyz": _slot_xyz(0.0),
+        "center_anchor_xyz": _slot_xyz(center_slot_position),
+    }
+
+
+def _uniform_pad_surface_assignments(
+    *,
+    base_order_names: tuple[str, ...],
+    ordered_names: list[str],
+    cfg: Mapping[str, object],
+    z_step_m: float = 0.0,
+) -> tuple[PadSurfaceAssignment, ...]:
+    angle_rad = np.deg2rad(float(cfg["nds_azimuth_deg"]) % 360.0)
+    ux = float(np.sin(angle_rad))
+    uy = float(np.cos(angle_rad))
+    center_slot_index = 0.5 * float(max(len(base_order_names) - 1, 0))
+    anchor_mode = str(
+        cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)
+    )
+    assignments: list[PadSurfaceAssignment] = []
+    for slot_index, (source_well_name, well_name) in enumerate(
+        zip(base_order_names, ordered_names, strict=True),
+        start=1,
+    ):
+        if anchor_mode == PAD_SURFACE_ANCHOR_CENTER:
+            slot_offset = float(slot_index - 1) - center_slot_index
+        else:
+            slot_offset = float(slot_index - 1)
+        assignments.append(
+            PadSurfaceAssignment(
+                slot_index=int(slot_index),
+                well_name=str(well_name),
+                surface_x_m=float(
+                    float(cfg["first_surface_x"]) + slot_offset * float(cfg["spacing_m"]) * ux
+                ),
+                surface_y_m=float(
+                    float(cfg["first_surface_y"]) + slot_offset * float(cfg["spacing_m"]) * uy
+                ),
+                surface_z_m=float(
+                    float(cfg["first_surface_z"]) + slot_offset * float(z_step_m)
+                ),
+                source_well_name=str(source_well_name),
+            )
+        )
+    return tuple(assignments)
+
+
 def _expanded_source_slot_rows(
     *,
     pad: WellPad,
@@ -998,6 +1159,19 @@ def pad_anchor_defaults(
             float(defaults["first_surface_y"]),
             float(defaults["first_surface_z"]),
         )
+    if not _preserves_source_surface_slots(pad_meta):
+        partial_layout = _partial_source_surface_layout(pad=pad, basis=basis)
+        if partial_layout is not None:
+            anchor_xyz = (
+                partial_layout["center_anchor_xyz"]
+                if str(anchor_mode) == PAD_SURFACE_ANCHOR_CENTER
+                else partial_layout["first_anchor_xyz"]
+            )
+            return (
+                float(anchor_xyz[0]),
+                float(anchor_xyz[1]),
+                float(anchor_xyz[2]),
+            )
     if str(anchor_mode) == PAD_SURFACE_ANCHOR_CENTER:
         center_xyz = basis["center_anchor_xyz"]
         return (
@@ -1056,8 +1230,37 @@ def pad_surface_assignments(
     )
     fixed_slots = pad_fixed_slots_from_config(pad=pad, config=cfg)
     basis = _source_defined_pad_basis(pad, pad_meta)
+    partial_layout = (
+        _partial_source_surface_layout(pad=pad, basis=basis)
+        if basis is not None and not _preserves_source_surface_slots(pad_meta)
+        else None
+    )
 
     if _uses_source_surface_basis(pad, pad_meta, basis):
+        if partial_layout is not None:
+            base_order_names = list(partial_layout["ordered_slot_names"])
+            if bool(cfg.get(WT_PAD_APPLY_AUTO_ORDER_KEY, False)):
+                ordered_names = [
+                    str(well.name)
+                    for well in ordered_pad_wells(
+                        pad=pad,
+                        nds_azimuth_deg=float(cfg["nds_azimuth_deg"]),
+                        fixed_slots=fixed_slots,
+                        auto_order_mode=pad_auto_order_mode(session_state),
+                    )
+                ]
+            else:
+                ordered_names = _apply_fixed_slots_to_ordered_names(
+                    base_order_names,
+                    fixed_slots=fixed_slots,
+                )
+            return _uniform_pad_surface_assignments(
+                base_order_names=tuple(base_order_names),
+                ordered_names=ordered_names,
+                cfg=cfg,
+                z_step_m=float(partial_layout["z_step_m"]),
+            )
+
         slot_rows = _expanded_source_slot_rows(
             pad=pad,
             basis=basis,
@@ -1199,31 +1402,13 @@ def pad_surface_assignments(
         fixed_slots=fixed_slots,
         auto_order_mode=auto_order_mode,
     )
-    angle_rad = np.deg2rad(float(cfg["nds_azimuth_deg"]) % 360.0)
-    ux = float(np.sin(angle_rad))
-    uy = float(np.cos(angle_rad))
-    center_slot_index = 0.5 * float(max(len(ordered_wells) - 1, 0))
-    assignments: list[PadSurfaceAssignment] = []
-    for slot_index, well in enumerate(ordered_wells, start=1):
-        if str(cfg.get("surface_anchor_mode", DEFAULT_PAD_SURFACE_ANCHOR_MODE)) == (
-            PAD_SURFACE_ANCHOR_CENTER
-        ):
-            shift_m = (float(slot_index - 1) - center_slot_index) * float(
-                cfg["spacing_m"]
-            )
-        else:
-            shift_m = float(slot_index - 1) * float(cfg["spacing_m"])
-        assignments.append(
-            PadSurfaceAssignment(
-                slot_index=int(slot_index),
-                well_name=str(well.name),
-                surface_x_m=float(cfg["first_surface_x"] + shift_m * ux),
-                surface_y_m=float(cfg["first_surface_y"] + shift_m * uy),
-                surface_z_m=float(cfg["first_surface_z"]),
-                source_well_name=str(well.name),
-            )
-        )
-    return tuple(assignments)
+    ordered_names = [str(well.name) for well in ordered_wells]
+    return _uniform_pad_surface_assignments(
+        base_order_names=tuple(ordered_names),
+        ordered_names=ordered_names,
+        cfg=cfg,
+        z_step_m=0.0,
+    )
 
 
 def ensure_pad_configs(
@@ -1645,6 +1830,26 @@ def _pad_defaults_for_metadata(
     basis = _source_defined_pad_basis(pad, pad_meta)
     if _uses_source_surface_basis(pad, pad_meta, basis):
         defaults = pad_config_defaults(pad)
+        partial_layout = (
+            _partial_source_surface_layout(pad=pad, basis=basis)
+            if basis is not None and not _preserves_source_surface_slots(pad_meta)
+            else None
+        )
+        if partial_layout is not None:
+            center_xyz = partial_layout["center_anchor_xyz"]
+            return {
+                "spacing_m": float(
+                    max(float(partial_layout["spacing_ref_m"]), 0.0)
+                ),
+                "nds_azimuth_deg": float(partial_layout["axis_deg"]) % 360.0,
+                "first_surface_x": float(center_xyz[0]),
+                "first_surface_y": float(center_xyz[1]),
+                "first_surface_z": float(center_xyz[2]),
+                "surface_anchor_mode": DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+                WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY: False,
+                WT_PAD_APPLY_AUTO_ORDER_KEY: False,
+                "fixed_slots": (),
+            }
         center_xyz = (
             basis["center_anchor_xyz"]
             if isinstance(basis.get("center_anchor_xyz"), tuple)
