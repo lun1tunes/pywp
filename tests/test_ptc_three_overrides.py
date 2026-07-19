@@ -187,6 +187,47 @@ def test_trajectory_overrides_build_tree_focus_targets_for_multi_pad() -> None:
     assert overrides["component_key"] == "results-overview"
 
 
+def test_build_edit_pads_payload_uses_current_pad_assignments() -> None:
+    session_state: dict[str, object] = {}
+    records = _records()
+    pads = ptc_pad_state.ensure_pad_configs(session_state, base_records=records)
+
+    edit_pads = ptc_three_overrides.build_edit_pads_payload(
+        session_state,
+        records=records,
+        visible_well_names=[record.name for record in records],
+    )
+
+    assert len(edit_pads) == 1
+    edit_pad = edit_pads[0]
+    cfg = ptc_pad_state.pad_config_for_ui(session_state, pads[0])
+    assignments = ptc_pad_state.pad_surface_assignments(session_state, pad=pads[0])
+
+    assert edit_pad["id"] == str(pads[0].pad_id)
+    assert edit_pad["focus_id"] == f"pad::{pads[0].pad_id}"
+    assert edit_pad["anchor"] == [
+        float(cfg["first_surface_x"]),
+        float(cfg["first_surface_y"]),
+        float(cfg["first_surface_z"]),
+    ]
+    assert edit_pad["well_names"] == [
+        str(item.well_name) for item in assignments
+    ]
+    assert edit_pad["surface_points"] == [
+        {
+            "slot_index": int(item.slot_index),
+            "well_name": str(item.well_name),
+            "source_well_name": str(item.source_well_name),
+            "position": [
+                float(item.surface_x_m),
+                float(item.surface_y_m),
+                float(item.surface_z_m),
+            ],
+        }
+        for item in assignments
+    ]
+
+
 def test_trajectory_overrides_add_imported_dev_overlay_for_matching_well() -> None:
     success = _successful_plan_xy(name="WELL-A", x_offset_m=0.0, y_offset_m=0.0)
     imported_dev_well = ImportedTrajectoryWell(

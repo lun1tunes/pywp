@@ -737,6 +737,7 @@ def handle_three_edit_event(
     event: object,
     *,
     apply_changes: ApplyChangesCallback,
+    apply_pad_changes: ApplyChangesCallback | None = None,
     bump_three_viewer_nonce: Callable[[], None],
 ) -> bool:
     if not isinstance(event, Mapping):
@@ -746,7 +747,12 @@ def handle_three_edit_event(
     nonce = str(event.get("nonce") or "")
     if nonce and nonce == str(session_state.get("wt_last_edit_targets_nonce", "")):
         return False
-    updated_names = apply_changes(event.get("changes"), "three_viewer")
+    updated_names = list(apply_changes(event.get("changes"), "three_viewer"))
+    if apply_pad_changes is not None:
+        updated_names.extend(
+            apply_pad_changes(event.get("pad_changes"), "three_viewer")
+        )
+    updated_names = unique_well_names(updated_names)
     if not updated_names:
         return False
     if nonce:

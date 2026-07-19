@@ -758,3 +758,42 @@ def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:
     )
     assert len(applied) == 1
     assert bumped == 1
+
+
+def test_handle_three_edit_event_accepts_pad_changes() -> None:
+    session_state: dict[str, object] = {}
+    applied: list[tuple[object, str]] = []
+    pad_applied: list[tuple[object, str]] = []
+    bumped = 0
+
+    def apply_changes(changes: object, source: str) -> list[str]:
+        applied.append((changes, source))
+        return []
+
+    def apply_pad_changes(changes: object, source: str) -> list[str]:
+        pad_applied.append((changes, source))
+        return ["PAD1-A", "PAD1-B"]
+
+    def bump_nonce() -> None:
+        nonlocal bumped
+        bumped += 1
+
+    event = {
+        "type": "pywp:editTargets",
+        "nonce": "pad-1",
+        "pad_changes": [{"pad_id": "PAD-1", "anchor": [10.0, 20.0, 0.0]}],
+    }
+
+    assert ptc_edit_targets.handle_three_edit_event(
+        session_state,
+        event,
+        apply_changes=apply_changes,
+        apply_pad_changes=apply_pad_changes,
+        bump_three_viewer_nonce=bump_nonce,
+    )
+    assert session_state["wt_last_edit_targets_nonce"] == "pad-1"
+    assert applied == [(None, "three_viewer")]
+    assert pad_applied == [
+        ([{"pad_id": "PAD-1", "anchor": [10.0, 20.0, 0.0]}], "three_viewer")
+    ]
+    assert bumped == 1

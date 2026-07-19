@@ -29,6 +29,7 @@ from pywp.welltrack_batch import SuccessfulWellPlan
 __all__ = [
     "anticollision_three_payload_overrides",
     "augment_three_payload",
+    "build_edit_pads_payload",
     "build_edit_wells_payload",
     "build_target_only_edit_wells_payload",
     "imported_dev_target_three_payload_overrides",
@@ -359,6 +360,7 @@ def augment_three_payload(
     focus_targets: Mapping[str, dict[str, list[float]]] | None = None,
     hidden_flat_legend_labels: set[str] | None = None,
     collisions: list[dict[str, object]] | None = None,
+    edit_pads: list[dict[str, object]] | None = None,
     edit_wells: list[dict[str, object]] | None = None,
     extra_bounds: dict[str, list[float]] | None = None,
     extra_lines: list[dict[str, object]] | None = None,
@@ -382,6 +384,8 @@ def augment_three_payload(
         ]
     if collisions is not None:
         updated["collisions"] = list(collisions)
+    if edit_pads is not None:
+        updated["edit_pads"] = list(edit_pads)
     if edit_wells is not None:
         updated["edit_wells"] = list(edit_wells)
     if extra_bounds is not None:
@@ -581,6 +585,93 @@ def build_edit_wells_payload(
     return edit_wells
 
 
+def build_edit_pads_payload(
+    session_state: MutableMapping[str, object],
+    *,
+    records: list[WelltrackRecord],
+    visible_well_names: Iterable[str],
+) -> list[dict[str, object]]:
+    visible_name_by_key = {
+        well_name_key(name): str(name)
+        for name in visible_well_names
+        if str(name).strip()
+    }
+    if not visible_name_by_key:
+        return []
+
+    pads, _pad_labels, well_names_by_pad_id = ptc_pad_state.pad_membership(
+        session_state,
+        records,
+    )
+    edit_pads: list[dict[str, object]] = []
+    for pad in pads:
+        pad_id = str(pad.pad_id)
+        cfg = ptc_pad_state.pad_config_for_ui(session_state, pad)
+        assignments = ptc_pad_state.pad_surface_assignments(
+            session_state,
+            pad=pad,
+            config=cfg,
+        )
+        surface_points: list[dict[str, object]] = []
+        visible_order_keys = {
+            well_name_key(name)
+            for name in well_names_by_pad_id.get(pad_id, ())
+            if well_name_key(name) in visible_name_by_key
+        }
+        if not visible_order_keys:
+            continue
+        for assignment in assignments:
+            visible_name = visible_name_by_key.get(
+                well_name_key(assignment.well_name)
+            )
+            if visible_name is None:
+                continue
+            surface_points.append(
+                {
+                    "slot_index": int(assignment.slot_index),
+                    "well_name": visible_name,
+                    "source_well_name": str(assignment.source_well_name),
+                    "position": [
+                        float(assignment.surface_x_m),
+                        float(assignment.surface_y_m),
+                        float(assignment.surface_z_m),
+                    ],
+                }
+            )
+        if not surface_points:
+            continue
+        anchor_mode = str(
+            cfg.get(
+                "surface_anchor_mode",
+                ptc_pad_state.DEFAULT_PAD_SURFACE_ANCHOR_MODE,
+            )
+        )
+        edit_pads.append(
+            {
+                "id": pad_id,
+                "focus_id": f"pad::{pad_id}",
+                "label": ptc_pad_state.pad_display_label(pad),
+                "title": pad_id,
+                "anchor": [
+                    float(cfg["first_surface_x"]),
+                    float(cfg["first_surface_y"]),
+                    float(cfg["first_surface_z"]),
+                ],
+                "anchor_mode": anchor_mode,
+                "anchor_mode_label": ptc_pad_state.pad_anchor_mode_label(
+                    anchor_mode
+                ),
+                "spacing_m": float(cfg["spacing_m"]),
+                "nds_azimuth_deg": float(cfg["nds_azimuth_deg"]),
+                "well_names": [
+                    str(item["well_name"]) for item in surface_points
+                ],
+                "surface_points": surface_points,
+            }
+        )
+    return edit_pads
+
+
 def _has_sidetrack_window_metadata(success: SuccessfulWellPlan) -> bool:
     summary = dict(getattr(success, "summary", {}) or {})
     trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
@@ -692,6 +783,11 @@ def trajectory_three_payload_overrides(
         "legend_tree": legend_tree,
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
+        "edit_pads": build_edit_pads_payload(
+            session_state,
+            records=records,
+            visible_well_names=tuple(well_bounds_by_name.keys()),
+        ),
         "edit_wells": [
             *build_edit_wells_payload(
                 successes,
@@ -793,6 +889,11 @@ def anticollision_three_payload_overrides(
         "focus_targets": focus_targets,
         "hidden_flat_legend_labels": hidden_labels,
         "collisions": _collision_payloads(analysis),
+        "edit_pads": build_edit_pads_payload(
+            session_state,
+            records=records,
+            visible_well_names=tuple(visible_names),
+        ),
         "extra_bounds": imported_dev_overrides.get("bounds"),
         "extra_lines": list(imported_dev_overrides.get("extra_lines") or []),
         "extra_meshes": pad_first_surface_arrow_payloads(

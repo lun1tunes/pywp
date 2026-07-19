@@ -1170,6 +1170,7 @@ def _augment_three_payload(
     focus_targets: Mapping[str, dict[str, list[float]]] | None = None,
     hidden_flat_legend_labels: set[str] | None = None,
     collisions: list[dict[str, object]] | None = None,
+    edit_pads: list[dict[str, object]] | None = None,
     edit_wells: list[dict[str, object]] | None = None,
     extra_bounds: dict[str, list[float]] | None = None,
     extra_lines: list[dict[str, object]] | None = None,
@@ -1183,6 +1184,7 @@ def _augment_three_payload(
         focus_targets=focus_targets,
         hidden_flat_legend_labels=hidden_flat_legend_labels,
         collisions=collisions,
+        edit_pads=edit_pads,
         edit_wells=edit_wells,
         extra_bounds=extra_bounds,
         extra_lines=extra_lines,
@@ -1291,6 +1293,7 @@ def _cached_augmented_three_payload(
             )
         ),
         collisions=payload_overrides.get("collisions"),
+        edit_pads=payload_overrides.get("edit_pads"),
         edit_wells=payload_overrides.get("edit_wells"),
         extra_bounds=payload_overrides.get("extra_bounds"),
         extra_lines=payload_overrides.get("extra_lines"),
@@ -2550,11 +2553,94 @@ def _apply_edit_targets_changes(
     )
 
 
+def _apply_edit_pad_changes(
+    changes: object,
+    *,
+    source: str = "3d",
+) -> list[str]:
+    if not isinstance(changes, list) or not changes:
+        return []
+    base_records = list(
+        st.session_state.get("wt_records_original")
+        or st.session_state.get("wt_records")
+        or []
+    )
+    working_records = list(st.session_state.get("wt_records") or base_records)
+    if not base_records:
+        return []
+    pads = _ensure_pad_configs(base_records=base_records)
+    if not pads:
+        return []
+
+    pad_by_id = {str(pad.pad_id): pad for pad in pads}
+    raw_configs = st.session_state.setdefault("wt_pad_configs", {})
+    changed_well_names: list[str] = []
+    updated_any = False
+
+    for raw_change in changes:
+        if not isinstance(raw_change, Mapping):
+            continue
+        pad_id = str(raw_change.get("pad_id") or "").strip()
+        pad = pad_by_id.get(pad_id)
+        anchor = raw_change.get("anchor")
+        if pad is None or not isinstance(anchor, (list, tuple)) or len(anchor) < 3:
+            continue
+        try:
+            anchor_xyz = [float(anchor[0]), float(anchor[1]), float(anchor[2])]
+        except (TypeError, ValueError):
+            continue
+        if not all(np.isfinite(anchor_xyz)):
+            continue
+        next_cfg = dict(raw_configs.get(pad_id) or {})
+        next_cfg["first_surface_x"] = float(anchor_xyz[0])
+        next_cfg["first_surface_y"] = float(anchor_xyz[1])
+        next_cfg["first_surface_z"] = float(anchor_xyz[2])
+        next_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = True
+        raw_configs[pad_id] = next_cfg
+        changed_well_names.extend(str(well.name) for well in pad.wells)
+        updated_any = True
+
+    if not updated_any:
+        return []
+
+    existing_highlighted_names = _unique_well_names(
+        [
+            *(st.session_state.get("wt_edit_targets_pending_names") or []),
+            *(st.session_state.get("wt_edit_targets_highlight_names") or []),
+        ]
+    )
+    updated_records = sync_pilot_surfaces_to_parents(
+        apply_pad_layout(
+            records=working_records,
+            pads=pads,
+            plan_by_pad_id=_build_pad_plan_map(pads),
+        )
+    )
+    st.session_state["wt_records"] = list(updated_records)
+    st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    st.session_state["wt_pad_auto_applied_on_import"] = False
+    _clear_results()
+    highlighted_names = _unique_well_names(
+        [*existing_highlighted_names, *changed_well_names]
+    )
+    st.session_state["wt_edit_targets_pending_names"] = list(highlighted_names)
+    st.session_state["wt_edit_targets_highlight_names"] = list(highlighted_names)
+    st.session_state["wt_edit_targets_highlight_points"] = {}
+    st.session_state["wt_edit_targets_applied_source"] = source
+    return highlighted_names
+
+
 def _handle_three_edit_event(event: object) -> bool:
     return ptc_edit_targets.handle_three_edit_event(
         st.session_state,
         event,
         apply_changes=lambda changes, source: _apply_edit_targets_changes(
+            changes,
+            source=source,
+        ),
+        apply_pad_changes=lambda changes, source: _apply_edit_pad_changes(
             changes,
             source=source,
         ),
@@ -2617,6 +2703,7 @@ def _clear_pad_state() -> None:
     st.session_state["wt_pad_detected_meta"] = {}
     st.session_state["wt_pad_last_applied_at"] = ""
     st.session_state["wt_pad_auto_applied_on_import"] = False
+    st.session_state[ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = False
     st.session_state.pop("wt_pad_selected_id", None)
     for key in list(st.session_state.keys()):
         if str(key).startswith("wt_pad_cfg_") or str(key).startswith(
@@ -6222,7 +6309,7 @@ def _render_dev_fixed_t1_controls(*, available_names: Sequence[str]) -> None:
         available_names
     )
     enabled = st.toggle(
-        "определять `t1` по фиксированному INC (зенитному углу входа в пласт)",
+        "Определять `t1` по фиксированному INC (зенитному углу входа в пласт)",
         key="wt_source_dev_fixed_t1_enabled",
     )
     if not enabled:
@@ -6868,7 +6955,7 @@ def _auto_apply_pad_layout_if_shared_surface(
         "%Y-%m-%d %H:%M:%S"
     )
     st.session_state["wt_pad_auto_applied_on_import"] = True
-    st.session_state[ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
+    st.session_state[ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = False
     return True
 
 
@@ -9565,14 +9652,14 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
 
         a1, a2 = st.columns(2, gap="small")
         apply_clicked = a1.button(
-            "Рассчитать устья скважин",
+            "Применить координаты устьев",
             type="primary",
             icon=":material/tune:",
             width="stretch",
             disabled=surface_controls_disabled,
         )
         reset_clicked = a2.button(
-            "Вернуть исходные устья",
+            "Вернуть исходные координаты устьев",
             icon=":material/restart_alt:",
             width="stretch",
             disabled=surface_controls_disabled,

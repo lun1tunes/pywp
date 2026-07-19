@@ -91,7 +91,7 @@ WT_SOURCE_WELLTRACK_MODES: tuple[str, ...] = (
 AUTO_LAYOUT_APPLIED_MESSAGE = (
     "Обнаружены кусты с общим исходным S: устья автоматически "
     "разведены по параметрам блока 'Кусты и расчет устьев'. "
-    "При необходимости можно нажать 'Вернуть исходные устья'."
+    "При необходимости можно нажать 'Вернуть исходные координаты устьев'."
 )
 IMPORTED_DEV_TARGET_WELLS_STATE_KEY = "wt_imported_dev_target_wells"
 TARGET_IMPORT_FAILURES_STATE_KEY = "wt_target_import_failures"

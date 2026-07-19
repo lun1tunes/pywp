@@ -2872,7 +2872,9 @@ def test_welltrack_import_auto_applies_pad_layout_for_shared_surface_and_can_res
         for widget in at.info
     )
 
-    _click_button(at, "Вернуть исходные устья")
+    _click_button(at, "Настроить положение куста, НДС и расстояние между устьями.")
+    at.run(timeout=120)
+    _click_button(at, "Вернуть исходные координаты устьев")
     at.run(timeout=120)
 
     reset_surfaces = _surface_points(at.session_state["wt_records"])
@@ -3137,6 +3139,41 @@ def test_render_dev_fixed_t1_controls_select_all_queues_pending_selection(
     assert rerun_calls == ["rerun"]
 
 
+def test_render_dev_fixed_t1_controls_uses_capitalized_toggle_label(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    labels: list[str] = []
+
+    monkeypatch.setattr(
+        page.st,
+        "toggle",
+        lambda label, key, **kwargs: labels.append(str(label))
+        or (key == "wt_source_dev_fixed_t1_enabled"),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "columns",
+        lambda spec, *args, **kwargs: tuple(
+            page.st for _ in range(int(spec) if isinstance(spec, int) else len(spec))
+        ),
+    )
+    monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, options, key, **kwargs: page.st.session_state.setdefault(
+            key, []
+        ),
+    )
+    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+
+    page._render_dev_fixed_t1_controls(available_names=[])
+
+    assert labels[0].startswith("Определять `t1` по фиксированному INC")
+
+
 def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface() -> (
     None
 ):
@@ -3154,6 +3191,10 @@ def test_auto_pad_layout_applies_for_each_multi_pad_cluster_with_shared_surface(
     assert updated_surfaces[2] != updated_surfaces[3]
     assert page.st.session_state["wt_pad_auto_applied_on_import"] is True
     assert page.st.session_state["wt_pad_last_applied_at"] != ""
+    assert (
+        page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY]
+        is False
+    )
 
 
 def test_auto_pad_layout_applies_for_degenerate_three_point_surface_records() -> None:
@@ -3193,6 +3234,23 @@ def test_auto_pad_layout_applies_for_degenerate_three_point_surface_records() ->
     assert {value[2] for value in updated_surfaces.values()} == {0.0}
     assert page.st.session_state["wt_pad_auto_applied_on_import"] is True
     assert page.st.session_state["wt_pad_last_applied_at"] != ""
+    assert (
+        page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY]
+        is False
+    )
+
+
+def test_clear_pad_state_resets_pad_layout_details_to_collapsed() -> None:
+    page = wt_import_module
+    page._init_state()
+    page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY] = True
+
+    page._clear_pad_state()
+
+    assert (
+        page.st.session_state[page.ptc_pad_state.WT_PAD_LAYOUT_DETAILS_OPEN_KEY]
+        is False
+    )
 
 
 def test_auto_pad_layout_uses_loaded_surfaces_for_mixed_dev_pad() -> None:
@@ -3811,7 +3869,7 @@ def test_pad_layout_apply_button_smoke_updates_irregular_mixed_pad_records(
 
     class _ApplyButtonColumn(_InputColumn):
         def button(self, label, *args, **kwargs):
-            return str(label) == "Рассчитать устья скважин"
+            return str(label) == "Применить координаты устьев"
 
     class _ResetButtonColumn(_InputColumn):
         def button(self, *args, **kwargs):
@@ -3956,7 +4014,7 @@ def test_pad_layout_apply_button_updates_current_records_instead_of_original(
 
     class _ApplyButtonColumn(_InputColumn):
         def button(self, label, *args, **kwargs):
-            return str(label) == "Рассчитать устья скважин"
+            return str(label) == "Применить координаты устьев"
 
     class _ResetButtonColumn(_InputColumn):
         def button(self, *args, **kwargs):
@@ -4094,7 +4152,7 @@ def test_pad_layout_controls_do_not_attach_help_tooltips(monkeypatch) -> None:
     assert "help" not in captured["toggle_kwargs"]["Координата куста = центр расстановки"]
     assert "help" not in captured["number_input_kwargs"]["Расстояние между устьями, м"]
     assert "help" not in captured["number_input_kwargs"]["НДС (азимут), deg"]
-    assert "help" not in captured["button_kwargs"]["Рассчитать устья скважин"]
+    assert "help" not in captured["button_kwargs"]["Применить координаты устьев"]
 
 
 def test_pad_layout_can_hide_selected_pad_details(monkeypatch) -> None:
@@ -4467,8 +4525,8 @@ def test_pad_layout_unlocks_source_defined_inputs_when_editing_enabled(
     assert disabled_by_label["Расстояние между устьями, м"] is False
     assert disabled_by_label["НДС (азимут), deg"] is False
     button_disabled = dict(captured["buttons"])
-    assert button_disabled["Рассчитать устья скважин"] is False
-    assert button_disabled["Вернуть исходные устья"] is False
+    assert button_disabled["Применить координаты устьев"] is False
+    assert button_disabled["Вернуть исходные координаты устьев"] is False
 
 
 def test_pad_layout_disables_apply_auto_order_until_source_editing_is_enabled(

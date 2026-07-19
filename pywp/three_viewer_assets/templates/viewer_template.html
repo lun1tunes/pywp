@@ -925,6 +925,53 @@
         color: #b91c1c;
       }
 
+      .edit-pad-summary {
+        display: none;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .edit-pad-summary.is-visible {
+        display: flex;
+      }
+
+      .edit-pad-summary-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
+      .edit-pad-summary-mode {
+        color: #64748b;
+        font-size: 10px;
+      }
+
+      .edit-pad-summary-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        color: #475569;
+        font-family:
+          "SFMono-Regular",
+          ui-monospace,
+          Menlo,
+          Consolas,
+          monospace;
+        font-size: 11px;
+      }
+
+      .edit-pad-summary-row strong {
+        color: #0f172a;
+        font-weight: 700;
+      }
+
+      .edit-pad-summary-total {
+        margin-top: 2px;
+        padding-top: 4px;
+        border-top: 1px solid rgba(15,23,42,0.08);
+      }
+
       .edit-delta-label {
         min-width: 118px;
         padding: 3px 5px;
@@ -1650,6 +1697,29 @@
               <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
             </div>
           </div>
+          <div class="edit-toolbox-section">
+            <div class="edit-toolbox-label">Куст</div>
+            <div id="edit-pad-summary" class="edit-pad-summary">
+              <div id="edit-pad-summary-title" class="edit-pad-summary-title"></div>
+              <div id="edit-pad-summary-mode" class="edit-pad-summary-mode"></div>
+              <div class="edit-pad-summary-row">
+                <span>ΔX</span>
+                <strong id="edit-pad-delta-x">0,0 м</strong>
+              </div>
+              <div class="edit-pad-summary-row">
+                <span>ΔY</span>
+                <strong id="edit-pad-delta-y">0,0 м</strong>
+              </div>
+              <div class="edit-pad-summary-row edit-pad-summary-total">
+                <span>X</span>
+                <strong id="edit-pad-final-x">0,0 м</strong>
+              </div>
+              <div class="edit-pad-summary-row">
+                <span>Y</span>
+                <strong id="edit-pad-final-y">0,0 м</strong>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <button id="edit-save-btn" type="button">Сохранить изменения</button>
@@ -1901,8 +1971,10 @@
             : {};
         let legendWellNameKeys = new Set();
         let selectedLegendWellNameKeys = new Set();
+        let editPads = Array.isArray(payload.edit_pads) ? payload.edit_pads : [];
         let editWells = Array.isArray(payload.edit_wells) ? payload.edit_wells : [];
         let editChannelName = String(payload.edit_channel || "");
+        let selectedEditPadIndex = null;
         let selectedEditWellIndex = editWells.length > 0 ? 0 : null;
         let selectedEditWellIndices = new Set(
           Number.isInteger(selectedEditWellIndex) ? [selectedEditWellIndex] : [],
@@ -1910,6 +1982,8 @@
         let editLegendSelectionAnchorIndex = selectedEditWellIndex;
         const worldAxisFocusPadById = new Map();
         const worldAxisPadFocusIds = [];
+        const editPadIndexById = new Map();
+        const editPadIndexByWellKey = new Map();
         const editWellIndexByName = new Map();
         const editableWellColors = new Set(
           editWells
@@ -1967,11 +2041,14 @@
               worldAxisFocusPadById.set(String(focusId), String(focusId));
             }
           });
+          editPads = Array.isArray(payload.edit_pads) ? payload.edit_pads : [];
           editWells = Array.isArray(payload.edit_wells) ? payload.edit_wells : [];
           optionalReferenceLabels = Array.isArray(payload.optional_reference_labels)
             ? payload.optional_reference_labels
             : [];
           editChannelName = String(payload.edit_channel || "");
+          editPadIndexById.clear();
+          editPadIndexByWellKey.clear();
           editWellIndexByName.clear();
           editWells.forEach((well, index) => {
             const name = String((well && well.name) || "").trim();
@@ -1984,6 +2061,24 @@
             }
             editWellIndexByName.set(name, index);
             editWellIndexByName.set(`well::${name}`, index);
+          });
+          editPads.forEach((pad, index) => {
+            const padId = String((pad && pad.id) || "").trim();
+            const focusId = String((pad && pad.focus_id) || "").trim();
+            if (padId) {
+              editPadIndexById.set(padId, index);
+            }
+            if (focusId) {
+              editPadIndexById.set(focusId, index);
+            }
+            (Array.isArray(pad && pad.well_names) ? pad.well_names : []).forEach((name) => {
+              const wellKey = normalizedWellNameKey(name);
+              if (!wellKey) {
+                return;
+              }
+              editPadIndexByWellKey.set(wellKey, index);
+              legendWellNameKeys.add(wellKey);
+            });
           });
           editableWellColors.clear();
           editWells
@@ -2010,6 +2105,13 @@
           } else {
             selectedEditWellIndex = null;
             editLegendSelectionAnchorIndex = null;
+          }
+          if (
+            !Number.isInteger(selectedEditPadIndex) ||
+            selectedEditPadIndex < 0 ||
+            selectedEditPadIndex >= editPads.length
+          ) {
+            selectedEditPadIndex = null;
           }
         }
 
@@ -4825,6 +4927,10 @@
 
         function legendWellNameKeysForItem(item, kind) {
           if (kind === "pad") {
+            const padIndex = editPadIndexById.get(String((item && item.id) || "").trim());
+            if (isValidEditPadIndex(padIndex)) {
+              return editPadWellNameKeys(padIndex);
+            }
             return new Set();
           }
           const editableIndex = editableIndexForLegendItem(item);
@@ -4978,6 +5084,13 @@
               Number.isInteger(nodeIndex) && selection.has(nodeIndex),
             );
           });
+          legendElement.querySelectorAll("[data-edit-pad-index]").forEach((node) => {
+            const nodeIndex = Number(node.getAttribute("data-edit-pad-index"));
+            node.classList.toggle(
+              "is-selected-edit",
+              Number.isInteger(nodeIndex) && nodeIndex === selectedEditPadIndex,
+            );
+          });
         }
 
         function createTreeNodeButton(item, kind) {
@@ -5007,6 +5120,10 @@
           button.appendChild(label);
           const editableIndex =
             kind === "well" ? editableIndexForLegendItem(item) : null;
+          const editablePadIndex =
+            kind === "pad"
+              ? editPadIndexById.get(String((item && item.id) || "").trim())
+              : null;
           if (editableIndex !== null) {
             button.classList.add("is-editable");
             button.dataset.editWellIndex = String(editableIndex);
@@ -5014,8 +5131,27 @@
               button.classList.add("is-selected-edit");
             }
           }
+          if (isValidEditPadIndex(editablePadIndex)) {
+            button.classList.add("is-editable");
+            button.dataset.editPadIndex = String(editablePadIndex);
+            if (editablePadIndex === selectedEditPadIndex) {
+              button.classList.add("is-selected-edit");
+            }
+          }
           button.addEventListener("click", (event) => {
             setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, kind));
+            if (kind === "pad" && isValidEditPadIndex(editablePadIndex)) {
+              if (editModeActive) {
+                selectEditPad(editablePadIndex, { render: false });
+                requestRender();
+                return;
+              }
+              const padTargetBounds = focusTargets[String(item.id || "")];
+              if (padTargetBounds) {
+                focusViewerTarget(padTargetBounds, String(item.id || ""));
+              }
+              return;
+            }
             if (editableIndex !== null) {
               const preserveMultiSelection = Boolean(
                 editModeActive && event && (event.ctrlKey || event.metaKey || event.shiftKey),
@@ -6773,6 +6909,13 @@
         const editRedoBtn = document.getElementById("edit-redo-btn");
         const editResetBtn = document.getElementById("edit-reset-btn");
         const editSaveBtn = document.getElementById("edit-save-btn");
+        const editPadSummary = document.getElementById("edit-pad-summary");
+        const editPadSummaryTitle = document.getElementById("edit-pad-summary-title");
+        const editPadSummaryMode = document.getElementById("edit-pad-summary-mode");
+        const editPadDeltaX = document.getElementById("edit-pad-delta-x");
+        const editPadDeltaY = document.getElementById("edit-pad-delta-y");
+        const editPadFinalX = document.getElementById("edit-pad-final-x");
+        const editPadFinalY = document.getElementById("edit-pad-final-y");
         const editWarningToast = document.getElementById("edit-warning-toast");
         const editWarningHideBtn = document.getElementById("edit-warning-hide-btn");
         const hasEditUiElements = Boolean(
@@ -6804,11 +6947,17 @@
         let editMoveScope = "point"; // "point" | "pair"
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
+        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, padIndex, wellIndex, wellName, dataPos[3], color}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
         const editRotationControls = []; // ring controls per well for t1-anchored XY rotation
         const editRotationPickMeshes = [];
+        const editPadOriginalAnchors = []; // original anchor [x,y,z] per pad
+        const editPadCurrentAnchors = []; // current anchor [x,y,z] per pad
+        const editPadOriginalPoints = []; // original surface points per pad
+        const editPadCurrentPoints = []; // current surface points per pad
+        const editPadDirtyFlags = []; // boolean per pad
         const editOriginalPoints = []; // all editable target points per well
         const editCurrentPoints = []; // current editable target points per well
         const editOriginalT1 = []; // original t1 [x,y,z] per well
@@ -6819,6 +6968,7 @@
         const editUndoStacks = []; // previous states per well
         const editRedoStacks = []; // undone states per well
         let editDragHandle = null;
+        let editPadDragMarker = null;
         let editDragAxisOrigin = null;
         let editDragAxisDirection = null;
         let editDragStartPosition = null;
@@ -6827,6 +6977,8 @@
         let editDragMoveScope = "point";
         let editDragPlaneZ = 0.0;
         let editDragPointerOffset = null;
+        let editPadDragStartAnchor = null;
+        let editPadDragStartPoints = null;
         let editDragHistoryStartState = null;
         let editDragHistoryStatesByWell = null;
         let editDragInputMode = "scene";
@@ -6875,6 +7027,11 @@
 
         function formatLengthMeters(value) {
           return formatDeltaMeters(Math.max(0, Number(value) || 0), false);
+        }
+
+        function formatCoordinateMeters(value) {
+          const numericValue = Number(value) || 0;
+          return `${numericValue.toFixed(1).replace(".", ",")} м`;
         }
 
         function copyEditPoint(point) {
@@ -7075,6 +7232,56 @@
           );
         }
 
+        function isValidEditPadIndex(index) {
+          return (
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index < editPads.length
+          );
+        }
+
+        function editPadWellIndices(index) {
+          if (!isValidEditPadIndex(index)) {
+            return [];
+          }
+          const pad = editPads[index] || {};
+          const indices = [];
+          (Array.isArray(pad.well_names) ? pad.well_names : []).forEach((wellName) => {
+            const mappedIndex = editWellIndexByName.get(String(wellName).trim());
+            if (isValidEditWellIndex(mappedIndex) && !indices.includes(mappedIndex)) {
+              indices.push(mappedIndex);
+            }
+          });
+          return indices;
+        }
+
+        function editPadWellNameKeys(index) {
+          const keys = new Set();
+          if (!isValidEditPadIndex(index)) {
+            return keys;
+          }
+          const pad = editPads[index] || {};
+          (Array.isArray(pad.well_names) ? pad.well_names : []).forEach((wellName) => {
+            const wellKey = normalizedWellNameKey(wellName);
+            if (wellKey) {
+              keys.add(wellKey);
+            }
+          });
+          return keys;
+        }
+
+        function selectedEditPad() {
+          return isValidEditPadIndex(selectedEditPadIndex)
+            ? editPads[selectedEditPadIndex]
+            : null;
+        }
+
+        function selectedEditPadAnchor() {
+          return isValidEditPadIndex(selectedEditPadIndex)
+            ? copyEditPoint(editPadCurrentAnchors[selectedEditPadIndex])
+            : null;
+        }
+
         function normalizedEditWellSelection(indices, fallbackIndex) {
           const unique = [];
           const seen = new Set();
@@ -7151,6 +7358,10 @@
 
         function currentCollisionHighlightWellNameKeys() {
           if (editModeActive) {
+            const padKeys = editPadWellNameKeys(selectedEditPadIndex);
+            if (padKeys.size > 0) {
+              return padKeys;
+            }
             const editKeys = editSelectionWellNameKeys(selectedEditWellIndexArray());
             if (editKeys.size > 0) {
               return editKeys;
@@ -7160,6 +7371,7 @@
         }
 
         function setSelectedEditWellSelection(indices, options) {
+          selectedEditPadIndex = null;
           const requestedPrimaryIndex = Number(options && options.primaryIndex);
           const fallbackIndex = isValidEditWellIndex(requestedPrimaryIndex)
             ? requestedPrimaryIndex
@@ -7187,6 +7399,41 @@
           if (!options || options.render !== false) {
             requestRender();
           }
+        }
+
+        function selectEditPad(index, options) {
+          const nextIndex = Number(index);
+          if (!isValidEditPadIndex(nextIndex)) {
+            return false;
+          }
+          selectedEditPadIndex = nextIndex;
+          const padWellIndices = editPadWellIndices(nextIndex);
+          selectedEditWellIndices = new Set(padWellIndices);
+          selectedEditWellIndex = padWellIndices.length > 0 ? padWellIndices[0] : null;
+          editLegendSelectionAnchorIndex = selectedEditWellIndex;
+          selectedEditHandleIndex = null;
+          if (editPlane !== "xy") {
+            setEditPlane("xy");
+          }
+          if (editTransformMode !== "move") {
+            setEditTransformMode("move");
+          }
+          setSelectedLegendWellNameKeys(editPadWellNameKeys(nextIndex));
+          syncEditVisibility();
+          syncSelectedCollisionHighlights();
+          if (options && options.focus) {
+            const pad = editPads[nextIndex] || {};
+            const focusId = String((pad && pad.focus_id) || `pad::${pad.id || ""}`);
+            const targetBounds = focusTargets[focusId];
+            if (targetBounds) {
+              focusViewerTarget(targetBounds, focusId);
+              return true;
+            }
+          }
+          if (!options || options.render !== false) {
+            requestRender();
+          }
+          return true;
         }
 
         function handleEditLegendSelection(editableIndex, event) {
@@ -7276,6 +7523,10 @@
         }
 
         function syncSelectedEditHandle() {
+          if (Number.isInteger(selectedEditPadIndex)) {
+            selectedEditHandleIndex = null;
+            return;
+          }
           if (!Number.isInteger(selectedEditWellIndex)) {
             selectedEditHandleIndex = null;
             return;
@@ -7319,6 +7570,9 @@
         }
 
         function setSelectedEditHandleByRole(pointRole) {
+          if (Number.isInteger(selectedEditPadIndex)) {
+            return false;
+          }
           if (!Number.isInteger(selectedEditWellIndex)) {
             return false;
           }
@@ -7394,6 +7648,134 @@
 
         function isEditWellDirty(wellIndex) {
           return !editStatesEqual(cloneEditState(wellIndex), originalEditState(wellIndex));
+        }
+
+        function cloneEditPadSurfacePoints(padIndex) {
+          return (editPadCurrentPoints[padIndex] || []).map(copyEditPoint);
+        }
+
+        function originalEditPadSurfacePoints(padIndex) {
+          return (editPadOriginalPoints[padIndex] || []).map(copyEditPoint);
+        }
+
+        function isEditPadDirty(padIndex) {
+          if (!isValidEditPadIndex(padIndex)) {
+            return false;
+          }
+          if (
+            !pointsNearlyEqual(
+              editPadCurrentAnchors[padIndex],
+              editPadOriginalAnchors[padIndex],
+            )
+          ) {
+            return true;
+          }
+          const currentPoints = editPadCurrentPoints[padIndex] || [];
+          const originalPoints = editPadOriginalPoints[padIndex] || [];
+          if (currentPoints.length !== originalPoints.length) {
+            return true;
+          }
+          return currentPoints.some((point, pointIndex) =>
+            !pointsNearlyEqual(point, originalPoints[pointIndex]),
+          );
+        }
+
+        function syncEditPadMarkerHover(marker) {
+          if (!marker || !marker.pickMesh) {
+            return;
+          }
+          const point = marker.dataPos || [0, 0, 0];
+          marker.pickMesh.userData.hover = {
+            name: marker.wellName,
+            point: "S",
+            x: Number(point[0]) || 0,
+            y: Number(point[1]) || 0,
+            z: Number(point[2]) || 0,
+            color: marker.color || "#2563eb",
+          };
+        }
+
+        function updateEditPadMarkerPosition(marker, point) {
+          if (!marker) {
+            return;
+          }
+          marker.dataPos = copyEditPoint(point);
+          const position = displayPoint(point);
+          if (marker.mesh) {
+            marker.mesh.position.copy(position);
+          }
+          if (marker.pickMesh) {
+            marker.pickMesh.position.copy(position);
+          }
+          syncEditPadMarkerHover(marker);
+        }
+
+        function applyEditPadState(padIndex, nextAnchor, nextSurfacePoints) {
+          if (!isValidEditPadIndex(padIndex)) {
+            return;
+          }
+          const anchor = copyEditPoint(nextAnchor);
+          const points = (Array.isArray(nextSurfacePoints) ? nextSurfacePoints : []).map(
+            copyEditPoint,
+          );
+          editPadCurrentAnchors[padIndex] = anchor;
+          editPadCurrentPoints[padIndex] = points;
+          editPadMarkers.forEach((marker) => {
+            if (marker.padIndex !== padIndex) {
+              return;
+            }
+            const nextPoint = points[marker.pointIndex];
+            if (nextPoint) {
+              updateEditPadMarkerPosition(marker, nextPoint);
+            }
+          });
+          editPadDirtyFlags[padIndex] = isEditPadDirty(padIndex);
+        }
+
+        function resetEditPad(padIndex) {
+          if (!isValidEditPadIndex(padIndex)) {
+            return;
+          }
+          applyEditPadState(
+            padIndex,
+            editPadOriginalAnchors[padIndex],
+            originalEditPadSurfacePoints(padIndex),
+          );
+        }
+
+        function syncEditPadSummary() {
+          if (
+            !editPadSummary ||
+            !editPadSummaryTitle ||
+            !editPadSummaryMode ||
+            !editPadDeltaX ||
+            !editPadDeltaY ||
+            !editPadFinalX ||
+            !editPadFinalY
+          ) {
+            return;
+          }
+          const padIndex = selectedEditPadIndex;
+          const pad = selectedEditPad();
+          if (!editModeActive || !pad || !isValidEditPadIndex(padIndex)) {
+            editPadSummary.classList.remove("is-visible");
+            return;
+          }
+          const currentAnchor = editPadCurrentAnchors[padIndex] || [0, 0, 0];
+          const originalAnchor = editPadOriginalAnchors[padIndex] || [0, 0, 0];
+          editPadSummaryTitle.textContent = String(
+            pad.title || pad.label || pad.id || "Куст",
+          );
+          editPadSummaryMode.textContent = String(pad.anchor_mode_label || "");
+          editPadDeltaX.textContent = formatDeltaMeters(
+            Number(currentAnchor[0]) - Number(originalAnchor[0]),
+          );
+          editPadDeltaY.textContent = formatDeltaMeters(
+            Number(currentAnchor[1]) - Number(originalAnchor[1]),
+          );
+          editPadFinalX.textContent = formatCoordinateMeters(currentAnchor[0]);
+          editPadFinalY.textContent = formatCoordinateMeters(currentAnchor[1]);
+          editPadSummary.classList.add("is-visible");
         }
 
         function createUnitCircleGeometry(segments) {
@@ -8177,15 +8559,19 @@
           if (!editUndoBtn || !editRedoBtn || !editResetBtn || !editPointSelector) {
             return;
           }
-          const selectedIndex = Number.isInteger(selectedEditWellIndex)
+          const selectedPad = isValidEditPadIndex(selectedEditPadIndex)
+            ? selectedEditPadIndex
+            : null;
+          const selectedIndex = selectedPad === null && Number.isInteger(selectedEditWellIndex)
             ? selectedEditWellIndex
             : null;
-          const hasSelection = selectedIndex !== null;
+          const hasSelection = selectedPad !== null || selectedIndex !== null;
           const selectedSupportsRotation =
             hasSelection && editWellSupportsRotation(selectedIndex);
           const activePointRole = selectedEditPointRole();
           const canPickPoint =
             editModeActive &&
+            selectedPad === null &&
             hasSelection &&
             editTransformMode === "move" &&
             (
@@ -8194,23 +8580,33 @@
             );
           editUndoBtn.disabled =
             !editModeActive ||
+            selectedPad !== null ||
             !hasSelection ||
             !Array.isArray(editUndoStacks[selectedIndex]) ||
             editUndoStacks[selectedIndex].length === 0;
           editRedoBtn.disabled =
             !editModeActive ||
+            selectedPad !== null ||
             !hasSelection ||
             !Array.isArray(editRedoStacks[selectedIndex]) ||
             editRedoStacks[selectedIndex].length === 0;
           editResetBtn.disabled =
             !editModeActive ||
             !hasSelection ||
-            !Boolean(editDirtyFlags[selectedIndex]);
+            (
+              selectedPad !== null
+                ? !Boolean(editPadDirtyFlags[selectedPad])
+                : !Boolean(editDirtyFlags[selectedIndex])
+            );
           editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
-            btn.disabled = !editModeActive || !hasSelection || editTransformMode === "rotate";
+            btn.disabled =
+              !editModeActive ||
+              !hasSelection ||
+              selectedPad !== null ||
+              editTransformMode === "rotate";
           });
           editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
-            btn.disabled = !editModeActive || !hasSelection;
+            btn.disabled = !editModeActive || !hasSelection || selectedPad !== null;
           });
           editPointSelector.querySelectorAll(".point-btn").forEach((btn) => {
             const pointRole = String(btn.dataset.pointRole || "");
@@ -8224,11 +8620,19 @@
               !editModeActive ||
               !hasSelection ||
               (btn.dataset.operation === "rotate" &&
-                (editMoveScope !== "pair" || !selectedSupportsRotation));
+                (
+                  selectedPad !== null ||
+                  editMoveScope !== "pair" ||
+                  !selectedSupportsRotation
+                ));
           });
+          syncEditPadSummary();
         }
 
         function undoSelectedEdit() {
+          if (Number.isInteger(selectedEditPadIndex)) {
+            return;
+          }
           const wellIndex = selectedEditWellIndex;
           const selectedIndices = selectedEditWellIndexArray();
           if (!Number.isInteger(wellIndex) || editUndoStacks[wellIndex].length === 0) {
@@ -8261,6 +8665,9 @@
         }
 
         function redoSelectedEdit() {
+          if (Number.isInteger(selectedEditPadIndex)) {
+            return;
+          }
           const wellIndex = selectedEditWellIndex;
           const selectedIndices = selectedEditWellIndexArray();
           if (!Number.isInteger(wellIndex) || editRedoStacks[wellIndex].length === 0) {
@@ -8293,6 +8700,17 @@
         }
 
         function resetSelectedEdit() {
+          if (Number.isInteger(selectedEditPadIndex)) {
+            if (!editPadDirtyFlags[selectedEditPadIndex]) {
+              return;
+            }
+            resetEditPad(selectedEditPadIndex);
+            resetEditSaveButtonState();
+            syncEditVisibility();
+            showEditFeedback();
+            requestRender();
+            return;
+          }
           const wellIndex = selectedEditWellIndex;
           const selectedIndices = selectedEditWellIndexArray();
           if (!Number.isInteger(wellIndex) || !selectedIndices.some((index) => editDirtyFlags[index])) {
@@ -8463,6 +8881,97 @@
           });
         }
 
+        function initEditPads() {
+          const markerGeometry = new THREE.SphereGeometry(1.0, 16, 12);
+          const pickMaterial = new THREE.MeshBasicMaterial({
+            color: "#ffffff",
+            transparent: true,
+            opacity: 0.0,
+            depthTest: false,
+            depthWrite: false,
+          });
+          pickMaterial.colorWrite = false;
+          editPads.forEach((pad, padIndex) => {
+            const anchor = copyEditPoint((pad && pad.anchor) || [0, 0, 0]);
+            const pointEntries = Array.isArray(pad && pad.surface_points)
+              ? pad.surface_points
+              : [];
+            const originalPoints = pointEntries
+              .map((entry) => copyEditPoint(entry && entry.position))
+              .filter((point) =>
+                point.every((value) => Number.isFinite(Number(value))),
+              );
+            editPadOriginalAnchors.push(anchor.slice());
+            editPadCurrentAnchors.push(anchor.slice());
+            editPadOriginalPoints.push(originalPoints.map(copyEditPoint));
+            editPadCurrentPoints.push(originalPoints.map(copyEditPoint));
+            editPadDirtyFlags.push(false);
+            originalPoints.forEach((point, pointIndex) => {
+              const pointMeta = pointEntries[pointIndex] || {};
+              const wellName = String(pointMeta.well_name || "");
+              const mappedWellIndex = editWellIndexByName.get(wellName);
+              const wellIndex = isValidEditWellIndex(mappedWellIndex)
+                ? mappedWellIndex
+                : null;
+              const color = hexOrDefault(
+                String((wellIndex !== null ? editWells[wellIndex] : {}).color || "#2563eb"),
+                "#2563eb",
+              );
+              const mesh = new THREE.Mesh(
+                markerGeometry,
+                new THREE.MeshBasicMaterial({
+                  color: color,
+                  transparent: true,
+                  opacity: 0.58,
+                  depthTest: false,
+                  depthWrite: false,
+                }),
+              );
+              mesh.position.copy(displayPoint(point));
+              mesh.userData.lockViewerZGeometryScale = true;
+              mesh.visible = false;
+              mesh.renderOrder = 13;
+              scene.add(mesh);
+              const originalMesh = new THREE.Mesh(
+                markerGeometry,
+                new THREE.MeshBasicMaterial({
+                  color: "#ffffff",
+                  transparent: true,
+                  opacity: 0.9,
+                  depthTest: false,
+                  depthWrite: false,
+                }),
+              );
+              originalMesh.position.copy(displayPoint(point));
+              originalMesh.userData.lockViewerZGeometryScale = true;
+              originalMesh.visible = false;
+              originalMesh.renderOrder = 12;
+              scene.add(originalMesh);
+              const pickMesh = new THREE.Mesh(markerGeometry, pickMaterial);
+              pickMesh.position.copy(mesh.position);
+              pickMesh.userData.lockViewerZGeometryScale = true;
+              pickMesh.userData.editPadMarkerIndex = editPadMarkers.length;
+              pickMesh.visible = false;
+              pickMesh.renderOrder = 11;
+              scene.add(pickMesh);
+              hoverTargets.push(pickMesh);
+              const marker = {
+                mesh: mesh,
+                pickMesh: pickMesh,
+                originalMesh: originalMesh,
+                padIndex: padIndex,
+                pointIndex: pointIndex,
+                wellIndex: wellIndex,
+                wellName: wellName,
+                dataPos: point.slice(),
+                color: color,
+              };
+              syncEditPadMarkerHover(marker);
+              editPadMarkers.push(marker);
+            });
+          });
+        }
+
         function worldUnitsPerPixelAt(displayPosition) {
           const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
           if (camera && camera.isOrthographicCamera) {
@@ -8519,6 +9028,29 @@
             if (h.originalMesh) {
               h.originalMesh.scale.setScalar(
                 editHandleScale(h.originalMesh.position, 11.0)
+              );
+            }
+          });
+          editPadMarkers.forEach((marker) => {
+            const selectedPad = marker.padIndex === selectedEditPadIndex;
+            const markerScale = editHandleScale(
+              marker.mesh ? marker.mesh.position : displayPoint(marker.dataPos),
+              selectedPad ? 24.0 : 18.0,
+            );
+            if (marker.mesh) {
+              marker.mesh.scale.setScalar(markerScale);
+            }
+            if (marker.pickMesh) {
+              marker.pickMesh.scale.setScalar(
+                editHandleScale(
+                  marker.pickMesh.position,
+                  selectedPad ? 36.0 : 28.0,
+                ),
+              );
+            }
+            if (marker.originalMesh) {
+              marker.originalMesh.scale.setScalar(
+                editHandleScale(marker.originalMesh.position, 14.0),
               );
             }
           });
@@ -8585,7 +9117,10 @@
 
         function syncEditVisibility() {
           syncSelectedEditHandle();
-          const selectedIndex = Number.isInteger(selectedEditWellIndex)
+          const selectedPadIndex = isValidEditPadIndex(selectedEditPadIndex)
+            ? selectedEditPadIndex
+            : null;
+          const selectedIndex = selectedPadIndex === null && Number.isInteger(selectedEditWellIndex)
             ? selectedEditWellIndex
             : null;
           editHandles.forEach((h, handleIndex) => {
@@ -8625,6 +9160,26 @@
               }
             }
           });
+          editPadMarkers.forEach((marker) => {
+            const selectedPad = selectedPadIndex !== null && marker.padIndex === selectedPadIndex;
+            const dirtyPad = Boolean(editPadDirtyFlags[marker.padIndex]);
+            marker.mesh.visible = editModeActive;
+            if (marker.mesh && marker.mesh.material) {
+              marker.mesh.material.opacity = selectedPad ? 0.92 : 0.34;
+              marker.mesh.material.depthTest = !selectedPad;
+              marker.mesh.material.needsUpdate = true;
+            }
+            if (marker.pickMesh) {
+              marker.pickMesh.visible = editModeActive;
+            }
+            if (marker.originalMesh) {
+              marker.originalMesh.visible = editModeActive && selectedPad && dirtyPad;
+              if (marker.originalMesh.material) {
+                marker.originalMesh.material.opacity = selectedPad ? 0.92 : 0.78;
+                marker.originalMesh.material.needsUpdate = true;
+              }
+            }
+          });
           updateHandleScales();
           setEditableBaseDimmed(editModeActive, selectedIndex);
           editLineObjects.forEach((lineObject, index) => {
@@ -8650,6 +9205,7 @@
           if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= editWells.length) {
             return;
           }
+          selectedEditPadIndex = null;
           if (!selectedEditWellIndices.has(nextIndex)) {
             selectedEditWellIndices = new Set([nextIndex]);
           }
@@ -8744,7 +9300,8 @@
           }
           if (
             operation === "rotate" &&
-            (editMoveScope !== "pair" ||
+            (Number.isInteger(selectedEditPadIndex) ||
+              editMoveScope !== "pair" ||
               (Number.isInteger(selectedEditWellIndex) &&
                 !editWellSupportsRotation(selectedEditWellIndex)))
           ) {
@@ -8899,7 +9456,7 @@
         }
 
         function showEditFeedback() {
-          editHasAnyChange = editDirtyFlags.some(Boolean);
+          editHasAnyChange = editDirtyFlags.some(Boolean) || editPadDirtyFlags.some(Boolean);
           if (!editHasAnyChange) {
             editWarningDismissed = false;
           }
@@ -9084,6 +9641,9 @@
         }
 
         function onEditKeyDown(event) {
+          if (Number.isInteger(selectedEditPadIndex)) {
+            return;
+          }
           if (shouldToggleSelectedEditPoint(event) && toggleSelectedEditHandleRole()) {
             event.preventDefault();
             event.stopPropagation();
@@ -9443,6 +10003,7 @@
         function miniMapEditableHandleAtEvent(event) {
           if (
             !editModeActive ||
+            Number.isInteger(selectedEditPadIndex) ||
             !Number.isInteger(selectedEditWellIndex) ||
             editTransformMode === "rotate"
           ) {
@@ -9540,6 +10101,43 @@
               }
             }
           }
+          const padMeshes = editPadMarkers.map((marker) => marker.pickMesh || marker.mesh);
+          const padHits = ray.intersectObjects(padMeshes, false);
+          if (padHits.length) {
+            const padMarkerIndex = Number(
+              padHits[0].object.userData.editPadMarkerIndex,
+            );
+            const marker = editPadMarkers[padMarkerIndex] || null;
+            if (marker) {
+              event.preventDefault();
+              event.stopPropagation();
+              selectEditPad(marker.padIndex, { render: false });
+              controls.enabled = false;
+              interactionActive = true;
+              hideTooltip();
+              editPadDragMarker = marker;
+              editDragPlane = "xy";
+              editDragMoveScope = "pair";
+              editDragPlaneZ = marker.mesh.position.z;
+              editDragPointerOffset = marker.mesh.position
+                .clone()
+                .sub(
+                  pointerPlaneIntersection(event, editDragPlaneZ) ||
+                    marker.mesh.position,
+                );
+              editPadDragStartAnchor = copyEditPoint(
+                editPadCurrentAnchors[marker.padIndex],
+              );
+              editPadDragStartPoints = cloneEditPadSurfacePoints(marker.padIndex);
+              editDragInputMode = "scene";
+              try {
+                renderer.domElement.setPointerCapture(event.pointerId);
+              } catch (e) { /* ignore */ }
+              syncEditVisibility();
+              requestRender();
+              return;
+            }
+          }
           const meshes = editHandles
             .filter((h) => h.wellIndex === selectedEditWellIndex)
             .map((h) => h.pickMesh || h.mesh);
@@ -9613,6 +10211,31 @@
         function onEditPointerMove(event) {
           if (Number.isInteger(editRotateWellIndex)) {
             updateEditRotationDrag(event);
+            return;
+          }
+          if (editPadDragMarker) {
+            const planeHit = pointerPlaneIntersection(event, editDragPlaneZ);
+            if (!planeHit || !editPadDragStartAnchor || !editPadDragStartPoints) {
+              return;
+            }
+            planeHit.z = editDragPlaneZ;
+            const newPos = planeHit.add(editDragPointerOffset || new THREE.Vector3());
+            newPos.z = editDragPlaneZ;
+            const dataPoint = dataPointFromDisplay(newPos);
+            const startPoint =
+              editPadDragStartPoints[editPadDragMarker.pointIndex] ||
+              editPadDragMarker.dataPos;
+            const dx = Number(dataPoint[0]) - Number(startPoint[0]);
+            const dy = Number(dataPoint[1]) - Number(startPoint[1]);
+            const nextAnchor = addDeltaToPoint(editPadDragStartAnchor, [dx, dy, 0.0]);
+            const nextPoints = editPadDragStartPoints.map((point) =>
+              addDeltaToPoint(point, [dx, dy, 0.0]),
+            );
+            applyEditPadState(editPadDragMarker.padIndex, nextAnchor, nextPoints);
+            resetEditSaveButtonState();
+            syncEditVisibility();
+            showEditFeedback();
+            requestRender();
             return;
           }
           if (!editDragHandle || !editDragStartPosition) return;
@@ -9762,6 +10385,24 @@
           if (endEditRotationDrag(event)) {
             return;
           }
+          if (editPadDragMarker) {
+            controls.enabled = true;
+            editPadDragMarker = null;
+            editDragPlane = null;
+            editDragMoveScope = "point";
+            editDragPlaneZ = 0.0;
+            editDragPointerOffset = null;
+            editPadDragStartAnchor = null;
+            editPadDragStartPoints = null;
+            editDragInputMode = "scene";
+            interactionActive = false;
+            try {
+              renderer.domElement.releasePointerCapture(event.pointerId);
+            } catch (e) { /* ignore */ }
+            syncEditVisibility();
+            requestRender();
+            return;
+          }
           if (!editDragHandle) return;
           const previousStates = editDragHistoryStatesByWell;
           pushEditUndoStates(previousStates);
@@ -9783,7 +10424,7 @@
           requestRender();
         }
 
-        function sendEditTargetsToStreamlit(changes) {
+        function sendEditTargetsToStreamlit(changes, padChanges) {
           if (!editChannelName || typeof BroadcastChannel === "undefined") {
             return false;
           }
@@ -9793,7 +10434,8 @@
             }
             editBroadcastChannel.postMessage({
               type: "pywp:editTargets",
-              changes: changes,
+              changes: Array.isArray(changes) ? changes : [],
+              pad_changes: Array.isArray(padChanges) ? padChanges : [],
               nonce: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
             });
             return true;
@@ -9805,6 +10447,7 @@
         function onEditSave() {
           // Collect changes
           const changes = [];
+          const padChanges = [];
           editWells.forEach((well, idx) => {
             if (!isEditWellDirty(idx)) return;
             if (editWellHasExplicitPoints(idx)) {
@@ -9878,12 +10521,33 @@
               });
             }
           });
-          if (changes.length === 0) return;
+          editPads.forEach((pad, padIndex) => {
+            if (!isEditPadDirty(padIndex)) {
+              return;
+            }
+            const anchor = editPadCurrentAnchors[padIndex] || [0, 0, 0];
+            const originalAnchor = editPadOriginalAnchors[padIndex] || [0, 0, 0];
+            const padId = String((pad && pad.id) || "").trim();
+            if (!padId) {
+              return;
+            }
+            padChanges.push({
+              pad_id: padId,
+              anchor: anchor.map((value) => Math.round(Number(value || 0) * 100) / 100),
+              delta: [
+                Math.round((Number(anchor[0]) - Number(originalAnchor[0])) * 100) / 100,
+                Math.round((Number(anchor[1]) - Number(originalAnchor[1])) * 100) / 100,
+                Math.round((Number(anchor[2]) - Number(originalAnchor[2])) * 100) / 100,
+              ],
+              well_names: Array.isArray(pad && pad.well_names) ? pad.well_names : [],
+            });
+          });
+          if (changes.length === 0 && padChanges.length === 0) return;
           // Visual feedback
           editSaveBtn.disabled = true;
           editSaveBtn.textContent = "Применяем...";
           editSaveBtn.classList.add("is-pending");
-          if (!sendEditTargetsToStreamlit(changes)) {
+          if (!sendEditTargetsToStreamlit(changes, padChanges)) {
             editSaveBtn.disabled = false;
             editSaveBtn.classList.remove("is-pending");
             editSaveBtn.classList.add("is-error");
@@ -10026,6 +10690,7 @@
           controls.enabled = true;
           interactionActive = false;
           editDragHandle = null;
+          editPadDragMarker = null;
           editDragAxisOrigin = null;
           editDragAxisDirection = null;
           editDragStartPosition = null;
@@ -10034,6 +10699,8 @@
           editDragMoveScope = "point";
           editDragPlaneZ = 0.0;
           editDragPointerOffset = null;
+          editPadDragStartAnchor = null;
+          editPadDragStartPoints = null;
           editDragHistoryStartState = null;
           editDragHistoryStatesByWell = null;
           editDragInputMode = "scene";
@@ -10046,6 +10713,7 @@
           editRotateStartPreviewPoints = null;
           editHasAnyChange = false;
           editWarningDismissed = false;
+          selectedEditPadIndex = null;
           selectedEditWellIndex = editWells.length > 0 ? 0 : null;
           selectedEditWellIndices = new Set(
             Number.isInteger(selectedEditWellIndex) ? [selectedEditWellIndex] : [],
@@ -10053,11 +10721,17 @@
           editLegendSelectionAnchorIndex = selectedEditWellIndex;
           selectedEditHandleIndex = null;
           editHandles.length = 0;
+          editPadMarkers.length = 0;
           editReplanners.length = 0;
           editLineObjects.length = 0;
           editLateralLabels.length = 0;
           editRotationControls.length = 0;
           editRotationPickMeshes.length = 0;
+          editPadOriginalAnchors.length = 0;
+          editPadCurrentAnchors.length = 0;
+          editPadOriginalPoints.length = 0;
+          editPadCurrentPoints.length = 0;
+          editPadDirtyFlags.length = 0;
           editOriginalPoints.length = 0;
           editCurrentPoints.length = 0;
           editOriginalT1.length = 0;
@@ -10073,6 +10747,9 @@
           }
           if (editToolbox) {
             editToolbox.classList.remove("is-visible");
+          }
+          if (editPadSummary) {
+            editPadSummary.classList.remove("is-visible");
           }
           if (editSaveBtn) {
             editSaveBtn.classList.remove("is-visible", "is-pending", "is-error");
@@ -10186,6 +10863,7 @@
           }
           if (canEditTargets) {
             initEditHandles();
+            initEditPads();
             syncEditVisibility();
             syncEditToolboxState();
           }

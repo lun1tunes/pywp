@@ -344,7 +344,8 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "fitCameraToEditWellTargets(nextIndex)" in html
     assert "data-edit-well-index" in html
     assert "function selectEditWell(index, options)" in html
-    assert "function sendEditTargetsToStreamlit(changes)" in html
+    assert "function sendEditTargetsToStreamlit(changes, padChanges)" in html
+    assert "pad_changes: Array.isArray(padChanges) ? padChanges : []" in html
     assert "font-size: 15px;" in html
     assert "const originalMesh = new THREE.Mesh(handleGeometry, originalMat);" in html
     assert "originalMesh.position.copy(displayPoint(point));" in html

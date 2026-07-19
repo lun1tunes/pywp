@@ -220,6 +220,52 @@ def test_ptc_page_keeps_open_calc_params_panel_after_three_multi_edit_rerun(
     assert at.session_state["wt_edit_targets_pending_names"] == ["WELL-A", "WELL-B"]
 
 
+def test_apply_edit_pad_changes_updates_pad_layout_state() -> None:
+    ptc_core.st.session_state.clear()
+    records = _records()
+    ptc_core.st.session_state["wt_records"] = list(records)
+    ptc_core.st.session_state["wt_records_original"] = list(records)
+    pads = ptc_core._ensure_pad_configs(base_records=list(records))
+    pad_id = str(pads[0].pad_id)
+    cfg = ptc_core.st.session_state["wt_pad_configs"][pad_id]
+    next_anchor = [
+        float(cfg["first_surface_x"]) + 120.0,
+        float(cfg["first_surface_y"]) - 45.0,
+        float(cfg["first_surface_z"]),
+    ]
+
+    updated_names = ptc_core._apply_edit_pad_changes(
+        [{"pad_id": pad_id, "anchor": next_anchor}],
+        source="three_viewer",
+    )
+
+    assert updated_names == ["WELL-A", "WELL-B"]
+    assert (
+        ptc_core.st.session_state["wt_pad_configs"][pad_id]["first_surface_x"]
+        == next_anchor[0]
+    )
+    assert (
+        ptc_core.st.session_state["wt_pad_configs"][pad_id]["first_surface_y"]
+        == next_anchor[1]
+    )
+    assert (
+        ptc_core.st.session_state["wt_pad_configs"][pad_id][
+            ptc_core.ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY
+        ]
+        is True
+    )
+    assert ptc_core.st.session_state["wt_edit_targets_pending_names"] == [
+        "WELL-A",
+        "WELL-B",
+    ]
+    assert ptc_core.st.session_state["wt_edit_targets_applied_source"] == "three_viewer"
+    assert any(
+        float(updated.points[0].x) != float(original.points[0].x)
+        or float(updated.points[0].y) != float(original.points[0].y)
+        for updated, original in zip(ptc_core.st.session_state["wt_records"], records)
+    )
+
+
 def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sections() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()
