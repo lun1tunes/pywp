@@ -564,6 +564,20 @@
         pointer-events: none;
       }
 
+      .scene-label.edit-pad-handle-label {
+        padding: 4px 8px;
+        border: 1px solid rgba(37,99,235,0.34);
+        border-radius: 999px;
+        background: rgba(255,255,255,0.96);
+        box-shadow: 0 4px 14px rgba(37,99,235,0.2);
+        color: #1d4ed8;
+        font-size: 11px;
+        font-weight: 700;
+        transform: translate(-50%, calc(-100% - 12px));
+        transform-origin: 50% 100%;
+        text-shadow: none;
+      }
+
       .world-axis-handle {
         position: absolute;
         display: none;
@@ -2386,10 +2400,12 @@
 
         function setEditableBaseDimmed(dimmed, selectedWellIndex) {
           const selectedIndices = new Set(
-            normalizedEditWellSelection(
-              selectedEditWellIndexArray(),
-              selectedWellIndex,
-            ),
+            Number.isInteger(selectedEditPadIndex)
+              ? []
+              : normalizedEditWellSelection(
+                  selectedEditWellIndexArray(),
+                  selectedWellIndex,
+                ),
           );
           const selectedColorKeys = new Set();
           let hasDirtySelectedWell = false;
@@ -5121,7 +5137,7 @@
             );
             if (kind === "pad" && isValidEditPadIndex(editablePadIndex)) {
               if (editModeActive) {
-                selectEditPad(editablePadIndex, { focus: true });
+                selectEditPad(editablePadIndex);
                 return;
               }
               const padTargetBounds = focusTargets[String(item.id || "")];
@@ -6925,7 +6941,7 @@
         let editMoveScope = "point"; // "point" | "pair"
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
-        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], color}
+        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
@@ -6957,6 +6973,7 @@
         let editDragPointerOffset = null;
         let editPadDragStartAnchor = null;
         let editPadDragStartPoints = null;
+        let editPadDragStartVisualPoint = null;
         let editDragHistoryStartState = null;
         let editDragHistoryStatesByWell = null;
         let editDragInputMode = "scene";
@@ -7671,12 +7688,59 @@
           };
         }
 
+        function editPadHandleVisualPoint(marker, anchorPoint) {
+          const anchor = copyEditPoint(anchorPoint || (marker && marker.dataPos) || [0, 0, 0]);
+          const spacingM = Math.max(Number((marker && marker.spacingM) || 0), 1.0);
+          const ndsAzimuthDeg = Number((marker && marker.ndsAzimuthDeg) || 0);
+          const angleRad = ((ndsAzimuthDeg % 360.0) * Math.PI) / 180.0;
+          let dirX = Math.sin(angleRad);
+          let dirY = Math.cos(angleRad);
+          const dirLength = Math.hypot(dirX, dirY);
+          if (dirLength <= 1e-6) {
+            dirX = 0.0;
+            dirY = 1.0;
+          } else {
+            dirX /= dirLength;
+            dirY /= dirLength;
+          }
+          const offsetM = clampValue(spacingM * 2.1, 34.0, 120.0);
+          const verticalLiftM = clampValue(spacingM * 1.2, 24.0, 110.0);
+          const thicknessM = clampValue(spacingM * 0.22, 5.0, 20.0);
+          return [
+            Number(anchor[0]) + dirX * offsetM,
+            Number(anchor[1]) + dirY * offsetM,
+            Number(anchor[2]) - verticalLiftM - thicknessM * 1.15,
+          ];
+        }
+
+        function editPadHandleLabelText(marker) {
+          if (!marker) {
+            return "Куст";
+          }
+          return String(marker.pointLabel || "") === "Центр"
+            ? "Куст · Центр"
+            : "Куст · S";
+        }
+
+        function syncEditPadHandleLabel(marker) {
+          if (!marker || !marker.label) {
+            return;
+          }
+          marker.label.position.copy(displayPoint(marker.visualPos || marker.dataPos || [0, 0, 0]));
+          marker.label.element.textContent = editPadHandleLabelText(marker);
+          marker.label.visible =
+            editModeActive &&
+            Number.isInteger(selectedEditPadIndex) &&
+            marker.padIndex === selectedEditPadIndex;
+        }
+
         function updateEditPadMarkerPosition(marker, point) {
           if (!marker) {
             return;
           }
           marker.dataPos = copyEditPoint(point);
-          const position = displayPoint(point);
+          marker.visualPos = editPadHandleVisualPoint(marker, marker.dataPos);
+          const position = displayPoint(marker.visualPos);
           if (marker.mesh) {
             marker.mesh.position.copy(position);
           }
@@ -7687,6 +7751,7 @@
             marker.selectionMesh.position.copy(position);
           }
           syncEditPadMarkerHover(marker);
+          syncEditPadHandleLabel(marker);
         }
 
         function applyEditPadState(padIndex, nextAnchor, nextSurfacePoints) {
@@ -8858,7 +8923,10 @@
         }
 
         function initEditPads() {
-          const markerGeometry = new THREE.SphereGeometry(1.0, 16, 12);
+          const markerGeometry = new THREE.OctahedronGeometry(1.0, 0);
+          markerGeometry.scale(0.82, 0.82, 1.95);
+          const pickGeometry = new THREE.OctahedronGeometry(1.0, 0);
+          pickGeometry.scale(1.08, 1.08, 2.15);
           const pickMaterial = new THREE.MeshBasicMaterial({
             color: "#ffffff",
             transparent: true,
@@ -8867,106 +8935,128 @@
             depthWrite: false,
           });
           pickMaterial.colorWrite = false;
-        editPads.forEach((pad, padIndex) => {
-          const anchor = copyEditPoint((pad && pad.anchor) || [0, 0, 0]);
-          const pointEntries = Array.isArray(pad && pad.surface_points)
-            ? pad.surface_points
-            : [];
+          editPads.forEach((pad, padIndex) => {
+            const anchor = copyEditPoint((pad && pad.anchor) || [0, 0, 0]);
+            const pointEntries = Array.isArray(pad && pad.surface_points)
+              ? pad.surface_points
+              : [];
             const originalPoints = pointEntries
               .map((entry) => copyEditPoint(entry && entry.position))
               .filter((point) =>
                 point.every((value) => Number.isFinite(Number(value))),
               );
-          editPadOriginalAnchors.push(anchor.slice());
-          editPadCurrentAnchors.push(anchor.slice());
-          editPadOriginalPoints.push(originalPoints.map(copyEditPoint));
-          editPadCurrentPoints.push(originalPoints.map(copyEditPoint));
-          editPadDirtyFlags.push(false);
-          const firstPointMeta = pointEntries[0] || {};
-          const wellName = String(firstPointMeta.well_name || "");
-          const mappedWellIndex = editWellIndexByName.get(wellName);
-          const wellIndex = isValidEditWellIndex(mappedWellIndex)
-            ? mappedWellIndex
-            : null;
-          const color = hexOrDefault(
-            String((wellIndex !== null ? editWells[wellIndex] : {}).color || "#2563eb"),
-            "#2563eb",
-          );
-          const pointLabel =
-            String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";
-          const markerPoint = anchor.slice();
-          const mesh = new THREE.Mesh(
-            markerGeometry,
-            new THREE.MeshBasicMaterial({
+            editPadOriginalAnchors.push(anchor.slice());
+            editPadCurrentAnchors.push(anchor.slice());
+            editPadOriginalPoints.push(originalPoints.map(copyEditPoint));
+            editPadCurrentPoints.push(originalPoints.map(copyEditPoint));
+            editPadDirtyFlags.push(false);
+            const firstPointMeta = pointEntries[0] || {};
+            const wellName = String(firstPointMeta.well_name || "");
+            const mappedWellIndex = editWellIndexByName.get(wellName);
+            const wellIndex = isValidEditWellIndex(mappedWellIndex)
+              ? mappedWellIndex
+              : null;
+            const color = hexOrDefault(
+              String((wellIndex !== null ? editWells[wellIndex] : {}).color || "#2563eb"),
+              "#2563eb",
+            );
+            const pointLabel =
+              String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";
+            const markerPoint = anchor.slice();
+            const initialDisplayPoint = displayPoint(markerPoint);
+            const mesh = new THREE.Mesh(
+              markerGeometry,
+              new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.94,
+                depthTest: false,
+                depthWrite: false,
+              }),
+            );
+            mesh.position.copy(initialDisplayPoint);
+            mesh.rotation.set(Math.PI * 0.14, 0.0, Math.PI * 0.25);
+            mesh.userData.lockViewerZGeometryScale = true;
+            mesh.visible = false;
+            mesh.renderOrder = 13;
+            scene.add(mesh);
+            const originalMesh = new THREE.Mesh(
+              markerGeometry,
+              new THREE.MeshBasicMaterial({
+                color: "#ffffff",
+                transparent: true,
+                opacity: 0.88,
+                depthTest: false,
+                depthWrite: false,
+              }),
+            );
+            originalMesh.position.copy(initialDisplayPoint);
+            originalMesh.rotation.copy(mesh.rotation);
+            originalMesh.userData.lockViewerZGeometryScale = true;
+            originalMesh.visible = false;
+            originalMesh.renderOrder = 12;
+            scene.add(originalMesh);
+            const selectionMesh = new THREE.Mesh(
+              markerGeometry,
+              new THREE.MeshBasicMaterial({
+                color: "#ffffff",
+                wireframe: true,
+                transparent: true,
+                opacity: 0.98,
+                depthTest: false,
+                depthWrite: false,
+              }),
+            );
+            selectionMesh.position.copy(initialDisplayPoint);
+            selectionMesh.rotation.copy(mesh.rotation);
+            selectionMesh.userData.lockViewerZGeometryScale = true;
+            selectionMesh.visible = false;
+            selectionMesh.renderOrder = 14;
+            scene.add(selectionMesh);
+            const pickMesh = new THREE.Mesh(pickGeometry, pickMaterial);
+            pickMesh.position.copy(initialDisplayPoint);
+            pickMesh.rotation.copy(mesh.rotation);
+            pickMesh.userData.lockViewerZGeometryScale = true;
+            pickMesh.userData.editPadMarkerIndex = editPadMarkers.length;
+            pickMesh.visible = false;
+            pickMesh.renderOrder = 11;
+            scene.add(pickMesh);
+            hoverTargets.push(pickMesh);
+            const label = addSceneLabel(
+              "",
+              initialDisplayPoint,
+              "#1d4ed8",
+              "edit-pad-handle-label",
+              { offsetX: 0, offsetY: 0, role: "edit_pad_label" },
+            );
+            label.visible = false;
+            const marker = {
+              mesh: mesh,
+              pickMesh: pickMesh,
+              originalMesh: originalMesh,
+              selectionMesh: selectionMesh,
+              label: label,
+              padIndex: padIndex,
+              pointIndex: null,
+              wellIndex: wellIndex,
+              wellName: wellName,
+              padLabel: String((pad && (pad.title || pad.label || pad.id)) || "Куст"),
+              pointLabel: pointLabel,
+              dataPos: markerPoint.slice(),
+              visualPos: markerPoint.slice(),
+              ndsAzimuthDeg: Number((pad && pad.nds_azimuth_deg) || 0),
+              spacingM: Number((pad && pad.spacing_m) || 0),
               color: color,
-              transparent: true,
-              opacity: 0.86,
-              depthTest: false,
-              depthWrite: false,
-            }),
-          );
-          mesh.position.copy(displayPoint(markerPoint));
-          mesh.userData.lockViewerZGeometryScale = true;
-          mesh.visible = false;
-          mesh.renderOrder = 13;
-          scene.add(mesh);
-          const originalMesh = new THREE.Mesh(
-            markerGeometry,
-            new THREE.MeshBasicMaterial({
-              color: "#ffffff",
-              transparent: true,
-              opacity: 0.9,
-              depthTest: false,
-              depthWrite: false,
-            }),
-          );
-          originalMesh.position.copy(displayPoint(markerPoint));
-          originalMesh.userData.lockViewerZGeometryScale = true;
-          originalMesh.visible = false;
-          originalMesh.renderOrder = 12;
-          scene.add(originalMesh);
-          const selectionMesh = new THREE.Mesh(
-            markerGeometry,
-            new THREE.MeshBasicMaterial({
-              color: "#ffffff",
-              wireframe: true,
-              transparent: true,
-              opacity: 0.98,
-              depthTest: false,
-              depthWrite: false,
-            }),
-          );
-          selectionMesh.position.copy(mesh.position);
-          selectionMesh.userData.lockViewerZGeometryScale = true;
-          selectionMesh.visible = false;
-          selectionMesh.renderOrder = 14;
-          scene.add(selectionMesh);
-          const pickMesh = new THREE.Mesh(markerGeometry, pickMaterial);
-          pickMesh.position.copy(mesh.position);
-          pickMesh.userData.lockViewerZGeometryScale = true;
-          pickMesh.userData.editPadMarkerIndex = editPadMarkers.length;
-          pickMesh.visible = false;
-          pickMesh.renderOrder = 11;
-          scene.add(pickMesh);
-          hoverTargets.push(pickMesh);
-          const marker = {
-            mesh: mesh,
-            pickMesh: pickMesh,
-            originalMesh: originalMesh,
-            selectionMesh: selectionMesh,
-            padIndex: padIndex,
-            pointIndex: null,
-            wellIndex: wellIndex,
-            wellName: wellName,
-            padLabel: String((pad && (pad.title || pad.label || pad.id)) || "Куст"),
-            pointLabel: pointLabel,
-            dataPos: markerPoint.slice(),
-            color: color,
-          };
-          syncEditPadMarkerHover(marker);
-          editPadMarkers.push(marker);
-        });
-      }
+            };
+            originalMesh.position.copy(
+              displayPoint(editPadHandleVisualPoint(marker, anchor)),
+            );
+            updateEditPadMarkerPosition(marker, anchor);
+            syncEditPadMarkerHover(marker);
+            syncEditPadHandleLabel(marker);
+            editPadMarkers.push(marker);
+          });
+        }
 
         function worldUnitsPerPixelAt(displayPosition) {
           const canvasHeight = Math.max(renderer.domElement.clientHeight || 1, 1);
@@ -9027,36 +9117,38 @@
               );
             }
           });
-        editPadMarkers.forEach((marker) => {
-          const selectedPad = marker.padIndex === selectedEditPadIndex;
-          const markerScale = editHandleScale(
-            marker.mesh ? marker.mesh.position : displayPoint(marker.dataPos),
-            selectedPad ? 38.0 : 20.0,
-          );
-          if (marker.mesh) {
-            marker.mesh.scale.setScalar(markerScale);
-          }
-          if (marker.pickMesh) {
-            marker.pickMesh.scale.setScalar(
-              editHandleScale(
-                marker.pickMesh.position,
-                selectedPad ? 56.0 : 34.0,
-              ),
+          editPadMarkers.forEach((marker) => {
+            const selectedPad = marker.padIndex === selectedEditPadIndex;
+            const markerScale = editHandleScale(
+              marker.mesh
+                ? marker.mesh.position
+                : displayPoint(marker.visualPos || marker.dataPos),
+              selectedPad ? 50.0 : 26.0,
             );
-          }
-          if (marker.originalMesh) {
-            marker.originalMesh.scale.setScalar(
-                editHandleScale(marker.originalMesh.position, 14.0),
+            if (marker.mesh) {
+              marker.mesh.scale.setScalar(markerScale);
+            }
+            if (marker.pickMesh) {
+              marker.pickMesh.scale.setScalar(
+                editHandleScale(
+                  marker.pickMesh.position,
+                  selectedPad ? 76.0 : 42.0,
+                ),
               );
-          }
-          if (marker.selectionMesh) {
-            marker.selectionMesh.scale.setScalar(
-              editHandleScale(
-                marker.selectionMesh.position,
-                selectedPad ? 64.0 : 42.0,
-              ),
-            );
-          }
+            }
+            if (marker.originalMesh) {
+              marker.originalMesh.scale.setScalar(
+                editHandleScale(marker.originalMesh.position, 18.0),
+              );
+            }
+            if (marker.selectionMesh) {
+              marker.selectionMesh.scale.setScalar(
+                editHandleScale(
+                  marker.selectionMesh.position,
+                  selectedPad ? 84.0 : 50.0,
+                ),
+              );
+            }
           });
         }
 
@@ -9190,7 +9282,8 @@
               marker.selectionMesh.material.needsUpdate = true;
             }
           }
-          });
+          syncEditPadHandleLabel(marker);
+        });
           updateHandleScales();
           setEditableBaseDimmed(editModeActive, selectedIndex);
           editLineObjects.forEach((lineObject, index) => {
@@ -10210,6 +10303,9 @@
                 editPadCurrentAnchors[marker.padIndex],
               );
               editPadDragStartPoints = cloneEditPadSurfacePoints(marker.padIndex);
+              editPadDragStartVisualPoint = copyEditPoint(
+                marker.visualPos || marker.dataPos,
+              );
               editDragInputMode = "scene";
               try {
                 renderer.domElement.setPointerCapture(event.pointerId);
@@ -10235,7 +10331,11 @@
             const newPos = planeHit.add(editDragPointerOffset || new THREE.Vector3());
             newPos.z = editDragPlaneZ;
             const dataPoint = dataPointFromDisplay(newPos);
-            const startPoint = editPadDragStartAnchor || editPadDragMarker.dataPos;
+            const startPoint =
+              editPadDragStartVisualPoint ||
+              editPadDragMarker.visualPos ||
+              editPadDragStartAnchor ||
+              editPadDragMarker.dataPos;
             const dx = Number(dataPoint[0]) - Number(startPoint[0]);
             const dy = Number(dataPoint[1]) - Number(startPoint[1]);
             const nextAnchor = addDeltaToPoint(editPadDragStartAnchor, [dx, dy, 0.0]);
@@ -10405,6 +10505,7 @@
             editDragPointerOffset = null;
             editPadDragStartAnchor = null;
             editPadDragStartPoints = null;
+            editPadDragStartVisualPoint = null;
             editDragInputMode = "scene";
             interactionActive = false;
             try {
@@ -10712,6 +10813,7 @@
           editDragPointerOffset = null;
           editPadDragStartAnchor = null;
           editPadDragStartPoints = null;
+          editPadDragStartVisualPoint = null;
           editDragHistoryStartState = null;
           editDragHistoryStatesByWell = null;
           editDragInputMode = "scene";
