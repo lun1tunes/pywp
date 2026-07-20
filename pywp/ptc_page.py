@@ -160,6 +160,24 @@ def run_page() -> None:
                 f"Точки обновлены из таблицы: {', '.join(edit_applied)}.",
                 icon=":material/edit:",
             )
+        elif edit_applied_source == "pad_layout":
+            st.success(
+                f"Координаты устьев обновлены по параметрам кустов: {', '.join(edit_applied)}. "
+                "Проверьте подсветку `S` ниже и запустите пересчёт."
+            )
+            st.toast(
+                f"Координаты устьев обновлены: {', '.join(edit_applied)}.",
+                icon=":material/tune:",
+            )
+        elif edit_applied_source == "three_viewer_pad_layout":
+            st.success(
+                f"Координаты устьев обновлены из 3D-редактора: {', '.join(edit_applied)}. "
+                "Проверьте подсветку `S` ниже и запустите пересчёт."
+            )
+            st.toast(
+                f"Координаты устьев обновлены из 3D-редактора: {', '.join(edit_applied)}.",
+                icon=":material/tune:",
+            )
         else:
             st.success(
                 f"Точки обновлены из 3D-редактора: {', '.join(edit_applied)}. "

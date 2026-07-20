@@ -3952,6 +3952,32 @@ def test_pad_layout_apply_button_smoke_updates_irregular_mixed_pad_records(
         )
     assert page.st.session_state["wt_pad_auto_applied_on_import"] is False
     assert page.st.session_state["wt_pad_last_applied_at"] != ""
+    assert page.st.session_state["wt_edit_targets_pending_names"] == [
+        "9301",
+        "9302",
+        "9303",
+        "9304",
+    ]
+    assert page.st.session_state["wt_edit_targets_highlight_names"] == [
+        "9301",
+        "9302",
+        "9303",
+        "9304",
+    ]
+    assert page.st.session_state["wt_edit_targets_highlight_points"] == {
+        "9301": [0],
+        "9302": [0],
+        "9303": [0],
+        "9304": [0],
+    }
+    assert page.st.session_state["wt_edit_targets_applied"] == [
+        "9301",
+        "9302",
+        "9303",
+        "9304",
+    ]
+    assert page.st.session_state["wt_edit_targets_applied_source"] == "pad_layout"
+    assert page.st.session_state["wt_edit_targets_last_source"] == "pad_layout"
     assert captured["rerun_called"] is True
     assert captured["toast"] == ["Координаты устьев обновлены по параметрам кустов."]
 
@@ -5855,6 +5881,75 @@ def test_render_raw_records_table_uses_preprocess_highlight_message(
         "Скорректированные точки `t3` подсвечены. "
         "Запустите расчёт для обновления траекторий."
     )
+
+
+def test_render_raw_records_table_shows_pad_layout_highlight_message(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    page.st.session_state["wt_edit_targets_highlight_names"] = ["WELL-A"]
+    page.st.session_state["wt_edit_targets_highlight_points"] = {"WELL-A": [0]}
+    page.st.session_state["wt_edit_targets_last_source"] = "pad_layout"
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(
+        page.st,
+        "success",
+        lambda message, *args, **kwargs: captured.setdefault("success", str(message)),
+    )
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+
+    page._render_raw_records_table(_records()[:1])
+
+    assert captured["success"] == (
+        "Изменённые координаты устьев подсвечены. "
+        "Запустите расчёт для обновления траекторий."
+    )
+
+
+def test_render_raw_records_table_accepts_tuple_highlight_points(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    captured: dict[str, object] = {}
+    page.st.session_state["wt_edit_targets_highlight_names"] = ["WELL-A"]
+    page.st.session_state["wt_edit_targets_highlight_points"] = {
+        "WELL-A": (0, 2, "bad"),
+    }
+
+    class _DummyExpander:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyExpander())
+    monkeypatch.setattr(page.st, "success", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "dataframe",
+        lambda frame, **kwargs: captured.setdefault("frame", frame),
+    )
+
+    page._render_raw_records_table(_records()[:1])
+
+    styler = captured["frame"]
+    styler._compute()
+    highlighted_rows = {
+        row_index
+        for (row_index, _col_index), styles in styler.ctx.items()
+        if ("background-color", "rgba(34, 197, 94, 0.14)") in styles
+    }
+    assert highlighted_rows == {0, 2}
 
 
 def test_render_raw_records_table_keeps_coordinate_edits_pending_until_save(

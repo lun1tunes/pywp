@@ -343,7 +343,7 @@ def _ensure_reference_import_state() -> None:
 def _render_reference_kind_header(container: object) -> None:
     container.markdown(
         (
-            "<div style='text-align: center; font-size: 0.875rem; "
+            "<div style='text-align: left; font-size: 0.875rem; "
             "opacity: 0.7;'>Тип фонда</div>"
         ),
         unsafe_allow_html=True,

@@ -56,7 +56,8 @@ def test_sidetrack_parent_names_detects_visible_parent_wells() -> None:
 def test_auto_batch_parallel_workers_uses_conservative_thresholds() -> None:
     assert _auto_batch_parallel_workers(0) == 0
     assert _auto_batch_parallel_workers(3) == 0
-    assert _auto_batch_parallel_workers(4) == 2
+    assert _auto_batch_parallel_workers(4) == 0
+    assert _auto_batch_parallel_workers(5) == 2
     assert _auto_batch_parallel_workers(7) == 2
     assert _auto_batch_parallel_workers(8) == 4
 

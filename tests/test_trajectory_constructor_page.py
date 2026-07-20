@@ -258,12 +258,74 @@ def test_apply_edit_pad_changes_updates_pad_layout_state() -> None:
         "WELL-A",
         "WELL-B",
     ]
-    assert ptc_core.st.session_state["wt_edit_targets_applied_source"] == "three_viewer"
+    assert ptc_core.st.session_state["wt_edit_targets_applied"] == [
+        "WELL-A",
+        "WELL-B",
+    ]
+    assert (
+        ptc_core.st.session_state["wt_edit_targets_applied_source"]
+        == "three_viewer_pad_layout"
+    )
+    assert ptc_core.st.session_state["wt_edit_targets_last_source"] == (
+        "three_viewer_pad_layout"
+    )
+    assert ptc_core.st.session_state["wt_edit_targets_highlight_points"] == {
+        "WELL-A": [0],
+        "WELL-B": [0],
+    }
     assert any(
         float(updated.points[0].x) != float(original.points[0].x)
         or float(updated.points[0].y) != float(original.points[0].y)
         for updated, original in zip(ptc_core.st.session_state["wt_records"], records)
     )
+
+
+def test_queue_surface_edit_feedback_merges_tuple_highlight_rows() -> None:
+    ptc_core.st.session_state.clear()
+    ptc_core.st.session_state["wt_edit_targets_pending_names"] = ["WELL-A"]
+    ptc_core.st.session_state["wt_edit_targets_highlight_names"] = ["WELL-A"]
+    ptc_core.st.session_state["wt_edit_targets_highlight_points"] = {
+        "WELL-A": (2,),
+    }
+
+    changed_names = ptc_core._queue_surface_edit_feedback(
+        ["WELL-A"],
+        source="pad_layout",
+    )
+
+    assert changed_names == ["WELL-A"]
+    assert ptc_core.st.session_state["wt_edit_targets_highlight_points"] == {
+        "WELL-A": [0, 2]
+    }
+    assert ptc_core.st.session_state["wt_edit_targets_applied_source"] == "pad_layout"
+
+
+def test_queue_surface_edit_feedback_drops_stale_highlight_names_without_points() -> None:
+    ptc_core.st.session_state.clear()
+    ptc_core.st.session_state["wt_edit_targets_pending_names"] = ["WELL-OLD"]
+    ptc_core.st.session_state["wt_edit_targets_highlight_names"] = ["WELL-OLD"]
+    ptc_core.st.session_state["wt_edit_targets_highlight_points"] = {}
+
+    changed_names = ptc_core._queue_surface_edit_feedback(
+        ["WELL-NEW"],
+        source="pad_layout",
+    )
+
+    assert changed_names == ["WELL-NEW"]
+    assert ptc_core.st.session_state["wt_edit_targets_pending_names"] == [
+        "WELL-OLD",
+        "WELL-NEW",
+    ]
+    assert ptc_core.st.session_state["wt_edit_targets_highlight_names"] == [
+        "WELL-NEW"
+    ]
+    assert ptc_core.st.session_state["wt_edit_targets_highlight_points"] == {
+        "WELL-NEW": [0]
+    }
+    assert ptc_core.st.session_state["wt_pending_selected_names"] == [
+        "WELL-OLD",
+        "WELL-NEW",
+    ]
 
 
 def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sections() -> None:
@@ -301,6 +363,22 @@ def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sectio
     expander_labels = {str(widget.label) for widget in at.expander}
     assert "Контроль попадания и точность расчета" not in expander_labels
     assert "Технические параметры и диагностика решателя" not in expander_labels
+
+
+def test_ptc_page_shows_pad_layout_apply_feedback_message() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.session_state["wt_records"] = _records()
+    at.session_state["wt_records_original"] = _records()
+    at.session_state["wt_edit_targets_applied"] = ["WELL-A", "WELL-B"]
+    at.session_state["wt_edit_targets_applied_source"] = "pad_layout"
+
+    at.run(timeout=120)
+
+    assert any(
+        "Координаты устьев обновлены по параметрам кустов: WELL-A, WELL-B."
+        in str(widget.value)
+        for widget in at.success
+    )
 
 
 def test_ptc_page_defers_anticollision_when_three_edits_are_pending() -> None:
@@ -496,6 +574,21 @@ def test_parse_reference_sources_requires_explicit_uploaded_welltrack_mode(
         )
 
     assert decode_calls == []
+
+
+def test_reference_kind_header_aligns_left() -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyContainer:
+        def markdown(self, body: str, *, unsafe_allow_html: bool = False) -> None:
+            captured["body"] = str(body)
+            captured["unsafe"] = bool(unsafe_allow_html)
+
+    ptc_page_reference._render_reference_kind_header(_DummyContainer())
+
+    assert "text-align: left" in str(captured["body"])
+    assert "text-align: center" not in str(captured["body"])
+    assert captured["unsafe"] is True
 
 
 def test_parse_reference_sources_handles_uploaded_welltrack_only_for_explicit_mode(

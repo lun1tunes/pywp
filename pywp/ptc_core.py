@@ -2512,6 +2512,116 @@ def _unique_well_names(names: Iterable[object]) -> list[str]:
     return ptc_edit_targets.unique_well_names(names)
 
 
+def _surface_xyz(record: WelltrackRecord) -> tuple[float, float, float] | None:
+    points = tuple(getattr(record, "points", ()) or ())
+    if not points:
+        return None
+    surface = points[0]
+    return (float(surface.x), float(surface.y), float(surface.z))
+
+
+def _changed_surface_well_names(
+    before_records: Iterable[WelltrackRecord],
+    after_records: Iterable[WelltrackRecord],
+) -> list[str]:
+    before_by_name = {
+        str(record.name).strip(): xyz
+        for record in before_records
+        if str(record.name).strip()
+        for xyz in [_surface_xyz(record)]
+        if xyz is not None
+    }
+    changed_names: list[str] = []
+    for record in after_records:
+        well_name = str(record.name).strip()
+        if not well_name:
+            continue
+        before_xyz = before_by_name.get(well_name)
+        after_xyz = _surface_xyz(record)
+        if before_xyz is None or after_xyz is None:
+            continue
+        if any(
+            abs(float(before_value) - float(after_value)) > 1e-9
+            for before_value, after_value in zip(before_xyz, after_xyz, strict=True)
+        ):
+            changed_names.append(well_name)
+    return _unique_well_names(changed_names)
+
+
+def _coerce_highlight_point_indices(raw_indices: object) -> list[int]:
+    if (
+        not isinstance(raw_indices, Iterable)
+        or isinstance(raw_indices, (str, bytes, Mapping))
+    ):
+        return []
+    return sorted(
+        {
+            int(raw_index)
+            for raw_index in raw_indices
+            if (
+                isinstance(raw_index, int)
+                or str(raw_index).lstrip("-").isdigit()
+            )
+            and int(raw_index) >= 0
+        }
+    )
+
+
+def _queue_surface_edit_feedback(
+    changed_well_names: Iterable[object],
+    *,
+    source: str,
+) -> list[str]:
+    changed_names = _unique_well_names(changed_well_names)
+    if not changed_names:
+        return []
+
+    existing_highlighted_names = _unique_well_names(
+        [
+            *(st.session_state.get("wt_edit_targets_pending_names") or []),
+            *(st.session_state.get("wt_edit_targets_highlight_names") or []),
+        ]
+    )
+    existing_highlight_points_raw = st.session_state.get(
+        "wt_edit_targets_highlight_points"
+    )
+    existing_highlight_points: dict[str, list[int]] = {}
+    if isinstance(existing_highlight_points_raw, Mapping):
+        for raw_name, raw_indices in existing_highlight_points_raw.items():
+            well_name = str(raw_name).strip()
+            if not well_name:
+                continue
+            parsed_indices = _coerce_highlight_point_indices(raw_indices)
+            if parsed_indices:
+                existing_highlight_points[well_name] = parsed_indices
+
+    _clear_results()
+    pending_names = _unique_well_names(
+        [*existing_highlighted_names, *changed_names]
+    )
+    for well_name in changed_names:
+        row_indices = set(existing_highlight_points.get(well_name, []))
+        row_indices.add(0)
+        existing_highlight_points[well_name] = sorted(row_indices)
+
+    highlight_points = {
+        well_name: list(existing_highlight_points[well_name])
+        for well_name in pending_names
+        if existing_highlight_points.get(well_name)
+    }
+    st.session_state["wt_edit_targets_pending_names"] = list(pending_names)
+    st.session_state["wt_edit_targets_highlight_names"] = [
+        well_name for well_name in pending_names if well_name in highlight_points
+    ]
+    st.session_state["wt_edit_targets_highlight_points"] = highlight_points
+    st.session_state["wt_edit_targets_applied"] = list(changed_names)
+    st.session_state["wt_edit_targets_applied_source"] = source
+    st.session_state["wt_edit_targets_last_source"] = source
+    st.session_state.pop("wt_edit_targets_applied_note", None)
+    st.session_state["wt_pending_selected_names"] = list(pending_names)
+    return changed_names
+
+
 def _bulk_horizontal_length_changes(
     records: Iterable[WelltrackRecord],
     *,
@@ -2574,7 +2684,6 @@ def _apply_edit_pad_changes(
 
     pad_by_id = {str(pad.pad_id): pad for pad in pads}
     raw_configs = st.session_state.setdefault("wt_pad_configs", {})
-    changed_well_names: list[str] = []
     updated_any = False
 
     for raw_change in changes:
@@ -2597,18 +2706,11 @@ def _apply_edit_pad_changes(
         next_cfg["first_surface_z"] = float(anchor_xyz[2])
         next_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = True
         raw_configs[pad_id] = next_cfg
-        changed_well_names.extend(str(well.name) for well in pad.wells)
         updated_any = True
 
     if not updated_any:
         return []
 
-    existing_highlighted_names = _unique_well_names(
-        [
-            *(st.session_state.get("wt_edit_targets_pending_names") or []),
-            *(st.session_state.get("wt_edit_targets_highlight_names") or []),
-        ]
-    )
     updated_records = sync_pilot_surfaces_to_parents(
         apply_pad_layout(
             records=working_records,
@@ -2621,15 +2723,14 @@ def _apply_edit_pad_changes(
         "%Y-%m-%d %H:%M:%S"
     )
     st.session_state["wt_pad_auto_applied_on_import"] = False
-    _clear_results()
-    highlighted_names = _unique_well_names(
-        [*existing_highlighted_names, *changed_well_names]
+    return _queue_surface_edit_feedback(
+        _changed_surface_well_names(working_records, updated_records),
+        source=(
+            "three_viewer_pad_layout"
+            if str(source).strip() == "three_viewer"
+            else str(source).strip() or "pad_layout"
+        ),
     )
-    st.session_state["wt_edit_targets_pending_names"] = list(highlighted_names)
-    st.session_state["wt_edit_targets_highlight_names"] = list(highlighted_names)
-    st.session_state["wt_edit_targets_highlight_points"] = {}
-    st.session_state["wt_edit_targets_applied_source"] = source
-    return highlighted_names
 
 
 def _handle_three_edit_event(event: object) -> bool:
@@ -8436,16 +8537,7 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
     highlight_points: dict[str, set[int]] = {}
     if isinstance(raw_highlight_points, Mapping):
         for raw_name, raw_indices in raw_highlight_points.items():
-            if not isinstance(raw_indices, list):
-                continue
-            indices: set[int] = set()
-            for raw_index in raw_indices:
-                try:
-                    index = int(raw_index)
-                except (TypeError, ValueError):
-                    continue
-                if index >= 0:
-                    indices.add(index)
+            indices = set(_coerce_highlight_point_indices(raw_indices))
             if indices:
                 highlight_points[str(raw_name)] = indices
 
@@ -8616,6 +8708,16 @@ def _render_raw_records_table(records: list[WelltrackRecord]) -> None:
             if highlight_source == "bulk_horizontal_length_preprocess":
                 st.success(
                     "Скорректированные точки `t3` подсвечены. "
+                    "Запустите расчёт для обновления траекторий."
+                )
+            elif highlight_source == "pad_layout":
+                st.success(
+                    "Изменённые координаты устьев подсвечены. "
+                    "Запустите расчёт для обновления траекторий."
+                )
+            elif highlight_source == "three_viewer_pad_layout":
+                st.success(
+                    "Изменённые в 3D-редакторе координаты устьев подсвечены. "
                     "Запустите расчёт для обновления траекторий."
                 )
             elif highlight_source == "raw_records_table":
@@ -9679,7 +9781,10 @@ def _render_pad_layout_panel(records: list[WelltrackRecord]) -> None:
                 "%Y-%m-%d %H:%M:%S"
             )
             st.session_state["wt_pad_auto_applied_on_import"] = False
-            _clear_results()
+            _queue_surface_edit_feedback(
+                _changed_surface_well_names(records, updated_records),
+                source="pad_layout",
+            )
             st.toast("Координаты устьев обновлены по параметрам кустов.")
             st.rerun()
 

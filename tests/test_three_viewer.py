@@ -661,7 +661,7 @@ def test_viewer_template_highlights_collisions_for_selected_legend_well() -> Non
     assert "function syncSelectedCollisionHighlights()" in html
     assert "function setSelectedLegendWellNameKeys(keys)" in html
     assert 'setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, "well"));' in html
-    assert "setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, kind));" in html
+    assert 'kind === "pad" ? new Set() : legendWellNameKeysForItem(item, kind)' in html
     assert "item.dataset.collisionWellA = normalizedWellNameKey(collision.well_a);" in html
     assert "item.dataset.collisionWellB = normalizedWellNameKey(collision.well_b);" in html
     assert 'item.classList.toggle(\n              "is-related-legend-well",' in html
@@ -688,9 +688,30 @@ def test_viewer_template_supports_multiselect_edit_wells_from_legend() -> None:
 def test_viewer_template_focuses_camera_for_pad_legend_clicks() -> None:
     html = three_viewer._viewer_template_with_libraries()
 
-    assert 'setSelectedLegendWellNameKeys(legendWellNameKeysForItem(item, kind));' in html
+    assert 'kind === "pad" ? new Set() : legendWellNameKeysForItem(item, kind)' in html
     assert 'const targetBounds = focusTargets[String(item.id || "")];' in html
     assert 'focusViewerTarget(targetBounds, String(item.id || ""));' in html
+
+
+def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert 'id="edit-pad-summary"' not in html
+    assert "if (Number.isInteger(selectedEditPadIndex)) {\n            return [];\n          }" in html
+    assert "selectedEditWellIndices = new Set();" in html
+    assert "selectedEditWellIndex = null;" in html
+    assert "editLegendSelectionAnchorIndex = null;" in html
+    assert "setSelectedLegendWellNameKeys(new Set());" in html
+    assert 'kind === "pad" ? new Set() : legendWellNameKeysForItem(item, kind)' in html
+    assert 'String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";' in html
+    assert "const markerPoint = anchor.slice();" in html
+    assert "pointIndex: null," in html
+    assert 'point: marker.pointLabel || "S",' in html
+    assert "updateEditPadMarkerPosition(marker, anchor);" in html
+    assert "const startPoint = editPadDragStartAnchor || editPadDragMarker.dataPos;" in html
+    assert html.index("const meshes = editHandles") < html.index(
+        "const padMeshes = editPadMarkers"
+    )
 
 
 def test_orbit_controls_use_expected_mouse_bindings() -> None:

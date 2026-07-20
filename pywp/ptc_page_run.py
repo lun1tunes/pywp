@@ -31,7 +31,7 @@ from pywp.ptc_sidetrack_state import (
 
 __all__ = ["render_run_section"]
 
-_BATCH_AUTO_PARALLEL_DISABLED_MAX_WELLS = 3
+_BATCH_AUTO_PARALLEL_DISABLED_MAX_WELLS = 4
 _BATCH_AUTO_PARALLEL_FOUR_WORKERS_MIN_WELLS = 8
 
 
