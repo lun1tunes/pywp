@@ -5121,8 +5121,7 @@
             );
             if (kind === "pad" && isValidEditPadIndex(editablePadIndex)) {
               if (editModeActive) {
-                selectEditPad(editablePadIndex, { render: false });
-                requestRender();
+                selectEditPad(editablePadIndex, { focus: true });
                 return;
               }
               const padTargetBounds = focusTargets[String(item.id || "")];
@@ -6926,7 +6925,7 @@
         let editMoveScope = "point"; // "point" | "pair"
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
-        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], color}
+        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], color}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
@@ -7683,6 +7682,9 @@
           }
           if (marker.pickMesh) {
             marker.pickMesh.position.copy(position);
+          }
+          if (marker.selectionMesh) {
+            marker.selectionMesh.position.copy(position);
           }
           syncEditPadMarkerHover(marker);
         }
@@ -8923,6 +8925,22 @@
           originalMesh.visible = false;
           originalMesh.renderOrder = 12;
           scene.add(originalMesh);
+          const selectionMesh = new THREE.Mesh(
+            markerGeometry,
+            new THREE.MeshBasicMaterial({
+              color: "#ffffff",
+              wireframe: true,
+              transparent: true,
+              opacity: 0.98,
+              depthTest: false,
+              depthWrite: false,
+            }),
+          );
+          selectionMesh.position.copy(mesh.position);
+          selectionMesh.userData.lockViewerZGeometryScale = true;
+          selectionMesh.visible = false;
+          selectionMesh.renderOrder = 14;
+          scene.add(selectionMesh);
           const pickMesh = new THREE.Mesh(markerGeometry, pickMaterial);
           pickMesh.position.copy(mesh.position);
           pickMesh.userData.lockViewerZGeometryScale = true;
@@ -8935,6 +8953,7 @@
             mesh: mesh,
             pickMesh: pickMesh,
             originalMesh: originalMesh,
+            selectionMesh: selectionMesh,
             padIndex: padIndex,
             pointIndex: null,
             wellIndex: wellIndex,
@@ -9012,7 +9031,7 @@
           const selectedPad = marker.padIndex === selectedEditPadIndex;
           const markerScale = editHandleScale(
             marker.mesh ? marker.mesh.position : displayPoint(marker.dataPos),
-            selectedPad ? 30.0 : 22.0,
+            selectedPad ? 38.0 : 20.0,
           );
           if (marker.mesh) {
             marker.mesh.scale.setScalar(markerScale);
@@ -9021,7 +9040,7 @@
             marker.pickMesh.scale.setScalar(
               editHandleScale(
                 marker.pickMesh.position,
-                selectedPad ? 44.0 : 34.0,
+                selectedPad ? 56.0 : 34.0,
               ),
             );
           }
@@ -9029,7 +9048,15 @@
             marker.originalMesh.scale.setScalar(
                 editHandleScale(marker.originalMesh.position, 14.0),
               );
-            }
+          }
+          if (marker.selectionMesh) {
+            marker.selectionMesh.scale.setScalar(
+              editHandleScale(
+                marker.selectionMesh.position,
+                selectedPad ? 64.0 : 42.0,
+              ),
+            );
+          }
           });
         }
 
@@ -9142,20 +9169,27 @@
           const dirtyPad = Boolean(editPadDirtyFlags[marker.padIndex]);
           marker.mesh.visible = editModeActive;
           if (marker.mesh && marker.mesh.material) {
-            marker.mesh.material.opacity = selectedPad ? 1.0 : 0.72;
+            marker.mesh.material.opacity = selectedPad ? 1.0 : 0.58;
             marker.mesh.material.depthTest = false;
             marker.mesh.material.needsUpdate = true;
           }
           if (marker.pickMesh) {
             marker.pickMesh.visible = editModeActive;
           }
-            if (marker.originalMesh) {
-              marker.originalMesh.visible = editModeActive && selectedPad && dirtyPad;
-              if (marker.originalMesh.material) {
-                marker.originalMesh.material.opacity = selectedPad ? 0.92 : 0.78;
-                marker.originalMesh.material.needsUpdate = true;
-              }
+          if (marker.originalMesh) {
+            marker.originalMesh.visible = editModeActive && selectedPad && dirtyPad;
+            if (marker.originalMesh.material) {
+              marker.originalMesh.material.opacity = selectedPad ? 0.92 : 0.78;
+              marker.originalMesh.material.needsUpdate = true;
             }
+          }
+          if (marker.selectionMesh) {
+            marker.selectionMesh.visible = editModeActive && selectedPad;
+            if (marker.selectionMesh.material) {
+              marker.selectionMesh.material.opacity = selectedPad ? 0.98 : 0.0;
+              marker.selectionMesh.material.needsUpdate = true;
+            }
+          }
           });
           updateHandleScales();
           setEditableBaseDimmed(editModeActive, selectedIndex);

@@ -691,6 +691,7 @@ def test_viewer_template_focuses_camera_for_pad_legend_clicks() -> None:
     assert 'kind === "pad" ? new Set() : legendWellNameKeysForItem(item, kind)' in html
     assert 'const targetBounds = focusTargets[String(item.id || "")];' in html
     assert 'focusViewerTarget(targetBounds, String(item.id || ""));' in html
+    assert 'selectEditPad(editablePadIndex, { focus: true });' in html
 
 
 def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
@@ -709,6 +710,8 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert 'point: marker.pointLabel || "S",' in html
     assert "updateEditPadMarkerPosition(marker, anchor);" in html
     assert "const startPoint = editPadDragStartAnchor || editPadDragMarker.dataPos;" in html
+    assert "selectionMesh: selectionMesh," in html
+    assert "marker.selectionMesh.visible = editModeActive && selectedPad;" in html
     assert html.index("const meshes = editHandles") < html.index(
         "const padMeshes = editPadMarkers"
     )
