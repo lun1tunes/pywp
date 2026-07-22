@@ -182,6 +182,73 @@ def test_survey_download_uses_export_stations_without_changing_display(
     )
 
 
+def test_survey_download_exports_true_and_grid_azimuth_columns(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {"downloads": []}
+
+    def fake_dataframe(_frame, **_kwargs) -> None:
+        return None
+
+    def fake_download_button(_label, *, data, **_kwargs) -> None:
+        captured["downloads"].append(
+            {
+                "label": str(_label),
+                "data": data,
+            }
+        )
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    import pywp.ui_well_panels as panels
+
+    monkeypatch.setattr(panels.st, "dataframe", fake_dataframe)
+    monkeypatch.setattr(panels.st, "download_button", fake_download_button)
+    monkeypatch.setattr(
+        panels.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn()),
+    )
+    monkeypatch.setattr(
+        panels.st.column_config,
+        "NumberColumn",
+        lambda label, **kwargs: {"label": label, **kwargs},
+    )
+    monkeypatch.setattr(
+        panels.st.column_config,
+        "TextColumn",
+        lambda label, **kwargs: {"label": label, **kwargs},
+    )
+
+    render_survey_table_with_download(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0],
+                "X_m": [10.0, 20.0],
+                "Y_m": [20.0, 30.0],
+                "Z_m": [0.0, 50.0],
+                "AZI_deg": [10.0, 20.0],
+            }
+        ),
+        export_azi_true_deg=np.array([11.5, 22.5]),
+        export_azi_grid_deg=np.array([9.5, 19.5]),
+    )
+
+    csv_export = pd.read_csv(BytesIO(captured["downloads"][0]["data"]))
+    assert "AZI_deg" not in csv_export.columns
+    assert csv_export["AZI_TN_deg"].tolist() == [11.5, 22.5]
+    assert csv_export["AZI_GN_deg"].tolist() == [9.5, 19.5]
+
+    excel_export = pd.read_excel(BytesIO(captured["downloads"][1]["data"]))
+    assert excel_export["AZI_TN_deg"].tolist() == [11.5, 22.5]
+    assert excel_export["AZI_GN_deg"].tolist() == [9.5, 19.5]
+
+
 def test_trajectory_panel_uses_local_three_for_default_3d(monkeypatch) -> None:
     import pywp.ui_well_panels as panels
 

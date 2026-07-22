@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -9,6 +10,7 @@ from pywp import ptc_core
 from pywp import ptc_page_results
 from pywp import welltrack_batch
 from pywp.anticollision import AntiCollisionAnalysis
+from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 
 
@@ -2072,6 +2074,110 @@ def test_render_success_tabs_hides_plotly_panels_for_single_well_constructor(
     )
 
     assert calls["plots_kwargs"]["show_plotly_panels"] is True
+
+
+def test_render_success_tabs_passes_true_and_grid_azimuths_to_single_well_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+    success = SimpleNamespace(
+        name="WELL-A",
+        surface=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        t1=SimpleNamespace(x=100.0, y=0.0, z=1000.0),
+        t3=SimpleNamespace(x=200.0, y=0.0, z=1100.0),
+        target_pairs=(),
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 1000.0],
+                "X_m": [0.0, 200.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 1100.0],
+                "INC_deg": [0.0, 90.0],
+                "AZI_deg": [0.0, 90.0],
+                "DLS_deg_per_30m": [0.0, 0.0],
+                "segment": ["VERTICAL", "HORIZONTAL"],
+            }
+        ),
+        summary={},
+        config=SimpleNamespace(dls_limits_deg_per_30m={}),
+        azimuth_deg=90.0,
+        md_t1_m=1000.0,
+        runtime_s=1.0,
+        md_postcheck_message="",
+        md_postcheck_exceeded=False,
+    )
+
+    class FakeStreamlit:
+        session_state = {"wt_results_view_mode": "Отдельная скважина"}
+
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Отдельная скважина"
+
+        def selectbox(self, _label: str, *, options: list[str]) -> str:
+            assert options == ["WELL-A"]
+            return "WELL-A"
+
+    monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
+    monkeypatch.setattr(
+        ptc_page_results,
+        "get_input_crs",
+        lambda: CoordinateSystem.PULKOVO_1942_ZONE_16,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "get_selected_crs",
+        lambda: CoordinateSystem.PULKOVO_1942_ZONE_16,
+    )
+    monkeypatch.setattr(ptc_page_results, "should_auto_convert", lambda: False)
+    monkeypatch.setattr(
+        ptc_page_results,
+        "csv_export_crs",
+        lambda *_args, **_kwargs: CoordinateSystem.PULKOVO_1942_ZONE_16,
+    )
+    monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
+    monkeypatch.setattr(
+        ptc_page_results.wt,
+        "_find_selected_success",
+        lambda **_kwargs: success,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "_single_well_pilot_context",
+        lambda **_kwargs: (None, None, ()),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_key_metrics",
+        lambda **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_result_plots",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ptc_page_results.ptc_batch_results,
+        "survey_export_azimuth_columns",
+        lambda **_kwargs: (
+            np.array([11.5, 22.5]),
+            np.array([9.5, 19.5]),
+        ),
+    )
+    monkeypatch.setattr(
+        ptc_page_results,
+        "render_result_tables",
+        lambda **kwargs: calls.setdefault("table_kwargs", kwargs),
+    )
+
+    ptc_page_results.render_success_tabs(
+        successes=[success],
+        records=[],
+        summary_rows=[],
+    )
+
+    table_kwargs = calls["table_kwargs"]
+    assert table_kwargs["survey_export_azi_true_deg"].tolist() == [11.5, 22.5]
+    assert table_kwargs["survey_export_azi_grid_deg"].tolist() == [9.5, 19.5]
 
 
 def test_render_success_tabs_keeps_single_well_plots_when_calc_params_are_stale(

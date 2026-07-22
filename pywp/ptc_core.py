@@ -9988,6 +9988,26 @@ def _build_batch_survey_csv(
     )
 
 
+def _build_batch_survey_excel(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_survey_excel(
+        successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs,
+        transform_stations_func=transform_stations_to_crs,
+        crs_display_suffix_func=get_crs_display_suffix,
+        survey_export_dataframe_func=survey_export_dataframe,
+        dls_to_pi_func=dls_to_pi,
+    )
+
+
 def _build_batch_survey_welltrack(
     successes: list[SuccessfulWellPlan],
     *,
@@ -10013,6 +10033,25 @@ def _build_batch_target_csv(
     source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> bytes:
     return ptc_batch_results.build_batch_target_csv(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs,
+        transform_xy_func=transform_xy_to_crs,
+        crs_display_suffix_func=get_crs_display_suffix,
+        survey_export_dataframe_func=survey_export_dataframe,
+    )
+
+
+def _build_batch_target_excel(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_target_excel(
         records,
         target_crs=target_crs,
         auto_convert=auto_convert,
@@ -10138,6 +10177,54 @@ def _build_batch_target_dev_file(
     )
 
 
+def _build_batch_export_package_files(
+    *,
+    successes: list[SuccessfulWellPlan] | None = None,
+    records: list[WelltrackRecord] | None = None,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> tuple[ptc_batch_results.ExportFilePayload, ...]:
+    return ptc_batch_results.build_batch_export_package_files(
+        successes=successes,
+        records=records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        reference_wells=_reference_wells_from_state(),
+        csv_export_crs_func=csv_export_crs,
+        transform_stations_func=transform_stations_to_crs,
+        transform_xy_func=transform_xy_to_crs,
+        crs_display_suffix_func=get_crs_display_suffix,
+        survey_export_dataframe_func=survey_export_dataframe,
+        dls_to_pi_func=dls_to_pi,
+    )
+
+
+def _build_batch_export_package_zip(
+    *,
+    successes: list[SuccessfulWellPlan] | None = None,
+    records: list[WelltrackRecord] | None = None,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+) -> bytes:
+    return ptc_batch_results.build_batch_export_package_zip(
+        successes=successes,
+        records=records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        reference_wells=_reference_wells_from_state(),
+        csv_export_crs_func=csv_export_crs,
+        transform_stations_func=transform_stations_to_crs,
+        transform_xy_func=transform_xy_to_crs,
+        crs_display_suffix_func=get_crs_display_suffix,
+        survey_export_dataframe_func=survey_export_dataframe,
+        dls_to_pi_func=dls_to_pi,
+    )
+
+
 def _render_batch_summary(
     summary_rows: list[dict[str, object]],
     *,
@@ -10156,15 +10243,19 @@ def _render_batch_summary(
         arrow_safe_text_dataframe_func=arrow_safe_text_dataframe,
         batch_summary_display_df_func=_batch_summary_display_df,
         build_batch_survey_csv_func=_build_batch_survey_csv,
+        build_batch_survey_excel_func=_build_batch_survey_excel,
         build_batch_survey_welltrack_func=_build_batch_survey_welltrack,
         build_batch_survey_dev_files_func=_build_batch_survey_dev_files,
         build_batch_survey_dev_7z_func=_build_batch_survey_dev_7z,
         build_batch_survey_dev_file_func=_build_batch_survey_dev_file,
         build_batch_target_csv_func=_build_batch_target_csv,
+        build_batch_target_excel_func=_build_batch_target_excel,
         build_batch_target_welltrack_func=_build_batch_target_welltrack,
         build_batch_target_dev_files_func=_build_batch_target_dev_files,
         build_batch_target_dev_7z_func=_build_batch_target_dev_7z,
         build_batch_target_dev_file_func=_build_batch_target_dev_file,
+        build_batch_export_package_files_func=_build_batch_export_package_files,
+        build_batch_export_package_zip_func=_build_batch_export_package_zip,
         render_small_note_func=render_small_note,
     )
 

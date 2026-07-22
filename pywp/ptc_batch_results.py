@@ -63,6 +63,7 @@ __all__ = [
     "find_selected_success",
     "has_md_postcheck_warning",
     "pilot_sidetrack_summary_df",
+    "survey_export_azimuth_columns",
 ]
 
 BATCH_SUMMARY_RENAME_COLUMNS: dict[str, str] = {
@@ -811,7 +812,7 @@ def _build_batch_survey_export_frame(
             if source_stations.empty or export_stations.empty:
                 continue
 
-        azimuth_true_deg, azimuth_grid_deg = _survey_export_azimuth_columns(
+        azimuth_true_deg, azimuth_grid_deg = survey_export_azimuth_columns(
             source_stations=source_stations,
             export_stations=export_stations,
             source_crs=source_crs,
@@ -1145,7 +1146,7 @@ def _callable_accepts_keyword(func: Callable[..., object], keyword: str) -> bool
     )
 
 
-def _survey_export_azimuth_columns(
+def survey_export_azimuth_columns(
     *,
     source_stations: pd.DataFrame,
     export_stations: pd.DataFrame,
@@ -1793,7 +1794,7 @@ def _unique_export_file_name(
 
 
 def _safe_export_stem(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(name).strip()).strip("._")
+    return re.sub(r"[^\w.-]+", "_", str(name).strip(), flags=re.UNICODE).strip("._")
 
 
 def batch_summary_display_df(summary_df: pd.DataFrame) -> pd.DataFrame:

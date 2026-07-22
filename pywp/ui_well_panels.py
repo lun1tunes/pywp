@@ -311,6 +311,8 @@ def render_survey_table_with_download(
     xy_unit: str = "м",
     export_xy_label_suffix: str | None = None,
     export_xy_unit: str | None = None,
+    export_azi_true_deg: object | None = None,
+    export_azi_grid_deg: object | None = None,
 ) -> None:
     def _prepare_survey_df(source: pd.DataFrame) -> pd.DataFrame:
         prepared = source.copy()
@@ -359,6 +361,8 @@ def render_survey_table_with_download(
         ),
         xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
         include_tvd=True,
+        azi_true_deg=export_azi_true_deg,
+        azi_grid_deg=export_azi_grid_deg,
     )
     excel_file_name = str(Path(file_name).with_suffix(".xlsx").name)
     csv_col, excel_col = st.columns(2, gap="small")

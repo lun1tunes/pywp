@@ -524,6 +524,33 @@ def test_build_batch_export_package_zip_collects_available_exports() -> None:
     assert "target_dev/WELL-A.dev" in names
 
 
+def test_build_batch_export_package_zip_preserves_cyrillic_file_names() -> None:
+    payload = ptc_batch_results.build_batch_export_package_zip(
+        successes=[
+            _success(
+                name="СКВ-01",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 100.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [20.0, 30.0],
+                        "Z_m": [0.0, 90.0],
+                        "INC_deg": [0.0, 15.0],
+                        "AZI_deg": [0.0, 30.0],
+                    }
+                ),
+            )
+        ],
+        records=[_record(name="ЦЕЛЬ-01")],
+    )
+
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        names = set(archive.namelist())
+
+    assert "survey_dev/СКВ-01.dev" in names
+    assert "target_dev/ЦЕЛЬ-01.dev" in names
+
+
 def test_build_batch_survey_welltrack_exports_calculated_station_rows() -> None:
     payload = ptc_batch_results.build_batch_survey_welltrack(
         [

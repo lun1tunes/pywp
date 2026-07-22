@@ -26,11 +26,20 @@ __all__ = ["render_batch_summary"]
 
 BuildBatchSurveyCsvFunc = Callable[..., bytes]
 BuildBatchSurveyPayloadFunc = Callable[..., bytes]
+BuildBatchExportFilesFunc = Callable[..., tuple[ptc_batch_results.ExportFilePayload, ...]]
 BuildBatchDevFilesFunc = Callable[..., tuple[ptc_batch_results.DevExportFilePayload, ...]]
 RenderSmallNoteFunc = Callable[[str], None]
+_SURVEY_DOWNLOAD_FORMAT_EXCEL = "Excel"
+_SURVEY_DOWNLOAD_FORMAT_CSV = "CSV"
+_SURVEY_DOWNLOAD_FORMAT_WELLTRACK = "WELLTRACK"
 _SURVEY_DOWNLOAD_FORMAT_DEV = ".dev (7z)"
 _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP = ".dev (ZIP)"
-_SURVEY_DOWNLOAD_FORMATS = ("CSV", "WELLTRACK", _SURVEY_DOWNLOAD_FORMAT_DEV)
+_SURVEY_DOWNLOAD_FORMATS = (
+    _SURVEY_DOWNLOAD_FORMAT_EXCEL,
+    _SURVEY_DOWNLOAD_FORMAT_CSV,
+    _SURVEY_DOWNLOAD_FORMAT_WELLTRACK,
+    _SURVEY_DOWNLOAD_FORMAT_DEV,
+)
 _EXPORT_KIND_TRAJECTORIES = "Траектории"
 _EXPORT_KIND_TARGETS = "Цели"
 _EXPORT_KINDS = (_EXPORT_KIND_TRAJECTORIES, _EXPORT_KIND_TARGETS)
@@ -44,7 +53,7 @@ _DEV_EXPORT_FEEDBACK_KEY = "wt_dev_export_feedback"
 @dataclass(frozen=True)
 class _PendingDevExportRequest:
     directory: str
-    files: tuple[ptc_batch_results.DevExportFilePayload, ...]
+    files: tuple[ptc_batch_results.ExportFilePayload, ...]
     conflict_file_names: tuple[str, ...]
     title: str
 
@@ -88,6 +97,9 @@ def render_batch_summary(
     build_batch_survey_csv_func: BuildBatchSurveyCsvFunc = (
         ptc_batch_results.build_batch_survey_csv
     ),
+    build_batch_survey_excel_func: BuildBatchSurveyCsvFunc = (
+        ptc_batch_results.build_batch_survey_excel
+    ),
     build_batch_survey_welltrack_func: BuildBatchSurveyPayloadFunc = (
         ptc_batch_results.build_batch_survey_welltrack
     ),
@@ -103,6 +115,9 @@ def render_batch_summary(
     build_batch_target_csv_func: BuildBatchSurveyCsvFunc = (
         ptc_batch_results.build_batch_target_csv
     ),
+    build_batch_target_excel_func: BuildBatchSurveyCsvFunc = (
+        ptc_batch_results.build_batch_target_excel
+    ),
     build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc = (
         ptc_batch_results.build_batch_target_welltrack
     ),
@@ -114,6 +129,12 @@ def render_batch_summary(
     ),
     build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc = (
         ptc_batch_results.build_batch_target_dev_file
+    ),
+    build_batch_export_package_files_func: BuildBatchExportFilesFunc = (
+        ptc_batch_results.build_batch_export_package_files
+    ),
+    build_batch_export_package_zip_func: BuildBatchSurveyPayloadFunc = (
+        ptc_batch_results.build_batch_export_package_zip
     ),
     render_small_note_func: RenderSmallNoteFunc = render_small_note,
 ) -> pd.DataFrame:
@@ -262,16 +283,29 @@ def render_batch_summary(
         auto_convert=auto_convert,
         source_crs=source_crs,
         build_batch_survey_csv_func=build_batch_survey_csv_func,
+        build_batch_survey_excel_func=build_batch_survey_excel_func,
         build_batch_survey_welltrack_func=build_batch_survey_welltrack_func,
         build_batch_survey_dev_files_func=build_batch_survey_dev_files_func,
         build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
         build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
         build_batch_target_csv_func=build_batch_target_csv_func,
+        build_batch_target_excel_func=build_batch_target_excel_func,
         build_batch_target_welltrack_func=build_batch_target_welltrack_func,
         build_batch_target_dev_files_func=build_batch_target_dev_files_func,
         build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
         build_batch_target_dev_file_func=build_batch_target_dev_file_func,
     )
+    _render_package_downloads(
+        state=state,
+        st_module=st_module,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        build_batch_export_package_files_func=build_batch_export_package_files_func,
+        build_batch_export_package_zip_func=build_batch_export_package_zip_func,
+    )
+    _show_dev_export_feedback(state=state, st_module=st_module)
+    _render_dev_export_overwrite_dialog(state=state, st_module=st_module)
     return summary_df
 
 
@@ -283,11 +317,13 @@ def _render_survey_downloads(
     auto_convert: bool,
     source_crs: CoordinateSystem,
     build_batch_survey_csv_func: BuildBatchSurveyCsvFunc,
+    build_batch_survey_excel_func: BuildBatchSurveyCsvFunc,
     build_batch_survey_welltrack_func: BuildBatchSurveyPayloadFunc,
     build_batch_survey_dev_files_func: BuildBatchDevFilesFunc,
     build_batch_survey_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_survey_dev_file_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
+    build_batch_target_excel_func: BuildBatchSurveyCsvFunc,
     build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_files_func: BuildBatchDevFilesFunc,
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
@@ -322,6 +358,11 @@ def _render_survey_downloads(
                 horizontal=True,
             )
         )
+    st_module.text_input(
+        "Папка для выгрузки",
+        key=_DEV_EXPORT_DIRECTORY_KEY,
+        placeholder=r"E:\Exports\Batch",
+    )
     if export_kind == _EXPORT_KIND_TARGETS:
         _render_target_downloads(
             state=state,
@@ -331,6 +372,7 @@ def _render_survey_downloads(
             source_crs=source_crs,
             export_format=export_format,
             build_batch_target_csv_func=build_batch_target_csv_func,
+            build_batch_target_excel_func=build_batch_target_excel_func,
             build_batch_target_welltrack_func=build_batch_target_welltrack_func,
             build_batch_target_dev_files_func=build_batch_target_dev_files_func,
             build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
@@ -366,6 +408,7 @@ def _render_survey_downloads(
     export_config = _survey_download_config(
         export_format=export_format,
         build_batch_survey_csv_func=build_batch_survey_csv_func,
+        build_batch_survey_excel_func=build_batch_survey_excel_func,
         build_batch_survey_welltrack_func=build_batch_survey_welltrack_func,
         build_batch_survey_dev_7z_func=build_batch_survey_dev_7z_func,
         build_batch_survey_dev_file_func=build_batch_survey_dev_file_func,
@@ -479,6 +522,27 @@ def _render_survey_downloads(
             disable_all=not successes,
             disable_selected=not selected_successes,
         )
+        return
+    _render_directory_export_controls(
+        state=state,
+        st_module=st_module,
+        title="Сохранение траекторий в папку",
+        build_all_files=lambda: _single_export_file_payload(
+            file_name=export_config.all_file_name,
+            data=survey_data,
+            display_name=export_config.all_label,
+        ),
+        build_selected_files=lambda: _single_export_file_payload(
+            file_name=selected_file_name,
+            data=selected_survey_data,
+            display_name=selected_label,
+        ),
+        save_all_label="Сохранить все файлы",
+        save_selected_label="Сохранить выбранные файлы",
+        disable_all=not survey_data,
+        disable_selected=not selected_survey_data,
+        caption=f"Формат `{export_format}` можно сохранить напрямую в папку.",
+    )
 
 
 def _render_target_downloads(
@@ -490,6 +554,7 @@ def _render_target_downloads(
     source_crs: CoordinateSystem,
     export_format: str,
     build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
+    build_batch_target_excel_func: BuildBatchSurveyCsvFunc,
     build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_files_func: BuildBatchDevFilesFunc,
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
@@ -519,6 +584,7 @@ def _render_target_downloads(
     export_config = _target_download_config(
         export_format=export_format,
         build_batch_target_csv_func=build_batch_target_csv_func,
+        build_batch_target_excel_func=build_batch_target_excel_func,
         build_batch_target_welltrack_func=build_batch_target_welltrack_func,
         build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
         build_batch_target_dev_file_func=build_batch_target_dev_file_func,
@@ -633,6 +699,27 @@ def _render_target_downloads(
             disable_all=not records,
             disable_selected=not selected_records,
         )
+        return
+    _render_directory_export_controls(
+        state=state,
+        st_module=st_module,
+        title="Сохранение целей в папку",
+        build_all_files=lambda: _single_export_file_payload(
+            file_name=export_config.all_file_name,
+            data=target_data,
+            display_name=export_config.all_label,
+        ),
+        build_selected_files=lambda: _single_export_file_payload(
+            file_name=selected_file_name,
+            data=selected_target_data,
+            display_name=selected_label,
+        ),
+        save_all_label="Сохранить все файлы",
+        save_selected_label="Сохранить выбранные файлы",
+        disable_all=not target_data,
+        disable_selected=not selected_target_data,
+        caption=f"Формат `{export_format}` можно сохранить напрямую в папку.",
+    )
 
 
 def _normalize_download_format(
@@ -816,11 +903,21 @@ def _survey_download_config(
     *,
     export_format: str,
     build_batch_survey_csv_func: BuildBatchSurveyCsvFunc,
+    build_batch_survey_excel_func: BuildBatchSurveyCsvFunc,
     build_batch_survey_welltrack_func: BuildBatchSurveyPayloadFunc,
     build_batch_survey_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_survey_dev_file_func: BuildBatchSurveyPayloadFunc,
 ) -> _SurveyDownloadConfig:
-    if export_format == "WELLTRACK":
+    if export_format == _SURVEY_DOWNLOAD_FORMAT_EXCEL:
+        return _SurveyDownloadConfig(
+            builder=build_batch_survey_excel_func,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            all_label="Скачать Excel траекторий всех скважин",
+            selected_label="Скачать Excel выбранных скважин",
+            all_file_name="welltrack_survey_all.xlsx",
+            selected_file_name="welltrack_survey_selected.xlsx",
+        )
+    if export_format == _SURVEY_DOWNLOAD_FORMAT_WELLTRACK:
         return _SurveyDownloadConfig(
             builder=build_batch_survey_welltrack_func,
             mime="text/plain",
@@ -855,11 +952,21 @@ def _target_download_config(
     *,
     export_format: str,
     build_batch_target_csv_func: BuildBatchSurveyCsvFunc,
+    build_batch_target_excel_func: BuildBatchSurveyCsvFunc,
     build_batch_target_welltrack_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
 ) -> _SurveyDownloadConfig:
-    if export_format == "WELLTRACK":
+    if export_format == _SURVEY_DOWNLOAD_FORMAT_EXCEL:
+        return _SurveyDownloadConfig(
+            builder=build_batch_target_excel_func,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            all_label="Скачать Excel целей всех скважин",
+            selected_label="Скачать Excel целей выбранных скважин",
+            all_file_name="welltrack_targets_all.xlsx",
+            selected_file_name="welltrack_targets_selected.xlsx",
+        )
+    if export_format == _SURVEY_DOWNLOAD_FORMAT_WELLTRACK:
         return _SurveyDownloadConfig(
             builder=build_batch_target_welltrack_func,
             mime="text/plain",
@@ -930,26 +1037,167 @@ def _selected_download_payload(
     )
 
 
-def _render_dev_directory_export_controls(
+def _render_package_downloads(
+    *,
+    state: MutableMapping[str, object],
+    st_module: Any,
+    target_crs: CoordinateSystem,
+    auto_convert: bool,
+    source_crs: CoordinateSystem,
+    build_batch_export_package_files_func: BuildBatchExportFilesFunc,
+    build_batch_export_package_zip_func: BuildBatchSurveyPayloadFunc,
+) -> None:
+    successes = list(state.get("wt_successes") or [])
+    records = list(state.get("wt_records") or state.get("wt_records_original") or [])
+    st_module.markdown("### Пакетная выгрузка")
+    st_module.caption(
+        "Пакет собирает траектории и цели в CSV, Excel, WELLTRACK и .dev."
+    )
+    item_count = _success_station_row_count(successes) + _record_point_count(records)
+    if item_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
+        prepare_key = "wt_prepare_package_download_payloads"
+        state.setdefault(prepare_key, False)
+        prepare_payloads = bool(
+            st_module.toggle(
+                "Подготовить пакет выгрузки",
+                key=prepare_key,
+                help=(
+                    "Для больших наборов пакет готовится по кнопке, "
+                    "чтобы страница не тормозила."
+                ),
+            )
+        )
+        if not prepare_payloads:
+            st_module.caption(
+                f"Пакет не сформирован автоматически: {item_count} строк и точек. "
+                "Включите подготовку только перед выгрузкой."
+            )
+            return
+    package_signature = _download_signature(
+        export_kind="package",
+        export_format="zip",
+        target_crs=target_crs,
+        source_crs=source_crs,
+        auto_convert=auto_convert,
+        item_signature=(
+            _successes_signature(successes),
+            _records_signature(records),
+        ),
+    )
+    package_data = _download_payload_from_state_cache(
+        state=state,
+        cache_key="wt_export_package_zip_payload_cache",
+        signature=package_signature,
+        build_payload=lambda: build_batch_export_package_zip_func(
+            successes=successes,
+            records=records,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
+        ),
+    )
+    action_cols = st_module.columns(2, gap="small")
+    with action_cols[0]:
+        st_module.download_button(
+            "Скачать пакет выгрузки",
+            data=package_data or b"",
+            file_name="welltrack_export_package.zip",
+            mime="application/zip",
+            icon=":material/download:",
+            use_container_width=True,
+            disabled=not package_data,
+        )
+    with action_cols[1]:
+        save_clicked = st_module.button(
+            "Сохранить пакет в папку",
+            icon=":material/folder_open:",
+            width="stretch",
+            disabled=not successes and not records,
+        )
+    if save_clicked:
+        file_signature = _download_signature(
+            export_kind="package",
+            export_format="folder",
+            target_crs=target_crs,
+            source_crs=source_crs,
+            auto_convert=auto_convert,
+            item_signature=(
+                _successes_signature(successes),
+                _records_signature(records),
+            ),
+        )
+        package_files = _download_payload_from_state_cache(
+            state=state,
+            cache_key="wt_export_package_files_payload_cache",
+            signature=file_signature,
+            build_payload=lambda: build_batch_export_package_files_func(
+                successes=successes,
+                records=records,
+                target_crs=target_crs,
+                auto_convert=auto_convert,
+                source_crs=source_crs,
+            ),
+        )
+        _start_dev_directory_export(
+            state=state,
+            build_files=lambda: package_files,
+            title="Сохранение пакетной выгрузки в папку",
+        )
+        _rerun_summary_fragment(st_module)
+
+
+def _single_export_file_payload(
+    *,
+    file_name: str,
+    data: bytes,
+    display_name: str,
+) -> tuple[ptc_batch_results.ExportFilePayload, ...]:
+    if not data:
+        return ()
+    return (
+        ptc_batch_results.ExportFilePayload(
+            file_name=str(file_name),
+            data=bytes(data),
+            display_name=str(display_name),
+        ),
+    )
+
+
+def _export_file_payloads_from_dev_files(
+    files: tuple[ptc_batch_results.DevExportFilePayload, ...],
+) -> tuple[ptc_batch_results.ExportFilePayload, ...]:
+    payloads: list[ptc_batch_results.ExportFilePayload] = []
+    for file_payload in files:
+        display_name = (
+            str(getattr(file_payload, "well_name", "")).strip()
+            or str(getattr(file_payload, "file_name", "")).strip()
+        )
+        payloads.append(
+            ptc_batch_results.ExportFilePayload(
+                file_name=str(file_payload.file_name),
+                data=bytes(file_payload.data),
+                display_name=display_name,
+            )
+        )
+    return tuple(payloads)
+
+
+def _render_directory_export_controls(
     *,
     state: MutableMapping[str, object],
     st_module: Any,
     title: str,
-    build_all_files: Callable[[], tuple[ptc_batch_results.DevExportFilePayload, ...]],
+    build_all_files: Callable[[], tuple[ptc_batch_results.ExportFilePayload, ...]],
     build_selected_files: Callable[
-        [], tuple[ptc_batch_results.DevExportFilePayload, ...]
+        [], tuple[ptc_batch_results.ExportFilePayload, ...]
     ],
     save_all_label: str,
     save_selected_label: str,
     disable_all: bool,
     disable_selected: bool,
+    caption: str,
 ) -> None:
-    st_module.caption("`.dev` файлы можно сохранить в папку без архива.")
-    st_module.text_input(
-        "Папка для .dev",
-        key=_DEV_EXPORT_DIRECTORY_KEY,
-        placeholder=r"E:\Exports\DEV",
-    )
+    st_module.caption(caption)
     action_cols = st_module.columns(2, gap="small")
     with action_cols[0]:
         save_all_clicked = st_module.button(
@@ -979,18 +1227,48 @@ def _render_dev_directory_export_controls(
             title=title,
         )
         _rerun_summary_fragment(st_module)
-    _show_dev_export_feedback(state=state, st_module=st_module)
-    _render_dev_export_overwrite_dialog(state=state, st_module=st_module)
+
+
+def _render_dev_directory_export_controls(
+    *,
+    state: MutableMapping[str, object],
+    st_module: Any,
+    title: str,
+    build_all_files: Callable[[], tuple[ptc_batch_results.DevExportFilePayload, ...]],
+    build_selected_files: Callable[
+        [], tuple[ptc_batch_results.DevExportFilePayload, ...]
+    ],
+    save_all_label: str,
+    save_selected_label: str,
+    disable_all: bool,
+    disable_selected: bool,
+) -> None:
+    _render_directory_export_controls(
+        state=state,
+        st_module=st_module,
+        title=title,
+        build_all_files=lambda: _export_file_payloads_from_dev_files(
+            build_all_files()
+        ),
+        build_selected_files=lambda: _export_file_payloads_from_dev_files(
+            build_selected_files()
+        ),
+        save_all_label=save_all_label,
+        save_selected_label=save_selected_label,
+        disable_all=disable_all,
+        disable_selected=disable_selected,
+        caption="`.dev` файлы можно сохранить в папку без архива.",
+    )
 
 
 def _start_dev_directory_export(
     *,
     state: MutableMapping[str, object],
-    build_files: Callable[[], tuple[ptc_batch_results.DevExportFilePayload, ...]],
+    build_files: Callable[[], tuple[ptc_batch_results.ExportFilePayload, ...]],
     title: str,
 ) -> None:
     raw_directory = str(state.get(_DEV_EXPORT_DIRECTORY_KEY, "")).strip()
-    directory, error_message = _validated_dev_export_directory(raw_directory)
+    directory, error_message = _validated_export_directory(raw_directory)
     if error_message is not None or directory is None:
         _set_dev_export_feedback(
             state=state,
@@ -1005,7 +1283,7 @@ def _start_dev_directory_export(
         _set_dev_export_feedback(
             state=state,
             level="warning",
-            message="Нет .dev файлов для сохранения в выбранной выгрузке.",
+            message="Нет файлов для сохранения в выбранной выгрузке.",
         )
         state.pop(_DEV_EXPORT_PENDING_KEY, None)
         return
@@ -1031,7 +1309,7 @@ def _start_dev_directory_export(
         _set_dev_export_feedback(
             state=state,
             level="error",
-            message=f"Не удалось сохранить .dev файлы: {exc}",
+            message=f"Не удалось сохранить файлы выгрузки: {exc}",
         )
         state.pop(_DEV_EXPORT_PENDING_KEY, None)
         return
@@ -1039,7 +1317,7 @@ def _start_dev_directory_export(
     _set_dev_export_feedback(
         state=state,
         level="success",
-        message=f"Сохранено .dev файлов: {len(files)}. Папка: {directory}",
+        message=f"Сохранено файлов: {len(files)}. Папка: {directory}",
     )
 
 
@@ -1060,11 +1338,9 @@ def _render_dev_export_overwrite_dialog(
     )
 
     def _render_content() -> None:
-        st_module.write("В папке уже есть .dev файлы с такими именами:")
+        st_module.write("В папке уже есть файлы с такими именами:")
         for file_payload in conflict_items:
-            st_module.write(
-                f"- {file_payload.well_name} ({file_payload.file_name})"
-            )
+            st_module.write(f"- {_export_conflict_item_label(file_payload)}")
         action_cols = st_module.columns(2, gap="small")
         with action_cols[0]:
             confirm_clicked = st_module.button(
@@ -1090,7 +1366,7 @@ def _render_dev_export_overwrite_dialog(
                 _set_dev_export_feedback(
                     state=state,
                     level="error",
-                    message=f"Не удалось заменить .dev файлы: {exc}",
+                    message=f"Не удалось заменить файлы выгрузки: {exc}",
                 )
                 _rerun_summary_fragment(st_module)
                 return
@@ -1099,7 +1375,7 @@ def _render_dev_export_overwrite_dialog(
                 state=state,
                 level="success",
                 message=(
-                    f"Сохранено .dev файлов: {len(pending.files)}. "
+                    f"Сохранено файлов: {len(pending.files)}. "
                     f"Заменено: {len(conflict_items)}."
                 ),
             )
@@ -1109,7 +1385,7 @@ def _render_dev_export_overwrite_dialog(
             _set_dev_export_feedback(
                 state=state,
                 level="info",
-                message="Сохранение .dev файлов отменено.",
+                message="Сохранение файлов отменено.",
             )
             _rerun_summary_fragment(st_module)
 
@@ -1123,9 +1399,35 @@ def _render_dev_export_overwrite_dialog(
         return
 
     st_module.warning(
-        "Нужна замена существующих .dev файлов. Подтвердите сохранение ниже."
+        "Нужна замена существующих файлов. Подтвердите сохранение ниже."
     )
     _render_content()
+
+
+def _export_conflict_item_label(
+    file_payload: ptc_batch_results.ExportFilePayload,
+) -> str:
+    file_name = str(file_payload.file_name)
+    display_name = str(getattr(file_payload, "display_name", "")).strip()
+    if display_name and display_name != file_name:
+        return f"{display_name} ({file_name})"
+    return file_name
+
+
+def _validated_export_directory(raw_path: str) -> tuple[Path | None, str | None]:
+    path_text = normalize_user_path_text(raw_path)
+    if not path_text:
+        return None, "Укажите папку для выгрузки файлов."
+    windows_error = _windows_export_directory_error(path_text)
+    if windows_error is not None:
+        return None, windows_error
+
+    path = Path(path_text).expanduser()
+    if path == Path(path.anchor or "/"):
+        return None, "Нельзя выгружать файлы в корень диска."
+    if path.exists() and not path.is_dir():
+        return None, "Указанный путь уже существует и не является папкой."
+    return path, None
 
 
 def _validated_dev_export_directory(raw_path: str) -> tuple[Path | None, str | None]:
@@ -1142,6 +1444,30 @@ def _validated_dev_export_directory(raw_path: str) -> tuple[Path | None, str | N
     if path.exists() and not path.is_dir():
         return None, "Указанный путь уже существует и не является папкой."
     return path, None
+
+
+def _windows_export_directory_error(path_text: str) -> str | None:
+    normalized = normalize_user_path_text(path_text).replace("/", "\\")
+    if not normalized:
+        return None
+    match = re.match(r"(?i)^([a-z]):(?:\\(.*))?$", normalized)
+    if match is None:
+        return None
+    drive_letter = str(match.group(1) or "").strip().lower()
+    if drive_letter in _WINDOWS_BLOCKED_DEV_EXPORT_DRIVES:
+        return "На диски C: и D: выгрузка файлов запрещена."
+    tail = str(match.group(2) or "").strip("\\")
+    if not tail:
+        return "Нельзя выгружать файлы в корень диска Windows."
+    first_component = tail.split("\\", 1)[0].strip().lower()
+    if first_component in {
+        "windows",
+        "program files",
+        "program files (x86)",
+        "programdata",
+    }:
+        return "В системные каталоги Windows выгрузка файлов запрещена."
+    return None
 
 
 def _windows_dev_export_directory_error(path_text: str) -> str | None:
@@ -1171,12 +1497,13 @@ def _windows_dev_export_directory_error(path_text: str) -> str | None:
 def _write_dev_export_files(
     *,
     directory: Path,
-    files: tuple[ptc_batch_results.DevExportFilePayload, ...],
+    files: tuple[ptc_batch_results.ExportFilePayload, ...],
     overwrite: bool,
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for file_payload in files:
         destination = directory / str(file_payload.file_name)
+        destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() and not overwrite:
             raise FileExistsError(str(destination))
         temp_path = destination.with_name(destination.name + ".pywp_tmp")

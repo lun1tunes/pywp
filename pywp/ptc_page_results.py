@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 from streamlit.errors import StreamlitAPIException
 
+from pywp import ptc_batch_results
 from pywp import ptc_core as wt
 from pywp import ptc_anticollision_params
 from pywp import ptc_reference_state as reference_state
@@ -1573,6 +1574,8 @@ def render_success_tabs(
         survey_export_stations = None
         survey_export_xy_label_suffix = ""
         survey_export_xy_unit = "м"
+        survey_export_azi_true_deg = None
+        survey_export_azi_grid_deg = None
         survey_export_crs = csv_export_crs(
             selected_crs,
             input_crs,
@@ -1592,6 +1595,21 @@ def render_success_tabs(
         if auto_convert and selected_crs != input_crs:
             survey_export_xy_label_suffix = get_crs_display_suffix(survey_export_crs)
             survey_export_xy_unit = "deg" if survey_export_crs.is_geographic() else "м"
+        if hasattr(input_crs, "is_geographic") and hasattr(
+            survey_export_crs, "is_geographic"
+        ):
+            survey_export_azi_true_deg, survey_export_azi_grid_deg = (
+                ptc_batch_results.survey_export_azimuth_columns(
+                    source_stations=selected.stations,
+                    export_stations=(
+                        survey_export_stations
+                        if survey_export_stations is not None
+                        else selected.stations
+                    ),
+                    source_crs=input_crs,
+                    export_crs=survey_export_crs,
+                )
+            )
         single_well_name_to_color = {
             str(selected.name): str(name_to_color.get(str(selected.name), "#2563eb"))
         }
@@ -1641,6 +1659,8 @@ def render_success_tabs(
             survey_export_stations=survey_export_stations,
             survey_export_xy_label_suffix=survey_export_xy_label_suffix,
             survey_export_xy_unit=survey_export_xy_unit,
+            survey_export_azi_true_deg=survey_export_azi_true_deg,
+            survey_export_azi_grid_deg=survey_export_azi_grid_deg,
             show_validation_section=False,
             show_solver_diagnostics_section=False,
         )

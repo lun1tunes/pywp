@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
+from io import BytesIO
 import json
 import math
 from pathlib import Path
@@ -8708,24 +8709,28 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
         },
         {
             "label": "Формат выгрузки",
-            "options": ["CSV", "WELLTRACK", ".dev (7z)"],
+            "options": ["Excel", "CSV", "WELLTRACK", ".dev (7z)"],
             "key": "wt_survey_download_format",
         },
     ]
-    assert download_labels == {
-        "Скачать рассчитанные траектории всех скважин",
-        "Скачать рассчитанные траектории выбранных скважин",
-    }
+    assert {
+        "Скачать Excel траекторий всех скважин",
+        "Скачать Excel выбранных скважин",
+    }.issubset(download_labels)
+    assert "Скачать пакет выгрузки" in download_labels
     selected_download = next(
         item
         for item in downloads
-        if item["label"] == "Скачать рассчитанные траектории выбранных скважин"
+        if item["label"] == "Скачать Excel выбранных скважин"
     )
-    selected_csv = bytes(selected_download["data"]).decode("utf-8")
-    assert "WELL-B" in selected_csv
-    assert "WELL-A" not in selected_csv
-    assert selected_download["file_name"] == "welltrack_survey_selected.csv"
-    assert selected_download["mime"] == "text/csv"
+    selected_excel = pd.read_excel(BytesIO(bytes(selected_download["data"])))
+    assert "WELL-B" in set(selected_excel["well_name"].astype(str))
+    assert "WELL-A" not in set(selected_excel["well_name"].astype(str))
+    assert selected_download["file_name"] == "welltrack_survey_selected.xlsx"
+    assert (
+        selected_download["mime"]
+        == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     assert selected_download["disabled"] is False
 
 
@@ -8735,6 +8740,7 @@ def test_batch_summary_reuses_prepared_download_payload_cache(monkeypatch) -> No
     page.st.session_state["wt_successes"] = [
         _successful_plan(name="WELL-A", y_offset_m=0.0)
     ]
+    page.st.session_state["wt_survey_download_format"] = "CSV"
     build_calls = {"count": 0}
 
     class _DummyContext:
@@ -8762,7 +8768,14 @@ def test_batch_summary_reuses_prepared_download_payload_cache(monkeypatch) -> No
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
     monkeypatch.setattr(page.st, "multiselect", lambda *args, **kwargs: [])
-    monkeypatch.setattr(page.st, "radio", lambda _label, options, **kwargs: options[0])
+    monkeypatch.setattr(
+        page.st,
+        "radio",
+        lambda _label, options, **kwargs: page.st.session_state.get(
+            kwargs.get("key"),
+            options[0],
+        ),
+    )
     monkeypatch.setattr(page.st, "download_button", lambda *args, **kwargs: False)
     monkeypatch.setattr(page, "_build_batch_survey_csv", _fake_builder)
 
@@ -9240,23 +9253,29 @@ def test_batch_summary_can_export_target_points(monkeypatch) -> None:
         },
         {
             "label": "Формат выгрузки",
-            "options": ["CSV", "WELLTRACK", ".dev (7z)"],
+            "options": ["Excel", "CSV", "WELLTRACK", ".dev (7z)"],
             "key": "wt_target_download_format",
         },
     ]
-    assert labels == {
-        "Скачать цели всех скважин",
-        "Скачать цели выбранных скважин",
-    }
+    assert {
+        "Скачать Excel целей всех скважин",
+        "Скачать Excel целей выбранных скважин",
+    }.issubset(labels)
+    assert "Скачать пакет выгрузки" in labels
     selected_download = next(
-        item for item in downloads if item["label"] == "Скачать цели выбранных скважин"
+        item
+        for item in downloads
+        if item["label"] == "Скачать Excel целей выбранных скважин"
     )
-    selected_csv = bytes(selected_download["data"]).decode("utf-8")
-    assert "WELL-A" in selected_csv
-    assert "WELL-B" not in selected_csv
-    assert "point_name" in selected_csv
-    assert selected_download["file_name"] == "welltrack_targets_selected.csv"
-    assert selected_download["mime"] == "text/csv"
+    selected_excel = pd.read_excel(BytesIO(bytes(selected_download["data"])))
+    assert "WELL-A" in set(selected_excel["well_name"].astype(str))
+    assert "WELL-B" not in set(selected_excel["well_name"].astype(str))
+    assert "point_name" in selected_excel.columns
+    assert selected_download["file_name"] == "welltrack_targets_selected.xlsx"
+    assert (
+        selected_download["mime"]
+        == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 def test_batch_summary_renders_pilot_sidetrack_details_table(monkeypatch) -> None:
