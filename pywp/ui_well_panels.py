@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from io import BytesIO
+from pathlib import Path
 import re
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -60,10 +63,30 @@ def survey_export_dataframe(
     xy_label_suffix: str = "",
     xy_unit: str = "м",
     include_tvd: bool = False,
+    azi_true_deg: object | None = None,
+    azi_grid_deg: object | None = None,
 ) -> pd.DataFrame:
     export_df = display_df.copy()
     if include_tvd:
         export_df = _with_export_tvd(export_df)
+    if "AZI_deg" in export_df.columns and (
+        azi_true_deg is not None or azi_grid_deg is not None
+    ):
+        insert_at = export_df.columns.get_loc("AZI_deg")
+        export_df = export_df.drop(columns=["AZI_deg"])
+        if azi_true_deg is not None:
+            export_df.insert(
+                insert_at,
+                "AZI_TN_deg",
+                np.asarray(azi_true_deg, dtype=float),
+            )
+            insert_at += 1
+        if azi_grid_deg is not None:
+            export_df.insert(
+                insert_at,
+                "AZI_GN_deg",
+                np.asarray(azi_grid_deg, dtype=float),
+            )
     unit_label = _csv_unit_label(xy_unit)
     crs_label = _csv_crs_label(xy_label_suffix)
     if not crs_label and unit_label == "m":
@@ -78,7 +101,28 @@ def survey_export_dataframe(
 
 
 def survey_export_csv_bytes(export_df: pd.DataFrame) -> bytes:
-    return export_df.to_csv(index=False, sep=",").encode("utf-8")
+    return export_df.to_csv(index=False, sep=",").encode("utf-8-sig")
+
+
+def survey_export_excel_bytes(
+    export_df: pd.DataFrame,
+    *,
+    sheet_name: str = "survey",
+) -> bytes:
+    workbook = BytesIO()
+    with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+        export_df.to_excel(
+            writer,
+            sheet_name=_excel_sheet_name(sheet_name),
+            index=False,
+        )
+    return workbook.getvalue()
+
+
+def _excel_sheet_name(name: str) -> str:
+    sanitized = re.sub(r"[\[\]:*?/\\]+", "_", str(name).strip(), flags=re.UNICODE)
+    sanitized = sanitized.strip("' ") or "sheet"
+    return sanitized[:31]
 
 
 def render_run_log_panel(
@@ -306,22 +350,35 @@ def render_survey_table_with_download(
         hide_index=True,
         column_config=column_config,
     )
-    st.download_button(
-        button_label,
-        data=survey_export_csv_bytes(
-            survey_export_dataframe(
-                export_df,
-                xy_label_suffix=(
-                    xy_label_suffix
-                    if export_xy_label_suffix is None
-                    else export_xy_label_suffix
-                ),
-                xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
-                include_tvd=True,
-            )
+    export_payload = survey_export_dataframe(
+        export_df,
+        xy_label_suffix=(
+            xy_label_suffix
+            if export_xy_label_suffix is None
+            else export_xy_label_suffix
         ),
-        file_name=file_name,
-        mime="text/csv",
-        icon=":material/download:",
-        width="content",
+        xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
+        include_tvd=True,
     )
+    excel_file_name = str(Path(file_name).with_suffix(".xlsx").name)
+    csv_col, excel_col = st.columns(2, gap="small")
+    with csv_col:
+        st.download_button(
+            button_label,
+            data=survey_export_csv_bytes(export_payload),
+            file_name=file_name,
+            mime="text/csv",
+            icon=":material/download:",
+            width="stretch",
+        )
+    with excel_col:
+        st.download_button(
+            "Скачать Excel инклинометрии",
+            data=survey_export_excel_bytes(export_payload, sheet_name="survey"),
+            file_name=excel_file_name,
+            mime=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            icon=":material/download:",
+            width="stretch",
+        )

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from io import BytesIO
+import zipfile
 
+import numpy as np
 import pandas as pd
 import py7zr
 import pytest
@@ -180,6 +182,67 @@ def test_build_batch_survey_csv_labels_transformed_geographic_coordinates() -> N
     assert result["TVD_m"].tolist() == pytest.approx([0.0, 125.0])
 
 
+def test_build_batch_survey_csv_exports_true_and_grid_azimuth_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_transform(
+        stations: pd.DataFrame,
+        _target_crs: CoordinateSystem,
+        _source_crs: CoordinateSystem,
+        *,
+        rename_columns: bool = True,
+    ) -> pd.DataFrame:
+        transformed = stations.copy()
+        transformed["X_m"] = transformed["X_m"].astype(float) + 1000.0
+        transformed["Y_m"] = transformed["Y_m"].astype(float) + 2000.0
+        return transformed
+
+    def fake_convergence(
+        x_values: object,
+        y_values: object,
+        crs: CoordinateSystem,
+    ) -> np.ndarray | None:
+        del x_values, y_values
+        if crs == CoordinateSystem.PULKOVO_1942_ZONE_16:
+            return np.array([2.0, 3.0], dtype=float)
+        if crs == CoordinateSystem.WGS84_UTM_ZONE_43N:
+            return np.array([0.5, 1.0], dtype=float)
+        return None
+
+    monkeypatch.setattr(
+        ptc_batch_results,
+        "meridian_convergence_series_deg",
+        fake_convergence,
+    )
+
+    payload = ptc_batch_results.build_batch_survey_csv(
+        [
+            _success(
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 125.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [20.0, 30.0],
+                        "Z_m": [-63.0, 62.0],
+                        "INC_deg": [0.0, 30.0],
+                        "AZI_deg": [10.0, 20.0],
+                        "DLS_deg_per_30m": [3.0, 3.0],
+                    }
+                )
+            )
+        ],
+        target_crs=CoordinateSystem.WGS84_UTM_ZONE_43N,
+        auto_convert=True,
+        source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
+        transform_stations_func=fake_transform,
+    )
+    result = pd.read_csv(BytesIO(payload), sep=",")
+
+    assert "AZI_deg" not in result.columns
+    assert result["AZI_TN_deg"].tolist() == pytest.approx([12.0, 23.0])
+    assert result["AZI_GN_deg"].tolist() == pytest.approx([11.5, 22.0])
+
+
 def test_build_batch_survey_csv_returns_empty_payload_without_station_frames() -> None:
     assert ptc_batch_results.build_batch_survey_csv([]) == b""
     assert (
@@ -240,6 +303,30 @@ def test_build_batch_survey_csv_keeps_legacy_export_callback_signature() -> None
     assert result["TVD_m"].tolist() == pytest.approx([0.0, 50.0])
 
 
+def test_build_batch_survey_excel_returns_xlsx_payload() -> None:
+    payload = ptc_batch_results.build_batch_survey_excel(
+        [
+            _success(
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 50.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [20.0, 30.0],
+                        "Z_m": [-10.0, 40.0],
+                        "INC_deg": [0.0, 15.0],
+                        "AZI_deg": [0.0, 30.0],
+                    }
+                )
+            )
+        ]
+    )
+
+    result = pd.read_excel(BytesIO(payload))
+
+    assert result["well_name"].tolist() == ["WELL-01", "WELL-01"]
+    assert result["TVD_m"].tolist() == pytest.approx([0.0, 50.0])
+
+
 def test_build_batch_target_csv_includes_input_and_output_coordinate_blocks() -> None:
     def fake_transform_xy(
         x_value: float,
@@ -269,6 +356,81 @@ def test_build_batch_target_csv_includes_input_and_output_coordinate_blocks() ->
     assert result["Y_ГК_13N_42_m"].iloc[0] == pytest.approx(20.0)
     assert result["X_WGS_deg"].iloc[0] == pytest.approx(1010.0)
     assert result["Y_WGS_deg"].iloc[0] == pytest.approx(2020.0)
+
+
+def test_build_batch_target_excel_returns_xlsx_payload() -> None:
+    payload = ptc_batch_results.build_batch_target_excel([_record()])
+    result = pd.read_excel(BytesIO(payload))
+
+    assert list(result.columns) == [
+        "well_name",
+        "point_name",
+        "point_md_m",
+        "X_m",
+        "Y_m",
+        "Z_m",
+    ]
+    assert result["well_name"].tolist() == ["WELL-01", "WELL-01", "WELL-01"]
+
+
+def test_build_batch_target_csv_labels_source_block_when_transform_is_unavailable() -> None:
+    payload = ptc_batch_results.build_batch_target_csv(
+        [_record()],
+        target_crs=CoordinateSystem.WGS84,
+        auto_convert=True,
+        source_crs=CoordinateSystem.PNO_13_ZONE,
+    )
+    result = pd.read_csv(BytesIO(payload), sep=",")
+
+    assert list(result.columns) == [
+        "well_name",
+        "point_name",
+        "point_md_m",
+        "X_PNO13_m",
+        "Y_PNO13_m",
+        "Z_m",
+    ]
+
+
+def test_build_batch_target_csv_keeps_unique_columns_with_legacy_export_callback() -> None:
+    def fake_transform_xy(
+        x_value: float,
+        y_value: float,
+        _source_crs: CoordinateSystem,
+        _target_crs: CoordinateSystem,
+    ) -> tuple[float, float]:
+        return x_value + 1000.0, y_value + 2000.0
+
+    def legacy_export(
+        frame: pd.DataFrame,
+        *,
+        xy_label_suffix: str = "",
+        xy_unit: str = "м",
+    ) -> pd.DataFrame:
+        del xy_label_suffix, xy_unit
+        return frame
+
+    payload = ptc_batch_results.build_batch_target_csv(
+        [_record()],
+        target_crs=CoordinateSystem.WGS84,
+        auto_convert=True,
+        source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
+        transform_xy_func=fake_transform_xy,
+        survey_export_dataframe_func=legacy_export,
+    )
+    result = pd.read_csv(BytesIO(payload), sep=",")
+
+    assert list(result.columns) == [
+        "well_name",
+        "point_name",
+        "point_md_m",
+        "X_СК-42/З16_m",
+        "Y_СК-42/З16_m",
+        "Z_input_m",
+        "X_WGS_deg",
+        "Y_WGS_deg",
+        "Z_output_m",
+    ]
 
 
 def test_build_batch_target_csv_keeps_single_coordinate_block_when_not_converting() -> None:
@@ -308,6 +470,58 @@ def test_build_batch_target_dev_file_returns_target_dev_payload() -> None:
 
     assert text.startswith("# TARGET POINTS FROM PYWP")
     assert "# TRAJECTORY TYPE:          TARGET POINTS" in text
+
+
+def test_build_batch_target_dev_file_keeps_zero_true_azimuth_for_first_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ptc_batch_results,
+        "meridian_convergence_series_deg",
+        lambda *_args, **_kwargs: np.array([5.0, 5.0, 5.0], dtype=float),
+    )
+
+    payload = ptc_batch_results.build_batch_target_dev_file([_record(name="WELL-A")])
+    rows = _parse_dev_rows(payload.decode("utf-8"))
+
+    assert float(rows.iloc[0]["AZIM_GN"]) == pytest.approx(0.0)
+    assert float(rows.iloc[0]["AZIM_TN"]) == pytest.approx(0.0)
+    assert float(rows.iloc[1]["AZIM_TN"]) == pytest.approx(
+        float(rows.iloc[1]["AZIM_GN"]) + 5.0
+    )
+
+
+def test_build_batch_export_package_zip_collects_available_exports() -> None:
+    payload = ptc_batch_results.build_batch_export_package_zip(
+        successes=[
+            _success(
+                name="WELL-A",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 100.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [20.0, 30.0],
+                        "Z_m": [0.0, 90.0],
+                        "INC_deg": [0.0, 15.0],
+                        "AZI_deg": [0.0, 30.0],
+                    }
+                ),
+            )
+        ],
+        records=[_record(name="WELL-A")],
+    )
+
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        names = set(archive.namelist())
+
+    assert "survey/welltrack_survey.csv" in names
+    assert "survey/welltrack_survey.xlsx" in names
+    assert "survey/welltrack_survey.inc" in names
+    assert "survey_dev/WELL-A.dev" in names
+    assert "targets/welltrack_targets.csv" in names
+    assert "targets/welltrack_targets.xlsx" in names
+    assert "targets/welltrack_targets.inc" in names
+    assert "target_dev/WELL-A.dev" in names
 
 
 def test_build_batch_survey_welltrack_exports_calculated_station_rows() -> None:
@@ -695,6 +909,40 @@ def test_build_batch_survey_dev_file_preserves_original_parent_dev_rows() -> Non
     assert float(rows.iloc[1]["DLS"]) == pytest.approx(0.7)
     assert float(rows.iloc[2]["AZIM_TN"]) == pytest.approx(25.5)
     assert float(rows.iloc[2]["INCL"]) == pytest.approx(16.0)
+
+
+def test_build_batch_survey_dev_file_separates_true_and_grid_azimuth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ptc_batch_results,
+        "meridian_convergence_series_deg",
+        lambda *_args, **_kwargs: np.array([1.0, 2.0], dtype=float),
+    )
+
+    payload = ptc_batch_results.build_batch_survey_dev_file(
+        [
+            _success(
+                name="WELL-A",
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 100.0],
+                        "X_m": [10.0, 20.0],
+                        "Y_m": [30.0, 45.0],
+                        "Z_m": [-5.0, 95.0],
+                        "INC_deg": [0.0, 20.0],
+                        "AZI_deg": [10.0, 45.0],
+                    }
+                ),
+            )
+        ],
+        source_crs=CoordinateSystem.PULKOVO_1942_ZONE_16,
+    )
+
+    rows = _parse_dev_rows(payload.decode("utf-8"))
+
+    assert rows["AZIM_GN"].tolist() == pytest.approx([10.0, 45.0])
+    assert rows["AZIM_TN"].tolist() == pytest.approx([11.0, 47.0])
 
 
 def test_build_batch_survey_dev_file_uses_parent_prefix_from_attrs_for_pilot() -> None:

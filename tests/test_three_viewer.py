@@ -685,13 +685,13 @@ def test_viewer_template_supports_multiselect_edit_wells_from_legend() -> None:
     assert "selection.has(nodeIndex)" in html
 
 
-def test_viewer_template_focuses_camera_for_pad_legend_clicks_only_outside_edit_mode() -> None:
+def test_viewer_template_focuses_camera_for_pad_legend_clicks_in_edit_mode() -> None:
     html = three_viewer._viewer_template_with_libraries()
 
     assert 'kind === "pad" ? new Set() : legendWellNameKeysForItem(item, kind)' in html
     assert 'const targetBounds = focusTargets[String(item.id || "")];' in html
     assert 'focusViewerTarget(targetBounds, String(item.id || ""));' in html
-    assert "if (editModeActive) {\n                selectEditPad(editablePadIndex);\n                return;\n              }" in html
+    assert "if (editModeActive) {\n                selectEditPad(editablePadIndex, { focus: true });\n                return;\n              }" in html
 
 
 def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
@@ -707,6 +707,8 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert 'String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";' in html
     assert "const markerPoint = anchor.slice();" in html
     assert "const markerGeometry = new THREE.OctahedronGeometry(1.0, 0);" in html
+    assert "const anchorGeometry = new THREE.SphereGeometry(1.0, 16, 12);" in html
+    assert "const connectorLine = new THREE.Line(" in html
     assert "markerGeometry.scale(0.82, 0.82, 1.95);" in html
     assert "pointIndex: null," in html
     assert 'point: marker.pointLabel || "S",' in html
@@ -716,14 +718,26 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert "visualPos: markerPoint.slice()," in html
     assert "ndsAzimuthDeg: Number((pad && pad.nds_azimuth_deg) || 0)," in html
     assert "function syncEditPadHandleLabel(marker)" in html
+    assert "return `Куст ${padLabel} · ${roleLabel}`;" in html
     assert "updateEditPadMarkerPosition(marker, anchor);" in html
+    assert "marker.anchorMesh.position.copy(anchorPosition);" in html
+    assert "marker.connectorLine.geometry.getAttribute(\"position\")" in html
     assert "syncEditPadHandleLabel(marker);" in html
     assert "editPadDragStartVisualPoint = copyEditPoint(" in html
     assert "const startPoint =" in html
     assert "editPadDragStartVisualPoint ||" in html
     assert "Number.isInteger(selectedEditPadIndex)\n              ? []\n              : normalizedEditWellSelection(" in html
+    assert "anchorPickMesh: anchorPickMesh," in html
+    assert "anchorMesh: anchorMesh," in html
+    assert "anchorSelectionMesh: anchorSelectionMesh," in html
+    assert "connectorLine: connectorLine," in html
     assert "selectionMesh: selectionMesh," in html
+    assert "marker.anchorMesh.visible = editModeActive;" in html
+    assert "marker.connectorLine.visible = editModeActive;" in html
+    assert "marker.anchorSelectionMesh.visible = editModeActive && selectedPad;" in html
+    assert "marker.anchorPickMesh.visible = editModeActive;" in html
     assert "marker.selectionMesh.visible = editModeActive && selectedPad;" in html
+    assert "const padMeshes = editPadMarkers.flatMap((marker) =>" in html
     assert html.index("const meshes = editHandles") < html.index(
         "const padMeshes = editPadMarkers"
     )

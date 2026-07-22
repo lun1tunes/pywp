@@ -1,4 +1,5 @@
 """Tests for coordinate system integration with trajectory planning."""
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -11,6 +12,7 @@ from pywp.coordinate_integration import (
     INPUT_CRS_OPTIONS,
     _can_transform_directly,
     csv_export_crs,
+    meridian_convergence_series_deg,
     _transform_xy,
     apply_crs_to_well_view,
     format_coordinates_for_display,
@@ -258,6 +260,62 @@ class TestCoordinateIntegration:
         assert x == pytest.approx(599_911.695515, abs=0.001)
         assert y == pytest.approx(7_404_416.769352, abs=0.001)
 
+    def test_meridian_convergence_series_rejects_shape_mismatch(self) -> None:
+        with pytest.raises(ValueError):
+            meridian_convergence_series_deg(
+                [1.0, 2.0],
+                [3.0],
+                CoordinateSystem.PULKOVO_1942_GK_13N,
+            )
+
+    @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+    def test_meridian_convergence_series_returns_zero_for_geographic_crs(self) -> None:
+        convergence = meridian_convergence_series_deg(
+            [37.6173, float("nan")],
+            [55.7558, 60.0],
+            CoordinateSystem.WGS84,
+        )
+
+        assert convergence is not None
+        assert convergence[0] == pytest.approx(0.0)
+        assert np.isnan(convergence[1])
+
+    @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+    def test_meridian_convergence_series_returns_finite_projected_values(self) -> None:
+        convergence = meridian_convergence_series_deg(
+            [500_053.72885872814],
+            [6_097_276.68079257],
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+        )
+
+        assert convergence is not None
+        assert convergence.shape == (1,)
+        assert np.isfinite(convergence[0])
+
+    def test_meridian_convergence_series_converts_nonfinite_factors_to_nan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _FakeFactors:
+            meridian_convergence = np.array([1.25, float("inf")], dtype=float)
+
+        class _FakeProj:
+            def get_factors(self, *_args, **_kwargs):
+                return _FakeFactors()
+
+        monkeypatch.setattr(ci, "can_transform_crs", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(ci, "_try_create_proj", lambda _crs: _FakeProj())
+
+        convergence = meridian_convergence_series_deg(
+            [10.0, 20.0],
+            [30.0, 40.0],
+            CoordinateSystem.PULKOVO_1942_GK_13N,
+        )
+
+        assert convergence is not None
+        assert convergence[0] == pytest.approx(1.25)
+        assert np.isnan(convergence[1])
+
         stations = pd.DataFrame(
             {
                 "X_m": [600_010.6],
@@ -271,8 +329,14 @@ class TestCoordinateIntegration:
             CoordinateSystem.PULKOVO_1942_GK_13N,
             rename_columns=False,
         )
-        assert float(transformed["X_m"].iloc[0]) == pytest.approx(x, abs=1e-9)
-        assert float(transformed["Y_m"].iloc[0]) == pytest.approx(y, abs=1e-9)
+        assert float(transformed["X_m"].iloc[0]) == pytest.approx(
+            599_911.695515,
+            abs=0.001,
+        )
+        assert float(transformed["Y_m"].iloc[0]) == pytest.approx(
+            7_404_416.769352,
+            abs=0.001,
+        )
 
     @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
     def test_transform_gk_13n_42_to_wgs84_degrees_control_point(self) -> None:

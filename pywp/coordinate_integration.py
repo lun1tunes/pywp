@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+try:
+    from pyproj import Proj
+except ImportError:  # pragma: no cover - exercised via HAS_PYPROJ guards
+    Proj = None  # type: ignore[assignment]
 
 from pywp.coordinate_systems import (
     CoordinateSystem,
@@ -250,6 +254,19 @@ def _try_create_transformer() -> CoordinateTransformer | None:
         return None
 
 
+@lru_cache(maxsize=32)
+def _try_create_proj(crs: CoordinateSystem) -> Proj | None:
+    if not HAS_PYPROJ or Proj is None:
+        return None
+    effective_crs = _effective_pyproj_crs(crs)
+    if effective_crs is None or not effective_crs.is_projected():
+        return None
+    try:
+        return Proj(effective_crs.value)
+    except Exception:
+        return None
+
+
 def _can_transform_directly(from_crs: CoordinateSystem, to_crs: CoordinateSystem) -> bool:
     """Check if direct pyproj transformation is available.
 
@@ -299,6 +316,55 @@ def can_transform_crs(
 ) -> bool:
     """Return True when coordinate values can be safely transformed."""
     return bool(HAS_PYPROJ and _can_transform_directly(from_crs, to_crs))
+
+
+def meridian_convergence_series_deg(
+    x_values: object,
+    y_values: object,
+    crs: CoordinateSystem,
+) -> np.ndarray | None:
+    effective_crs = _effective_pyproj_crs(crs)
+    if effective_crs is None:
+        return None
+
+    x_array = np.asarray(x_values, dtype=float)
+    y_array = np.asarray(y_values, dtype=float)
+    if x_array.shape != y_array.shape:
+        raise ValueError("x_values and y_values must have matching shapes")
+
+    result = np.full(x_array.shape, np.nan, dtype=float)
+    finite_mask = np.isfinite(x_array) & np.isfinite(y_array)
+    if not np.any(finite_mask):
+        return result
+
+    if effective_crs.is_geographic():
+        result[finite_mask] = 0.0
+        return result
+    if not effective_crs.is_projected():
+        return None
+    if not can_transform_crs(crs, CoordinateSystem.WGS84):
+        return None
+
+    proj = _try_create_proj(crs)
+    if proj is None:
+        return None
+
+    coords = np.column_stack([x_array[finite_mask], y_array[finite_mask]])
+    lon_lat = _transform_station_xy_values(coords, crs, CoordinateSystem.WGS84)
+    if lon_lat.shape != coords.shape:
+        return None
+
+    try:
+        factors = proj.get_factors(lon_lat[:, 0], lon_lat[:, 1])
+    except Exception:
+        return None
+
+    convergence = np.asarray(factors.meridian_convergence, dtype=float)
+    if convergence.shape != x_array[finite_mask].shape:
+        return None
+    convergence[~np.isfinite(convergence)] = np.nan
+    result[finite_mask] = convergence
+    return result
 
 
 def csv_export_crs(
@@ -749,6 +815,7 @@ __all__ = [
     "transform_xy_to_crs",
     "transform_point_to_crs",
     "transform_stations_to_crs",
+    "meridian_convergence_series_deg",
     "can_transform_crs",
     "csv_export_crs",
     "format_coordinates_for_display",

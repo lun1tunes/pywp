@@ -5137,7 +5137,7 @@
             );
             if (kind === "pad" && isValidEditPadIndex(editablePadIndex)) {
               if (editModeActive) {
-                selectEditPad(editablePadIndex);
+                selectEditPad(editablePadIndex, { focus: true });
                 return;
               }
               const padTargetBounds = focusTargets[String(item.id || "")];
@@ -6941,7 +6941,7 @@
         let editMoveScope = "point"; // "point" | "pair"
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
-        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
+        const editPadMarkers = []; // {mesh, pickMesh, anchorPickMesh, anchorMesh, anchorSelectionMesh, connectorLine, originalMesh, selectionMesh, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
@@ -6991,6 +6991,8 @@
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
         const EDIT_DELTA_EPS_M = 0.005;
         const EDIT_KEYBOARD_STEP_M = 10.0;
+        const EDIT_PAD_HANDLE_ACCENT = "#1d4ed8";
+        const EDIT_PAD_HANDLE_NEUTRAL = "#334155";
         const EDIT_DELTA_AXIS_COLORS = {
           x: "#16A34A",
           y: "#2563EB",
@@ -7674,18 +7676,24 @@
         }
 
         function syncEditPadMarkerHover(marker) {
-          if (!marker || !marker.pickMesh) {
+          if (!marker) {
             return;
           }
           const point = marker.dataPos || [0, 0, 0];
-          marker.pickMesh.userData.hover = {
+          const hoverData = {
             name: marker.padLabel || marker.wellName,
             point: marker.pointLabel || "S",
             x: Number(point[0]) || 0,
             y: Number(point[1]) || 0,
             z: Number(point[2]) || 0,
-            color: marker.color || "#2563eb",
+            color: EDIT_PAD_HANDLE_ACCENT,
           };
+          [marker.pickMesh, marker.anchorPickMesh].forEach((pickTarget) => {
+            if (!pickTarget) {
+              return;
+            }
+            pickTarget.userData.hover = hoverData;
+          });
         }
 
         function editPadHandleVisualPoint(marker, anchorPoint) {
@@ -7717,9 +7725,13 @@
           if (!marker) {
             return "Куст";
           }
-          return String(marker.pointLabel || "") === "Центр"
-            ? "Куст · Центр"
-            : "Куст · S";
+          const padLabel = String(marker.padLabel || "").trim();
+          const roleLabel =
+            String(marker.pointLabel || "") === "Центр" ? "Центр" : "S";
+          if (!padLabel) {
+            return `Куст · ${roleLabel}`;
+          }
+          return `Куст ${padLabel} · ${roleLabel}`;
         }
 
         function syncEditPadHandleLabel(marker) {
@@ -7740,7 +7752,26 @@
           }
           marker.dataPos = copyEditPoint(point);
           marker.visualPos = editPadHandleVisualPoint(marker, marker.dataPos);
+          const anchorPosition = displayPoint(marker.dataPos);
           const position = displayPoint(marker.visualPos);
+          if (marker.anchorMesh) {
+            marker.anchorMesh.position.copy(anchorPosition);
+          }
+          if (marker.anchorPickMesh) {
+            marker.anchorPickMesh.position.copy(anchorPosition);
+          }
+          if (marker.anchorSelectionMesh) {
+            marker.anchorSelectionMesh.position.copy(anchorPosition);
+          }
+          if (marker.connectorLine && marker.connectorLine.geometry) {
+            const connectorPositions = marker.connectorLine.geometry.getAttribute("position");
+            if (connectorPositions && connectorPositions.count >= 2) {
+              connectorPositions.setXYZ(0, anchorPosition.x, anchorPosition.y, anchorPosition.z);
+              connectorPositions.setXYZ(1, position.x, position.y, position.z);
+              connectorPositions.needsUpdate = true;
+              marker.connectorLine.geometry.computeBoundingSphere();
+            }
+          }
           if (marker.mesh) {
             marker.mesh.position.copy(position);
           }
@@ -8925,6 +8956,8 @@
         function initEditPads() {
           const markerGeometry = new THREE.OctahedronGeometry(1.0, 0);
           markerGeometry.scale(0.82, 0.82, 1.95);
+          const anchorGeometry = new THREE.SphereGeometry(1.0, 16, 12);
+          const anchorSelectionGeometry = new THREE.SphereGeometry(1.0, 12, 10);
           const pickGeometry = new THREE.OctahedronGeometry(1.0, 0);
           pickGeometry.scale(1.08, 1.08, 2.15);
           const pickMaterial = new THREE.MeshBasicMaterial({
@@ -8964,12 +8997,71 @@
               String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";
             const markerPoint = anchor.slice();
             const initialDisplayPoint = displayPoint(markerPoint);
+            const anchorMesh = new THREE.Mesh(
+              anchorGeometry,
+              new THREE.MeshBasicMaterial({
+                color: "#ffffff",
+                transparent: true,
+                opacity: 0.98,
+                depthTest: false,
+                depthWrite: false,
+              }),
+            );
+            anchorMesh.position.copy(initialDisplayPoint);
+            anchorMesh.userData.lockViewerZGeometryScale = true;
+            anchorMesh.visible = false;
+            anchorMesh.renderOrder = 12;
+            scene.add(anchorMesh);
+            const anchorSelectionMesh = new THREE.Mesh(
+              anchorSelectionGeometry,
+              new THREE.MeshBasicMaterial({
+                color: EDIT_PAD_HANDLE_ACCENT,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.96,
+                depthTest: false,
+                depthWrite: false,
+              }),
+            );
+            anchorSelectionMesh.position.copy(initialDisplayPoint);
+            anchorSelectionMesh.userData.lockViewerZGeometryScale = true;
+            anchorSelectionMesh.visible = false;
+            anchorSelectionMesh.renderOrder = 14;
+            scene.add(anchorSelectionMesh);
+            const connectorGeometry = new THREE.BufferGeometry();
+            connectorGeometry.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(
+                [
+                  initialDisplayPoint.x,
+                  initialDisplayPoint.y,
+                  initialDisplayPoint.z,
+                  initialDisplayPoint.x,
+                  initialDisplayPoint.y,
+                  initialDisplayPoint.z,
+                ],
+                3,
+              ),
+            );
+            const connectorLine = new THREE.Line(
+              connectorGeometry,
+              new THREE.LineBasicMaterial({
+                color: EDIT_PAD_HANDLE_NEUTRAL,
+                transparent: true,
+                opacity: 0.34,
+                depthTest: false,
+                depthWrite: false,
+              }),
+            );
+            connectorLine.visible = false;
+            connectorLine.renderOrder = 11;
+            scene.add(connectorLine);
             const mesh = new THREE.Mesh(
               markerGeometry,
               new THREE.MeshBasicMaterial({
-                color: color,
+                color: EDIT_PAD_HANDLE_ACCENT,
                 transparent: true,
-                opacity: 0.94,
+                opacity: 0.98,
                 depthTest: false,
                 depthWrite: false,
               }),
@@ -9022,10 +9114,18 @@
             pickMesh.renderOrder = 11;
             scene.add(pickMesh);
             hoverTargets.push(pickMesh);
+            const anchorPickMesh = new THREE.Mesh(pickGeometry, pickMaterial);
+            anchorPickMesh.position.copy(initialDisplayPoint);
+            anchorPickMesh.userData.lockViewerZGeometryScale = true;
+            anchorPickMesh.userData.editPadMarkerIndex = editPadMarkers.length;
+            anchorPickMesh.visible = false;
+            anchorPickMesh.renderOrder = 11;
+            scene.add(anchorPickMesh);
+            hoverTargets.push(anchorPickMesh);
             const label = addSceneLabel(
               "",
               initialDisplayPoint,
-              "#1d4ed8",
+              EDIT_PAD_HANDLE_ACCENT,
               "edit-pad-handle-label",
               { offsetX: 0, offsetY: 0, role: "edit_pad_label" },
             );
@@ -9033,6 +9133,10 @@
             const marker = {
               mesh: mesh,
               pickMesh: pickMesh,
+              anchorPickMesh: anchorPickMesh,
+              anchorMesh: anchorMesh,
+              anchorSelectionMesh: anchorSelectionMesh,
+              connectorLine: connectorLine,
               originalMesh: originalMesh,
               selectionMesh: selectionMesh,
               label: label,
@@ -9128,6 +9232,14 @@
             if (marker.mesh) {
               marker.mesh.scale.setScalar(markerScale);
             }
+            if (marker.anchorMesh) {
+              marker.anchorMesh.scale.setScalar(
+                editHandleScale(
+                  marker.anchorMesh.position,
+                  selectedPad ? 22.0 : 14.0,
+                ),
+              );
+            }
             if (marker.pickMesh) {
               marker.pickMesh.scale.setScalar(
                 editHandleScale(
@@ -9136,9 +9248,25 @@
                 ),
               );
             }
+            if (marker.anchorPickMesh) {
+              marker.anchorPickMesh.scale.setScalar(
+                editHandleScale(
+                  marker.anchorPickMesh.position,
+                  selectedPad ? 48.0 : 30.0,
+                ),
+              );
+            }
             if (marker.originalMesh) {
               marker.originalMesh.scale.setScalar(
                 editHandleScale(marker.originalMesh.position, 18.0),
+              );
+            }
+            if (marker.anchorSelectionMesh) {
+              marker.anchorSelectionMesh.scale.setScalar(
+                editHandleScale(
+                  marker.anchorSelectionMesh.position,
+                  selectedPad ? 34.0 : 18.0,
+                ),
               );
             }
             if (marker.selectionMesh) {
@@ -9265,14 +9393,41 @@
             marker.mesh.material.depthTest = false;
             marker.mesh.material.needsUpdate = true;
           }
+          if (marker.anchorMesh) {
+            marker.anchorMesh.visible = editModeActive;
+            if (marker.anchorMesh.material) {
+              marker.anchorMesh.material.opacity = selectedPad ? 0.98 : 0.86;
+              marker.anchorMesh.material.needsUpdate = true;
+            }
+          }
+          if (marker.connectorLine) {
+            marker.connectorLine.visible = editModeActive;
+            if (marker.connectorLine.material) {
+              marker.connectorLine.material.opacity = selectedPad ? 0.78 : 0.34;
+              marker.connectorLine.material.color.set(
+                selectedPad ? EDIT_PAD_HANDLE_ACCENT : EDIT_PAD_HANDLE_NEUTRAL,
+              );
+              marker.connectorLine.material.needsUpdate = true;
+            }
+          }
           if (marker.pickMesh) {
             marker.pickMesh.visible = editModeActive;
+          }
+          if (marker.anchorPickMesh) {
+            marker.anchorPickMesh.visible = editModeActive;
           }
           if (marker.originalMesh) {
             marker.originalMesh.visible = editModeActive && selectedPad && dirtyPad;
             if (marker.originalMesh.material) {
               marker.originalMesh.material.opacity = selectedPad ? 0.92 : 0.78;
               marker.originalMesh.material.needsUpdate = true;
+            }
+          }
+          if (marker.anchorSelectionMesh) {
+            marker.anchorSelectionMesh.visible = editModeActive && selectedPad;
+            if (marker.anchorSelectionMesh.material) {
+              marker.anchorSelectionMesh.material.opacity = selectedPad ? 0.98 : 0.0;
+              marker.anchorSelectionMesh.material.needsUpdate = true;
             }
           }
           if (marker.selectionMesh) {
@@ -10275,7 +10430,9 @@
             syncEditVisibility();
             return;
           }
-          const padMeshes = editPadMarkers.map((marker) => marker.pickMesh || marker.mesh);
+          const padMeshes = editPadMarkers.flatMap((marker) =>
+            [marker.pickMesh, marker.anchorPickMesh, marker.mesh].filter(Boolean)
+          );
           const padHits = ray.intersectObjects(padMeshes, false);
           if (padHits.length) {
             const padMarkerIndex = Number(

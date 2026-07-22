@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import math
 import re
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from io import BytesIO
@@ -17,6 +19,7 @@ from pywp.coordinate_integration import (
     DEFAULT_CRS,
     csv_export_crs,
     get_crs_display_suffix,
+    meridian_convergence_series_deg,
     transform_stations_to_crs,
     transform_xy_to_crs,
 )
@@ -29,6 +32,7 @@ from pywp.ui_well_panels import (
     _with_export_tvd,
     survey_export_csv_bytes,
     survey_export_dataframe,
+    survey_export_excel_bytes,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -37,14 +41,19 @@ __all__ = [
     "BATCH_SUMMARY_RENAME_COLUMNS",
     "BatchSummaryStatusCounts",
     "DevExportFilePayload",
+    "ExportFilePayload",
     "batch_summary_display_df",
     "batch_summary_status_counts",
     "build_batch_survey_csv",
+    "build_batch_survey_excel",
     "build_batch_survey_dev_files",
     "build_batch_survey_dev_7z",
     "build_batch_survey_dev_file",
     "build_batch_survey_dev_zip",
+    "build_batch_export_package_files",
+    "build_batch_export_package_zip",
     "build_batch_target_csv",
+    "build_batch_target_excel",
     "build_batch_target_dev_files",
     "build_batch_target_dev_7z",
     "build_batch_target_dev_file",
@@ -128,6 +137,13 @@ class DevExportFilePayload:
     data: bytes
 
 
+@dataclass(frozen=True)
+class ExportFilePayload:
+    file_name: str
+    data: bytes
+    display_name: str = ""
+
+
 def build_batch_survey_csv(
     successes: list[SuccessfulWellPlan],
     *,
@@ -140,46 +156,48 @@ def build_batch_survey_csv(
     survey_export_dataframe_func: SurveyExportFrameFunc = survey_export_dataframe,
     dls_to_pi_func: DlsToPiFunc = dls_to_pi,
 ) -> bytes:
-    if not successes:
-        return b""
-    export_context = _survey_export_context(
+    combined = _build_batch_survey_export_frame(
+        successes,
         target_crs=target_crs,
         auto_convert=auto_convert,
         source_crs=source_crs,
         csv_export_crs_func=csv_export_crs_func,
+        transform_stations_func=transform_stations_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
+        dls_to_pi_func=dls_to_pi_func,
     )
-    frames: list[pd.DataFrame] = []
-    for success in successes:
-        stations = success.stations.copy()
-        if stations.empty:
-            continue
-        if export_context.should_transform:
-            stations = transform_stations_func(
-                stations,
-                target_crs,
-                source_crs,
-                rename_columns=False,
-            )
-        stations.insert(0, "well_name", str(success.name))
-        if "DLS_deg_per_30m" in stations.columns:
-            stations["PI_deg_per_10m"] = dls_to_pi_func(
-                stations["DLS_deg_per_30m"].to_numpy(dtype=float)
-            )
-            stations = stations.drop(columns=["DLS_deg_per_30m"])
-        if export_context.should_label_export_crs:
-            stations = survey_export_dataframe_func(
-                stations,
-                xy_label_suffix=crs_display_suffix_func(export_context.export_crs),
-                xy_unit="deg" if export_context.export_crs.is_geographic() else "м",
-            )
-        else:
-            stations = survey_export_dataframe_func(stations)
-        stations = _with_export_tvd(stations)
-        frames.append(stations)
-    if not frames:
+    if combined.empty:
         return b""
-    combined = pd.concat(frames, ignore_index=True)
     return survey_export_csv_bytes(combined)
+
+
+def build_batch_survey_excel(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+    csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
+    transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
+    crs_display_suffix_func: Callable[[CoordinateSystem], str] = get_crs_display_suffix,
+    survey_export_dataframe_func: SurveyExportFrameFunc = survey_export_dataframe,
+    dls_to_pi_func: DlsToPiFunc = dls_to_pi,
+) -> bytes:
+    combined = _build_batch_survey_export_frame(
+        successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_stations_func=transform_stations_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
+        dls_to_pi_func=dls_to_pi_func,
+    )
+    if combined.empty:
+        return b""
+    return survey_export_excel_bytes(combined, sheet_name="survey")
 
 
 def build_batch_target_csv(
@@ -193,88 +211,45 @@ def build_batch_target_csv(
     crs_display_suffix_func: Callable[[CoordinateSystem], str] = get_crs_display_suffix,
     survey_export_dataframe_func: SurveyExportFrameFunc = survey_export_dataframe,
 ) -> bytes:
-    prepared = _iter_prepared_target_rows(records)
-    if not prepared:
-        return b""
-
-    export_context = _survey_export_context(
+    combined = _build_batch_target_export_frame(
+        records,
         target_crs=target_crs,
         auto_convert=auto_convert,
         source_crs=source_crs,
         csv_export_crs_func=csv_export_crs_func,
+        transform_xy_func=transform_xy_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
     )
-    frames: list[pd.DataFrame] = []
-    for record, rows in prepared:
-        identity_df = pd.DataFrame(
-            {
-                "well_name": [str(record.name)] * len(rows.index),
-                "point_name": rows["point_name"].astype(str),
-                "point_md_m": rows["point_md_m"].astype(float),
-            }
-        )
-        if export_context.should_transform:
-            source_block = _target_coordinate_block(
-                rows[["X_m", "Y_m", "Z_m"]],
-                xy_label_suffix=crs_display_suffix_func(source_crs),
-                xy_unit="deg" if source_crs.is_geographic() else "м",
-                z_column_name="Z_input_m",
-                survey_export_dataframe_func=survey_export_dataframe_func,
-            )
-            export_rows = rows.copy()
-            transformed_xy = [
-                transform_xy_func(
-                    float(x_value),
-                    float(y_value),
-                    source_crs,
-                    target_crs,
-                )
-                for x_value, y_value in zip(
-                    export_rows["X_m"],
-                    export_rows["Y_m"],
-                    strict=False,
-                )
-            ]
-            export_rows["X_m"] = [point[0] for point in transformed_xy]
-            export_rows["Y_m"] = [point[1] for point in transformed_xy]
-            export_block = _target_coordinate_block(
-                export_rows[["X_m", "Y_m", "Z_m"]],
-                xy_label_suffix=crs_display_suffix_func(export_context.export_crs),
-                xy_unit="deg" if export_context.export_crs.is_geographic() else "м",
-                z_column_name="Z_output_m",
-                survey_export_dataframe_func=survey_export_dataframe_func,
-            )
-            frames.append(
-                pd.concat(
-                    [
-                        identity_df.reset_index(drop=True),
-                        source_block.reset_index(drop=True),
-                        export_block.reset_index(drop=True),
-                    ],
-                    axis=1,
-                )
-            )
-            continue
-
-        source_block = _target_coordinate_block(
-            rows[["X_m", "Y_m", "Z_m"]],
-            xy_label_suffix="",
-            xy_unit="deg" if source_crs.is_geographic() else "м",
-            z_column_name="Z_m",
-            survey_export_dataframe_func=survey_export_dataframe_func,
-        )
-        frames.append(
-            pd.concat(
-                [
-                    identity_df.reset_index(drop=True),
-                    source_block.reset_index(drop=True),
-                ],
-                axis=1,
-            )
-        )
-    if not frames:
+    if combined.empty:
         return b""
-    combined = pd.concat(frames, ignore_index=True)
     return survey_export_csv_bytes(combined)
+
+
+def build_batch_target_excel(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+    csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
+    transform_xy_func: TransformXyFunc = transform_xy_to_crs,
+    crs_display_suffix_func: Callable[[CoordinateSystem], str] = get_crs_display_suffix,
+    survey_export_dataframe_func: SurveyExportFrameFunc = survey_export_dataframe,
+) -> bytes:
+    combined = _build_batch_target_export_frame(
+        records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_xy_func=transform_xy_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
+    )
+    if combined.empty:
+        return b""
+    return survey_export_excel_bytes(combined, sheet_name="targets")
 
 
 def build_batch_survey_welltrack(
@@ -401,6 +376,200 @@ def build_batch_target_dev_7z(
     return buffer.getvalue()
 
 
+def build_batch_export_package_files(
+    *,
+    successes: list[SuccessfulWellPlan] | None = None,
+    records: list[WelltrackRecord] | None = None,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
+    transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
+    transform_xy_func: TransformXyFunc = transform_xy_to_crs,
+    crs_display_suffix_func: Callable[[CoordinateSystem], str] = get_crs_display_suffix,
+    survey_export_dataframe_func: SurveyExportFrameFunc = survey_export_dataframe,
+    dls_to_pi_func: DlsToPiFunc = dls_to_pi,
+) -> tuple[ExportFilePayload, ...]:
+    ordered_successes = list(successes or [])
+    ordered_records = list(records or [])
+    payloads: list[ExportFilePayload] = []
+
+    survey_csv = build_batch_survey_csv(
+        ordered_successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_stations_func=transform_stations_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
+        dls_to_pi_func=dls_to_pi_func,
+    )
+    if survey_csv:
+        payloads.append(
+            ExportFilePayload(
+                file_name="survey/welltrack_survey.csv",
+                data=survey_csv,
+                display_name="Траектории CSV",
+            )
+        )
+    survey_excel = build_batch_survey_excel(
+        ordered_successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_stations_func=transform_stations_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
+        dls_to_pi_func=dls_to_pi_func,
+    )
+    if survey_excel:
+        payloads.append(
+            ExportFilePayload(
+                file_name="survey/welltrack_survey.xlsx",
+                data=survey_excel,
+                display_name="Траектории Excel",
+            )
+        )
+    survey_welltrack = build_batch_survey_welltrack(
+        ordered_successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_stations_func=transform_stations_func,
+    )
+    if survey_welltrack:
+        payloads.append(
+            ExportFilePayload(
+                file_name="survey/welltrack_survey.inc",
+                data=survey_welltrack,
+                display_name="Траектории WELLTRACK",
+            )
+        )
+    for file_payload in build_batch_survey_dev_files(
+        ordered_successes,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        reference_wells=reference_wells,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_stations_func=transform_stations_func,
+    ):
+        payloads.append(
+            ExportFilePayload(
+                file_name=f"survey_dev/{file_payload.file_name}",
+                data=bytes(file_payload.data),
+                display_name=str(file_payload.well_name),
+            )
+        )
+
+    target_csv = build_batch_target_csv(
+        ordered_records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_xy_func=transform_xy_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
+    )
+    if target_csv:
+        payloads.append(
+            ExportFilePayload(
+                file_name="targets/welltrack_targets.csv",
+                data=target_csv,
+                display_name="Цели CSV",
+            )
+        )
+    target_excel = build_batch_target_excel(
+        ordered_records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_xy_func=transform_xy_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
+    )
+    if target_excel:
+        payloads.append(
+            ExportFilePayload(
+                file_name="targets/welltrack_targets.xlsx",
+                data=target_excel,
+                display_name="Цели Excel",
+            )
+        )
+    target_welltrack = build_batch_target_welltrack(
+        ordered_records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+    )
+    if target_welltrack:
+        payloads.append(
+            ExportFilePayload(
+                file_name="targets/welltrack_targets.inc",
+                data=target_welltrack,
+                display_name="Цели WELLTRACK",
+            )
+        )
+    for file_payload in build_batch_target_dev_files(
+        ordered_records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+    ):
+        payloads.append(
+            ExportFilePayload(
+                file_name=f"target_dev/{file_payload.file_name}",
+                data=bytes(file_payload.data),
+                display_name=str(file_payload.well_name),
+            )
+        )
+    return tuple(payloads)
+
+
+def build_batch_export_package_zip(
+    *,
+    successes: list[SuccessfulWellPlan] | None = None,
+    records: list[WelltrackRecord] | None = None,
+    target_crs: CoordinateSystem = DEFAULT_CRS,
+    auto_convert: bool = True,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    csv_export_crs_func: Callable[..., CoordinateSystem] = csv_export_crs,
+    transform_stations_func: Callable[..., pd.DataFrame] = transform_stations_to_crs,
+    transform_xy_func: TransformXyFunc = transform_xy_to_crs,
+    crs_display_suffix_func: Callable[[CoordinateSystem], str] = get_crs_display_suffix,
+    survey_export_dataframe_func: SurveyExportFrameFunc = survey_export_dataframe,
+    dls_to_pi_func: DlsToPiFunc = dls_to_pi,
+) -> bytes:
+    file_payloads = build_batch_export_package_files(
+        successes=successes,
+        records=records,
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        reference_wells=reference_wells,
+        csv_export_crs_func=csv_export_crs_func,
+        transform_stations_func=transform_stations_func,
+        transform_xy_func=transform_xy_func,
+        crs_display_suffix_func=crs_display_suffix_func,
+        survey_export_dataframe_func=survey_export_dataframe_func,
+        dls_to_pi_func=dls_to_pi_func,
+    )
+    if not file_payloads:
+        return b""
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for file_payload in file_payloads:
+            archive.writestr(str(file_payload.file_name), bytes(file_payload.data))
+    return buffer.getvalue()
+
+
 def build_batch_survey_dev_zip(
     successes: list[SuccessfulWellPlan],
     *,
@@ -504,6 +673,7 @@ def build_batch_survey_dev_files(
                     success=success,
                     stations=stations,
                     reference_wells=reference_wells,
+                    source_crs=source_crs,
                 ).encode("utf-8"),
             )
         )
@@ -517,7 +687,7 @@ def build_batch_target_dev_files(
     auto_convert: bool = True,
     source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> tuple[DevExportFilePayload, ...]:
-    del target_crs, auto_convert, source_crs
+    del target_crs, auto_convert
     used_names: set[str] = set()
     payloads: list[DevExportFilePayload] = []
     for index, (record, rows) in enumerate(_iter_prepared_target_rows(records), start=1):
@@ -533,7 +703,11 @@ def build_batch_target_dev_files(
             DevExportFilePayload(
                 well_name=str(record.name),
                 file_name=file_name,
-                data=_target_dev_export_text(record=record, rows=rows).encode("utf-8"),
+                data=_target_dev_export_text(
+                    record=record,
+                    rows=rows,
+                    source_crs=source_crs,
+                ).encode("utf-8"),
             )
         )
     return tuple(payloads)
@@ -590,6 +764,91 @@ def _iter_prepared_success_stations(
     return prepared
 
 
+def _build_batch_survey_export_frame(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_crs: CoordinateSystem,
+    auto_convert: bool,
+    source_crs: CoordinateSystem,
+    csv_export_crs_func: Callable[..., CoordinateSystem],
+    transform_stations_func: Callable[..., pd.DataFrame],
+    crs_display_suffix_func: Callable[[CoordinateSystem], str],
+    survey_export_dataframe_func: SurveyExportFrameFunc,
+    dls_to_pi_func: DlsToPiFunc,
+) -> pd.DataFrame:
+    if not successes:
+        return pd.DataFrame()
+    export_context = _survey_export_context(
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+    )
+    frames: list[pd.DataFrame] = []
+    for success in successes:
+        source_stations = success.stations.copy()
+        if source_stations.empty or not set(_SURVEY_EXPORT_REQUIRED_COLUMNS).issubset(
+            source_stations.columns
+        ):
+            continue
+        source_stations = _sanitize_export_stations(source_stations)
+        if source_stations.empty:
+            continue
+
+        export_stations = source_stations.copy()
+        if export_context.should_transform:
+            export_stations = transform_stations_func(
+                export_stations,
+                target_crs,
+                source_crs,
+                rename_columns=False,
+            )
+            export_stations = _sanitize_export_stations(export_stations)
+            if export_stations.empty:
+                continue
+            source_stations = _align_stations_by_md(source_stations, export_stations)
+            export_stations = _align_stations_by_md(export_stations, source_stations)
+            if source_stations.empty or export_stations.empty:
+                continue
+
+        azimuth_true_deg, azimuth_grid_deg = _survey_export_azimuth_columns(
+            source_stations=source_stations,
+            export_stations=export_stations,
+            source_crs=source_crs,
+            export_crs=export_context.export_crs,
+        )
+        export_frame = export_stations.copy()
+        export_frame.insert(0, "well_name", str(success.name))
+        if "DLS_deg_per_30m" in export_frame.columns:
+            export_frame["PI_deg_per_10m"] = dls_to_pi_func(
+                export_frame["DLS_deg_per_30m"].to_numpy(dtype=float)
+            )
+            export_frame = export_frame.drop(columns=["DLS_deg_per_30m"])
+        if export_context.should_label_export_crs:
+            export_frame = _call_survey_export_dataframe_func(
+                survey_export_dataframe_func,
+                export_frame,
+                xy_label_suffix=crs_display_suffix_func(export_context.export_crs),
+                xy_unit=(
+                    "deg" if export_context.export_crs.is_geographic() else "м"
+                ),
+                azi_true_deg=azimuth_true_deg,
+                azi_grid_deg=azimuth_grid_deg,
+            )
+        else:
+            export_frame = _call_survey_export_dataframe_func(
+                survey_export_dataframe_func,
+                export_frame,
+                azi_true_deg=azimuth_true_deg,
+                azi_grid_deg=azimuth_grid_deg,
+            )
+        export_frame = _with_export_tvd(export_frame)
+        frames.append(export_frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 def _iter_prepared_target_rows(
     records: list[WelltrackRecord],
 ) -> list[tuple[WelltrackRecord, pd.DataFrame]]:
@@ -618,6 +877,104 @@ def _iter_prepared_target_rows(
     return prepared
 
 
+def _build_batch_target_export_frame(
+    records: list[WelltrackRecord],
+    *,
+    target_crs: CoordinateSystem,
+    auto_convert: bool,
+    source_crs: CoordinateSystem,
+    csv_export_crs_func: Callable[..., CoordinateSystem],
+    transform_xy_func: TransformXyFunc,
+    crs_display_suffix_func: Callable[[CoordinateSystem], str],
+    survey_export_dataframe_func: SurveyExportFrameFunc,
+) -> pd.DataFrame:
+    prepared = _iter_prepared_target_rows(records)
+    if not prepared:
+        return pd.DataFrame()
+
+    export_context = _survey_export_context(
+        target_crs=target_crs,
+        auto_convert=auto_convert,
+        source_crs=source_crs,
+        csv_export_crs_func=csv_export_crs_func,
+    )
+    frames: list[pd.DataFrame] = []
+    for record, rows in prepared:
+        identity_df = pd.DataFrame(
+            {
+                "well_name": [str(record.name)] * len(rows.index),
+                "point_name": rows["point_name"].astype(str),
+                "point_md_m": rows["point_md_m"].astype(float),
+            }
+        )
+        if export_context.should_transform:
+            source_block = _target_coordinate_block(
+                rows[["X_m", "Y_m", "Z_m"]],
+                xy_label_suffix=crs_display_suffix_func(source_crs),
+                xy_unit="deg" if source_crs.is_geographic() else "м",
+                z_column_name="Z_input_m",
+                survey_export_dataframe_func=survey_export_dataframe_func,
+            )
+            export_rows = rows.copy()
+            transformed_xy = [
+                transform_xy_func(
+                    float(x_value),
+                    float(y_value),
+                    source_crs,
+                    target_crs,
+                )
+                for x_value, y_value in zip(
+                    export_rows["X_m"],
+                    export_rows["Y_m"],
+                    strict=False,
+                )
+            ]
+            export_rows["X_m"] = [point[0] for point in transformed_xy]
+            export_rows["Y_m"] = [point[1] for point in transformed_xy]
+            export_block = _target_coordinate_block(
+                export_rows[["X_m", "Y_m", "Z_m"]],
+                xy_label_suffix=crs_display_suffix_func(export_context.export_crs),
+                xy_unit="deg" if export_context.export_crs.is_geographic() else "м",
+                z_column_name="Z_output_m",
+                survey_export_dataframe_func=survey_export_dataframe_func,
+            )
+            frames.append(
+                pd.concat(
+                    [
+                        identity_df.reset_index(drop=True),
+                        source_block.reset_index(drop=True),
+                        export_block.reset_index(drop=True),
+                    ],
+                    axis=1,
+                )
+            )
+            continue
+
+        source_block = _target_coordinate_block(
+            rows[["X_m", "Y_m", "Z_m"]],
+            xy_label_suffix=(
+                crs_display_suffix_func(export_context.export_crs)
+                if export_context.should_label_export_crs
+                else ""
+            ),
+            xy_unit="deg" if export_context.export_crs.is_geographic() else "м",
+            z_column_name="Z_m",
+            survey_export_dataframe_func=survey_export_dataframe_func,
+        )
+        frames.append(
+            pd.concat(
+                [
+                    identity_df.reset_index(drop=True),
+                    source_block.reset_index(drop=True),
+                ],
+                axis=1,
+            )
+        )
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 def _sanitize_export_stations(stations: pd.DataFrame) -> pd.DataFrame:
     result = stations.copy()
     for column in _SURVEY_EXPORT_REQUIRED_COLUMNS:
@@ -631,6 +988,16 @@ def _sanitize_export_stations(stations: pd.DataFrame) -> pd.DataFrame:
     result = result.sort_values("MD_m", kind="mergesort")
     result = result.drop_duplicates(subset=["MD_m"], keep="first")
     return result.reset_index(drop=True)
+
+
+def _align_stations_by_md(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
+    common_md = set(right["MD_m"].to_numpy(dtype=float))
+    aligned = left.loc[left["MD_m"].map(float).isin(common_md)].copy()
+    if aligned.empty:
+        return aligned
+    aligned = aligned.sort_values("MD_m", kind="mergesort")
+    aligned = aligned.drop_duplicates(subset=["MD_m"], keep="first")
+    return aligned.reset_index(drop=True)
 
 
 def _sanitize_target_rows(rows: pd.DataFrame) -> pd.DataFrame:
@@ -679,12 +1046,157 @@ def _target_coordinate_block(
     z_column_name: str,
     survey_export_dataframe_func: SurveyExportFrameFunc,
 ) -> pd.DataFrame:
-    block = survey_export_dataframe_func(
+    block = _call_survey_export_dataframe_func(
+        survey_export_dataframe_func,
         rows.copy(),
         xy_label_suffix=xy_label_suffix,
         xy_unit=xy_unit,
     )
+    block = _ensure_target_coordinate_block_labels(
+        block,
+        xy_label_suffix=xy_label_suffix,
+        xy_unit=xy_unit,
+    )
     return block.rename(columns={"Z_m": z_column_name})
+
+
+def _ensure_target_coordinate_block_labels(
+    block: pd.DataFrame,
+    *,
+    xy_label_suffix: str,
+    xy_unit: str,
+) -> pd.DataFrame:
+    result = block.copy()
+    x_column_name = _export_coordinate_column_name(
+        "X",
+        xy_label_suffix=xy_label_suffix,
+        xy_unit=xy_unit,
+    )
+    y_column_name = _export_coordinate_column_name(
+        "Y",
+        xy_label_suffix=xy_label_suffix,
+        xy_unit=xy_unit,
+    )
+    rename_columns: dict[str, str] = {}
+    if "X_m" in result.columns and x_column_name != "X_m":
+        rename_columns["X_m"] = x_column_name
+    if "Y_m" in result.columns and y_column_name != "Y_m":
+        rename_columns["Y_m"] = y_column_name
+    if rename_columns:
+        result = result.rename(columns=rename_columns)
+    return result
+
+
+def _export_coordinate_column_name(
+    axis: str,
+    *,
+    xy_label_suffix: str,
+    xy_unit: str,
+) -> str:
+    unit_label = (
+        "deg"
+        if str(xy_unit or "").strip().casefold() in {"deg", "degree", "degrees"}
+        else "m"
+    )
+    crs_label = str(xy_label_suffix or "").strip().strip("()").strip()
+    if not crs_label and unit_label == "m":
+        return f"{axis}_m"
+    infix = f"{crs_label}_" if crs_label else ""
+    return f"{axis}_{infix}{unit_label}"
+
+
+def _call_survey_export_dataframe_func(
+    survey_export_dataframe_func: SurveyExportFrameFunc,
+    frame: pd.DataFrame,
+    *,
+    xy_label_suffix: str | None = None,
+    xy_unit: str | None = None,
+    azi_true_deg: object | None = None,
+    azi_grid_deg: object | None = None,
+) -> pd.DataFrame:
+    kwargs: dict[str, object] = {}
+    if xy_label_suffix is not None:
+        kwargs["xy_label_suffix"] = xy_label_suffix
+    if xy_unit is not None:
+        kwargs["xy_unit"] = xy_unit
+    if azi_true_deg is not None and _callable_accepts_keyword(
+        survey_export_dataframe_func,
+        "azi_true_deg",
+    ):
+        kwargs["azi_true_deg"] = azi_true_deg
+    if azi_grid_deg is not None and _callable_accepts_keyword(
+        survey_export_dataframe_func,
+        "azi_grid_deg",
+    ):
+        kwargs["azi_grid_deg"] = azi_grid_deg
+    return survey_export_dataframe_func(frame, **kwargs)
+
+
+def _callable_accepts_keyword(func: Callable[..., object], keyword: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    if keyword in signature.parameters:
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _survey_export_azimuth_columns(
+    *,
+    source_stations: pd.DataFrame,
+    export_stations: pd.DataFrame,
+    source_crs: CoordinateSystem,
+    export_crs: CoordinateSystem,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if "AZI_deg" not in source_stations.columns:
+        return None, None
+    grid_source = _normalize_azimuth_array(source_stations["AZI_deg"])
+    if source_crs.is_geographic():
+        true_azimuth = grid_source
+    else:
+        source_convergence = meridian_convergence_series_deg(
+            source_stations["X_m"],
+            source_stations["Y_m"],
+            source_crs,
+        )
+        if source_convergence is None:
+            if (
+                source_crs == export_crs
+                and len(source_stations.index) == len(export_stations.index)
+            ):
+                return None, grid_source
+            return None, None
+        true_azimuth = _normalize_azimuth_array(grid_source + source_convergence)
+
+    if export_crs.is_geographic():
+        return true_azimuth, None
+    if (
+        source_crs == export_crs
+        and len(source_stations.index) == len(export_stations.index)
+    ):
+        return true_azimuth, grid_source
+
+    export_convergence = meridian_convergence_series_deg(
+        export_stations["X_m"],
+        export_stations["Y_m"],
+        export_crs,
+    )
+    if export_convergence is None:
+        return true_azimuth, None
+    return (
+        true_azimuth,
+        _normalize_azimuth_array(true_azimuth - export_convergence),
+    )
+
+
+def _normalize_azimuth_array(values: object) -> np.ndarray:
+    normalized = np.asarray(values, dtype=float) % 360.0
+    normalized[~np.isfinite(normalized)] = np.nan
+    return normalized
 
 
 def _dev_export_text(
@@ -692,11 +1204,13 @@ def _dev_export_text(
     success: SuccessfulWellPlan,
     stations: pd.DataFrame,
     reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> str:
     rows = _dev_export_rows(
         success=success,
         stations=stations,
         reference_wells=reference_wells,
+        source_crs=source_crs,
     )
     if rows.empty:
         return ""
@@ -724,6 +1238,7 @@ def _dev_export_rows(
     success: SuccessfulWellPlan,
     stations: pd.DataFrame,
     reference_wells: tuple[ImportedTrajectoryWell, ...],
+    source_crs: CoordinateSystem,
 ) -> pd.DataFrame:
     if stations.empty:
         return pd.DataFrame(columns=_DEV_EXPORT_COLUMNS)
@@ -731,10 +1246,11 @@ def _dev_export_rows(
         success=success,
         stations=stations,
         reference_wells=reference_wells,
+        source_crs=source_crs,
     )
     if sidetrack_rows is not None and not sidetrack_rows.empty:
         return sidetrack_rows
-    return _dev_rows_from_stations(stations)
+    return _dev_rows_from_stations(stations, source_crs=source_crs)
 
 
 def _sidetrack_dev_export_rows(
@@ -742,6 +1258,7 @@ def _sidetrack_dev_export_rows(
     success: SuccessfulWellPlan,
     stations: pd.DataFrame,
     reference_wells: tuple[ImportedTrajectoryWell, ...],
+    source_crs: CoordinateSystem,
 ) -> pd.DataFrame | None:
     summary = dict(getattr(success, "summary", {}) or {})
     window_md = _summary_optional_float(summary, "sidetrack_window_md_m")
@@ -752,6 +1269,7 @@ def _sidetrack_dev_export_rows(
         window_md=window_md,
         summary=summary,
         reference_wells=reference_wells,
+        source_crs=source_crs,
     )
     if prefix_rows is None or prefix_rows.empty:
         return None
@@ -760,7 +1278,11 @@ def _sidetrack_dev_export_rows(
         float(prefix_rows["Y"].iloc[0]),
         -float(prefix_rows["Z"].iloc[0]),
     )
-    branch_rows = _dev_rows_from_stations(stations, surface_xyz=surface_override)
+    branch_rows = _dev_rows_from_stations(
+        stations,
+        surface_xyz=surface_override,
+        source_crs=source_crs,
+    )
     branch_rows = branch_rows.loc[
         branch_rows["MD"].to_numpy(dtype=float) > float(window_md) + 1e-6
     ].copy()
@@ -774,6 +1296,7 @@ def _sidetrack_parent_prefix_rows(
     window_md: float,
     summary: dict[str, object],
     reference_wells: tuple[ImportedTrajectoryWell, ...],
+    source_crs: CoordinateSystem,
 ) -> pd.DataFrame | None:
     parent_well = _sidetrack_parent_reference_well(
         summary=summary,
@@ -797,7 +1320,7 @@ def _sidetrack_parent_prefix_rows(
     )
     if prefix_stations.empty:
         return None
-    prefix_rows = _dev_rows_from_stations(prefix_stations)
+    prefix_rows = _dev_rows_from_stations(prefix_stations, source_crs=source_crs)
     if parent_well is not None and parent_well.dev_export_rows is not None:
         prefix_rows = _overlay_original_dev_rows(
             derived_rows=prefix_rows,
@@ -1000,6 +1523,7 @@ def _dev_rows_from_stations(
     stations: pd.DataFrame,
     *,
     surface_xyz: tuple[float, float, float] | None = None,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> pd.DataFrame:
     if stations.empty:
         return pd.DataFrame(columns=_DEV_EXPORT_COLUMNS)
@@ -1013,6 +1537,22 @@ def _dev_rows_from_stations(
             float(surface_xyz[1]),
             float(surface_xyz[2]),
         )
+    grid_azimuth = (
+        _normalize_azimuth_array(stations["AZI_deg"].to_numpy(dtype=float))
+        if "AZI_deg" in stations.columns
+        else np.zeros(len(stations), dtype=float)
+    )
+    true_azimuth = grid_azimuth.copy()
+    convergence = meridian_convergence_series_deg(
+        stations["X_m"],
+        stations["Y_m"],
+        source_crs,
+    )
+    if convergence is not None:
+        finite_mask = np.isfinite(convergence)
+        true_azimuth[finite_mask] = _normalize_azimuth_array(
+            grid_azimuth[finite_mask] + convergence[finite_mask]
+        )
     rows = pd.DataFrame(
         {
             "MD": stations["MD_m"].to_numpy(dtype=float),
@@ -1022,11 +1562,7 @@ def _dev_rows_from_stations(
             "TVD": stations["Z_m"].to_numpy(dtype=float) - float(surface_z),
             "DX": stations["X_m"].to_numpy(dtype=float) - float(surface_x),
             "DY": stations["Y_m"].to_numpy(dtype=float) - float(surface_y),
-            "AZIM_TN": (
-                stations["AZI_deg"].to_numpy(dtype=float)
-                if "AZI_deg" in stations.columns
-                else np.zeros(len(stations), dtype=float)
-            ),
+            "AZIM_TN": true_azimuth,
             "INCL": (
                 stations["INC_deg"].to_numpy(dtype=float)
                 if "INC_deg" in stations.columns
@@ -1039,7 +1575,7 @@ def _dev_rows_from_stations(
             ),
         }
     )
-    rows["AZIM_GN"] = rows["AZIM_TN"].to_numpy(dtype=float)
+    rows["AZIM_GN"] = grid_azimuth
     return _sanitize_dev_export_rows(rows)
 
 
@@ -1081,6 +1617,7 @@ def _target_dev_export_text(
     *,
     record: WelltrackRecord,
     rows: pd.DataFrame,
+    source_crs: CoordinateSystem = DEFAULT_CRS,
 ) -> str:
     if rows.empty:
         return ""
@@ -1101,6 +1638,11 @@ def _target_dev_export_text(
         "#==============================================================================================================================================",
     ]
 
+    convergence = meridian_convergence_series_deg(
+        rows["X_m"],
+        rows["Y_m"],
+        source_crs,
+    )
     cumulative_md = 0.0
     prev_inc_deg = 0.0
     prev_azi_deg = 0.0
@@ -1113,7 +1655,7 @@ def _target_dev_export_text(
         z_value = _station_float(row, "Z_m")
         if int(index) == 0:
             inc_deg = 0.0
-            azi_deg = 0.0
+            grid_azi_deg = 0.0
             dls_deg_per_30m = 0.0
         else:
             dx = x_value - prev_x
@@ -1127,7 +1669,7 @@ def _target_dev_export_text(
                 if segment_length_m > 1e-9
                 else prev_inc_deg
             )
-            azi_deg = (
+            grid_azi_deg = (
                 math.degrees(math.atan2(dx, dy)) % 360.0
                 if horizontal_offset_m > 1e-9
                 else prev_azi_deg
@@ -1138,7 +1680,7 @@ def _target_dev_export_text(
                         prev_inc_deg,
                         prev_azi_deg,
                         inc_deg,
-                        azi_deg,
+                        grid_azi_deg,
                     )
                 )
             )
@@ -1147,6 +1689,11 @@ def _target_dev_export_text(
                 if segment_length_m > 1e-9
                 else 0.0
             )
+        true_azi_deg = grid_azi_deg
+        if int(index) != 0 and convergence is not None:
+            convergence_value = float(convergence[int(index)])
+            if math.isfinite(convergence_value):
+                true_azi_deg = float((grid_azi_deg + convergence_value) % 360.0)
         lines.append(
             _format_dev_export_data_values(
                 cumulative_md,
@@ -1156,17 +1703,17 @@ def _target_dev_export_text(
                 z_value - surface_z,
                 x_value - surface_x,
                 y_value - surface_y,
-                azi_deg,
+                true_azi_deg,
                 inc_deg,
                 dls_deg_per_30m,
-                azi_deg,
+                grid_azi_deg,
             )
         )
         prev_x = x_value
         prev_y = y_value
         prev_z = z_value
         prev_inc_deg = inc_deg
-        prev_azi_deg = azi_deg
+        prev_azi_deg = grid_azi_deg
     return "\n".join(lines) + "\n"
 
 

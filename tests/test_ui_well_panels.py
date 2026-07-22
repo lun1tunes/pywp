@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -60,25 +61,66 @@ def test_survey_export_dataframe_can_add_tvd_relative_to_surface() -> None:
     assert result["TVD_m"].tolist() == [0.0, 100.0, 240.0]
 
 
+def test_survey_export_dataframe_can_split_true_and_grid_azimuth_columns() -> None:
+    display_df = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "AZI_deg": [10.0, 20.0],
+            "X_m": [10.0, 20.0],
+            "Y_m": [20.0, 30.0],
+            "Z_m": [0.0, 50.0],
+        }
+    )
+
+    result = survey_export_dataframe(
+        display_df,
+        azi_true_deg=np.array([11.5, 22.5]),
+        azi_grid_deg=np.array([9.5, 19.5]),
+    )
+
+    assert "AZI_deg" not in result.columns
+    assert result["AZI_TN_deg"].tolist() == [11.5, 22.5]
+    assert result["AZI_GN_deg"].tolist() == [9.5, 19.5]
+
+
 def test_survey_download_uses_export_stations_without_changing_display(
     monkeypatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, object] = {"downloads": []}
 
     def fake_dataframe(frame, **_kwargs) -> None:
         captured["display"] = frame.copy()
         captured["column_config"] = _kwargs["column_config"]
 
     def fake_download_button(_label, *, data, **_kwargs) -> None:
-        captured["csv"] = data
+        captured["downloads"].append(
+            {
+                "label": str(_label),
+                "data": data,
+                "file_name": str(_kwargs.get("file_name", "")),
+                "mime": str(_kwargs.get("mime", "")),
+            }
+        )
 
     def fake_number_column(label, **kwargs):
         return {"label": label, **kwargs}
+
+    class _DummyColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
     import pywp.ui_well_panels as panels
 
     monkeypatch.setattr(panels.st, "dataframe", fake_dataframe)
     monkeypatch.setattr(panels.st, "download_button", fake_download_button)
+    monkeypatch.setattr(
+        panels.st,
+        "columns",
+        lambda *args, **kwargs: (_DummyColumn(), _DummyColumn()),
+    )
     monkeypatch.setattr(panels.st.column_config, "NumberColumn", fake_number_column)
     monkeypatch.setattr(
         panels.st.column_config,
@@ -114,12 +156,30 @@ def test_survey_download_uses_export_stations_without_changing_display(
     assert column_config["X_m"]["label"] == "X (East), м"
     assert column_config["Y_m"]["label"] == "Y (North), м"
 
-    exported = pd.read_csv(BytesIO(captured["csv"]))
+    downloads = list(captured["downloads"])
+    assert [item["label"] for item in downloads] == [
+        "Скачать CSV инклинометрии",
+        "Скачать Excel инклинометрии",
+    ]
+
+    csv_download = downloads[0]
+    exported = pd.read_csv(BytesIO(csv_download["data"]))
     assert "X_m" not in exported.columns
     assert exported["X_WGS_deg"].iloc[0] == 110.0
     assert exported["Y_WGS_deg"].iloc[0] == 220.0
     assert exported["Z_m"].tolist() == [-63.0, 62.0]
     assert exported["TVD_m"].tolist() == [0.0, 125.0]
+    assert csv_download["file_name"] == "well_survey.csv"
+    assert csv_download["mime"] == "text/csv"
+
+    excel_download = downloads[1]
+    excel_export = pd.read_excel(BytesIO(excel_download["data"]))
+    assert excel_export["X_WGS_deg"].iloc[1] == 180.0
+    assert excel_download["file_name"] == "well_survey.xlsx"
+    assert (
+        excel_download["mime"]
+        == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 def test_trajectory_panel_uses_local_three_for_default_3d(monkeypatch) -> None:
