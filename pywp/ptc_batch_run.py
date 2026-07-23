@@ -586,20 +586,12 @@ def run_batch_if_clicked(
             if (
                 parallel_requested
                 and dynamic_cluster_context is None
-                and not selected_has_pilot_dependencies
-            ):
-                append_log(
-                    f"Параллельный расчёт: {int(request.parallel_workers)} процессов."
-                )
-            elif (
-                parallel_requested
-                and dynamic_cluster_context is None
                 and selected_has_pilot_dependencies
             ):
                 append_log(
                     "Параллельный расчёт частично: независимые скважины и пилоты "
-                    f"считаются в {int(request.parallel_workers)} процессов, "
-                    "боковые стволы — после готовности пилота."
+                    "считаются параллельно, боковые стволы — после готовности "
+                    "пилота."
                 )
             elif parallel_requested and dynamic_cluster_context is not None:
                 append_log(

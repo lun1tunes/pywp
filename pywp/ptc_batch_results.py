@@ -6,6 +6,7 @@ import re
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -58,6 +59,7 @@ __all__ = [
     "build_batch_target_dev_7z",
     "build_batch_target_dev_file",
     "build_batch_target_welltrack",
+    "dated_export_file_name",
     "dev_export_file_name",
     "build_batch_survey_welltrack",
     "find_selected_success",
@@ -143,6 +145,21 @@ class ExportFilePayload:
     file_name: str
     data: bytes
     display_name: str = ""
+
+
+def dated_export_file_name(
+    file_name: str,
+    *,
+    export_date: date | None = None,
+) -> str:
+    text = str(file_name).strip()
+    if not text:
+        return ""
+    suffix = (export_date or date.today()).strftime("%Y.%m.%d")
+    stem, dot, extension = text.rpartition(".")
+    if dot:
+        return f"{stem}_{suffix}.{extension}"
+    return f"{text}_{suffix}"
 
 
 def build_batch_survey_csv(
@@ -410,7 +427,7 @@ def build_batch_export_package_files(
     if survey_csv:
         payloads.append(
             ExportFilePayload(
-                file_name="survey/welltrack_survey.csv",
+                file_name=f"survey/{dated_export_file_name('welltrack_survey.csv')}",
                 data=survey_csv,
                 display_name="Траектории CSV",
             )
@@ -429,7 +446,7 @@ def build_batch_export_package_files(
     if survey_excel:
         payloads.append(
             ExportFilePayload(
-                file_name="survey/welltrack_survey.xlsx",
+                file_name=f"survey/{dated_export_file_name('welltrack_survey.xlsx')}",
                 data=survey_excel,
                 display_name="Траектории Excel",
             )
@@ -480,7 +497,7 @@ def build_batch_export_package_files(
     if target_csv:
         payloads.append(
             ExportFilePayload(
-                file_name="targets/welltrack_targets.csv",
+                file_name=f"targets/{dated_export_file_name('welltrack_targets.csv')}",
                 data=target_csv,
                 display_name="Цели CSV",
             )
@@ -498,7 +515,9 @@ def build_batch_export_package_files(
     if target_excel:
         payloads.append(
             ExportFilePayload(
-                file_name="targets/welltrack_targets.xlsx",
+                file_name=(
+                    f"targets/{dated_export_file_name('welltrack_targets.xlsx')}"
+                ),
                 data=target_excel,
                 display_name="Цели Excel",
             )

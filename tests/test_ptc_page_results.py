@@ -456,9 +456,8 @@ def test_anticollision_panel_renders_settings_under_section_header(
         show_visualization=False,
     )
 
-    assert calls[:4] == [
+    assert calls[:3] == [
         ("markdown", "### Anti-collision"),
-        ("caption", "Multiprocessing для anti-collision отключён автоматически: для текущего набора быстрее последовательный расчёт."),
         ("params", "rendered"),
         ("button", "Расчёт пересечений"),
     ]

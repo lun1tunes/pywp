@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from pywp import ptc_batch_results
 from pywp import ptc_core as wt_import_module
 from pywp import ptc_anticollision_params
 from pywp import ptc_edit_targets
@@ -5298,10 +5299,7 @@ def test_welltrack_page_prompts_to_run_anticollision_for_successful_batch() -> N
     assert "Пресет неопределенности для anti-collision" not in selectbox_labels
     assert "Параллельный расчёт anti-collision" not in selectbox_labels
     caption_values = [str(widget.value) for widget in at.caption]
-    assert any(
-        "Multiprocessing для anti-collision отключён автоматически" in value
-        for value in caption_values
-    )
+    assert not any("Multiprocessing" in value for value in caption_values)
 
 
 def test_welltrack_page_normalizes_invalid_anticollision_uncertainty_preset() -> None:
@@ -8600,6 +8598,7 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
 ) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state["wt_survey_download_format"] = "Excel"
     page.st.session_state["wt_records"] = [
         WelltrackRecord(
             name="WELL-A",
@@ -8628,6 +8627,7 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
         "markdown": [],
         "multiselect": None,
         "radios": [],
+        "events": [],
     }
 
     class _DummyContext:
@@ -8662,6 +8662,7 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
         return str(page.st.session_state.get(kwargs.get("key"), options[0]))
 
     def _fake_download_button(label, *args, **kwargs):
+        captured["events"].append(f"download:{label}")
         captured["download_buttons"].append(
             {
                 "label": str(label),
@@ -8671,6 +8672,14 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
                 "mime": str(kwargs.get("mime", "")),
             }
         )
+        return False
+
+    def _fake_text_input(label, *args, **kwargs):
+        captured["events"].append(f"input:{label}")
+        return ""
+
+    def _fake_button(label, *args, **kwargs):
+        captured["events"].append(f"button:{label}")
         return False
 
     monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
@@ -8684,6 +8693,8 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "multiselect", _fake_multiselect)
     monkeypatch.setattr(page.st, "radio", _fake_radio)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "button", _fake_button)
     monkeypatch.setattr(page.st, "download_button", _fake_download_button)
 
     page._render_batch_summary(
@@ -8709,7 +8720,7 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
         },
         {
             "label": "Формат выгрузки",
-            "options": ["Excel", "CSV", "WELLTRACK", ".dev (7z)"],
+            "options": ["Пакет", "Excel", "CSV", "WELLTRACK", ".dev (7z)"],
             "key": "wt_survey_download_format",
         },
     ]
@@ -8717,7 +8728,7 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
         "Скачать Excel траекторий всех скважин",
         "Скачать Excel выбранных скважин",
     }.issubset(download_labels)
-    assert "Скачать пакет выгрузки" in download_labels
+    assert "Скачать пакет выгрузки" not in download_labels
     selected_download = next(
         item
         for item in downloads
@@ -8726,12 +8737,113 @@ def test_batch_summary_keeps_survey_downloads_in_visible_export_block(
     selected_excel = pd.read_excel(BytesIO(bytes(selected_download["data"])))
     assert "WELL-B" in set(selected_excel["well_name"].astype(str))
     assert "WELL-A" not in set(selected_excel["well_name"].astype(str))
-    assert selected_download["file_name"] == "welltrack_survey_selected.xlsx"
+    assert selected_download["file_name"] == ptc_batch_results.dated_export_file_name(
+        "welltrack_survey_selected.xlsx"
+    )
     assert (
         selected_download["mime"]
         == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert selected_download["disabled"] is False
+    assert captured["events"].index("input:Папка для выгрузки") < captured["events"].index(
+        "button:Сохранить все файлы"
+    )
+    assert captured["events"].index("input:Папка для выгрузки") < captured["events"].index(
+        "button:Сохранить выбранные файлы"
+    )
+
+
+def test_batch_summary_defaults_to_package_export_without_duplicate_section(
+    monkeypatch,
+) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_records"] = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=10.0, y=0.0, z=1000.0, md=2.0),
+            ),
+        )
+    ]
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0)
+    ]
+    captured: dict[str, object] = {
+        "download_buttons": [],
+        "markdown": [],
+        "radios": [],
+        "events": [],
+    }
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fake_radio(label, options, *args, **kwargs):
+        captured["radios"].append(
+            {
+                "label": str(label),
+                "options": [str(option) for option in options],
+                "key": str(kwargs.get("key")),
+            }
+        )
+        return str(page.st.session_state.get(kwargs.get("key"), options[0]))
+
+    def _fake_download_button(label, *args, **kwargs):
+        captured["events"].append(f"download:{label}")
+        captured["download_buttons"].append(str(label))
+        return False
+
+    def _fake_text_input(label, *args, **kwargs):
+        captured["events"].append(f"input:{label}")
+        return ""
+
+    def _fake_button(label, *args, **kwargs):
+        captured["events"].append(f"button:{label}")
+        return False
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "markdown",
+        lambda value, *args, **kwargs: captured["markdown"].append(str(value)),
+    )
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "radio", _fake_radio)
+    monkeypatch.setattr(page.st, "text_input", _fake_text_input)
+    monkeypatch.setattr(page.st, "download_button", _fake_download_button)
+    monkeypatch.setattr(page.st, "button", _fake_button)
+
+    page._render_batch_summary(
+        [{"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 2}]
+    )
+
+    assert captured["radios"][1] == {
+        "label": "Формат выгрузки",
+        "options": ["Пакет", "Excel", "CSV", "WELLTRACK", ".dev (7z)"],
+        "key": "wt_survey_download_format",
+    }
+    assert "Скачать пакет выгрузки" in captured["download_buttons"]
+    assert "### Пакетная выгрузка" not in captured["markdown"]
+    assert captured["events"] == [
+        "download:Скачать пакет выгрузки",
+        "input:Папка для выгрузки",
+        "button:Сохранить пакет в папку",
+    ]
 
 
 def test_batch_summary_reuses_prepared_download_payload_cache(monkeypatch) -> None:
@@ -8789,6 +8901,7 @@ def test_batch_summary_reuses_prepared_download_payload_cache(monkeypatch) -> No
 def test_batch_summary_skips_large_download_payloads_until_requested(monkeypatch) -> None:
     page = wt_import_module
     page.st.session_state.clear()
+    page.st.session_state["wt_survey_download_format"] = "CSV"
     row_count = 5001
     stations = pd.DataFrame(
         {
@@ -8835,7 +8948,14 @@ def test_batch_summary_skips_large_download_payloads_until_requested(monkeypatch
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
     monkeypatch.setattr(page.st, "multiselect", lambda *args, **kwargs: [])
-    monkeypatch.setattr(page.st, "radio", lambda _label, options, **kwargs: options[0])
+    monkeypatch.setattr(
+        page.st,
+        "radio",
+        lambda _label, options, **kwargs: page.st.session_state.get(
+            kwargs.get("key"),
+            options[0],
+        ),
+    )
     monkeypatch.setattr(page.st, "toggle", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         page.st,
@@ -8863,7 +8983,7 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
     ]
     page.st.session_state["wt_survey_download_selected_names"] = ["WELL-A"]
     page.st.session_state["wt_survey_download_format"] = ".dev (7z)"
-    captured: dict[str, object] = {"download_buttons": []}
+    captured: dict[str, object] = {"download_buttons": [], "events": [], "captions": []}
 
     class _DummyContext:
         def __enter__(self):
@@ -8880,6 +9000,7 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
         return tuple(_DummyContext() for _ in range(count))
 
     def _fake_download_button(label, *args, **kwargs):
+        captured["events"].append(f"download:{label}")
         captured["download_buttons"].append(
             {
                 "label": str(label),
@@ -8891,9 +9012,21 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
         )
         return False
 
+    def _fake_text_input(label, *args, **kwargs):
+        captured["events"].append(f"input:{label}")
+        return page.st.session_state.setdefault(kwargs.get("key"), "")
+
+    def _fake_button(label, *args, **kwargs):
+        captured["events"].append(f"button:{label}")
+        return False
+
     monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "columns", _fake_columns)
-    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        page.st,
+        "caption",
+        lambda value, *args, **kwargs: captured["captions"].append(str(value)),
+    )
     monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
@@ -8914,11 +9047,9 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
     monkeypatch.setattr(
         page.st,
         "text_input",
-        lambda _label, *args, **kwargs: page.st.session_state.setdefault(
-            kwargs.get("key"), ""
-        ),
+        _fake_text_input,
     )
-    monkeypatch.setattr(page.st, "button", lambda *args, **kwargs: False)
+    monkeypatch.setattr(page.st, "button", _fake_button)
     monkeypatch.setattr(page.st, "rerun", lambda *args, **kwargs: None)
     monkeypatch.setattr(page.st, "dialog", lambda *_args, **_kwargs: (lambda func: func))
     monkeypatch.setattr(page.st, "download_button", _fake_download_button)
@@ -8948,6 +9079,13 @@ def test_batch_summary_dev_export_downloads_7z_or_single_dev(monkeypatch) -> Non
         .decode("utf-8")
         .startswith("# SURVEY FROM PYWP")
     )
+    assert captured["events"].index("input:Папка для выгрузки") < captured["events"].index(
+        "button:Сохранить все .dev"
+    )
+    assert captured["events"].index("input:Папка для выгрузки") < captured["events"].index(
+        "button:Сохранить выбранные .dev"
+    )
+    assert not any("`.dev` файлы можно сохранить в папку без архива." in item for item in captured["captions"])
 
 
 def test_batch_summary_dev_folder_export_writes_selected_files(monkeypatch, tmp_path) -> None:
@@ -9160,6 +9298,7 @@ def test_batch_summary_can_export_target_points(monkeypatch) -> None:
     page = wt_import_module
     page.st.session_state.clear()
     page.st.session_state["wt_download_kind"] = "Цели"
+    page.st.session_state["wt_target_download_format"] = "Excel"
     page.st.session_state["wt_target_download_selected_names"] = ["WELL-A"]
     page.st.session_state["wt_records"] = [
         WelltrackRecord(
@@ -9261,7 +9400,7 @@ def test_batch_summary_can_export_target_points(monkeypatch) -> None:
         "Скачать Excel целей всех скважин",
         "Скачать Excel целей выбранных скважин",
     }.issubset(labels)
-    assert "Скачать пакет выгрузки" in labels
+    assert "Скачать пакет выгрузки" not in labels
     selected_download = next(
         item
         for item in downloads
@@ -9271,11 +9410,101 @@ def test_batch_summary_can_export_target_points(monkeypatch) -> None:
     assert "WELL-A" in set(selected_excel["well_name"].astype(str))
     assert "WELL-B" not in set(selected_excel["well_name"].astype(str))
     assert "point_name" in selected_excel.columns
-    assert selected_download["file_name"] == "welltrack_targets_selected.xlsx"
+    assert selected_download["file_name"] == ptc_batch_results.dated_export_file_name(
+        "welltrack_targets_selected.xlsx"
+    )
     assert (
         selected_download["mime"]
         == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+def test_batch_summary_targets_export_rejects_stale_package_format(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_download_kind"] = "Цели"
+    page.st.session_state["wt_target_download_format"] = "Пакет"
+    page.st.session_state["wt_target_download_selected_names"] = ["WELL-A"]
+    page.st.session_state["wt_records"] = [
+        WelltrackRecord(
+            name="WELL-A",
+            points=(
+                WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+                WelltrackPoint(x=10.0, y=0.0, z=1000.0, md=2.0),
+                WelltrackPoint(x=20.0, y=0.0, z=1100.0, md=3.0),
+            ),
+        ),
+    ]
+    page.st.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+    ]
+    captured: dict[str, object] = {"download_buttons": [], "radios": []}
+
+    class _DummyContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def metric(self, *args, **kwargs):
+            return None
+
+    def _fake_columns(spec, *args, **kwargs):
+        count = int(spec) if isinstance(spec, int) else len(spec)
+        return tuple(_DummyContext() for _ in range(count))
+
+    def _fake_download_button(label, *args, **kwargs):
+        captured["download_buttons"].append(str(label))
+        return False
+
+    def _fake_radio(label, options, *args, **kwargs):
+        captured["radios"].append(
+            {
+                "label": str(label),
+                "options": [str(option) for option in options],
+                "key": str(kwargs.get("key")),
+            }
+        )
+        return str(page.st.session_state.get(kwargs.get("key"), options[0]))
+
+    monkeypatch.setattr(page, "render_small_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "columns", _fake_columns)
+    monkeypatch.setattr(page.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(page.st, "expander", lambda *args, **kwargs: _DummyContext())
+    monkeypatch.setattr(
+        page.st,
+        "multiselect",
+        lambda _label, options, *args, **kwargs: list(
+            page.st.session_state.get(kwargs.get("key"), [])
+        ),
+    )
+    monkeypatch.setattr(page.st, "radio", _fake_radio)
+    monkeypatch.setattr(page.st, "download_button", _fake_download_button)
+
+    page._render_batch_summary(
+        [
+            {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+        ]
+    )
+
+    assert page.st.session_state["wt_target_download_format"] == "Excel"
+    assert captured["radios"] == [
+        {
+            "label": "Что выгружать",
+            "options": ["Траектории", "Цели"],
+            "key": "wt_download_kind",
+        },
+        {
+            "label": "Формат выгрузки",
+            "options": ["Excel", "CSV", "WELLTRACK", ".dev (7z)"],
+            "key": "wt_target_download_format",
+        },
+    ]
+    assert "Скачать пакет выгрузки" not in set(captured["download_buttons"])
+    assert "Скачать Excel целей всех скважин" in set(captured["download_buttons"])
 
 
 def test_batch_summary_renders_pilot_sidetrack_details_table(monkeypatch) -> None:
@@ -10090,7 +10319,6 @@ def test_cached_anti_collision_view_model_reports_pair_progress_with_eta(
         value == 48
         and "пары 5/10" in text
         and "осталось оц. 30 с" in text
-        and "4 процессов" in text
         for value, text in progress_events
     )
     assert page.st.session_state["wt_anticollision_last_run"]["parallel_workers"] == 4
@@ -10278,7 +10506,6 @@ def test_cached_anti_collision_cone_eta_uses_parallel_rebuild_workers(
     assert any(
         "конусы неопределённости 1/10" in text
         and "осталось оц. 1 мин 08 с" in text
-        and "4 процессов" in text
         and "построено 1/10" in text
         for _value, text in progress_events
     )
@@ -10367,7 +10594,6 @@ def test_cached_anti_collision_parallel_eta_uses_worker_count_before_first_wave(
     assert any(
         "пары 1/10" in text
         and "осталось оц. 1 мин 08 с" in text
-        and "4 процессов" in text
         for _value, text in progress_events
     )
 

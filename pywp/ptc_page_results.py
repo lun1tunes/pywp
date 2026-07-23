@@ -95,20 +95,6 @@ def _auto_anticollision_parallel_workers(total_well_count: int) -> int:
     return 2
 
 
-def _auto_anticollision_parallel_caption(total_well_count: int) -> str:
-    workers = _auto_anticollision_parallel_workers(total_well_count)
-    well_count = int(max(total_well_count, 0))
-    if workers <= 1:
-        return (
-            "Multiprocessing для anti-collision отключён автоматически: "
-            "для текущего набора быстрее последовательный расчёт."
-        )
-    return (
-        f"Multiprocessing для anti-collision: автоматически {workers} процесса "
-        f"для текущего набора ({well_count} скв.)."
-    )
-
-
 def _point_signature(point: object | None) -> tuple[float, float, float] | None:
     if point is None:
         return None
@@ -563,13 +549,6 @@ def _render_anticollision_panel(
     anti_collision_parallel_workers = _auto_anticollision_parallel_workers(
         len(successes) + len(resolved_reference_wells)
     )
-    caption = getattr(st, "caption", None)
-    if callable(caption):
-        caption(
-            _auto_anticollision_parallel_caption(
-                len(successes) + len(resolved_reference_wells)
-            )
-        )
     st.session_state["wt_anticollision_parallel_workers"] = int(
         anti_collision_parallel_workers
     )

@@ -159,7 +159,7 @@ def test_ptc_page_uses_automatic_parallel_worker_selection() -> None:
     selectbox_labels = {str(widget.label) for widget in at.selectbox}
     assert "Параллельный расчёт" not in selectbox_labels
     caption_values = [str(widget.value) for widget in at.caption]
-    assert any("Multiprocessing" in value for value in caption_values)
+    assert not any("Multiprocessing" in value for value in caption_values)
 
 
 def test_ptc_page_keeps_open_calc_params_panel_after_three_multi_edit_rerun(
@@ -277,6 +277,42 @@ def test_apply_edit_pad_changes_updates_pad_layout_state() -> None:
         float(updated.points[0].x) != float(original.points[0].x)
         or float(updated.points[0].y) != float(original.points[0].y)
         for updated, original in zip(ptc_core.st.session_state["wt_records"], records)
+    )
+
+
+def test_apply_edit_pad_changes_updates_nds_azimuth() -> None:
+    ptc_core.st.session_state.clear()
+    records = _records()
+    ptc_core.st.session_state["wt_records"] = list(records)
+    ptc_core.st.session_state["wt_records_original"] = list(records)
+    pads = ptc_core._ensure_pad_configs(base_records=list(records))
+    pad_id = str(pads[0].pad_id)
+    cfg = ptc_core.st.session_state["wt_pad_configs"][pad_id]
+    original_nds = float(cfg["nds_azimuth_deg"])
+    next_nds = (original_nds + 37.5) % 360.0
+    anchor = [
+        float(cfg["first_surface_x"]),
+        float(cfg["first_surface_y"]),
+        float(cfg["first_surface_z"]),
+    ]
+
+    updated_names = ptc_core._apply_edit_pad_changes(
+        [
+            {
+                "pad_id": pad_id,
+                "anchor": anchor,
+                "nds_azimuth_deg": next_nds,
+            }
+        ],
+        source="three_viewer",
+    )
+
+    assert updated_names == ["WELL-A", "WELL-B"]
+    assert ptc_core.st.session_state["wt_pad_configs"][pad_id][
+        "nds_azimuth_deg"
+    ] == pytest.approx(next_nds)
+    assert ptc_core.st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] == (
+        pytest.approx(next_nds)
     )
 
 

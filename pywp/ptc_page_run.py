@@ -55,20 +55,6 @@ def _auto_batch_parallel_workers(selected_well_count: int) -> int:
     return 2
 
 
-def _auto_batch_parallel_caption(selected_well_count: int) -> str:
-    workers = _auto_batch_parallel_workers(selected_well_count)
-    well_count = int(max(selected_well_count, 0))
-    if workers <= 1:
-        return (
-            "Multiprocessing отключён автоматически: для текущего набора "
-            "быстрее последовательный расчёт."
-        )
-    return (
-        f"Multiprocessing: автоматически {workers} процесса "
-        f"для текущего набора ({well_count} скв.)."
-    )
-
-
 @st.fragment
 def render_run_section(*, records: list[object]) -> None:
     st.markdown("## 4. Расчёт траекторий")
@@ -162,9 +148,6 @@ def render_run_section(*, records: list[object]) -> None:
         ]
         _parallel_workers = _auto_batch_parallel_workers(
             len(selected_names_for_parallel)
-        )
-        st.caption(
-            _auto_batch_parallel_caption(len(selected_names_for_parallel))
         )
 
         run_clicked = st.form_submit_button(

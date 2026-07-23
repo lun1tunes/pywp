@@ -514,12 +514,24 @@ def test_build_batch_export_package_zip_collects_available_exports() -> None:
     with zipfile.ZipFile(BytesIO(payload)) as archive:
         names = set(archive.namelist())
 
-    assert "survey/welltrack_survey.csv" in names
-    assert "survey/welltrack_survey.xlsx" in names
+    assert (
+        f"survey/{ptc_batch_results.dated_export_file_name('welltrack_survey.csv')}"
+        in names
+    )
+    assert (
+        f"survey/{ptc_batch_results.dated_export_file_name('welltrack_survey.xlsx')}"
+        in names
+    )
     assert "survey/welltrack_survey.inc" in names
     assert "survey_dev/WELL-A.dev" in names
-    assert "targets/welltrack_targets.csv" in names
-    assert "targets/welltrack_targets.xlsx" in names
+    assert (
+        f"targets/{ptc_batch_results.dated_export_file_name('welltrack_targets.csv')}"
+        in names
+    )
+    assert (
+        f"targets/{ptc_batch_results.dated_export_file_name('welltrack_targets.xlsx')}"
+        in names
+    )
     assert "targets/welltrack_targets.inc" in names
     assert "target_dev/WELL-A.dev" in names
 

@@ -472,6 +472,7 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert 'id="minimap-ruler-label"' in html
     assert ".minimap-well-label" in html
     assert ".minimap-edit-delta-label" in html
+    assert ".minimap-edit-position-label" in html
     assert ".minimap-edit-lateral-label" in html
     assert ".minimap-ruler-line" in html
     assert ".minimap-ruler-point" in html
@@ -501,8 +502,17 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "function resetMiniMapRulerMeasurement()" in html
     assert "for (let index = miniMapLabels.length - 1; index >= 0; index -= 1) {" in html
     assert "(item && item.sourceLabel && item.sourceLabel.role)" in html
-    assert 'labelRole === "edit_delta_label"' in html
-    assert 'labelRole === "edit_lateral_label"' in html
+    assert "function addMiniMapLabel(text, position, extraClassName, options)" in html
+    assert (
+        'const shouldMirrorToMiniMap =\n'
+        "            miniMapLabelLayer &&\n"
+        "            (\n"
+        '              labelRole === "well_label" ||\n'
+        '              labelRole === "reference_label" ||\n'
+        '              labelRole === "reference_label_optional" ||\n'
+        '              labelRole === "edit_pad_label"\n'
+        "            );"
+    ) in html
     assert "{ offsetY: offsetY, role: role }" in html
     assert "function syncEditWellNameLabelPosition(wellIndex)" in html
     assert 'id="minimap-control"' in html
@@ -551,6 +561,8 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "cursor: nwse-resize;" in html
     assert "border-top: 18px solid rgba(71,85,105,0.62);" in html
     assert "Math.sqrt(targetArea * aspect) * 1.2" in html
+    assert "maxWidth: Math.max(canvasWidth - margin * 2, 1)," in html
+    assert "maxHeight: Math.max(canvasHeight - margin * 2, 1)," in html
     assert "renderer.setScissorTest(true)" in html
     assert "const miniMapHiddenContourObjects = [];" in html
     assert "function renderMiniMapScene()" in html
@@ -586,8 +598,9 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "miniMapWorldAtEvent(event)" in html
     assert 'role: "edit_delta_label"' in html
     assert 'role: "edit_lateral_label"' in html
+    assert 'role: "edit_position_label"' in html
     assert "item.sourceLabel || null" in html
-    assert 'item.role === "edit_delta_label"' in html
+    assert "item.visible === false" in html
     assert 'miniMapRulerState.phase = "measuring";' in html
     assert 'miniMapRulerState.phase = "fixed";' in html
     assert "setMiniMapRulerEnabled(false);" in html
@@ -706,41 +719,116 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert 'kind === "pad" ? new Set() : legendWellNameKeysForItem(item, kind)' in html
     assert 'String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";' in html
     assert "const markerPoint = anchor.slice();" in html
-    assert "const markerGeometry = new THREE.OctahedronGeometry(1.0, 0);" in html
-    assert "const anchorGeometry = new THREE.SphereGeometry(1.0, 16, 12);" in html
-    assert "const connectorLine = new THREE.Line(" in html
-    assert "markerGeometry.scale(0.82, 0.82, 1.95);" in html
+    assert "const markerGeometry = new THREE.SphereGeometry(1.0, 16, 12);" in html
+    assert "OctahedronGeometry" not in html.split("function initEditPads()")[1].split(
+        "function worldUnitsPerPixelAt"
+    )[0]
     assert "pointIndex: null," in html
     assert 'point: marker.pointLabel || "S",' in html
-    assert '.scene-label.edit-pad-handle-label' in html
+    assert ".scene-label.edit-pad-handle-label" in html
     assert 'role: "edit_pad_label"' in html
-    assert "function editPadHandleVisualPoint(marker, anchorPoint)" in html
     assert "visualPos: markerPoint.slice()," in html
-    assert "ndsAzimuthDeg: Number((pad && pad.nds_azimuth_deg) || 0)," in html
+    assert "ndsAzimuthDeg: initialNds," in html
+    assert "ndsAzimuthDeg: Number((pad && pad.nds_azimuth_deg) || 0)," not in html
     assert "function syncEditPadHandleLabel(marker)" in html
     assert "return `Куст ${padLabel} · ${roleLabel}`;" in html
+    assert "formatCoordinateMeters(current[0])" in html
+    assert "formatCoordinateMeters(current[1])" in html
+    assert "formatDeltaMeters(dx)" in html
+    assert "formatDeltaMeters(dy)" in html
+    assert "formatAzimuthDegrees(currentNds)" in html
+    assert "formatAzimuthDegrees(originalNds)" in html
+    assert "formatDeltaDegrees(deltaNds)" in html
+    assert "function editPadRotationModeEnabled()" in html
+    assert "function startEditPadRotationDrag(padIndex, event)" in html
+    assert "function createEditPadNdsArrow(padIndex)" in html
+    assert "nds_azimuth_deg:" in html
+    assert (
+        "btn.dataset.operation === \"rotate\" &&\n"
+        "                selectedPad === null &&"
+    ) in html
     assert "updateEditPadMarkerPosition(marker, anchor);" in html
-    assert "marker.anchorMesh.position.copy(anchorPosition);" in html
-    assert "marker.connectorLine.geometry.getAttribute(\"position\")" in html
     assert "syncEditPadHandleLabel(marker);" in html
-    assert "editPadDragStartVisualPoint = copyEditPoint(" in html
-    assert "const startPoint =" in html
-    assert "editPadDragStartVisualPoint ||" in html
+    assert "editPadDragStartVisualPoint = copyEditPoint(marker.dataPos);" in html
     assert "Number.isInteger(selectedEditPadIndex)\n              ? []\n              : normalizedEditWellSelection(" in html
-    assert "anchorPickMesh: anchorPickMesh," in html
-    assert "anchorMesh: anchorMesh," in html
-    assert "anchorSelectionMesh: anchorSelectionMesh," in html
-    assert "connectorLine: connectorLine," in html
     assert "selectionMesh: selectionMesh," in html
-    assert "marker.anchorMesh.visible = editModeActive;" in html
-    assert "marker.connectorLine.visible = editModeActive;" in html
-    assert "marker.anchorSelectionMesh.visible = editModeActive && selectedPad;" in html
-    assert "marker.anchorPickMesh.visible = editModeActive;" in html
+    assert "marker.mesh.visible = editModeActive;" in html
     assert "marker.selectionMesh.visible = editModeActive && selectedPad;" in html
     assert "const padMeshes = editPadMarkers.flatMap((marker) =>" in html
+    assert "[marker.pickMesh, marker.mesh].filter(Boolean)" in html
     assert html.index("const meshes = editHandles") < html.index(
         "const padMeshes = editPadMarkers"
     )
+
+
+def test_viewer_template_initializes_pad_handles_on_initial_load() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert (
+        "if (hasEditUiElements) {\n"
+        "          if (canEditTargets) {\n"
+        "            initEditHandles();\n"
+        "            initEditPads();\n"
+        "          }"
+    ) in html
+
+
+def test_viewer_template_keeps_minimap_synced_for_pad_edits() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "function editPadFocusBounds(index)" in html
+    assert (
+        "if (Number.isInteger(selectedEditPadIndex)) {\n"
+        "            ensureMiniMapContainsRawBounds(editPadFocusBounds(selectedEditPadIndex));\n"
+        "            return;\n"
+        "          }"
+    ) in html
+    assert "editPadCurrentAnchors[padIndex]," in html
+    assert "...(editPadCurrentPoints[padIndex] || [])," in html
+    assert "keepMiniMapOnActiveEditSelection();" in html
+
+
+def test_viewer_template_syncs_minimap_label_positions_from_live_source_labels() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "if (item.visible === false) {" in html
+    assert "const labelPosition =" in html
+    assert (
+        "sourceLabel && sourceLabel.position ? sourceLabel.position : item.position"
+        in html
+    )
+    assert "if (sourceLabel.position) {" in html
+    assert "item.position.copy(sourceLabel.position);" in html
+    assert "const localX = ((labelPosition.x - leftWorld) / viewWidth) * rect.width;" in html
+    assert "const localY = ((topWorld - labelPosition.y) / viewHeight) * rect.height;" in html
+
+
+def test_viewer_template_shows_current_edit_handle_coordinates_in_minimap() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "let miniMapEditPositionLabel = null;" in html
+    assert "function initMiniMapEditPositionLabel()" in html
+    assert "function syncMiniMapEditPositionLabel()" in html
+    assert 'miniMapEditPositionLabel = addMiniMapLabel(' in html
+    assert '"minimap-edit-position-label"' in html
+    assert "miniMapEditPositionLabel.visible = Boolean(visible);" in html
+    assert "miniMapEditPositionLabel.position.copy(" in html
+    assert "miniMapEditPositionLabel.element.innerHTML = editHandlePositionLabelHtml(handle);" in html
+    assert "function editHandlePositionLabelHtml(handle)" in html
+    assert (
+        '<span class="edit-delta-row"><span>X</span><span>${formatCoordinateMeters(current[0])}</span></span>'
+        in html
+    )
+    assert (
+        '<span class="edit-delta-row"><span>Y</span><span>${formatCoordinateMeters(current[1])}</span></span>'
+        in html
+    )
+    assert (
+        '<span class="edit-delta-row"><span>Z</span><span>${formatCoordinateMeters(current[2])}</span></span>'
+        in html
+    )
+    assert "initMiniMapEditPositionLabel();" in html
+    assert "syncMiniMapEditPositionLabel();" in html
 
 
 def test_orbit_controls_use_expected_mouse_bindings() -> None:

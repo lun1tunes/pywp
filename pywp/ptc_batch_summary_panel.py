@@ -29,12 +29,20 @@ BuildBatchSurveyPayloadFunc = Callable[..., bytes]
 BuildBatchExportFilesFunc = Callable[..., tuple[ptc_batch_results.ExportFilePayload, ...]]
 BuildBatchDevFilesFunc = Callable[..., tuple[ptc_batch_results.DevExportFilePayload, ...]]
 RenderSmallNoteFunc = Callable[[str], None]
+_SURVEY_DOWNLOAD_FORMAT_PACKAGE = "Пакет"
 _SURVEY_DOWNLOAD_FORMAT_EXCEL = "Excel"
 _SURVEY_DOWNLOAD_FORMAT_CSV = "CSV"
 _SURVEY_DOWNLOAD_FORMAT_WELLTRACK = "WELLTRACK"
 _SURVEY_DOWNLOAD_FORMAT_DEV = ".dev (7z)"
 _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP = ".dev (ZIP)"
 _SURVEY_DOWNLOAD_FORMATS = (
+    _SURVEY_DOWNLOAD_FORMAT_PACKAGE,
+    _SURVEY_DOWNLOAD_FORMAT_EXCEL,
+    _SURVEY_DOWNLOAD_FORMAT_CSV,
+    _SURVEY_DOWNLOAD_FORMAT_WELLTRACK,
+    _SURVEY_DOWNLOAD_FORMAT_DEV,
+)
+_TARGET_DOWNLOAD_FORMATS = (
     _SURVEY_DOWNLOAD_FORMAT_EXCEL,
     _SURVEY_DOWNLOAD_FORMAT_CSV,
     _SURVEY_DOWNLOAD_FORMAT_WELLTRACK,
@@ -294,13 +302,6 @@ def render_batch_summary(
         build_batch_target_dev_files_func=build_batch_target_dev_files_func,
         build_batch_target_dev_7z_func=build_batch_target_dev_7z_func,
         build_batch_target_dev_file_func=build_batch_target_dev_file_func,
-    )
-    _render_package_downloads(
-        state=state,
-        st_module=st_module,
-        target_crs=target_crs,
-        auto_convert=auto_convert,
-        source_crs=source_crs,
         build_batch_export_package_files_func=build_batch_export_package_files_func,
         build_batch_export_package_zip_func=build_batch_export_package_zip_func,
     )
@@ -328,6 +329,8 @@ def _render_survey_downloads(
     build_batch_target_dev_files_func: BuildBatchDevFilesFunc,
     build_batch_target_dev_7z_func: BuildBatchSurveyPayloadFunc,
     build_batch_target_dev_file_func: BuildBatchSurveyPayloadFunc,
+    build_batch_export_package_files_func: BuildBatchExportFilesFunc,
+    build_batch_export_package_zip_func: BuildBatchSurveyPayloadFunc,
 ) -> None:
     st_module.markdown("### Выгрузка")
     kind_key = "wt_download_kind"
@@ -348,21 +351,39 @@ def _render_survey_downloads(
         if export_kind == _EXPORT_KIND_TARGETS
         else "wt_survey_download_format"
     )
-    _normalize_download_format(state=state, format_key=format_key)
+    available_formats = (
+        _TARGET_DOWNLOAD_FORMATS
+        if export_kind == _EXPORT_KIND_TARGETS
+        else _SURVEY_DOWNLOAD_FORMATS
+    )
+    _normalize_download_format(
+        state=state,
+        format_key=format_key,
+        allowed_formats=available_formats,
+    )
     with format_col:
         export_format = str(
             st_module.radio(
                 "Формат выгрузки",
-                options=list(_SURVEY_DOWNLOAD_FORMATS),
+                options=list(available_formats),
                 key=format_key,
                 horizontal=True,
             )
         )
-    st_module.text_input(
-        "Папка для выгрузки",
-        key=_DEV_EXPORT_DIRECTORY_KEY,
-        placeholder=r"E:\Exports\Batch",
-    )
+    if (
+        export_kind == _EXPORT_KIND_TRAJECTORIES
+        and export_format == _SURVEY_DOWNLOAD_FORMAT_PACKAGE
+    ):
+        _render_package_downloads(
+            state=state,
+            st_module=st_module,
+            target_crs=target_crs,
+            auto_convert=auto_convert,
+            source_crs=source_crs,
+            build_batch_export_package_files_func=build_batch_export_package_files_func,
+            build_batch_export_package_zip_func=build_batch_export_package_zip_func,
+        )
+        return
     if export_kind == _EXPORT_KIND_TARGETS:
         _render_target_downloads(
             state=state,
@@ -541,7 +562,6 @@ def _render_survey_downloads(
         save_selected_label="Сохранить выбранные файлы",
         disable_all=not survey_data,
         disable_selected=not selected_survey_data,
-        caption=f"Формат `{export_format}` можно сохранить напрямую в папку.",
     )
 
 
@@ -718,7 +738,6 @@ def _render_target_downloads(
         save_selected_label="Сохранить выбранные файлы",
         disable_all=not target_data,
         disable_selected=not selected_target_data,
-        caption=f"Формат `{export_format}` можно сохранить напрямую в папку.",
     )
 
 
@@ -726,12 +745,13 @@ def _normalize_download_format(
     *,
     state: MutableMapping[str, object],
     format_key: str,
+    allowed_formats: tuple[str, ...] = _SURVEY_DOWNLOAD_FORMATS,
 ) -> str:
     current_value = str(state.get(format_key, "")).strip()
     if current_value == _LEGACY_SURVEY_DOWNLOAD_FORMAT_DEV_ZIP:
         current_value = _SURVEY_DOWNLOAD_FORMAT_DEV
-    if current_value not in _SURVEY_DOWNLOAD_FORMATS:
-        current_value = _SURVEY_DOWNLOAD_FORMATS[0]
+    if current_value not in allowed_formats:
+        current_value = allowed_formats[0]
     state[format_key] = current_value
     return current_value
 
@@ -914,8 +934,12 @@ def _survey_download_config(
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             all_label="Скачать Excel траекторий всех скважин",
             selected_label="Скачать Excel выбранных скважин",
-            all_file_name="welltrack_survey_all.xlsx",
-            selected_file_name="welltrack_survey_selected.xlsx",
+            all_file_name=ptc_batch_results.dated_export_file_name(
+                "welltrack_survey_all.xlsx"
+            ),
+            selected_file_name=ptc_batch_results.dated_export_file_name(
+                "welltrack_survey_selected.xlsx"
+            ),
         )
     if export_format == _SURVEY_DOWNLOAD_FORMAT_WELLTRACK:
         return _SurveyDownloadConfig(
@@ -943,8 +967,12 @@ def _survey_download_config(
         mime="text/csv",
         all_label="Скачать рассчитанные траектории всех скважин",
         selected_label="Скачать рассчитанные траектории выбранных скважин",
-        all_file_name="welltrack_survey_all.csv",
-        selected_file_name="welltrack_survey_selected.csv",
+        all_file_name=ptc_batch_results.dated_export_file_name(
+            "welltrack_survey_all.csv"
+        ),
+        selected_file_name=ptc_batch_results.dated_export_file_name(
+            "welltrack_survey_selected.csv"
+        ),
     )
 
 
@@ -963,8 +991,12 @@ def _target_download_config(
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             all_label="Скачать Excel целей всех скважин",
             selected_label="Скачать Excel целей выбранных скважин",
-            all_file_name="welltrack_targets_all.xlsx",
-            selected_file_name="welltrack_targets_selected.xlsx",
+            all_file_name=ptc_batch_results.dated_export_file_name(
+                "welltrack_targets_all.xlsx"
+            ),
+            selected_file_name=ptc_batch_results.dated_export_file_name(
+                "welltrack_targets_selected.xlsx"
+            ),
         )
     if export_format == _SURVEY_DOWNLOAD_FORMAT_WELLTRACK:
         return _SurveyDownloadConfig(
@@ -992,8 +1024,12 @@ def _target_download_config(
         mime="text/csv",
         all_label="Скачать цели всех скважин",
         selected_label="Скачать цели выбранных скважин",
-        all_file_name="welltrack_targets_all.csv",
-        selected_file_name="welltrack_targets_selected.csv",
+        all_file_name=ptc_batch_results.dated_export_file_name(
+            "welltrack_targets_all.csv"
+        ),
+        selected_file_name=ptc_batch_results.dated_export_file_name(
+            "welltrack_targets_selected.csv"
+        ),
     )
 
 
@@ -1049,10 +1085,6 @@ def _render_package_downloads(
 ) -> None:
     successes = list(state.get("wt_successes") or [])
     records = list(state.get("wt_records") or state.get("wt_records_original") or [])
-    st_module.markdown("### Пакетная выгрузка")
-    st_module.caption(
-        "Пакет собирает траектории и цели в CSV, Excel, WELLTRACK и .dev."
-    )
     item_count = _success_station_row_count(successes) + _record_point_count(records)
     if item_count > _DOWNLOAD_AUTO_BUILD_ROW_LIMIT:
         prepare_key = "wt_prepare_package_download_payloads"
@@ -1096,24 +1128,22 @@ def _render_package_downloads(
             source_crs=source_crs,
         ),
     )
-    action_cols = st_module.columns(2, gap="small")
-    with action_cols[0]:
-        st_module.download_button(
-            "Скачать пакет выгрузки",
-            data=package_data or b"",
-            file_name="welltrack_export_package.zip",
-            mime="application/zip",
-            icon=":material/download:",
-            use_container_width=True,
-            disabled=not package_data,
-        )
-    with action_cols[1]:
-        save_clicked = st_module.button(
-            "Сохранить пакет в папку",
-            icon=":material/folder_open:",
-            width="stretch",
-            disabled=not successes and not records,
-        )
+    st_module.download_button(
+        "Скачать пакет выгрузки",
+        data=package_data or b"",
+        file_name="welltrack_export_package.zip",
+        mime="application/zip",
+        icon=":material/download:",
+        use_container_width=True,
+        disabled=not package_data,
+    )
+    _render_export_directory_input(st_module=st_module)
+    save_clicked = st_module.button(
+        "Сохранить пакет в папку",
+        icon=":material/folder_open:",
+        width="stretch",
+        disabled=not successes and not records,
+    )
     if save_clicked:
         file_signature = _download_signature(
             export_kind="package",
@@ -1195,9 +1225,8 @@ def _render_directory_export_controls(
     save_selected_label: str,
     disable_all: bool,
     disable_selected: bool,
-    caption: str,
 ) -> None:
-    st_module.caption(caption)
+    _render_export_directory_input(st_module=st_module)
     action_cols = st_module.columns(2, gap="small")
     with action_cols[0]:
         save_all_clicked = st_module.button(
@@ -1229,6 +1258,14 @@ def _render_directory_export_controls(
         _rerun_summary_fragment(st_module)
 
 
+def _render_export_directory_input(*, st_module: Any) -> None:
+    st_module.text_input(
+        "Папка для выгрузки",
+        key=_DEV_EXPORT_DIRECTORY_KEY,
+        placeholder=r"E:\Exports\Batch",
+    )
+
+
 def _render_dev_directory_export_controls(
     *,
     state: MutableMapping[str, object],
@@ -1257,7 +1294,6 @@ def _render_dev_directory_export_controls(
         save_selected_label=save_selected_label,
         disable_all=disable_all,
         disable_selected=disable_selected,
-        caption="`.dev` файлы можно сохранить в папку без архива.",
     )
 
 

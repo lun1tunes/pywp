@@ -1850,8 +1850,6 @@ def _cached_anti_collision_view_model(
                 total=eta_total,
                 parallel_workers=int(getattr(progress, "parallel_workers", 0) or 0),
             )
-            workers = int(getattr(progress, "parallel_workers", 0) or 0)
-            worker_text = f" · {workers} процессов" if workers > 1 else ""
             built_text = (
                 f"{rebuild_completed}/{rebuild_total}"
                 if rebuild_total > 0
@@ -1859,7 +1857,7 @@ def _cached_anti_collision_view_model(
             )
             progress_text = (
                 "Anti-collision: конусы неопределённости "
-                f"{completed}/{total} · {eta_text}{worker_text} · "
+                f"{completed}/{total} · {eta_text} · "
                 f"кэш скважин {int(progress.reused_well_count)} · "
                 f"построено {built_text}"
             )
@@ -1888,10 +1886,9 @@ def _cached_anti_collision_view_model(
             total=total,
             parallel_workers=workers,
         )
-        worker_text = f" · {workers} процессов" if workers > 1 else ""
         progress_text = (
             f"Anti-collision: пары {completed}/{total} · {eta_text}"
-            f"{worker_text} · кэш {int(progress.reused_pair_count)} · "
+            f" · кэш {int(progress.reused_pair_count)} · "
             f"prefilter {int(progress.prefiltered_pair_count)} · "
             f"пересчёт {int(progress.recalculated_pair_count)}"
         )
@@ -2009,11 +2006,6 @@ def _cached_anti_collision_view_model(
                     "Anti-collision рассчитано без переиспользованных пар: "
                     f"скважин {incremental_stats.rebuilt_well_count}, "
                     f"пар {incremental_stats.recalculated_pair_count}."
-                    + (
-                        f" Параллельных процессов: {int(parallel_workers)}."
-                        if int(parallel_workers) > 1
-                        else ""
-                    )
                 ),
             )
         _emit(72, "Построение рекомендаций anti-collision.")
@@ -2190,10 +2182,7 @@ def _render_status_run_log(
                 f"{reused_pairs}/{reused_pairs + recalculated_pairs}",
             )
         if int(state_payload.get("parallel_workers") or 0) > 1:
-            st.caption(
-                "Параллельный расчёт anti-collision: "
-                f"{int(state_payload.get('parallel_workers') or 0)} процессов."
-            )
+            pass
         if "status" in state_payload:
             st.caption(f"Статус результата: {str(state_payload.get('status'))}")
         log_lines = tuple(state_payload.get("log_lines") or ())
@@ -2704,8 +2693,29 @@ def _apply_edit_pad_changes(
         next_cfg["first_surface_x"] = float(anchor_xyz[0])
         next_cfg["first_surface_y"] = float(anchor_xyz[1])
         next_cfg["first_surface_z"] = float(anchor_xyz[2])
+        raw_nds = raw_change.get("nds_azimuth_deg")
+        nds_updated = False
+        if raw_nds is not None:
+            try:
+                next_cfg["nds_azimuth_deg"] = float(raw_nds) % 360.0
+                nds_updated = True
+            except (TypeError, ValueError):
+                pass
         next_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = True
         raw_configs[pad_id] = next_cfg
+        st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = float(
+            next_cfg["first_surface_x"]
+        )
+        st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = float(
+            next_cfg["first_surface_y"]
+        )
+        st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = float(
+            next_cfg["first_surface_z"]
+        )
+        if nds_updated:
+            st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = float(
+                next_cfg["nds_azimuth_deg"]
+            ) % 360.0
         updated_any = True
 
     if not updated_any:
