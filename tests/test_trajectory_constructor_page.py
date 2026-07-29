@@ -220,6 +220,63 @@ def test_ptc_page_keeps_open_calc_params_panel_after_three_multi_edit_rerun(
     assert at.session_state["wt_edit_targets_pending_names"] == ["WELL-A", "WELL-B"]
 
 
+def test_ptc_page_applies_three_pad_edit_without_widget_state_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted = False
+    captured_pad_id = ""
+
+    def _fake_three_scene(payload, **_kwargs):
+        nonlocal emitted, captured_pad_id
+        if emitted:
+            return None
+        emitted = True
+        edit_pads = list(payload.get("edit_pads") or [])
+        assert edit_pads
+        captured_pad_id = str(edit_pads[0]["id"])
+        return {
+            "type": "pywp:editTargets",
+            "nonce": "pad-edit-1",
+            "pad_changes": [
+                {
+                    "pad_id": captured_pad_id,
+                    "anchor": [100.0, 200.0, 0.0],
+                    "nds_azimuth_deg": 35.0,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(ptc_core, "render_local_three_scene", _fake_three_scene)
+
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+    ]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+
+    at.run(timeout=120)
+
+    assert captured_pad_id
+    assert not at.exception
+    assert at.session_state["wt_last_edit_targets_nonce"] == "pad-edit-1"
+    assert at.session_state["wt_edit_targets_pending_names"] == ["WELL-A", "WELL-B"]
+    assert at.session_state["wt_pad_configs"][captured_pad_id]["first_surface_x"] == (
+        pytest.approx(100.0)
+    )
+    assert at.session_state["wt_pad_configs"][captured_pad_id]["first_surface_y"] == (
+        pytest.approx(200.0)
+    )
+
+
 def test_apply_edit_pad_changes_updates_pad_layout_state() -> None:
     ptc_core.st.session_state.clear()
     records = _records()

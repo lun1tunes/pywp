@@ -74,6 +74,7 @@ class TestCoordinateIntegration:
         assert "ГК_13N_42" in labels
         assert "СК-42 Зона 13 (13 млн)" in labels
         assert "СК-42 Зона 16" in labels
+        assert "МСК-89" in labels
 
     def test_format_coordinates_projected(self) -> None:
         """Format projected coordinates with locale-independent space separator."""
@@ -167,6 +168,11 @@ class TestCoordinateIntegration:
         suffix = get_crs_display_suffix(CoordinateSystem.PULKOVO_1995_CM_39E)
         assert "П95/CM39" in suffix
 
+    def test_get_crs_display_suffix_msk89(self) -> None:
+        """Display suffix for MSK-89."""
+        suffix = get_crs_display_suffix(CoordinateSystem.MSK_89)
+        assert "МСК-89" in suffix
+
     def test_can_transform_directly_same_crs(self) -> None:
         """Same CRS is always directly transformable."""
         assert _can_transform_directly(
@@ -187,6 +193,9 @@ class TestCoordinateIntegration:
         assert _can_transform_directly(
             CoordinateSystem.PNO_16_ZONE, CoordinateSystem.WGS84
         ) is False
+        assert _can_transform_directly(
+            CoordinateSystem.MSK_89, CoordinateSystem.WGS84
+        ) is False
 
     def test_csv_export_crs_falls_back_to_source_for_pno_placeholder(self) -> None:
         """CSV labels must match actual values when PNO conversion is unavailable."""
@@ -197,6 +206,17 @@ class TestCoordinateIntegration:
                 auto_convert=True,
             )
             == CoordinateSystem.PNO_16_ZONE
+        )
+
+    def test_csv_export_crs_falls_back_to_source_for_msk89(self) -> None:
+        """MSK-89 stays source-labelled until authority transform parameters are added."""
+        assert (
+            csv_export_crs(
+                CoordinateSystem.WGS84,
+                CoordinateSystem.MSK_89,
+                auto_convert=True,
+            )
+            == CoordinateSystem.MSK_89
         )
         assert (
             csv_export_crs(

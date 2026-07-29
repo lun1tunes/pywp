@@ -1,0 +1,733 @@
+# 🚀 Архитектура Мультиагентной Системы (MAS) ГДМ
+**Версия:** 1.0 (MVP для защиты бюджета)
+**Платформа:** n8n v2 (Advanced AI)
+
+---
+
+## 🎯 1. Концепция: Масштабируемая коммуникация агентов и Метаданные
+Для достижения "WOW-эффекта" перед руководством, система не работает как жесткий скрипт. Мы используем паттерн **ReAct (Reason + Act)** и **Contract-Driven Architecture**.
+
+### 🌐 ИНТЕРФЕЙСЫ МАСШТАБИРОВАНИЯ (Как общаются агенты)
+Чтобы система легко масштабировалась на новые типы моделей (ЗБС, полимерное заводнение и т.д.) без переписывания кода, мы внедряем **Базу Знаний (Metadata Registry)** в Supabase.
+
+**Сущность "Ключевое слово симулятора" в БД хранится не просто как текст, а как сложный JSON-объект:**
+```json
+{
+  "keyword": "COMPDATMD",
+  "description": "Задает интервалы перфорации скважины по MD",
+  "required_parameters": [
+    {"name": "well_id", "type": "string", "source": "any"},
+    {"name": "perf_start_md", "type": "float", "source": "math_service"},
+    {"name": "perf_end_md", "type": "float", "source": "math_service"}
+  ],
+  "template": "COMPDATMD\n'{{well_id}}' {{perf_start_md}} {{perf_end_md}} /"
+}
+```
+**Логика общения:** Оркестратор НЕ ЗНАЕТ заранее, что нужно достать из Экселя. Сначала он обращается к базе: *"Я строю прогноз ГРП. Какие параметры мне нужны?"*. База отвечает: *"Тебе нужны даты, стадии и MD"*. Только после этого Оркестратор формирует динамический JSON-запрос (Контракт) и отправляет его `Universal_Data_Agent`. Это делает систему бесконечно масштабируемой!
+
+---
+
+## 🧠 ВОРКФЛОУ 1: ОРКЕСТРАТОР (The Boss)
+**Задача:** Общение с юзером, планирование шагов (Reasoning), вызов инструментов (Action).
+
+### Детальная настройка нод:
+
+1. **`Form Trigger` (Входная точка)**
+   - **Form Title:** ИИ-Генератор SCHEDULE (Alpha)
+   - **Form Elements:**
+     - `prompt` (Text) — Запрос от пользователя.
+     - `excel_file` (File) — График бурения.
+     - `dev_files` (File, Allow Multiple: true) — Файлы инклинометрии.
+     - `completion_file` (File) — Конструкции скважин.
+     - `map_file` (File) — Структурная карта (.cps).
+   - **Respond:** `Using 'Respond to Webhook' Node` (ВАЖНО! Держит страницу загруженной).
+
+2. **`Edit Fields` (Set)**
+   - **Настройка ноды:** Выключить `Keep Only Set` (или `Include Other Fields` = false), чтобы бинарники прошли дальше!
+   - **Values to Set (Boolean):**
+     - `has_excel`: `={{ !!$binary.excel_file }}`
+     - `has_completion`: `={{ !!$binary.completion_file }}`
+     - `has_map`: `={{ !!$binary.map_file }}`
+     - `has_dev`: `={{ Object.keys($binary || {}).some(key => key.startsWith('dev_files')) }}`
+   - **Values to Set (String):**
+     - `user_query`: `={{ $json.prompt }}`
+
+3. **`PostgreSQL Chat Memory` (Подключается к 'Memory' слоту AI Agent)**
+   - **Session ID:** `={{ $execution.id }}`
+   - Укажи креды от БД.
+
+4. **`OpenAI Chat Model` (Подключается к 'Model' слоту AI Agent)**
+   - Укажи креды и выбери мощную модель (например, 27B или GPT-4).
+
+5. **`AI Agent` (Ядро)**
+   - **Text / User Prompt:** В режиме `Define below` вставь: `={{ $json.user_query }}` (Удалить `chat.input`!).
+   - **System Message:**
+     ```text
+     Ты — Главный Архитектор ГДМ. Твоя задача — координировать генерацию SCHEDULE.
+     Пользователь загрузил файлы: Excel, .dev, .cps.
+     
+     ТВОЙ АЛГОРИТМ (Строгий протокол JSON-RPC):
+     1. DISCOVERY: Вызови 'Get_Model_Requirements' (запрос к БД), чтобы узнать, какие параметры (target_fields) требуются для построения модели, запрошенной пользователем.
+     2. EXTRACTION: На основе ответа из шага 1, сформируй JSON-контракт и вызови 'Universal_Data_Agent', чтобы извлечь нужные поля из Excel.
+     3. CALCULATION: Если в требованиях (шаг 1) есть параметры от "math_service" (например, координаты), вызови 'Math_Service'.
+     4. COMPILATION: Вызови 'Compiler_Agent', передав ему единый агрегированный JSON со всеми собранными параметрами.
+     
+     Обязательно комментируй логику: "Для секции COMPDATMD требуются MD координаты. Формирую JSON-запрос для Math_Service..."
+     ```
+
+6. **`Tools` (Подключаются к слоту 'Tools' AI Agent)**
+   - *Лайфхак n8n v2:* Если в ноде AI Agent нет кнопки выбора типа агента, он автоматически становится 'Tools Agent', когда к нему подключены инструменты. **Ключевой фактор здесь — поле 'Description' внутри каждого инструмента.** ИИ ориентируется ИСКЛЮЧИТЕЛЬНО на эти описания, чтобы понять, что передавать на вход.
+   
+   - **Настройка нод `Call n8n Workflow Tool`:**
+     - **Name:** `Get_Model_Requirements`
+       **Description:** "Возвращает JSON с описанием ключевых слов и требуемых параметров для модели."
+     - **Name:** `Universal_Data_Agent`
+       **Description:** "Извлекает данные из Excel. Обязательный входной JSON: {'target_fields': ['Поле1', 'Поле2'], 'binary_key': 'excel_file' или 'completion_file'}."
+     - **Name:** `Math_Service`
+       **Description:** "Выполняет 3D математику. Обязательный входной JSON: {'requested_math_function': 'calculate_frac_stages', 'data': <json_от_парсера>}."
+     - **Name:** `Compiler_Agent`
+       **Description:** "Собирает финальный файл. Обязательный вход: {'aggregated_data': <все_собранные_данные>}."
+
+7. **`Respond to Webhook` (Выход)**
+   - **Respond With:** `JSON` (позже поменяем на Binary, когда настроим скачивание файла).
+   - **Response Body:** `={{ $json.output }}`
+
+---
+
+## 🕵️‍♂️ ВОРКФЛОУ 2: UNIVERSAL DATA AGENT (Универсальный Парсер Excel)
+**Задача:** Извлекать ЛЮБЫЕ данные из любого Excel по динамическому запросу Оркестратора.
+
+*Лайфхак масштабируемости:* Excel-файлы подрядчиков — это хаос. Данные могут быть на разных листах (sheets), с кривыми заголовками и пустыми строками. Поэтому наш парсер должен быть **умным анализатором**.
+
+### Детальная настройка нод:
+
+1. **`Execute Workflow Trigger`**
+   - **Вход от Оркестратора:** 
+     - Бинарники (передаются сквозь тулзу `Pass Input Data`).
+     - JSON-параметры (запрос Оркестратора), например: 
+       `{"target_fields": ["Скважина", "Дата ввода"], "file_type": "drilling_schedule"}`
+
+2. **`Code` (Python): "Extract Multi-Sheet Schema"**
+   - *Цель:* Собрать оглавление всего Экселя (все листы и их колонки), не загружая весь файл в LLM.
+   - **Код:**
+   ```python
+   import pandas as pd
+   import io
+   
+   # Выбираем нужный файл на основе запроса Оркестратора
+   file_type = items[0].json.file_type
+   binary_key = 'excel_file' if file_type == 'drilling_schedule' else 'completion_file'
+   
+   if binary_key not in items[0].binary:
+       return [{"json": {"error": f"Файл {binary_key} не найден!"}}]
+       
+   binary_data = items[0].binary[binary_key].data
+   
+   # Читаем ExcelFile, чтобы получить доступ ко всем листам
+   xls = pd.ExcelFile(io.BytesIO(binary_data))
+   schema = {}
+   
+   # Проходим по всем листам
+   for sheet in xls.sheet_names:
+       # Читаем только верхние 10 строк каждого листа, пропуская пустые
+       df = pd.read_excel(xls, sheet_name=sheet, nrows=10).dropna(how='all')
+       if not df.empty:
+           schema[sheet] = df.columns.astype(str).tolist()
+   
+   return [{
+       "json": {
+           "schema": schema, 
+           "target_fields": items[0].json.target_fields,
+           "binary_key": binary_key
+       }
+   }]
+   ```
+
+3. **`Basic LLM Chain` (Мозг Парсера)**
+   - **Model:** 9B.
+   - **Prompt:** 
+     `Ты — эксперт по анализу Excel файлов.
+     Вот структура файла по листам: {{ $json.schema }}
+     Оркестратор запросил найти эти данные: {{ $json.target_fields }}
+     Твоя задача — определить, на каком ЛИСТЕ находятся нужные данные, и сопоставить запрашиваемые поля с РЕАЛЬНЫМИ названиями колонок в этом листе.`
+
+4. **`Structured Output Parser` (Подключается к Basic LLM Chain)**
+   - **Schema Type:** Generate from JSON Example.
+   - **JSON Example (ЖЕСТКАЯ СХЕМА):**
+     ```json
+     {
+       "target_sheet": "Название листа из схемы",
+       "mapping": {
+         "запрошенное_поле_1": "реальная_колонка_из_экселя",
+         "запрошенное_поле_2": "реальная_колонка_из_экселя"
+       }
+     }
+     ```
+   - *Лайфхак:* Эта схема заставляет LLM вернуть не просто маппинг колонок, но и **конкретный лист**, где она их нашла!
+
+5. **`Code` (Python): "Data Extractor & Cleaner"**
+   - *Цель:* Применить маппинг от LLM к конкретному листу и вычистить мусор.
+   - **Код:**
+   ```python
+   import pandas as pd
+   import io
+   
+   binary_key = items[0].json.binary_key
+   binary_data = items[0].binary[binary_key].data
+   
+   # Получаем ответ от LLM
+   llm_output = items[0].json.text # или output, в зависимости от версии n8n
+   target_sheet = llm_output['target_sheet']
+   mapping = llm_output['mapping']
+   
+   # Читаем ТОЛЬКО нужный лист (экономия RAM)
+   df = pd.read_excel(io.BytesIO(binary_data), sheet_name=target_sheet)
+   
+   # Оставляем только нужные колонки
+   actual_columns = list(mapping.values())
+   clean_df = df[actual_columns]
+   
+   # Очистка данных (удаляем строки, где пустые ВСЕ запрошенные поля)
+   clean_df = clean_df.dropna(how='all')
+   
+   # Опционально: Очищаем мусор в колонке со скважинами (если там текст типа "Скв. 15", оставляем "15")
+   # Для MVP просто переименовываем колонки обратно в ключи Оркестратора
+   clean_df = clean_df.rename(columns={v: k for k, v in mapping.items()})
+   
+   return [{"json": {"extracted_data": clean_df.to_dict('records')}}]
+   ```
+
+6. **`Execute Workflow` (Output)**
+   - Возвращает `extracted_data` обратно Оркестратору в идеальном, предсказуемом формате.
+
+---
+
+## 🧮 ВОРКФЛОУ 3: MATH SERVICE (Вычислительный движок)
+**Задача:** Детерминированная 3D-математика. ИИ ЗДЕСЬ НЕТ. Это черный ящик со скриптами.
+
+*Лайфхак масштабируемости:* Math Service не должен быть жестко зашит под одну задачу. Это **микросервис с роутером**. Оркестратор сам должен "выбрать" нужную математическую функцию, основываясь на списке доступного функционала. Это максимизирует роль ИИ (принятие решений) и минимизирует хардкод.
+
+### Детальная настройка нод:
+
+1. **`Execute Workflow Trigger`**
+   - **Вход:** JSON с параметром `requested_math_function` (который ИИ выбрал сам) + нужные параметры (стадии ГРП, координаты) + бинарники `.dev` и `.cps`.
+
+2. **`Switch Node` (Роутер скриптов)**
+   - Маршрутизирует поток в зависимости от значения `requested_math_function`.
+   - **Route 1 (`calculate_frac_stages`):** Пересечение `.dev` и `.cps` для ГРП.
+   - **Route 2 (`calculate_sidetrack`):** *Заглушка для будущих задач (боковые стволы).*
+   - **Route 3 (`calculate_volume`):** *Заглушка (подсчет объемов).*
+
+3. **`Code` (Python): "Intersection & Splitting" (Route 1)**
+   - *Это сложный скрипт, использующий `numpy`/`scipy` для работы с сетками (если они доступны в n8n env).*
+   - **Концептуальная логика скрипта:**
+     1. Загрузить грид Z из `.cps`.
+     2. Итерироваться по всем `.dev` файлам в массиве `$binary`.
+     3. Для каждого `.dev`: интерполировать Z-поверхность в координатах (X, Y) траектории.
+     4. Найти MD, где Z_traj >= Z_surface.
+     5. Взять `frac_stages` из входного JSON для этой скважины. Разделить интервал от MD_пересечения до MD_забоя на `frac_stages` равных частей.
+     6. Сохранить массив MD_стадий. Сгенерировать текстовый бинарник `WELLTRACK`.
+   - **Выход скрипта:** Возвращает обновленный JSON с координатами + пачку новых бинарников `*.WELLTRACK`.
+
+4. **`Execute Workflow` (Output)**
+   - Сводит все выходы от Switch Node и возвращает результаты Оркестратору.
+
+### Как Оркестратор "узнает" об этих функциях?
+В описании инструмента (`Call n8n Workflow Tool` для Math Service в Оркестраторе) нужно жестко прописать "контракт" (API):
+> "Этот сервис предоставляет математические вычисления. При вызове ты ОБЯЗАН передать параметр 'requested_math_function'. 
+> Доступные функции:
+> 1. 'calculate_frac_stages' — для расчета координат начала перфораций по .dev и карте.
+> 2. 'calculate_sidetrack' — для расчета боковых стволов (пока не реализовано).
+> Выбери нужную функцию исходя из контекста задачи пользователя."
+
+---
+
+## 🧠 ВОРКФЛОУ 4: COMPILER AGENT (Сборщик Модели с RAG)
+**Задача:** Умная шаблонизация. Агент берет собранные данные и интегрирует их в эталоны симулятора на основе метаданных.
+
+### Детальная настройка нод:
+
+1. **`Execute Workflow Trigger`**
+   - **Вход:** Единый агрегированный JSON со всеми датами, стадиями и координатами от Оркестратора.
+
+2. **`AI Agent` (Ядро Компилятора)**
+   - **Type:** Tools Agent.
+   - **Model:** 27B.
+   - **System Prompt:** 
+     `Ты — Senior Reservoir Engineer. Твоя задача — сгенерировать синтаксически идеальный код SCHEDULE для симулятора (Eclipse/tNav).
+     У тебя есть входные данные (цифры): {{ $json.aggregated_data }}.
+     
+     АЛГОРИТМ РАБОТЫ:
+     1. Для каждого требуемого ключевого слова (например, WCONPROD, COMPDATMD) используй инструмент 'Search_Knowledge_Base'.
+     2. Запрашивай у базы как "Мануал" (описание синтаксиса), так и "Примеры" (готовые рабочие куски кода).
+     3. Строго следуй найденным мануалам и форматам из примеров.
+     4. Подставь в примеры входные данные (даты, стадии, координаты).
+     5. Сгенерируй финальный текст SCHEDULE файла.`
+
+3. **`Call n8n Workflow Tool` (Search_Knowledge_Base)**
+   - *Лайфхак масштабируемости:* Мы не делаем два разных инструмента для мануалов и примеров. Мы делаем один умный векторный поиск.
+
+4. **`Supabase Vector Store` (Подключается к Vector Store Tool)**
+   - **Operation:** Retrieve.
+   - **База Данных (Supabase):** У тебя в Supabase должна быть таблица `knowledge_base`, куда гидродинамики (вы) будете скидывать и мануалы (PDF/Markdown), и золотые куски `.DATA` файлов.
+   - **Metadata Filter (Двойной фильтр):**
+     `metadata->>'keyword' = '{{ $fromAI("requested_keyword") }}' AND metadata->>'doc_type' IN ('manual', 'example')`
+     *(Агент делает запрос: "Дай мне мануал и пример для WCONPROD". База возвращает ему сухую выжимку синтаксиса + кусок рабочего кода из эталонной модели).*
+
+5. **`Code` (JS): "File Assembler"**
+   - Конвертирует сгенерированный текст в скачиваемый файл.
+   ```javascript
+   const content = items[0].json.output;
+   const buffer = Buffer.from(content, 'utf-8');
+   
+   return [{
+     json: { status: "Success" },
+     binary: {
+       schedule_file: {
+         data: buffer.toString('base64'),
+         mimeType: 'text/plain',
+         fileName: `Model_Schedule_${Date.now()}.sch`
+       }
+     }
+   }];
+   ```
+
+6. **`Execute Workflow` (Output)**
+   - Возвращает `schedule_file` Оркестратору.
+
+---
+
+## 💎 ВАЖНЫЕ НЮАНСЫ n8n v2 ДЛЯ ПРЕЗЕНТАЦИИ
+
+### 1. Как настроить и показать "Рассуждения" (Reasoning / Thought Process) ИИ-агентов
+Генеральный директор должен видеть, что система ДУМАЕТ, а не просто выполняет жесткий скрипт. В n8n v2 это делается так:
+
+**Шаг 1: Настройка в AI Agent (Оркестратор)**
+- В ноде `AI Agent` (которая Type: Tools Agent), открой настройки (шестеренку) в самом низу.
+- Найди параметр **`Return Intermediate Steps`** (или `Return Thought Process`) и включи его (True). 
+- Это заставит агента отдавать не только финальный ответ, но и массив JSON со всеми его внутренними мыслями (Thoughts) и вызовами инструментов (Tool Calls).
+
+**Шаг 2: Вывод логов пользователю (Светофор / Отчет)**
+- В ноде `Respond to Webhook` (которая отдает результат юзеру), вместо того чтобы просто отдать файл, мы отдаем красивый JSON или HTML-отчет.
+- В `Response Body` можно пробросить массив этих мыслей:
+  ```json
+  {
+    "status": "Успешно",
+    "file": "{{ $binary.schedule_file }}",
+    "ai_reasoning_log": "{{ $json.intermediate_steps }}" 
+  }
+  ```
+- *Для демо:* Если ты используешь `Chat Trigger` вместо формы, все "мысли" агента (например: *"Вызываю инструмент Math_Service..."*) будут автоматически отображаться в окном чата серым текстом перед финальным ответом. Это создает максимальный WOW-эффект.
+
+### 2. Строгие контракты (JSON-RPC) и Логирование
+- Чтобы система не "развалилась" в продакшене, каждый вызов саб-воркфлоу (инструмента) должен логироваться.
+- В начале и в конце каждого Sub-Workflow (например, `Universal Data Agent`) добавь ноду `Postgres` или `Supabase` (Insert). 
+- Пиши туда: `execution_id`, `input_data`, `output_data` и `status`. Если ИИ ошибется, гидродинамик всегда сможет открыть базу и посмотреть: *"Ага, Data_Agent криво распарсил колонку Пористости"*. Это и есть та самая **Администрация Баз Данных**, про которую ты скажешь на 4-м слайде презентации.
+
+### 3. Безопасность (Human-in-the-Loop)
+- Для MVP мы отдаем файл напрямую юзеру. 
+- Но на презентации обязательно скажи: *"В следующей версии мы внедряем ноду **`Wait`**"*.
+- *Как это работает:* Агент собирает файл -> отправляет его гидродинамику в корпоративный мессенджер с кнопками [Approve] / [Reject] -> Воркфлоу замирает (suspend) -> Если инженер жмет Approve, файл уходит дальше в расчет на кластер. ИИ никогда не принимает критических решений самостоятельно.
+
+
+[
+  {
+    "name": "1. ОРКЕСТРАТОР (Supervisor MAS)",
+    "nodes": [
+      {
+        "parameters": {
+          "formTitle": "ИИ-Генератор SCHEDULE (Alpha)",
+          "formFields": {
+            "values": [
+              {
+                "fieldLabel": "Опишите задачу",
+                "customFieldId": "prompt",
+                "fieldType": "text",
+                "required": true
+              },
+              {
+                "fieldLabel": "График бурения",
+                "customFieldId": "excel_file",
+                "fieldType": "file",
+                "required": true
+              },
+              {
+                "fieldLabel": "Файлы траекторий (.dev)",
+                "customFieldId": "dev_files",
+                "fieldType": "file",
+                "multiselect": true,
+                "required": true
+              },
+              {
+                "fieldLabel": "Конструкции скважин",
+                "customFieldId": "completion_file",
+                "fieldType": "file",
+                "required": true
+              },
+              {
+                "fieldLabel": "Структурная карта (.cps)",
+                "customFieldId": "map_file",
+                "fieldType": "file",
+                "required": true
+              }
+            ]
+          },
+          "responseMode": "responseNode"
+        },
+        "name": "Form Trigger",
+        "type": "n8n-nodes-base.formTrigger",
+        "typeVersion": 2,
+        "position": [0, 300]
+      },
+      {
+        "parameters": {
+          "keepOnlySet": false,
+          "values": {
+            "boolean": [
+              {"name": "has_excel", "value": "={{ !!$binary.excel_file }}"},
+              {"name": "has_completion", "value": "={{ !!$binary.completion_file }}"},
+              {"name": "has_map", "value": "={{ !!$binary.map_file }}"},
+              {"name": "has_dev", "value": "={{ Object.keys($binary || {}).some(key => key.startsWith('dev_files')) }}"}
+            ],
+            "string": [
+              {"name": "user_query", "value": "={{ $json.prompt }}"}
+            ]
+          }
+        },
+        "name": "Edit Fields (Set Context)",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3,
+        "position": [250, 300]
+      },
+      {
+        "parameters": {
+          "promptType": "define",
+          "text": "={{ $json.user_query }}",
+          "options": {
+            "systemMessage": "Ты — Главный Архитектор ГДМ. Твоя задача — координировать генерацию SCHEDULE.\nПользователь загрузил файлы: Excel, .dev, .cps.\n\nТВОЙ АЛГОРИТМ (Строгий протокол JSON-RPC):\n1. DISCOVERY: Вызови 'Get_Model_Requirements', чтобы узнать, какие параметры (target_fields) требуются.\n2. EXTRACTION: Сформируй JSON-контракт и вызови 'Universal_Data_Agent'.\n3. CALCULATION: Вызови 'Math_Service', передав ему JSON с параметром 'requested_math_function'.\n4. COMPILATION: Вызови 'Compiler_Agent', передав ему единый агрегированный JSON.",
+            "returnIntermediateSteps": true
+          }
+        },
+        "name": "AI Agent (Orchestrator)",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "typeVersion": 1,
+        "position": [550, 300]
+      },
+      {
+        "parameters": {
+          "model": "gpt-4o"
+        },
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "typeVersion": 1,
+        "position": [550, 500]
+      },
+      {
+        "parameters": {
+          "sessionId": "={{ $execution.id }}",
+          "contextWindowLength": 10
+        },
+        "name": "Postgres Chat Memory",
+        "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+        "typeVersion": 1,
+        "position": [700, 500]
+      },
+      {
+        "parameters": {
+          "name": "Get_Model_Requirements",
+          "description": "Возвращает JSON с описанием ключевых слов и требуемых параметров для модели."
+        },
+        "name": "Tool: Discovery",
+        "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+        "typeVersion": 1,
+        "position": [850, 200]
+      },
+      {
+        "parameters": {
+          "name": "Universal_Data_Agent",
+          "description": "Извлекает данные из Excel. Обязательный входной JSON: {'target_fields': ['Поле1'], 'binary_key': 'excel_file'}"
+        },
+        "name": "Tool: Extraction",
+        "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+        "typeVersion": 1,
+        "position": [850, 350]
+      },
+      {
+        "parameters": {
+          "name": "Math_Service",
+          "description": "Выполняет 3D математику. Обязательный входной JSON: {'requested_math_function': 'calculate_frac_stages', 'data': <json>}"
+        },
+        "name": "Tool: Math",
+        "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+        "typeVersion": 1,
+        "position": [850, 500]
+      },
+      {
+        "parameters": {
+          "name": "Compiler_Agent",
+          "description": "Собирает финальный файл. Обязательный вход: {'aggregated_data': <все_собранные_данные>}"
+        },
+        "name": "Tool: Compiler",
+        "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+        "typeVersion": 1,
+        "position": [850, 650]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "{\n  \"status\": \"Success\",\n  \"ai_reasoning_log\": {{$json.intermediate_steps}}\n}"
+        },
+        "name": "Respond to Webhook",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [950, 300]
+      }
+    ],
+    "connections": {
+      "Form Trigger": {
+        "main": [[{"node": "Edit Fields (Set Context)", "type": "main", "index": 0}]]
+      },
+      "Edit Fields (Set Context)": {
+        "main": [[{"node": "AI Agent (Orchestrator)", "type": "main", "index": 0}]]
+      },
+      "AI Agent (Orchestrator)": {
+        "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [[{"node": "AI Agent (Orchestrator)", "type": "ai_languageModel", "index": 0}]]
+      },
+      "Postgres Chat Memory": {
+        "ai_memory": [[{"node": "AI Agent (Orchestrator)", "type": "ai_memory", "index": 0}]]
+      },
+      "Tool: Discovery": {
+        "ai_tool": [[{"node": "AI Agent (Orchestrator)", "type": "ai_tool", "index": 0}]]
+      },
+      "Tool: Extraction": {
+        "ai_tool": [[{"node": "AI Agent (Orchestrator)", "type": "ai_tool", "index": 0}]]
+      },
+      "Tool: Math": {
+        "ai_tool": [[{"node": "AI Agent (Orchestrator)", "type": "ai_tool", "index": 0}]]
+      },
+      "Tool: Compiler": {
+        "ai_tool": [[{"node": "AI Agent (Orchestrator)", "type": "ai_tool", "index": 0}]]
+      }
+    }
+  },
+  {
+    "name": "2. UNIVERSAL DATA AGENT (Парсер)",
+    "nodes": [
+      {
+        "parameters": {},
+        "name": "Execute Workflow Trigger",
+        "type": "n8n-nodes-base.executeWorkflowTrigger",
+        "typeVersion": 1,
+        "position": [0, 300]
+      },
+      {
+        "parameters": {
+          "language": "python",
+          "jsCode": "import pandas as pd\nimport io\n\nfile_type = items[0].json.get('file_type', 'drilling_schedule')\nbinary_key = 'excel_file' if file_type == 'drilling_schedule' else 'completion_file'\n\nbinary_data = items[0].binary[binary_key].data\n\nxls = pd.ExcelFile(io.BytesIO(binary_data))\nschema = {}\n\nfor sheet in xls.sheet_names:\n    df = pd.read_excel(xls, sheet_name=sheet, nrows=10).dropna(how='all')\n    if not df.empty:\n        schema[sheet] = df.columns.astype(str).tolist()\n\nreturn [{\n    \"json\": {\n        \"schema\": schema, \n        \"target_fields\": items[0].json.get('target_fields', []),\n        \"binary_key\": binary_key\n    }\n}]"
+        },
+        "name": "Extract Schema (Python)",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [250, 300]
+      },
+      {
+        "parameters": {
+          "prompt": "Ты эксперт по анализу Excel.\nСтруктура: {{ $json.schema }}\nОркестратор запросил: {{ $json.target_fields }}\nОпредели лист и сопоставь колонки."
+        },
+        "name": "Basic LLM Chain",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "typeVersion": 1,
+        "position": [500, 300]
+      },
+      {
+        "parameters": {},
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "typeVersion": 1,
+        "position": [500, 500]
+      },
+      {
+        "parameters": {
+          "jsonSchemaExample": "{\n  \"target_sheet\": \"Название листа\",\n  \"mapping\": {\n    \"запрошенное_поле\": \"реальная_колонка\"\n  }\n}"
+        },
+        "name": "Structured Output Parser",
+        "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+        "typeVersion": 1,
+        "position": [650, 500]
+      },
+      {
+        "parameters": {
+          "language": "python",
+          "jsCode": "import pandas as pd\nimport io\n\nbinary_key = items[0].json.binary_key\nbinary_data = items[0].binary[binary_key].data\n\nllm_output = items[0].json.output\ntarget_sheet = llm_output['target_sheet']\nmapping = llm_output['mapping']\n\ndf = pd.read_excel(io.BytesIO(binary_data), sheet_name=target_sheet)\nactual_columns = list(mapping.values())\nclean_df = df[actual_columns].dropna(how='all')\nclean_df = clean_df.rename(columns={v: k for k, v in mapping.items()})\n\nreturn [{\"json\": {\"extracted_data\": clean_df.to_dict('records')}}]"
+        },
+        "name": "Data Extractor (Python)",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [850, 300]
+      }
+    ],
+    "connections": {
+      "Execute Workflow Trigger": {
+        "main": [[{"node": "Extract Schema (Python)", "type": "main", "index": 0}]]
+      },
+      "Extract Schema (Python)": {
+        "main": [[{"node": "Basic LLM Chain", "type": "main", "index": 0}]]
+      },
+      "Basic LLM Chain": {
+        "main": [[{"node": "Data Extractor (Python)", "type": "main", "index": 0}]]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [[{"node": "Basic LLM Chain", "type": "ai_languageModel", "index": 0}]]
+      },
+      "Structured Output Parser": {
+        "ai_outputParser": [[{"node": "Basic LLM Chain", "type": "ai_outputParser", "index": 0}]]
+      }
+    }
+  },
+  {
+    "name": "3. MATH SERVICE (Движок)",
+    "nodes": [
+      {
+        "parameters": {},
+        "name": "Execute Workflow Trigger",
+        "type": "n8n-nodes-base.executeWorkflowTrigger",
+        "typeVersion": 1,
+        "position": [0, 300]
+      },
+      {
+        "parameters": {
+          "mode": "expression",
+          "output": "={{ $json.requested_math_function }}",
+          "rules": {
+            "rules": [
+              {"outputKey": "calculate_frac_stages"},
+              {"outputKey": "calculate_sidetrack"}
+            ]
+          }
+        },
+        "name": "Switch (Router)",
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3,
+        "position": [250, 300]
+      },
+      {
+        "parameters": {
+          "language": "python",
+          "jsCode": "# Заглушка для скрипта пересечения 3D сеток\nimport json\n\ndata = items[0].json.get('data', {})\n# Тут будет логика scipy/numpy для .cps и .dev\nresults = {\"well_1\": {\"perf_start_md\": 2500, \"stages\": 5}}\n\nreturn [{\"json\": {\"status\": \"success\", \"math_results\": results}}]"
+        },
+        "name": "Intersect & Split (Python)",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [500, 200]
+      }
+    ],
+    "connections": {
+      "Execute Workflow Trigger": {
+        "main": [[{"node": "Switch (Router)", "type": "main", "index": 0}]]
+      },
+      "Switch (Router)": {
+        "main": [
+          [{"node": "Intersect & Split (Python)", "type": "main", "index": 0}],
+          []
+        ]
+      }
+    }
+  },
+  {
+    "name": "4. COMPILER AGENT (Сборка RAG)",
+    "nodes": [
+      {
+        "parameters": {},
+        "name": "Execute Workflow Trigger",
+        "type": "n8n-nodes-base.executeWorkflowTrigger",
+        "typeVersion": 1,
+        "position": [0, 300]
+      },
+      {
+        "parameters": {
+          "promptType": "define",
+          "text": "={{ $json.aggregated_data }}",
+          "options": {
+            "systemMessage": "Ты — Senior Reservoir Engineer.\nАЛГОРИТМ:\n1. Запроси шаблоны (COMPDATMD, WCONPROD) через 'Search_Templates'.\n2. Сравни требуемые параметры шаблона с входными данными.\n3. Сгенерируй код SCHEDULE."
+          }
+        },
+        "name": "AI Agent (Compiler)",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "typeVersion": 1,
+        "position": [300, 300]
+      },
+      {
+        "parameters": {
+          "model": "gpt-4o"
+        },
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "typeVersion": 1,
+        "position": [300, 500]
+      },
+      {
+        "parameters": {
+          "name": "Search_Templates",
+          "description": "Поиск шаблонов в БД. Передай requested_keyword."
+        },
+        "name": "Vector Store Tool",
+        "type": "@n8n/n8n-nodes-langchain.toolVectorStore",
+        "typeVersion": 1,
+        "position": [600, 300]
+      },
+      {
+        "parameters": {
+          "operation": "retrieve",
+          "tableName": "knowledge_base",
+          "matchName": "match_documents",
+          "options": {
+            "filter": "metadata->>'keyword' = '{{ $fromAI(\"requested_keyword\") }}'"
+          }
+        },
+        "name": "Supabase Vector Store",
+        "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+        "typeVersion": 1,
+        "position": [600, 500]
+      },
+      {
+        "parameters": {},
+        "name": "OpenAI Embeddings",
+        "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+        "typeVersion": 1,
+        "position": [600, 700]
+      },
+      {
+        "parameters": {
+          "jsCode": "const content = items[0].json.output;\nconst buffer = Buffer.from(content || '', 'utf-8');\n\nreturn [{\n  json: { status: \"Success\" },\n  binary: {\n    schedule_file: {\n      data: buffer.toString('base64'),\n      mimeType: 'text/plain',\n      fileName: `Model_Schedule_${Date.now()}.sch`\n    }\n  }\n}];"
+        },
+        "name": "File Assembler (JS)",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [900, 300]
+      }
+    ],
+    "connections": {
+      "Execute Workflow Trigger": {
+        "main": [[{"node": "AI Agent (Compiler)", "type": "main", "index": 0}]]
+      },
+      "AI Agent (Compiler)": {
+        "main": [[{"node": "File Assembler (JS)", "type": "main", "index": 0}]]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [[{"node": "AI Agent (Compiler)", "type": "ai_languageModel", "index": 0}]]
+      },
+      "Vector Store Tool": {
+        "ai_tool": [[{"node": "AI Agent (Compiler)", "type": "ai_tool", "index": 0}]]
+      },
+      "Supabase Vector Store": {
+        "ai_vectorStore": [[{"node": "Vector Store Tool", "type": "ai_vectorStore", "index": 0}]]
+      },
+      "OpenAI Embeddings": {
+        "ai_embedding": [[{"node": "Supabase Vector Store", "type": "ai_embedding", "index": 0}]]
+      }
+    }
+  }
+]

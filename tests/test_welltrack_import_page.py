@@ -6310,6 +6310,71 @@ def test_apply_three_edit_targets_defers_result_widget_state_update() -> None:
     assert page.st.session_state["wt_pending_all_wells_results_focus"] is False
 
 
+def test_queue_all_wells_results_focus_defers_results_view_reset_until_init_state() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+    page.st.session_state["wt_results_all_view_mode"] = "Траектории"
+    page.st.session_state["wt_3d_render_mode"] = "Минимум"
+    page.st.session_state["wt_3d_backend"] = "mock-backend"
+
+    page._queue_all_wells_results_focus()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Отдельная скважина"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Траектории"
+    assert page.st.session_state["wt_3d_render_mode"] == "Минимум"
+    assert page.st.session_state["wt_3d_backend"] == "mock-backend"
+    assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
+
+    page._init_state()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+    assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
+    assert "wt_3d_backend" not in page.st.session_state
+    assert page.st.session_state["wt_pending_all_wells_results_focus"] is False
+
+
+def test_apply_three_pad_edit_defers_result_widget_state_update() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_records()[:2])
+    page.st.session_state["wt_records"] = list(records)
+    page.st.session_state["wt_records_original"] = list(records)
+    page.st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+    page.st.session_state["wt_results_all_view_mode"] = "Anti-collision"
+    pads = page._ensure_pad_configs(base_records=list(records))
+    pad_id = str(pads[0].pad_id)
+    cfg = page.st.session_state["wt_pad_configs"][pad_id]
+
+    updated = page._apply_edit_pad_changes(
+        [
+            {
+                "pad_id": pad_id,
+                "anchor": [
+                    float(cfg["first_surface_x"]) + 120.0,
+                    float(cfg["first_surface_y"]) - 35.0,
+                    float(cfg["first_surface_z"]),
+                ],
+            }
+        ],
+        source="three_viewer",
+    )
+
+    assert updated == ["WELL-A", "WELL-B"]
+    assert page.st.session_state["wt_results_view_mode"] == "Отдельная скважина"
+    assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
+
+    page._init_state()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+    assert "wt_3d_backend" not in page.st.session_state
+    assert page.st.session_state["wt_pending_all_wells_results_focus"] is False
+
+
 def test_selected_override_configs_apply_kop_depth_function_per_well_depth() -> None:
     page = wt_import_module
     clear_kop_min_vertical_function(prefix=page.WT_CALC_PARAMS.prefix)

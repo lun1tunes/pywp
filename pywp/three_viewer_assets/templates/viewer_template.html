@@ -565,13 +565,14 @@
       }
 
       .scene-label.edit-pad-handle-label {
-        min-width: 126px;
+        min-width: 118px;
         padding: 3px 5px;
         border: none;
         border-radius: 4px;
         background: rgba(255,255,255,0.18);
         box-shadow: none;
         color: rgba(15,23,42,0.86);
+        cursor: grab;
         font-family:
           "SFMono-Regular",
           ui-monospace,
@@ -581,8 +582,9 @@
         font-size: 10px;
         font-weight: 500;
         line-height: 1.35;
+        pointer-events: auto;
         text-align: left;
-        transform: translate(10px, calc(-100% - 8px));
+        transform: translate(10px, -100%);
         transform-origin: 0 100%;
         text-shadow:
           0 1px 2px rgba(255,255,255,0.95),
@@ -590,10 +592,19 @@
         backdrop-filter: blur(2px);
       }
 
+      .scene-label.edit-pad-handle-label:hover {
+        background: rgba(255,255,255,0.28);
+      }
+
+      .scene-label.edit-pad-handle-label.is-dragging {
+        cursor: grabbing;
+        background: rgba(255,255,255,0.34);
+      }
+
       .scene-label.edit-pad-handle-label .edit-delta-head {
         display: block;
         margin-bottom: 3px;
-        color: #1d4ed8;
+        color: rgba(15,23,42,0.86);
         font-family:
           Inter,
           -apple-system,
@@ -3036,6 +3047,8 @@
             if (sourceLabel) {
               if (item.role === "edit_delta_label" || item.role === "edit_pad_label") {
                 item.element.innerHTML = sourceLabel.element.innerHTML;
+                item.offsetX = Number(sourceLabel.offsetX || 0);
+                item.offsetY = Number(sourceLabel.offsetY || 0);
               } else {
                 item.element.textContent = sourceLabel.element.textContent || "";
               }
@@ -9630,9 +9643,10 @@
               initialDisplayPoint,
               EDIT_PAD_HANDLE_ACCENT,
               "edit-pad-handle-label",
-              { offsetX: 10, offsetY: -8, role: "edit_pad_label" },
+              { offsetX: 14, offsetY: 18, role: "edit_pad_label" },
             );
             label.visible = false;
+            initEditDeltaLabelDrag(label);
             const ndsArrow = createEditPadNdsArrow(padIndex);
             const rotationControl = createEditPadRotationControl(padIndex);
             const marker = {

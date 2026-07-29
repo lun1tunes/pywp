@@ -66,6 +66,7 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("Пулково 1995 Зона 13", CoordinateSystem.PULKOVO_1995_ZONE_13),
     ("Пулково 1995 Зона 18", CoordinateSystem.PULKOVO_1995_ZONE_18),
     ("Пулково 1995 CM 39E", CoordinateSystem.PULKOVO_1995_CM_39E),
+    ("МСК-89", CoordinateSystem.MSK_89),
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
 ]
 
@@ -300,6 +301,7 @@ def _effective_pyproj_crs(crs: CoordinateSystem) -> CoordinateSystem | None:
     """
     if crs in {
         CoordinateSystem.LOCAL,
+        CoordinateSystem.MSK_89,
         CoordinateSystem.PNO_13_ZONE,
         CoordinateSystem.PNO_13_CM,
         CoordinateSystem.PNO_16_ZONE,
@@ -684,6 +686,7 @@ def _build_transform_message(
             f"требуется установка pyproj: pip install pyproj"
         )
     if target_crs in {
+        CoordinateSystem.MSK_89,
         CoordinateSystem.PNO_13_ZONE,
         CoordinateSystem.PNO_13_CM,
         CoordinateSystem.PNO_16_ZONE,
@@ -786,6 +789,7 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         CoordinateSystem.PULKOVO_1942: " (СК-42)",
         CoordinateSystem.PULKOVO_1995: " (П95)",
         CoordinateSystem.PULKOVO_1995_CM_39E: " (П95/CM39)",
+        CoordinateSystem.MSK_89: " (МСК-89)",
         CoordinateSystem.GSK_2011: " (ГСК)",
         CoordinateSystem.WGS84: " (WGS)",
     }

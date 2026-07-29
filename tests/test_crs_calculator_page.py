@@ -63,6 +63,17 @@ def test_crs_calculator_input_options_include_wgs84_degrees() -> None:
     assert "WGS84 (градусы)" in list(input_selectbox.options)
 
 
+def test_crs_calculator_input_options_include_msk89() -> None:
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.run(timeout=60)
+
+    input_selectbox = next(
+        widget for widget in at.selectbox if str(widget.label) == "Входная CRS"
+    )
+
+    assert "МСК-89" in list(input_selectbox.options)
+
+
 def test_crs_calculator_can_swap_default_crs_pair() -> None:
     at = AppTest.from_file("pages/04_crs_calculator.py")
     at.run(timeout=60)

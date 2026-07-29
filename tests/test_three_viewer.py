@@ -709,6 +709,9 @@ def test_viewer_template_focuses_camera_for_pad_legend_clicks_in_edit_mode() -> 
 
 def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     html = three_viewer._viewer_template_with_libraries()
+    pad_section = html.split("function initEditPads()")[1].split(
+        "function worldUnitsPerPixelAt"
+    )[0]
 
     assert 'id="edit-pad-summary"' not in html
     assert "if (Number.isInteger(selectedEditPadIndex)) {\n            return [];\n          }" in html
@@ -720,12 +723,12 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert 'String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";' in html
     assert "const markerPoint = anchor.slice();" in html
     assert "const markerGeometry = new THREE.SphereGeometry(1.0, 16, 12);" in html
-    assert "OctahedronGeometry" not in html.split("function initEditPads()")[1].split(
-        "function worldUnitsPerPixelAt"
-    )[0]
+    assert "OctahedronGeometry" not in pad_section
     assert "pointIndex: null," in html
     assert 'point: marker.pointLabel || "S",' in html
     assert ".scene-label.edit-pad-handle-label" in html
+    assert ".scene-label.edit-pad-handle-label:hover" in html
+    assert ".scene-label.edit-pad-handle-label.is-dragging" in html
     assert 'role: "edit_pad_label"' in html
     assert "visualPos: markerPoint.slice()," in html
     assert "ndsAzimuthDeg: initialNds," in html
@@ -739,6 +742,8 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert "formatAzimuthDegrees(currentNds)" in html
     assert "formatAzimuthDegrees(originalNds)" in html
     assert "formatDeltaDegrees(deltaNds)" in html
+    assert '{ offsetX: 14, offsetY: 18, role: "edit_pad_label" },' in html
+    assert "initEditDeltaLabelDrag(label);" in pad_section
     assert "function editPadRotationModeEnabled()" in html
     assert "function startEditPadRotationDrag(padIndex, event)" in html
     assert "function createEditPadNdsArrow(padIndex)" in html
@@ -799,6 +804,8 @@ def test_viewer_template_syncs_minimap_label_positions_from_live_source_labels()
     )
     assert "if (sourceLabel.position) {" in html
     assert "item.position.copy(sourceLabel.position);" in html
+    assert "item.offsetX = Number(sourceLabel.offsetX || 0);" in html
+    assert "item.offsetY = Number(sourceLabel.offsetY || 0);" in html
     assert "const localX = ((labelPosition.x - leftWorld) / viewWidth) * rect.width;" in html
     assert "const localY = ((topWorld - labelPosition.y) / viewHeight) * rect.height;" in html
 

@@ -18,6 +18,7 @@ class TestCoordinateSystem:
         assert CoordinateSystem.PULKOVO_1942.value == "EPSG:4284"
         # Pulkovo 1995 from PDF (EPSG:4200)
         assert CoordinateSystem.PULKOVO_1995.value == "EPSG:4200"
+        assert CoordinateSystem.MSK_89.value == "MSK-89"
         # PNO now disambiguated per PDF research
         assert CoordinateSystem.PNO_13_ZONE.value == "PNO-13-ZONE"
         assert CoordinateSystem.PNO_16_CM.value == "PNO-16-CM"
@@ -25,6 +26,8 @@ class TestCoordinateSystem:
     def test_is_geographic(self) -> None:
         assert CoordinateSystem.WGS84.is_geographic()
         assert CoordinateSystem.PULKOVO_1995.is_geographic()
+        assert not CoordinateSystem.MSK_89.is_geographic()
+        assert CoordinateSystem.MSK_89.is_projected()
         assert not CoordinateSystem.PULKOVO_1942_ZONE_10.is_geographic()
         assert not CoordinateSystem.PULKOVO_1995_ZONE_13.is_geographic()
 

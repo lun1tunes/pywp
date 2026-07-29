@@ -2769,8 +2769,6 @@ def _clear_results() -> None:
     st.session_state["wt_last_calc_param_signature"] = None
     st.session_state[WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY] = None
     st.session_state["wt_last_run_log_lines"] = []
-    st.session_state["wt_results_view_mode"] = "Все скважины"
-    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     st.session_state["wt_prepared_well_overrides"] = {}
     st.session_state["wt_prepared_override_message"] = ""
     st.session_state["wt_prepared_recommendation_id"] = ""
@@ -2782,6 +2780,10 @@ def _clear_results() -> None:
     st.session_state["wt_edit_targets_pending_names"] = []
     st.session_state["wt_edit_targets_highlight_names"] = []
     st.session_state["wt_edit_targets_highlight_points"] = {}
+    # Result-view widgets can already be instantiated when edits arrive from the
+    # embedded 3D viewer. Reset the view mode on the next app pass instead of
+    # mutating widget-backed keys during the current render.
+    _queue_all_wells_results_focus()
 
 
 def _set_all_wells_results_focus_state() -> None:

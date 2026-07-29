@@ -74,6 +74,11 @@ class CoordinateSystem(Enum):
     PULKOVO_1995_ZONE_18 = "EPSG:20073"  # Zone 18, CM 105°E
     PULKOVO_1995_CM_39E = "EPSG:5043"    # Custom meridian 39°E
 
+    # Regional/local projected systems used in field data imports.
+    # MSK-89 is kept as an explicit selectable source CRS label, but without
+    # authority-backed transform parameters in this codebase yet.
+    MSK_89 = "MSK-89"
+
     # PNO systems - AMBIGUOUS, require disambiguation (per PDF)
     # PNO_16: if easting > 1,000,000 → ZONE, else CM (custom meridian)
     PNO_13_ZONE = "PNO-13-ZONE"    # Zone-based (easting > 1M typically)

@@ -218,6 +218,14 @@ def test_bulk_horizontal_length_changes_updates_t3_along_t1_t3_vector() -> None:
     )
 
 
+def test_queue_all_wells_results_focus_marks_pending_flag() -> None:
+    session_state: dict[str, object] = {}
+
+    ptc_edit_targets.queue_all_wells_results_focus(session_state)
+
+    assert session_state["wt_pending_all_wells_results_focus"] is True
+
+
 def test_bulk_horizontal_length_changes_skips_multi_horizontal_but_updates_single_zbs() -> None:
     multi = _record(
         "MULTI",
