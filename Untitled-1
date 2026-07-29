@@ -267,10 +267,10 @@
 3. **`Call n8n Workflow Tool` (Search_Knowledge_Base)**
    - *Лайфхак масштабируемости:* Мы не делаем два разных инструмента для мануалов и примеров. Мы делаем один умный векторный поиск.
 
-4. **`Supabase Vector Store` (Подключается к Vector Store Tool)**
+4. **`Postgres Vector Store` (Подключается к Vector Store Tool)**
    - **Operation:** Retrieve.
-   - **База Данных (Supabase):** У тебя в Supabase должна быть таблица `knowledge_base`, куда гидродинамики (вы) будете скидывать и мануалы (PDF/Markdown), и золотые куски `.DATA` файлов.
-   - **Metadata Filter (Двойной фильтр):**
+   - **База Данных (PostgreSQL с pgvector):** У тебя в Postgres должна быть таблица `knowledge_base` (с векторным расширением), куда гидродинамики (вы) будете скидывать и мануалы (PDF/Markdown), и золотые куски `.DATA` файлов.
+   - **Metadata Filter (Двойной фильтр в формате Postgres JSONB):**
      `metadata->>'keyword' = '{{ $fromAI("requested_keyword") }}' AND metadata->>'doc_type' IN ('manual', 'example')`
      *(Агент делает запрос: "Дай мне мануал и пример для WCONPROD". База возвращает ему сухую выжимку синтаксиса + кусок рабочего кода из эталонной модели).*
 
@@ -682,13 +682,12 @@
         "parameters": {
           "operation": "retrieve",
           "tableName": "knowledge_base",
-          "matchName": "match_documents",
           "options": {
-            "filter": "metadata->>'keyword' = '{{ $fromAI(\"requested_keyword\") }}'"
+            "where": "metadata->>'keyword' = '{{ $fromAI(\"requested_keyword\") }}'"
           }
         },
-        "name": "Supabase Vector Store",
-        "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+        "name": "Postgres Vector Store",
+        "type": "@n8n/n8n-nodes-langchain.vectorStorePostgres",
         "typeVersion": 1,
         "position": [600, 500]
       },
@@ -722,11 +721,11 @@
       "Vector Store Tool": {
         "ai_tool": [[{"node": "AI Agent (Compiler)", "type": "ai_tool", "index": 0}]]
       },
-      "Supabase Vector Store": {
+      "Postgres Vector Store": {
         "ai_vectorStore": [[{"node": "Vector Store Tool", "type": "ai_vectorStore", "index": 0}]]
       },
       "OpenAI Embeddings": {
-        "ai_embedding": [[{"node": "Supabase Vector Store", "type": "ai_embedding", "index": 0}]]
+        "ai_embedding": [[{"node": "Postgres Vector Store", "type": "ai_embedding", "index": 0}]]
       }
     }
   }
