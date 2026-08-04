@@ -13451,7 +13451,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/eclipse_welltrack.py	31697
+===BEGIN_FILE===	pywp/eclipse_welltrack.py	34264
 from __future__ import annotations
 
 import math
@@ -13491,6 +13491,7 @@ _TABLE_POINT_DISPLAY_LABELS: dict[str, str] = {
     "t1": "t1",
     "t3": "t3",
 }
+_TABLE_PILOT_SUFFIX = "_PL"
 _TABLE_ZBS_SUFFIX = "_ZBS"
 _TABLE_ALT_BRANCH_SUFFIX = "_2"
 
@@ -13690,9 +13691,14 @@ def parse_welltrack_points_table(
             "Wellname / Point / X / Y / Z."
         )
 
+    pilot_surface_by_parent_key = _table_pilot_surface_by_parent_key(grouped_points)
     records: list[WelltrackRecord] = []
     for well_name in well_order:
-        points_by_name = grouped_points[well_name]
+        points_by_name = _table_points_with_inferred_pilot_surface(
+            grouped_points[well_name],
+            well_name=well_name,
+            pilot_surface_by_parent_key=pilot_surface_by_parent_key,
+        )
         if _is_table_pilot_well_name(well_name):
             ordered_names = _ordered_table_pilot_point_names(
                 points_by_name,
@@ -13984,7 +13990,11 @@ def _normalize_table_point_name(
             "Для бокового ствола от факта используйте имя fact_well_name_ZBS "
             "или fact_well_name_2 и точки t1, t3 без S; для многопластового "
             "бокового ствола используйте 1_t1, 1_t3, 2_t1, 2_t3, ... без S. "
-            "Если wellname_2 задан как ствол от пилота, добавьте обычную точку S."
+            "Для ствола от пилота можно использовать имя wellname или "
+            "wellname_2 и задавать t1/t3, последовательность t1/t2/t3/... "
+            "или многопластовые пары 1_t1/1_t3, 2_t1/2_t3, ... . "
+            "Точку S можно задать явно или не задавать: если загружен "
+            "wellname_PL, система возьмёт её из пилота автоматически."
         )
 
 
@@ -14017,7 +14027,7 @@ def _table_point_md_index(point_name: str) -> float:
 
 
 def _is_table_pilot_well_name(well_name: object) -> bool:
-    return str(well_name).strip().upper().endswith("_PL")
+    return str(well_name).strip().upper().endswith(_TABLE_PILOT_SUFFIX)
 
 
 def _is_table_zbs_well_name(well_name: object) -> bool:
@@ -14027,6 +14037,63 @@ def _is_table_zbs_well_name(well_name: object) -> bool:
 
 def _is_table_alt_branch_well_name(well_name: object) -> bool:
     return str(well_name).strip().upper().endswith(_TABLE_ALT_BRANCH_SUFFIX)
+
+
+def _table_well_name_key(well_name: object) -> str:
+    return str(well_name).strip().casefold()
+
+
+def _table_parent_name_for_pilot_well_name(well_name: object) -> str:
+    text = str(well_name).strip()
+    if not _is_table_pilot_well_name(text):
+        return text
+    return text[: -len(_TABLE_PILOT_SUFFIX)]
+
+
+def _table_pilot_parent_name_for_well_name(well_name: object) -> str:
+    text = str(well_name).strip()
+    if _is_table_pilot_well_name(text):
+        return _table_parent_name_for_pilot_well_name(text)
+    if _is_table_alt_branch_well_name(text):
+        return text[: -len(_TABLE_ALT_BRANCH_SUFFIX)]
+    return text
+
+
+def _table_pilot_surface_by_parent_key(
+    grouped_points: Mapping[str, Mapping[str, WelltrackPoint]],
+) -> dict[str, WelltrackPoint]:
+    pilot_surface_by_parent_key: dict[str, WelltrackPoint] = {}
+    for well_name, points_by_name in grouped_points.items():
+        if not _is_table_pilot_well_name(well_name):
+            continue
+        surface = points_by_name.get("wellhead")
+        if surface is None:
+            continue
+        pilot_surface_by_parent_key.setdefault(
+            _table_well_name_key(_table_pilot_parent_name_for_well_name(well_name)),
+            surface,
+        )
+    return pilot_surface_by_parent_key
+
+
+def _table_points_with_inferred_pilot_surface(
+    points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+    pilot_surface_by_parent_key: Mapping[str, WelltrackPoint],
+) -> Mapping[str, WelltrackPoint]:
+    if "wellhead" in points_by_name or _is_table_pilot_well_name(well_name):
+        return points_by_name
+    if _is_table_zbs_well_name(well_name) and not _is_table_alt_branch_well_name(
+        well_name
+    ):
+        return points_by_name
+    pilot_surface = pilot_surface_by_parent_key.get(
+        _table_well_name_key(_table_pilot_parent_name_for_well_name(well_name))
+    )
+    if pilot_surface is None:
+        return points_by_name
+    return {"wellhead": pilot_surface, **points_by_name}
 
 
 def _ordered_table_pilot_point_names(
@@ -31912,7 +31979,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	380941
+===BEGIN_FILE===	pywp/ptc_core.py	384121
 from __future__ import annotations
 
 import colorsys
@@ -38543,7 +38610,7 @@ def _render_target_table_help() -> None:
                 "Z": "Zpl2",
             },
         ],
-        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL`. Например, пилот `well_01_PL` будет связан с основной скважиной `well_01`.",
+        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL`. Используйте точки `S`, `PL1`, `PL2`, ... без пропусков. Точек пилота может быть сколько угодно: от `PL1` до `PLN`.",
     )
     _render_example(
         "ЗБС от фактической скважины",
@@ -38566,14 +38633,21 @@ def _render_target_table_help() -> None:
         "Можно также использовать имя `fact_01_2`. Точку `S` для такого ЗБС указывать не нужно: система берёт старт из уже загруженной фактической скважины. Имя `fact_well` должно совпадать с именем загруженной фактической скважины.",
     )
     _render_example(
-        "Ствол от пилота",
+        "Пилот и обычный боковой ствол",
         [
             {
-                "Wellname": "well_01_2",
+                "Wellname": "well_01_PL",
                 "Point": "S",
                 "X": "Xs",
                 "Y": "Ys",
                 "Z": "Zs",
+            },
+            {
+                "Wellname": "well_01_PL",
+                "Point": "PL1",
+                "X": "Xpl1",
+                "Y": "Ypl1",
+                "Z": "Zpl1",
             },
             {
                 "Wellname": "well_01_2",
@@ -38590,7 +38664,103 @@ def _render_target_table_help() -> None:
                 "Z": "Z3",
             },
         ],
-        "Если проектный ствол назван `well_01_2`, система свяжет его с пилотом `well_01_PL`. В этом случае точка `S` нужна, потому что это отдельная проектная траектория. Имя `well` должно совпадать с основной скважиной.",
+        "Ствол от пилота можно задать именем `well_01` или `well_01_2`. Пилот `well_01_PL` и боковой ствол нужно загружать вместе. Для такого ствола можно использовать обычные точки `t1`/`t3`, а точку `S` можно задать явно или не задавать: если она не задана, система возьмёт устье из пилота.",
+    )
+    _render_example(
+        "Пилот и ствол с последовательностью целей",
+        [
+            {
+                "Wellname": "well_01_PL",
+                "Point": "S",
+                "X": "Xs",
+                "Y": "Ys",
+                "Z": "Zs",
+            },
+            {
+                "Wellname": "well_01_PL",
+                "Point": "PL1",
+                "X": "Xpl1",
+                "Y": "Ypl1",
+                "Z": "Zpl1",
+            },
+            {
+                "Wellname": "well_01",
+                "Point": "t1",
+                "X": "X1",
+                "Y": "Y1",
+                "Z": "Z1",
+            },
+            {
+                "Wellname": "well_01",
+                "Point": "t2",
+                "X": "X2",
+                "Y": "Y2",
+                "Z": "Z2",
+            },
+            {
+                "Wellname": "well_01",
+                "Point": "t3",
+                "X": "X3",
+                "Y": "Y3",
+                "Z": "Z3",
+            },
+            {
+                "Wellname": "well_01",
+                "Point": "t4",
+                "X": "X4",
+                "Y": "Y4",
+                "Z": "Z4",
+            },
+        ],
+        "Для бокового ствола от пилота можно задавать произвольную последовательность целей `t1`, `t2`, `t3`, ... без пропусков. Работают оба имени: `well_01` и `well_01_2`. Точку `S` можно добавить, а можно не добавлять.",
+    )
+    _render_example(
+        "Пилот и многопластовый боковой ствол",
+        [
+            {
+                "Wellname": "well_02_PL",
+                "Point": "S",
+                "X": "Xs",
+                "Y": "Ys",
+                "Z": "Zs",
+            },
+            {
+                "Wellname": "well_02_PL",
+                "Point": "PL1",
+                "X": "Xpl1",
+                "Y": "Ypl1",
+                "Z": "Zpl1",
+            },
+            {
+                "Wellname": "well_02_2",
+                "Point": "1_t1",
+                "X": "X1_1",
+                "Y": "Y1_1",
+                "Z": "Z1_1",
+            },
+            {
+                "Wellname": "well_02_2",
+                "Point": "1_t3",
+                "X": "X1_3",
+                "Y": "Y1_3",
+                "Z": "Z1_3",
+            },
+            {
+                "Wellname": "well_02_2",
+                "Point": "2_t1",
+                "X": "X2_1",
+                "Y": "Y2_1",
+                "Z": "Z2_1",
+            },
+            {
+                "Wellname": "well_02_2",
+                "Point": "2_t3",
+                "X": "X2_3",
+                "Y": "Y2_3",
+                "Z": "Z2_3",
+            },
+        ],
+        "Для бокового ствола от пилота работают и многопластовые пары `1_t1/1_t3`, `2_t1/2_t3`, ... . Имя можно задавать как `well_02`, так и `well_02_2`; точка `S` для такого ствола может быть и задана, и опущена.",
     )
     _render_example(
         "Многопластовая скважина",
@@ -108357,7 +108527,7 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     assert " B " in second
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	32218
+===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	32209
 from __future__ import annotations
 
 from pathlib import Path
@@ -108894,11 +109064,10 @@ def test_ptc_core_contains_bulk_horizontal_length_preprocess_controls() -> None:
 def test_ptc_core_keeps_explicit_pilot_and_zbs_name_matching_guidance() -> None:
     source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
 
-    assert "Имя `well` должно совпадать с основной скважиной." in source
-    assert "`fact_well` должно совпадать с именем загруженной " in source
-    assert "фактической скважины." in source
-    assert "Есть ЗБС: для расчёта загрузите " in source
-    assert 'фактическую основную скважину "' in source
+    assert "Ствол от пилота можно задать именем `well_01` или `well_01_2`." in source
+    assert "Пилот `well_01_PL` и боковой ствол нужно загружать вместе." in source
+    assert "`S` можно задать явно или не задавать" in source
+    assert "Можно также использовать имя `fact_01_2`." in source
 
 
 def test_ptc_core_keeps_auto_order_guardrails_for_source_defined_wellheads() -> None:
@@ -112737,7 +112906,7 @@ def test_welltracks2_pad_detection_and_layout() -> None:
         assert before.points[1:] == after.points[1:]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_batch.py	144211
+===BEGIN_FILE===	tests/test_welltrack_batch.py	149891
 from __future__ import annotations
 
 import multiprocessing
@@ -112775,6 +112944,7 @@ from pywp.anticollision_recommendations import (
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
+    parse_welltrack_points_table,
     parse_welltrack_text,
 )
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
@@ -116588,6 +116758,103 @@ def test_batch_planner_builds_target_sequence_pilot_sidetrack() -> None:
     assert "HORIZONTAL_BUILD1" in set(success.stations["segment"])
 
 
+def test_batch_planner_builds_target_sequence_pilot_sidetrack_from_table_without_parent_surface() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {"Wellname": "WELL-04", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04", "Point": "t2", "X": 1400.0, "Y": 0.0, "Z": 2220.0},
+            {"Wellname": "WELL-04", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
+        ]
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["target_sequence"] == "yes"
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert success.surface.z > 0.0
+    assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
+
+
+def test_batch_planner_builds_pilot_sidetrack_from_alt_branch_table_without_surface() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {"Wellname": "WELL-04_2", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04_2", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
+        ]
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04_2"},
+        selected_order=["WELL-04_2"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04_2"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert success.surface.z > 0.0
+    assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
+
+
+def test_batch_planner_builds_target_sequence_pilot_sidetrack_from_alt_branch_table_without_surface() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {"Wellname": "WELL-04_2", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04_2", "Point": "t2", "X": 1400.0, "Y": 0.0, "Z": 2220.0},
+            {"Wellname": "WELL-04_2", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
+        ]
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04_2"},
+        selected_order=["WELL-04_2"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04_2"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["target_sequence"] == "yes"
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert success.surface.z > 0.0
+    assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
+
+
 def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
     pilot = WelltrackRecord(
         name="WELL-04_PL",
@@ -116630,6 +116897,41 @@ def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
         "HORIZONTAL_BUILD1",
         "HORIZONTAL2",
     }.issubset(set(success.stations["segment"]))
+
+
+def test_batch_planner_builds_multi_horizontal_pilot_sidetrack_from_alt_branch_table_without_surface() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {"Wellname": "WELL-04_2", "Point": "1_t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04_2", "Point": "1_t3", "X": 1800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04_2", "Point": "2_t1", "X": 2800.0, "Y": 0.0, "Z": 2220.0},
+            {"Wellname": "WELL-04_2", "Point": "2_t3", "X": 3400.0, "Y": 0.0, "Z": 2220.0},
+        ]
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04_2"},
+        selected_order=["WELL-04_2"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04_2"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["multi_horizontal"] == "yes"
+    assert success.summary["multi_horizontal_levels"] == 2
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert len(success.target_pairs) == 2
+    assert success.t3 == success.target_pairs[-1][1]
 
 
 def test_batch_planner_reports_missing_actual_parent_for_zbs() -> None:
@@ -130767,7 +131069,7 @@ def test_anticollision_3d_trajectory_hover_is_reserved_for_wells_targets_and_con
     assert {"md", "dls", "inc"}.issubset(conflict_hovers[0].keys())
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_parser.py	15476
+===BEGIN_FILE===	tests/test_welltrack_parser.py	19589
 from __future__ import annotations
 
 from pathlib import Path
@@ -131121,6 +131423,90 @@ def test_parse_welltrack_points_table_accepts_target_sequence() -> None:
     assert [record.name for record in records] == ["WELL-A"]
     assert [point.md for point in records[0].points] == [0.0, 1.0, 2.0, 3.0]
     assert records[0].point_labels == ("S", "t1", "t2", "t3")
+
+
+def test_parse_welltrack_points_table_infers_surface_from_pilot_for_parent_sequence() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "2095_PL", "Point": "S", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "2095_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1300.0},
+            {"Wellname": "2095", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "2095", "Point": "t2", "X": 900.0, "Y": 1200.0, "Z": 2450.0},
+            {"Wellname": "2095", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "2095", "Point": "t4", "X": 2100.0, "Y": 2600.0, "Z": 2510.0},
+            {"Wellname": "2095", "Point": "t5", "X": 2600.0, "Y": 3200.0, "Z": 2520.0},
+            {"Wellname": "2095", "Point": "t6", "X": 3200.0, "Y": 3900.0, "Z": 2530.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["2095_PL", "2095"]
+    parent = records[1]
+    assert [point.md for point in parent.points] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert parent.point_labels == ("S", "t1", "t2", "t3", "t4", "t5", "t6")
+    assert parent.points[0] == WelltrackPoint(x=10.0, y=20.0, z=30.0, md=0.0)
+
+
+def test_parse_welltrack_points_table_infers_surface_from_pilot_for_alt_branch_t1_t3() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "2095_PL", "Point": "S", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "2095_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1300.0},
+            {"Wellname": "2095_2", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "2095_2", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["2095_PL", "2095_2"]
+    branch = records[1]
+    assert [point.md for point in branch.points] == [0.0, 1.0, 3.0]
+    assert branch.point_labels == ("S", "t1", "t3")
+    assert branch.points[0] == WelltrackPoint(x=10.0, y=20.0, z=30.0, md=0.0)
+
+
+def test_parse_welltrack_points_table_infers_surface_from_pilot_for_alt_branch_sequence() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "2095_PL", "Point": "S", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "2095_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1300.0},
+            {"Wellname": "2095_2", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "2095_2", "Point": "t2", "X": 900.0, "Y": 1200.0, "Z": 2450.0},
+            {"Wellname": "2095_2", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "2095_2", "Point": "t4", "X": 2100.0, "Y": 2600.0, "Z": 2510.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["2095_PL", "2095_2"]
+    branch = records[1]
+    assert [point.md for point in branch.points] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert branch.point_labels == ("S", "t1", "t2", "t3", "t4")
+    assert branch.points[0] == WelltrackPoint(x=10.0, y=20.0, z=30.0, md=0.0)
+
+
+def test_parse_welltrack_points_table_infers_surface_from_pilot_for_alt_branch_multi_horizontal() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "2095_PL", "Point": "S", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "2095_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1300.0},
+            {"Wellname": "2095_2", "Point": "1_t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "2095_2", "Point": "1_t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "2095_2", "Point": "2_t1", "X": 2100.0, "Y": 2600.0, "Z": 2510.0},
+            {"Wellname": "2095_2", "Point": "2_t3", "X": 2600.0, "Y": 3200.0, "Z": 2520.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["2095_PL", "2095_2"]
+    branch = records[1]
+    assert [point.md for point in branch.points] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert branch.point_labels == ("S", "1_t1", "1_t3", "2_t1", "2_t3")
+    assert branch.points[0] == WelltrackPoint(x=10.0, y=20.0, z=30.0, md=0.0)
 
 
 def test_ordered_table_points_preserves_existing_md_values() -> None:

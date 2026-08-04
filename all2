@@ -1,3 +1,74 @@
+        segment_b = "—"
+        if analysis is not None:
+            segment_a = _segment_types_for_interval(
+                analysis,
+                str(item.well_a),
+                float(item.md_a_start_m),
+                float(item.md_a_end_m),
+            )
+            segment_b = _segment_types_for_interval(
+                analysis,
+                str(item.well_b),
+                float(item.md_b_start_m),
+                float(item.md_b_end_m),
+            )
+        rows.append(
+            {
+                "Приоритет": str(item.priority_rank),
+                "Скважина A": str(item.well_a),
+                "Скважина B": str(item.well_b),
+                "Участок A": segment_a,
+                "Участок B": segment_b,
+                "Интервал A, м": md_interval_label(
+                    float(item.md_a_start_m),
+                    float(item.md_a_end_m),
+                ),
+                "Интервал B, м": md_interval_label(
+                    float(item.md_b_start_m),
+                    float(item.md_b_end_m),
+                ),
+                "SF min": float(item.min_separation_factor),
+                "Макс. пересечение, м": float(item.max_overlap_depth_m),
+                "Мин. расстояние, м": float(item.min_center_distance_m),
+                "Рекомендация по устранению": str(item.summary),
+            }
+        )
+    return rows
+
+
+def pad_scoped_cluster_target_well_names(
+    *,
+    cluster: AntiCollisionRecommendationCluster,
+    focus_pad_well_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
+    focused_cluster = tuple(
+        str(name) for name in cluster.well_names if str(name) in focus_set
+    )
+    cluster_scope = (
+        tuple(str(name) for name in cluster.well_names)
+        if cluster.well_names
+        else tuple(str(name) for name in cluster.affected_wells)
+    )
+    if not focused_cluster:
+        return cluster_scope
+    ordered_scope: list[str] = []
+    for well_name in [*focused_cluster, *cluster_scope]:
+        normalized = str(well_name).strip()
+        if normalized and normalized not in ordered_scope:
+            ordered_scope.append(normalized)
+    return tuple(ordered_scope)
+
+
+def pad_scoped_cluster_focus_well_names(
+    *,
+    cluster: AntiCollisionRecommendationCluster,
+    focus_pad_well_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    focus_set = {str(name) for name in focus_pad_well_names if str(name).strip()}
+    if not focus_set:
+        return ()
+    focused_affected = tuple(
         str(name) for name in cluster.affected_wells if str(name) in focus_set
     )
     if focused_affected:
@@ -4438,7 +4509,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	380941
+===BEGIN_FILE===	pywp/ptc_core.py	384121
 from __future__ import annotations
 
 import colorsys
@@ -11069,7 +11140,7 @@ def _render_target_table_help() -> None:
                 "Z": "Zpl2",
             },
         ],
-        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL`. Например, пилот `well_01_PL` будет связан с основной скважиной `well_01`.",
+        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL`. Используйте точки `S`, `PL1`, `PL2`, ... без пропусков. Точек пилота может быть сколько угодно: от `PL1` до `PLN`.",
     )
     _render_example(
         "ЗБС от фактической скважины",
@@ -11092,14 +11163,21 @@ def _render_target_table_help() -> None:
         "Можно также использовать имя `fact_01_2`. Точку `S` для такого ЗБС указывать не нужно: система берёт старт из уже загруженной фактической скважины. Имя `fact_well` должно совпадать с именем загруженной фактической скважины.",
     )
     _render_example(
-        "Ствол от пилота",
+        "Пилот и обычный боковой ствол",
         [
             {
-                "Wellname": "well_01_2",
+                "Wellname": "well_01_PL",
                 "Point": "S",
                 "X": "Xs",
                 "Y": "Ys",
                 "Z": "Zs",
+            },
+            {
+                "Wellname": "well_01_PL",
+                "Point": "PL1",
+                "X": "Xpl1",
+                "Y": "Ypl1",
+                "Z": "Zpl1",
             },
             {
                 "Wellname": "well_01_2",
@@ -11116,7 +11194,103 @@ def _render_target_table_help() -> None:
                 "Z": "Z3",
             },
         ],
-        "Если проектный ствол назван `well_01_2`, система свяжет его с пилотом `well_01_PL`. В этом случае точка `S` нужна, потому что это отдельная проектная траектория. Имя `well` должно совпадать с основной скважиной.",
+        "Ствол от пилота можно задать именем `well_01` или `well_01_2`. Пилот `well_01_PL` и боковой ствол нужно загружать вместе. Для такого ствола можно использовать обычные точки `t1`/`t3`, а точку `S` можно задать явно или не задавать: если она не задана, система возьмёт устье из пилота.",
+    )
+    _render_example(
+        "Пилот и ствол с последовательностью целей",
+        [
+            {
+                "Wellname": "well_01_PL",
+                "Point": "S",
+                "X": "Xs",
+                "Y": "Ys",
+                "Z": "Zs",
+            },
+            {
+                "Wellname": "well_01_PL",
+                "Point": "PL1",
+                "X": "Xpl1",
+                "Y": "Ypl1",
+                "Z": "Zpl1",
+            },
+            {
+                "Wellname": "well_01",
+                "Point": "t1",
+                "X": "X1",
+                "Y": "Y1",
+                "Z": "Z1",
+            },
+            {
+                "Wellname": "well_01",
+                "Point": "t2",
+                "X": "X2",
+                "Y": "Y2",
+                "Z": "Z2",
+            },
+            {
+                "Wellname": "well_01",
+                "Point": "t3",
+                "X": "X3",
+                "Y": "Y3",
+                "Z": "Z3",
+            },
+            {
+                "Wellname": "well_01",
+                "Point": "t4",
+                "X": "X4",
+                "Y": "Y4",
+                "Z": "Z4",
+            },
+        ],
+        "Для бокового ствола от пилота можно задавать произвольную последовательность целей `t1`, `t2`, `t3`, ... без пропусков. Работают оба имени: `well_01` и `well_01_2`. Точку `S` можно добавить, а можно не добавлять.",
+    )
+    _render_example(
+        "Пилот и многопластовый боковой ствол",
+        [
+            {
+                "Wellname": "well_02_PL",
+                "Point": "S",
+                "X": "Xs",
+                "Y": "Ys",
+                "Z": "Zs",
+            },
+            {
+                "Wellname": "well_02_PL",
+                "Point": "PL1",
+                "X": "Xpl1",
+                "Y": "Ypl1",
+                "Z": "Zpl1",
+            },
+            {
+                "Wellname": "well_02_2",
+                "Point": "1_t1",
+                "X": "X1_1",
+                "Y": "Y1_1",
+                "Z": "Z1_1",
+            },
+            {
+                "Wellname": "well_02_2",
+                "Point": "1_t3",
+                "X": "X1_3",
+                "Y": "Y1_3",
+                "Z": "Z1_3",
+            },
+            {
+                "Wellname": "well_02_2",
+                "Point": "2_t1",
+                "X": "X2_1",
+                "Y": "Y2_1",
+                "Z": "Z2_1",
+            },
+            {
+                "Wellname": "well_02_2",
+                "Point": "2_t3",
+                "X": "X2_3",
+                "Y": "Y2_3",
+                "Z": "Z2_3",
+            },
+        ],
+        "Для бокового ствола от пилота работают и многопластовые пары `1_t1/1_t3`, `2_t1/2_t3`, ... . Имя можно задавать как `well_02`, так и `well_02_2`; точка `S` для такого ствола может быть и задана, и опущена.",
     )
     _render_example(
         "Многопластовая скважина",
@@ -26915,179 +27089,3 @@ def _sidetrack_window_edit_point(
     ):
         return None
     try:
-        md_m = float(summary.get("sidetrack_window_md_m"))
-        position = [
-            float(summary.get("sidetrack_window_x_m")),
-            float(summary.get("sidetrack_window_y_m")),
-            float(summary.get("sidetrack_window_z_m")),
-        ]
-    except (TypeError, ValueError):
-        return None
-    if not _finite_triplet(position) or not np.isfinite(md_m):
-        return None
-
-    parent_name = str(
-        summary.get("sidetrack_parent_well_name")
-        or summary.get("pilot_well_name")
-        or summary.get("actual_parent_well_name")
-        or ""
-    ).strip()
-    if not parent_name:
-        return None
-    parent_key = well_name_key(parent_name)
-    parent_stations = None
-    parent_success = parent_success_by_key.get(parent_key)
-    if parent_success is not None:
-        parent_stations = parent_success.stations
-    parent_reference = reference_well_by_key.get(parent_key)
-    if parent_reference is not None:
-        parent_stations = parent_reference.stations
-    if parent_stations is None:
-        parent_stations = getattr(success.stations, "attrs", {}).get(
-            "uncertainty_reference_stations"
-        )
-    parent_points = _station_path_points(
-        parent_stations,
-        include_md=True,
-        extra_point=[*position, md_m],
-    )
-    if len(parent_points) < 2:
-        return None
-    return {
-        "index": -1,
-        "label": "Окно",
-        "point_type": "sidetrack_window",
-        "position": position,
-        "md_m": md_m,
-        "parent_name": parent_name,
-        "parent_points": parent_points,
-    }
-
-
-def _finite_triplet(point: list[float]) -> bool:
-    return len(point) >= 3 and all(np.isfinite(float(value)) for value in point[:3])
-
-
-def _collision_payloads(
-    analysis: AntiCollisionAnalysis,
-) -> list[dict[str, object]]:
-    events = anti_collision_report_events(analysis)
-    zone_lookup: dict[tuple[str, str], list[AntiCollisionZone]] = {}
-    for zone in analysis.zones:
-        key = (str(zone.well_a), str(zone.well_b))
-        zone_lookup.setdefault(key, []).append(zone)
-
-    collisions: list[dict[str, object]] = []
-    for index, event in enumerate(events):
-        segment_a = _segment_types_for_interval(
-            analysis,
-            str(event.well_a),
-            float(event.md_a_start_m),
-            float(event.md_a_end_m),
-        )
-        segment_b = _segment_types_for_interval(
-            analysis,
-            str(event.well_b),
-            float(event.md_b_start_m),
-            float(event.md_b_end_m),
-        )
-        best_zone = _best_event_zone(
-            zones=zone_lookup.get((str(event.well_a), str(event.well_b)), []),
-            md_a_start_m=float(event.md_a_start_m),
-            md_a_end_m=float(event.md_a_end_m),
-            md_b_start_m=float(event.md_b_start_m),
-            md_b_end_m=float(event.md_b_end_m),
-        )
-        hotspot = (
-            list(best_zone.hotspot_xyz) if best_zone is not None else [0.0, 0.0, 0.0]
-        )
-        collisions.append(
-            {
-                "id": f"collision::{event.well_a}::{event.well_b}::{index}",
-                "well_a": str(event.well_a),
-                "well_b": str(event.well_b),
-                "label": f"{event.well_a} ↔ {event.well_b}",
-                "classification": str(event.classification),
-                "priority_rank": int(event.priority_rank),
-                "hotspot": hotspot,
-                "separation_factor": float(event.min_separation_factor),
-                "center_distance_m": float(event.min_center_distance_m),
-                "segment_a": segment_a,
-                "segment_b": segment_b,
-            }
-        )
-    return _group_collision_payloads(collisions)
-
-
-def _group_collision_payloads(
-    collisions: Iterable[dict[str, object]],
-) -> list[dict[str, object]]:
-    grouped: dict[
-        tuple[str, str, tuple[str, ...], tuple[str, ...]],
-        dict[str, object],
-    ] = {}
-    for collision in collisions:
-        key = _collision_group_key(collision)
-        existing = grouped.get(key)
-        if existing is None:
-            item = dict(collision)
-            item["grouped_collision_count"] = 1
-            grouped[key] = item
-            continue
-        grouped_count = int(existing.get("grouped_collision_count", 1)) + 1
-        if _collision_payload_is_more_extreme(collision, existing):
-            item = dict(collision)
-            item["grouped_collision_count"] = grouped_count
-            grouped[key] = item
-            continue
-        existing["grouped_collision_count"] = grouped_count
-    return list(grouped.values())
-
-
-def _collision_group_key(
-    collision: Mapping[str, object],
-) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
-    return (
-        str(collision.get("well_a", "")).strip(),
-        str(collision.get("well_b", "")).strip(),
-        _normalized_collision_segment_key(collision.get("segment_a")),
-        _normalized_collision_segment_key(collision.get("segment_b")),
-    )
-
-
-def _normalized_collision_segment_key(value: object) -> tuple[str, ...]:
-    parts = [
-        str(part).strip().upper()
-        for part in str(value or "").split(",")
-        if str(part).strip()
-    ]
-    if not parts:
-        return ("—",)
-    return tuple(sorted(set(parts)))
-
-
-def _collision_payload_is_more_extreme(
-    candidate: Mapping[str, object],
-    current: Mapping[str, object],
-) -> bool:
-    candidate_sf = float(candidate.get("separation_factor", float("inf")))
-    current_sf = float(current.get("separation_factor", float("inf")))
-    if candidate_sf < current_sf:
-        return True
-    if candidate_sf > current_sf:
-        return False
-    candidate_priority = int(candidate.get("priority_rank", 999999))
-    current_priority = int(current.get("priority_rank", 999999))
-    if candidate_priority < current_priority:
-        return True
-    if candidate_priority > current_priority:
-        return False
-    candidate_distance = float(candidate.get("center_distance_m", float("inf")))
-    current_distance = float(current.get("center_distance_m", float("inf")))
-    return candidate_distance < current_distance
-
-
-def overlap_volume_payloads(
-    analysis: AntiCollisionAnalysis,
-) -> list[dict[str, object]]:
-    if not hasattr(analysis, "wells"):

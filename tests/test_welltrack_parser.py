@@ -353,6 +353,90 @@ def test_parse_welltrack_points_table_accepts_target_sequence() -> None:
     assert records[0].point_labels == ("S", "t1", "t2", "t3")
 
 
+def test_parse_welltrack_points_table_infers_surface_from_pilot_for_parent_sequence() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "2095_PL", "Point": "S", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "2095_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1300.0},
+            {"Wellname": "2095", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "2095", "Point": "t2", "X": 900.0, "Y": 1200.0, "Z": 2450.0},
+            {"Wellname": "2095", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "2095", "Point": "t4", "X": 2100.0, "Y": 2600.0, "Z": 2510.0},
+            {"Wellname": "2095", "Point": "t5", "X": 2600.0, "Y": 3200.0, "Z": 2520.0},
+            {"Wellname": "2095", "Point": "t6", "X": 3200.0, "Y": 3900.0, "Z": 2530.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["2095_PL", "2095"]
+    parent = records[1]
+    assert [point.md for point in parent.points] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert parent.point_labels == ("S", "t1", "t2", "t3", "t4", "t5", "t6")
+    assert parent.points[0] == WelltrackPoint(x=10.0, y=20.0, z=30.0, md=0.0)
+
+
+def test_parse_welltrack_points_table_infers_surface_from_pilot_for_alt_branch_t1_t3() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "2095_PL", "Point": "S", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "2095_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1300.0},
+            {"Wellname": "2095_2", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "2095_2", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["2095_PL", "2095_2"]
+    branch = records[1]
+    assert [point.md for point in branch.points] == [0.0, 1.0, 3.0]
+    assert branch.point_labels == ("S", "t1", "t3")
+    assert branch.points[0] == WelltrackPoint(x=10.0, y=20.0, z=30.0, md=0.0)
+
+
+def test_parse_welltrack_points_table_infers_surface_from_pilot_for_alt_branch_sequence() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "2095_PL", "Point": "S", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "2095_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1300.0},
+            {"Wellname": "2095_2", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "2095_2", "Point": "t2", "X": 900.0, "Y": 1200.0, "Z": 2450.0},
+            {"Wellname": "2095_2", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "2095_2", "Point": "t4", "X": 2100.0, "Y": 2600.0, "Z": 2510.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["2095_PL", "2095_2"]
+    branch = records[1]
+    assert [point.md for point in branch.points] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert branch.point_labels == ("S", "t1", "t2", "t3", "t4")
+    assert branch.points[0] == WelltrackPoint(x=10.0, y=20.0, z=30.0, md=0.0)
+
+
+def test_parse_welltrack_points_table_infers_surface_from_pilot_for_alt_branch_multi_horizontal() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "2095_PL", "Point": "S", "X": 10.0, "Y": 20.0, "Z": 30.0},
+            {"Wellname": "2095_PL", "Point": "PL1", "X": 100.0, "Y": 200.0, "Z": 1300.0},
+            {"Wellname": "2095_2", "Point": "1_t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "2095_2", "Point": "1_t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+            {"Wellname": "2095_2", "Point": "2_t1", "X": 2100.0, "Y": 2600.0, "Z": 2510.0},
+            {"Wellname": "2095_2", "Point": "2_t3", "X": 2600.0, "Y": 3200.0, "Z": 2520.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["2095_PL", "2095_2"]
+    branch = records[1]
+    assert [point.md for point in branch.points] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert branch.point_labels == ("S", "1_t1", "1_t3", "2_t1", "2_t3")
+    assert branch.points[0] == WelltrackPoint(x=10.0, y=20.0, z=30.0, md=0.0)
+
+
 def test_ordered_table_points_preserves_existing_md_values() -> None:
     ordered = _ordered_table_points(
         {

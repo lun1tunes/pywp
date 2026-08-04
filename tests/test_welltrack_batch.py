@@ -35,6 +35,7 @@ from pywp.anticollision_recommendations import (
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
+    parse_welltrack_points_table,
     parse_welltrack_text,
 )
 from pywp.models import PlannerResult, Point3D, TrajectoryConfig
@@ -3848,6 +3849,103 @@ def test_batch_planner_builds_target_sequence_pilot_sidetrack() -> None:
     assert "HORIZONTAL_BUILD1" in set(success.stations["segment"])
 
 
+def test_batch_planner_builds_target_sequence_pilot_sidetrack_from_table_without_parent_surface() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {"Wellname": "WELL-04", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04", "Point": "t2", "X": 1400.0, "Y": 0.0, "Z": 2220.0},
+            {"Wellname": "WELL-04", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
+        ]
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["target_sequence"] == "yes"
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert success.surface.z > 0.0
+    assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
+
+
+def test_batch_planner_builds_pilot_sidetrack_from_alt_branch_table_without_surface() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {"Wellname": "WELL-04_2", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04_2", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
+        ]
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04_2"},
+        selected_order=["WELL-04_2"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04_2"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert success.surface.z > 0.0
+    assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
+
+
+def test_batch_planner_builds_target_sequence_pilot_sidetrack_from_alt_branch_table_without_surface() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {"Wellname": "WELL-04_2", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04_2", "Point": "t2", "X": 1400.0, "Y": 0.0, "Z": 2220.0},
+            {"Wellname": "WELL-04_2", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
+        ]
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04_2"},
+        selected_order=["WELL-04_2"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04_2"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["target_sequence"] == "yes"
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert success.surface.z > 0.0
+    assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
+
+
 def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
     pilot = WelltrackRecord(
         name="WELL-04_PL",
@@ -3890,6 +3988,41 @@ def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
         "HORIZONTAL_BUILD1",
         "HORIZONTAL2",
     }.issubset(set(success.stations["segment"]))
+
+
+def test_batch_planner_builds_multi_horizontal_pilot_sidetrack_from_alt_branch_table_without_surface() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
+            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {"Wellname": "WELL-04_2", "Point": "1_t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04_2", "Point": "1_t3", "X": 1800.0, "Y": 0.0, "Z": 2200.0},
+            {"Wellname": "WELL-04_2", "Point": "2_t1", "X": 2800.0, "Y": 0.0, "Z": 2220.0},
+            {"Wellname": "WELL-04_2", "Point": "2_t3", "X": 3400.0, "Y": 0.0, "Z": 2220.0},
+        ]
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=records,
+        selected_names={"WELL-04_2"},
+        selected_order=["WELL-04_2"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04_2"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["multi_horizontal"] == "yes"
+    assert success.summary["multi_horizontal_levels"] == 2
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert len(success.target_pairs) == 2
+    assert success.t3 == success.target_pairs[-1][1]
 
 
 def test_batch_planner_reports_missing_actual_parent_for_zbs() -> None:

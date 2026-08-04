@@ -534,11 +534,10 @@ def test_ptc_core_contains_bulk_horizontal_length_preprocess_controls() -> None:
 def test_ptc_core_keeps_explicit_pilot_and_zbs_name_matching_guidance() -> None:
     source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
 
-    assert "Имя `well` должно совпадать с основной скважиной." in source
-    assert "`fact_well` должно совпадать с именем загруженной " in source
-    assert "фактической скважины." in source
-    assert "Есть ЗБС: для расчёта загрузите " in source
-    assert 'фактическую основную скважину "' in source
+    assert "Ствол от пилота можно задать именем `well_01` или `well_01_2`." in source
+    assert "Пилот `well_01_PL` и боковой ствол нужно загружать вместе." in source
+    assert "`S` можно задать явно или не задавать" in source
+    assert "Можно также использовать имя `fact_01_2`." in source
 
 
 def test_ptc_core_keeps_auto_order_guardrails_for_source_defined_wellheads() -> None:

@@ -37,6 +37,7 @@ _TABLE_POINT_DISPLAY_LABELS: dict[str, str] = {
     "t1": "t1",
     "t3": "t3",
 }
+_TABLE_PILOT_SUFFIX = "_PL"
 _TABLE_ZBS_SUFFIX = "_ZBS"
 _TABLE_ALT_BRANCH_SUFFIX = "_2"
 
@@ -236,9 +237,14 @@ def parse_welltrack_points_table(
             "Wellname / Point / X / Y / Z."
         )
 
+    pilot_surface_by_parent_key = _table_pilot_surface_by_parent_key(grouped_points)
     records: list[WelltrackRecord] = []
     for well_name in well_order:
-        points_by_name = grouped_points[well_name]
+        points_by_name = _table_points_with_inferred_pilot_surface(
+            grouped_points[well_name],
+            well_name=well_name,
+            pilot_surface_by_parent_key=pilot_surface_by_parent_key,
+        )
         if _is_table_pilot_well_name(well_name):
             ordered_names = _ordered_table_pilot_point_names(
                 points_by_name,
@@ -530,7 +536,11 @@ def _normalize_table_point_name(
             "Для бокового ствола от факта используйте имя fact_well_name_ZBS "
             "или fact_well_name_2 и точки t1, t3 без S; для многопластового "
             "бокового ствола используйте 1_t1, 1_t3, 2_t1, 2_t3, ... без S. "
-            "Если wellname_2 задан как ствол от пилота, добавьте обычную точку S."
+            "Для ствола от пилота можно использовать имя wellname или "
+            "wellname_2 и задавать t1/t3, последовательность t1/t2/t3/... "
+            "или многопластовые пары 1_t1/1_t3, 2_t1/2_t3, ... . "
+            "Точку S можно задать явно или не задавать: если загружен "
+            "wellname_PL, система возьмёт её из пилота автоматически."
         )
 
 
@@ -563,7 +573,7 @@ def _table_point_md_index(point_name: str) -> float:
 
 
 def _is_table_pilot_well_name(well_name: object) -> bool:
-    return str(well_name).strip().upper().endswith("_PL")
+    return str(well_name).strip().upper().endswith(_TABLE_PILOT_SUFFIX)
 
 
 def _is_table_zbs_well_name(well_name: object) -> bool:
@@ -573,6 +583,63 @@ def _is_table_zbs_well_name(well_name: object) -> bool:
 
 def _is_table_alt_branch_well_name(well_name: object) -> bool:
     return str(well_name).strip().upper().endswith(_TABLE_ALT_BRANCH_SUFFIX)
+
+
+def _table_well_name_key(well_name: object) -> str:
+    return str(well_name).strip().casefold()
+
+
+def _table_parent_name_for_pilot_well_name(well_name: object) -> str:
+    text = str(well_name).strip()
+    if not _is_table_pilot_well_name(text):
+        return text
+    return text[: -len(_TABLE_PILOT_SUFFIX)]
+
+
+def _table_pilot_parent_name_for_well_name(well_name: object) -> str:
+    text = str(well_name).strip()
+    if _is_table_pilot_well_name(text):
+        return _table_parent_name_for_pilot_well_name(text)
+    if _is_table_alt_branch_well_name(text):
+        return text[: -len(_TABLE_ALT_BRANCH_SUFFIX)]
+    return text
+
+
+def _table_pilot_surface_by_parent_key(
+    grouped_points: Mapping[str, Mapping[str, WelltrackPoint]],
+) -> dict[str, WelltrackPoint]:
+    pilot_surface_by_parent_key: dict[str, WelltrackPoint] = {}
+    for well_name, points_by_name in grouped_points.items():
+        if not _is_table_pilot_well_name(well_name):
+            continue
+        surface = points_by_name.get("wellhead")
+        if surface is None:
+            continue
+        pilot_surface_by_parent_key.setdefault(
+            _table_well_name_key(_table_pilot_parent_name_for_well_name(well_name)),
+            surface,
+        )
+    return pilot_surface_by_parent_key
+
+
+def _table_points_with_inferred_pilot_surface(
+    points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+    pilot_surface_by_parent_key: Mapping[str, WelltrackPoint],
+) -> Mapping[str, WelltrackPoint]:
+    if "wellhead" in points_by_name or _is_table_pilot_well_name(well_name):
+        return points_by_name
+    if _is_table_zbs_well_name(well_name) and not _is_table_alt_branch_well_name(
+        well_name
+    ):
+        return points_by_name
+    pilot_surface = pilot_surface_by_parent_key.get(
+        _table_well_name_key(_table_pilot_parent_name_for_well_name(well_name))
+    )
+    if pilot_surface is None:
+        return points_by_name
+    return {"wellhead": pilot_surface, **points_by_name}
 
 
 def _ordered_table_pilot_point_names(
