@@ -2240,16 +2240,6 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pytest.ini	259
-[pytest]
-testpaths = tests
-pythonpath = .
-addopts = -ra --strict-markers -m "not slow"
-markers =
-    integration: End-to-end tests that run real planner/batch flows.
-    slow: High-cost scenarios (dense baselines, hard TURN geometries, long optimizer paths).
-
-===END_FILE===
 ===BEGIN_FILE===	pywp/__init__.py	4178
 from __future__ import annotations
 
@@ -27468,3 +27458,12 @@ def report_rows_from_recommendations(
     rows: list[dict[str, object]] = []
     for item in recommendations:
         segment_a = "—"
+        segment_b = "—"
+        if analysis is not None:
+            segment_a = _segment_types_for_interval(
+                analysis,
+                str(item.well_a),
+                float(item.md_a_start_m),
+                float(item.md_a_end_m),
+            )
+            segment_b = _segment_types_for_interval(

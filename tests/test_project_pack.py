@@ -22,14 +22,18 @@ def test_collect_files_skips_excluded_and_poetry(tmp_path: Path) -> None:
     (root / "pkg").mkdir(parents=True)
     (root / ".venv" / "ignored").mkdir(parents=True)
     (root / "tools").mkdir(parents=True)
+    (root / "tests").mkdir(parents=True)
     (root / ".streamlit").mkdir(parents=True)
     (root / "pywp" / "three_viewer_assets" / "templates").mkdir(parents=True)
 
     (root / "main.py").write_text("print('root')\n", encoding="utf-8")
     (root / "pkg" / "mod.py").write_text("def f():\n    return 'ok'\n", encoding="utf-8")
+    (root / "conftest.py").write_text("pytest_plugins = []\n", encoding="utf-8")
+    (root / "test_root.py").write_text("def test_root():\n    assert True\n", encoding="utf-8")
     (root / "requirements.txt").write_text("requests==2.0\n", encoding="utf-8")
     (root / "requirements-dev.txt").write_text("pytest==8.0\n", encoding="utf-8")
     (root / "pyproject.toml").write_text("[project]\nname='pywp'\n", encoding="utf-8")
+    (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     (root / ".streamlit" / "config.toml").write_text("[theme]\n", encoding="utf-8")
     (root / "tools" / "viewer.json").write_text('{"ok": true}\n', encoding="utf-8")
     (root / "tools" / "sample.inc").write_text("WELLTRACK 'A'\n/\n", encoding="utf-8")
@@ -37,10 +41,12 @@ def test_collect_files_skips_excluded_and_poetry(tmp_path: Path) -> None:
     (root / "tools" / "widget.js").write_text("console.log('ok')\n", encoding="utf-8")
     (root / "tools" / "theme.css").write_text("body{}\n", encoding="utf-8")
     (root / "tools" / "notes.md").write_text("# Notes\n", encoding="utf-8")
+    (root / "tools" / "api_test.py").write_text("def test_api():\n    assert True\n", encoding="utf-8")
     (root / "pywp" / "three_viewer_assets" / "templates" / "viewer_template.html").write_text(
         "<div></div>\n",
         encoding="utf-8",
     )
+    (root / "tests" / "test_pack.py").write_text("def test_pack():\n    assert True\n", encoding="utf-8")
     (root / ".venv" / "ignored" / "skip.py").write_text("print('skip')\n", encoding="utf-8")
     (root / "tools" / "binary.bin").write_bytes(b"\x00\x01")
     (root / "all.txt").write_text("archive\n", encoding="utf-8")
@@ -89,6 +95,37 @@ def test_pack_and_unpack_restore_contents(tmp_path: Path) -> None:
     for relative_path, expected_content in original_files.items():
         restored_path = out / relative_path
         assert restored_path.read_text(encoding="utf-8") == expected_content
+
+
+def test_pack_writes_relative_paths_and_unpack_restores_structure(tmp_path: Path) -> None:
+    module = _load_project_pack_module()
+    root = tmp_path / "src"
+    out = tmp_path / "out"
+    archive = tmp_path / "archive.txt"
+
+    original_files = {
+        "app.py": "print('root')\n",
+        "pkg/nested/mod.py": "VALUE = 1\n",
+        "pywp/viewer/assets/widget.js": "console.log('ok')\n",
+    }
+    for relative_path, content in original_files.items():
+        target = root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    module.pack(root, archive)
+    archive_text = archive.read_text(encoding="utf-8")
+
+    assert "===BEGIN_FILE===\tapp.py\t" in archive_text
+    assert "===BEGIN_FILE===\tpkg/nested/mod.py\t" in archive_text
+    assert "===BEGIN_FILE===\tpywp/viewer/assets/widget.js\t" in archive_text
+
+    module.unpack(out, archive)
+
+    restored_files = sorted(
+        path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file()
+    )
+    assert restored_files == sorted(original_files)
 
 
 def test_collect_files_excludes_custom_archive_inside_root(tmp_path: Path) -> None:

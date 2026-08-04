@@ -18,10 +18,16 @@ EXCLUDED_DIR_NAMES = {
     ".pytest_cache",
     ".ruff_cache",
     ".idea",
+    "tests",
 }
 
 EXCLUDED_FILE_PATHS = {
     ".windsurf/workflows/check_and_pack.yaml",
+    "pytest.ini",
+}
+
+EXCLUDED_FILE_NAMES = {
+    "conftest.py",
 }
 
 INCLUDED_FILE_EXTENSIONS = {
@@ -49,6 +55,12 @@ def should_skip_path(path: Path, root: Path) -> bool:
     if parts & EXCLUDED_DIR_NAMES:
         return True
     if rel.as_posix() in EXCLUDED_FILE_PATHS:
+        return True
+    if path.name in EXCLUDED_FILE_NAMES:
+        return True
+    if path.name.startswith("test_") and path.suffix.lower() == ".py":
+        return True
+    if path.name.endswith("_test.py"):
         return True
     return False
 
