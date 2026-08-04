@@ -3807,6 +3807,47 @@ def test_batch_planner_applies_manual_sidetrack_window_override() -> None:
     )
 
 
+def test_batch_planner_builds_target_sequence_pilot_sidetrack() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1400.0, y=0.0, z=2220.0, md=3.0),
+            WelltrackPoint(x=2200.0, y=0.0, z=2220.0, md=4.0),
+        ),
+        point_labels=("S", "t1", "t2", "t3"),
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["target_sequence"] == "yes"
+    assert success.summary["target_sequence_point_count"] == 3
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert success.surface.z > 0.0
+    assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
+    assert "HORIZONTAL_BUILD1" in set(success.stations["segment"])
+
+
 def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
     pilot = WelltrackRecord(
         name="WELL-04_PL",

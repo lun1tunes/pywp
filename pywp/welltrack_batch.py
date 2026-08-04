@@ -62,7 +62,11 @@ from pywp.pilot_wells import (
     well_name_key,
     zbs_target_points_to_pairs,
 )
-from pywp.planner import PlanningError, TrajectoryPlanner
+from pywp.planner import (
+    PlanningError,
+    TrajectoryPlanner,
+    extend_plan_with_target_sequence,
+)
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_ACTUAL
 from pywp.solver_diagnostics import summarize_problem_ru
@@ -2282,7 +2286,7 @@ class WelltrackBatchPlanner:
                 ),
                 None,
             )
-            use_pilot_sidetrack = pilot_success is not None and not layout.target_sequence
+            use_pilot_sidetrack = pilot_success is not None
             if use_pilot_sidetrack:
                 window, sidetrack_result = select_sidetrack_window(
                     pilot_name=str(pilot_success.name),
@@ -2301,12 +2305,29 @@ class WelltrackBatchPlanner:
                     window=window,
                     config=config,
                 )
-                result = sidetrack.result
                 stations = sidetrack.stations
                 summary = dict(sidetrack.summary)
                 md_t1_m = float(sidetrack.md_t1_m)
                 azimuth_deg = float(sidetrack.azimuth_deg)
                 success_surface = sidetrack.window.point
+                if layout.target_sequence:
+                    extended_result = extend_plan_with_target_sequence(
+                        base_result=PlannerResult(
+                            stations=stations,
+                            summary=summary,
+                            azimuth_deg=azimuth_deg,
+                            md_t1_m=md_t1_m,
+                        ),
+                        targets=layout.target_sequence,
+                        config=config,
+                        progress_callback=planner_progress_callback,
+                        trajectory_type="PILOT_SIDETRACK",
+                    )
+                    stations = extended_result.stations
+                    summary = dict(extended_result.summary)
+                    md_t1_m = float(extended_result.md_t1_m)
+                    azimuth_deg = float(extended_result.azimuth_deg)
+                    t3 = layout.final_target
             else:
                 if layout.target_sequence:
                     plan_kwargs = {

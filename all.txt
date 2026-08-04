@@ -12104,7 +12104,7 @@ SMALL: float = 1e-9
 __all__ = ["DEG2RAD", "RAD2DEG", "SMALL"]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_integration.py	28308
+===BEGIN_FILE===	pywp/coordinate_integration.py	28461
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
@@ -12173,6 +12173,7 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("Пулково 1995 Зона 13", CoordinateSystem.PULKOVO_1995_ZONE_13),
     ("Пулково 1995 Зона 18", CoordinateSystem.PULKOVO_1995_ZONE_18),
     ("Пулково 1995 CM 39E", CoordinateSystem.PULKOVO_1995_CM_39E),
+    ("МСК-89", CoordinateSystem.MSK_89),
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
 ]
 
@@ -12407,6 +12408,7 @@ def _effective_pyproj_crs(crs: CoordinateSystem) -> CoordinateSystem | None:
     """
     if crs in {
         CoordinateSystem.LOCAL,
+        CoordinateSystem.MSK_89,
         CoordinateSystem.PNO_13_ZONE,
         CoordinateSystem.PNO_13_CM,
         CoordinateSystem.PNO_16_ZONE,
@@ -12791,6 +12793,7 @@ def _build_transform_message(
             f"требуется установка pyproj: pip install pyproj"
         )
     if target_crs in {
+        CoordinateSystem.MSK_89,
         CoordinateSystem.PNO_13_ZONE,
         CoordinateSystem.PNO_13_CM,
         CoordinateSystem.PNO_16_ZONE,
@@ -12893,6 +12896,7 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         CoordinateSystem.PULKOVO_1942: " (СК-42)",
         CoordinateSystem.PULKOVO_1995: " (П95)",
         CoordinateSystem.PULKOVO_1995_CM_39E: " (П95/CM39)",
+        CoordinateSystem.MSK_89: " (МСК-89)",
         CoordinateSystem.GSK_2011: " (ГСК)",
         CoordinateSystem.WGS84: " (WGS)",
     }
@@ -12939,7 +12943,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_systems.py	16554
+===BEGIN_FILE===	pywp/coordinate_systems.py	16787
 """Coordinate system transformations for well trajectory planning.
 
 Supports Russian petroleum industry coordinate systems:
@@ -13015,6 +13019,11 @@ class CoordinateSystem(Enum):
     PULKOVO_1995_ZONE_13 = "EPSG:2472"   # Zone 13, CM 75°E
     PULKOVO_1995_ZONE_18 = "EPSG:20073"  # Zone 18, CM 105°E
     PULKOVO_1995_CM_39E = "EPSG:5043"    # Custom meridian 39°E
+
+    # Regional/local projected systems used in field data imports.
+    # MSK-89 is kept as an explicit selectable source CRS label, but without
+    # authority-backed transform parameters in this codebase yet.
+    MSK_89 = "MSK-89"
 
     # PNO systems - AMBIGUOUS, require disambiguation (per PDF)
     # PNO_16: if easting > 1,000,000 → ZONE, else CM (custom meridian)
@@ -19296,7 +19305,7 @@ def _first_valid_azimuth_deg(stations: pd.DataFrame) -> float:
     return float((math.degrees(math.atan2(dx[index], dy[index])) + 360.0) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/planner.py	235567
+===BEGIN_FILE===	pywp/planner.py	236059
 from __future__ import annotations
 
 from dataclasses import replace
@@ -19712,148 +19721,15 @@ class TrajectoryPlanner:
             ),
             optimization_context=optimization_context,
         )
-        stations = pd.DataFrame(base_result.stations).copy().reset_index(drop=True)
-        if stations.empty:
-            raise PlanningError("Последовательность целей: базовая траектория пуста.")
-        required_columns = {"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"}
-        missing_columns = required_columns.difference(stations.columns)
-        if missing_columns:
-            raise PlanningError(
-                "Последовательность целей: базовая траектория не содержит колонки "
-                f"{', '.join(sorted(missing_columns))}."
-            )
-
-        rows: list[dict[str, object]] = []
-        current = _row_state(stations.iloc[-1])
-        extension_targets = ordered_targets[2:]
-        extension_count = len(extension_targets)
-
-        for extension_index, target in enumerate(extension_targets, start=1):
-            label = f"t{extension_index + 2}"
-            segment_progress = 0.60 + 0.35 * (
-                float(extension_index - 1) / float(extension_count)
-            )
-            _emit_progress(
-                progress_callback,
-                f"Планировщик: проводка к {label}.",
-                segment_progress,
-            )
-            try:
-                current_point = _point3d_from_state(current)
-                is_final_target = extension_index == extension_count
-                if is_final_target:
-                    target_inc_deg, target_azi_deg = _direction_angles_between(
-                        current_point,
-                        target,
-                    )
-                else:
-                    next_target = extension_targets[extension_index]
-                    target_inc_deg, target_azi_deg = _direction_angles_between(
-                        target,
-                        next_target,
-                    )
-
-                direct_inc_deg, direct_azi_deg = _direction_angles_between(
-                    current_point,
-                    target,
-                )
-                start_matches_direct = (
-                    abs(float(current["inc_deg"]) - direct_inc_deg) <= 1e-3
-                    and abs(
-                        _shortest_azimuth_delta_deg(
-                            float(current["azi_deg"]),
-                            direct_azi_deg,
-                        )
-                    )
-                    <= 1e-3
-                )
-                end_matches_direct = (
-                    abs(float(target_inc_deg) - direct_inc_deg) <= 1e-3
-                    and abs(
-                        _shortest_azimuth_delta_deg(target_azi_deg, direct_azi_deg)
-                    )
-                    <= 1e-3
-                )
-                if start_matches_direct and end_matches_direct:
-                    segment_rows = _linear_hold_rows(
-                        current=current,
-                        target=target,
-                        inc_deg=direct_inc_deg,
-                        azi_deg=direct_azi_deg,
-                        segment_name=f"HORIZONTAL{extension_index + 1}",
-                        config=config,
-                    )
-                else:
-                    segment_rows = _smooth_transition_rows(
-                        current=current,
-                        target=target,
-                        target_inc_deg=target_inc_deg,
-                        target_azi_deg=target_azi_deg,
-                        segment_name=f"HORIZONTAL_BUILD{extension_index}",
-                        config=config,
-                    )
-            except PlanningError as exc:
-                raise _target_sequence_error(str(exc)) from exc
-            if not segment_rows:
-                raise PlanningError(
-                    f"Последовательность целей: не удалось построить участок к {label}."
-                )
-            rows.extend(segment_rows)
-            current = _row_state_from_payload(segment_rows[-1])
-
-        stations = pd.concat([stations, pd.DataFrame(rows)], ignore_index=True)
-        stations = add_dls(stations)
-        try:
-            _validate_extended_stations(
-                stations=stations,
-                final_target=ordered_targets[-1],
-                config=config,
-                post_t1_start_md_m=float(base_result.md_t1_m),
-            )
-        except PlanningError as exc:
-            raise _target_sequence_error(str(exc)) from exc
-
-        summary = dict(base_result.summary)
-        final_target = ordered_targets[-1]
-        max_dls = float(np.nanmax(stations["DLS_deg_per_30m"].to_numpy(dtype=float)))
-        max_inc = float(np.nanmax(stations["INC_deg"].to_numpy(dtype=float)))
-        md_total_m = float(stations["MD_m"].iloc[-1])
-        md_postcheck_limit_m = float(config.max_total_md_postcheck_m)
-        md_postcheck_excess_m = float(max(0.0, md_total_m - md_postcheck_limit_m))
-        final_azimuth_deg = float(stations["AZI_deg"].iloc[-1])
-        summary.update(
-            {
-                "trajectory_type": "Target sequence",
-                "target_sequence": "yes",
-                "target_sequence_point_count": int(len(ordered_targets)),
-                "horizontal_length_m": _target_sequence_length_m(ordered_targets),
-                "hold_azimuth_deg": final_azimuth_deg,
-                "max_inc_actual_deg": max_inc,
-                "max_dls_total_deg_per_30m": max_dls,
-                "md_total_m": md_total_m,
-                "md_postcheck_excess_m": md_postcheck_excess_m,
-                "md_postcheck_exceeded": (
-                    "yes" if md_postcheck_excess_m > 1e-6 else "no"
-                ),
-                "distance_t3_m": 0.0,
-                "lateral_distance_t3_m": 0.0,
-                "vertical_distance_t3_m": 0.0,
-                "distance_t3_control_m": 0.0,
-                "control_gap_t3_m": 0.0,
-                "t3_exact_x_m": float(final_target.x),
-                "t3_exact_y_m": float(final_target.y),
-                "t3_exact_z_m": float(final_target.z),
-                "t3_miss_dx_m": 0.0,
-                "t3_miss_dy_m": 0.0,
-                "t3_miss_dz_m": 0.0,
-            }
-        )
-        _emit_progress(progress_callback, "Планировщик: результат готов.", 1.00)
-        return PlannerResult(
-            stations=stations,
-            summary=summary,
-            azimuth_deg=final_azimuth_deg,
-            md_t1_m=float(base_result.md_t1_m),
+        return extend_plan_with_target_sequence(
+            base_result=base_result,
+            targets=ordered_targets,
+            config=config,
+            progress_callback=_scaled_progress_callback(
+                progress_callback=progress_callback,
+                start_fraction=0.60,
+                end_fraction=1.00,
+            ),
         )
 
 
@@ -19871,6 +19747,167 @@ def _target_sequence_error(message: str) -> PlanningError:
     if text.startswith(prefix):
         text = text[len(prefix) :].strip()
     return PlanningError(f"Последовательность целей: {text}")
+
+
+def extend_plan_with_target_sequence(
+    *,
+    base_result: PlannerResult,
+    targets: tuple[Point3D, ...] | list[Point3D],
+    config: TrajectoryConfig,
+    progress_callback: ProgressCallback | None = None,
+    trajectory_type: str | None = "Target sequence",
+) -> PlannerResult:
+    ordered_targets = tuple(targets)
+    if len(ordered_targets) < 2:
+        raise PlanningError(
+            "Последовательность целей должна содержать как минимум две точки (t1 и t2)."
+        )
+
+    stations = pd.DataFrame(base_result.stations).copy().reset_index(drop=True)
+    if stations.empty:
+        raise PlanningError("Последовательность целей: базовая траектория пуста.")
+    required_columns = {"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"}
+    missing_columns = required_columns.difference(stations.columns)
+    if missing_columns:
+        raise PlanningError(
+            "Последовательность целей: базовая траектория не содержит колонки "
+            f"{', '.join(sorted(missing_columns))}."
+        )
+
+    rows: list[dict[str, object]] = []
+    current = _row_state(stations.iloc[-1])
+    extension_targets = ordered_targets[2:]
+    extension_count = len(extension_targets)
+
+    for extension_index, target in enumerate(extension_targets, start=1):
+        label = f"t{extension_index + 2}"
+        segment_progress = 0.05 + 0.85 * (
+            float(extension_index - 1) / float(max(extension_count, 1))
+        )
+        _emit_progress(
+            progress_callback,
+            f"Планировщик: проводка к {label}.",
+            segment_progress,
+        )
+        try:
+            current_point = _point3d_from_state(current)
+            is_final_target = extension_index == extension_count
+            if is_final_target:
+                target_inc_deg, target_azi_deg = _direction_angles_between(
+                    current_point,
+                    target,
+                )
+            else:
+                next_target = extension_targets[extension_index]
+                target_inc_deg, target_azi_deg = _direction_angles_between(
+                    target,
+                    next_target,
+                )
+
+            direct_inc_deg, direct_azi_deg = _direction_angles_between(
+                current_point,
+                target,
+            )
+            start_matches_direct = (
+                abs(float(current["inc_deg"]) - direct_inc_deg) <= 1e-3
+                and abs(
+                    _shortest_azimuth_delta_deg(
+                        float(current["azi_deg"]),
+                        direct_azi_deg,
+                    )
+                )
+                <= 1e-3
+            )
+            end_matches_direct = (
+                abs(float(target_inc_deg) - direct_inc_deg) <= 1e-3
+                and abs(_shortest_azimuth_delta_deg(target_azi_deg, direct_azi_deg))
+                <= 1e-3
+            )
+            if start_matches_direct and end_matches_direct:
+                segment_rows = _linear_hold_rows(
+                    current=current,
+                    target=target,
+                    inc_deg=direct_inc_deg,
+                    azi_deg=direct_azi_deg,
+                    segment_name=f"HORIZONTAL{extension_index + 1}",
+                    config=config,
+                )
+            else:
+                segment_rows = _smooth_transition_rows(
+                    current=current,
+                    target=target,
+                    target_inc_deg=target_inc_deg,
+                    target_azi_deg=target_azi_deg,
+                    segment_name=f"HORIZONTAL_BUILD{extension_index}",
+                    config=config,
+                )
+        except PlanningError as exc:
+            raise _target_sequence_error(str(exc)) from exc
+        if not segment_rows:
+            raise PlanningError(
+                f"Последовательность целей: не удалось построить участок к {label}."
+            )
+        rows.extend(segment_rows)
+        current = _row_state_from_payload(segment_rows[-1])
+
+    if rows:
+        stations = pd.concat([stations, pd.DataFrame(rows)], ignore_index=True)
+        stations = add_dls(stations)
+    try:
+        _validate_extended_stations(
+            stations=stations,
+            final_target=ordered_targets[-1],
+            config=config,
+            post_t1_start_md_m=float(base_result.md_t1_m),
+        )
+    except PlanningError as exc:
+        raise _target_sequence_error(str(exc)) from exc
+
+    summary = dict(base_result.summary)
+    final_target = ordered_targets[-1]
+    max_dls = float(np.nanmax(stations["DLS_deg_per_30m"].to_numpy(dtype=float)))
+    max_inc = float(np.nanmax(stations["INC_deg"].to_numpy(dtype=float)))
+    md_total_m = float(stations["MD_m"].iloc[-1])
+    md_postcheck_limit_m = float(config.max_total_md_postcheck_m)
+    md_postcheck_excess_m = float(max(0.0, md_total_m - md_postcheck_limit_m))
+    final_azimuth_deg = float(stations["AZI_deg"].iloc[-1])
+    resolved_trajectory_type = trajectory_type
+    if resolved_trajectory_type is None:
+        existing_type = str(summary.get("trajectory_type", "")).strip()
+        resolved_trajectory_type = existing_type or None
+
+    summary_updates: dict[str, object] = {
+        "target_sequence": "yes",
+        "target_sequence_point_count": int(len(ordered_targets)),
+        "horizontal_length_m": _target_sequence_length_m(ordered_targets),
+        "hold_azimuth_deg": final_azimuth_deg,
+        "max_inc_actual_deg": max_inc,
+        "max_dls_total_deg_per_30m": max_dls,
+        "md_total_m": md_total_m,
+        "md_postcheck_excess_m": md_postcheck_excess_m,
+        "md_postcheck_exceeded": "yes" if md_postcheck_excess_m > 1e-6 else "no",
+        "distance_t3_m": 0.0,
+        "lateral_distance_t3_m": 0.0,
+        "vertical_distance_t3_m": 0.0,
+        "distance_t3_control_m": 0.0,
+        "control_gap_t3_m": 0.0,
+        "t3_exact_x_m": float(final_target.x),
+        "t3_exact_y_m": float(final_target.y),
+        "t3_exact_z_m": float(final_target.z),
+        "t3_miss_dx_m": 0.0,
+        "t3_miss_dy_m": 0.0,
+        "t3_miss_dz_m": 0.0,
+    }
+    if resolved_trajectory_type is not None:
+        summary_updates["trajectory_type"] = resolved_trajectory_type
+    summary.update(summary_updates)
+    _emit_progress(progress_callback, "Планировщик: результат готов.", 1.00)
+    return PlannerResult(
+        stations=stations,
+        summary=summary,
+        azimuth_deg=final_azimuth_deg,
+        md_t1_m=float(base_result.md_t1_m),
+    )
 
 
 def _target_sequence_length_m(targets: tuple[Point3D, ...]) -> float:
@@ -31875,7 +31912,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	380814
+===BEGIN_FILE===	pywp/ptc_core.py	380941
 from __future__ import annotations
 
 import colorsys
@@ -34647,8 +34684,6 @@ def _clear_results() -> None:
     st.session_state["wt_last_calc_param_signature"] = None
     st.session_state[WT_LAST_WELL_CALC_OVERRIDE_SIGNATURE_KEY] = None
     st.session_state["wt_last_run_log_lines"] = []
-    st.session_state["wt_results_view_mode"] = "Все скважины"
-    st.session_state["wt_results_all_view_mode"] = "Anti-collision"
     st.session_state["wt_prepared_well_overrides"] = {}
     st.session_state["wt_prepared_override_message"] = ""
     st.session_state["wt_prepared_recommendation_id"] = ""
@@ -34660,6 +34695,10 @@ def _clear_results() -> None:
     st.session_state["wt_edit_targets_pending_names"] = []
     st.session_state["wt_edit_targets_highlight_names"] = []
     st.session_state["wt_edit_targets_highlight_points"] = {}
+    # Result-view widgets can already be instantiated when edits arrive from the
+    # embedded 3D viewer. Reset the view mode on the next app pass instead of
+    # mutating widget-backed keys during the current render.
+    _queue_all_wells_results_focus()
 
 
 def _set_all_wells_results_focus_state() -> None:
@@ -58393,7 +58432,7 @@ class FastReplan {
 </html>
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	438353
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	438814
 <!doctype html>
 <html lang="en">
   <head>
@@ -58961,13 +59000,14 @@ class FastReplan {
       }
 
       .scene-label.edit-pad-handle-label {
-        min-width: 126px;
+        min-width: 118px;
         padding: 3px 5px;
         border: none;
         border-radius: 4px;
         background: rgba(255,255,255,0.18);
         box-shadow: none;
         color: rgba(15,23,42,0.86);
+        cursor: grab;
         font-family:
           "SFMono-Regular",
           ui-monospace,
@@ -58977,8 +59017,9 @@ class FastReplan {
         font-size: 10px;
         font-weight: 500;
         line-height: 1.35;
+        pointer-events: auto;
         text-align: left;
-        transform: translate(10px, calc(-100% - 8px));
+        transform: translate(10px, -100%);
         transform-origin: 0 100%;
         text-shadow:
           0 1px 2px rgba(255,255,255,0.95),
@@ -58986,10 +59027,19 @@ class FastReplan {
         backdrop-filter: blur(2px);
       }
 
+      .scene-label.edit-pad-handle-label:hover {
+        background: rgba(255,255,255,0.28);
+      }
+
+      .scene-label.edit-pad-handle-label.is-dragging {
+        cursor: grabbing;
+        background: rgba(255,255,255,0.34);
+      }
+
       .scene-label.edit-pad-handle-label .edit-delta-head {
         display: block;
         margin-bottom: 3px;
-        color: #1d4ed8;
+        color: rgba(15,23,42,0.86);
         font-family:
           Inter,
           -apple-system,
@@ -61432,6 +61482,8 @@ class FastReplan {
             if (sourceLabel) {
               if (item.role === "edit_delta_label" || item.role === "edit_pad_label") {
                 item.element.innerHTML = sourceLabel.element.innerHTML;
+                item.offsetX = Number(sourceLabel.offsetX || 0);
+                item.offsetY = Number(sourceLabel.offsetY || 0);
               } else {
                 item.element.textContent = sourceLabel.element.textContent || "";
               }
@@ -68026,9 +68078,10 @@ class FastReplan {
               initialDisplayPoint,
               EDIT_PAD_HANDLE_ACCENT,
               "edit-pad-handle-label",
-              { offsetX: 10, offsetY: -8, role: "edit_pad_label" },
+              { offsetX: 14, offsetY: 18, role: "edit_pad_label" },
             );
             label.visible = false;
+            initEditDeltaLabelDrag(label);
             const ndsArrow = createEditPadNdsArrow(padIndex);
             const rotationControl = createEditPadRotationControl(padIndex);
             const marker = {
@@ -77263,7 +77316,7 @@ def _vector_to_azimuth_deg(*, dx: float, dy: float) -> float:
     return float(math.degrees(math.atan2(float(dx), float(dy))) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_batch.py	107013
+===BEGIN_FILE===	pywp/welltrack_batch.py	107910
 from __future__ import annotations
 
 import logging
@@ -77328,7 +77381,11 @@ from pywp.pilot_wells import (
     well_name_key,
     zbs_target_points_to_pairs,
 )
-from pywp.planner import PlanningError, TrajectoryPlanner
+from pywp.planner import (
+    PlanningError,
+    TrajectoryPlanner,
+    extend_plan_with_target_sequence,
+)
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
 from pywp.reference_trajectories import ImportedTrajectoryWell, REFERENCE_WELL_ACTUAL
 from pywp.solver_diagnostics import summarize_problem_ru
@@ -79548,7 +79605,7 @@ class WelltrackBatchPlanner:
                 ),
                 None,
             )
-            use_pilot_sidetrack = pilot_success is not None and not layout.target_sequence
+            use_pilot_sidetrack = pilot_success is not None
             if use_pilot_sidetrack:
                 window, sidetrack_result = select_sidetrack_window(
                     pilot_name=str(pilot_success.name),
@@ -79567,12 +79624,29 @@ class WelltrackBatchPlanner:
                     window=window,
                     config=config,
                 )
-                result = sidetrack.result
                 stations = sidetrack.stations
                 summary = dict(sidetrack.summary)
                 md_t1_m = float(sidetrack.md_t1_m)
                 azimuth_deg = float(sidetrack.azimuth_deg)
                 success_surface = sidetrack.window.point
+                if layout.target_sequence:
+                    extended_result = extend_plan_with_target_sequence(
+                        base_result=PlannerResult(
+                            stations=stations,
+                            summary=summary,
+                            azimuth_deg=azimuth_deg,
+                            md_t1_m=md_t1_m,
+                        ),
+                        targets=layout.target_sequence,
+                        config=config,
+                        progress_callback=planner_progress_callback,
+                        trajectory_type="PILOT_SIDETRACK",
+                    )
+                    stations = extended_result.stations
+                    summary = dict(extended_result.summary)
+                    md_t1_m = float(extended_result.md_t1_m)
+                    azimuth_deg = float(extended_result.azimuth_deg)
+                    t3 = layout.final_target
             else:
                 if layout.target_sequence:
                     plan_kwargs = {
@@ -86629,7 +86703,7 @@ def test_unspecified_thresholds_are_resolved_once_for_interpolation_anchors() ->
     assert anchor_1000.hold_complex_max_deg == float(rule_2000.hold_complex_max_deg)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_coordinate_integration.py	21307
+===BEGIN_FILE===	tests/test_coordinate_integration.py	22048
 """Tests for coordinate system integration with trajectory planning."""
 import numpy as np
 import pandas as pd
@@ -86706,6 +86780,7 @@ class TestCoordinateIntegration:
         assert "ГК_13N_42" in labels
         assert "СК-42 Зона 13 (13 млн)" in labels
         assert "СК-42 Зона 16" in labels
+        assert "МСК-89" in labels
 
     def test_format_coordinates_projected(self) -> None:
         """Format projected coordinates with locale-independent space separator."""
@@ -86799,6 +86874,11 @@ class TestCoordinateIntegration:
         suffix = get_crs_display_suffix(CoordinateSystem.PULKOVO_1995_CM_39E)
         assert "П95/CM39" in suffix
 
+    def test_get_crs_display_suffix_msk89(self) -> None:
+        """Display suffix for MSK-89."""
+        suffix = get_crs_display_suffix(CoordinateSystem.MSK_89)
+        assert "МСК-89" in suffix
+
     def test_can_transform_directly_same_crs(self) -> None:
         """Same CRS is always directly transformable."""
         assert _can_transform_directly(
@@ -86819,6 +86899,9 @@ class TestCoordinateIntegration:
         assert _can_transform_directly(
             CoordinateSystem.PNO_16_ZONE, CoordinateSystem.WGS84
         ) is False
+        assert _can_transform_directly(
+            CoordinateSystem.MSK_89, CoordinateSystem.WGS84
+        ) is False
 
     def test_csv_export_crs_falls_back_to_source_for_pno_placeholder(self) -> None:
         """CSV labels must match actual values when PNO conversion is unavailable."""
@@ -86829,6 +86912,17 @@ class TestCoordinateIntegration:
                 auto_convert=True,
             )
             == CoordinateSystem.PNO_16_ZONE
+        )
+
+    def test_csv_export_crs_falls_back_to_source_for_msk89(self) -> None:
+        """MSK-89 stays source-labelled until authority transform parameters are added."""
+        assert (
+            csv_export_crs(
+                CoordinateSystem.WGS84,
+                CoordinateSystem.MSK_89,
+                auto_convert=True,
+            )
+            == CoordinateSystem.MSK_89
         )
         assert (
             csv_export_crs(
@@ -87189,7 +87283,7 @@ class TestCoordinateIntegration:
         assert calls["array"] == 1
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_coordinate_systems.py	5068
+===BEGIN_FILE===	tests/test_coordinate_systems.py	5238
 """Tests for coordinate system transformations."""
 import numpy as np
 import pytest
@@ -87210,6 +87304,7 @@ class TestCoordinateSystem:
         assert CoordinateSystem.PULKOVO_1942.value == "EPSG:4284"
         # Pulkovo 1995 from PDF (EPSG:4200)
         assert CoordinateSystem.PULKOVO_1995.value == "EPSG:4200"
+        assert CoordinateSystem.MSK_89.value == "MSK-89"
         # PNO now disambiguated per PDF research
         assert CoordinateSystem.PNO_13_ZONE.value == "PNO-13-ZONE"
         assert CoordinateSystem.PNO_16_CM.value == "PNO-16-CM"
@@ -87217,6 +87312,8 @@ class TestCoordinateSystem:
     def test_is_geographic(self) -> None:
         assert CoordinateSystem.WGS84.is_geographic()
         assert CoordinateSystem.PULKOVO_1995.is_geographic()
+        assert not CoordinateSystem.MSK_89.is_geographic()
+        assert CoordinateSystem.MSK_89.is_projected()
         assert not CoordinateSystem.PULKOVO_1942_ZONE_10.is_geographic()
         assert not CoordinateSystem.PULKOVO_1995_ZONE_13.is_geographic()
 
@@ -87322,7 +87419,7 @@ class TestPNODisambiguation:
         assert zone_def.central_meridian_deg == 75.0
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_crs_calculator_page.py	7484
+===BEGIN_FILE===	tests/test_crs_calculator_page.py	7798
 from __future__ import annotations
 
 import importlib
@@ -87386,6 +87483,17 @@ def test_crs_calculator_input_options_include_wgs84_degrees() -> None:
     )
 
     assert "WGS84 (градусы)" in list(input_selectbox.options)
+
+
+def test_crs_calculator_input_options_include_msk89() -> None:
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.run(timeout=60)
+
+    input_selectbox = next(
+        widget for widget in at.selectbox if str(widget.label) == "Входная CRS"
+    )
+
+    assert "МСК-89" in list(input_selectbox.options)
 
 
 def test_crs_calculator_can_swap_default_crs_pair() -> None:
@@ -96210,7 +96318,7 @@ def test_batch_target_csv_applies_selected_crs(
     assert result["Y_WGS_deg"].iloc[0] == pytest.approx(220.0)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ptc_edit_targets.py	28201
+===BEGIN_FILE===	tests/test_ptc_edit_targets.py	28453
 from __future__ import annotations
 
 import math
@@ -96429,6 +96537,14 @@ def test_bulk_horizontal_length_changes_updates_t3_along_t1_t3_vector() -> None:
             2400.0 + 100.0 * expected_scale,
         ]
     )
+
+
+def test_queue_all_wells_results_focus_marks_pending_flag() -> None:
+    session_state: dict[str, object] = {}
+
+    ptc_edit_targets.queue_all_wells_results_focus(session_state)
+
+    assert session_state["wt_pending_all_wells_results_focus"] is True
 
 
 def test_bulk_horizontal_length_changes_skips_multi_horizontal_but_updates_single_zbs() -> None:
@@ -107132,7 +107248,7 @@ def test_default_three_camera_uses_z_up_eye() -> None:
     assert DEFAULT_THREE_CAMERA["eye"] == {"x": 1.25, "y": 1.25, "z": 1.25}
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_three_viewer.py	57697
+===BEGIN_FILE===	tests/test_three_viewer.py	58131
 from __future__ import annotations
 
 from pathlib import Path
@@ -107844,6 +107960,9 @@ def test_viewer_template_focuses_camera_for_pad_legend_clicks_in_edit_mode() -> 
 
 def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     html = three_viewer._viewer_template_with_libraries()
+    pad_section = html.split("function initEditPads()")[1].split(
+        "function worldUnitsPerPixelAt"
+    )[0]
 
     assert 'id="edit-pad-summary"' not in html
     assert "if (Number.isInteger(selectedEditPadIndex)) {\n            return [];\n          }" in html
@@ -107855,12 +107974,12 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert 'String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";' in html
     assert "const markerPoint = anchor.slice();" in html
     assert "const markerGeometry = new THREE.SphereGeometry(1.0, 16, 12);" in html
-    assert "OctahedronGeometry" not in html.split("function initEditPads()")[1].split(
-        "function worldUnitsPerPixelAt"
-    )[0]
+    assert "OctahedronGeometry" not in pad_section
     assert "pointIndex: null," in html
     assert 'point: marker.pointLabel || "S",' in html
     assert ".scene-label.edit-pad-handle-label" in html
+    assert ".scene-label.edit-pad-handle-label:hover" in html
+    assert ".scene-label.edit-pad-handle-label.is-dragging" in html
     assert 'role: "edit_pad_label"' in html
     assert "visualPos: markerPoint.slice()," in html
     assert "ndsAzimuthDeg: initialNds," in html
@@ -107874,6 +107993,8 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert "formatAzimuthDegrees(currentNds)" in html
     assert "formatAzimuthDegrees(originalNds)" in html
     assert "formatDeltaDegrees(deltaNds)" in html
+    assert '{ offsetX: 14, offsetY: 18, role: "edit_pad_label" },' in html
+    assert "initEditDeltaLabelDrag(label);" in pad_section
     assert "function editPadRotationModeEnabled()" in html
     assert "function startEditPadRotationDrag(padIndex, event)" in html
     assert "function createEditPadNdsArrow(padIndex)" in html
@@ -107934,6 +108055,8 @@ def test_viewer_template_syncs_minimap_label_positions_from_live_source_labels()
     )
     assert "if (sourceLabel.position) {" in html
     assert "item.position.copy(sourceLabel.position);" in html
+    assert "item.offsetX = Number(sourceLabel.offsetX || 0);" in html
+    assert "item.offsetY = Number(sourceLabel.offsetY || 0);" in html
     assert "const localX = ((labelPosition.x - leftWorld) / viewWidth) * rect.width;" in html
     assert "const localY = ((topWorld - labelPosition.y) / viewHeight) * rect.height;" in html
 
@@ -108234,7 +108357,7 @@ def test_three_viewer_asset_loader_reloads_file_after_mtime_change(
     assert " B " in second
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	30186
+===BEGIN_FILE===	tests/test_trajectory_constructor_page.py	32218
 from __future__ import annotations
 
 from pathlib import Path
@@ -108455,6 +108578,63 @@ def test_ptc_page_keeps_open_calc_params_panel_after_three_multi_edit_rerun(
     assert "Скрыть" in button_labels
     assert at.session_state[ptc_page_state.PTC_CALC_PARAMS_OPEN_KEY] is True
     assert at.session_state["wt_edit_targets_pending_names"] == ["WELL-A", "WELL-B"]
+
+
+def test_ptc_page_applies_three_pad_edit_without_widget_state_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted = False
+    captured_pad_id = ""
+
+    def _fake_three_scene(payload, **_kwargs):
+        nonlocal emitted, captured_pad_id
+        if emitted:
+            return None
+        emitted = True
+        edit_pads = list(payload.get("edit_pads") or [])
+        assert edit_pads
+        captured_pad_id = str(edit_pads[0]["id"])
+        return {
+            "type": "pywp:editTargets",
+            "nonce": "pad-edit-1",
+            "pad_changes": [
+                {
+                    "pad_id": captured_pad_id,
+                    "anchor": [100.0, 200.0, 0.0],
+                    "nds_azimuth_deg": 35.0,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(ptc_core, "render_local_three_scene", _fake_three_scene)
+
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    records = _records()
+    at.session_state["wt_records"] = records
+    at.session_state["wt_records_original"] = records
+    at.session_state["wt_summary_rows"] = [
+        {"Скважина": "WELL-A", "Статус": "OK", "Проблема": "", "Точек": 3},
+        {"Скважина": "WELL-B", "Статус": "OK", "Проблема": "", "Точек": 3},
+    ]
+    at.session_state["wt_successes"] = [
+        _successful_plan(name="WELL-A", y_offset_m=0.0),
+        _successful_plan(name="WELL-B", y_offset_m=25.0),
+    ]
+    at.session_state["wt_results_view_mode"] = "Все скважины"
+    at.session_state["wt_results_all_view_mode"] = "Anti-collision"
+
+    at.run(timeout=120)
+
+    assert captured_pad_id
+    assert not at.exception
+    assert at.session_state["wt_last_edit_targets_nonce"] == "pad-edit-1"
+    assert at.session_state["wt_edit_targets_pending_names"] == ["WELL-A", "WELL-B"]
+    assert at.session_state["wt_pad_configs"][captured_pad_id]["first_surface_x"] == (
+        pytest.approx(100.0)
+    )
+    assert at.session_state["wt_pad_configs"][captured_pad_id]["first_surface_y"] == (
+        pytest.approx(200.0)
+    )
 
 
 def test_apply_edit_pad_changes_updates_pad_layout_state() -> None:
@@ -112557,7 +112737,7 @@ def test_welltracks2_pad_detection_and_layout() -> None:
         assert before.points[1:] == after.points[1:]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_batch.py	142664
+===BEGIN_FILE===	tests/test_welltrack_batch.py	144211
 from __future__ import annotations
 
 import multiprocessing
@@ -116367,6 +116547,47 @@ def test_batch_planner_applies_manual_sidetrack_window_override() -> None:
     )
 
 
+def test_batch_planner_builds_target_sequence_pilot_sidetrack() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=1400.0, y=0.0, z=2220.0, md=3.0),
+            WelltrackPoint(x=2200.0, y=0.0, z=2220.0, md=4.0),
+        ),
+        point_labels=("S", "t1", "t2", "t3"),
+    )
+
+    _rows, successes = WelltrackBatchPlanner(planner=_StubPlanner()).evaluate(
+        records=[parent, pilot],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04"],
+        config=_fast_batch_config(
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+        ),
+    )
+
+    by_name = {success.name: success for success in successes}
+    success = by_name["WELL-04"]
+    assert success.summary["trajectory_type"] == "PILOT_SIDETRACK"
+    assert success.summary["target_sequence"] == "yes"
+    assert success.summary["target_sequence_point_count"] == 3
+    assert success.summary["pilot_well_name"] == "WELL-04_PL"
+    assert success.surface.z > 0.0
+    assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
+    assert "HORIZONTAL_BUILD1" in set(success.stations["segment"])
+
+
 def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
     pilot = WelltrackRecord(
         name="WELL-04_PL",
@@ -117080,7 +117301,7 @@ def test_calc_params_panel_can_hide_after_param_edit() -> None:
     assert "Шаг MD, м" not in [str(widget.label) for widget in at.number_input]
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_welltrack_import_page.py	473949
+===BEGIN_FILE===	tests/test_welltrack_import_page.py	476699
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -123382,6 +123603,71 @@ def test_apply_three_edit_targets_defers_result_widget_state_update() -> None:
     )
 
     assert updated == ["WELL-A"]
+    assert page.st.session_state["wt_results_view_mode"] == "Отдельная скважина"
+    assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
+
+    page._init_state()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+    assert "wt_3d_backend" not in page.st.session_state
+    assert page.st.session_state["wt_pending_all_wells_results_focus"] is False
+
+
+def test_queue_all_wells_results_focus_defers_results_view_reset_until_init_state() -> (
+    None
+):
+    page = wt_import_module
+    page.st.session_state.clear()
+    page.st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+    page.st.session_state["wt_results_all_view_mode"] = "Траектории"
+    page.st.session_state["wt_3d_render_mode"] = "Минимум"
+    page.st.session_state["wt_3d_backend"] = "mock-backend"
+
+    page._queue_all_wells_results_focus()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Отдельная скважина"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Траектории"
+    assert page.st.session_state["wt_3d_render_mode"] == "Минимум"
+    assert page.st.session_state["wt_3d_backend"] == "mock-backend"
+    assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
+
+    page._init_state()
+
+    assert page.st.session_state["wt_results_view_mode"] == "Все скважины"
+    assert page.st.session_state["wt_results_all_view_mode"] == "Anti-collision"
+    assert page.st.session_state["wt_3d_render_mode"] == page.WT_3D_RENDER_DETAIL
+    assert "wt_3d_backend" not in page.st.session_state
+    assert page.st.session_state["wt_pending_all_wells_results_focus"] is False
+
+
+def test_apply_three_pad_edit_defers_result_widget_state_update() -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_records()[:2])
+    page.st.session_state["wt_records"] = list(records)
+    page.st.session_state["wt_records_original"] = list(records)
+    page.st.session_state["wt_results_view_mode"] = "Отдельная скважина"
+    page.st.session_state["wt_results_all_view_mode"] = "Anti-collision"
+    pads = page._ensure_pad_configs(base_records=list(records))
+    pad_id = str(pads[0].pad_id)
+    cfg = page.st.session_state["wt_pad_configs"][pad_id]
+
+    updated = page._apply_edit_pad_changes(
+        [
+            {
+                "pad_id": pad_id,
+                "anchor": [
+                    float(cfg["first_surface_x"]) + 120.0,
+                    float(cfg["first_surface_y"]) - 35.0,
+                    float(cfg["first_surface_z"]),
+                ],
+            }
+        ],
+        source="three_viewer",
+    )
+
+    assert updated == ["WELL-A", "WELL-B"]
     assert page.st.session_state["wt_results_view_mode"] == "Отдельная скважина"
     assert bool(page.st.session_state["wt_pending_all_wells_results_focus"]) is True
 
