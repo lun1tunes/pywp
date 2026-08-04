@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def _load_project_pack_module():
     spec = importlib.util.spec_from_file_location(
@@ -126,6 +128,83 @@ def test_pack_writes_relative_paths_and_unpack_restores_structure(tmp_path: Path
         path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file()
     )
     assert restored_files == sorted(original_files)
+
+
+def test_split_and_join_restore_archive_and_unpack(tmp_path: Path) -> None:
+    module = _load_project_pack_module()
+    root = tmp_path / "src"
+    out = tmp_path / "out"
+    archive = tmp_path / "archive.txt"
+
+    original_files = {
+        "app.py": "print('root')\n",
+        "pkg/mod.py": "VALUE = 1\n",
+        "assets/view.js": "console.log('ok')\n",
+    }
+    for relative_path, content in original_files.items():
+        target = root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    module.pack(root, archive)
+    original_archive = archive.read_bytes()
+    chunk_paths = module.split_archive(archive, chunk_size=40)
+
+    assert [path.name for path in chunk_paths] == [
+        f"archive{index}" for index in range(1, len(chunk_paths) + 1)
+    ]
+    assert len(chunk_paths) > 1
+
+    archive.unlink()
+    module.join_archive(archive)
+
+    assert archive.read_bytes() == original_archive
+
+    module.unpack(out, archive)
+    restored_files = sorted(
+        path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file()
+    )
+    assert restored_files == sorted(original_files)
+
+
+def test_join_detects_missing_chunk_sequence(tmp_path: Path) -> None:
+    module = _load_project_pack_module()
+    archive = tmp_path / "archive.txt"
+
+    (tmp_path / "archive1").write_text("part1\n", encoding="utf-8")
+    (tmp_path / "archive3").write_text("part3\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="expected archive2, found archive3",
+    ):
+        module.join_archive(archive)
+
+
+def test_split_removes_stale_chunks_before_writing_new_ones(tmp_path: Path) -> None:
+    module = _load_project_pack_module()
+    archive = tmp_path / "all.txt"
+    archive.write_text("line1\nline2\n", encoding="utf-8")
+
+    stale_paths = [
+        tmp_path / "all1",
+        tmp_path / "all2",
+        tmp_path / "all5",
+        tmp_path / "all6",
+    ]
+    for stale_path in stale_paths:
+        stale_path.write_text("stale\n", encoding="utf-8")
+
+    chunk_paths = module.split_archive(archive, chunk_size=100, chunk_prefix="all")
+
+    assert [path.name for path in chunk_paths] == ["all1"]
+    assert sorted(
+        path.name for path in tmp_path.iterdir() if path.name.startswith("all")
+    ) == [
+        "all.txt",
+        "all1",
+    ]
+    assert (tmp_path / "all1").read_text(encoding="utf-8") == "line1\nline2\n"
 
 
 def test_collect_files_excludes_custom_archive_inside_root(tmp_path: Path) -> None:

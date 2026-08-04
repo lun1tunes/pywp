@@ -8814,17 +8814,19 @@ if __name__ == "__main__":
     main()
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/project_pack.py	5190
+===BEGIN_FILE===	scripts/project_pack.py	10579
 #!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 
 
 ARCHIVE_FILE = "all.txt"
 BEGIN = "===BEGIN_FILE==="
 END = "===END_FILE==="
+DEFAULT_CHUNK_SIZE = 1_000_000
 
 EXCLUDED_DIR_NAMES = {
     ".git",
@@ -8909,6 +8911,48 @@ def collect_files(root: Path, *, archive_path: Path | None = None) -> list[Path]
     return sorted(set(files), key=lambda p: str(p.relative_to(root)))
 
 
+def _chunk_prefix_for_archive(archive_path: Path) -> str:
+    return archive_path.stem
+
+
+def _chunk_name_pattern(chunk_prefix: str) -> re.Pattern[str]:
+    return re.compile(rf"^{re.escape(chunk_prefix)}([1-9][0-9]*)$")
+
+
+def _remove_existing_chunk_files(chunk_dir: Path, chunk_prefix: str) -> None:
+    pattern = _chunk_name_pattern(chunk_prefix)
+    for path in chunk_dir.iterdir():
+        if path.is_file() and pattern.fullmatch(path.name):
+            path.unlink()
+
+
+def collect_chunk_files(chunk_dir: Path, chunk_prefix: str) -> list[Path]:
+    pattern = _chunk_name_pattern(chunk_prefix)
+    matches: list[tuple[int, Path]] = []
+    for path in chunk_dir.iterdir():
+        if not path.is_file():
+            continue
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            continue
+        matches.append((int(match.group(1)), path))
+
+    if not matches:
+        raise FileNotFoundError(
+            f"Archive chunks not found in {chunk_dir} with prefix {chunk_prefix!r}"
+        )
+
+    matches.sort(key=lambda item: item[0])
+    for expected_index, (actual_index, path) in enumerate(matches, start=1):
+        if actual_index != expected_index:
+            raise ValueError(
+                "Archive chunks are incomplete or out of order: expected "
+                f"{chunk_prefix}{expected_index}, found {path.name}"
+            )
+
+    return [path for _, path in matches]
+
+
 def pack(root: Path, output_file: Path) -> None:
     files = collect_files(root, archive_path=output_file)
     with output_file.open("w", encoding="utf-8", newline="") as out:
@@ -8921,6 +8965,91 @@ def pack(root: Path, output_file: Path) -> None:
             out.write(f"{END}\n")
 
     print(f"Packed {len(files)} files into {output_file}")
+
+
+def split_archive(
+    input_file: Path,
+    *,
+    chunk_dir: Path | None = None,
+    chunk_prefix: str | None = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+) -> list[Path]:
+    if not input_file.exists():
+        raise FileNotFoundError(f"Archive file not found: {input_file}")
+    if chunk_size <= 0:
+        raise ValueError("Chunk size must be a positive integer")
+
+    target_dir = input_file.parent if chunk_dir is None else chunk_dir
+    prefix = (
+        _chunk_prefix_for_archive(input_file)
+        if chunk_prefix is None
+        else str(chunk_prefix)
+    )
+    _remove_existing_chunk_files(target_dir, prefix)
+
+    chunk_paths: list[Path] = []
+    chunk_file = None
+    chunk_path: Path | None = None
+    chunk_bytes = 0
+    chunk_index = 0
+
+    try:
+        with input_file.open("r", encoding="utf-8", newline="") as src:
+            for line in src:
+                line_bytes = len(line.encode("utf-8"))
+                if chunk_file is None or (
+                    chunk_bytes > 0 and chunk_bytes + line_bytes > chunk_size
+                ):
+                    if chunk_file is not None and chunk_path is not None:
+                        chunk_file.close()
+                        chunk_paths.append(chunk_path)
+                    chunk_index += 1
+                    chunk_path = target_dir / f"{prefix}{chunk_index}"
+                    chunk_file = chunk_path.open("w", encoding="utf-8", newline="")
+                    chunk_bytes = 0
+                chunk_file.write(line)
+                chunk_bytes += line_bytes
+
+        if chunk_file is None:
+            chunk_index = 1
+            chunk_path = target_dir / f"{prefix}{chunk_index}"
+            chunk_file = chunk_path.open("w", encoding="utf-8", newline="")
+
+        if chunk_file is not None:
+            chunk_file.close()
+            if chunk_path is not None:
+                chunk_paths.append(chunk_path)
+    finally:
+        if chunk_file is not None and not chunk_file.closed:
+            chunk_file.close()
+
+    print(
+        f"Split {input_file} into {len(chunk_paths)} chunks in {target_dir} "
+        f"with prefix {prefix!r}"
+    )
+    return chunk_paths
+
+
+def join_archive(
+    output_file: Path,
+    *,
+    chunk_dir: Path | None = None,
+    chunk_prefix: str | None = None,
+) -> list[Path]:
+    source_dir = output_file.parent if chunk_dir is None else chunk_dir
+    prefix = (
+        _chunk_prefix_for_archive(output_file)
+        if chunk_prefix is None
+        else str(chunk_prefix)
+    )
+    chunk_paths = collect_chunk_files(source_dir, prefix)
+
+    with output_file.open("wb") as out:
+        for chunk_path in chunk_paths:
+            out.write(chunk_path.read_bytes())
+
+    print(f"Joined {len(chunk_paths)} chunks into {output_file}")
+    return chunk_paths
 
 
 def unpack(root: Path, input_file: Path) -> None:
@@ -8967,13 +9096,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Pack project text sources/config/assets (Python, HTML/JS/CSS, JSON/TOML,"
-            " Markdown, WELLTRACK .inc, etc.) to all.txt and unpack back."
+            " Markdown, WELLTRACK .inc, etc.) to all.txt, split it into chunks,"
+            " join chunks back, and unpack the archive."
         )
     )
     parser.add_argument(
         "mode",
-        choices=("pack", "unpack"),
-        help="pack: create all.txt, unpack: restore files from all.txt",
+        choices=("pack", "unpack", "split", "join"),
+        help=(
+            "pack: create all.txt, unpack: restore files from archive, "
+            "split: create chunk files from archive, join: rebuild archive from chunks"
+        ),
     )
     parser.add_argument(
         "--root",
@@ -8985,6 +9118,22 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=f"Archive file path (default: <root>/{ARCHIVE_FILE})",
     )
+    parser.add_argument(
+        "--chunk-dir",
+        default=None,
+        help="Directory for chunk files (default: archive directory)",
+    )
+    parser.add_argument(
+        "--chunk-prefix",
+        default=None,
+        help="Chunk file prefix (default: archive file stem, for example 'all')",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help=f"Maximum chunk size in bytes for split mode (default: {DEFAULT_CHUNK_SIZE})",
+    )
     return parser.parse_args()
 
 
@@ -8994,9 +9143,23 @@ def main() -> None:
     archive = (
         (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
     )
+    chunk_dir = archive.parent if args.chunk_dir is None else Path(args.chunk_dir).resolve()
 
     if args.mode == "pack":
         pack(root, archive)
+    elif args.mode == "split":
+        split_archive(
+            archive,
+            chunk_dir=chunk_dir,
+            chunk_prefix=args.chunk_prefix,
+            chunk_size=args.chunk_size,
+        )
+    elif args.mode == "join":
+        join_archive(
+            archive,
+            chunk_dir=chunk_dir,
+            chunk_prefix=args.chunk_prefix,
+        )
     else:
         unpack(root, archive)
 
