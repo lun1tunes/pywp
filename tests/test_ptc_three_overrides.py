@@ -705,6 +705,109 @@ def test_build_edit_wells_payload_decimates_large_station_arrays() -> None:
     assert edit_wells[0]["config"]["dls_horizontal_max_deg_per_30m"] == 1.8
 
 
+def test_build_edit_wells_payload_exposes_all_successful_pilot_points() -> None:
+    surface = Point3D(0.0, 0.0, 0.0)
+    pl1 = Point3D(100.0, 20.0, 900.0)
+    pl2 = Point3D(240.0, 60.0, 1500.0)
+    pilot = _successful_plan_xy(
+        name="WELL-A_PL",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+    ).model_copy(
+        update={
+            "surface": surface,
+            "t1": pl1,
+            "t3": pl2,
+            "target_points": (surface, pl1, pl2),
+            "target_labels": ("S", "PL1", "PL2"),
+        }
+    )
+
+    payload = ptc_three_overrides.build_edit_wells_payload(
+        [pilot], {"WELL-A_PL": "#123456"}
+    )[0]
+
+    assert [point["label"] for point in payload["edit_points"]] == [
+        "S",
+        "PL1",
+        "PL2",
+    ]
+    assert [point["point_type"] for point in payload["edit_points"]] == [
+        "surface",
+        "pilot",
+        "pilot",
+    ]
+    assert [point["index"] for point in payload["edit_points"]] == [0, 1, 2]
+
+
+def test_build_edit_wells_payload_keeps_plain_three_point_fast_edit_mode() -> None:
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(500.0, 0.0, 1600.0)
+    t3 = Point3D(1500.0, 0.0, 1600.0)
+    success = _successful_plan_xy(
+        name="ORDINARY",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+    ).model_copy(
+        update={
+            "surface": surface,
+            "t1": t1,
+            "t3": t3,
+            "target_points": (surface, t1, t3),
+            "target_labels": ("S", "t1", "t3"),
+        }
+    )
+
+    payload = ptc_three_overrides.build_edit_wells_payload(
+        [success], {"ORDINARY": "#123456"}
+    )[0]
+
+    assert payload["edit_points"] == []
+
+
+def test_build_edit_wells_payload_exposes_arbitrary_target_sequence() -> None:
+    points = (
+        Point3D(0.0, 0.0, 0.0),
+        Point3D(500.0, 0.0, 1600.0),
+        Point3D(800.0, 100.0, 1900.0),
+        Point3D(1200.0, 250.0, 2100.0),
+        Point3D(1700.0, 400.0, 2200.0),
+    )
+    success = _successful_plan_xy(
+        name="SEQUENCE",
+        x_offset_m=0.0,
+        y_offset_m=0.0,
+    ).model_copy(
+        update={
+            "surface": points[0],
+            "t1": points[1],
+            "t3": points[-1],
+            "target_points": points,
+            "target_labels": ("S", "t1", "t2", "t3", "t4"),
+        }
+    )
+
+    payload = ptc_three_overrides.build_edit_wells_payload(
+        [success], {"SEQUENCE": "#abcdef"}
+    )[0]
+
+    assert [point["label"] for point in payload["edit_points"]] == [
+        "S",
+        "t1",
+        "t2",
+        "t3",
+        "t4",
+    ]
+    assert [point["point_type"] for point in payload["edit_points"]] == [
+        "surface",
+        "t1",
+        "point",
+        "t3",
+        "point",
+    ]
+    assert [point["index"] for point in payload["edit_points"]] == [0, 1, 2, 3, 4]
+
+
 def test_build_edit_wells_payload_includes_multi_horizontal_edit_points() -> None:
     regular = _successful_plan_xy(
         name="WELL-A",

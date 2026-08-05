@@ -7300,7 +7300,9 @@
         let editWarningDismissed = false;
         let selectedEditHandleIndex = null;
         let editBroadcastChannel = null;
+        let editSavePendingTimeoutId = null;
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
+        const EDIT_SAVE_ACK_TIMEOUT_MS = 12000;
         const EDIT_DELTA_EPS_M = 0.005;
         const EDIT_KEYBOARD_STEP_M = 10.0;
         const EDIT_PAD_HANDLE_ACCENT = "#1d4ed8";
@@ -9111,7 +9113,7 @@
             return false;
           }
           const normalizedRole = String(pointRole || "");
-          if (normalizedRole !== "t1" && normalizedRole !== "t3") {
+          if (!normalizedRole || normalizedRole === "sidetrack_window") {
             return false;
           }
           if (Array.isArray(baseState.points) && baseState.points.length > 0) {
@@ -9132,6 +9134,9 @@
             });
             updateWellEditPoints(wellIndex, nextPoints);
             return true;
+          }
+          if (normalizedRole !== "t1" && normalizedRole !== "t3") {
+            return false;
           }
           const nextT1 = copyEditPoint(baseState.t1);
           const nextT3 = copyEditPoint(baseState.t3);
@@ -9157,6 +9162,7 @@
           if (
             selectedEditWellIndices.size <= 1 ||
             !selectedEditWellIndices.has(primaryWellIndex) ||
+            (normalizedRole !== "t1" && normalizedRole !== "t3") ||
             (
               normalizedScope !== "pair" &&
               normalizedRole !== "t1" &&
@@ -9182,8 +9188,12 @@
               baseStates instanceof Map && baseStates.has(wellIndex)
                 ? baseStates.get(wellIndex)
                 : cloneEditState(wellIndex);
+            const pointRole = String(primaryHandle.pointRole || "");
+            const usePairScope =
+              normalizedScope === "pair" &&
+              (pointRole === "t1" || pointRole === "t3");
             const applied =
-              normalizedScope === "pair"
+              usePairScope
                 ? applyPairDeltaFromState(wellIndex, baseState, delta)
                 : applyPointDeltaFromState(
                     wellIndex,
@@ -9768,10 +9778,28 @@
           if (!editSaveBtn) {
             return;
           }
+          if (editSavePendingTimeoutId !== null) {
+            clearTimeout(editSavePendingTimeoutId);
+            editSavePendingTimeoutId = null;
+          }
           editSaveBtn.disabled = false;
           editSaveBtn.textContent = EDIT_SAVE_DEFAULT_TEXT;
           editSaveBtn.classList.remove("is-pending", "is-error");
           editSaveBtn.style.background = "";
+        }
+
+        function showEditSaveError(message) {
+          if (!editSaveBtn) {
+            return;
+          }
+          if (editSavePendingTimeoutId !== null) {
+            clearTimeout(editSavePendingTimeoutId);
+            editSavePendingTimeoutId = null;
+          }
+          editSaveBtn.disabled = false;
+          editSaveBtn.classList.remove("is-pending");
+          editSaveBtn.classList.add("is-error");
+          editSaveBtn.textContent = String(message || "Не удалось применить");
         }
 
         function initEditToolboxDrag() {
@@ -11431,10 +11459,11 @@
           editSaveBtn.textContent = "Применяем...";
           editSaveBtn.classList.add("is-pending");
           if (!sendEditTargetsToStreamlit(changes, padChanges)) {
-            editSaveBtn.disabled = false;
-            editSaveBtn.classList.remove("is-pending");
-            editSaveBtn.classList.add("is-error");
-            editSaveBtn.textContent = "Не удалось применить";
+            showEditSaveError("Не удалось применить");
+          } else {
+            editSavePendingTimeoutId = setTimeout(() => {
+              showEditSaveError("Нет подтверждения — повторить");
+            }, EDIT_SAVE_ACK_TIMEOUT_MS);
           }
         }
 

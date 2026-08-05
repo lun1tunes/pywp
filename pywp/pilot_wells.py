@@ -477,7 +477,7 @@ def select_sidetrack_window(
                 f"{window_override.value_m:.2f} м не дало расчет бокового ствола: {exc}"
             ) from exc
 
-    candidates = _sidetrack_window_candidates(
+    candidate_groups = _sidetrack_window_candidate_groups(
         pilot_name=pilot_name,
         parent_name=parent_name,
         pilot_stations=pilot_stations,
@@ -485,33 +485,36 @@ def select_sidetrack_window(
         config=config,
     )
     last_problem = ""
-    best: tuple[float, float, PilotWindow, PlannerResult] | None = None
-    for window in candidates:
-        try:
-            result = sidetrack_planner.plan(
-                start=SidetrackStart(
-                    point=window.point,
-                    inc_deg=float(window.inc_deg),
-                    azi_deg=float(window.azi_deg),
-                ),
-                t1=parent_t1,
-                t3=parent_t3,
-                config=config,
+    for candidates in candidate_groups:
+        best: tuple[float, float, PilotWindow, PlannerResult] | None = None
+        for window in candidates:
+            try:
+                result = sidetrack_planner.plan(
+                    start=SidetrackStart(
+                        point=window.point,
+                        inc_deg=float(window.inc_deg),
+                        azi_deg=float(window.azi_deg),
+                    ),
+                    t1=parent_t1,
+                    t3=parent_t3,
+                    config=config,
+                )
+            except (ValueError, PlanningError) as exc:
+                last_problem = str(exc)
+                continue
+            score = _sidetrack_window_score(
+                window=window,
+                result=result,
+                optimization_context=optimization_context,
             )
-        except (ValueError, PlanningError) as exc:
-            last_problem = str(exc)
-            continue
-        score = _sidetrack_window_score(
-            window=window,
-            result=result,
-            optimization_context=optimization_context,
-        )
-        if best is None or (score, -float(window.md_m)) < (best[0], best[1]):
-            best = (score, -float(window.md_m), window, result)
+            if best is None or (score, -float(window.md_m)) < (best[0], best[1]):
+                best = (score, -float(window.md_m), window, result)
 
-    if best is not None:
-        _, _, window, result = best
-        return window, result
+        # The 50-100 m interval is a strict first priority.  Only when every
+        # preferred window fails do we spend time on the broader pilot search.
+        if best is not None:
+            _, _, window, result = best
+            return window, result
 
     suffix = f" Последняя причина: {last_problem}" if last_problem else ""
     raise ValueError(
@@ -901,6 +904,24 @@ def _sidetrack_window_candidates(
     parent_t1: Point3D,
     config: TrajectoryConfig,
 ) -> list[PilotWindow]:
+    groups = _sidetrack_window_candidate_groups(
+        pilot_name=pilot_name,
+        parent_name=parent_name,
+        pilot_stations=pilot_stations,
+        parent_t1=parent_t1,
+        config=config,
+    )
+    return [window for group in groups for window in group]
+
+
+def _sidetrack_window_candidate_groups(
+    *,
+    pilot_name: str,
+    parent_name: str,
+    pilot_stations: pd.DataFrame,
+    parent_t1: Point3D,
+    config: TrajectoryConfig,
+) -> list[list[PilotWindow]]:
     if pilot_stations.empty:
         return []
     stations = pilot_stations.copy()
@@ -909,12 +930,15 @@ def _sidetrack_window_candidates(
         parent_t1=parent_t1,
         config=config,
     )
-    if not preferred.empty:
-        return _pilot_windows_from_rows(
+    preferred_windows = (
+        _pilot_windows_from_rows(
             preferred,
             pilot_name=pilot_name,
             parent_name=parent_name,
         )
+        if not preferred.empty
+        else []
+    )
 
     vertical_room = float(parent_t1.z) - stations["Z_m"].to_numpy(dtype=float)
     min_room = max(
@@ -938,7 +962,7 @@ def _sidetrack_window_candidates(
             .copy()
         )
     if eligible.empty:
-        return []
+        return [preferred_windows] if preferred_windows else []
     eligible = eligible.sort_values("MD_m", ascending=True)
     spacing_m = max(150.0, float(config.md_step_m) * 10.0)
     selected_rows = []
@@ -951,11 +975,23 @@ def _sidetrack_window_candidates(
     if len(selected_rows) > 18:
         indices = np.linspace(0, len(selected_rows) - 1, 18, dtype=int)
         selected_rows = [selected_rows[int(index)] for index in indices]
-    return _pilot_windows_from_rows(
+    expanded_windows = _pilot_windows_from_rows(
         selected_rows,
         pilot_name=pilot_name,
         parent_name=parent_name,
     )
+    if preferred_windows:
+        preferred_md = {round(float(window.md_m), 6) for window in preferred_windows}
+        expanded_windows = [
+            window
+            for window in expanded_windows
+            if round(float(window.md_m), 6) not in preferred_md
+        ]
+    return [
+        group
+        for group in (preferred_windows, expanded_windows)
+        if group
+    ]
 
 
 def _preferred_sidetrack_window_rows(

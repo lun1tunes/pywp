@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -67,9 +68,55 @@ class SidetrackPlanner:
                 if best_dls_excess is None or dls_excess < best_dls_excess[0]:
                     best_dls_excess = (dls_excess, max_dls)
                 continue
+            max_inc = _finite_max(stations["INC_deg"])
+            if max_inc > float(config.max_inc_deg) + 1e-6:
+                last_problem = (
+                    "Боковой ствол превышает configured max INC: "
+                    f"{max_inc:.2f} > {float(config.max_inc_deg):.2f} deg."
+                )
+                continue
             score = _candidate_score(stations=stations, config=config)
             if best is None or score < best[0]:
                 best = (score, stations)
+
+        fallback_used = False
+        if best is None:
+            for stations in _bend_fallback_station_candidates(
+                start=start,
+                t1=t1,
+                t3=t3,
+                horizontal_inc_deg=horizontal_inc_deg,
+                horizontal_azi_deg=horizontal_azi_deg,
+                config=config,
+            ):
+                max_dls = _finite_max(stations["DLS_deg_per_30m"])
+                dls_limit = float(config.dls_build_max_deg_per_30m)
+                dls_excess = max(0.0, max_dls - dls_limit)
+                if dls_excess > 1e-6:
+                    last_problem = (
+                        "ПИ бокового ствола превышает лимит расчетной модели: "
+                        f"{dls_to_pi(max_dls):.2f} > "
+                        f"{dls_to_pi(dls_limit):.2f} deg/10m."
+                    )
+                    if best_dls_excess is None or dls_excess < best_dls_excess[0]:
+                        best_dls_excess = (dls_excess, max_dls)
+                    continue
+                max_inc = _finite_max(stations["INC_deg"])
+                if max_inc > float(config.max_inc_deg) + 1e-6:
+                    last_problem = (
+                        "Боковой ствол превышает configured max INC: "
+                        f"{max_inc:.2f} > {float(config.max_inc_deg):.2f} deg."
+                    )
+                    continue
+                score = _candidate_score(stations=stations, config=config)
+                if best is None or score < best[0]:
+                    best = (score, stations)
+                    fallback_used = True
+                    # Candidate order prefers the shortest/smallest bend.  A
+                    # feasible fallback is already a last-resort path, so do
+                    # not evaluate the rest of the comparatively expensive
+                    # two-Bezier lattice for this window.
+                    break
 
         if best is None:
             if best_dls_excess is not None:
@@ -95,6 +142,7 @@ class SidetrackPlanner:
             horizontal_inc_deg=horizontal_inc_deg,
             horizontal_azi_deg=horizontal_azi_deg,
             config=config,
+            fallback_used=fallback_used,
         )
         _validate_target_miss(summary=summary, config=config)
         return PlannerResult(
@@ -177,6 +225,193 @@ def _build_sidetrack_stations(
     )
     stations = add_dls(stations)
     return stations
+
+
+def _bend_fallback_station_candidates(
+    *,
+    start: SidetrackStart,
+    t1: Point3D,
+    t3: Point3D,
+    horizontal_inc_deg: float,
+    horizontal_azi_deg: float,
+    config: TrajectoryConfig,
+) -> Iterator[pd.DataFrame]:
+    """Yield longer C1-continuous two-Bezier approaches to t1.
+
+    The extra bend supplies trajectory length for difficult pose changes while
+    preserving the exact window pose and the t1->t3 tangent.  The caller still
+    enforces the configured DLS and INC limits for every yielded candidate.
+    """
+
+    p0 = _point_array(start.point)
+    p6 = _point_array(t1)
+    chord = p6 - p0
+    chord_m = float(np.linalg.norm(chord))
+    if chord_m <= SMALL:
+        return
+    chord_dir = chord / chord_m
+    start_dir = _unit_vector_from_angles(float(start.inc_deg), float(start.azi_deg))
+    end_dir = _unit_vector_from_angles(horizontal_inc_deg, horizontal_azi_deg)
+    bend_basis_1, bend_basis_2 = _bend_basis_vectors(
+        chord_dir=chord_dir,
+        start_dir=start_dir,
+        end_dir=end_dir,
+    )
+    bend_directions = (
+        bend_basis_1,
+        -bend_basis_1,
+        bend_basis_2,
+        -bend_basis_2,
+    )
+    horizontal_m = max(_distance(t1, t3), float(config.md_step_m))
+    bend_base_m = max(chord_m, 0.25 * horizontal_m)
+
+    for fraction in (0.50, 0.38, 0.62):
+        chord_waypoint = p0 + chord * float(fraction)
+        for offset_scale in (0.20, 0.40, 0.70, 1.00):
+            for direction in bend_directions:
+                waypoint = chord_waypoint + direction * bend_base_m * offset_scale
+                incoming = waypoint - p0
+                outgoing = p6 - waypoint
+                incoming_m = float(np.linalg.norm(incoming))
+                outgoing_m = float(np.linalg.norm(outgoing))
+                if incoming_m <= SMALL or outgoing_m <= SMALL:
+                    continue
+                joint_dir = _normalized_vector(
+                    incoming / incoming_m + outgoing / outgoing_m,
+                    fallback=chord_dir,
+                )
+                for handle_scale in (0.22, 0.36, 0.52, 0.72):
+                    try:
+                        yield _build_bend_sidetrack_stations(
+                            start=start,
+                            t1=t1,
+                            t3=t3,
+                            horizontal_inc_deg=horizontal_inc_deg,
+                            horizontal_azi_deg=horizontal_azi_deg,
+                            waypoint=waypoint,
+                            joint_dir=joint_dir,
+                            start_handle_m=max(
+                                float(config.md_step_m),
+                                incoming_m * handle_scale,
+                            ),
+                            incoming_joint_handle_m=max(
+                                float(config.md_step_m),
+                                incoming_m * handle_scale,
+                            ),
+                            outgoing_joint_handle_m=max(
+                                float(config.md_step_m),
+                                outgoing_m * handle_scale,
+                            ),
+                            end_handle_m=max(
+                                float(config.md_step_m),
+                                outgoing_m * handle_scale,
+                            ),
+                            config=config,
+                        )
+                    except (ValueError, PlanningError):
+                        continue
+
+
+def _bend_basis_vectors(
+    *,
+    chord_dir: np.ndarray,
+    start_dir: np.ndarray,
+    end_dir: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    seed = start_dir + end_dir
+    seed = seed - chord_dir * float(np.dot(seed, chord_dir))
+    if float(np.linalg.norm(seed)) <= SMALL:
+        axes = (
+            np.asarray([0.0, 0.0, 1.0], dtype=float),
+            np.asarray([1.0, 0.0, 0.0], dtype=float),
+            np.asarray([0.0, 1.0, 0.0], dtype=float),
+        )
+        seed = max(
+            (axis - chord_dir * float(np.dot(axis, chord_dir)) for axis in axes),
+            key=lambda value: float(np.linalg.norm(value)),
+        )
+    first = _normalized_vector(seed, fallback=np.asarray([1.0, 0.0, 0.0]))
+    second = _normalized_vector(
+        np.cross(chord_dir, first),
+        fallback=np.asarray([0.0, 1.0, 0.0]),
+    )
+    return first, second
+
+
+def _normalized_vector(value: np.ndarray, *, fallback: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(value))
+    if norm > SMALL:
+        return value / norm
+    fallback_norm = float(np.linalg.norm(fallback))
+    if fallback_norm <= SMALL:
+        raise PlanningError("Не удалось определить направление загиба бокового ствола.")
+    return fallback / fallback_norm
+
+
+def _build_bend_sidetrack_stations(
+    *,
+    start: SidetrackStart,
+    t1: Point3D,
+    t3: Point3D,
+    horizontal_inc_deg: float,
+    horizontal_azi_deg: float,
+    waypoint: np.ndarray,
+    joint_dir: np.ndarray,
+    start_handle_m: float,
+    incoming_joint_handle_m: float,
+    outgoing_joint_handle_m: float,
+    end_handle_m: float,
+    config: TrajectoryConfig,
+) -> pd.DataFrame:
+    p0 = _point_array(start.point)
+    p6 = _point_array(t1)
+    start_dir = _unit_vector_from_angles(float(start.inc_deg), float(start.azi_deg))
+    end_dir = _unit_vector_from_angles(horizontal_inc_deg, horizontal_azi_deg)
+
+    first_xyz = _sample_cubic_bezier(
+        p0=p0,
+        p1=p0 + start_dir * float(start_handle_m),
+        p2=waypoint - joint_dir * float(incoming_joint_handle_m),
+        p3=waypoint,
+        step_m=float(config.md_step_m),
+    )
+    second_xyz = _sample_cubic_bezier(
+        p0=waypoint,
+        p1=waypoint + joint_dir * float(outgoing_joint_handle_m),
+        p2=p6 - end_dir * float(end_handle_m),
+        p3=p6,
+        step_m=float(config.md_step_m),
+    )
+    build1 = _stations_from_xyz(xyz=first_xyz, segment="BUILD1", start_md_m=0.0)
+    build2 = _stations_from_xyz(
+        xyz=second_xyz,
+        segment="BUILD2",
+        start_md_m=float(build1["MD_m"].iloc[-1]),
+    )
+    joint_inc_deg, joint_azi_deg = _angles_from_vector(joint_dir)
+    build1.loc[0, "INC_deg"] = float(start.inc_deg)
+    build1.loc[0, "AZI_deg"] = _normalize_azimuth_deg(float(start.azi_deg))
+    build1.loc[len(build1) - 1, "INC_deg"] = joint_inc_deg
+    build1.loc[len(build1) - 1, "AZI_deg"] = joint_azi_deg
+    build2.loc[0, "INC_deg"] = joint_inc_deg
+    build2.loc[0, "AZI_deg"] = joint_azi_deg
+    build2.loc[len(build2) - 1, "INC_deg"] = horizontal_inc_deg
+    build2.loc[len(build2) - 1, "AZI_deg"] = horizontal_azi_deg
+    build = pd.concat([build1, build2.iloc[1:].copy()], ignore_index=True)
+
+    horizontal = _straight_segment_stations(
+        start=t1,
+        end=t3,
+        inc_deg=horizontal_inc_deg,
+        azi_deg=horizontal_azi_deg,
+        start_md_m=float(build["MD_m"].iloc[-1]),
+        step_m=float(config.md_step_m),
+        segment="HORIZONTAL",
+    )
+    return add_dls(
+        pd.concat([build, horizontal.iloc[1:].copy()], ignore_index=True)
+    )
 
 
 def _sample_cubic_bezier(
@@ -283,6 +518,7 @@ def _build_summary(
     horizontal_inc_deg: float,
     horizontal_azi_deg: float,
     config: TrajectoryConfig,
+    fallback_used: bool = False,
 ) -> SummaryDict:
     t1_row = stations.loc[int((stations["MD_m"] - float(md_t1_m)).abs().idxmin())]
     t3_row = stations.iloc[-1]
@@ -296,6 +532,8 @@ def _build_summary(
     max_inc = float(np.nanmax(stations["INC_deg"].to_numpy(dtype=float)))
     md_total = float(stations["MD_m"].iloc[-1])
     build1_dls = _segment_dls_max(stations, "BUILD1")
+    build2_dls = _segment_dls_max(stations, "BUILD2")
+    build_dls = max(build1_dls, build2_dls)
     horizontal_dls = _segment_dls_max(stations, "HORIZONTAL")
     dls_limit = float(config.dls_build_max_deg_per_30m)
     summary: SummaryDict = {
@@ -325,12 +563,12 @@ def _build_summary(
         "horizontal_inc_deg": float(horizontal_inc_deg),
         "hold_inc_deg": float(horizontal_inc_deg),
         "hold_length_m": 0.0,
-        "build_dls_selected_deg_per_30m": build1_dls,
+        "build_dls_selected_deg_per_30m": build_dls,
         "build1_dls_selected_deg_per_30m": build1_dls,
-        "build2_dls_selected_deg_per_30m": 0.0,
+        "build2_dls_selected_deg_per_30m": build2_dls,
         "build_dls_max_config_deg_per_30m": dls_limit,
         "build_dls_relaxed_from_max": "no",
-        "build_dls_split_selected": "no",
+        "build_dls_split_selected": "yes" if fallback_used else "no",
         "max_dls_total_deg_per_30m": max_dls,
         "md_total_m": md_total,
         "max_total_md_postcheck_m": float(config.max_total_md_postcheck_m),
@@ -343,7 +581,11 @@ def _build_summary(
         "dls_postcheck_excess_deg_per_30m": max(0.0, max_dls - dls_limit),
         "t1_horizontal_offset_m": _horizontal_offset(start.point, t1),
         "horizontal_length_m": _distance(t1, t3),
-        "trajectory_type": "Sidetrack Bezier + Horizontal",
+        "trajectory_type": (
+            "Sidetrack Bend Fallback + Horizontal"
+            if fallback_used
+            else "Sidetrack Bezier + Horizontal"
+        ),
         "trajectory_target_direction": "Боковой продуктивный ствол",
         "well_complexity": "Пилот + боковой ствол",
         "well_complexity_by_offset": "Пилот + боковой ствол",
@@ -365,7 +607,9 @@ def _build_summary(
         "azimuth_turn_deg": abs(
             _shortest_azimuth_delta_deg(float(start.azi_deg), float(horizontal_azi_deg))
         ),
-        "solver_turn_mode": "sidetrack_bezier",
+        "solver_turn_mode": (
+            "sidetrack_bend_fallback" if fallback_used else "sidetrack_bezier"
+        ),
         "solver_turn_max_restarts": int(config.turn_solver_max_restarts),
         "solver_turn_restarts_used": 0,
         "solver_turn_attempts_used": 1,
@@ -381,11 +625,16 @@ def _build_summary(
         "optimization_relative_gap_pct": 0.0,
         "optimization_seeds_used": 0,
         "optimization_runs_used": 0,
-        "solver_strategy": "pilot_sidetrack_bezier",
+        "solver_strategy": (
+            "pilot_sidetrack_bend_fallback"
+            if fallback_used
+            else "pilot_sidetrack_bezier"
+        ),
+        "sidetrack_fallback_used": "yes" if fallback_used else "no",
         "max_dls_vertical_deg_per_30m": 0.0,
         "max_dls_build1_deg_per_30m": build1_dls,
         "max_dls_hold_deg_per_30m": 0.0,
-        "max_dls_build2_deg_per_30m": 0.0,
+        "max_dls_build2_deg_per_30m": build2_dls,
         "max_dls_horizontal_deg_per_30m": horizontal_dls,
     }
     for segment, limit in config.dls_limits_deg_per_30m.items():
@@ -429,7 +678,7 @@ def _validate_target_miss(
 
 
 def _md_at_t1(stations: pd.DataFrame) -> float:
-    build_rows = stations.loc[stations["segment"] == "BUILD1"]
+    build_rows = stations.loc[stations["segment"].isin(("BUILD1", "BUILD2"))]
     if build_rows.empty:
         raise PlanningError("Не удалось определить MD входа в t1 для бокового ствола.")
     return float(build_rows["MD_m"].iloc[-1])
@@ -447,6 +696,23 @@ def _angles_from_points(start: Point3D, end: Point3D) -> tuple[float, float]:
         0.0
         if horizontal <= SMALL
         else _normalize_azimuth_deg(math.degrees(math.atan2(dx, dy)))
+    )
+    return inc_deg, azi_deg
+
+
+def _angles_from_vector(direction: np.ndarray) -> tuple[float, float]:
+    vector = _normalized_vector(
+        np.asarray(direction, dtype=float),
+        fallback=np.asarray([0.0, 0.0, 1.0], dtype=float),
+    )
+    horizontal = float(math.hypot(float(vector[0]), float(vector[1])))
+    inc_deg = float(math.degrees(math.atan2(horizontal, float(vector[2]))))
+    azi_deg = (
+        0.0
+        if horizontal <= SMALL
+        else _normalize_azimuth_deg(
+            math.degrees(math.atan2(float(vector[0]), float(vector[1])))
+        )
     )
     return inc_deg, azi_deg
 

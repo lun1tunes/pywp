@@ -1012,6 +1012,24 @@ def test_three_viewer_pair_move_scope_shifts_only_target_points() -> None:
     assert ": copyEditPoint(entry.position)," in html
 
 
+def test_three_viewer_moves_generic_and_pilot_edit_points_by_exact_label() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert 'normalizedRole === "sidetrack_window"' in html
+    assert 'normalizedRole !== "t1" && normalizedRole !== "t3"' in html
+    assert "pointEntryIndicesForSync(" in html
+    assert 'String(entry && entry.label) === normalizedLabel' in html
+    assert "usePairScope" in html
+
+
+def test_three_viewer_pending_edit_save_has_recoverable_timeout() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "const EDIT_SAVE_ACK_TIMEOUT_MS = 12000;" in html
+    assert "function showEditSaveError(message)" in html
+    assert 'showEditSaveError("Нет подтверждения — повторить")' in html
+
+
 def test_three_viewer_keyboard_arrows_move_selected_targets() -> None:
     html = three_viewer._viewer_template_with_libraries()
 

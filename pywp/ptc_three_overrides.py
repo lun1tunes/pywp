@@ -497,8 +497,27 @@ def build_edit_wells_payload(
         is_zbs = _success_uses_target_only_sidetrack_points(success)
         config = success.config
         base_points = _decimated_base_points(success)
-        edit_points: list[dict[str, object]] = []
-        if len(target_pairs) > 1:
+        # SuccessfulWellPlan keeps the exact source-record point sequence.  It
+        # is the authoritative edit contract for pilots (S, PL1, ...), target
+        # sequences (S, t1, t2, ...), and multi-horizontal wells.  Falling
+        # back to t1/t3 here used to make the other points impossible to edit
+        # and, for a two-point pilot, produced indices that could never be
+        # applied to the WelltrackRecord.
+        edit_points = _explicit_target_edit_points(
+            success,
+            omit_surface=has_sidetrack_metadata and not is_zbs,
+        )
+        if (
+            not has_sidetrack_metadata
+            and not is_zbs
+            and len(target_pairs) <= 1
+            and _uses_legacy_three_point_edit_layout(success)
+        ):
+            # Keep the established fast-replan/rotation UX for a plain
+            # S-t1-t3 well. Indexed handles are required only when the source
+            # record contains additional or differently typed points.
+            edit_points = []
+        if not edit_points and len(target_pairs) > 1:
             include_surface = not has_sidetrack_metadata and not is_zbs
             if include_surface:
                 edit_points.append(
@@ -954,6 +973,10 @@ def _points_bounds(points: Iterable[Point3D]) -> dict[str, list[float]] | None:
 
 
 def _target_only_edit_points(target_only: object) -> list[dict[str, object]]:
+    explicit_points = _explicit_target_edit_points(target_only)
+    if explicit_points:
+        return explicit_points
+
     target_points = tuple(getattr(target_only, "target_points", ()) or ())
     if not target_points:
         target_pairs = tuple(getattr(target_only, "target_pairs", ()) or ())
@@ -987,6 +1010,49 @@ def _target_only_edit_points(target_only: object) -> list[dict[str, object]]:
             }
         )
     return edit_points
+
+
+def _explicit_target_edit_points(
+    target: object,
+    *,
+    omit_surface: bool = False,
+) -> list[dict[str, object]]:
+    """Return editable source points while preserving Welltrack indices."""
+
+    target_points = tuple(getattr(target, "target_points", ()) or ())
+    if not target_points:
+        return []
+    target_pairs = tuple(getattr(target, "target_pairs", ()) or ())
+    labels = tuple(getattr(target, "target_labels", ()) or ())
+    if len(labels) != len(target_points):
+        labels = _fallback_target_labels(
+            len(target_points),
+            target_pairs=target_pairs,
+        )
+
+    edit_points: list[dict[str, object]] = []
+    for index, point in enumerate(target_points):
+        label = str(labels[index]) if index < len(labels) else f"P{index}"
+        point_type = _target_point_type(label=label, index=index)
+        if omit_surface and point_type == "surface":
+            continue
+        edit_points.append(
+            {
+                "index": int(index),
+                "label": label,
+                "point_type": point_type,
+                "position": _point3d_payload(point),
+            }
+        )
+    return edit_points
+
+
+def _uses_legacy_three_point_edit_layout(target: object) -> bool:
+    target_points = tuple(getattr(target, "target_points", ()) or ())
+    target_labels = tuple(getattr(target, "target_labels", ()) or ())
+    return len(target_points) == 3 and tuple(
+        str(label).strip().casefold() for label in target_labels
+    ) == ("s", "t1", "t3")
 
 
 def _fallback_target_labels(

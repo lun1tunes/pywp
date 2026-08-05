@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
@@ -20,6 +21,7 @@ from pywp.pilot_wells import (
     select_sidetrack_window,
     sync_pilot_surfaces_to_parents,
 )
+from pywp import pilot_wells
 from pywp.planner_types import PlanningError
 from pywp.sidetrack_solver import SidetrackPlanner, SidetrackStart
 from pywp.uncertainty import (
@@ -268,6 +270,62 @@ def test_sidetrack_window_is_selected_50_to_100m_above_first_pilot_target() -> N
 
     offset_m = float(pilot.md_first_target_m) - float(window.md_m)
     assert 50.0 <= offset_m <= 100.0
+
+
+def test_sidetrack_window_search_expands_after_preferred_group_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preferred = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=900.0,
+        point=Point3D(0.0, 0.0, 900.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    expanded = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=600.0,
+        point=Point3D(0.0, 0.0, 600.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    calls: list[float] = []
+
+    monkeypatch.setattr(
+        pilot_wells,
+        "_sidetrack_window_candidate_groups",
+        lambda **_kwargs: [[preferred], [expanded]],
+    )
+    real_plan = SidetrackPlanner().plan
+
+    def fake_plan(self: SidetrackPlanner, **kwargs: object):
+        start = kwargs["start"]
+        calls.append(float(start.point.z))
+        if float(start.point.z) == pytest.approx(900.0):
+            raise PlanningError("preferred failed")
+        return real_plan(**kwargs)
+
+    monkeypatch.setattr(SidetrackPlanner, "plan", fake_plan)
+
+    selected, result = select_sidetrack_window(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_stations=pd.DataFrame({"MD_m": [0.0]}),
+        parent_t1=Point3D(500.0, 0.0, 1200.0),
+        parent_t3=Point3D(1500.0, 0.0, 1200.0),
+        config=TrajectoryConfig(
+            md_step_m=25.0,
+            dls_build_max_deg_per_30m=6.0,
+            max_inc_deg=120.0,
+        ),
+        planner=object(),
+    )
+
+    assert selected == expanded
+    assert calls == [900.0, 600.0]
+    assert float(result.summary["distance_t1_m"]) == pytest.approx(0.0)
 
 
 def test_single_point_pilot_window_minimizes_sidetrack_md() -> None:
@@ -539,6 +597,40 @@ def test_sidetrack_solver_preserves_window_pose_and_hits_t1_t3() -> None:
     assert float(result.summary["distance_t1_m"]) == pytest.approx(0.0)
     assert float(result.summary["distance_t3_m"]) == pytest.approx(0.0)
     assert result.summary["solver_strategy"] == "pilot_sidetrack_bezier"
+
+
+def test_sidetrack_solver_uses_bend_fallback_when_single_bezier_misses_dls() -> None:
+    start = SidetrackStart(
+        point=Point3D(0.0, 0.0, 0.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    t1 = Point3D(500.0, 0.0, 500.0)
+    t3 = Point3D(1500.0, 0.0, 500.0)
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        dls_build_max_deg_per_30m=4.0,
+        max_inc_deg=120.0,
+    )
+
+    result = SidetrackPlanner().plan(
+        start=start,
+        t1=t1,
+        t3=t3,
+        config=config,
+    )
+
+    assert result.summary["solver_strategy"] == "pilot_sidetrack_bend_fallback"
+    assert result.summary["sidetrack_fallback_used"] == "yes"
+    assert result.summary["build_dls_split_selected"] == "yes"
+    assert float(result.summary["max_dls_total_deg_per_30m"]) <= 4.0 + 1e-6
+    assert float(result.summary["max_inc_actual_deg"]) <= 120.0 + 1e-6
+    assert float(result.summary["distance_t1_m"]) == pytest.approx(0.0)
+    assert float(result.summary["distance_t3_m"]) == pytest.approx(0.0)
+    first = result.stations.iloc[0]
+    assert float(first["INC_deg"]) == pytest.approx(start.inc_deg)
+    assert float(first["AZI_deg"]) == pytest.approx(start.azi_deg)
+    assert "BUILD2" in set(result.stations["segment"])
 
 
 def test_sidetrack_solver_rejects_over_limit_dls() -> None:

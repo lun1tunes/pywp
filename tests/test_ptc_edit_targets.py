@@ -446,6 +446,92 @@ def test_apply_edit_targets_changes_invalidates_pilot_and_parent_together() -> N
     assert session_state["wt_anticollision_analysis_cache"] is cached_analysis
 
 
+def test_apply_edit_targets_changes_accepts_two_point_pilot_pl1_index() -> None:
+    pilot = _record(
+        "WELL-A_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=200.0, z=1800.0, md=1800.0),
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [pilot],
+        "wt_records_original": [pilot],
+        "wt_successes": [SimpleNamespace(name="WELL-A_PL")],
+        "wt_summary_rows": [
+            {"Скважина": "WELL-A_PL", "Статус": "OK", "Проблема": ""}
+        ],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "WELL-A_PL",
+                "points": [
+                    {"index": 1, "position": [125.0, 225.0, 1810.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["WELL-A_PL"]
+    assert session_state["wt_records"][0].points[1].x == pytest.approx(125.0)
+    assert session_state["wt_records_original"][0].points[1].z == pytest.approx(
+        1810.0
+    )
+    assert session_state["wt_edit_targets_highlight_points"] == {
+        "WELL-A_PL": [1]
+    }
+
+
+def test_apply_edit_targets_changes_accepts_arbitrary_target_sequence_indices() -> None:
+    record = _record(
+        "SEQUENCE",
+        points=tuple(
+            WelltrackPoint(
+                x=float(index * 100),
+                y=0.0,
+                z=float(index * 400),
+                md=float(index),
+            )
+            for index in range(7)
+        ),
+    )
+    session_state: dict[str, object] = {
+        "wt_records": [record],
+        "wt_records_original": [record],
+        "wt_successes": [SimpleNamespace(name="SEQUENCE")],
+        "wt_summary_rows": [
+            {"Скважина": "SEQUENCE", "Статус": "OK", "Проблема": ""}
+        ],
+    }
+
+    updated_names = ptc_edit_targets.apply_edit_targets_changes(
+        session_state,
+        [
+            {
+                "name": "SEQUENCE",
+                "points": [
+                    {"index": 2, "position": [225.0, 15.0, 805.0]},
+                    {"index": 5, "position": [530.0, 25.0, 2010.0]},
+                ],
+            }
+        ],
+        source="three_viewer",
+        base_row_factory=_base_row,
+    )
+
+    assert updated_names == ["SEQUENCE"]
+    assert session_state["wt_records"][0].points[2].x == pytest.approx(225.0)
+    assert session_state["wt_records"][0].points[5].y == pytest.approx(25.0)
+    assert session_state["wt_records_original"][0].points[5].z == pytest.approx(
+        2010.0
+    )
+
+
 def test_apply_edit_targets_changes_accepts_multi_horizontal_point_payload() -> None:
     record = _record(
         "MULTI",
