@@ -106,6 +106,23 @@ class SidetrackPlan:
     azimuth_deg: float
 
 
+@dataclass(frozen=True)
+class ReorientedPilotSidetrackPlan:
+    """Joint fallback result for a replanned pilot and its sidetrack.
+
+    ``total_drilled_md_m`` deliberately includes the complete pilot down to
+    its last PL point and the lateral length from the selected window.  The
+    pilot below the window remains a separately drilled bore and must not be
+    dropped from the optimization objective.
+    """
+
+    pilot: PilotBuildResult
+    window: PilotWindow
+    sidetrack_result: PlannerResult
+    target_azimuth_deg: float
+    total_drilled_md_m: float
+
+
 def is_pilot_name(name: object) -> bool:
     return str(name).strip().upper().endswith(PILOT_SUFFIX)
 
@@ -523,6 +540,142 @@ def select_sidetrack_window(
     )
 
 
+def plan_reoriented_pilot_sidetrack_fallback(
+    *,
+    pilot_name: str,
+    parent_name: str,
+    pilot_target_points: tuple[Point3D, ...],
+    parent_t1: Point3D,
+    parent_t3: Point3D,
+    productive_direction_target: Point3D,
+    pilot_config: TrajectoryConfig,
+    sidetrack_config: TrajectoryConfig,
+    optimization_context: AntiCollisionOptimizationContext | None = None,
+) -> ReorientedPilotSidetrackPlan:
+    """Reorient the project pilot as a last-resort sidetrack fallback.
+
+    The approach to PL1 is rebuilt with its terminal azimuth aligned to the
+    first productive interval (t1->t2 for a target sequence, otherwise
+    t1->t3).  Every original PL point is still hit exactly.  All feasible
+    pilot/window combinations are ranked by complete drilled MD rather than
+    by ``window_md + lateral_md``.
+    """
+
+    if len(pilot_target_points) < 2:
+        raise ValueError(
+            "Fallback перестройки пилота требует устье и минимум одну PL-точку."
+        )
+    productive_delta = (
+        _point_array(productive_direction_target) - _point_array(parent_t1)
+    )
+    if float(np.linalg.norm(productive_delta)) <= SMALL:
+        raise ValueError(
+            "Невозможно перестроить пилот: первая продуктивная секция имеет "
+            "нулевую длину."
+        )
+    _productive_inc_deg, target_azimuth_deg = _angles_from_delta(productive_delta)
+
+    best: tuple[
+        tuple[float, float, float, float, float],
+        PilotBuildResult,
+        PilotWindow,
+        PlannerResult,
+    ] | None = None
+    last_problem = ""
+    for pilot in _reoriented_pilot_candidates(
+        target_points=pilot_target_points,
+        target_azimuth_deg=target_azimuth_deg,
+        productive_direction_target=productive_direction_target,
+        parent_t1=parent_t1,
+        config=pilot_config,
+    ):
+        pilot_anti_collision_penalty = (
+            _trajectory_anticollision_penalty(
+                stations=pilot.stations,
+                optimization_context=optimization_context,
+            )
+            if optimization_context is not None
+            else 0.0
+        )
+        candidate_groups = _sidetrack_window_candidate_groups(
+            pilot_name=pilot_name,
+            parent_name=parent_name,
+            pilot_stations=pilot.stations,
+            parent_t1=parent_t1,
+            config=sidetrack_config,
+        )
+        # Unlike the normal path, this is a global joint optimization.  The
+        # preferred 50-100 m group is evaluated first but does not prevent a
+        # shorter feasible total-drilling solution in the expanded group.
+        windows = _bounded_reoriented_window_candidates(candidate_groups)
+        for window in windows:
+            try:
+                sidetrack_result = SidetrackPlanner().plan(
+                    start=SidetrackStart(
+                        point=window.point,
+                        inc_deg=float(window.inc_deg),
+                        azi_deg=float(window.azi_deg),
+                    ),
+                    t1=parent_t1,
+                    t3=parent_t3,
+                    config=sidetrack_config,
+                )
+            except (ValueError, PlanningError) as exc:
+                last_problem = str(exc)
+                continue
+
+            lateral_md_m = float(
+                sidetrack_result.summary.get("md_total_m", 0.0)
+            )
+            total_drilled_md_m = float(pilot.md_total_m) + lateral_md_m
+            anti_collision_penalty = (
+                _sidetrack_anticollision_penalty(
+                    result=sidetrack_result,
+                    window=window,
+                    optimization_context=optimization_context,
+                )
+                if optimization_context is not None
+                else 0.0
+            )
+            max_dls = max(
+                float(
+                    pilot.summary.get("max_dls_total_deg_per_30m", 0.0)
+                ),
+                float(
+                    sidetrack_result.summary.get(
+                        "max_dls_total_deg_per_30m", 0.0
+                    )
+                ),
+            )
+            key = (
+                total_drilled_md_m
+                + pilot_anti_collision_penalty
+                + anti_collision_penalty,
+                total_drilled_md_m,
+                max_dls,
+                lateral_md_m,
+                -float(window.md_m),
+            )
+            if best is None or key < best[0]:
+                best = (key, pilot, window, sidetrack_result)
+
+    if best is None:
+        suffix = f" Последняя причина: {last_problem}" if last_problem else ""
+        raise ValueError(
+            "Не удалось выполнить fallback с перестройкой пилота под азимут "
+            "продуктивной секции и подобрать допустимое окно зарезки." + suffix
+        )
+
+    key, pilot, window, sidetrack_result = best
+    return ReorientedPilotSidetrackPlan(
+        pilot=pilot,
+        window=window,
+        sidetrack_result=sidetrack_result,
+        target_azimuth_deg=float(target_azimuth_deg),
+        total_drilled_md_m=float(key[1]),
+    )
+
+
 def combine_pilot_and_sidetrack(
     *,
     pilot_stations: pd.DataFrame,
@@ -554,6 +707,15 @@ def combine_pilot_and_sidetrack(
     stations.attrs["uncertainty_reference_stations"] = pilot_upper.copy()
     summary = dict(sidetrack_result.summary)
     md_total_m = float(stations["MD_m"].iloc[-1])
+    if not math.isfinite(md_total_m):
+        md_total_m = 0.0
+    pilot_total_md_m = float(pilot_stations["MD_m"].iloc[-1])
+    if not math.isfinite(pilot_total_md_m):
+        pilot_total_md_m = 0.0
+    sidetrack_lateral_md_m = float(sidetrack_result.summary.get("md_total_m", 0.0))
+    if not math.isfinite(sidetrack_lateral_md_m):
+        sidetrack_lateral_md_m = 0.0
+    total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
     max_dls = max(
         float(summary.get("max_dls_total_deg_per_30m", 0.0)),
         _finite_max(stations.get("DLS_deg_per_30m", pd.Series(dtype=float))),
@@ -568,14 +730,15 @@ def combine_pilot_and_sidetrack(
             "sidetrack_window_z_m": float(window.point.z),
             "sidetrack_window_inc_deg": float(window.inc_deg),
             "sidetrack_window_azi_deg": float(window.azi_deg),
-            "sidetrack_lateral_md_m": float(
-                sidetrack_result.summary.get("md_total_m", 0.0)
-            ),
+            "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
+            "pilot_total_md_m": pilot_total_md_m,
+            "total_drilled_md_m": total_drilled_md_m,
+            "sidetrack_window_optimization_objective_m": total_drilled_md_m,
             "md_total_m": md_total_m,
             "max_total_md_postcheck_m": float(config.max_total_md_postcheck_m),
             "md_postcheck_excess_m": max(
                 0.0,
-                md_total_m - float(config.max_total_md_postcheck_m),
+                total_drilled_md_m - float(config.max_total_md_postcheck_m),
             ),
             "max_dls_total_deg_per_30m": max_dls,
             "dls_postcheck_excess_deg_per_30m": max(
@@ -697,6 +860,432 @@ def _directional_pilot_stations(
 
     stations = pd.concat(parts, ignore_index=True)
     return add_dls(stations), md_first_target_m
+
+
+def _reoriented_pilot_candidates(
+    *,
+    target_points: tuple[Point3D, ...],
+    target_azimuth_deg: float,
+    productive_direction_target: Point3D,
+    parent_t1: Point3D,
+    config: TrajectoryConfig,
+) -> list[PilotBuildResult]:
+    """Build feasible pilots whose PL1 tangent has a prescribed azimuth."""
+
+    surface = target_points[0]
+    study_points = target_points[1:]
+    surface_wp = WelltrackPoint(
+        x=float(surface.x), y=float(surface.y), z=float(surface.z), md=0.0
+    )
+    first_wp = WelltrackPoint(
+        x=float(study_points[0].x),
+        y=float(study_points[0].y),
+        z=float(study_points[0].z),
+        md=1.0,
+    )
+    kop = _pilot_kop_point(
+        surface=surface_wp,
+        first_target=first_wp,
+        config=config,
+    )
+    vertical = _vertical_pilot_stations(
+        surface=surface_wp,
+        kop=kop,
+        config=config,
+    )
+    p0 = _point_array(kop)
+    p3 = _point_array(study_points[0])
+    chord_m = float(np.linalg.norm(p3 - p0))
+    if chord_m <= SMALL:
+        return []
+
+    geometric_inc_deg, _ = _angles_from_delta(p3 - p0)
+    productive_inc_deg, _ = _angles_from_delta(
+        _point_array(productive_direction_target) - _point_array(parent_t1)
+    )
+    to_t1_inc_deg, _ = _angles_from_delta(
+        _point_array(parent_t1) - _point_array(study_points[0])
+    )
+    max_inc_deg = float(config.max_inc_deg)
+    inc_candidates = _unique_floats(
+        min(max_inc_deg, max(0.0, value))
+        for value in (
+            geometric_inc_deg,
+            to_t1_inc_deg,
+            productive_inc_deg,
+            5.0,
+            10.0,
+            20.0,
+            30.0,
+            45.0,
+            60.0,
+            75.0,
+            90.0,
+        )
+    )
+    start_dir = _unit_vector_xyz(inc_deg=0.0, azi_deg=target_azimuth_deg)
+    dls_limit = float(config.dls_build_max_deg_per_30m)
+    first_legs_by_terminal_inc: dict[
+        float, list[tuple[tuple[float, float, float], pd.DataFrame]]
+    ] = {}
+
+    for terminal_inc_deg in inc_candidates:
+        end_dir = _unit_vector_xyz(
+            inc_deg=terminal_inc_deg,
+            azi_deg=target_azimuth_deg,
+        )
+        for lead_scale in (0.15, 0.30, 0.50, 0.75, 1.00, 1.35):
+            for tail_scale in (0.12, 0.22, 0.36, 0.55, 0.80, 1.10):
+                lead_m = max(float(config.md_step_m), chord_m * lead_scale)
+                tail_m = max(float(config.md_step_m), chord_m * tail_scale)
+                try:
+                    first_leg = _pilot_cubic_leg(
+                        p0=p0,
+                        p1=p0 + start_dir * lead_m,
+                        p2=p3 - end_dir * tail_m,
+                        p3=p3,
+                        start_md_m=float(vertical["MD_m"].iloc[-1]),
+                        start_inc_deg=0.0,
+                        start_azi_deg=target_azimuth_deg,
+                        end_inc_deg=terminal_inc_deg,
+                        end_azi_deg=target_azimuth_deg,
+                        config=config,
+                    )
+                except (ValueError, PlanningError):
+                    continue
+
+                first_leg_max_dls = _finite_max(first_leg["DLS_deg_per_30m"])
+                if first_leg_max_dls > dls_limit + 1e-6:
+                    continue
+                if _finite_max(first_leg["INC_deg"]) > max_inc_deg + 1e-6:
+                    continue
+                alignment_md = max(
+                    float(vertical["MD_m"].iloc[-1]),
+                    float(first_leg["MD_m"].iloc[-1]) - 75.0,
+                )
+                alignment_row = _interpolate_station_by_md(first_leg, alignment_md)
+                alignment_error = _azimuth_difference_deg(
+                    float(alignment_row["AZI_deg"]), target_azimuth_deg
+                )
+                key = (
+                    alignment_error,
+                    float(first_leg["MD_m"].iloc[-1]),
+                    first_leg_max_dls,
+                )
+                bucket = first_legs_by_terminal_inc.setdefault(
+                    round(terminal_inc_deg, 6), []
+                )
+                bucket.append((key, first_leg))
+
+    # Retain geometric diversity without allowing the fallback lattice to
+    # explode when each pilot is evaluated against all candidate windows.
+    candidates: list[PilotBuildResult] = []
+    for terminal_inc_key, bucket in first_legs_by_terminal_inc.items():
+        bucket.sort(key=lambda item: item[0])
+        for _key, first_leg in bucket[:1]:
+            parts = [vertical, first_leg.iloc[1:].copy()]
+            current_md = float(first_leg["MD_m"].iloc[-1])
+            current_inc = float(first_leg["INC_deg"].iloc[-1])
+            current_azi = float(first_leg["AZI_deg"].iloc[-1])
+            current_point = study_points[0]
+            try:
+                for segment_index, target in enumerate(study_points[1:], start=2):
+                    leg = _pilot_build_hold_leg_to_target(
+                        start=current_point,
+                        target=target,
+                        start_md_m=current_md,
+                        start_inc_deg=current_inc,
+                        start_azi_deg=current_azi,
+                        segment_index=segment_index,
+                        config=config,
+                    )
+                    parts.append(leg.iloc[1:].copy())
+                    current_point = target
+                    current_md = float(leg["MD_m"].iloc[-1])
+                    current_inc = float(leg["INC_deg"].iloc[-1])
+                    current_azi = float(leg["AZI_deg"].iloc[-1])
+                stations = add_dls(pd.concat(parts, ignore_index=True))
+            except (ValueError, PlanningError):
+                continue
+            max_dls = _finite_max(stations["DLS_deg_per_30m"])
+            actual_max_inc = _finite_max(stations["INC_deg"])
+            md_values = stations["MD_m"].to_numpy(dtype=float)
+            if (
+                max_dls > dls_limit + 1e-6
+                or actual_max_inc > max_inc_deg + 1e-6
+                or np.any(np.diff(md_values) <= SMALL)
+            ):
+                continue
+            candidates.append(
+                _pilot_result_from_reoriented_stations(
+                    stations=stations,
+                    surface=surface,
+                    study_points=study_points,
+                    md_first_target_m=float(first_leg["MD_m"].iloc[-1]),
+                    target_azimuth_deg=target_azimuth_deg,
+                    terminal_inc_deg=float(terminal_inc_key),
+                    config=config,
+                )
+            )
+    candidates.sort(
+        key=lambda pilot: (
+            float(pilot.md_total_m),
+            float(pilot.summary.get("max_dls_total_deg_per_30m", 0.0)),
+        )
+    )
+    return _select_diverse_reoriented_pilot_candidates(candidates, limit=12)
+
+
+def _select_diverse_reoriented_pilot_candidates(
+    candidates: list[PilotBuildResult],
+    *,
+    limit: int,
+) -> list[PilotBuildResult]:
+    if len(candidates) <= limit:
+        return candidates
+
+    selected: list[PilotBuildResult] = []
+    selected_ids: set[int] = set()
+
+    def add_candidate(pilot: PilotBuildResult) -> None:
+        if len(selected) >= limit:
+            return
+        pilot_id = id(pilot)
+        if pilot_id in selected_ids:
+            return
+        selected.append(pilot)
+        selected_ids.add(pilot_id)
+
+    for pilot in candidates[: min(4, limit)]:
+        add_candidate(pilot)
+
+    by_inc = sorted(
+        candidates,
+        key=lambda pilot: float(
+            pilot.summary.get("pilot_reorientation_pl1_inc_deg", 0.0)
+        ),
+    )
+    for idx in np.linspace(0, len(by_inc) - 1, num=limit, dtype=int):
+        add_candidate(by_inc[int(idx)])
+        if len(selected) >= limit:
+            break
+
+    for pilot in candidates:
+        add_candidate(pilot)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _bounded_reoriented_window_candidates(
+    candidate_groups: list[list[PilotWindow]],
+) -> list[PilotWindow]:
+    """Keep the joint fallback search broad without an unbounded solver grid."""
+
+    selected: list[PilotWindow] = []
+    for group_index, group in enumerate(candidate_groups):
+        limit = 6 if group_index == 0 else 8
+        if len(group) <= limit:
+            sampled = group
+        else:
+            indices = np.linspace(0, len(group) - 1, limit, dtype=int)
+            sampled = [group[int(index)] for index in indices]
+        selected.extend(sampled)
+    by_md: dict[float, PilotWindow] = {}
+    for window in selected:
+        by_md.setdefault(round(float(window.md_m), 6), window)
+    return list(by_md.values())
+
+
+def _pilot_cubic_leg(
+    *,
+    p0: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+    p3: np.ndarray,
+    start_md_m: float,
+    start_inc_deg: float,
+    start_azi_deg: float,
+    end_inc_deg: float,
+    end_azi_deg: float,
+    config: TrajectoryConfig,
+) -> pd.DataFrame:
+    xyz = _sample_pilot_cubic_bezier(
+        p0=p0,
+        p1=p1,
+        p2=p2,
+        p3=p3,
+        step_m=float(config.md_step_m),
+    )
+    distances = np.linalg.norm(np.diff(xyz, axis=0), axis=1)
+    if len(xyz) < 2 or np.any(distances <= SMALL):
+        raise ValueError("Перестроенный участок пилота содержит совпадающие станции.")
+    md = float(start_md_m) + np.concatenate([[0.0], np.cumsum(distances)])
+    stations = _build_signed_trajectory_stations(
+        xyz=xyz,
+        md=md,
+    )
+    stations["segment"] = "PILOT_BUILD_1"
+    stations.loc[0, "INC_deg"] = float(start_inc_deg)
+    stations.loc[0, "AZI_deg"] = _normalize_azimuth_deg(start_azi_deg)
+    stations.loc[len(stations) - 1, "INC_deg"] = float(end_inc_deg)
+    stations.loc[len(stations) - 1, "AZI_deg"] = _normalize_azimuth_deg(end_azi_deg)
+    return add_dls(stations)
+
+
+def _sample_pilot_cubic_bezier(
+    *,
+    p0: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+    p3: np.ndarray,
+    step_m: float,
+) -> np.ndarray:
+    chord_m = float(np.linalg.norm(p3 - p0))
+    control_m = float(
+        np.linalg.norm(p1 - p0)
+        + np.linalg.norm(p2 - p1)
+        + np.linalg.norm(p3 - p2)
+    )
+    samples = max(int(math.ceil(max(chord_m, control_m) / max(step_m, 1.0))), 8)
+    samples = min(samples, 1600)
+    t = np.linspace(0.0, 1.0, samples + 1)
+    omt = 1.0 - t
+    xyz = (
+        (omt**3)[:, None] * p0
+        + (3.0 * omt * omt * t)[:, None] * p1
+        + (3.0 * omt * t * t)[:, None] * p2
+        + (t**3)[:, None] * p3
+    )
+    if len(xyz) < 2:
+        raise ValueError("Недостаточно станций перестроенного пилота.")
+    keep = np.ones(len(xyz), dtype=bool)
+    keep[1:] = np.linalg.norm(np.diff(xyz, axis=0), axis=1) > SMALL
+    return xyz[keep]
+
+
+def _build_signed_trajectory_stations(
+    *,
+    xyz: np.ndarray,
+    md: np.ndarray,
+) -> pd.DataFrame:
+    xyz = np.asarray(xyz, dtype=float)
+    md = np.asarray(md, dtype=float)
+    if xyz.ndim != 2 or xyz.shape[1] != 3 or len(xyz) != len(md):
+        raise ValueError("Некорректные станции перестроенного пилота.")
+    if len(xyz) < 2:
+        raise ValueError("Недостаточно станций перестроенного пилота.")
+    if np.any(~np.isfinite(xyz)) or np.any(~np.isfinite(md)):
+        raise ValueError("Перестроенный пилот содержит нечисловые станции.")
+    if np.any(np.diff(md) <= SMALL):
+        raise ValueError("MD перестроенного пилота должен строго возрастать.")
+
+    tangents = _signed_station_tangent_vectors(xyz=xyz, md=md)
+    horizontal = np.hypot(tangents[:, 0], tangents[:, 1])
+    inc = np.degrees(np.arctan2(horizontal, tangents[:, 2]))
+    azi = np.zeros(len(xyz), dtype=float)
+    previous_azi = 0.0
+    for idx, horizontal_component in enumerate(horizontal):
+        if horizontal_component > SMALL:
+            previous_azi = _normalize_azimuth_deg(
+                math.degrees(math.atan2(float(tangents[idx, 0]), float(tangents[idx, 1])))
+            )
+        azi[idx] = previous_azi
+
+    return pd.DataFrame(
+        {
+            "MD_m": md,
+            "INC_deg": inc,
+            "AZI_deg": azi,
+            "X_m": xyz[:, 0],
+            "Y_m": xyz[:, 1],
+            "Z_m": xyz[:, 2],
+        }
+    )
+
+
+def _signed_station_tangent_vectors(
+    *,
+    xyz: np.ndarray,
+    md: np.ndarray,
+) -> np.ndarray:
+    segment_md = np.diff(md)
+    segment_vectors = np.diff(xyz, axis=0) / segment_md[:, None]
+    tangents = np.empty_like(xyz, dtype=float)
+    tangents[0] = segment_vectors[0]
+    tangents[-1] = segment_vectors[-1]
+    if len(xyz) > 2:
+        span_md = (md[2:] - md[:-2])[:, None]
+        tangents[1:-1] = (xyz[2:] - xyz[:-2]) / span_md
+    norms = np.linalg.norm(tangents, axis=1)
+    if np.any(norms <= SMALL):
+        raise ValueError("Перестроенный пилот содержит нулевую касательную.")
+    return tangents / norms[:, None]
+
+
+def _pilot_result_from_reoriented_stations(
+    *,
+    stations: pd.DataFrame,
+    surface: Point3D,
+    study_points: tuple[Point3D, ...],
+    md_first_target_m: float,
+    target_azimuth_deg: float,
+    terminal_inc_deg: float,
+    config: TrajectoryConfig,
+) -> PilotBuildResult:
+    md_total_m = float(stations["MD_m"].iloc[-1])
+    max_dls = _finite_max(stations["DLS_deg_per_30m"])
+    summary: SummaryDict = {
+        "trajectory_type": "PILOT",
+        "trajectory_target_direction": "Пилотный ствол",
+        "well_complexity": "Пилот; перестроен под окно зарезки",
+        "horizontal_length_m": 0.0,
+        "entry_inc_deg": 0.0,
+        "hold_inc_deg": 0.0,
+        "max_dls_total_deg_per_30m": max_dls,
+        "md_total_m": md_total_m,
+        "max_total_md_postcheck_m": float(config.max_total_md_postcheck_m),
+        "md_postcheck_excess_m": max(
+            0.0, md_total_m - float(config.max_total_md_postcheck_m)
+        ),
+        "dls_postcheck_excess_deg_per_30m": max(
+            0.0, max_dls - float(config.dls_build_max_deg_per_30m)
+        ),
+        "solver_turn_restarts_used": 0.0,
+        "solver_turn_max_restarts": float(config.turn_solver_max_restarts),
+        "pilot_target_count": float(len(study_points)),
+        "kop_md_m": float(
+            stations.loc[stations["segment"] == "VERTICAL", "MD_m"].max()
+        ),
+        "pilot_reorientation_fallback_used": "yes",
+        "pilot_reorientation_target_azi_deg": float(target_azimuth_deg),
+        "pilot_reorientation_pl1_inc_deg": float(terminal_inc_deg),
+    }
+    return PilotBuildResult(
+        stations=stations,
+        surface=surface,
+        first_target=study_points[0],
+        final_target=study_points[-1],
+        md_first_target_m=float(md_first_target_m),
+        md_total_m=md_total_m,
+        azimuth_deg=_first_valid_azimuth_deg(stations),
+        summary=summary,
+    )
+
+
+def _unique_floats(values: Iterable[float]) -> list[float]:
+    result: list[float] = []
+    for value in values:
+        if not math.isfinite(float(value)):
+            continue
+        if any(abs(float(value) - existing) <= 1e-6 for existing in result):
+            continue
+        result.append(float(value))
+    return result
+
+
+def _azimuth_difference_deg(left: float, right: float) -> float:
+    return float(abs((float(left) - float(right) + 180.0) % 360.0 - 180.0))
 
 
 def _pilot_build_hold_leg_to_target(
@@ -1239,18 +1828,46 @@ def _sidetrack_anticollision_penalty(
     shifted_stations["MD_m"] = shifted_stations["MD_m"].to_numpy(dtype=float) + float(
         window.md_m
     )
+    return _trajectory_anticollision_penalty(
+        stations=shifted_stations,
+        optimization_context=optimization_context,
+    )
+
+
+def _trajectory_anticollision_penalty(
+    *,
+    stations: pd.DataFrame,
+    optimization_context: AntiCollisionOptimizationContext | None,
+) -> float:
+    if optimization_context is None:
+        return 0.0
+    if stations.empty:
+        return 10_000.0
+    required_columns = {"MD_m", "X_m", "Y_m", "Z_m"}
+    if not required_columns.issubset(stations.columns):
+        return 10_000.0
     try:
         clearance = evaluate_stations_anti_collision_clearance(
-            stations=shifted_stations,
+            stations=stations,
             context=optimization_context,
         )
-    except ValueError:
+    except (AttributeError, KeyError, TypeError, ValueError):
         return 10_000.0
-    sf_deficit = max(
-        0.0,
-        float(optimization_context.sf_target) - float(clearance.min_separation_factor),
-    )
-    return float(sf_deficit * 1000.0 + float(clearance.max_overlap_depth_m) * 0.1)
+    try:
+        sf_target = float(optimization_context.sf_target)
+        min_sf = float(clearance.min_separation_factor)
+        max_overlap_m = float(clearance.max_overlap_depth_m)
+    except (TypeError, ValueError):
+        return 10_000.0
+    if (
+        not math.isfinite(sf_target)
+        or not math.isfinite(min_sf)
+        or not math.isfinite(max_overlap_m)
+    ):
+        return 10_000.0
+    sf_deficit = max(0.0, sf_target - min_sf)
+    overlap_penalty_m = max(0.0, max_overlap_m)
+    return float(sf_deficit * 1000.0 + overlap_penalty_m * 0.1)
 
 
 def _sidetrack_segment_label(value: object) -> str:

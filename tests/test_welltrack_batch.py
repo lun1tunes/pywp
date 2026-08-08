@@ -57,12 +57,15 @@ from pywp.uncertainty import (
 )
 from pywp.welltrack_batch import (
     DynamicClusterExecutionContext,
+    RecordEvaluationResult,
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
     _evaluate_record_from_dicts,
     _evaluate_record_standalone,
     _optimization_context_from_worker_payload,
     _optimization_context_to_worker_payload,
+    _postcheck_state,
+    _refresh_pilot_sidetrack_drilled_md_summary,
     merge_batch_results,
     recommended_batch_selection,
 )
@@ -3988,6 +3991,151 @@ def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
         "HORIZONTAL_BUILD1",
         "HORIZONTAL2",
     }.issubset(set(success.stations["segment"]))
+
+
+def test_refresh_pilot_sidetrack_drilled_md_summary_after_extension() -> None:
+    stations = pd.DataFrame({"MD_m": [0.0, 600.0, 1800.0]})
+    summary = {
+        "trajectory_type": "PILOT_SIDETRACK",
+        "pilot_total_md_m": 1000.0,
+        "sidetrack_window_md_m": 600.0,
+        "md_total_m": 1800.0,
+        "total_drilled_md_m": 1400.0,
+        "sidetrack_window_optimization_objective_m": 1400.0,
+        "max_total_md_postcheck_m": 2000.0,
+        "md_postcheck_excess_m": 0.0,
+    }
+
+    refreshed = _refresh_pilot_sidetrack_drilled_md_summary(
+        summary=summary,
+        stations=stations,
+        config=TrajectoryConfig(max_total_md_postcheck_m=2000.0),
+    )
+
+    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["total_drilled_md_m"] == pytest.approx(2200.0)
+    assert refreshed["sidetrack_window_optimization_objective_m"] == pytest.approx(
+        2200.0
+    )
+    assert refreshed["md_postcheck_excess_m"] == pytest.approx(200.0)
+
+
+def test_refresh_pilot_sidetrack_drilled_md_summary_uses_station_md_fallback() -> None:
+    stations = pd.DataFrame({"MD_m": [0.0, 600.0, 1800.0]})
+    summary = {
+        "trajectory_type": "PILOT_SIDETRACK",
+        "pilot_total_md_m": 1000.0,
+        "sidetrack_window_md_m": 600.0,
+        "md_total_m": np.nan,
+        "total_drilled_md_m": 1400.0,
+        "sidetrack_window_optimization_objective_m": 1400.0,
+        "max_total_md_postcheck_m": 2000.0,
+        "md_postcheck_excess_m": 0.0,
+    }
+
+    refreshed = _refresh_pilot_sidetrack_drilled_md_summary(
+        summary=summary,
+        stations=stations,
+        config=TrajectoryConfig(max_total_md_postcheck_m=2000.0),
+    )
+
+    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["total_drilled_md_m"] == pytest.approx(2200.0)
+    assert refreshed["md_total_m"] == pytest.approx(1800.0)
+    assert refreshed["md_postcheck_excess_m"] == pytest.approx(200.0)
+
+
+def test_postcheck_state_uses_total_drilled_md_for_pilot_sidetrack() -> None:
+    exceeded, message = _postcheck_state(
+        {
+            "trajectory_type": "PILOT_SIDETRACK",
+            "md_total_m": 1000.0,
+            "total_drilled_md_m": 1500.0,
+            "max_total_md_postcheck_m": 1200.0,
+            "md_postcheck_excess_m": 300.0,
+        }
+    )
+
+    assert exceeded is True
+    assert "1500.00 м > 1200.00 м" in message
+
+
+def test_batch_planner_keeps_existing_pilot_when_updated_sidetrack_rejected(
+    monkeypatch,
+) -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=0.0, y=0.0, z=800.0, md=2.0),
+            WelltrackPoint(x=200.0, y=0.0, z=1300.0, md=3.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=2.0),
+            WelltrackPoint(x=2200.0, y=0.0, z=2220.0, md=3.0),
+        ),
+    )
+    old_pilot_base = _straight_success("WELL-04_PL", y_offset_m=0.0)
+    old_pilot = old_pilot_base.validated_copy(
+        summary={
+            **old_pilot_base.summary,
+            "pilot_marker": "old",
+        }
+    )
+    new_pilot = old_pilot.validated_copy(
+        summary={**old_pilot.summary, "pilot_marker": "new"}
+    )
+    existing_sidetrack = _straight_success("WELL-04", y_offset_m=5.0).validated_copy(
+        summary={"md_total_m": 1900.0}
+    )
+    candidate_sidetrack = _straight_success("WELL-04", y_offset_m=10.0).validated_copy(
+        config=TrajectoryConfig(optimization_mode="anti_collision_avoidance"),
+        summary={"md_total_m": 1800.0, "anti_collision_stage": "trajectory"},
+    )
+
+    def fake_evaluate_record(self, record, **kwargs):
+        if str(record.name) == "WELL-04_PL":
+            return self._row_from_success(record=record, success=old_pilot), old_pilot
+        return RecordEvaluationResult(
+            row=self._row_from_success(record=record, success=candidate_sidetrack),
+            success=candidate_sidetrack,
+            updated_pilot_success=new_pilot,
+        )
+
+    monkeypatch.setattr(
+        WelltrackBatchPlanner,
+        "_evaluate_record",
+        fake_evaluate_record,
+    )
+    monkeypatch.setattr(
+        WelltrackBatchPlanner,
+        "_select_monotonic_anticollision_success",
+        staticmethod(lambda **_kwargs: existing_sidetrack),
+    )
+
+    context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=0.0,
+        candidate_md_end_m=1000.0,
+        sf_target=1.0,
+        sample_step_m=50.0,
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        references=(),
+    )
+    _rows, successes = WelltrackBatchPlanner().evaluate(
+        records=[pilot, parent],
+        selected_names={"WELL-04_PL", "WELL-04"},
+        selected_order=["WELL-04_PL", "WELL-04"],
+        config=_fast_batch_config(),
+        optimization_context_by_name={"WELL-04": context},
+    )
+
+    by_name = {success.name: success for success in successes}
+    assert by_name["WELL-04_PL"].summary["pilot_marker"] == "old"
+    assert by_name["WELL-04"].summary["md_total_m"] == pytest.approx(1900.0)
 
 
 def test_batch_planner_builds_multi_horizontal_pilot_sidetrack_from_alt_branch_table_without_surface() -> (

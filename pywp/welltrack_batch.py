@@ -50,6 +50,7 @@ from pywp.models import (
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.parallel import process_pool_context
 from pywp.pilot_wells import (
+    PilotBuildResult,
     SidetrackWindowOverride,
     build_pilot_trajectory,
     combine_pilot_and_sidetrack,
@@ -58,6 +59,7 @@ from pywp.pilot_wells import (
     order_records_with_pilots_first,
     parent_name_for_zbs,
     pilot_name_key_for_record,
+    plan_reoriented_pilot_sidetrack_fallback,
     select_sidetrack_window,
     well_name_key,
     zbs_target_points_to_pairs,
@@ -88,6 +90,75 @@ class DynamicClusterExecutionContext:
     reference_uncertainty_models_by_name: Mapping[
         str, PlanningUncertaintyModel
     ] | None = None
+
+
+@dataclass(frozen=True)
+class RecordEvaluationResult:
+    row: dict[str, Any]
+    success: "SuccessfulWellPlan | None"
+    updated_pilot_success: "SuccessfulWellPlan | None" = None
+
+
+def _unpack_record_evaluation(
+    value: RecordEvaluationResult
+    | tuple[dict[str, Any], "SuccessfulWellPlan | None"],
+) -> tuple[
+    dict[str, Any], "SuccessfulWellPlan | None", "SuccessfulWellPlan | None"
+]:
+    # Preserve compatibility with tests and integrations that monkeypatch the
+    # historical two-item private return value.
+    if isinstance(value, RecordEvaluationResult):
+        return value.row, value.success, value.updated_pilot_success
+    row, success = value
+    return row, success, None
+
+
+def _replace_pilot_evaluation_state(
+    *,
+    updated_pilot_success: "SuccessfulWellPlan",
+    selected_records_by_name: Mapping[str, WelltrackRecord],
+    success_by_name: dict[str, "SuccessfulWellPlan"],
+    successes: list["SuccessfulWellPlan"] | None,
+    rows: dict[str, dict[str, Any]],
+    ordered_rows: list[dict[str, Any]] | None,
+) -> None:
+    """Atomically expose a replanned pilot to 3D, summaries and later wells."""
+
+    pilot_key = well_name_key(updated_pilot_success.name)
+    pilot_record = next(
+        (
+            record
+            for name, record in selected_records_by_name.items()
+            if well_name_key(name) == pilot_key
+        ),
+        None,
+    )
+    if pilot_record is None:
+        return
+    existing_name = next(
+        (name for name in success_by_name if well_name_key(name) == pilot_key),
+        str(updated_pilot_success.name),
+    )
+    success_by_name[existing_name] = updated_pilot_success
+    if successes is not None:
+        for index, success in enumerate(successes):
+            if well_name_key(success.name) == pilot_key:
+                successes[index] = updated_pilot_success
+                break
+    updated_row = WelltrackBatchPlanner._row_from_success(
+        record=pilot_record,
+        success=updated_pilot_success,
+    )
+    row_name = next(
+        (name for name in rows if well_name_key(name) == pilot_key),
+        str(pilot_record.name),
+    )
+    rows[row_name] = updated_row
+    if ordered_rows is not None:
+        for index, row in enumerate(ordered_rows):
+            if well_name_key(row.get("Скважина", "")) == pilot_key:
+                ordered_rows[index] = updated_row
+                break
 
 
 _MAX_DYNAMIC_CLUSTER_PASSES = 3
@@ -696,19 +767,46 @@ def _pilot_build_to_success(
     )
 
 
+def _pilot_build_result_to_updated_success(
+    *,
+    existing: SuccessfulWellPlan,
+    pilot: PilotBuildResult,
+) -> SuccessfulWellPlan:
+    summary = dict(pilot.summary)
+    postcheck_exceeded, postcheck_message = _postcheck_state(summary)
+    return existing.validated_copy(
+        surface=pilot.surface,
+        t1=pilot.first_target,
+        t3=pilot.final_target,
+        stations=pilot.stations,
+        summary=summary,
+        azimuth_deg=float(pilot.azimuth_deg),
+        md_t1_m=float(pilot.md_first_target_m),
+        md_postcheck_exceeded=postcheck_exceeded,
+        md_postcheck_message=postcheck_message,
+    )
+
+
 def _postcheck_state(summary: Mapping[str, object]) -> tuple[bool, str]:
     messages: list[str] = []
-    md_total_m = float(summary.get("md_total_m", 0.0))
-    md_limit_m = float(summary.get("max_total_md_postcheck_m", 0.0))
-    md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
+    md_total_m = _summary_float(summary, "total_drilled_md_m")
+    if md_total_m <= 0.0:
+        md_total_m = _summary_float(summary, "md_total_m")
+    md_limit_m = _summary_float(summary, "max_total_md_postcheck_m")
+    md_postcheck_excess_m = _summary_float(summary, "md_postcheck_excess_m")
+    if md_limit_m > 0.0 and md_total_m > md_limit_m:
+        md_postcheck_excess_m = max(
+            md_postcheck_excess_m,
+            md_total_m - md_limit_m,
+        )
     if md_postcheck_excess_m > 1e-6:
         messages.append(
             "Превышен лимит итоговой MD (постпроверка): "
             f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
         )
-    dls_excess = float(summary.get("dls_postcheck_excess_deg_per_30m", 0.0))
+    dls_excess = _summary_float(summary, "dls_postcheck_excess_deg_per_30m")
     if dls_excess > 1e-6:
-        max_dls = float(summary.get("max_dls_total_deg_per_30m", 0.0))
+        max_dls = _summary_float(summary, "max_dls_total_deg_per_30m")
         messages.append(
             "Превышен лимит ПИ (постпроверка): "
             f"{dls_to_pi(max_dls):.2f} deg/10m > "
@@ -781,6 +879,46 @@ def _summary_float(summary: Mapping[str, object], key: str) -> float:
     if not np.isfinite(value):
         return 0.0
     return value
+
+
+def _refresh_pilot_sidetrack_drilled_md_summary(
+    *,
+    summary: SummaryDict,
+    stations: pd.DataFrame,
+    config: TrajectoryConfig,
+) -> SummaryDict:
+    if str(summary.get("trajectory_type", "")).strip() != "PILOT_SIDETRACK":
+        return summary
+
+    refreshed = dict(summary)
+    pilot_total_md_m = _summary_float(refreshed, "pilot_total_md_m")
+    window_md_m = _summary_float(refreshed, "sidetrack_window_md_m")
+    md_total_m = _summary_float(refreshed, "md_total_m")
+    if md_total_m <= 0.0 and "MD_m" in stations.columns and not stations.empty:
+        try:
+            md_total_m = float(stations["MD_m"].iloc[-1])
+        except (TypeError, ValueError):
+            md_total_m = 0.0
+    if not np.isfinite(md_total_m):
+        md_total_m = 0.0
+    if pilot_total_md_m <= 0.0 or md_total_m <= 0.0:
+        return refreshed
+
+    sidetrack_lateral_md_m = max(0.0, md_total_m - window_md_m)
+    total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
+    md_limit_m = float(config.max_total_md_postcheck_m)
+    refreshed.update(
+        {
+            "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
+            "pilot_total_md_m": pilot_total_md_m,
+            "md_total_m": md_total_m,
+            "total_drilled_md_m": total_drilled_md_m,
+            "sidetrack_window_optimization_objective_m": total_drilled_md_m,
+            "max_total_md_postcheck_m": md_limit_m,
+            "md_postcheck_excess_m": max(0.0, total_drilled_md_m - md_limit_m),
+        }
+    )
+    return refreshed
 
 
 def _actual_reference_wells_by_key(
@@ -1031,7 +1169,7 @@ class WelltrackBatchPlanner:
                 )
                 success = None
             else:
-                row, success = self._evaluate_record(
+                evaluation = self._evaluate_record(
                     record=record,
                     config=runtime_override["config"],
                     optimization_context=runtime_override["optimization_context"],
@@ -1042,6 +1180,11 @@ class WelltrackBatchPlanner:
                     ),
                     actual_reference_wells_by_key=actual_reference_wells_by_key,
                 )
+                row, success, updated_pilot_success = _unpack_record_evaluation(
+                    evaluation
+                )
+            if missing_pilot is not None:
+                updated_pilot_success = None
             if success is not None:
                 optimization_context = runtime_override["optimization_context"]
                 previous_success = recalculated_success_by_name.get(str(record.name))
@@ -1095,6 +1238,15 @@ class WelltrackBatchPlanner:
                             success=success,
                             stage=attempted_stage,
                         )
+                if updated_pilot_success is not None and retained_success is None:
+                    _replace_pilot_evaluation_state(
+                        updated_pilot_success=updated_pilot_success,
+                        selected_records_by_name=selected_records_by_name,
+                        success_by_name=recalculated_success_by_name,
+                        successes=successes,
+                        rows=evaluated_rows_by_name,
+                        ordered_rows=summary_rows,
+                    )
             summary_rows.append(row)
             row_name = str(row.get("Скважина", "")).strip()
             if row_name:
@@ -1307,13 +1459,16 @@ class WelltrackBatchPlanner:
                 sidetrack_override = sidetrack_window_overrides_by_key.get(
                     well_name_key(record.name)
                 )
-                row, success = self._evaluate_record(
+                evaluation = self._evaluate_record(
                     record=record,
                     config=well_config,
                     optimization_context=opt_ctx,
                     recalculated_success_by_name=success_by_name,
                     sidetrack_window_override=sidetrack_override,
                     actual_reference_wells_by_key=actual_reference_wells_by_key,
+                )
+                row, success, _updated_pilot_success = _unpack_record_evaluation(
+                    evaluation
                 )
                 first_wave_rows.append(row)
                 if success is not None:
@@ -1370,7 +1525,7 @@ class WelltrackBatchPlanner:
                 )
                 success = None
             else:
-                row, success = self._evaluate_record(
+                evaluation = self._evaluate_record(
                     record=record,
                     config=well_config,
                     optimization_context=opt_ctx,
@@ -1379,9 +1534,21 @@ class WelltrackBatchPlanner:
                     sidetrack_window_override=sidetrack_override,
                     actual_reference_wells_by_key=actual_reference_wells_by_key,
                 )
+                row, success, updated_pilot_success = _unpack_record_evaluation(
+                    evaluation
+                )
             rows_by_name[str(record.name)] = row
             if success is not None:
                 success_by_name[str(success.name)] = success
+                if updated_pilot_success is not None:
+                    _replace_pilot_evaluation_state(
+                        updated_pilot_success=updated_pilot_success,
+                        selected_records_by_name=selected_records_by_name,
+                        success_by_name=success_by_name,
+                        successes=None,
+                        rows=rows_by_name,
+                        ordered_rows=None,
+                    )
             if record_done_callback is not None:
                 record_done_callback(index, total, record.name, row)
             executed_well_names.append(str(record.name))
@@ -2247,7 +2414,10 @@ class WelltrackBatchPlanner:
         actual_reference_wells_by_key: (
             Mapping[str, ImportedTrajectoryWell] | None
         ) = None,
-    ) -> tuple[dict[str, Any], SuccessfulWellPlan | None]:
+    ) -> (
+        tuple[dict[str, Any], SuccessfulWellPlan | None]
+        | RecordEvaluationResult
+    ):
         if is_pilot_record(record):
             return self._evaluate_pilot_record(record=record, config=config)
         if is_zbs_record(record):
@@ -2287,20 +2457,53 @@ class WelltrackBatchPlanner:
                 None,
             )
             use_pilot_sidetrack = pilot_success is not None
+            updated_pilot_success: SuccessfulWellPlan | None = None
             if use_pilot_sidetrack:
-                window, sidetrack_result = select_sidetrack_window(
-                    pilot_name=str(pilot_success.name),
-                    parent_name=str(record.name),
-                    pilot_stations=pilot_success.stations,
-                    parent_t1=t1,
-                    parent_t3=t3,
-                    config=config,
-                    planner=self._planner,
-                    optimization_context=optimization_context,
-                    window_override=sidetrack_window_override,
-                )
+                try:
+                    window, sidetrack_result = select_sidetrack_window(
+                        pilot_name=str(pilot_success.name),
+                        parent_name=str(record.name),
+                        pilot_stations=pilot_success.stations,
+                        parent_t1=t1,
+                        parent_t3=t3,
+                        config=config,
+                        planner=self._planner,
+                        optimization_context=optimization_context,
+                        window_override=sidetrack_window_override,
+                    )
+                except (ValueError, PlanningError):
+                    # A manual window is an explicit engineering constraint:
+                    # never silently move it or mutate the parent pilot.
+                    if sidetrack_window_override is not None:
+                        raise
+                    productive_direction_target = (
+                        layout.target_sequence[1]
+                        if len(layout.target_sequence) >= 2
+                        else t3
+                    )
+                    fallback = plan_reoriented_pilot_sidetrack_fallback(
+                        pilot_name=str(pilot_success.name),
+                        parent_name=str(record.name),
+                        pilot_target_points=tuple(pilot_success.target_points),
+                        parent_t1=t1,
+                        parent_t3=t3,
+                        productive_direction_target=productive_direction_target,
+                        pilot_config=pilot_success.config,
+                        sidetrack_config=config,
+                        optimization_context=optimization_context,
+                    )
+                    window = fallback.window
+                    sidetrack_result = fallback.sidetrack_result
+                    updated_pilot_success = _pilot_build_result_to_updated_success(
+                        existing=pilot_success,
+                        pilot=fallback.pilot,
+                    )
                 sidetrack = combine_pilot_and_sidetrack(
-                    pilot_stations=pilot_success.stations,
+                    pilot_stations=(
+                        updated_pilot_success.stations
+                        if updated_pilot_success is not None
+                        else pilot_success.stations
+                    ),
                     sidetrack_result=sidetrack_result,
                     window=window,
                     config=config,
@@ -2310,6 +2513,29 @@ class WelltrackBatchPlanner:
                 md_t1_m = float(sidetrack.md_t1_m)
                 azimuth_deg = float(sidetrack.azimuth_deg)
                 success_surface = sidetrack.window.point
+                if updated_pilot_success is not None:
+                    summary.update(
+                        {
+                            "solver_strategy": (
+                                "pilot_sidetrack_reoriented_pilot_fallback"
+                            ),
+                            "sidetrack_fallback_used": "yes",
+                            "pilot_reorientation_fallback_used": "yes",
+                            "pilot_reorientation_target_azi_deg": float(
+                                fallback.target_azimuth_deg
+                            ),
+                            "pilot_replanned_md_total_m": float(
+                                fallback.pilot.md_total_m
+                            ),
+                            "pilot_total_md_m": float(fallback.pilot.md_total_m),
+                            "total_drilled_md_m": float(
+                                fallback.total_drilled_md_m
+                            ),
+                            "sidetrack_window_optimization_objective_m": float(
+                                fallback.total_drilled_md_m
+                            ),
+                        }
+                    )
                 if layout.target_sequence:
                     extended_result = extend_plan_with_target_sequence(
                         base_result=PlannerResult(
@@ -2386,6 +2612,12 @@ class WelltrackBatchPlanner:
                             "well_complexity": complexity,
                         }
                     )
+            if use_pilot_sidetrack:
+                summary = _refresh_pilot_sidetrack_drilled_md_summary(
+                    summary=summary,
+                    stations=stations,
+                    config=config,
+                )
             runtime_s = float(perf_counter() - started)
         except (ValueError, PlanningError) as exc:
             row["Статус"] = "Ошибка расчета"
@@ -2415,6 +2647,12 @@ class WelltrackBatchPlanner:
             md_postcheck_message=postcheck_message,
         )
         row = self._row_from_success(record=record, success=success)
+        if updated_pilot_success is not None:
+            return RecordEvaluationResult(
+                row=row,
+                success=success,
+                updated_pilot_success=updated_pilot_success,
+            )
         return row, success
 
     def _evaluate_zbs_record(
