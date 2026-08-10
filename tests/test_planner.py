@@ -245,6 +245,345 @@ def test_plan_multi_target_extends_base_plan_to_final_target(
     )
 
 
+def test_plan_multi_target_horizontal_start_finishes_curve_at_t2_and_holds_to_t3() -> (
+    None
+):
+    import pywp.planner as planner_module
+
+    planner = TrajectoryPlanner()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(600.0, 800.0, 2400.0)
+    t2 = Point3D(1500.0, 2000.0, 2500.0)
+    t3 = Point3D(2200.0, 2933.333333, 2500.0)
+    config = _fast_config(max_total_md_postcheck_m=20000.0)
+
+    result = planner.plan_multi_target(
+        surface=surface,
+        targets=(t1, t2, t3),
+        config=config,
+        horizontal_start_at_second_target=True,
+    )
+
+    assert result.summary["target_sequence_horizontal_start"] == "yes"
+    assert result.summary["horizontal_start_target"] == "t2"
+    assert result.summary["horizontal_start_straight_to_t3"] == "yes"
+    assert result.summary["horizontal_start_z_floor_enforced"] == "yes"
+    assert float(result.summary["horizontal_start_z_floor_max_excess_m"]) <= 1e-6
+    assert float(
+        result.summary["target_sequence_base_lateral_end_md_m"]
+    ) == pytest.approx(float(result.stations["MD_m"].iloc[-1]))
+    assert float(result.stations["Z_m"].max()) <= t2.z + 1e-6
+    assert float(result.summary["horizontal_length_m"]) == pytest.approx(
+        np.linalg.norm(np.asarray([t3.x - t2.x, t3.y - t2.y, t3.z - t2.z]))
+    )
+
+    t2_md = float(result.summary["horizontal_start_md_m"])
+    t2_row = result.stations.loc[(result.stations["MD_m"] - t2_md).abs().idxmin()]
+    expected_inc, expected_azi = planner_module._direction_angles_between(t2, t3)
+    assert float(t2_row["X_m"]) == pytest.approx(t2.x, abs=1e-6)
+    assert float(t2_row["Y_m"]) == pytest.approx(t2.y, abs=1e-6)
+    assert float(t2_row["Z_m"]) == pytest.approx(t2.z, abs=1e-6)
+    assert float(t2_row["INC_deg"]) == pytest.approx(expected_inc, abs=1e-6)
+    assert float(t2_row["AZI_deg"]) == pytest.approx(expected_azi, abs=1e-6)
+    assert set(
+        result.stations.loc[result.stations["MD_m"] > t2_md + 1e-6, "segment"]
+    ) == {"HORIZONTAL1"}
+    final = result.stations.iloc[-1]
+    assert float(final["X_m"]) == pytest.approx(t3.x, abs=1e-6)
+    assert float(final["Y_m"]) == pytest.approx(t3.y, abs=1e-6)
+    assert float(final["Z_m"]) == pytest.approx(t3.z, abs=1e-6)
+
+
+def test_plan_multi_target_horizontal_start_rejects_target_below_t2() -> None:
+    with pytest.raises(PlanningError, match="глубже расположены t3"):
+        TrajectoryPlanner().plan_multi_target(
+            surface=Point3D(0.0, 0.0, 0.0),
+            targets=(
+                Point3D(600.0, 800.0, 2400.0),
+                Point3D(1500.0, 2000.0, 2500.0),
+                Point3D(2200.0, 2933.333333, 2510.0),
+            ),
+            config=_fast_config(max_total_md_postcheck_m=20000.0),
+            horizontal_start_at_second_target=True,
+        )
+
+
+def test_plan_multi_target_horizontal_start_keeps_z_floor_after_t3() -> None:
+    t2 = Point3D(1500.0, 2000.0, 2500.0)
+    t4 = Point3D(3100.0, 3700.0, 2490.0)
+
+    result = TrajectoryPlanner().plan_multi_target(
+        surface=Point3D(0.0, 0.0, 0.0),
+        targets=(
+            Point3D(600.0, 800.0, 2400.0),
+            t2,
+            Point3D(2200.0, 2933.333333, 2500.0),
+            t4,
+        ),
+        target_numbers=(1, 2, 3, 4),
+        config=_fast_config(
+            dls_horizontal_max_deg_per_30m=3.0,
+            max_total_md_postcheck_m=20000.0,
+        ),
+        horizontal_start_at_second_target=True,
+    )
+
+    assert float(result.stations["Z_m"].max()) <= t2.z + 1e-6
+    assert float(result.summary["horizontal_start_z_floor_max_excess_m"]) <= 1e-6
+    assert float(
+        result.summary["target_sequence_base_lateral_end_md_m"]
+    ) == pytest.approx(
+        float(
+            result.stations.loc[
+                result.stations["segment"] == "HORIZONTAL1", "MD_m"
+            ].max()
+        )
+    )
+    assert float(
+        result.summary["target_sequence_base_lateral_end_md_m"]
+    ) < float(result.summary["md_total_m"])
+    assert "HORIZONTAL_BUILD2" in set(result.stations["segment"])
+    final = result.stations.iloc[-1]
+    assert float(final["X_m"]) == pytest.approx(t4.x, abs=1e-6)
+    assert float(final["Y_m"]) == pytest.approx(t4.y, abs=1e-6)
+    assert float(final["Z_m"]) == pytest.approx(t4.z, abs=1e-6)
+
+
+def test_plan_multi_target_without_t2_keeps_legacy_target_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywp.planner as planner_module
+
+    planner = TrajectoryPlanner()
+    surface = Point3D(0.0, 0.0, 0.0)
+    t1 = Point3D(100.0, 0.0, 200.0)
+    t3 = Point3D(200.0, 0.0, 300.0)
+    t4 = Point3D(260.0, 50.0, 330.0)
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0, 250.0],
+                "INC_deg": [0.0, 70.0, 86.0],
+                "AZI_deg": [0.0, 0.0, 0.0],
+                "X_m": [surface.x, t1.x, t3.x],
+                "Y_m": [surface.y, t1.y, t3.y],
+                "Z_m": [surface.z, t1.z, t3.z],
+                "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+                "DLS_deg_per_30m": [0.0, 1.0, 1.5],
+            }
+        ),
+        summary={"md_total_m": 250.0},
+        azimuth_deg=0.0,
+        md_t1_m=100.0,
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_plan(self: TrajectoryPlanner, **kwargs: object) -> PlannerResult:
+        captured["base_t3"] = kwargs["t3"]
+        return base_result
+
+    def _fake_transition_rows(**kwargs: object) -> list[dict[str, object]]:
+        captured["segment_name"] = kwargs["segment_name"]
+        return [
+            {
+                "MD_m": 350.0,
+                "INC_deg": 88.0,
+                "AZI_deg": 15.0,
+                "X_m": t4.x,
+                "Y_m": t4.y,
+                "Z_m": t4.z,
+                "segment": kwargs["segment_name"],
+                "DLS_deg_per_30m": 1.8,
+            }
+        ]
+
+    monkeypatch.setattr(TrajectoryPlanner, "plan", _fake_plan)
+    monkeypatch.setattr(
+        planner_module, "_smooth_transition_rows", _fake_transition_rows
+    )
+    monkeypatch.setattr(planner_module, "_validate_extended_stations", lambda **_: None)
+
+    reference_stations = base_result.stations.iloc[:2].copy()
+    base_result.stations.attrs["uncertainty_reference_stations"] = reference_stations
+
+    result = planner.plan_multi_target(
+        surface=surface,
+        targets=(t1, t3, t4),
+        target_numbers=(1, 3, 4),
+        config=_fast_config(),
+    )
+
+    assert captured["base_t3"] == t3
+    assert captured["segment_name"] == "HORIZONTAL_BUILD1"
+    assert result.summary["target_sequence_horizontal_start"] == "no"
+    assert result.stations.attrs["uncertainty_reference_stations"].equals(
+        reference_stations
+    )
+
+
+def test_plan_multi_target_rejects_inconsistent_explicit_target_numbers_before_solver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def _unexpected_solver_call(*args: object, **kwargs: object) -> PlannerResult:
+        nonlocal called
+        called = True
+        raise AssertionError("base solver must not run for invalid target labels")
+
+    monkeypatch.setattr(TrajectoryPlanner, "plan", _unexpected_solver_call)
+    targets = (
+        Point3D(100.0, 0.0, 200.0),
+        Point3D(200.0, 0.0, 300.0),
+        Point3D(300.0, 0.0, 300.0),
+    )
+
+    with pytest.raises(PlanningError, match="требует непрерывную последовательность"):
+        TrajectoryPlanner().plan_multi_target(
+            surface=Point3D(0.0, 0.0, 0.0),
+            targets=targets,
+            target_numbers=(1, 3, 4),
+            horizontal_start_at_second_target=True,
+            config=_fast_config(),
+        )
+    with pytest.raises(
+        PlanningError, match="без t2 допустима только последовательность"
+    ):
+        TrajectoryPlanner().plan_multi_target(
+            surface=Point3D(0.0, 0.0, 0.0),
+            targets=targets,
+            target_numbers=(1, 2, 3),
+            config=_fast_config(),
+        )
+    assert called is False
+
+
+def test_plan_multi_target_rejects_continuous_tvd_floor_overshoot_before_t1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0],
+                "INC_deg": [80.0, 100.0],
+                "AZI_deg": [0.0, 0.0],
+                "X_m": [0.0, 100.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 0.0],
+                "DLS_deg_per_30m": [0.0, 6.0],
+                "segment": ["BUILD1", "BUILD1"],
+            }
+        ),
+        summary={},
+        azimuth_deg=0.0,
+        md_t1_m=100.0,
+    )
+
+    def _fake_plan(*args: object, **kwargs: object) -> PlannerResult:
+        return base_result
+
+    monkeypatch.setattr(TrajectoryPlanner, "plan", _fake_plan)
+    with pytest.raises(
+        PlanningError,
+        match="базовая траектория до t1 проходит ниже t2",
+    ):
+        TrajectoryPlanner().plan_multi_target(
+            surface=Point3D(0.0, 0.0, 0.0),
+            targets=(
+                Point3D(100.0, 0.0, 0.0),
+                Point3D(200.0, 0.0, 4.0),
+                Point3D(300.0, 0.0, 4.0),
+            ),
+            horizontal_start_at_second_target=True,
+            config=_fast_config(),
+        )
+
+
+def test_plan_multi_target_checks_pilot_reference_tvd_floor_before_t1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "INC_deg": [90.0, 90.0],
+            "AZI_deg": [90.0, 90.0],
+            "X_m": [0.0, 100.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+            "DLS_deg_per_30m": [0.0, 0.0],
+            "segment": ["BUILD1", "BUILD1"],
+        }
+    )
+    base_stations.attrs["uncertainty_reference_stations"] = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "INC_deg": [80.0, 100.0],
+            "AZI_deg": [0.0, 0.0],
+            "X_m": [0.0, 100.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+        }
+    )
+    base_result = PlannerResult(
+        stations=base_stations,
+        summary={},
+        azimuth_deg=0.0,
+        md_t1_m=100.0,
+    )
+    monkeypatch.setattr(TrajectoryPlanner, "plan", lambda *args, **kwargs: base_result)
+
+    with pytest.raises(
+        PlanningError,
+        match="базовая траектория до t1 проходит ниже t2",
+    ):
+        TrajectoryPlanner().plan_multi_target(
+            surface=Point3D(0.0, 0.0, 0.0),
+            targets=(
+                Point3D(100.0, 0.0, 0.0),
+                Point3D(200.0, 0.0, 4.0),
+                Point3D(300.0, 0.0, 4.0),
+            ),
+            horizontal_start_at_second_target=True,
+            config=_fast_config(),
+        )
+
+
+def test_target_sequence_prefix_rejects_invalid_md_contract() -> None:
+    import pywp.planner as planner_module
+
+    stations = pd.DataFrame({"MD_m": [0.0, 100.0, 50.0]})
+
+    with pytest.raises(PlanningError, match="строго возрастать"):
+        planner_module._target_sequence_prefix_through_t1(
+            stations,
+            md_t1_m=100.0,
+        )
+    with pytest.raises(PlanningError, match="некорректный MD станции t1"):
+        planner_module._target_sequence_prefix_through_t1(
+            pd.DataFrame({"MD_m": [0.0, 100.0]}),
+            md_t1_m=float("nan"),
+        )
+    with pytest.raises(PlanningError, match="неотрицательным"):
+        planner_module._target_sequence_prefix_through_t1(
+            pd.DataFrame({"MD_m": [-1.0, 100.0]}),
+            md_t1_m=100.0,
+        )
+
+
+def test_plan_multi_target_rejects_coincident_t2_t3() -> None:
+    with pytest.raises(PlanningError, match="нулевую длину"):
+        TrajectoryPlanner().plan_multi_target(
+            surface=Point3D(0.0, 0.0, 0.0),
+            targets=(
+                Point3D(100.0, 0.0, 200.0),
+                Point3D(200.0, 0.0, 300.0),
+                Point3D(200.0, 0.0, 300.0),
+            ),
+            horizontal_start_at_second_target=True,
+            config=_fast_config(),
+        )
+
+
 def test_same_direction_reference_case_solves_with_minimum_kop() -> None:
     config = _fast_config(kop_min_vertical_m=550.0, offer_j_profile=False)
     result = TrajectoryPlanner().plan(
@@ -646,7 +985,9 @@ def test_reverse_variable_j_regression_cases_fall_back_to_unified_profile(
 
     record = next(
         item
-        for item in parse_welltrack_text(Path("tests/test_data/WELLTRACKS4.INC").read_text())
+        for item in parse_welltrack_text(
+            Path("tests/test_data/WELLTRACKS4.INC").read_text()
+        )
         if str(item.name) == well_name
     )
     surface, t1, t3 = welltrack_points_to_targets(record.points)
@@ -674,7 +1015,9 @@ def test_reverse_variable_j_regression_cases_fall_back_to_unified_profile(
     assert str(params.profile_family) == "unified"
 
 
-def test_reverse_variable_j_candidate_falls_back_to_unified_when_relaxed_build_allows_it() -> None:
+def test_reverse_variable_j_candidate_falls_back_to_unified_when_relaxed_build_allows_it() -> (
+    None
+):
     record = parse_welltrack_text(
         Path("tests/test_data/WELLTRACKS_DEBUG_1.INC").read_text()
     )[0]
@@ -838,10 +1181,13 @@ def test_split_build_rescue_can_find_independent_build_candidate() -> None:
         candidate.dls_build2_deg_per_30m,
         abs=1e-3,
     )
-    assert max(
-        candidate.dls_build1_deg_per_30m,
-        candidate.dls_build2_deg_per_30m,
-    ) <= build_dls_upper + 1e-6
+    assert (
+        max(
+            candidate.dls_build1_deg_per_30m,
+            candidate.dls_build2_deg_per_30m,
+        )
+        <= build_dls_upper + 1e-6
+    )
     assert best[0] < 1e-6
 
 
@@ -930,9 +1276,11 @@ def test_split_build_md_search_keeps_later_shorter_candidate(
         planner_module,
         "_make_turn_profile_builder",
         lambda **kwargs: (
-            lambda values: worse_candidate
-            if float(np.asarray(values, dtype=float)[0]) > 0.9
-            else better_candidate
+            lambda values: (
+                worse_candidate
+                if float(np.asarray(values, dtype=float)[0]) > 0.9
+                else better_candidate
+            )
         ),
     )
     monkeypatch.setattr(
@@ -1031,7 +1379,10 @@ def test_planner_respects_build2_limit_when_build1_limit_is_higher() -> None:
     assert float(result.summary["distance_t1_m"]) <= split_config.lateral_tolerance_m
     assert float(result.summary["build1_dls_selected_deg_per_30m"]) <= 5.4 + 1e-6
     assert float(result.summary["build2_dls_selected_deg_per_30m"]) <= 3.0 + 1e-6
-    assert float(result.summary["md_total_m"]) <= float(control.summary["md_total_m"]) + 1e-6
+    assert (
+        float(result.summary["md_total_m"])
+        <= float(control.summary["md_total_m"]) + 1e-6
+    )
 
 
 def test_split_build_limits_do_not_worsen_md_vs_base_build2_limit_case() -> None:
@@ -1063,7 +1414,10 @@ def test_split_build_limits_do_not_worsen_md_vs_base_build2_limit_case() -> None
     assert float(split.summary["distance_t3_m"]) <= split_config.lateral_tolerance_m
     assert float(split.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
     assert float(split.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
-    assert float(split.summary["md_total_m"]) <= float(control.summary["md_total_m"]) + 1e-6
+    assert (
+        float(split.summary["md_total_m"])
+        <= float(control.summary["md_total_m"]) + 1e-6
+    )
 
 
 def test_split_build_limits_keep_equal_build_baseline_for_welltrack4_well_08() -> None:
@@ -1101,7 +1455,10 @@ def test_split_build_limits_keep_equal_build_baseline_for_welltrack4_well_08() -
     assert float(split.summary["distance_t3_m"]) <= split_config.lateral_tolerance_m
     assert float(split.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
     assert float(split.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
-    assert float(split.summary["md_total_m"]) <= float(control.summary["md_total_m"]) + 1e-6
+    assert (
+        float(split.summary["md_total_m"])
+        <= float(control.summary["md_total_m"]) + 1e-6
+    )
 
 
 def test_zero_azimuth_turn_does_not_trigger_split_build_rescue(
@@ -1133,7 +1490,9 @@ def test_zero_azimuth_turn_does_not_trigger_split_build_rescue(
 
 def test_zero_azimuth_turn_respects_independent_build2_limit_for_dev_fixture() -> None:
     parsed = parse_dev_target_file(
-        Path("tests/test_data/dev_target_import/build_hold_build_equal_pi_with_horizontal_pi.dev")
+        Path(
+            "tests/test_data/dev_target_import/build_hold_build_equal_pi_with_horizontal_pi.dev"
+        )
     )
     surface, t1, t3 = parsed.record.points
     control_config = _fast_config(
@@ -1170,15 +1529,20 @@ def test_zero_azimuth_turn_respects_independent_build2_limit_for_dev_fixture() -
     assert float(split.summary["distance_t3_m"]) <= split_config.lateral_tolerance_m
     assert float(split.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
     assert float(split.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
-    assert float(split.summary["build1_dls_selected_deg_per_30m"]) > float(
-        split.summary["build2_dls_selected_deg_per_30m"]
-    ) + 1e-3
-    assert float(split.summary["md_total_m"]) < float(control.summary["md_total_m"]) - 1e-3
+    assert (
+        float(split.summary["build1_dls_selected_deg_per_30m"])
+        > float(split.summary["build2_dls_selected_deg_per_30m"]) + 1e-3
+    )
+    assert (
+        float(split.summary["md_total_m"]) < float(control.summary["md_total_m"]) - 1e-3
+    )
 
 
 def test_zero_azimuth_turn_split_build_remains_feasible_with_fixed_kop() -> None:
     parsed = parse_dev_target_file(
-        Path("tests/test_data/dev_target_import/build_hold_build_equal_pi_with_horizontal_pi.dev")
+        Path(
+            "tests/test_data/dev_target_import/build_hold_build_equal_pi_with_horizontal_pi.dev"
+        )
     )
     surface, t1, t3 = parsed.record.points
     config = _fast_config(
@@ -1206,9 +1570,10 @@ def test_zero_azimuth_turn_split_build_remains_feasible_with_fixed_kop() -> None
     )
     assert float(result.summary["build1_dls_selected_deg_per_30m"]) <= 2.4 + 1e-6
     assert float(result.summary["build2_dls_selected_deg_per_30m"]) <= 1.8 + 1e-6
-    assert float(result.summary["build1_dls_selected_deg_per_30m"]) >= float(
-        result.summary["build2_dls_selected_deg_per_30m"]
-    ) - 1e-6
+    assert (
+        float(result.summary["build1_dls_selected_deg_per_30m"])
+        >= float(result.summary["build2_dls_selected_deg_per_30m"]) - 1e-6
+    )
 
 
 def test_post_entry_solver_keeps_boundary_case_within_numerical_tolerance() -> None:
@@ -2849,9 +3214,10 @@ def test_min_hold_angle_constraint_raises_hold_inc_without_breaking_solution() -
         float(constrained_result.summary["distance_t3_m"])
         <= constrained_config.pos_tolerance_m
     )
-    assert float(constrained_result.summary["md_total_m"]) >= float(
-        base_result.summary["md_total_m"]
-    ) - 1e-6
+    assert (
+        float(constrained_result.summary["md_total_m"])
+        >= float(base_result.summary["md_total_m"]) - 1e-6
+    )
 
 
 def test_kop_optimization_hits_minimum_kop_limit_for_shallow_turn_case() -> None:
@@ -3018,7 +3384,7 @@ def test_md_boundary_extremum_without_improvement_keeps_seed_candidate(
     monkeypatch.setattr(
         planner_module,
         "_make_turn_profile_builder",
-        lambda **kwargs: (lambda values: seed_candidate),
+        lambda **kwargs: lambda values: seed_candidate,
     )
     monkeypatch.setattr(
         planner_module,
@@ -3163,7 +3529,7 @@ def test_md_2d_boundary_extremum_without_improvement_keeps_seed_candidate(
     monkeypatch.setattr(
         planner_module,
         "_make_turn_profile_builder",
-        lambda **kwargs: (lambda values: seed_candidate),
+        lambda **kwargs: lambda values: seed_candidate,
     )
     monkeypatch.setattr(
         planner_module,
@@ -3322,7 +3688,7 @@ def test_md_2d_refinement_runs_even_when_boundary_already_improved(
     monkeypatch.setattr(
         planner_module,
         "_make_turn_profile_builder",
-        lambda **kwargs: (lambda values: seed_candidate),
+        lambda **kwargs: lambda values: seed_candidate,
     )
     monkeypatch.setattr(
         planner_module,

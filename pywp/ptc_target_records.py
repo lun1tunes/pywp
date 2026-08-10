@@ -21,9 +21,9 @@ from pywp.pilot_wells import (
     zbs_multi_horizontal_level_count,
 )
 from pywp.welltrack_targets import (
+    ordinary_record_target_layout,
     record_is_ordinary_target_sequence,
     record_multi_horizontal_level_count,
-    record_point_labels,
     target_sequence_points_from_record,
 )
 
@@ -68,8 +68,14 @@ def records_overview_dataframe(
         if is_pilot_record(record)
     }
     visible_records = [record for record in records if not is_pilot_record(record)]
-    return pd.DataFrame(
-        [
+    rows: list[dict[str, object]] = []
+    for record in visible_records:
+        problem = _record_overview_problem_text(
+            record,
+            pilot=pilot_by_parent_key.get(pilot_parent_key_for_record(record)),
+            wellhead_z_tolerance_m=wellhead_z_tolerance_m,
+        )
+        rows.append(
             {
                 "Скважина": record.name,
                 "Точек": record_target_point_count(record),
@@ -79,30 +85,11 @@ def records_overview_dataframe(
                     record,
                     has_pilot=pilot_name_key_for_record(record) in record_names,
                 ),
-                "Статус": (
-                    "✅"
-                    if _record_overview_problem_text(
-                        record,
-                        pilot=pilot_by_parent_key.get(
-                            pilot_parent_key_for_record(record)
-                        ),
-                        wellhead_z_tolerance_m=wellhead_z_tolerance_m,
-                    )
-                    == "—"
-                    else "❌"
-                ),
-                "Проблема": _record_overview_problem_text(
-                    record,
-                    pilot=pilot_by_parent_key.get(
-                        pilot_parent_key_for_record(record)
-                    ),
-                    wellhead_z_tolerance_m=wellhead_z_tolerance_m,
-                ),
+                "Статус": "✅" if problem == "—" else "❌",
+                "Проблема": problem,
             }
-            for record in visible_records
-        ],
-        columns=list(_OVERVIEW_COLUMNS),
-    )
+        )
+    return pd.DataFrame(rows, columns=list(_OVERVIEW_COLUMNS))
 
 
 def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
@@ -112,8 +99,7 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
     for record in records:
         point_count = len(tuple(record.points))
         explicit_labels = tuple(
-            str(label).strip()
-            for label in (getattr(record, "point_labels", ()) or ())
+            str(label).strip() for label in (getattr(record, "point_labels", ()) or ())
         )
         use_explicit_labels = (
             bool(explicit_labels)
@@ -131,7 +117,9 @@ def raw_records_dataframe(records: list[WelltrackRecord]) -> pd.DataFrame:
                             index,
                             is_pilot=is_pilot_record(record),
                             is_zbs=is_zbs_record(record),
-                            multi_level_count=_record_multi_horizontal_level_count(record),
+                            multi_level_count=_record_multi_horizontal_level_count(
+                                record
+                            ),
                         )
                     ),
                     "X, м": float(point.x),
@@ -195,13 +183,23 @@ def _record_t1_t3_length_m(record: WelltrackRecord) -> float | None:
         return None
     sequence_points = target_sequence_points_from_record(record)
     if len(sequence_points) >= 2:
+        try:
+            has_horizontal_start = ordinary_record_target_layout(
+                record
+            ).target_sequence_has_horizontal_start
+        except ValueError:
+            return None
+        if has_horizontal_start and len(sequence_points) >= 3:
+            sequence_points = sequence_points[1:]
         return float(
             sum(
                 math.dist(
                     (float(left.x), float(left.y), float(left.z)),
                     (float(right.x), float(right.y), float(right.z)),
                 )
-                for left, right in zip(sequence_points, sequence_points[1:], strict=False)
+                for left, right in zip(
+                    sequence_points, sequence_points[1:], strict=False
+                )
             )
         )
     try:
@@ -254,8 +252,7 @@ def record_first_point_is_surface_like(
 def record_has_strictly_increasing_md(record: WelltrackRecord) -> bool:
     md_values = [float(point.md) for point in tuple(record.points)]
     return all(
-        left < right
-        for left, right in zip(md_values, md_values[1:], strict=False)
+        left < right for left, right in zip(md_values, md_values[1:], strict=False)
     )
 
 
@@ -321,6 +318,17 @@ def record_import_problem_text(
                 "Для многопластовой скважины после `S` ожидаются полные пары "
                 "`N_t1/N_t3`."
             )
+    if (
+        target_count >= 2
+        and not is_pilot_record(record)
+        and not is_zbs_record(record)
+        and bool(tuple(getattr(record, "point_labels", ()) or ()))
+        and record_has_finite_points(record)
+    ):
+        try:
+            ordinary_record_target_layout(record)
+        except ValueError as exc:
+            problems.append(str(exc))
     if is_pilot_record(record):
         pilot_problem = pilot_record_problem_text(record)
         if pilot_problem != "—":

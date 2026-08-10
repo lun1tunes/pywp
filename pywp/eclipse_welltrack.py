@@ -786,7 +786,17 @@ def _ordered_table_target_sequence_point_names(
     if len(target_indices) < 2:
         return None
     max_index = int(target_indices[-1])
-    expected_indices = list(range(1, max_index + 1))
+    has_horizontal_start = 2 in target_indices
+    if has_horizontal_start and max_index < 3:
+        raise WelltrackParseError(
+            "Табличный WELLTRACK: для скважины "
+            f"'{well_name}' при наличии t2 обязательна точка t3."
+        )
+    expected_indices = (
+        list(range(1, max_index + 1))
+        if has_horizontal_start
+        else [1, *range(3, max_index + 1)]
+    )
     missing = [index for index in expected_indices if index not in target_indices]
     if missing:
         raise WelltrackParseError(
@@ -803,8 +813,8 @@ def _ordered_table_target_sequence_point_names(
     if extra:
         raise WelltrackParseError(
             "Табличный WELLTRACK: для скважины "
-            f"'{well_name}' используйте либо S/t1/t3, либо полную последовательность "
-            "S/t1/t2/t3/... без посторонних точек. "
+            f"'{well_name}' используйте либо S/t1/t3, либо последовательность "
+            "S/t1/t2/t3/... или S/t1/t3/t4/... без посторонних точек. "
             f"Лишние точки: {', '.join(extra)}."
         )
     return ("wellhead", *(f"t{index}" for index in expected_indices))

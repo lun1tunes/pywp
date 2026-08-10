@@ -55,6 +55,34 @@ def test_records_overview_dataframe_uses_status_icons_and_problem_text() -> None
     assert "Не хватает одной из точек" in str(overview_df.iloc[1]["Проблема"])
 
 
+def test_records_overview_rejects_explicit_t1_t2_without_t3() -> None:
+    malformed = _record().model_copy(update={"point_labels": ("S", "t1", "t2")})
+
+    overview_df = target_records.records_overview_dataframe([malformed])
+
+    assert target_records.record_is_ready_for_calc(malformed) is False
+    assert str(overview_df.iloc[0]["Статус"]) == "❌"
+    assert "S/t1/t2/t3" in str(overview_df.iloc[0]["Проблема"])
+
+
+def test_records_overview_rejects_mixed_explicit_target_layout() -> None:
+    malformed = _record(
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1000.0, md=1.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1000.0, md=2.0),
+            WelltrackPoint(x=700.0, y=0.0, z=1010.0, md=3.0),
+            WelltrackPoint(x=1100.0, y=0.0, z=1010.0, md=4.0),
+        ),
+    ).model_copy(update={"point_labels": ("S", "t1", "1_t3", "2_t1", "2_t3")})
+
+    overview_df = target_records.records_overview_dataframe([malformed])
+
+    assert target_records.record_is_ready_for_calc(malformed) is False
+    assert str(overview_df.iloc[0]["Статус"]) == "❌"
+    assert "полные пары" in str(overview_df.iloc[0]["Проблема"])
+
+
 def test_records_overview_dataframe_recalculates_t1_metrics_after_t1_t3_swap() -> None:
     source = _record(
         "BAD-ORDER",
@@ -245,7 +273,9 @@ def test_zbs_record_is_ready_with_t1_t3_without_surface() -> None:
     assert list(raw_df["Точка"]) == ["t1", "t3"]
 
 
-def test_alt_branch_record_with_surface_is_treated_as_regular_branch_with_pilot() -> None:
+def test_alt_branch_record_with_surface_is_treated_as_regular_branch_with_pilot() -> (
+    None
+):
     branch = _record(
         "well_04_2",
         points=(
@@ -312,8 +342,7 @@ def test_multi_horizontal_zbs_record_is_ready_and_labeled_by_levels() -> None:
     assert int(overview_df.iloc[0]["Точек"]) == 4
     assert float(overview_df.iloc[0]["Длина ГС, м"]) == pytest.approx(1050.0)
     assert str(overview_df.iloc[0]["Примечание"]) == (
-        "Боковой ствол от факта: нужна скважина 9010; "
-        "Многопластовая: 2 уровней"
+        "Боковой ствол от факта: нужна скважина 9010; Многопластовая: 2 уровней"
     )
     assert list(raw_df["Точка"]) == ["1_t1", "1_t3", "2_t1", "2_t3"]
 
@@ -404,9 +433,7 @@ def test_records_overview_hides_pilot_row_but_reports_pilot_problem_on_parent() 
     )
     pilot = _record(
         "well_04_PL",
-        points=(
-            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),
-        ),
+        points=(WelltrackPoint(x=0.0, y=0.0, z=0.0, md=1.0),),
     )
 
     overview_df = target_records.records_overview_dataframe([parent, pilot])

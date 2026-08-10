@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Callable, Mapping, Sequence
 
 import pandas as pd
@@ -15,7 +16,6 @@ from pywp.uncertainty import (
     build_uncertainty_overlay,
     normalize_uncertainty_preset,
     planning_uncertainty_model_for_preset,
-    uncertainty_model_caption,
     uncertainty_preset_label,
 )
 from pywp.ui_utils import arrow_safe_text_dataframe, dls_to_pi, format_distance
@@ -163,19 +163,34 @@ def _summary_float_or_none(value: object) -> float | None:
         return None
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return result if pd.notna(result) else None
+    return result if math.isfinite(result) else None
 
 
 def md_postcheck_issue_message(summary: Mapping[str, float | str]) -> str:
-    md_postcheck_excess_m = float(summary.get("md_postcheck_excess_m", 0.0))
+    md_postcheck_excess_m = (
+        _summary_float_or_none(summary.get("md_postcheck_excess_m")) or 0.0
+    )
     if md_postcheck_excess_m <= 1e-6:
         return ""
+    checked_md_m = _summary_float_or_none(summary.get("total_drilled_md_m"))
+    if checked_md_m is None:
+        checked_md_m = _summary_float_or_none(summary.get("md_total_m"))
+    md_limit_m = _summary_float_or_none(summary.get("max_total_md_postcheck_m"))
+    if checked_md_m is None and md_limit_m is not None:
+        checked_md_m = md_limit_m + md_postcheck_excess_m
+    if md_limit_m is None and checked_md_m is not None:
+        md_limit_m = max(0.0, checked_md_m - md_postcheck_excess_m)
+    if checked_md_m is None or md_limit_m is None:
+        return (
+            "Превышен лимит итоговой MD (постпроверка): "
+            f"+{md_postcheck_excess_m:.2f} м."
+        )
     return (
         "Превышен лимит итоговой MD (постпроверка): "
-        f"{float(summary.get('md_total_m', 0.0)):.2f} м > "
-        f"{float(summary.get('max_total_md_postcheck_m', 0.0)):.2f} м "
+        f"{checked_md_m:.2f} м > "
+        f"{md_limit_m:.2f} м "
         f"(+{md_postcheck_excess_m:.2f} м)."
     )
 

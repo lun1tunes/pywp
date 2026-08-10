@@ -37,6 +37,7 @@ from pywp.models import (
 from pywp.multi_horizontal import (
     _direction_angles_between,
     _linear_hold_rows,
+    _minimum_curvature_path_max_z_m,
     _row_state,
     _row_state_from_payload,
     _smooth_transition_rows,
@@ -380,12 +381,21 @@ class TrajectoryPlanner:
         config: TrajectoryConfig,
         progress_callback: ProgressCallback | None = None,
         optimization_context: AntiCollisionOptimizationContext | None = None,
+        horizontal_start_at_second_target: bool = False,
+        target_numbers: tuple[int, ...] | list[int] | None = None,
     ) -> PlannerResult:
         ordered_targets = tuple(targets)
-        if len(ordered_targets) < 2:
-            raise PlanningError(
-                "Последовательность целей должна содержать как минимум две точки (t1 и t2)."
-            )
+        ordered_target_numbers = _validated_target_sequence_numbers(
+            target_count=len(ordered_targets),
+            target_numbers=target_numbers,
+            horizontal_start_at_second_target=horizontal_start_at_second_target,
+        )
+        _validate_target_sequence_geometry(
+            targets=ordered_targets,
+            target_numbers=ordered_target_numbers,
+            horizontal_start_at_second_target=horizontal_start_at_second_target,
+            config=config,
+        )
         if len(ordered_targets) == 2:
             return self.plan(
                 surface=surface,
@@ -422,6 +432,12 @@ class TrajectoryPlanner:
                 start_fraction=0.60,
                 end_fraction=1.00,
             ),
+            horizontal_start_at_second_target=horizontal_start_at_second_target,
+            target_numbers=(
+                ordered_target_numbers
+                if target_numbers is not None or horizontal_start_at_second_target
+                else None
+            ),
         )
 
 
@@ -441,6 +457,267 @@ def _target_sequence_error(message: str) -> PlanningError:
     return PlanningError(f"Последовательность целей: {text}")
 
 
+def _coerce_target_sequence_numbers(
+    target_numbers: tuple[int, ...] | list[int],
+) -> tuple[int, ...]:
+    """Convert runtime inputs without silently truncating fractional labels."""
+
+    result: list[int] = []
+    for index, raw_number in enumerate(tuple(target_numbers), start=1):
+        if isinstance(raw_number, bool):
+            raise PlanningError(
+                "Последовательность целей: номера tN должны быть целыми числами "
+                f"(ошибка в позиции {index})."
+            )
+        try:
+            numeric = float(raw_number)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise PlanningError(
+                "Последовательность целей: номера tN должны быть целыми числами "
+                f"(ошибка в позиции {index})."
+            ) from exc
+        if not np.isfinite(numeric) or not numeric.is_integer():
+            raise PlanningError(
+                "Последовательность целей: номера tN должны быть целыми числами "
+                f"(ошибка в позиции {index})."
+            )
+        result.append(int(numeric))
+    return tuple(result)
+
+
+def _validated_target_sequence_numbers(
+    *,
+    target_count: int,
+    target_numbers: tuple[int, ...] | list[int] | None,
+    horizontal_start_at_second_target: bool,
+) -> tuple[int, ...]:
+    """Validate the label contract before invoking the trajectory solver.
+
+    A labeled input with ``t2`` is the explicit horizontal-start mode and must
+    be contiguous ``t1,t2,t3,...``.  An explicitly labeled input without ``t2``
+    must use ``t1,t3,t4,...``.  ``None`` remains a backward-compatible
+    positional API for callers that do not carry point labels.
+    """
+
+    count = int(target_count)
+    if count < 2:
+        raise PlanningError(
+            "Последовательность целей должна содержать как минимум две точки (t1 и t3)."
+        )
+    if horizontal_start_at_second_target and count < 3:
+        raise PlanningError(
+            "Для режима начала горизонтального ствола в t2 нужны точки t1, t2 и t3."
+        )
+
+    labels_are_explicit = target_numbers is not None
+    if labels_are_explicit:
+        try:
+            raw_numbers = tuple(target_numbers) if target_numbers is not None else ()
+        except TypeError as exc:
+            raise PlanningError(
+                "Последовательность целей: номера tN должны быть переданы "
+                "как последовательность целых чисел."
+            ) from exc
+        numbers = _coerce_target_sequence_numbers(raw_numbers)
+    else:
+        # The unlabeled Python API historically used positional target numbers.
+        # Keep that behavior; table/WELLTRACK callers always pass explicit labels.
+        numbers = tuple(range(1, count + 1))
+
+    if len(numbers) != count:
+        raise PlanningError(
+            "Последовательность целей: число меток целей не совпадает с числом точек."
+        )
+    if any(number <= 0 for number in numbers):
+        raise PlanningError(
+            "Последовательность целей: номера tN должны быть положительными."
+        )
+
+    if horizontal_start_at_second_target:
+        expected = tuple(range(1, count + 1))
+        if numbers != expected:
+            raise PlanningError(
+                "Последовательность целей: режим начала горизонтального ствола "
+                "требует непрерывную последовательность t1,t2,t3,... без пропусков."
+            )
+        return numbers
+
+    if labels_are_explicit:
+        expected = (1, *range(3, count + 2))
+        if numbers != expected:
+            raise PlanningError(
+                "Последовательность целей: без t2 допустима только последовательность "
+                "t1,t3,t4,... без пропусков."
+            )
+    return numbers
+
+
+def _target_sequence_prefix_through_t1(
+    stations: pd.DataFrame,
+    *,
+    md_t1_m: object,
+) -> pd.DataFrame:
+    try:
+        resolved_md_t1_m = float(md_t1_m)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PlanningError(
+            "Последовательность целей: базовая траектория содержит "
+            "некорректный MD станции t1."
+        ) from exc
+    if not np.isfinite(resolved_md_t1_m) or resolved_md_t1_m < -SMALL:
+        raise PlanningError(
+            "Последовательность целей: базовая траектория содержит "
+            "некорректный MD станции t1."
+        )
+    try:
+        md_values = stations["MD_m"].to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise PlanningError(
+            "Последовательность целей: базовая траектория не содержит "
+            "корректную станцию t1."
+        ) from exc
+    if len(md_values) == 0 or np.any(~np.isfinite(md_values)):
+        raise PlanningError(
+            "Последовательность целей: базовая траектория не содержит "
+            "корректную станцию t1."
+        )
+    if float(md_values[0]) < -SMALL:
+        raise PlanningError(
+            "Последовательность целей: MD базовой траектории должен быть "
+            "неотрицательным."
+        )
+    if len(md_values) > 1 and np.any(np.diff(md_values) <= SMALL):
+        raise PlanningError(
+            "Последовательность целей: MD базовой траектории должен строго возрастать."
+        )
+    t1_index = int(np.argmin(np.abs(md_values - resolved_md_t1_m)))
+    if abs(float(md_values[t1_index]) - resolved_md_t1_m) > 1e-4:
+        raise PlanningError(
+            "Последовательность целей: в базовой траектории отсутствует "
+            f"точная станция t1 на MD {resolved_md_t1_m:.3f} м."
+        )
+    return stations.iloc[: t1_index + 1].copy().reset_index(drop=True)
+
+
+def _target_sequence_continuous_floor_excess_m(
+    stations: pd.DataFrame,
+    *,
+    max_z_m: float,
+) -> float:
+    """Check TVD continuously for a minimum-curvature survey prefix."""
+
+    continuous_max_z_m = _minimum_curvature_path_max_z_m(stations)
+    return float(max(0.0, continuous_max_z_m - float(max_z_m)))
+
+
+def _validate_horizontal_start_targets(
+    *,
+    targets: tuple[Point3D, ...],
+    max_z_m: float,
+) -> None:
+    deeper_targets = [
+        index
+        for index, target in enumerate(targets, start=1)
+        if float(target.z) > float(max_z_m) + 1e-6
+    ]
+    if not deeper_targets:
+        return
+    labels = ", ".join(f"t{index}" for index in deeper_targets)
+    raise PlanningError(
+        "Последовательность целей: режим начала горизонтального ствола в t2 "
+        f"запрещает TVD ниже t2={float(max_z_m):.2f} м; глубже расположены {labels}."
+    )
+
+
+def _validate_target_sequence_geometry(
+    *,
+    targets: tuple[Point3D, ...],
+    target_numbers: tuple[int, ...],
+    horizontal_start_at_second_target: bool,
+    config: TrajectoryConfig,
+) -> None:
+    for index, (left, right) in enumerate(zip(targets, targets[1:], strict=False)):
+        distance_m = float(
+            np.linalg.norm(
+                np.asarray(
+                    [
+                        float(right.x) - float(left.x),
+                        float(right.y) - float(left.y),
+                        float(right.z) - float(left.z),
+                    ],
+                    dtype=float,
+                )
+            )
+        )
+        if distance_m <= SMALL:
+            raise PlanningError(
+                "Последовательность целей: участок "
+                f"t{target_numbers[index]}→t{target_numbers[index + 1]} "
+                "имеет нулевую длину."
+            )
+
+    if not horizontal_start_at_second_target:
+        return
+    horizontal_start = targets[1]
+    _validate_horizontal_start_targets(
+        targets=targets,
+        max_z_m=float(horizontal_start.z),
+    )
+    horizontal_inc_deg, _ = _direction_angles_between(horizontal_start, targets[2])
+    if horizontal_inc_deg > float(config.max_inc_deg) + 1e-6:
+        raise PlanningError(
+            "Последовательность целей: участок t2→t3 требует INC "
+            f"{horizontal_inc_deg:.2f}°, что выше ограничения "
+            f"{float(config.max_inc_deg):.2f}°."
+        )
+
+
+def _target_sequence_transition_rows(
+    *,
+    current: dict[str, float],
+    target: Point3D,
+    target_inc_deg: float,
+    target_azi_deg: float,
+    transition_number: int,
+    config: TrajectoryConfig,
+    max_z_m: float | None,
+) -> list[dict[str, object]]:
+    current_point = _point3d_from_state(current)
+    direct_inc_deg, direct_azi_deg = _direction_angles_between(current_point, target)
+    start_matches_direct = (
+        abs(float(current["inc_deg"]) - direct_inc_deg) <= 1e-3
+        and abs(
+            _shortest_azimuth_delta_deg(
+                float(current["azi_deg"]),
+                direct_azi_deg,
+            )
+        )
+        <= 1e-3
+    )
+    end_matches_direct = (
+        abs(float(target_inc_deg) - direct_inc_deg) <= 1e-3
+        and abs(_shortest_azimuth_delta_deg(target_azi_deg, direct_azi_deg)) <= 1e-3
+    )
+    if start_matches_direct and end_matches_direct:
+        return _linear_hold_rows(
+            current=current,
+            target=target,
+            inc_deg=direct_inc_deg,
+            azi_deg=direct_azi_deg,
+            segment_name=f"HORIZONTAL{transition_number + 1}",
+            config=config,
+        )
+    return _smooth_transition_rows(
+        current=current,
+        target=target,
+        target_inc_deg=target_inc_deg,
+        target_azi_deg=target_azi_deg,
+        segment_name=f"HORIZONTAL_BUILD{transition_number}",
+        config=config,
+        max_z_m=max_z_m,
+    )
+
+
 def extend_plan_with_target_sequence(
     *,
     base_result: PlannerResult,
@@ -448,13 +725,25 @@ def extend_plan_with_target_sequence(
     config: TrajectoryConfig,
     progress_callback: ProgressCallback | None = None,
     trajectory_type: str | None = "Target sequence",
+    horizontal_start_at_second_target: bool = False,
+    target_numbers: tuple[int, ...] | list[int] | None = None,
 ) -> PlannerResult:
     ordered_targets = tuple(targets)
-    if len(ordered_targets) < 2:
-        raise PlanningError(
-            "Последовательность целей должна содержать как минимум две точки (t1 и t2)."
-        )
+    ordered_target_numbers = _validated_target_sequence_numbers(
+        target_count=len(ordered_targets),
+        target_numbers=target_numbers,
+        horizontal_start_at_second_target=horizontal_start_at_second_target,
+    )
+    _validate_target_sequence_geometry(
+        targets=ordered_targets,
+        target_numbers=ordered_target_numbers,
+        horizontal_start_at_second_target=horizontal_start_at_second_target,
+        config=config,
+    )
 
+    reference_stations = getattr(base_result.stations, "attrs", {}).get(
+        "uncertainty_reference_stations"
+    )
     stations = pd.DataFrame(base_result.stations).copy().reset_index(drop=True)
     if stations.empty:
         raise PlanningError("Последовательность целей: базовая траектория пуста.")
@@ -467,12 +756,112 @@ def extend_plan_with_target_sequence(
         )
 
     rows: list[dict[str, object]] = []
-    current = _row_state(stations.iloc[-1])
-    extension_targets = ordered_targets[2:]
+    horizontal_start_floor_m: float | None = None
+    horizontal_start_md_m: float | None = None
+    horizontal_start_inc_deg: float | None = None
+    horizontal_start_azi_deg: float | None = None
+    base_lateral_end_md_m: float | None = None
+    extension_start_index = 2
+
+    if horizontal_start_at_second_target:
+        horizontal_start = ordered_targets[1]
+        first_horizontal_target = ordered_targets[2]
+        horizontal_start_floor_m = float(horizontal_start.z)
+        _validate_horizontal_start_targets(
+            targets=ordered_targets,
+            max_z_m=horizontal_start_floor_m,
+        )
+        stations = _target_sequence_prefix_through_t1(
+            stations,
+            md_t1_m=base_result.md_t1_m,
+        )
+        prefix_floor_excess_m = _target_sequence_continuous_floor_excess_m(
+            stations,
+            max_z_m=horizontal_start_floor_m,
+        )
+        if (
+            isinstance(reference_stations, pd.DataFrame)
+            and not reference_stations.empty
+        ):
+            prefix_floor_excess_m = max(
+                prefix_floor_excess_m,
+                _target_sequence_continuous_floor_excess_m(
+                    reference_stations,
+                    max_z_m=horizontal_start_floor_m,
+                ),
+            )
+        if prefix_floor_excess_m > 1e-6:
+            raise PlanningError(
+                "Последовательность целей: базовая траектория до t1 проходит "
+                f"ниже t2 на {prefix_floor_excess_m:.3f} м."
+            )
+
+        current = _row_state(stations.iloc[-1])
+        try:
+            horizontal_inc_deg, horizontal_azi_deg = _direction_angles_between(
+                horizontal_start,
+                first_horizontal_target,
+            )
+            horizontal_start_inc_deg = float(horizontal_inc_deg)
+            horizontal_start_azi_deg = float(horizontal_azi_deg)
+            if horizontal_inc_deg > float(config.max_inc_deg) + 1e-6:
+                raise PlanningError(
+                    "участок t2→t3 требует INC "
+                    f"{horizontal_inc_deg:.2f}°, что выше ограничения "
+                    f"{float(config.max_inc_deg):.2f}°."
+                )
+            _emit_progress(
+                progress_callback,
+                "Планировщик: завершение искривления в t2.",
+                0.05,
+            )
+            transition_rows = _target_sequence_transition_rows(
+                current=current,
+                target=horizontal_start,
+                target_inc_deg=horizontal_inc_deg,
+                target_azi_deg=horizontal_azi_deg,
+                transition_number=1,
+                config=config,
+                max_z_m=horizontal_start_floor_m,
+            )
+            if not transition_rows:
+                raise PlanningError("не удалось построить участок t1→t2.")
+            rows.extend(transition_rows)
+            current = _row_state_from_payload(transition_rows[-1])
+            horizontal_start_md_m = float(current["md_m"])
+
+            _emit_progress(
+                progress_callback,
+                "Планировщик: прямой горизонтальный участок t2→t3.",
+                0.20,
+            )
+            horizontal_rows = _linear_hold_rows(
+                current=current,
+                target=first_horizontal_target,
+                inc_deg=horizontal_inc_deg,
+                azi_deg=horizontal_azi_deg,
+                segment_name="HORIZONTAL1",
+                config=config,
+            )
+            if not horizontal_rows:
+                raise PlanningError("участок t2→t3 имеет нулевую длину.")
+            rows.extend(horizontal_rows)
+            current = _row_state_from_payload(horizontal_rows[-1])
+            base_lateral_end_md_m = float(current["md_m"])
+        except PlanningError as exc:
+            raise _target_sequence_error(str(exc)) from exc
+        extension_start_index = 3
+    if not horizontal_start_at_second_target:
+        current = _row_state(stations.iloc[-1])
+        base_lateral_end_md_m = float(current["md_m"])
+
+    extension_targets = ordered_targets[extension_start_index:]
     extension_count = len(extension_targets)
 
     for extension_index, target in enumerate(extension_targets, start=1):
-        label = f"t{extension_index + 2}"
+        target_index = extension_start_index + extension_index - 1
+        target_number = ordered_target_numbers[target_index]
+        label = f"t{target_number}"
         segment_progress = 0.05 + 0.85 * (
             float(extension_index - 1) / float(max(extension_count, 1))
         )
@@ -496,43 +885,15 @@ def extend_plan_with_target_sequence(
                     next_target,
                 )
 
-            direct_inc_deg, direct_azi_deg = _direction_angles_between(
-                current_point,
-                target,
+            segment_rows = _target_sequence_transition_rows(
+                current=current,
+                target=target,
+                target_inc_deg=target_inc_deg,
+                target_azi_deg=target_azi_deg,
+                transition_number=target_index - 1,
+                config=config,
+                max_z_m=horizontal_start_floor_m,
             )
-            start_matches_direct = (
-                abs(float(current["inc_deg"]) - direct_inc_deg) <= 1e-3
-                and abs(
-                    _shortest_azimuth_delta_deg(
-                        float(current["azi_deg"]),
-                        direct_azi_deg,
-                    )
-                )
-                <= 1e-3
-            )
-            end_matches_direct = (
-                abs(float(target_inc_deg) - direct_inc_deg) <= 1e-3
-                and abs(_shortest_azimuth_delta_deg(target_azi_deg, direct_azi_deg))
-                <= 1e-3
-            )
-            if start_matches_direct and end_matches_direct:
-                segment_rows = _linear_hold_rows(
-                    current=current,
-                    target=target,
-                    inc_deg=direct_inc_deg,
-                    azi_deg=direct_azi_deg,
-                    segment_name=f"HORIZONTAL{extension_index + 1}",
-                    config=config,
-                )
-            else:
-                segment_rows = _smooth_transition_rows(
-                    current=current,
-                    target=target,
-                    target_inc_deg=target_inc_deg,
-                    target_azi_deg=target_azi_deg,
-                    segment_name=f"HORIZONTAL_BUILD{extension_index}",
-                    config=config,
-                )
         except PlanningError as exc:
             raise _target_sequence_error(str(exc)) from exc
         if not segment_rows:
@@ -554,6 +915,28 @@ def extend_plan_with_target_sequence(
         )
     except PlanningError as exc:
         raise _target_sequence_error(str(exc)) from exc
+    horizontal_start_floor_excess_m = 0.0
+    if horizontal_start_floor_m is not None:
+        horizontal_start_floor_excess_m = _target_sequence_continuous_floor_excess_m(
+            stations,
+            max_z_m=horizontal_start_floor_m,
+        )
+        if (
+            isinstance(reference_stations, pd.DataFrame)
+            and not reference_stations.empty
+        ):
+            horizontal_start_floor_excess_m = max(
+                horizontal_start_floor_excess_m,
+                _target_sequence_continuous_floor_excess_m(
+                    reference_stations,
+                    max_z_m=horizontal_start_floor_m,
+                ),
+            )
+        if horizontal_start_floor_excess_m > 1e-6:
+            raise PlanningError(
+                "Последовательность целей: построенная траектория проходит "
+                f"ниже t2 на {horizontal_start_floor_excess_m:.3f} м."
+            )
 
     summary = dict(base_result.summary)
     final_target = ordered_targets[-1]
@@ -571,7 +954,15 @@ def extend_plan_with_target_sequence(
     summary_updates: dict[str, object] = {
         "target_sequence": "yes",
         "target_sequence_point_count": int(len(ordered_targets)),
-        "horizontal_length_m": _target_sequence_length_m(ordered_targets),
+        "target_sequence_base_lateral_end_md_m": float(base_lateral_end_md_m),
+        "target_sequence_horizontal_start": (
+            "yes" if horizontal_start_at_second_target else "no"
+        ),
+        "horizontal_length_m": _target_sequence_length_m(
+            ordered_targets[1:]
+            if horizontal_start_at_second_target
+            else ordered_targets
+        ),
         "hold_azimuth_deg": final_azimuth_deg,
         "max_inc_actual_deg": max_inc,
         "max_dls_total_deg_per_30m": max_dls,
@@ -590,9 +981,44 @@ def extend_plan_with_target_sequence(
         "t3_miss_dy_m": 0.0,
         "t3_miss_dz_m": 0.0,
     }
+    if horizontal_start_at_second_target:
+        horizontal_start = ordered_targets[1]
+        summary_updates.update(
+            {
+                "horizontal_start_target": "t2",
+                "horizontal_start_x_m": float(horizontal_start.x),
+                "horizontal_start_y_m": float(horizontal_start.y),
+                "horizontal_start_z_m": float(horizontal_start.z),
+                "horizontal_start_md_m": float(horizontal_start_md_m or 0.0),
+                "horizontal_start_inc_deg": float(horizontal_start_inc_deg or 0.0),
+                "horizontal_start_azi_deg": float(horizontal_start_azi_deg or 0.0),
+                "horizontal_start_straight_to_t3": "yes",
+                "horizontal_start_z_floor_enforced": "yes",
+                "horizontal_start_z_floor_max_excess_m": float(
+                    horizontal_start_floor_excess_m
+                ),
+            }
+        )
     if resolved_trajectory_type is not None:
         summary_updates["trajectory_type"] = resolved_trajectory_type
+    if str(resolved_trajectory_type or "").strip().upper() == "PILOT_SIDETRACK":
+        try:
+            sidetrack_window_md_m = float(summary.get("sidetrack_window_md_m"))
+        except (TypeError, ValueError, OverflowError):
+            sidetrack_window_md_m = float("nan")
+        if (
+            np.isfinite(sidetrack_window_md_m)
+            and float(base_lateral_end_md_m) > sidetrack_window_md_m + SMALL
+        ):
+            # In t1,t2,t3 mode the initial sidetrack solver ends at t2, while
+            # t3 still belongs to the base productive branch.  Later t4...tN
+            # targets must not move this drilled-lateral accounting boundary.
+            summary_updates["sidetrack_lateral_md_m"] = float(
+                base_lateral_end_md_m - sidetrack_window_md_m
+            )
     summary.update(summary_updates)
+    if isinstance(reference_stations, pd.DataFrame):
+        stations.attrs["uncertainty_reference_stations"] = reference_stations.copy()
     _emit_progress(progress_callback, "Планировщик: результат готов.", 1.00)
     return PlannerResult(
         stations=stations,
@@ -1247,11 +1673,14 @@ def _variable_j_build_endpoint(
         return None
     if dls1 <= SMALL or dls2 <= SMALL:
         return None
-    if _azimuth_shortest_arc_excess_deg(
-        float(geometry.azimuth_surface_t1_deg),
-        float(az_mid_deg),
-        float(geometry.azimuth_entry_deg),
-    ) > VARIABLE_J_AZIMUTH_EXCESS_TOLERANCE_DEG:
+    if (
+        _azimuth_shortest_arc_excess_deg(
+            float(geometry.azimuth_surface_t1_deg),
+            float(az_mid_deg),
+            float(geometry.azimuth_entry_deg),
+        )
+        > VARIABLE_J_AZIMUTH_EXCESS_TOLERANCE_DEG
+    ):
         return None
 
     length1_m = _build_length_from_dls(
@@ -1629,7 +2058,9 @@ def _solve_turn_profile(
                 )
             else:
                 optimization_mode = str(config.optimization_mode)
-                objective_value = _optimization_objective_value(selected, optimization_mode)
+                objective_value = _optimization_objective_value(
+                    selected, optimization_mode
+                )
                 lower_bound = (
                     0.0
                     if optimization_mode == OPTIMIZATION_NONE
@@ -1861,7 +2292,9 @@ def _solve_turn_profile(
             )
             if de_result.success and np.all(np.isfinite(de_result.x)):
                 seed_vectors = [
-                    _clip_to_bounds(np.asarray(de_result.x, dtype=float), bounds=bounds),
+                    _clip_to_bounds(
+                        np.asarray(de_result.x, dtype=float), bounds=bounds
+                    ),
                     *seed_vectors,
                 ]
         elif str(config.turn_solver_mode) != TURN_SOLVER_LEAST_SQUARES:
@@ -2658,9 +3091,7 @@ def _is_md_boundary_extremum_candidate(
             float(candidate.dls_build1_deg_per_30m) - float(build_dls_upper_deg_per_30m)
         )
         <= MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE
-        and abs(
-            float(candidate.dls_build2_deg_per_30m) - build2_upper
-        )
+        and abs(float(candidate.dls_build2_deg_per_30m) - build2_upper)
         <= MD_BOUNDARY_EXTREMUM_BUILD_TOLERANCE
         and abs(float(candidate.kop_vertical_m) - float(kop_lower_m))
         <= MD_BOUNDARY_EXTREMUM_KOP_TOLERANCE_M
@@ -3159,33 +3590,43 @@ def _select_anti_collision_candidate(
                 constraints=[
                     {
                         "type": "ineq",
-                        "fun": lambda values_reduced: evaluate(
-                            expand_reduced(np.asarray(values_reduced, dtype=float))
-                        )[0].t1_margin_m,
+                        "fun": lambda values_reduced: (
+                            evaluate(
+                                expand_reduced(np.asarray(values_reduced, dtype=float))
+                            )[0].t1_margin_m
+                        ),
                     },
                     {
                         "type": "ineq",
-                        "fun": lambda values_reduced: evaluate(
-                            expand_reduced(np.asarray(values_reduced, dtype=float))
-                        )[0].build1_margin_m,
+                        "fun": lambda values_reduced: (
+                            evaluate(
+                                expand_reduced(np.asarray(values_reduced, dtype=float))
+                            )[0].build1_margin_m
+                        ),
                     },
                     {
                         "type": "ineq",
-                        "fun": lambda values_reduced: evaluate(
-                            expand_reduced(np.asarray(values_reduced, dtype=float))
-                        )[0].build2_margin_m,
+                        "fun": lambda values_reduced: (
+                            evaluate(
+                                expand_reduced(np.asarray(values_reduced, dtype=float))
+                            )[0].build2_margin_m
+                        ),
                     },
                     {
                         "type": "ineq",
-                        "fun": lambda values_reduced: evaluate(
-                            expand_reduced(np.asarray(values_reduced, dtype=float))
-                        )[0].max_inc_margin_deg,
+                        "fun": lambda values_reduced: (
+                            evaluate(
+                                expand_reduced(np.asarray(values_reduced, dtype=float))
+                            )[0].max_inc_margin_deg
+                        ),
                     },
                     {
                         "type": "ineq",
-                        "fun": lambda values_reduced: evaluate(
-                            expand_reduced(np.asarray(values_reduced, dtype=float))
-                        )[0].horizontal_dls_margin_deg_per_30m,
+                        "fun": lambda values_reduced: (
+                            evaluate(
+                                expand_reduced(np.asarray(values_reduced, dtype=float))
+                            )[0].horizontal_dls_margin_deg_per_30m
+                        ),
                     },
                 ],
                 options={
@@ -3463,9 +3904,7 @@ def _evaluate_profile_candidate(
             vertical_m=miss_t1_vertical_m,
             config=config,
         ),
-        build1_margin_m=float(
-            candidate.build1_length_m - min_structural_segment_m
-        ),
+        build1_margin_m=float(candidate.build1_length_m - min_structural_segment_m),
         build2_margin_m=_optional_structural_segment_margin_m(
             length_m=float(candidate.build2_length_m),
             min_length_m=min_structural_segment_m,
@@ -4054,9 +4493,7 @@ def _recover_turn_profile_from_build_and_kop(
         np.array(
             [inc_seed_default, float(geometry.azimuth_surface_t1_deg)], dtype=float
         ),
-        np.array(
-            [inc_seed_default, float(geometry.azimuth_entry_deg)], dtype=float
-        ),
+        np.array([inc_seed_default, float(geometry.azimuth_entry_deg)], dtype=float),
     ]
 
     bounds_lower = np.array([min_hold_inc, 0.0], dtype=float)
@@ -4083,7 +4520,9 @@ def _recover_turn_profile_from_build_and_kop(
             probes = [clipped_seed]
             if bool(solution.success) and np.all(np.isfinite(solution.x)):
                 probes.append(
-                    np.clip(np.asarray(solution.x, dtype=float), bounds_lower, bounds_upper)
+                    np.clip(
+                        np.asarray(solution.x, dtype=float), bounds_lower, bounds_upper
+                    )
                 )
 
             for probe in probes:
@@ -4242,9 +4681,9 @@ def _two_dimensional_md_refine_candidates(
         lambda values: evaluate(np.asarray(values, dtype=float)).build1_margin_m,
         lambda values: evaluate(np.asarray(values, dtype=float)).build2_margin_m,
         lambda values: evaluate(np.asarray(values, dtype=float)).max_inc_margin_deg,
-        lambda values: evaluate(
-            np.asarray(values, dtype=float)
-        ).horizontal_dls_margin_deg_per_30m,
+        lambda values: (
+            evaluate(np.asarray(values, dtype=float)).horizontal_dls_margin_deg_per_30m
+        ),
     )
     for seed in seed_vectors:
         seed_pair = _clip_to_bounds(
@@ -4631,9 +5070,7 @@ def _select_feasible_candidate(
                 )
                 < seed_sort_key
             )
-            selected_2d_candidate = (
-                current_best_after_2d if improved else best_seed
-            )
+            selected_2d_candidate = current_best_after_2d if improved else best_seed
             selected_2d_objective = _optimization_objective_value(
                 selected_2d_candidate,
                 optimization_mode,
@@ -4644,9 +5081,7 @@ def _select_feasible_candidate(
                     optimization=OptimizationOutcome(
                         mode=optimization_mode,
                         status=(
-                            "at_md_boundary_extremum"
-                            if improved
-                            else "seed_selected"
+                            "at_md_boundary_extremum" if improved else "seed_selected"
                         ),
                         objective_value=selected_2d_objective,
                         theoretical_lower_bound=lower_bound,
@@ -5366,7 +5801,9 @@ def _slsqp_search_probes(
         return [seed]
 
     reduced_bounds = [bounds[index] for index in free_indices]
-    reduced_seed = np.asarray([float(seed[index]) for index in free_indices], dtype=float)
+    reduced_seed = np.asarray(
+        [float(seed[index]) for index in free_indices], dtype=float
+    )
 
     def expand_reduced(values_reduced: np.ndarray) -> np.ndarray:
         full = seed.copy()

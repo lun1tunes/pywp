@@ -33,6 +33,54 @@ def test_md_postcheck_issue_message_is_empty_without_excess() -> None:
     assert md_postcheck_issue_message(summary) == ""
 
 
+def test_md_postcheck_issue_message_uses_pilot_sidetrack_drilled_md() -> None:
+    summary = {
+        "md_total_m": 1800.0,
+        "total_drilled_md_m": 2200.0,
+        "max_total_md_postcheck_m": 2000.0,
+        "md_postcheck_excess_m": 200.0,
+    }
+
+    message = md_postcheck_issue_message(summary)
+
+    assert "2200.00 м > 2000.00 м" in message
+
+    overflow_message = md_postcheck_issue_message(
+        {
+            "md_total_m": 10**10000,
+            "max_total_md_postcheck_m": 2000.0,
+            "md_postcheck_excess_m": 200.0,
+        }
+    )
+
+    assert "2200.00 м > 2000.00 м" in overflow_message
+    assert "1800.00 м" not in message
+
+
+def test_md_postcheck_issue_message_handles_nonfinite_summary_values() -> None:
+    assert (
+        md_postcheck_issue_message(
+            {
+                "md_total_m": 1800.0,
+                "max_total_md_postcheck_m": 2000.0,
+                "md_postcheck_excess_m": float("nan"),
+            }
+        )
+        == ""
+    )
+
+    message = md_postcheck_issue_message(
+        {
+            "md_total_m": 2200.0,
+            "total_drilled_md_m": "invalid",
+            "max_total_md_postcheck_m": 2000.0,
+            "md_postcheck_excess_m": 200.0,
+        }
+    )
+
+    assert "2200.00 м > 2000.00 м" in message
+
+
 def test_collect_issue_messages_deduplicates_postcheck_message() -> None:
     summary = {
         "md_total_m": 6578.04,

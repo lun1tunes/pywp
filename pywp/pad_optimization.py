@@ -112,6 +112,10 @@ def recalculate_well(
                 surface=surface,
                 targets=layout.target_sequence,
                 config=config,
+                target_numbers=layout.target_sequence_numbers,
+                horizontal_start_at_second_target=(
+                    layout.target_sequence_has_horizontal_start
+                ),
             )
             t3 = layout.final_target
         else:

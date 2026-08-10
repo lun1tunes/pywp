@@ -51,6 +51,7 @@ from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.parallel import process_pool_context
 from pywp.pilot_wells import (
     PilotBuildResult,
+    PilotWindow,
     SidetrackWindowOverride,
     build_pilot_trajectory,
     combine_pilot_and_sidetrack,
@@ -87,9 +88,9 @@ class DynamicClusterExecutionContext:
     uncertainty_model: PlanningUncertaintyModel
     initial_successes: tuple["SuccessfulWellPlan", ...]
     reference_wells: tuple[ImportedTrajectoryWell, ...] = ()
-    reference_uncertainty_models_by_name: Mapping[
-        str, PlanningUncertaintyModel
-    ] | None = None
+    reference_uncertainty_models_by_name: (
+        Mapping[str, PlanningUncertaintyModel] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -100,11 +101,8 @@ class RecordEvaluationResult:
 
 
 def _unpack_record_evaluation(
-    value: RecordEvaluationResult
-    | tuple[dict[str, Any], "SuccessfulWellPlan | None"],
-) -> tuple[
-    dict[str, Any], "SuccessfulWellPlan | None", "SuccessfulWellPlan | None"
-]:
+    value: RecordEvaluationResult | tuple[dict[str, Any], "SuccessfulWellPlan | None"],
+) -> tuple[dict[str, Any], "SuccessfulWellPlan | None", "SuccessfulWellPlan | None"]:
     # Preserve compatibility with tests and integrations that monkeypatch the
     # historical two-item private return value.
     if isinstance(value, RecordEvaluationResult):
@@ -659,7 +657,11 @@ def _evaluate_record_standalone(
             plan_kwargs = {
                 "surface": surface,
                 "targets": layout.target_sequence,
+                "target_numbers": layout.target_sequence_numbers,
                 "config": config,
+                "horizontal_start_at_second_target": (
+                    layout.target_sequence_has_horizontal_start
+                ),
             }
             if optimization_context is not None:
                 plan_kwargs["optimization_context"] = optimization_context
@@ -874,10 +876,22 @@ def _target_miss_warning_message(summary: Mapping[str, object]) -> str:
 def _summary_float(summary: Mapping[str, object], key: str) -> float:
     try:
         value = float(summary.get(key, 0.0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
     if not np.isfinite(value):
         return 0.0
+    return value
+
+
+def _summary_finite_value(summary: Mapping[str, object], key: str) -> float | None:
+    if key not in summary:
+        return None
+    try:
+        value = float(summary.get(key))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not np.isfinite(value):
+        return None
     return value
 
 
@@ -887,38 +901,143 @@ def _refresh_pilot_sidetrack_drilled_md_summary(
     stations: pd.DataFrame,
     config: TrajectoryConfig,
 ) -> SummaryDict:
-    if str(summary.get("trajectory_type", "")).strip() != "PILOT_SIDETRACK":
+    if str(summary.get("trajectory_type", "")).strip() not in {
+        "PILOT_SIDETRACK",
+        "FACT_SIDETRACK",
+    }:
         return summary
 
     refreshed = dict(summary)
     pilot_total_md_m = _summary_float(refreshed, "pilot_total_md_m")
     window_md_m = _summary_float(refreshed, "sidetrack_window_md_m")
     md_total_m = _summary_float(refreshed, "md_total_m")
-    if md_total_m <= 0.0 and "MD_m" in stations.columns and not stations.empty:
+    if "MD_m" in stations.columns and not stations.empty:
         try:
-            md_total_m = float(stations["MD_m"].iloc[-1])
-        except (TypeError, ValueError):
-            md_total_m = 0.0
+            station_md_total_m = float(stations["MD_m"].iloc[-1])
+        except (TypeError, ValueError, OverflowError):
+            station_md_total_m = float("nan")
+        if np.isfinite(station_md_total_m) and station_md_total_m > 0.0:
+            md_total_m = station_md_total_m
     if not np.isfinite(md_total_m):
         md_total_m = 0.0
-    if pilot_total_md_m <= 0.0 or md_total_m <= 0.0:
+    complete_lateral_md_m = md_total_m - window_md_m
+    if (
+        pilot_total_md_m <= 0.0
+        or window_md_m < 0.0
+        or complete_lateral_md_m <= 0.0
+    ):
         return refreshed
 
-    sidetrack_lateral_md_m = max(0.0, md_total_m - window_md_m)
+    existing_lateral_md_m = _summary_finite_value(
+        refreshed,
+        "sidetrack_lateral_md_m",
+    )
+    base_lateral_end_md_m = _summary_finite_value(
+        refreshed,
+        "target_sequence_base_lateral_end_md_m",
+    )
+    lateral_from_base_end_m = (
+        base_lateral_end_md_m - window_md_m
+        if base_lateral_end_md_m is not None
+        and base_lateral_end_md_m <= md_total_m + 1e-6
+        else 0.0
+    )
+    if 0.0 < lateral_from_base_end_m <= complete_lateral_md_m + 1e-6:
+        sidetrack_lateral_md_m = lateral_from_base_end_m
+    elif (
+        existing_lateral_md_m is not None
+        and 0.0 < existing_lateral_md_m <= complete_lateral_md_m + 1e-6
+    ):
+        sidetrack_lateral_md_m = existing_lateral_md_m
+    else:
+        existing_total_drilled_md_m = _summary_finite_value(
+            refreshed,
+            "total_drilled_md_m",
+        )
+        lateral_from_drilled_total_m = (
+            existing_total_drilled_md_m - pilot_total_md_m
+            if existing_total_drilled_md_m is not None
+            else 0.0
+        )
+        if 0.0 < lateral_from_drilled_total_m <= complete_lateral_md_m + 1e-6:
+            sidetrack_lateral_md_m = lateral_from_drilled_total_m
+        else:
+            # md_total_m may include later multi-target extensions; only use it
+            # for legacy summaries without drilled-lateral metadata.
+            sidetrack_lateral_md_m = complete_lateral_md_m
     total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
+    sidetrack_complete_lateral_md_m = complete_lateral_md_m
+    sidetrack_window_optimization_objective_m = (
+        pilot_total_md_m + sidetrack_complete_lateral_md_m
+    )
     md_limit_m = float(config.max_total_md_postcheck_m)
     refreshed.update(
         {
             "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
+            "sidetrack_complete_lateral_md_m": sidetrack_complete_lateral_md_m,
             "pilot_total_md_m": pilot_total_md_m,
             "md_total_m": md_total_m,
             "total_drilled_md_m": total_drilled_md_m,
-            "sidetrack_window_optimization_objective_m": total_drilled_md_m,
+            "sidetrack_window_optimization_objective_m": (
+                sidetrack_window_optimization_objective_m
+            ),
             "max_total_md_postcheck_m": md_limit_m,
             "md_postcheck_excess_m": max(0.0, total_drilled_md_m - md_limit_m),
+            "md_postcheck_exceeded": (
+                "yes" if total_drilled_md_m > md_limit_m + 1e-6 else "no"
+            ),
         }
     )
     return refreshed
+
+
+def _build_complete_sidetrack_candidate(
+    pilot_stations: pd.DataFrame,
+    window: PilotWindow,
+    sidetrack_result: PlannerResult,
+    *,
+    config: TrajectoryConfig,
+    target_sequence: tuple[Point3D, ...] = (),
+    target_sequence_numbers: tuple[int, ...] = (),
+    horizontal_start_at_second_target: bool = False,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+    trajectory_type: str = "PILOT_SIDETRACK",
+) -> PlannerResult:
+    """Assemble and validate the complete productive branch for one window."""
+
+    if target_sequence and target_pairs:
+        raise ValueError(
+            "Кандидат бокового ствола не может одновременно использовать "
+            "последовательность целей и многопластовые пары."
+        )
+    sidetrack = combine_pilot_and_sidetrack(
+        pilot_stations=pilot_stations,
+        sidetrack_result=sidetrack_result,
+        window=window,
+        config=config,
+    )
+    complete_result = PlannerResult(
+        stations=sidetrack.stations,
+        summary=dict(sidetrack.summary),
+        azimuth_deg=float(sidetrack.azimuth_deg),
+        md_t1_m=float(sidetrack.md_t1_m),
+    )
+    if target_sequence:
+        return extend_plan_with_target_sequence(
+            base_result=complete_result,
+            targets=target_sequence,
+            target_numbers=target_sequence_numbers,
+            config=config,
+            trajectory_type=trajectory_type,
+            horizontal_start_at_second_target=horizontal_start_at_second_target,
+        )
+    if len(target_pairs) > 1:
+        return extend_plan_with_multi_horizontal_targets(
+            base_result=complete_result,
+            target_pairs=target_pairs,
+            config=config,
+        )
+    return complete_result
 
 
 def _actual_reference_wells_by_key(
@@ -980,9 +1099,7 @@ class WelltrackBatchPlanner:
             well_name_key(name): override
             for name, override in (sidetrack_window_overrides_by_name or {}).items()
         }
-        actual_reference_wells_by_key = _actual_reference_wells_by_key(
-            reference_wells
-        )
+        actual_reference_wells_by_key = _actual_reference_wells_by_key(reference_wells)
 
         # ------------------------------------------------------------------
         # Parallel fast-path: when workers > 1 and no dynamic cluster
@@ -1292,9 +1409,9 @@ class WelltrackBatchPlanner:
         # Preserve submission order so results come back in the same order.
         ordered_names: list[str] = [str(r.name) for r in selected_records]
         future_to_name: dict[Future, str] = {}
-        results_by_name: dict[str, tuple[dict[str, Any], SuccessfulWellPlan | None]] = (
-            {}
-        )
+        results_by_name: dict[
+            str, tuple[dict[str, Any], SuccessfulWellPlan | None]
+        ] = {}
         has_zbs_records = any(is_zbs_record(record) for record in selected_records)
         reference_well_dicts = (
             tuple(well.model_dump() for well in reference_wells)
@@ -1448,7 +1565,9 @@ class WelltrackBatchPlanner:
                 progress_total=total,
                 completed_offset=0,
             )
-            executed_well_names.extend(str(record.name) for record in first_wave_records)
+            executed_well_names.extend(
+                str(record.name) for record in first_wave_records
+            )
         else:
             for record in first_wave_records:
                 index = len(executed_well_names) + 1
@@ -1557,9 +1676,7 @@ class WelltrackBatchPlanner:
         successes: list[SuccessfulWellPlan] = []
         for record in selected_records:
             name = str(record.name)
-            summary_rows.append(
-                rows_by_name.get(name, self._base_row(record=record))
-            )
+            summary_rows.append(rows_by_name.get(name, self._base_row(record=record)))
             success = success_by_name.get(name)
             if success is not None:
                 successes.append(success)
@@ -2414,10 +2531,7 @@ class WelltrackBatchPlanner:
         actual_reference_wells_by_key: (
             Mapping[str, ImportedTrajectoryWell] | None
         ) = None,
-    ) -> (
-        tuple[dict[str, Any], SuccessfulWellPlan | None]
-        | RecordEvaluationResult
-    ):
+    ) -> tuple[dict[str, Any], SuccessfulWellPlan | None] | RecordEvaluationResult:
         if is_pilot_record(record):
             return self._evaluate_pilot_record(record=record, config=config)
         if is_zbs_record(record):
@@ -2444,9 +2558,7 @@ class WelltrackBatchPlanner:
             success_surface = surface
             started = perf_counter()
             pilot_key = (
-                pilot_name_key_for_record(record)
-                if not is_zbs_record(record)
-                else ""
+                pilot_name_key_for_record(record) if not is_zbs_record(record) else ""
             )
             pilot_success = next(
                 (
@@ -2459,6 +2571,25 @@ class WelltrackBatchPlanner:
             use_pilot_sidetrack = pilot_success is not None
             updated_pilot_success: SuccessfulWellPlan | None = None
             if use_pilot_sidetrack:
+
+                def validate_complete_candidate(
+                    pilot_stations: pd.DataFrame,
+                    window: PilotWindow,
+                    sidetrack_result: PlannerResult,
+                ) -> PlannerResult:
+                    return _build_complete_sidetrack_candidate(
+                        pilot_stations,
+                        window,
+                        sidetrack_result,
+                        config=config,
+                        target_sequence=layout.target_sequence,
+                        target_sequence_numbers=layout.target_sequence_numbers,
+                        horizontal_start_at_second_target=(
+                            layout.target_sequence_has_horizontal_start
+                        ),
+                        target_pairs=target_pairs,
+                    )
+
                 try:
                     window, sidetrack_result = select_sidetrack_window(
                         pilot_name=str(pilot_success.name),
@@ -2470,6 +2601,7 @@ class WelltrackBatchPlanner:
                         planner=self._planner,
                         optimization_context=optimization_context,
                         window_override=sidetrack_window_override,
+                        candidate_validator=validate_complete_candidate,
                     )
                 except (ValueError, PlanningError):
                     # A manual window is an explicit engineering constraint:
@@ -2491,6 +2623,7 @@ class WelltrackBatchPlanner:
                         pilot_config=pilot_success.config,
                         sidetrack_config=config,
                         optimization_context=optimization_context,
+                        candidate_validator=validate_complete_candidate,
                     )
                     window = fallback.window
                     sidetrack_result = fallback.sidetrack_result
@@ -2524,13 +2657,23 @@ class WelltrackBatchPlanner:
                             "pilot_reorientation_target_azi_deg": float(
                                 fallback.target_azimuth_deg
                             ),
+                            "pilot_reorientation_geometry_seed_source": str(
+                                fallback.geometry_seed_source
+                            ),
+                            "pilot_reorientation_geometry_seed_azi_deg": float(
+                                fallback.geometry_seed_azimuth_deg
+                            ),
+                            "pilot_reorientation_geometry_seed_inc_deg": float(
+                                fallback.geometry_seed_inc_deg
+                            ),
+                            "pilot_reorientation_geometry_seed_md_total_m": float(
+                                fallback.geometry_seed_md_total_m
+                            ),
                             "pilot_replanned_md_total_m": float(
                                 fallback.pilot.md_total_m
                             ),
                             "pilot_total_md_m": float(fallback.pilot.md_total_m),
-                            "total_drilled_md_m": float(
-                                fallback.total_drilled_md_m
-                            ),
+                            "total_drilled_md_m": float(fallback.total_drilled_md_m),
                             "sidetrack_window_optimization_objective_m": float(
                                 fallback.total_drilled_md_m
                             ),
@@ -2545,9 +2688,13 @@ class WelltrackBatchPlanner:
                             md_t1_m=md_t1_m,
                         ),
                         targets=layout.target_sequence,
+                        target_numbers=layout.target_sequence_numbers,
                         config=config,
                         progress_callback=planner_progress_callback,
                         trajectory_type="PILOT_SIDETRACK",
+                        horizontal_start_at_second_target=(
+                            layout.target_sequence_has_horizontal_start
+                        ),
                     )
                     stations = extended_result.stations
                     summary = dict(extended_result.summary)
@@ -2559,8 +2706,12 @@ class WelltrackBatchPlanner:
                     plan_kwargs = {
                         "surface": surface,
                         "targets": layout.target_sequence,
+                        "target_numbers": layout.target_sequence_numbers,
                         "config": config,
                         "progress_callback": planner_progress_callback,
+                        "horizontal_start_at_second_target": (
+                            layout.target_sequence_has_horizontal_start
+                        ),
                     }
                 else:
                     plan_kwargs = {
@@ -2682,6 +2833,21 @@ class WelltrackBatchPlanner:
 
         try:
             started = perf_counter()
+
+            def validate_complete_candidate(
+                pilot_stations: pd.DataFrame,
+                window: PilotWindow,
+                sidetrack_result: PlannerResult,
+            ) -> PlannerResult:
+                return _build_complete_sidetrack_candidate(
+                    pilot_stations,
+                    window,
+                    sidetrack_result,
+                    config=config,
+                    target_pairs=target_pairs,
+                    trajectory_type="FACT_SIDETRACK",
+                )
+
             window, sidetrack_result = select_sidetrack_window(
                 pilot_name=str(parent_well.name),
                 parent_name=str(record.name),
@@ -2692,6 +2858,7 @@ class WelltrackBatchPlanner:
                 planner=self._planner,
                 optimization_context=optimization_context,
                 window_override=sidetrack_window_override,
+                candidate_validator=validate_complete_candidate,
             )
             sidetrack = combine_pilot_and_sidetrack(
                 pilot_stations=parent_well.stations,
@@ -2740,6 +2907,11 @@ class WelltrackBatchPlanner:
                 "actual_parent_well_name": str(parent_well.name),
                 "pilot_well_name": str(parent_well.name),
             }
+        )
+        summary = _refresh_pilot_sidetrack_drilled_md_summary(
+            summary=summary,
+            stations=stations,
+            config=config,
         )
         anti_collision_stage = anti_collision_stage_from_context(optimization_context)
         if anti_collision_stage is not None:

@@ -45,6 +45,9 @@ def extend_plan_with_multi_horizontal_targets(
     if len(target_pairs) <= 1:
         return base_result
 
+    reference_stations = getattr(base_result.stations, "attrs", {}).get(
+        "uncertainty_reference_stations"
+    )
     stations = pd.DataFrame(base_result.stations).copy().reset_index(drop=True)
     if stations.empty:
         raise PlanningError("Многопластовая скважина: базовая траектория пуста.")
@@ -91,7 +94,6 @@ def extend_plan_with_multi_horizontal_targets(
         )
         if transition.excess_m > 1e-6:
             raise PlanningError(_transition_problem_text(transition))
-        transitions.append(transition)
 
         transition_rows = _smooth_transition_rows(
             current=current,
@@ -101,6 +103,12 @@ def extend_plan_with_multi_horizontal_targets(
             segment_name=f"HORIZONTAL_BUILD{pair_index - 1}",
             config=config,
         )
+        _validate_transition_md_span(
+            current=current,
+            transition_rows=transition_rows,
+            transition=transition,
+        )
+        transitions.append(transition)
         rows.extend(transition_rows)
         current = _row_state_from_payload(transition_rows[-1])
 
@@ -161,6 +169,8 @@ def extend_plan_with_multi_horizontal_targets(
             "t3_miss_dz_m": 0.0,
         }
     )
+    if isinstance(reference_stations, pd.DataFrame):
+        stations.attrs["uncertainty_reference_stations"] = reference_stations.copy()
     return PlannerResult(
         stations=stations,
         summary=summary,
@@ -176,15 +186,62 @@ def _validate_extended_stations(
     config: TrajectoryConfig,
     post_t1_start_md_m: float,
 ) -> None:
-    md_values = stations["MD_m"].to_numpy(dtype=float)
-    if len(md_values) < 2 or np.any(~np.isfinite(md_values)):
-        raise PlanningError("Многопластовая скважина: некорректная сетка MD.")
+    required_columns = {
+        "MD_m",
+        "INC_deg",
+        "AZI_deg",
+        "X_m",
+        "Y_m",
+        "Z_m",
+        "DLS_deg_per_30m",
+    }
+    missing_columns = required_columns.difference(stations.columns)
+    if missing_columns:
+        raise PlanningError(
+            "Многопластовая скважина: выходная инклинометрия не содержит "
+            f"колонки {', '.join(sorted(missing_columns))}."
+        )
+    try:
+        values = stations[["MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"]].to_numpy(
+            dtype=float
+        )
+    except (TypeError, ValueError) as exc:
+        raise PlanningError(
+            "Многопластовая скважина: выходная инклинометрия содержит "
+            "нечисловую станцию."
+        ) from exc
+    if len(values) < 2 or np.any(~np.isfinite(values)):
+        raise PlanningError(
+            "Многопластовая скважина: выходная инклинометрия содержит "
+            "нечисловую станцию."
+        )
+    md_values = values[:, 0]
     if np.any(np.diff(md_values) <= 0.0):
         raise PlanningError("Многопластовая скважина: MD должен строго возрастать.")
+    if float(md_values[0]) < -SMALL:
+        raise PlanningError("Многопластовая скважина: MD должен быть неотрицательным.")
+    try:
+        post_t1_start_md = float(post_t1_start_md_m)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PlanningError(
+            "Многопластовая скважина: MD t1 должен быть конечным числом."
+        ) from exc
+    if not np.isfinite(post_t1_start_md):
+        raise PlanningError(
+            "Многопластовая скважина: MD t1 должен быть конечным числом."
+        )
+    if (
+        post_t1_start_md < float(md_values[0]) - 1e-6
+        or post_t1_start_md > float(md_values[-1]) + 1e-6
+    ):
+        raise PlanningError(
+            "Многопластовая скважина: MD t1 находится вне выходной сетки MD."
+        )
 
-    inc_values = stations["INC_deg"].to_numpy(dtype=float)
-    finite_inc = inc_values[np.isfinite(inc_values)]
-    max_inc = float(np.max(finite_inc)) if len(finite_inc) else 0.0
+    inc_values = values[:, 1]
+    if np.any(inc_values < -1e-9):
+        raise PlanningError("Многопластовая скважина: INC должен быть неотрицательным.")
+    max_inc = float(np.max(inc_values))
     if max_inc > float(config.max_inc_deg) + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: построенный HORIZONTAL_BUILD превышает "
@@ -193,12 +250,22 @@ def _validate_extended_stations(
         )
 
     horizontal_limit = _horizontal_dls_limit(config)
-    post_t1_mask = (
-        stations["MD_m"].to_numpy(dtype=float) > float(post_t1_start_md_m) + 1e-6
-    )
-    dls_values = stations.loc[post_t1_mask, "DLS_deg_per_30m"].to_numpy(dtype=float)
-    finite_dls = dls_values[np.isfinite(dls_values)]
-    max_dls = float(np.max(finite_dls)) if len(finite_dls) else 0.0
+    post_t1_mask = stations["MD_m"].to_numpy(dtype=float) > post_t1_start_md + 1e-6
+    try:
+        dls_values = stations.loc[post_t1_mask, "DLS_deg_per_30m"].to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise PlanningError(
+            "Многопластовая скважина: ПИ содержит нечисловое значение."
+        ) from exc
+    if np.any(~np.isfinite(dls_values)):
+        raise PlanningError(
+            "Многопластовая скважина: ПИ после t1 содержит нечисловое значение."
+        )
+    if np.any(dls_values < -1e-9):
+        raise PlanningError(
+            "Многопластовая скважина: ПИ после t1 не может быть отрицательным."
+        )
+    max_dls = float(np.max(dls_values)) if len(dls_values) else 0.0
     if max_dls > horizontal_limit + 1e-6:
         raise PlanningError(
             "Многопластовая скважина: построенный HORIZONTAL_BUILD превышает "
@@ -239,42 +306,33 @@ def _transition_feasibility(
     gap = _distance_from_current(current, target)
     if gap <= SMALL:
         raise PlanningError(
-            "Многопластовая скважина: точки "
-            f"{level_from}_t3 и {level_to}_t1 совпадают."
+            f"Многопластовая скважина: точки {level_from}_t3 и {level_to}_t1 совпадают."
         )
     direct_inc, direct_azi = _direction_angles_from_current(current, target)
-    _validate_inc_limit(
-        inc_deg=direct_inc,
-        config=config,
-        context=f"переход {level_from}_t3 → {level_to}_t1",
-    )
     dls_limit = _horizontal_dls_limit(config)
     if dls_limit <= SMALL:
         raise PlanningError(
             "Многопластовая скважина: для HORIZONTAL_BUILD требуется положительный "
             "максимальный ПИ HORIZONTAL."
         )
-    build_in_m = _dogleg_build_length_m(
+    # Any admissible curve must at least accumulate the net dogleg between
+    # its endpoint tangents.  Unlike the former two-turn-via-chord estimate,
+    # this is a true lower bound and therefore cannot reject a valid circular
+    # arc merely because its MD is naturally longer than its chord.
+    required = _dogleg_build_length_m(
         float(current["inc_deg"]),
         float(current["azi_deg"]),
-        direct_inc,
-        direct_azi,
-        dls_limit,
-    )
-    build_out_m = _dogleg_build_length_m(
-        direct_inc,
-        direct_azi,
         target_inc_deg,
         target_azi_deg,
         dls_limit,
     )
-    required = float(build_in_m + build_out_m)
+    max_transition_md_m = _max_transition_md_span_m(gap)
     return MultiHorizontalTransition(
         level_from=int(level_from),
         level_to=int(level_to),
         gap_m=float(gap),
         required_build_m=required,
-        excess_m=float(max(0.0, required - gap)),
+        excess_m=float(max(0.0, required - max_transition_md_m)),
         max_feasible_delta_z_m=_max_feasible_delta_z_m(
             current=current,
             target=target,
@@ -285,6 +343,196 @@ def _transition_feasibility(
     )
 
 
+def _max_transition_md_span_m(gap_m: float) -> float:
+    gap = float(gap_m)
+    return float(max(gap * MAX_TRANSITION_MD_MULTIPLIER, gap + 500.0))
+
+
+def _validate_transition_md_span(
+    *,
+    current: dict[str, float],
+    transition_rows: list[dict[str, object]],
+    transition: MultiHorizontalTransition,
+) -> None:
+    if not transition_rows:
+        raise PlanningError(
+            f"Многопластовая скважина: HORIZONTAL_BUILD{transition.level_from} "
+            "не содержит станций."
+        )
+    try:
+        end_md_m = float(transition_rows[-1]["MD_m"])
+        start_md_m = float(current["md_m"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise PlanningError(
+            f"Многопластовая скважина: HORIZONTAL_BUILD{transition.level_from} "
+            "содержит некорректный MD."
+        ) from exc
+    md_span_m = end_md_m - start_md_m
+    max_md_span_m = _max_transition_md_span_m(transition.gap_m)
+    if not np.isfinite(md_span_m) or md_span_m <= SMALL:
+        raise PlanningError(
+            f"Многопластовая скважина: HORIZONTAL_BUILD{transition.level_from} "
+            "должен иметь конечный положительный MD."
+        )
+    if md_span_m > max_md_span_m + 1e-6:
+        raise PlanningError(
+            f"Многопластовая скважина: HORIZONTAL_BUILD{transition.level_from} "
+            f"имеет чрезмерный MD {md_span_m:.1f} м при зазоре "
+            f"{transition.gap_m:.1f} м; допустимо не более {max_md_span_m:.1f} м."
+        )
+
+
+def _minimum_curvature_path_max_z_m(stations: pd.DataFrame) -> float:
+    """Return the continuous TVD maximum of a minimum-curvature survey.
+
+    Survey stations only sample a minimum-curvature arc.  When the dogleg
+    crosses 90 degrees, the deepest point can therefore lie between two
+    stations; checking only ``Z_m`` would miss that extremum.
+    """
+
+    required = {"MD_m", "INC_deg", "AZI_deg", "Z_m"}
+    missing = required.difference(stations.columns)
+    if missing:
+        raise PlanningError(
+            "Многопластовая скважина: непрерывная проверка TVD не может быть "
+            f"выполнена без колонок {', '.join(sorted(missing))}."
+        )
+    if stations.empty:
+        raise PlanningError(
+            "Многопластовая скважина: непрерывная проверка TVD получила пустую сетку."
+        )
+
+    try:
+        values = stations[["MD_m", "INC_deg", "AZI_deg", "Z_m"]].to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise PlanningError(
+            "Многопластовая скважина: непрерывная проверка TVD получила "
+            "станцию с нечисловыми значениями."
+        ) from exc
+    if np.any(~np.isfinite(values)):
+        raise PlanningError(
+            "Многопластовая скважина: непрерывная проверка TVD получила "
+            "нечисловую станцию."
+        )
+    md_values, inc_values, azi_values, z_values = values.T
+    if len(md_values) > 1 and np.any(np.diff(md_values) <= SMALL):
+        raise PlanningError(
+            "Многопластовая скважина: MD должен строго возрастать для "
+            "непрерывной проверки TVD."
+        )
+
+    max_z_m = float(np.max(z_values))
+    for index in range(len(md_values) - 1):
+        max_z_m = max(
+            max_z_m,
+            _minimum_curvature_interval_max_z_m(
+                start_z_m=float(z_values[index]),
+                md1_m=float(md_values[index]),
+                inc1_deg=float(inc_values[index]),
+                azi1_deg=float(azi_values[index]),
+                end_z_m=float(z_values[index + 1]),
+                md2_m=float(md_values[index + 1]),
+                inc2_deg=float(inc_values[index + 1]),
+                azi2_deg=float(azi_values[index + 1]),
+            ),
+        )
+    return float(max_z_m)
+
+
+def _minimum_curvature_interval_max_z_m(
+    *,
+    start_z_m: float,
+    md1_m: float,
+    inc1_deg: float,
+    azi1_deg: float,
+    end_z_m: float,
+    md2_m: float,
+    inc2_deg: float,
+    azi2_deg: float,
+) -> float:
+    dmd = float(md2_m) - float(md1_m)
+    if dmd <= SMALL:
+        raise PlanningError(
+            "Многопластовая скважина: минимум-кривизна требует возрастающий MD."
+        )
+    maximum = float(max(start_z_m, end_z_m))
+    first = _direction_vector(float(inc1_deg), float(azi1_deg))
+    second = _direction_vector(float(inc2_deg), float(azi2_deg))
+    cos_beta = float(np.clip(np.dot(first, second), -1.0, 1.0))
+    beta = float(np.arccos(cos_beta))
+    if beta <= 1e-10:
+        computed_end_z_m = float(start_z_m + dmd * float(first[2]))
+        return float(max(maximum, computed_end_z_m))
+    sin_beta = float(np.sin(beta))
+    if sin_beta <= 1e-10 or beta >= np.pi - 1e-3:
+        raise PlanningError(
+            "Многопластовая скважина: dogleg слишком близок к 180° для "
+            "непрерывной проверки TVD."
+        )
+
+    # The down component of the SLERP tangent is
+    # a*cos(theta) + b*sin(theta), theta in [0, beta].
+    a = float(first[2])
+    b = float((second[2] - a * cos_beta) / sin_beta)
+    computed_end_z_m = float(
+        start_z_m + dmd / beta * (a * np.sin(beta) + b * (1.0 - np.cos(beta)))
+    )
+    maximum = max(maximum, computed_end_z_m)
+    phase = float(np.arctan2(b, a))
+    for integer in range(-3, 4):
+        theta = phase + np.pi / 2.0 + float(integer) * np.pi
+        if theta <= 1e-10 or theta >= beta - 1e-10:
+            continue
+        delta_z = dmd / beta * (a * np.sin(theta) + b * (1.0 - np.cos(theta)))
+        maximum = max(maximum, float(start_z_m + delta_z))
+    return float(maximum)
+
+
+def _cubic_bezier_coordinate_max(
+    p0: float,
+    p1: float,
+    p2: float,
+    p3: float,
+) -> float:
+    """Evaluate the exact maximum of one cubic Bezier coordinate."""
+
+    values = np.asarray([p0, p1, p2, p3], dtype=float)
+    if np.any(~np.isfinite(values)):
+        raise PlanningError("Многопластовая скважина: Bezier содержит нечисловой Z.")
+    a = float(-values[0] + 3.0 * values[1] - 3.0 * values[2] + values[3])
+    b = float(3.0 * values[0] - 6.0 * values[1] + 3.0 * values[2])
+    c = float(-3.0 * values[0] + 3.0 * values[1])
+    candidates = [float(values[0]), float(values[3])]
+    derivative_a = 3.0 * a
+    derivative_b = 2.0 * b
+    derivative_c = c
+    roots: np.ndarray
+    if abs(derivative_a) <= 1e-12:
+        roots = (
+            np.asarray([-derivative_c / derivative_b], dtype=float)
+            if abs(derivative_b) > 1e-12
+            else np.asarray([], dtype=float)
+        )
+    else:
+        roots = np.roots([derivative_a, derivative_b, derivative_c])
+    for root in roots:
+        if abs(float(np.imag(root))) > 1e-9:
+            continue
+        parameter = float(np.real(root))
+        if parameter <= 0.0 or parameter >= 1.0:
+            continue
+        omt = 1.0 - parameter
+        candidates.append(
+            float(
+                omt**3 * values[0]
+                + 3.0 * omt * omt * parameter * values[1]
+                + 3.0 * omt * parameter * parameter * values[2]
+                + parameter**3 * values[3]
+            )
+        )
+    return float(max(candidates))
+
+
 def _smooth_transition_rows(
     *,
     current: dict[str, float],
@@ -293,6 +541,7 @@ def _smooth_transition_rows(
     target_azi_deg: float,
     segment_name: str,
     config: TrajectoryConfig,
+    max_z_m: float | None = None,
 ) -> list[dict[str, object]]:
     gap = _distance_from_current(current, target)
     p0 = np.array([current["x"], current["y"], current["z"]], dtype=float)
@@ -326,6 +575,20 @@ def _smooth_transition_rows(
         for tail_m in control_lengths:
             p1 = p0 + start_dir * float(lead_m)
             p2 = p3 - end_dir * float(tail_m)
+            if (
+                max_z_m is not None
+                and _cubic_bezier_coordinate_max(
+                    float(p0[2]),
+                    float(p1[2]),
+                    float(p2[2]),
+                    float(p3[2]),
+                )
+                > float(max_z_m) + 1e-6
+            ):
+                # Check the actual cubic extrema rather than its control-point
+                # hull; the hull is safe but can reject an otherwise feasible
+                # transition unnecessarily.
+                continue
             try:
                 xyz = _sample_cubic_bezier(
                     p0=p0,
@@ -345,11 +608,15 @@ def _smooth_transition_rows(
                 )
             except PlanningError:
                 continue
+            if max_z_m is not None:
+                try:
+                    continuous_max_z_m = _minimum_curvature_path_max_z_m(candidate)
+                except PlanningError:
+                    continue
+                if continuous_max_z_m > float(max_z_m) + 1e-6:
+                    continue
             md_span = float(candidate["MD_m"].iloc[-1] - candidate["MD_m"].iloc[0])
-            max_md_span = max(
-                float(gap) * MAX_TRANSITION_MD_MULTIPLIER,
-                float(gap) + 500.0,
-            )
+            max_md_span = _max_transition_md_span_m(gap)
             if md_span > max_md_span:
                 continue
             dls_values = candidate["DLS_deg_per_30m"].to_numpy(dtype=float)
@@ -390,6 +657,7 @@ def _smooth_transition_rows(
                 target_azi_deg=target_azi_deg,
                 segment_name=segment_name,
                 config=config,
+                max_z_m=max_z_m,
             )
         except PlanningError as exc:
             fallback_error = exc
@@ -400,10 +668,16 @@ def _smooth_transition_rows(
             ]
 
     if best is None:
+        floor_message = (
+            f" Траектория должна оставаться не ниже TVD {float(max_z_m):.2f} м."
+            if max_z_m is not None
+            else ""
+        )
         message = (
             "Многопластовая скважина: не удалось построить плавный "
             f"{segment_name} между уровнями без вырожденной геометрии. "
             "Увеличьте расстояние между горизонтальными участками или уменьшите ΔZ."
+            + floor_message
         )
         if fallback_error is not None:
             message += f" Constant-DLS fallback: {fallback_error}"
@@ -439,6 +713,7 @@ def _constant_dls_transition_candidate(
     target_azi_deg: float,
     segment_name: str,
     config: TrajectoryConfig,
+    max_z_m: float | None = None,
 ) -> _ConstantDlsTransitionCandidate:
     try:
         from scipy.optimize import least_squares
@@ -466,7 +741,7 @@ def _constant_dls_transition_candidate(
     end_inc = float(target_inc_deg)
     end_azi = float(target_azi_deg) % 360.0
     max_inc = float(config.max_inc_deg)
-    max_hold_m = float(max(gap_m * MAX_TRANSITION_MD_MULTIPLIER, gap_m + 500.0))
+    max_hold_m = _max_transition_md_span_m(gap_m)
     dls_lower = float(max(min(dls_limit * 0.02, 0.03), 1e-4))
     scale_m = float(max(gap_m, 1.0))
 
@@ -514,9 +789,7 @@ def _constant_dls_transition_candidate(
         )
         if not result.success and float(result.cost) > 1e-14:
             continue
-        inc_mid, azi_mid, dls_value, hold_length = [
-            float(item) for item in result.x
-        ]
+        inc_mid, azi_mid, dls_value, hold_length = [float(item) for item in result.x]
         try:
             stations = _build_constant_dls_transition_stations(
                 current=current,
@@ -556,6 +829,15 @@ def _constant_dls_transition_candidate(
             continue
         if actual_max_inc > max_inc + 1e-6:
             continue
+        if md_span > _max_transition_md_span_m(gap_m) + 1e-6:
+            continue
+        if max_z_m is not None:
+            try:
+                continuous_max_z_m = _minimum_curvature_path_max_z_m(stations)
+            except PlanningError:
+                continue
+            if continuous_max_z_m > float(max_z_m) + 1e-6:
+                continue
         candidate = _ConstantDlsTransitionCandidate(
             stations=stations,
             dls_deg_per_30m=dls_value,
@@ -564,11 +846,7 @@ def _constant_dls_transition_candidate(
             max_inc_deg=actual_max_inc,
             md_span_m=md_span,
         )
-        score = float(
-            endpoint_miss * 1_000_000.0
-            + 0.001 * md_span
-            - 0.01 * dls_value
-        )
+        score = float(endpoint_miss * 1_000_000.0 + 0.001 * md_span - 0.01 * dls_value)
         if score < best_score:
             best = candidate
             best_score = score
@@ -812,9 +1090,9 @@ def _constant_dls_transition_delta_xyz(
         )
         delta += np.array([de, dn, dz], dtype=float)
     if float(hold_length_m) > SMALL:
-        delta += _xyz_direction_vector(inc_deg=mid_inc_deg, azi_deg=mid_azi_deg) * float(
-            hold_length_m
-        )
+        delta += _xyz_direction_vector(
+            inc_deg=mid_inc_deg, azi_deg=mid_azi_deg
+        ) * float(hold_length_m)
     if build2_m > SMALL:
         dn, de, dz = minimum_curvature_increment(
             0.0,
@@ -828,7 +1106,9 @@ def _constant_dls_transition_delta_xyz(
     return delta, float(build1_m), float(build2_m)
 
 
-def _candidate_control_lengths(*, gap_m: float, min_control_m: float) -> tuple[float, ...]:
+def _candidate_control_lengths(
+    *, gap_m: float, min_control_m: float
+) -> tuple[float, ...]:
     gap = float(gap_m)
     values = {
         float(min_control_m),
@@ -860,9 +1140,7 @@ def _sample_cubic_bezier(
 ) -> np.ndarray:
     chord_m = float(np.linalg.norm(p3 - p0))
     control_m = float(
-        np.linalg.norm(p1 - p0)
-        + np.linalg.norm(p2 - p1)
-        + np.linalg.norm(p3 - p2)
+        np.linalg.norm(p1 - p0) + np.linalg.norm(p2 - p1) + np.linalg.norm(p3 - p2)
     )
     samples = max(int(np.ceil(max(chord_m, control_m) / max(float(step_m), 1.0))), 8)
     samples = min(samples, 2000)
@@ -944,7 +1222,9 @@ def _finite_values(values: np.ndarray) -> np.ndarray:
     return finite[np.isfinite(finite)]
 
 
-def _dedupe_float_candidates(values: np.ndarray, *, decimals: int = 8) -> tuple[float, ...]:
+def _dedupe_float_candidates(
+    values: np.ndarray, *, decimals: int = 8
+) -> tuple[float, ...]:
     result: list[float] = []
     seen: set[float] = set()
     for value in np.asarray(values, dtype=float):
@@ -958,7 +1238,9 @@ def _dedupe_float_candidates(values: np.ndarray, *, decimals: int = 8) -> tuple[
     return tuple(result)
 
 
-def _interpolate_azimuth_deg(start_deg: float, end_deg: float, fraction: float) -> float:
+def _interpolate_azimuth_deg(
+    start_deg: float, end_deg: float, fraction: float
+) -> float:
     start = float(start_deg) % 360.0
     delta = ((float(end_deg) - start + 540.0) % 360.0) - 180.0
     return float((start + delta * float(fraction)) % 360.0)
@@ -1082,7 +1364,9 @@ def _point_distance(point_a: Point3D, point_b: Point3D) -> float:
     )
 
 
-def _direction_angles_between(point_a: Point3D, point_b: Point3D) -> tuple[float, float]:
+def _direction_angles_between(
+    point_a: Point3D, point_b: Point3D
+) -> tuple[float, float]:
     dx = float(point_b.x) - float(point_a.x)
     dy = float(point_b.y) - float(point_a.y)
     dz = float(point_b.z) - float(point_a.z)
@@ -1099,7 +1383,9 @@ def _direction_angles_from_current(
     return _direction_angles_from_delta(dx=dx, dy=dy, dz=dz)
 
 
-def _direction_angles_from_delta(*, dx: float, dy: float, dz: float) -> tuple[float, float]:
+def _direction_angles_from_delta(
+    *, dx: float, dy: float, dz: float
+) -> tuple[float, float]:
     horizontal = float(np.hypot(dx, dy))
     if horizontal <= SMALL and abs(float(dz)) <= SMALL:
         raise PlanningError("Многопластовая скважина: нулевая длина участка.")
@@ -1211,16 +1497,17 @@ def _horizontal_dls_limit(config: TrajectoryConfig) -> float:
 
 
 def _transition_problem_text(transition: MultiHorizontalTransition) -> str:
-    trim_each = float(max(transition.excess_m, 0.0) / 2.0)
+    max_transition_md_m = _max_transition_md_span_m(transition.gap_m)
     return (
         "Многопластовая скважина: переход "
         f"HORIZONTAL_BUILD{transition.level_from} между "
         f"{transition.level_from}_t3 и {transition.level_to}_t1 слишком короткий "
         "для заданного максимального ПИ. "
-        f"Текущий зазор {transition.gap_m:.1f} м, требуется примерно "
-        f"{transition.required_build_m:.1f} м, не хватает {transition.excess_m:.1f} м. "
-        "Рекомендации: сократить соседние мини-горизонты примерно на "
-        f"{trim_each:.1f} м каждый, чтобы увеличить расстояние между пластами, "
+        f"Текущий зазор {transition.gap_m:.1f} м допускает траекторию до "
+        f"{max_transition_md_m:.1f} м, но только на изменение ориентации требуется "
+        f"не менее {transition.required_build_m:.1f} м (превышение "
+        f"{transition.excess_m:.1f} м). Рекомендации: сократить соседние "
+        "мини-горизонты, чтобы увеличить расстояние между пластами, "
         "или уменьшить вертикальную разницу между уровнями примерно до "
         f"{transition.max_feasible_delta_z_m:.1f} м."
     )

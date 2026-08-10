@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from pywp.models import Point3D
 from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackParseError,
+    WelltrackRecord,
     _ordered_table_multi_horizontal_point_names,
     _ordered_table_points,
     _ordered_table_zbs_multi_horizontal_point_names,
@@ -16,6 +18,10 @@ from pywp.eclipse_welltrack import (
     welltrack_multi_horizontal_level_count,
     welltrack_points_to_target_pairs,
     welltrack_points_to_targets,
+)
+from pywp.welltrack_targets import (
+    ordinary_record_target_layout,
+    record_is_ordinary_target_sequence,
 )
 
 
@@ -351,6 +357,83 @@ def test_parse_welltrack_points_table_accepts_target_sequence() -> None:
     assert [record.name for record in records] == ["WELL-A"]
     assert [point.md for point in records[0].points] == [0.0, 1.0, 2.0, 3.0]
     assert records[0].point_labels == ("S", "t1", "t2", "t3")
+    layout = ordinary_record_target_layout(records[0])
+    assert record_is_ordinary_target_sequence(records[0])
+    assert layout.target_sequence_has_horizontal_start is True
+    assert layout.target_sequence_numbers == (1, 2, 3)
+    assert layout.t1 == Point3D(x=600.0, y=800.0, z=2400.0)
+    assert layout.t3 == Point3D(x=900.0, y=1200.0, z=2450.0)
+
+
+def test_parse_welltrack_points_table_accepts_target_sequence_without_t2() -> None:
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "WELL-A", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2450.0},
+            {"Wellname": "WELL-A", "Point": "t4", "X": 2100.0, "Y": 2600.0, "Z": 2440.0},
+            {"Wellname": "WELL-A", "Point": "t5", "X": 2600.0, "Y": 3200.0, "Z": 2430.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["WELL-A"]
+    assert [point.md for point in records[0].points] == [0.0, 1.0, 3.0, 4.0, 5.0]
+    assert records[0].point_labels == ("S", "t1", "t3", "t4", "t5")
+    layout = ordinary_record_target_layout(records[0])
+    assert record_is_ordinary_target_sequence(records[0])
+    assert layout.target_sequence_has_horizontal_start is False
+    assert layout.target_sequence_numbers == (1, 3, 4, 5)
+    assert layout.t1 == Point3D(x=600.0, y=800.0, z=2400.0)
+    assert layout.t3 == Point3D(x=1500.0, y=2000.0, z=2450.0)
+
+
+def test_parse_welltrack_points_table_rejects_t2_without_t3() -> None:
+    with pytest.raises(WelltrackParseError, match="при наличии t2 обязательна точка t3"):
+        parse_welltrack_points_table(
+            [
+                {"Wellname": "WELL-A", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {"Wellname": "WELL-A", "Point": "t1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+                {"Wellname": "WELL-A", "Point": "t2", "X": 900.0, "Y": 1200.0, "Z": 2450.0},
+            ]
+        )
+
+
+def test_ordinary_target_layout_rejects_explicit_t2_without_t3() -> None:
+    record = WelltrackRecord(
+        name="WELL-A",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=1.0),
+            WelltrackPoint(x=900.0, y=1200.0, z=2450.0, md=2.0),
+        ),
+        point_labels=("S", "t1", "t2"),
+    )
+
+    assert record_is_ordinary_target_sequence(record) is False
+    with pytest.raises(ValueError, match="S/t1/t2/t3"):
+        ordinary_record_target_layout(record)
+
+
+@pytest.mark.parametrize("surface_label", ["S", "surface", "wellhead", "WH"])
+def test_ordinary_target_sequence_accepts_supported_surface_aliases(
+    surface_label: str,
+) -> None:
+    record = WelltrackRecord(
+        name="WELL-A",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=600.0, y=800.0, z=2400.0, md=1.0),
+            WelltrackPoint(x=1500.0, y=2000.0, z=2500.0, md=2.0),
+            WelltrackPoint(x=2200.0, y=2933.0, z=2500.0, md=3.0),
+        ),
+        point_labels=(surface_label, "t1", "t2", "t3"),
+    )
+
+    layout = ordinary_record_target_layout(record)
+
+    assert record_is_ordinary_target_sequence(record) is True
+    assert layout.target_sequence_has_horizontal_start is True
+    assert layout.target_sequence_numbers == (1, 2, 3)
 
 
 def test_parse_welltrack_points_table_infers_surface_from_pilot_for_parent_sequence() -> (

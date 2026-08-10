@@ -5,7 +5,8 @@ import pandas as pd
 import pytest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.models import Point3D, TrajectoryConfig
+from pywp.mcm import compute_positions_min_curv
+from pywp.models import PlannerResult, Point3D, TrajectoryConfig
 from pywp.pilot_wells import (
     PilotWindow,
     SidetrackWindowOverride,
@@ -18,6 +19,7 @@ from pywp.pilot_wells import (
     parent_name_for_zbs,
     paired_pilot_parent_names,
     pilot_parent_key_for_record,
+    plan_reoriented_pilot_sidetrack_fallback,
     select_sidetrack_window,
     sync_pilot_surfaces_to_parents,
 )
@@ -103,7 +105,9 @@ def test_alt_branch_name_without_surface_is_treated_as_fact_sidetrack() -> None:
     assert parent_name_for_zbs("9010_2") == "9010"
 
 
-def test_shallow_alt_branch_without_surface_is_still_treated_as_fact_sidetrack() -> None:
+def test_shallow_alt_branch_without_surface_is_still_treated_as_fact_sidetrack() -> (
+    None
+):
     sidetrack = WelltrackRecord(
         name="9010_2",
         points=(
@@ -115,7 +119,9 @@ def test_shallow_alt_branch_without_surface_is_still_treated_as_fact_sidetrack()
     assert is_zbs_record(sidetrack) is True
 
 
-def test_alt_branch_with_explicit_surface_label_is_not_zbs_even_with_even_point_count() -> None:
+def test_alt_branch_with_explicit_surface_label_is_not_zbs_even_with_even_point_count() -> (
+    None
+):
     branch = WelltrackRecord(
         name="well_04_2",
         points=(
@@ -328,6 +334,361 @@ def test_sidetrack_window_search_expands_after_preferred_group_fails(
     assert float(result.summary["distance_t1_m"]) == pytest.approx(0.0)
 
 
+def test_sidetrack_window_search_rejects_candidate_after_full_sequence_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preferred = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=900.0,
+        point=Point3D(0.0, 0.0, 900.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    expanded = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=600.0,
+        point=Point3D(0.0, 0.0, 600.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    callback_calls: list[float] = []
+
+    def local_result(point: Point3D) -> PlannerResult:
+        return PlannerResult(
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [0.0, 100.0],
+                    "INC_deg": [0.0, 0.0],
+                    "AZI_deg": [0.0, 0.0],
+                    "X_m": [float(point.x), float(point.x)],
+                    "Y_m": [float(point.y), float(point.y)],
+                    "Z_m": [float(point.z), float(point.z) + 100.0],
+                    "DLS_deg_per_30m": [0.0, 0.0],
+                }
+            ),
+            summary={
+                "md_total_m": 100.0,
+                "max_dls_total_deg_per_30m": 0.0,
+                "build_dls_max_config_deg_per_30m": 10.0,
+            },
+            azimuth_deg=0.0,
+            md_t1_m=50.0,
+        )
+
+    def complete_result(window: PilotWindow) -> PlannerResult:
+        return PlannerResult(
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [float(window.md_m), float(window.md_m) + 200.0],
+                    "INC_deg": [0.0, 0.0],
+                    "AZI_deg": [0.0, 0.0],
+                    "X_m": [float(window.point.x), float(window.point.x)],
+                    "Y_m": [float(window.point.y), float(window.point.y)],
+                    "Z_m": [float(window.point.z), float(window.point.z) + 200.0],
+                    "DLS_deg_per_30m": [0.0, 0.0],
+                }
+            ),
+            summary={
+                "md_total_m": float(window.md_m) + 200.0,
+                "max_dls_total_deg_per_30m": 0.0,
+                "build_dls_max_config_deg_per_30m": 10.0,
+            },
+            azimuth_deg=0.0,
+            md_t1_m=float(window.md_m) + 100.0,
+        )
+
+    monkeypatch.setattr(
+        pilot_wells,
+        "_sidetrack_window_candidate_groups",
+        lambda **_kwargs: [[preferred], [expanded]],
+    )
+
+    def fake_plan(self: SidetrackPlanner, **kwargs: object) -> PlannerResult:
+        start = kwargs["start"]
+        return local_result(start.point)
+
+    monkeypatch.setattr(SidetrackPlanner, "plan", fake_plan)
+
+    def validate_full_candidate(
+        _pilot_stations: pd.DataFrame,
+        window: PilotWindow,
+        _sidetrack_result: PlannerResult,
+    ) -> PlannerResult:
+        callback_calls.append(float(window.md_m))
+        if window == preferred:
+            raise PlanningError("полная последовательность не проходит")
+        return complete_result(window)
+
+    selected, result = select_sidetrack_window(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_stations=pd.DataFrame({"MD_m": [0.0]}),
+        parent_t1=Point3D(500.0, 0.0, 1200.0),
+        parent_t3=Point3D(1500.0, 0.0, 1200.0),
+        config=TrajectoryConfig(
+            md_step_m=25.0,
+            dls_build_max_deg_per_30m=6.0,
+            max_inc_deg=120.0,
+        ),
+        planner=object(),
+        candidate_validator=validate_full_candidate,
+    )
+
+    assert selected == expanded
+    assert callback_calls == [900.0, 600.0]
+    assert float(result.summary["md_total_m"]) == pytest.approx(100.0)
+
+
+def test_sidetrack_window_score_uses_complete_lateral_md(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=600.0,
+        point=Point3D(0.0, 0.0, 600.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    second = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=700.0,
+        point=Point3D(0.0, 0.0, 700.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+
+    def fake_plan(self: SidetrackPlanner, **kwargs: object) -> PlannerResult:
+        start = kwargs["start"]
+        window = start.point
+        return PlannerResult(
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [0.0, 100.0],
+                    "INC_deg": [0.0, 0.0],
+                    "AZI_deg": [0.0, 0.0],
+                    "X_m": [float(window.x), float(window.x)],
+                    "Y_m": [float(window.y), float(window.y)],
+                    "Z_m": [float(window.z), float(window.z) + 100.0],
+                    "DLS_deg_per_30m": [0.0, 0.0],
+                }
+            ),
+            summary={
+                "md_total_m": 100.0,
+                "max_dls_total_deg_per_30m": 0.0,
+                "build_dls_max_config_deg_per_30m": 10.0,
+            },
+            azimuth_deg=0.0,
+            md_t1_m=50.0,
+        )
+
+    def complete_result(window: PilotWindow, lateral_md_m: float) -> PlannerResult:
+        return PlannerResult(
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [
+                        float(window.md_m),
+                        float(window.md_m) + float(lateral_md_m),
+                    ],
+                    "INC_deg": [0.0, 0.0],
+                    "AZI_deg": [0.0, 0.0],
+                    "X_m": [float(window.point.x), float(window.point.x)],
+                    "Y_m": [float(window.point.y), float(window.point.y)],
+                    "Z_m": [
+                        float(window.point.z),
+                        float(window.point.z) + float(lateral_md_m),
+                    ],
+                    "DLS_deg_per_30m": [0.0, 0.0],
+                }
+            ),
+            summary={
+                "md_total_m": float(window.md_m) + float(lateral_md_m),
+                "max_dls_total_deg_per_30m": 0.0,
+                "build_dls_max_config_deg_per_30m": 10.0,
+            },
+            azimuth_deg=0.0,
+            md_t1_m=float(window.md_m) + float(lateral_md_m) / 2.0,
+        )
+
+    monkeypatch.setattr(
+        pilot_wells,
+        "_sidetrack_window_candidate_groups",
+        lambda **_kwargs: [[first, second]],
+    )
+    monkeypatch.setattr(SidetrackPlanner, "plan", fake_plan)
+
+    selected, _result = select_sidetrack_window(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_stations=pd.DataFrame({"MD_m": [0.0]}),
+        parent_t1=Point3D(500.0, 0.0, 1200.0),
+        parent_t3=Point3D(1500.0, 0.0, 1200.0),
+        config=TrajectoryConfig(
+            md_step_m=25.0,
+            dls_build_max_deg_per_30m=6.0,
+            max_inc_deg=120.0,
+        ),
+        planner=object(),
+        candidate_validator=lambda _pilot, window, _local: complete_result(
+            window,
+            500.0 if window == first else 100.0,
+        ),
+    )
+
+    assert selected == second
+
+
+def test_sidetrack_window_search_optimizes_across_preferred_and_expanded_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preferred = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=900.0,
+        point=Point3D(0.0, 0.0, 900.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    expanded = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=600.0,
+        point=Point3D(0.0, 0.0, 600.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+
+    def result_for(window: PilotWindow, *, local: bool) -> PlannerResult:
+        lateral_md_m = 100.0 if local or window == expanded else 500.0
+        start_md_m = 0.0 if local else float(window.md_m)
+        return PlannerResult(
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [start_md_m, start_md_m + lateral_md_m],
+                    "INC_deg": [0.0, 0.0],
+                    "AZI_deg": [0.0, 0.0],
+                    "X_m": [float(window.point.x), float(window.point.x)],
+                    "Y_m": [float(window.point.y), float(window.point.y)],
+                    "Z_m": [
+                        float(window.point.z),
+                        float(window.point.z) + lateral_md_m,
+                    ],
+                    "DLS_deg_per_30m": [0.0, 0.0],
+                }
+            ),
+            summary={
+                "md_total_m": start_md_m + lateral_md_m,
+                "max_dls_total_deg_per_30m": 0.0,
+                "build_dls_max_config_deg_per_30m": 10.0,
+            },
+            azimuth_deg=0.0,
+            md_t1_m=start_md_m + lateral_md_m / 2.0,
+        )
+
+    monkeypatch.setattr(
+        pilot_wells,
+        "_sidetrack_window_candidate_groups",
+        lambda **_kwargs: [[preferred], [expanded]],
+    )
+
+    def fake_plan(self: SidetrackPlanner, **kwargs: object) -> PlannerResult:
+        start = kwargs["start"]
+        window = preferred if float(start.point.z) == 900.0 else expanded
+        return result_for(window, local=True)
+
+    monkeypatch.setattr(SidetrackPlanner, "plan", fake_plan)
+
+    selected, _ = select_sidetrack_window(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_stations=pd.DataFrame({"MD_m": [0.0]}),
+        parent_t1=Point3D(0.0, 0.0, 1000.0),
+        parent_t3=Point3D(0.0, 0.0, 1100.0),
+        config=TrajectoryConfig(),
+        planner=object(),
+        candidate_validator=lambda _pilot, window, _local: result_for(
+            window,
+            local=False,
+        ),
+    )
+
+    assert selected == expanded
+
+
+def test_sidetrack_window_search_skips_nonfinite_candidate_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preferred = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=900.0,
+        point=Point3D(0.0, 0.0, 900.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    expanded = PilotWindow(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        md_m=600.0,
+        point=Point3D(0.0, 0.0, 600.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+    malformed = PlannerResult(
+        stations=pd.DataFrame(),
+        summary={"md_total_m": 100.0},
+        azimuth_deg=0.0,
+        md_t1_m=50.0,
+    )
+    valid = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0],
+                "INC_deg": [0.0, 0.0],
+                "AZI_deg": [0.0, 0.0],
+                "X_m": [0.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [600.0, 700.0],
+                "DLS_deg_per_30m": [np.nan, 0.0],
+            }
+        ),
+        summary={"md_total_m": 100.0},
+        azimuth_deg=0.0,
+        md_t1_m=50.0,
+    )
+    calls: list[float] = []
+
+    monkeypatch.setattr(
+        pilot_wells,
+        "_sidetrack_window_candidate_groups",
+        lambda **_kwargs: [[preferred], [expanded]],
+    )
+
+    def fake_plan(self: SidetrackPlanner, **kwargs: object) -> PlannerResult:
+        start = kwargs["start"]
+        calls.append(float(start.point.z))
+        return malformed if float(start.point.z) == 900.0 else valid
+
+    monkeypatch.setattr(SidetrackPlanner, "plan", fake_plan)
+
+    selected, result = select_sidetrack_window(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_stations=pd.DataFrame({"MD_m": [0.0]}),
+        parent_t1=Point3D(0.0, 0.0, 800.0),
+        parent_t3=Point3D(0.0, 0.0, 900.0),
+        config=TrajectoryConfig(),
+        planner=object(),
+    )
+
+    assert selected == expanded
+    assert result is valid
+    assert calls == [900.0, 600.0]
+
+
 def test_single_point_pilot_window_minimizes_sidetrack_md() -> None:
     config = TrajectoryConfig()
     pilot = build_pilot_trajectory(
@@ -521,6 +882,55 @@ def test_manual_sidetrack_window_rejects_out_of_range_value() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "md_values",
+    ([0.0, 100.0, 50.0], [0.0, 100.0, 100.0]),
+)
+def test_sidetrack_window_search_rejects_nonmonotonic_pilot_md(
+    md_values: list[float],
+) -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": md_values,
+            "X_m": [0.0, 0.0, 0.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 100.0, 200.0],
+            "INC_deg": [0.0, 0.0, 0.0],
+            "AZI_deg": [0.0, 0.0, 0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="не возрастающий MD"):
+        pilot_wells._sidetrack_window_candidate_groups(
+            pilot_name="WELL-04_PL",
+            parent_name="WELL-04",
+            pilot_stations=stations,
+            parent_t1=Point3D(0.0, 0.0, 1000.0),
+            config=TrajectoryConfig(),
+        )
+
+
+def test_manual_sidetrack_window_rejects_nonmonotonic_pilot_md() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0, 100.0],
+            "X_m": [0.0, 0.0, 0.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 100.0, 200.0],
+            "INC_deg": [0.0, 0.0, 0.0],
+            "AZI_deg": [0.0, 0.0, 0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="строго возрастающим"):
+        pilot_wells._manual_sidetrack_window(
+            pilot_name="WELL-04_PL",
+            parent_name="WELL-04",
+            pilot_stations=stations,
+            override=SidetrackWindowOverride(kind="md", value_m=50.0),
+        )
+
+
 def test_sidetrack_uncertainty_at_window_inherits_pilot_covariance() -> None:
     config = TrajectoryConfig(
         md_step_m=25.0,
@@ -648,4 +1058,540 @@ def test_sidetrack_solver_rejects_over_limit_dls() -> None:
                 dls_build_max_deg_per_30m=0.2,
                 max_inc_deg=100.0,
             ),
+        )
+
+
+def test_reoriented_pilot_fallback_uses_standalone_geometry_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        kop_min_vertical_m=100.0,
+        dls_build_max_deg_per_30m=6.0,
+        max_inc_deg=100.0,
+    )
+    surface = Point3D(0.0, 0.0, 0.0)
+    pl1 = Point3D(0.0, 0.0, 800.0)
+    parent_t1 = Point3D(400.0, 400.0, 1500.0)
+    parent_t3 = Point3D(1200.0, 800.0, 1500.0)
+    productive_target = Point3D(900.0, 900.0, 1500.0)
+    standalone_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0, 200.0],
+                "X_m": [0.0, 200.0, 400.0],
+                "Y_m": [0.0, 200.0, 400.0],
+                "Z_m": [0.0, 800.0, 1500.0],
+                "INC_deg": [5.0, 25.0, 45.0],
+                "AZI_deg": [135.0, 135.0, 135.0],
+                "segment": ["VERTICAL", "BUILD1", "HORIZONTAL"],
+            }
+        ),
+        summary={},
+        azimuth_deg=135.0,
+        md_t1_m=150.0,
+    )
+    pilot_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 250.0, 880.0],
+            "X_m": [0.0, 0.0, 0.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 800.0, 1200.0],
+            "INC_deg": [0.0, 35.0, 40.0],
+            "AZI_deg": [135.0, 135.0, 135.0],
+            "DLS_deg_per_30m": [0.0, 1.0, 1.0],
+            "segment": ["VERTICAL", "BUILD1", "HOLD"],
+        }
+    )
+    pilot_result = pilot_wells.PilotBuildResult(
+        stations=pilot_stations,
+        surface=surface,
+        first_target=pl1,
+        final_target=pl1,
+        md_first_target_m=250.0,
+        md_total_m=880.0,
+        azimuth_deg=135.0,
+        summary={"max_dls_total_deg_per_30m": 1.0},
+    )
+    sidetrack_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 320.0],
+                "X_m": [0.0, 800.0],
+                "Y_m": [0.0, 400.0],
+                "Z_m": [0.0, 0.0],
+                "INC_deg": [35.0, 90.0],
+                "AZI_deg": [135.0, 135.0],
+                "segment": ["BUILD1", "HORIZONTAL"],
+            }
+        ),
+        summary={"md_total_m": 320.0, "max_dls_total_deg_per_30m": 1.5},
+        azimuth_deg=135.0,
+        md_t1_m=160.0,
+    )
+    window = PilotWindow(
+        pilot_name="WELL_PL",
+        parent_name="WELL",
+        md_m=220.0,
+        point=Point3D(0.0, 0.0, 760.0),
+        inc_deg=35.0,
+        azi_deg=135.0,
+    )
+    captured_hints: list[tuple[float, float]] = []
+
+    class FakeTrajectoryPlanner:
+        def plan(self, **kwargs: object) -> PlannerResult:
+            return standalone_result
+
+    class FakeSidetrackPlanner:
+        def plan(self, **kwargs: object) -> PlannerResult:
+            return sidetrack_result
+
+    def fake_reoriented_pilot_candidates(**kwargs: object) -> list[object]:
+        captured_hints.append(
+            (
+                float(kwargs["target_azimuth_deg"]),
+                float(kwargs["terminal_inc_hint_deg"]),
+            )
+        )
+        return [pilot_result]
+
+    monkeypatch.setattr(pilot_wells, "TrajectoryPlanner", FakeTrajectoryPlanner)
+    monkeypatch.setattr(pilot_wells, "SidetrackPlanner", FakeSidetrackPlanner)
+    monkeypatch.setattr(
+        pilot_wells,
+        "_reoriented_pilot_candidates",
+        fake_reoriented_pilot_candidates,
+    )
+    monkeypatch.setattr(
+        pilot_wells,
+        "_sidetrack_window_candidate_groups",
+        lambda **kwargs: [[window]],
+    )
+
+    def validate_complete_candidate(
+        _pilot_stations: pd.DataFrame,
+        candidate_window: PilotWindow,
+        _sidetrack_result: PlannerResult,
+    ) -> PlannerResult:
+        return PlannerResult(
+            stations=pd.DataFrame(
+                {
+                    "MD_m": [
+                        float(candidate_window.md_m),
+                        float(candidate_window.md_m) + 320.0,
+                    ],
+                    "X_m": [
+                        float(candidate_window.point.x),
+                        float(candidate_window.point.x) + 800.0,
+                    ],
+                    "Y_m": [
+                        float(candidate_window.point.y),
+                        float(candidate_window.point.y) + 400.0,
+                    ],
+                    "Z_m": [
+                        float(candidate_window.point.z),
+                        float(candidate_window.point.z),
+                    ],
+                    "INC_deg": [
+                        float(candidate_window.inc_deg),
+                        90.0,
+                    ],
+                    "AZI_deg": [
+                        float(candidate_window.azi_deg),
+                        float(candidate_window.azi_deg),
+                    ],
+                }
+            ),
+            summary={"md_total_m": float(candidate_window.md_m) + 320.0},
+            azimuth_deg=float(candidate_window.azi_deg),
+            md_t1_m=float(candidate_window.md_m) + 160.0,
+        )
+
+    fallback = plan_reoriented_pilot_sidetrack_fallback(
+        pilot_name="WELL_PL",
+        parent_name="WELL",
+        pilot_target_points=(surface, pl1),
+        parent_t1=parent_t1,
+        parent_t3=parent_t3,
+        productive_direction_target=productive_target,
+        pilot_config=config,
+        sidetrack_config=config,
+        candidate_validator=validate_complete_candidate,
+    )
+
+    assert captured_hints[0] == pytest.approx((135.0, 35.0))
+    assert fallback.geometry_seed_source == "standalone_sidetrack"
+    assert fallback.geometry_seed_azimuth_deg == pytest.approx(135.0)
+    assert fallback.geometry_seed_inc_deg == pytest.approx(35.0)
+    assert fallback.geometry_seed_md_total_m == pytest.approx(200.0)
+    assert fallback.target_azimuth_deg == pytest.approx(135.0)
+    assert fallback.total_drilled_md_m == pytest.approx(1200.0)
+    assert fallback.sidetrack_lateral_md_m == pytest.approx(320.0)
+
+
+def test_reoriented_pilot_candidates_remain_minimum_curvature_reconstructable() -> (
+    None
+):
+    surface = Point3D(0.0, 0.0, 0.0)
+    candidates = pilot_wells._reoriented_pilot_candidates(
+        target_points=(
+            surface,
+            Point3D(0.0, 0.0, 800.0),
+            Point3D(200.0, 0.0, 1300.0),
+        ),
+        target_azimuth_deg=90.0,
+        terminal_inc_hint_deg=90.0,
+        productive_direction_target=Point3D(1800.0, 0.0, 2200.0),
+        parent_t1=Point3D(800.0, 0.0, 2200.0),
+        config=TrajectoryConfig(
+            md_step_m=25.0,
+            kop_min_vertical_m=200.0,
+            dls_build_max_deg_per_30m=12.0,
+            max_inc_deg=110.0,
+        ),
+    )
+
+    assert candidates
+    for candidate in candidates:
+        stations = candidate.stations
+        reconstructed = compute_positions_min_curv(
+            stations[["MD_m", "INC_deg", "AZI_deg"]],
+            start=surface,
+        )
+        mismatch_m = np.linalg.norm(
+            reconstructed[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float)
+            - stations[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float),
+            axis=1,
+        )
+        assert float(np.max(mismatch_m)) < 0.25
+
+
+def test_reoriented_pilot_fallback_uses_direct_seed_when_standalone_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        kop_min_vertical_m=100.0,
+        dls_build_max_deg_per_30m=6.0,
+        max_inc_deg=100.0,
+    )
+    surface = Point3D(0.0, 0.0, 0.0)
+    pl1 = Point3D(0.0, 0.0, 800.0)
+    parent_t1 = Point3D(400.0, 0.0, 1500.0)
+    parent_t3 = Point3D(1200.0, 0.0, 1500.0)
+    productive_target = Point3D(900.0, 0.0, 1500.0)
+    pilot_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 800.0],
+            "X_m": [0.0, 0.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 800.0],
+            "INC_deg": [0.0, 90.0],
+            "AZI_deg": [90.0, 90.0],
+            "DLS_deg_per_30m": [0.0, 1.0],
+        }
+    )
+    pilot_result = pilot_wells.PilotBuildResult(
+        stations=pilot_stations,
+        surface=surface,
+        first_target=pl1,
+        final_target=pl1,
+        md_first_target_m=800.0,
+        md_total_m=900.0,
+        azimuth_deg=90.0,
+        summary={"max_dls_total_deg_per_30m": 1.0},
+    )
+    sidetrack_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 300.0],
+                "X_m": [0.0, 800.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [0.0, 0.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+            }
+        ),
+        summary={"md_total_m": 300.0, "max_dls_total_deg_per_30m": 1.0},
+        azimuth_deg=90.0,
+        md_t1_m=100.0,
+    )
+    window = PilotWindow(
+        pilot_name="WELL_PL",
+        parent_name="WELL",
+        md_m=700.0,
+        point=Point3D(0.0, 0.0, 700.0),
+        inc_deg=90.0,
+        azi_deg=90.0,
+    )
+    captured_hints: list[tuple[float, float]] = []
+
+    class FailingTrajectoryPlanner:
+        def plan(self, **kwargs: object) -> PlannerResult:
+            raise KeyError("no standalone seed")
+
+    class FakeSidetrackPlanner:
+        def plan(self, **kwargs: object) -> PlannerResult:
+            return sidetrack_result
+
+    def fake_reoriented_pilot_candidates(**kwargs: object) -> list[object]:
+        captured_hints.append(
+            (
+                float(kwargs["target_azimuth_deg"]),
+                float(kwargs["terminal_inc_hint_deg"]),
+            )
+        )
+        return [pilot_result]
+
+    monkeypatch.setattr(pilot_wells, "TrajectoryPlanner", FailingTrajectoryPlanner)
+    monkeypatch.setattr(pilot_wells, "SidetrackPlanner", FakeSidetrackPlanner)
+    monkeypatch.setattr(
+        pilot_wells,
+        "_reoriented_pilot_candidates",
+        fake_reoriented_pilot_candidates,
+    )
+    monkeypatch.setattr(
+        pilot_wells,
+        "_sidetrack_window_candidate_groups",
+        lambda **kwargs: [[window]],
+    )
+
+    fallback = plan_reoriented_pilot_sidetrack_fallback(
+        pilot_name="WELL_PL",
+        parent_name="WELL",
+        pilot_target_points=(surface, pl1),
+        parent_t1=parent_t1,
+        parent_t3=parent_t3,
+        productive_direction_target=productive_target,
+        pilot_config=config,
+        sidetrack_config=config,
+    )
+
+    assert captured_hints == pytest.approx([(90.0, 90.0)])
+    assert fallback.geometry_seed_source == "productive_direction"
+    assert fallback.geometry_seed_azimuth_deg == pytest.approx(90.0)
+    assert fallback.geometry_seed_inc_deg == pytest.approx(90.0)
+    assert fallback.geometry_seed_md_total_m == pytest.approx(0.0)
+    assert fallback.total_drilled_md_m == pytest.approx(1200.0)
+
+
+def test_sidetrack_geometry_seed_falls_back_when_standalone_seed_is_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MalformedTrajectoryPlanner:
+        def plan(self, **kwargs: object) -> PlannerResult:
+            return PlannerResult(
+                stations=pd.DataFrame(
+                    {
+                        "MD_m": [0.0, 100.0],
+                        "INC_deg": [float("nan"), float("nan")],
+                    }
+                ),
+                summary={"md_total_m": "bad", "entry_inc_deg": float("nan")},
+                azimuth_deg=float("nan"),
+                md_t1_m=None,
+            )
+
+    monkeypatch.setattr(pilot_wells, "TrajectoryPlanner", MalformedTrajectoryPlanner)
+
+    seed = pilot_wells._sidetrack_geometry_seed(
+        pilot_target_points=(Point3D(0.0, 0.0, 0.0), Point3D(0.0, 0.0, 100.0)),
+        parent_t1=Point3D(100.0, 0.0, 100.0),
+        productive_direction_target=Point3D(300.0, 0.0, 100.0),
+        sidetrack_config=TrajectoryConfig(md_step_m=25.0),
+    )
+
+    assert seed.source == "productive_direction"
+    assert seed.azimuth_deg == pytest.approx(90.0)
+    assert seed.inc_deg == pytest.approx(90.0)
+    assert seed.md_total_m == pytest.approx(0.0)
+
+
+def test_combine_pilot_and_sidetrack_uses_station_md_for_lateral_length() -> None:
+    config = TrajectoryConfig(max_total_md_postcheck_m=1000.0)
+    pilot_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0, 500.0],
+            "X_m": [0.0, 0.0, 0.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 100.0, 500.0],
+            "INC_deg": [0.0, 20.0, 30.0],
+            "AZI_deg": [0.0, 90.0, 90.0],
+            "DLS_deg_per_30m": [0.0, 1.0, 1.0],
+        }
+    )
+    sidetrack_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 50.0, 240.0],
+                "X_m": [0.0, 40.0, 230.0],
+                "Y_m": [0.0, 0.0, 0.0],
+                "Z_m": [100.0, 130.0, 130.0],
+                "INC_deg": [20.0, 40.0, 90.0],
+                "AZI_deg": [90.0, 90.0, 90.0],
+                "DLS_deg_per_30m": [0.0, 1.0, 1.0],
+            }
+        ),
+        summary={
+            "md_total_m": 1.0,
+            "max_dls_total_deg_per_30m": float("nan"),
+            "kop_md_m": float("nan"),
+        },
+        azimuth_deg=90.0,
+        md_t1_m=50.0,
+    )
+    window = PilotWindow(
+        pilot_name="WELL_PL",
+        parent_name="WELL",
+        md_m=100.0,
+        point=Point3D(0.0, 0.0, 100.0),
+        inc_deg=20.0,
+        azi_deg=90.0,
+    )
+
+    sidetrack = combine_pilot_and_sidetrack(
+        pilot_stations=pilot_stations,
+        sidetrack_result=sidetrack_result,
+        window=window,
+        config=config,
+    )
+
+    assert sidetrack.summary["sidetrack_lateral_md_m"] == pytest.approx(240.0)
+    assert sidetrack.summary["pilot_total_md_m"] == pytest.approx(500.0)
+    assert sidetrack.summary["total_drilled_md_m"] == pytest.approx(740.0)
+    assert sidetrack.summary["sidetrack_window_optimization_objective_m"] == (
+        pytest.approx(740.0)
+    )
+    assert sidetrack.summary["md_total_m"] == pytest.approx(340.0)
+    assert sidetrack.summary["kop_md_m"] == pytest.approx(100.0)
+    assert sidetrack.summary["max_dls_total_deg_per_30m"] >= 0.0
+
+
+def test_combine_pilot_and_sidetrack_sorts_local_sidetrack_md() -> None:
+    pilot_stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0, 200.0],
+            "X_m": [0.0, 0.0, 0.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 100.0, 200.0],
+            "INC_deg": [0.0, 0.0, 0.0],
+            "AZI_deg": [0.0, 0.0, 0.0],
+        }
+    )
+    local_stations = pd.DataFrame(
+        {
+            "MD_m": [80.0, 0.0, 30.0],
+            "X_m": [0.0, 0.0, 0.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [180.0, 100.0, 130.0],
+            "INC_deg": [0.0, 0.0, 0.0],
+            "AZI_deg": [0.0, 0.0, 0.0],
+            "segment": ["HOLD", "BUILD", "BUILD"],
+        }
+    )
+    sidetrack_result = PlannerResult(
+        stations=local_stations,
+        summary={"md_total_m": 80.0},
+        azimuth_deg=0.0,
+        md_t1_m=30.0,
+    )
+    window = PilotWindow(
+        pilot_name="WELL_PL",
+        parent_name="WELL",
+        md_m=100.0,
+        point=Point3D(0.0, 0.0, 100.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+
+    combined = combine_pilot_and_sidetrack(
+        pilot_stations=pilot_stations,
+        sidetrack_result=sidetrack_result,
+        window=window,
+        config=TrajectoryConfig(),
+    )
+
+    assert combined.stations["MD_m"].tolist() == pytest.approx(
+        [100.0, 130.0, 180.0]
+    )
+    assert combined.stations["Z_m"].tolist() == pytest.approx(
+        [100.0, 130.0, 180.0]
+    )
+    assert np.all(np.diff(combined.stations["MD_m"].to_numpy(dtype=float)) > 0.0)
+
+
+def test_combine_pilot_and_sidetrack_rejects_invalid_surveys() -> None:
+    valid_pilot = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0, 200.0],
+            "X_m": [0.0, 0.0, 0.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 100.0, 200.0],
+            "INC_deg": [0.0, 0.0, 0.0],
+            "AZI_deg": [0.0, 0.0, 0.0],
+        }
+    )
+    window = PilotWindow(
+        pilot_name="WELL_PL",
+        parent_name="WELL",
+        md_m=100.0,
+        point=Point3D(0.0, 0.0, 100.0),
+        inc_deg=0.0,
+        azi_deg=0.0,
+    )
+
+    valid_sidetrack = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 50.0],
+                "X_m": [0.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [100.0, 150.0],
+                "INC_deg": [0.0, 0.0],
+                "AZI_deg": [0.0, 0.0],
+            }
+        ),
+        summary={"md_total_m": 50.0},
+        azimuth_deg=0.0,
+        md_t1_m=25.0,
+    )
+    nonmonotonic_pilot = valid_pilot.iloc[[0, 2, 1]].reset_index(drop=True)
+
+    with pytest.raises(ValueError, match="не возрастающий MD"):
+        combine_pilot_and_sidetrack(
+            pilot_stations=nonmonotonic_pilot,
+            sidetrack_result=valid_sidetrack,
+            window=window,
+            config=TrajectoryConfig(),
+        )
+
+    duplicate_sidetrack = valid_sidetrack.model_copy(
+        update={
+            "stations": pd.DataFrame(
+                {
+                    "MD_m": [0.0, 50.0, 50.0],
+                    "X_m": [0.0, 0.0, 0.0],
+                    "Y_m": [0.0, 0.0, 0.0],
+                    "Z_m": [100.0, 150.0, 150.0],
+                    "INC_deg": [0.0, 0.0, 0.0],
+                    "AZI_deg": [0.0, 0.0, 0.0],
+                }
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="не возрастающий MD"):
+        combine_pilot_and_sidetrack(
+            pilot_stations=valid_pilot,
+            sidetrack_result=duplicate_sidetrack,
+            window=window,
+            config=TrajectoryConfig(),
+        )
+
+    with pytest.raises(ValueError, match="MD t1 бокового ствола находится вне"):
+        combine_pilot_and_sidetrack(
+            pilot_stations=valid_pilot,
+            sidetrack_result=valid_sidetrack.model_copy(update={"md_t1_m": 75.0}),
+            window=window,
+            config=TrajectoryConfig(),
         )

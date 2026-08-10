@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Iterable, Literal
+from typing import Callable, Iterable, Literal
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,7 @@ from pywp.mcm import (
     minimum_curvature_increment,
 )
 from pywp.models import PlannerResult, Point3D, SummaryDict, TrajectoryConfig
+from pywp.planner import TrajectoryPlanner
 from pywp.planner_types import PlanningError
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.segments import BuildSegment, HoldSegment
@@ -69,6 +70,12 @@ class PilotWindow(FrozenArbitraryModel):
         )
 
 
+SidetrackCandidateValidator = Callable[
+    [pd.DataFrame, PilotWindow, PlannerResult],
+    PlannerResult | None,
+]
+
+
 @dataclass(frozen=True)
 class SidetrackWindowOverride:
     kind: Literal["md", "z"]
@@ -107,6 +114,14 @@ class SidetrackPlan:
 
 
 @dataclass(frozen=True)
+class _SidetrackGeometrySeed:
+    source: str
+    azimuth_deg: float
+    inc_deg: float
+    md_total_m: float
+
+
+@dataclass(frozen=True)
 class ReorientedPilotSidetrackPlan:
     """Joint fallback result for a replanned pilot and its sidetrack.
 
@@ -121,6 +136,11 @@ class ReorientedPilotSidetrackPlan:
     sidetrack_result: PlannerResult
     target_azimuth_deg: float
     total_drilled_md_m: float
+    geometry_seed_source: str = "legacy"
+    geometry_seed_azimuth_deg: float = 0.0
+    geometry_seed_inc_deg: float = 0.0
+    geometry_seed_md_total_m: float = 0.0
+    sidetrack_lateral_md_m: float = 0.0
 
 
 def is_pilot_name(name: object) -> bool:
@@ -136,7 +156,9 @@ def is_alt_branch_name(name: object) -> bool:
 
 
 def _record_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
-    labels = tuple(str(label).strip() for label in getattr(record, "point_labels", ()) or ())
+    labels = tuple(
+        str(label).strip() for label in getattr(record, "point_labels", ()) or ()
+    )
     if len(labels) != len(tuple(record.points)):
         return ()
     return labels
@@ -234,8 +256,7 @@ def visible_well_records(
     return [
         record
         for record in records
-        if not is_pilot_record(record)
-        and (include_zbs or not is_zbs_record(record))
+        if not is_pilot_record(record) and (include_zbs or not is_zbs_record(record))
     ]
 
 
@@ -358,7 +379,9 @@ def order_records_with_pilots_first(
             seen.add(name_key)
             continue
         if not is_zbs_record(record):
-            pilot = by_name.get(pilot_name_key_for_parent(pilot_parent_name_for_record(name)))
+            pilot = by_name.get(
+                pilot_name_key_for_parent(pilot_parent_name_for_record(name))
+            )
             if pilot is not None and well_name_key(pilot.name) not in seen:
                 result.append(pilot)
                 seen.add(well_name_key(pilot.name))
@@ -466,6 +489,7 @@ def select_sidetrack_window(
     planner: object,
     optimization_context: AntiCollisionOptimizationContext | None = None,
     window_override: SidetrackWindowOverride | None = None,
+    candidate_validator: SidetrackCandidateValidator | None = None,
 ) -> tuple[PilotWindow, PlannerResult]:
     del planner
     sidetrack_planner = SidetrackPlanner()
@@ -477,7 +501,7 @@ def select_sidetrack_window(
             override=window_override,
         )
         try:
-            return window, sidetrack_planner.plan(
+            result = sidetrack_planner.plan(
                 start=SidetrackStart(
                     point=window.point,
                     inc_deg=float(window.inc_deg),
@@ -487,7 +511,26 @@ def select_sidetrack_window(
                 t3=parent_t3,
                 config=config,
             )
-        except (ValueError, PlanningError) as exc:
+            if candidate_validator is not None:
+                complete_result = candidate_validator(pilot_stations, window, result)
+                if complete_result is None:
+                    raise ValueError(
+                        "Проверка полной траектории отклонила окно зарезки."
+                    )
+                _complete_sidetrack_lateral_md_m(
+                    window=window,
+                    result=complete_result,
+                )
+            return window, result
+        except (
+            ValueError,
+            PlanningError,
+            ArithmeticError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            IndexError,
+        ) as exc:
             coordinate_label = "MD" if window_override.kind == "md" else "Z"
             raise ValueError(
                 f"Ручное окно зарезки {parent_name} по {coordinate_label}="
@@ -502,8 +545,8 @@ def select_sidetrack_window(
         config=config,
     )
     last_problem = ""
+    best: tuple[float, float, PilotWindow, PlannerResult] | None = None
     for candidates in candidate_groups:
-        best: tuple[float, float, PilotWindow, PlannerResult] | None = None
         for window in candidates:
             try:
                 result = sidetrack_planner.plan(
@@ -516,27 +559,267 @@ def select_sidetrack_window(
                     t3=parent_t3,
                     config=config,
                 )
-            except (ValueError, PlanningError) as exc:
+                complete_result = None
+                if candidate_validator is not None:
+                    complete_result = candidate_validator(
+                        pilot_stations,
+                        window,
+                        result,
+                    )
+                    if complete_result is None:
+                        raise ValueError(
+                            "Проверка полной траектории отклонила окно зарезки."
+                        )
+                score = _sidetrack_window_score(
+                    window=window,
+                    result=result,
+                    complete_result=complete_result,
+                    optimization_context=optimization_context,
+                )
+            except (
+                ValueError,
+                PlanningError,
+                ArithmeticError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                IndexError,
+            ) as exc:
                 last_problem = str(exc)
                 continue
-            score = _sidetrack_window_score(
-                window=window,
-                result=result,
-                optimization_context=optimization_context,
-            )
+            if not math.isfinite(score):
+                last_problem = (
+                    "Расчет бокового ствола для окна "
+                    f"MD={float(window.md_m):.2f} м вернул некорректную оценку."
+                )
+                continue
             if best is None or (score, -float(window.md_m)) < (best[0], best[1]):
                 best = (score, -float(window.md_m), window, result)
 
-        # The 50-100 m interval is a strict first priority.  Only when every
-        # preferred window fails do we spend time on the broader pilot search.
-        if best is not None:
-            _, _, window, result = best
-            return window, result
+    # The 50-100 m interval is evaluated first, but earlier valid windows above
+    # PL1 still participate in the global complete-branch optimization.
+    if best is not None:
+        _, _, window, result = best
+        return window, result
 
     suffix = f" Последняя причина: {last_problem}" if last_problem else ""
     raise ValueError(
         "Не удалось подобрать окно зарезки на пилоте: ни одна станция пилота "
         "не дала расчет продуктивного ствола до t1/t3." + suffix
+    )
+
+
+def _finite_float_or_none(value: object) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _planner_result_md_total_m(result: PlannerResult) -> float:
+    """Read MD from stations first; summaries are metadata fallbacks only."""
+
+    stations = result.stations
+    if isinstance(stations, pd.DataFrame) and not stations.empty:
+        if "MD_m" not in stations.columns:
+            raise ValueError("Результат планировщика не содержит колонку MD_m.")
+        try:
+            md_values = stations["MD_m"].to_numpy(dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Результат планировщика содержит нечисловой MD.") from exc
+        if (
+            np.any(~np.isfinite(md_values))
+            or float(md_values[0]) < -SMALL
+            or (len(md_values) > 1 and np.any(np.diff(md_values) <= SMALL))
+        ):
+            raise ValueError(
+                "Результат планировщика содержит нечисловой, отрицательный "
+                "или не возрастающий MD."
+            )
+        return float(md_values[-1])
+
+    summary_md = _finite_float_or_none(result.summary.get("md_total_m"))
+    if summary_md is not None and summary_md >= 0.0:
+        return summary_md
+    return 0.0
+
+
+def _complete_sidetrack_lateral_md_m(
+    *,
+    window: PilotWindow,
+    result: PlannerResult,
+) -> float:
+    """Validate a complete, globally-MD-referenced sidetrack candidate."""
+
+    if not isinstance(result, PlannerResult):
+        raise TypeError(
+            "Проверка полного кандидата бокового ствола должна вернуть PlannerResult."
+        )
+    stations = result.stations
+    if not isinstance(stations, pd.DataFrame) or len(stations) < 2:
+        raise ValueError(
+            "Полный кандидат бокового ствола содержит меньше двух станций."
+        )
+    required_columns = {"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"}
+    missing_columns = required_columns.difference(stations.columns)
+    if missing_columns:
+        raise ValueError(
+            "Полный кандидат бокового ствола не содержит колонки "
+            f"{', '.join(sorted(missing_columns))}."
+        )
+    try:
+        station_values = stations[
+            ["MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"]
+        ].to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Полный кандидат бокового ствола содержит нечисловую станцию."
+        ) from exc
+    if np.any(~np.isfinite(station_values)):
+        raise ValueError("Полный кандидат бокового ствола содержит нечисловую станцию.")
+
+    window_md_m = float(window.md_m)
+    if abs(float(station_values[0, 0]) - window_md_m) > 1e-6:
+        raise ValueError(
+            "Глобальный MD полного кандидата бокового ствола должен начинаться "
+            "в выбранном окне зарезки."
+        )
+    start_miss_m = float(
+        np.linalg.norm(
+            station_values[0, 3:6]
+            - np.asarray(
+                [float(window.point.x), float(window.point.y), float(window.point.z)],
+                dtype=float,
+            )
+        )
+    )
+    if start_miss_m > 1e-3:
+        raise ValueError(
+            "Полный кандидат бокового ствола не начинается в выбранном окне зарезки."
+        )
+    if (
+        abs(float(station_values[0, 1]) - float(window.inc_deg)) > 1e-3
+        or _azimuth_difference_deg(
+            float(station_values[0, 2]),
+            float(window.azi_deg),
+        )
+        > 1e-3
+    ):
+        raise ValueError(
+            "Ориентация полного кандидата бокового ствола не совпадает с окном зарезки."
+        )
+
+    lateral_md_m = _planner_result_md_total_m(result) - window_md_m
+    if not math.isfinite(lateral_md_m) or lateral_md_m <= SMALL:
+        raise ValueError(
+            "Полный кандидат бокового ствола имеет некорректную длину от окна."
+        )
+    return float(lateral_md_m)
+
+
+def _planner_result_entry_inc_deg(
+    result: PlannerResult,
+    *,
+    fallback_inc_deg: float,
+) -> float:
+    md_t1_m = _finite_float_or_none(getattr(result, "md_t1_m", None))
+    stations = result.stations
+    if (
+        md_t1_m is not None
+        and isinstance(stations, pd.DataFrame)
+        and {"MD_m", "INC_deg"}.issubset(stations.columns)
+    ):
+        finite = stations[["MD_m", "INC_deg"]].copy()
+        finite = finite.loc[
+            np.isfinite(finite[["MD_m", "INC_deg"]].to_numpy(dtype=float)).all(axis=1)
+        ]
+        finite = finite.sort_values("MD_m").drop_duplicates("MD_m", keep="last")
+        if len(finite) >= 1:
+            md_values = finite["MD_m"].to_numpy(dtype=float)
+            inc_values = finite["INC_deg"].to_numpy(dtype=float)
+            if len(finite) == 1 or md_t1_m <= float(md_values[0]):
+                return float(inc_values[0])
+            if md_t1_m >= float(md_values[-1]):
+                return float(inc_values[-1])
+            return float(np.interp(md_t1_m, md_values, inc_values))
+
+    for key in ("entry_inc_deg", "inc_t1_deg", "hold_inc_deg"):
+        summary_inc = _finite_float_or_none(result.summary.get(key))
+        if summary_inc is not None:
+            return summary_inc
+
+    if isinstance(stations, pd.DataFrame) and "INC_deg" in stations.columns:
+        inc_values = stations["INC_deg"].to_numpy(dtype=float)
+        inc_values = inc_values[np.isfinite(inc_values)]
+        if len(inc_values) > 0:
+            return float(inc_values[-1])
+    return float(fallback_inc_deg)
+
+
+def _sidetrack_geometry_seed(
+    *,
+    pilot_target_points: tuple[Point3D, ...],
+    parent_t1: Point3D,
+    productive_direction_target: Point3D,
+    sidetrack_config: TrajectoryConfig,
+) -> _SidetrackGeometrySeed:
+    productive_delta = _point_array(productive_direction_target) - _point_array(
+        parent_t1
+    )
+    productive_inc_deg, productive_azimuth_deg = _angles_from_delta(productive_delta)
+    fallback = _SidetrackGeometrySeed(
+        source="productive_direction",
+        azimuth_deg=float(productive_azimuth_deg),
+        inc_deg=float(productive_inc_deg),
+        md_total_m=0.0,
+    )
+    if len(pilot_target_points) == 0:
+        return fallback
+
+    try:
+        standalone = TrajectoryPlanner().plan(
+            surface=pilot_target_points[0],
+            t1=parent_t1,
+            t3=productive_direction_target,
+            config=sidetrack_config,
+        )
+    except (ValueError, PlanningError, ArithmeticError, KeyError, TypeError):
+        return fallback
+
+    try:
+        seed_azimuth_deg = _finite_float_or_none(
+            getattr(standalone, "azimuth_deg", None)
+        )
+        stations = getattr(standalone, "stations", pd.DataFrame())
+        if seed_azimuth_deg is None:
+            if not isinstance(stations, pd.DataFrame) or not {"X_m", "Y_m"}.issubset(
+                stations.columns
+            ):
+                return fallback
+            seed_azimuth_deg = _first_valid_azimuth_deg(stations)
+        seed_inc_deg = _planner_result_entry_inc_deg(
+            standalone,
+            fallback_inc_deg=productive_inc_deg,
+        )
+        seed_md_total_m = _planner_result_md_total_m(standalone)
+    except (AttributeError, KeyError, TypeError, ValueError, ArithmeticError):
+        return fallback
+
+    seed_azimuth_deg = _finite_float_or_none(seed_azimuth_deg)
+    seed_inc_deg = _finite_float_or_none(seed_inc_deg)
+    seed_md_total_m = _finite_float_or_none(seed_md_total_m)
+    if seed_azimuth_deg is None or seed_inc_deg is None:
+        return fallback
+    if seed_md_total_m is None or seed_md_total_m < 0.0:
+        seed_md_total_m = 0.0
+    return _SidetrackGeometrySeed(
+        source="standalone_sidetrack",
+        azimuth_deg=_normalize_azimuth_deg(seed_azimuth_deg),
+        inc_deg=float(seed_inc_deg),
+        md_total_m=float(seed_md_total_m),
     )
 
 
@@ -551,113 +834,221 @@ def plan_reoriented_pilot_sidetrack_fallback(
     pilot_config: TrajectoryConfig,
     sidetrack_config: TrajectoryConfig,
     optimization_context: AntiCollisionOptimizationContext | None = None,
+    candidate_validator: SidetrackCandidateValidator | None = None,
 ) -> ReorientedPilotSidetrackPlan:
     """Reorient the project pilot as a last-resort sidetrack fallback.
 
-    The approach to PL1 is rebuilt with its terminal azimuth aligned to the
-    first productive interval (t1->t2 for a target sequence, otherwise
-    t1->t3).  Every original PL point is still hit exactly.  All feasible
-    pilot/window combinations are ranked by complete drilled MD rather than
-    by ``window_md + lateral_md``.
+    The productive branch is first planned as a standalone well to extract a
+    geometric approach hint.  The pilot is then rebuilt with PL1 terminal
+    azimuth/inc candidates from that standalone geometry and from the direct
+    t1->t2/t3 productive interval.  Every original PL point is still hit
+    exactly.  All feasible pilot/window combinations are ranked by complete
+    drilled MD rather than by ``window_md + lateral_md``.
     """
 
     if len(pilot_target_points) < 2:
         raise ValueError(
             "Fallback перестройки пилота требует устье и минимум одну PL-точку."
         )
-    productive_delta = (
-        _point_array(productive_direction_target) - _point_array(parent_t1)
+    productive_delta = _point_array(productive_direction_target) - _point_array(
+        parent_t1
     )
     if float(np.linalg.norm(productive_delta)) <= SMALL:
         raise ValueError(
             "Невозможно перестроить пилот: первая продуктивная секция имеет "
             "нулевую длину."
         )
-    _productive_inc_deg, target_azimuth_deg = _angles_from_delta(productive_delta)
-
-    best: tuple[
-        tuple[float, float, float, float, float],
-        PilotBuildResult,
-        PilotWindow,
-        PlannerResult,
-    ] | None = None
-    last_problem = ""
-    for pilot in _reoriented_pilot_candidates(
-        target_points=pilot_target_points,
-        target_azimuth_deg=target_azimuth_deg,
-        productive_direction_target=productive_direction_target,
+    productive_inc_deg, productive_azimuth_deg = _angles_from_delta(productive_delta)
+    geometry_seed = _sidetrack_geometry_seed(
+        pilot_target_points=pilot_target_points,
         parent_t1=parent_t1,
-        config=pilot_config,
+        productive_direction_target=productive_direction_target,
+        sidetrack_config=sidetrack_config,
+    )
+    azimuth_hints: list[tuple[float, float]] = []
+    for azimuth_deg, inc_deg in (
+        (geometry_seed.azimuth_deg, geometry_seed.inc_deg),
+        (productive_azimuth_deg, productive_inc_deg),
     ):
-        pilot_anti_collision_penalty = (
-            _trajectory_anticollision_penalty(
-                stations=pilot.stations,
-                optimization_context=optimization_context,
-            )
-            if optimization_context is not None
-            else 0.0
+        if not math.isfinite(float(azimuth_deg)) or not math.isfinite(float(inc_deg)):
+            continue
+        normalized_azimuth_deg = _normalize_azimuth_deg(float(azimuth_deg))
+        if any(
+            _azimuth_difference_deg(normalized_azimuth_deg, existing[0]) <= 1e-6
+            for existing in azimuth_hints
+        ):
+            continue
+        azimuth_hints.append((normalized_azimuth_deg, float(inc_deg)))
+    if not azimuth_hints:
+        azimuth_hints.append(
+            (_normalize_azimuth_deg(productive_azimuth_deg), float(productive_inc_deg))
         )
-        candidate_groups = _sidetrack_window_candidate_groups(
-            pilot_name=pilot_name,
-            parent_name=parent_name,
-            pilot_stations=pilot.stations,
-            parent_t1=parent_t1,
-            config=sidetrack_config,
-        )
-        # Unlike the normal path, this is a global joint optimization.  The
-        # preferred 50-100 m group is evaluated first but does not prevent a
-        # shorter feasible total-drilling solution in the expanded group.
-        windows = _bounded_reoriented_window_candidates(candidate_groups)
-        for window in windows:
-            try:
-                sidetrack_result = SidetrackPlanner().plan(
-                    start=SidetrackStart(
-                        point=window.point,
-                        inc_deg=float(window.inc_deg),
-                        azi_deg=float(window.azi_deg),
-                    ),
-                    t1=parent_t1,
-                    t3=parent_t3,
-                    config=sidetrack_config,
-                )
-            except (ValueError, PlanningError) as exc:
-                last_problem = str(exc)
-                continue
 
-            lateral_md_m = float(
-                sidetrack_result.summary.get("md_total_m", 0.0)
+    best: (
+        tuple[
+            tuple[float, float, float, float, float],
+            PilotBuildResult,
+            PilotWindow,
+            PlannerResult,
+            float,
+        ]
+        | None
+    ) = None
+    last_problem = ""
+    for target_azimuth_deg, terminal_inc_hint_deg in azimuth_hints:
+        try:
+            pilot_candidates = _reoriented_pilot_candidates(
+                target_points=pilot_target_points,
+                target_azimuth_deg=target_azimuth_deg,
+                terminal_inc_hint_deg=terminal_inc_hint_deg,
+                productive_direction_target=productive_direction_target,
+                parent_t1=parent_t1,
+                config=pilot_config,
             )
-            total_drilled_md_m = float(pilot.md_total_m) + lateral_md_m
-            anti_collision_penalty = (
-                _sidetrack_anticollision_penalty(
-                    result=sidetrack_result,
-                    window=window,
+        except (ValueError, PlanningError, ArithmeticError, KeyError, TypeError) as exc:
+            last_problem = str(exc)
+            continue
+        for pilot in pilot_candidates:
+            pilot_anti_collision_penalty = (
+                _trajectory_anticollision_penalty(
+                    stations=pilot.stations,
                     optimization_context=optimization_context,
                 )
                 if optimization_context is not None
                 else 0.0
             )
-            max_dls = max(
-                float(
-                    pilot.summary.get("max_dls_total_deg_per_30m", 0.0)
-                ),
-                float(
-                    sidetrack_result.summary.get(
-                        "max_dls_total_deg_per_30m", 0.0
+            candidate_groups = _sidetrack_window_candidate_groups(
+                pilot_name=pilot_name,
+                parent_name=parent_name,
+                pilot_stations=pilot.stations,
+                parent_t1=parent_t1,
+                config=sidetrack_config,
+            )
+            # Unlike the normal path, this is a global joint optimization.  The
+            # preferred 50-100 m group is evaluated first but does not prevent a
+            # shorter feasible total-drilling solution in the expanded group.
+            windows = _bounded_reoriented_window_candidates(candidate_groups)
+            for window in windows:
+                try:
+                    sidetrack_result = SidetrackPlanner().plan(
+                        start=SidetrackStart(
+                            point=window.point,
+                            inc_deg=float(window.inc_deg),
+                            azi_deg=float(window.azi_deg),
+                        ),
+                        t1=parent_t1,
+                        t3=parent_t3,
+                        config=sidetrack_config,
                     )
-                ),
-            )
-            key = (
-                total_drilled_md_m
-                + pilot_anti_collision_penalty
-                + anti_collision_penalty,
-                total_drilled_md_m,
-                max_dls,
-                lateral_md_m,
-                -float(window.md_m),
-            )
-            if best is None or key < best[0]:
-                best = (key, pilot, window, sidetrack_result)
+                    complete_result = (
+                        candidate_validator(pilot.stations, window, sidetrack_result)
+                        if candidate_validator is not None
+                        else None
+                    )
+                    if candidate_validator is not None and complete_result is None:
+                        raise ValueError(
+                            "Проверка полной траектории отклонила окно зарезки."
+                        )
+                    lateral_md_m = (
+                        _complete_sidetrack_lateral_md_m(
+                            window=window,
+                            result=complete_result,
+                        )
+                        if complete_result is not None
+                        else _planner_result_md_total_m(sidetrack_result)
+                    )
+                    if not math.isfinite(lateral_md_m) or lateral_md_m <= SMALL:
+                        raise ValueError(
+                            "Расчет бокового ствола вернул нулевую длину от окна."
+                        )
+                except (
+                    ValueError,
+                    PlanningError,
+                    ArithmeticError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                    IndexError,
+                ) as exc:
+                    last_problem = str(exc)
+                    continue
+                total_drilled_md_m = float(pilot.md_total_m) + lateral_md_m
+                if optimization_context is None:
+                    anti_collision_penalty = 0.0
+                elif complete_result is not None:
+                    # ``complete_result`` already uses global MD.  Applying
+                    # the local-window shift here would double-count the
+                    # pilot section in anti-collision evaluation.
+                    anti_collision_penalty = _trajectory_anticollision_penalty(
+                        stations=complete_result.stations,
+                        optimization_context=optimization_context,
+                    )
+                else:
+                    anti_collision_penalty = _sidetrack_anticollision_penalty(
+                        result=sidetrack_result,
+                        window=window,
+                        optimization_context=optimization_context,
+                    )
+                pilot_summary_dls = (
+                    _finite_float_or_none(
+                        pilot.summary.get("max_dls_total_deg_per_30m")
+                    )
+                    or 0.0
+                )
+                pilot_station_dls = (
+                    _finite_max(pilot.stations["DLS_deg_per_30m"])
+                    if "DLS_deg_per_30m" in pilot.stations.columns
+                    else 0.0
+                )
+                sidetrack_summary_dls = (
+                    _finite_float_or_none(
+                        (
+                            complete_result.summary
+                            if complete_result is not None
+                            else sidetrack_result.summary
+                        ).get("max_dls_total_deg_per_30m")
+                    )
+                    or 0.0
+                )
+                sidetrack_station_dls = (
+                    _finite_max(
+                        (
+                            complete_result.stations
+                            if complete_result is not None
+                            else sidetrack_result.stations
+                        )["DLS_deg_per_30m"]
+                    )
+                    if "DLS_deg_per_30m"
+                    in (
+                        complete_result.stations
+                        if complete_result is not None
+                        else sidetrack_result.stations
+                    ).columns
+                    else 0.0
+                )
+                max_dls = max(
+                    pilot_summary_dls,
+                    pilot_station_dls,
+                    sidetrack_summary_dls,
+                    sidetrack_station_dls,
+                )
+                key = (
+                    total_drilled_md_m
+                    + pilot_anti_collision_penalty
+                    + anti_collision_penalty,
+                    total_drilled_md_m,
+                    max_dls,
+                    lateral_md_m,
+                    -float(window.md_m),
+                )
+                if best is None or key < best[0]:
+                    best = (
+                        key,
+                        pilot,
+                        window,
+                        sidetrack_result,
+                        float(target_azimuth_deg),
+                    )
 
     if best is None:
         suffix = f" Последняя причина: {last_problem}" if last_problem else ""
@@ -666,13 +1057,18 @@ def plan_reoriented_pilot_sidetrack_fallback(
             "продуктивной секции и подобрать допустимое окно зарезки." + suffix
         )
 
-    key, pilot, window, sidetrack_result = best
+    key, pilot, window, sidetrack_result, selected_azimuth_deg = best
     return ReorientedPilotSidetrackPlan(
         pilot=pilot,
         window=window,
         sidetrack_result=sidetrack_result,
-        target_azimuth_deg=float(target_azimuth_deg),
+        target_azimuth_deg=float(selected_azimuth_deg),
+        geometry_seed_source=str(geometry_seed.source),
+        geometry_seed_azimuth_deg=float(geometry_seed.azimuth_deg),
+        geometry_seed_inc_deg=float(geometry_seed.inc_deg),
+        geometry_seed_md_total_m=float(geometry_seed.md_total_m),
         total_drilled_md_m=float(key[1]),
+        sidetrack_lateral_md_m=float(key[3]),
     )
 
 
@@ -684,15 +1080,168 @@ def combine_pilot_and_sidetrack(
     config: TrajectoryConfig,
 ) -> SidetrackPlan:
     window_md = float(window.md_m)
+    if not math.isfinite(window_md) or window_md < -SMALL:
+        raise ValueError("Окно зарезки должно иметь конечный неотрицательный MD.")
+    window_inc_deg = float(window.inc_deg)
+    window_azi_deg = float(window.azi_deg)
+    if (
+        not math.isfinite(window_inc_deg)
+        or not math.isfinite(window_azi_deg)
+        or window_inc_deg < -SMALL
+        or window_inc_deg > 180.0 + SMALL
+    ):
+        raise ValueError("Ориентация окна зарезки должна быть конечной и допустимой.")
+    required_pilot_columns = {"MD_m", "X_m", "Y_m", "Z_m", "INC_deg", "AZI_deg"}
+    if not required_pilot_columns.issubset(pilot_stations.columns):
+        raise ValueError(
+            "Инклинометрия пилота не содержит MD/X/Y/Z/INC/AZI для сборки ЗБС."
+        )
+    pilot_stations = pilot_stations.copy().reset_index(drop=True)
+    if len(pilot_stations) < 2:
+        raise ValueError("Инклинометрия пилота содержит меньше двух станций.")
+    try:
+        pilot_numeric = pilot_stations[list(required_pilot_columns)].to_numpy(
+            dtype=float
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Инклинометрия пилота содержит нечисловую станцию.") from exc
+    pilot_md_values = pilot_stations["MD_m"].to_numpy(dtype=float)
+    if (
+        np.any(~np.isfinite(pilot_numeric))
+        or float(pilot_md_values[0]) < -SMALL
+        or np.any(np.diff(pilot_md_values) <= SMALL)
+    ):
+        raise ValueError(
+            "Инклинометрия пилота содержит нечисловой, отрицательный "
+            "или не возрастающий MD."
+        )
+    pilot_total_md_m = float(pilot_stations["MD_m"].iloc[-1])
+    if window_md > pilot_total_md_m + SMALL:
+        raise ValueError("Окно зарезки находится ниже конечного MD пилота.")
+    expected_window = _interpolate_station_by_md(pilot_stations, window_md)
+    window_miss_m = float(
+        np.linalg.norm(
+            np.asarray(
+                [
+                    float(expected_window["X_m"]) - float(window.point.x),
+                    float(expected_window["Y_m"]) - float(window.point.y),
+                    float(expected_window["Z_m"]) - float(window.point.z),
+                ],
+                dtype=float,
+            )
+        )
+    )
+    if window_miss_m > 1e-3:
+        raise ValueError(
+            "Окно зарезки не лежит на траектории пилота "
+            f"(расхождение {window_miss_m:.3f} м)."
+        )
+    window_inc_miss_deg = abs(float(expected_window["INC_deg"]) - float(window.inc_deg))
+    window_azi_miss_deg = _azimuth_difference_deg(
+        float(expected_window["AZI_deg"]), float(window.azi_deg)
+    )
+    if window_inc_miss_deg > 1e-3 or window_azi_miss_deg > 1e-3:
+        raise ValueError("Ориентация окна зарезки не совпадает с траекторией пилота.")
     pilot_upper = pilot_stations.loc[
         pilot_stations["MD_m"].to_numpy(dtype=float) <= window_md + SMALL
     ].copy()
     if pilot_upper.empty:
         raise ValueError("Не удалось собрать общий участок пилота до окна зарезки.")
+    if float(pilot_upper["MD_m"].iloc[-1]) < window_md - SMALL:
+        window_row = {
+            "MD_m": window_md,
+            "INC_deg": float(window.inc_deg),
+            "AZI_deg": float(window.azi_deg),
+            "X_m": float(window.point.x),
+            "Y_m": float(window.point.y),
+            "Z_m": float(window.point.z),
+            "N_m": float(window.point.y),
+            "E_m": float(window.point.x),
+            "TVD_m": float(window.point.z),
+            "segment": "PILOT_WINDOW",
+        }
+        pilot_upper = pd.concat(
+            [pilot_upper, pd.DataFrame([window_row])],
+            ignore_index=True,
+        )
+        pilot_upper = add_dls(pilot_upper)
 
     sidetrack_stations = sidetrack_result.stations.copy()
-    if sidetrack_stations.empty:
-        raise ValueError("Расчет бокового ствола вернул пустую инклинометрию.")
+    if len(sidetrack_stations) < 2:
+        raise ValueError(
+            "Расчет бокового ствола вернул меньше двух станций инклинометрии."
+        )
+    required_sidetrack_columns = (
+        "MD_m",
+        "INC_deg",
+        "AZI_deg",
+        "X_m",
+        "Y_m",
+        "Z_m",
+    )
+    if not set(required_sidetrack_columns).issubset(sidetrack_stations.columns):
+        raise ValueError(
+            "Расчет бокового ствола не вернул MD/INC/AZI/X/Y/Z для сборки ЗБС."
+        )
+    sidetrack_stations = sidetrack_stations.reset_index(drop=True)
+    try:
+        sidetrack_numeric = sidetrack_stations[
+            list(required_sidetrack_columns)
+        ].to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Инклинометрия бокового ствола содержит нечисловую станцию."
+        ) from exc
+    if np.any(~np.isfinite(sidetrack_numeric)):
+        raise ValueError(
+            "Инклинометрия бокового ствола содержит нечисловой, отрицательный "
+            "или не возрастающий MD."
+        )
+    # PlannerResult does not require callers to preserve DataFrame row order.
+    # Normalize local MD before locating the window station and offsetting it
+    # into the combined well MD domain.  A stable sort keeps duplicate-MD rows
+    # deterministic; duplicates are still rejected by the strict-MD check.
+    sidetrack_stations["MD_m"] = sidetrack_numeric[:, 0]
+    sidetrack_stations = sidetrack_stations.sort_values(
+        "MD_m", kind="mergesort"
+    ).reset_index(drop=True)
+    sidetrack_md_values = sidetrack_stations["MD_m"].to_numpy(dtype=float)
+    if (
+        np.any(np.diff(sidetrack_md_values) <= SMALL)
+        or float(sidetrack_md_values[0]) < -SMALL
+    ):
+        raise ValueError(
+            "Инклинометрия бокового ствола содержит нечисловой, отрицательный "
+            "или не возрастающий MD."
+        )
+    if abs(float(sidetrack_md_values[0])) > 1e-6:
+        raise ValueError("Локальный MD бокового ствола должен начинаться с 0 м.")
+    sidetrack_start = sidetrack_stations.iloc[0]
+    sidetrack_start_miss_m = float(
+        np.linalg.norm(
+            np.asarray(
+                [
+                    float(sidetrack_start["X_m"]) - float(window.point.x),
+                    float(sidetrack_start["Y_m"]) - float(window.point.y),
+                    float(sidetrack_start["Z_m"]) - float(window.point.z),
+                ],
+                dtype=float,
+            )
+        )
+    )
+    if sidetrack_start_miss_m > 1e-3:
+        raise ValueError(
+            "Боковой ствол не начинается в выбранном окне зарезки "
+            f"(расхождение {sidetrack_start_miss_m:.3f} м)."
+        )
+    sidetrack_start_inc_miss_deg = abs(
+        float(sidetrack_start["INC_deg"]) - float(window.inc_deg)
+    )
+    sidetrack_start_azi_miss_deg = _azimuth_difference_deg(
+        float(sidetrack_start["AZI_deg"]), float(window.azi_deg)
+    )
+    if sidetrack_start_inc_miss_deg > 1e-3 or sidetrack_start_azi_miss_deg > 1e-3:
+        raise ValueError("Ориентация бокового ствола не совпадает с окном зарезки.")
     sidetrack_stations["MD_m"] = (
         sidetrack_stations["MD_m"].to_numpy(dtype=float) + window_md
     )
@@ -702,22 +1251,36 @@ def combine_pilot_and_sidetrack(
             "segment", pd.Series(["SIDETRACK"] * len(sidetrack_stations))
         )
     ]
-    stations = sidetrack_stations.sort_values("MD_m").reset_index(drop=True)
+    stations = sidetrack_stations.reset_index(drop=True)
     stations = add_dls(stations)
     stations.attrs["uncertainty_reference_stations"] = pilot_upper.copy()
     summary = dict(sidetrack_result.summary)
     md_total_m = float(stations["MD_m"].iloc[-1])
     if not math.isfinite(md_total_m):
         md_total_m = 0.0
-    pilot_total_md_m = float(pilot_stations["MD_m"].iloc[-1])
-    if not math.isfinite(pilot_total_md_m):
-        pilot_total_md_m = 0.0
-    sidetrack_lateral_md_m = float(sidetrack_result.summary.get("md_total_m", 0.0))
-    if not math.isfinite(sidetrack_lateral_md_m):
-        sidetrack_lateral_md_m = 0.0
+    # The input may legitimately have arrived in arbitrary row order.  Use
+    # the normalized local survey rather than re-reading the unsorted source.
+    sidetrack_lateral_md_m = float(sidetrack_md_values[-1])
+    local_md_t1_m = _finite_float_or_none(sidetrack_result.md_t1_m)
+    if (
+        local_md_t1_m is None
+        or local_md_t1_m < -SMALL
+        or local_md_t1_m > sidetrack_lateral_md_m + SMALL
+    ):
+        raise ValueError("MD t1 бокового ствола находится вне локальной сетки MD.")
+    sidetrack_azimuth_deg = _finite_float_or_none(sidetrack_result.azimuth_deg)
+    if sidetrack_azimuth_deg is None:
+        raise ValueError("Азимут бокового ствола должен быть конечным числом.")
     total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
+    sidetrack_summary_max_dls = (
+        _finite_float_or_none(summary.get("max_dls_total_deg_per_30m")) or 0.0
+    )
+    sidetrack_kop_md_m = max(
+        0.0,
+        _finite_float_or_none(summary.get("kop_md_m")) or 0.0,
+    )
     max_dls = max(
-        float(summary.get("max_dls_total_deg_per_30m", 0.0)),
+        sidetrack_summary_max_dls,
         _finite_max(stations.get("DLS_deg_per_30m", pd.Series(dtype=float))),
     )
     summary.update(
@@ -731,6 +1294,7 @@ def combine_pilot_and_sidetrack(
             "sidetrack_window_inc_deg": float(window.inc_deg),
             "sidetrack_window_azi_deg": float(window.azi_deg),
             "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
+            "sidetrack_complete_lateral_md_m": sidetrack_lateral_md_m,
             "pilot_total_md_m": pilot_total_md_m,
             "total_drilled_md_m": total_drilled_md_m,
             "sidetrack_window_optimization_objective_m": total_drilled_md_m,
@@ -740,12 +1304,17 @@ def combine_pilot_and_sidetrack(
                 0.0,
                 total_drilled_md_m - float(config.max_total_md_postcheck_m),
             ),
+            "md_postcheck_exceeded": (
+                "yes"
+                if total_drilled_md_m > float(config.max_total_md_postcheck_m) + 1e-6
+                else "no"
+            ),
             "max_dls_total_deg_per_30m": max_dls,
             "dls_postcheck_excess_deg_per_30m": max(
                 0.0,
                 max_dls - float(config.dls_build_max_deg_per_30m),
             ),
-            "kop_md_m": window_md + float(summary.get("kop_md_m", 0.0)),
+            "kop_md_m": window_md + sidetrack_kop_md_m,
         }
     )
     return SidetrackPlan(
@@ -753,8 +1322,8 @@ def combine_pilot_and_sidetrack(
         window=window,
         stations=stations,
         summary=summary,
-        md_t1_m=window_md + float(sidetrack_result.md_t1_m),
-        azimuth_deg=float(sidetrack_result.azimuth_deg),
+        md_t1_m=window_md + local_md_t1_m,
+        azimuth_deg=sidetrack_azimuth_deg,
     )
 
 
@@ -866,6 +1435,7 @@ def _reoriented_pilot_candidates(
     *,
     target_points: tuple[Point3D, ...],
     target_azimuth_deg: float,
+    terminal_inc_hint_deg: float,
     productive_direction_target: Point3D,
     parent_t1: Point3D,
     config: TrajectoryConfig,
@@ -907,9 +1477,13 @@ def _reoriented_pilot_candidates(
         _point_array(parent_t1) - _point_array(study_points[0])
     )
     max_inc_deg = float(config.max_inc_deg)
+    terminal_inc_hint = _finite_float_or_none(terminal_inc_hint_deg)
+    if terminal_inc_hint is None:
+        terminal_inc_hint = productive_inc_deg
     inc_candidates = _unique_floats(
         min(max_inc_deg, max(0.0, value))
         for value in (
+            terminal_inc_hint,
             geometric_inc_deg,
             to_t1_inc_deg,
             productive_inc_deg,
@@ -1115,7 +1689,10 @@ def _pilot_cubic_leg(
         p1=p1,
         p2=p2,
         p3=p3,
-        step_m=float(config.md_step_m),
+        # This fallback is exported as a minimum-curvature survey.  A coarse
+        # cubic sampling grid can otherwise accumulate visible XYZ drift when
+        # consumers reconstruct coordinates from MD/INC/AZI.
+        step_m=min(float(config.md_step_m), 10.0),
     )
     distances = np.linalg.norm(np.diff(xyz, axis=0), axis=1)
     if len(xyz) < 2 or np.any(distances <= SMALL):
@@ -1143,9 +1720,7 @@ def _sample_pilot_cubic_bezier(
 ) -> np.ndarray:
     chord_m = float(np.linalg.norm(p3 - p0))
     control_m = float(
-        np.linalg.norm(p1 - p0)
-        + np.linalg.norm(p2 - p1)
-        + np.linalg.norm(p3 - p2)
+        np.linalg.norm(p1 - p0) + np.linalg.norm(p2 - p1) + np.linalg.norm(p3 - p2)
     )
     samples = max(int(math.ceil(max(chord_m, control_m) / max(step_m, 1.0))), 8)
     samples = min(samples, 1600)
@@ -1188,7 +1763,9 @@ def _build_signed_trajectory_stations(
     for idx, horizontal_component in enumerate(horizontal):
         if horizontal_component > SMALL:
             previous_azi = _normalize_azimuth_deg(
-                math.degrees(math.atan2(float(tangents[idx, 0]), float(tangents[idx, 1])))
+                math.degrees(
+                    math.atan2(float(tangents[idx, 0]), float(tangents[idx, 1]))
+                )
             )
         azi[idx] = previous_azi
 
@@ -1513,7 +2090,28 @@ def _sidetrack_window_candidate_groups(
 ) -> list[list[PilotWindow]]:
     if pilot_stations.empty:
         return []
-    stations = pilot_stations.copy()
+    required_columns = {"MD_m", "X_m", "Y_m", "Z_m", "INC_deg", "AZI_deg"}
+    if not required_columns.issubset(pilot_stations.columns):
+        raise ValueError(
+            "Инклинометрия пилота не содержит MD/X/Y/Z/INC/AZI для поиска окна."
+        )
+    stations = pilot_stations.copy().reset_index(drop=True)
+    try:
+        numeric = stations[list(required_columns)].to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Инклинометрия пилота содержит нечисловую станцию.") from exc
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    if (
+        np.any(~np.isfinite(numeric))
+        or float(md_values[0]) < -SMALL
+        or (len(md_values) > 1 and np.any(np.diff(md_values) <= SMALL))
+    ):
+        raise ValueError(
+            "Инклинометрия пилота содержит нечисловой, отрицательный "
+            "или не возрастающий MD."
+        )
+    if len(stations) < 2:
+        return []
     preferred = _preferred_sidetrack_window_rows(
         stations=stations,
         parent_t1=parent_t1,
@@ -1536,20 +2134,32 @@ def _sidetrack_window_candidate_groups(
     min_window_md = max(
         float(config.kop_min_vertical_m), float(config.min_structural_segment_m)
     )
+    first_target_md = _first_pilot_target_md_m(stations)
+    before_first_target = np.ones(len(stations), dtype=bool)
+    if first_target_md is not None:
+        # Automatic windows must leave the engineering minimum distance above
+        # PL1.  A closer or lower window remains possible only as an explicit
+        # manual constraint.
+        before_first_target = (
+            stations["MD_m"].to_numpy(dtype=float)
+            <= first_target_md - SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M + SMALL
+        )
     eligible = stations.loc[
         (vertical_room >= min_room)
         & (stations["MD_m"].to_numpy(dtype=float) >= min_window_md)
+        & before_first_target
     ].copy()
     if eligible.empty:
         fallback_min_md = max(
             float(config.min_structural_segment_m),
             float(config.md_step_m),
         )
-        eligible = (
-            stations.loc[stations["MD_m"].to_numpy(dtype=float) >= fallback_min_md]
-            .iloc[:-1]
-            .copy()
-        )
+        eligible = stations.loc[
+            (stations["MD_m"].to_numpy(dtype=float) >= fallback_min_md)
+            & before_first_target
+        ].copy()
+        if first_target_md is None:
+            eligible = eligible.iloc[:-1].copy()
     if eligible.empty:
         return [preferred_windows] if preferred_windows else []
     eligible = eligible.sort_values("MD_m", ascending=True)
@@ -1576,11 +2186,7 @@ def _sidetrack_window_candidate_groups(
             for window in expanded_windows
             if round(float(window.md_m), 6) not in preferred_md
         ]
-    return [
-        group
-        for group in (preferred_windows, expanded_windows)
-        if group
-    ]
+    return [group for group in (preferred_windows, expanded_windows) if group]
 
 
 def _preferred_sidetrack_window_rows(
@@ -1658,16 +2264,27 @@ def _manual_sidetrack_window(
             "Ручное окно зарезки невозможно: в инклинометрии пилота нет "
             "MD/X/Y/Z/INC/AZI."
         )
-    finite_mask = np.isfinite(stations[list(required)].to_numpy(dtype=float)).all(axis=1)
-    stations = stations.loc[finite_mask].copy()
-    stations = (
-        stations.sort_values("MD_m", ascending=True)
-        .drop_duplicates(subset=["MD_m"], keep="last")
-        .reset_index(drop=True)
-    )
+    try:
+        numeric = stations[list(required)].to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Ручное окно зарезки невозможно: инклинометрия пилота содержит "
+            "нечисловую станцию."
+        ) from exc
+    stations = stations.reset_index(drop=True)
     if len(stations) < 2:
         raise ValueError(
             "Ручное окно зарезки невозможно: у пилота меньше двух станций."
+        )
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    if (
+        np.any(~np.isfinite(numeric))
+        or float(md_values[0]) < -SMALL
+        or np.any(np.diff(md_values) <= SMALL)
+    ):
+        raise ValueError(
+            "Ручное окно зарезки невозможно: MD пилота должен быть конечным, "
+            "неотрицательным и строго возрастающим."
         )
     if override.kind == "md":
         row = _interpolate_station_by_md(stations, float(override.value_m))
@@ -1782,10 +2399,54 @@ def _sidetrack_window_score(
     *,
     window: PilotWindow,
     result: PlannerResult,
+    complete_result: PlannerResult | None = None,
     optimization_context: AntiCollisionOptimizationContext | None = None,
 ) -> float:
     if result.stations.empty or len(result.stations) < 2:
         return float("inf")
+    required_columns = {"MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"}
+    missing_columns = required_columns.difference(result.stations.columns)
+    if missing_columns:
+        raise ValueError(
+            "Результат бокового ствола не содержит колонки "
+            f"{', '.join(sorted(missing_columns))}."
+        )
+    try:
+        station_values = result.stations[
+            ["MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m"]
+        ].to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Результат бокового ствола содержит нечисловую станцию."
+        ) from exc
+    if np.any(~np.isfinite(station_values)):
+        raise ValueError("Результат бокового ствола содержит нечисловую станцию.")
+    if abs(float(station_values[0, 0])) > 1e-6:
+        raise ValueError("Локальный MD бокового ствола должен начинаться с 0 м.")
+    start_miss_m = float(
+        np.linalg.norm(
+            station_values[0, 3:6]
+            - np.asarray(
+                [float(window.point.x), float(window.point.y), float(window.point.z)],
+                dtype=float,
+            )
+        )
+    )
+    if start_miss_m > 1e-3:
+        raise ValueError(
+            "Результат бокового ствола не начинается в выбранном окне зарезки."
+        )
+    if (
+        abs(float(station_values[0, 1]) - float(window.inc_deg)) > 1e-3
+        or _azimuth_difference_deg(
+            float(station_values[0, 2]),
+            float(window.azi_deg),
+        )
+        > 1e-3
+    ):
+        raise ValueError(
+            "Ориентация результата бокового ствола не совпадает с окном зарезки."
+        )
     first_tail = result.stations.iloc[1]
     window_md = float(window.md_m)
     tail_md = window_md + float(first_tail["MD_m"])
@@ -1801,19 +2462,47 @@ def _sidetrack_window_score(
             float(first_tail["AZI_deg"]),
         )[()]
     )
-    planned_dls = max(
-        junction_dls,
-        float(result.summary.get("max_dls_total_deg_per_30m", 0.0)),
+    scoring_result = complete_result if complete_result is not None else result
+    summary_dls = max(
+        _finite_float_or_none(result.summary.get("max_dls_total_deg_per_30m")) or 0.0,
+        _finite_float_or_none(scoring_result.summary.get("max_dls_total_deg_per_30m"))
+        or 0.0,
     )
-    sidetrack_md_m = float(result.summary.get("md_total_m", 0.0))
-    dls_limit = float(result.summary.get("build_dls_max_config_deg_per_30m", 0.0))
+    station_dls = max(
+        _finite_max(result.stations["DLS_deg_per_30m"])
+        if "DLS_deg_per_30m" in result.stations.columns
+        else 0.0,
+        _finite_max(scoring_result.stations["DLS_deg_per_30m"])
+        if "DLS_deg_per_30m" in scoring_result.stations.columns
+        else 0.0,
+    )
+    planned_dls = max(junction_dls, summary_dls, station_dls)
+    sidetrack_md_m = (
+        _complete_sidetrack_lateral_md_m(window=window, result=complete_result)
+        if complete_result is not None
+        else _planner_result_md_total_m(result)
+    )
+    dls_limit = (
+        _finite_float_or_none(
+            scoring_result.summary.get("build_dls_max_config_deg_per_30m")
+        )
+        or _finite_float_or_none(result.summary.get("build_dls_max_config_deg_per_30m"))
+        or 0.0
+    )
     dls_excess = max(0.0, planned_dls - dls_limit) if dls_limit > SMALL else 0.0
     score = sidetrack_md_m + 300.0 * planned_dls + 100_000.0 * dls_excess
     if optimization_context is not None:
-        score += _sidetrack_anticollision_penalty(
-            result=result,
-            window=window,
-            optimization_context=optimization_context,
+        score += (
+            _trajectory_anticollision_penalty(
+                stations=complete_result.stations,
+                optimization_context=optimization_context,
+            )
+            if complete_result is not None
+            else _sidetrack_anticollision_penalty(
+                result=result,
+                window=window,
+                optimization_context=optimization_context,
+            )
         )
     return score
 

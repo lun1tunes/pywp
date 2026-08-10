@@ -246,7 +246,9 @@ def test_multi_horizontal_record_extends_base_plan_with_numbered_segments() -> N
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
 
-def test_multi_horizontal_record_supports_shallower_next_level_with_enough_gap() -> None:
+def test_multi_horizontal_record_supports_shallower_next_level_with_enough_gap() -> (
+    None
+):
     record = WelltrackRecord(
         name="multi_shallower_ok",
         points=(
@@ -296,7 +298,7 @@ def test_multi_horizontal_record_reports_short_transition_recommendation() -> No
     assert success is None
     assert row["Статус"] == "Ошибка расчета"
     assert "HORIZONTAL_BUILD1" in str(row["Проблема"])
-    assert "сократить соседние мини-горизонты" in str(row["Проблема"])
+    assert "соседние мини-горизонты" in str(row["Проблема"])
     assert "deg/30m" not in str(row["Проблема"])
 
 
@@ -333,7 +335,9 @@ def test_welltracks4_multi_horizontal_fixture_calculates_well_08() -> None:
     assert _max_mcm_xyz_mismatch_m(success) < 0.25
 
 
-def test_welltracks4_multi_horizontal_fixture_limits_only_post_t1_by_horizontal_pi() -> None:
+def test_welltracks4_multi_horizontal_fixture_limits_only_post_t1_by_horizontal_pi() -> (
+    None
+):
     text = Path("tests/test_data/WELLTRACKS4_MULTIHORIZONTAL.INC").read_text(
         encoding="utf-8"
     )
@@ -381,6 +385,10 @@ def test_multi_horizontal_transition_uses_horizontal_dls_limit() -> None:
         azimuth_deg=90.0,
         md_t1_m=0.0,
     )
+    uncertainty_reference = base_result.stations.copy(deep=True)
+    base_result.stations.attrs["uncertainty_reference_stations"] = (
+        uncertainty_reference
+    )
     target_pairs = (
         (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
         (Point3D(800.0, 0.0, 1100.0), Point3D(1300.0, 0.0, 1100.0)),
@@ -414,6 +422,12 @@ def test_multi_horizontal_transition_uses_horizontal_dls_limit() -> None:
     assert float(horizontal_build_dls.max()) > 2.7
     assert float(horizontal_build_dls.quantile(0.9)) > 2.4
     assert result.summary["dls_limit_horizontal_deg_per_30m"] == pytest.approx(3.0)
+    preserved_reference = result.stations.attrs.get(
+        "uncertainty_reference_stations"
+    )
+    assert isinstance(preserved_reference, pd.DataFrame)
+    assert preserved_reference is not uncertainty_reference
+    pd.testing.assert_frame_equal(preserved_reference, uncertainty_reference)
 
 
 def test_multi_horizontal_transition_falls_back_to_constant_dls_when_bezier_fails(
@@ -470,9 +484,7 @@ def test_multi_horizontal_transition_falls_back_to_constant_dls_when_bezier_fail
     assert float(last_transition["Z_m"]) == pytest.approx(1100.0, abs=1e-4)
     transition_with_start = pd.concat(
         [
-            result.stations.loc[result.stations["segment"] == "HORIZONTAL1"].iloc[
-                [-1]
-            ],
+            result.stations.loc[result.stations["segment"] == "HORIZONTAL1"].iloc[[-1]],
             transition,
         ],
         ignore_index=True,
@@ -482,23 +494,321 @@ def test_multi_horizontal_transition_falls_back_to_constant_dls_when_bezier_fail
         start=Point3D(0.0, 0.0, 1000.0),
     )
     mismatch_m = np.sqrt(
-        (
-            rebuilt["X_m"].to_numpy()
-            - transition_with_start["X_m"].to_numpy()
-        )
-        ** 2
-        + (
-            rebuilt["Y_m"].to_numpy()
-            - transition_with_start["Y_m"].to_numpy()
-        )
-        ** 2
-        + (
-            rebuilt["Z_m"].to_numpy()
-            - transition_with_start["Z_m"].to_numpy()
-        )
-        ** 2
+        (rebuilt["X_m"].to_numpy() - transition_with_start["X_m"].to_numpy()) ** 2
+        + (rebuilt["Y_m"].to_numpy() - transition_with_start["Y_m"].to_numpy()) ** 2
+        + (rebuilt["Z_m"].to_numpy() - transition_with_start["Z_m"].to_numpy()) ** 2
     )
     assert float(np.max(mismatch_m)) < 0.25
+
+
+def test_multi_horizontal_allows_feasible_arc_longer_than_its_chord() -> None:
+    radius_m = 30.0 / np.radians(3.0)
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 500.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [-500.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [1000.0, 1000.0],
+                "segment": ["HORIZONTAL", "HORIZONTAL"],
+            }
+        ),
+        summary={"trajectory_type": "base", "md_total_m": 500.0},
+        azimuth_deg=90.0,
+        md_t1_m=0.0,
+    )
+    next_t1 = Point3D(radius_m, radius_m, 1000.0)
+    target_pairs = (
+        (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
+        (next_t1, Point3D(radius_m, radius_m + 500.0, 1000.0)),
+    )
+    config = TrajectoryConfig(
+        dls_horizontal_max_deg_per_30m=3.0,
+        max_inc_deg=95.0,
+        md_step_m=10.0,
+    )
+    feasibility = multi_horizontal_module._transition_feasibility(
+        current={
+            "md_m": 500.0,
+            "inc_deg": 90.0,
+            "azi_deg": 90.0,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 1000.0,
+        },
+        target=next_t1,
+        target_inc_deg=90.0,
+        target_azi_deg=0.0,
+        config=config,
+        level_from=1,
+        level_to=2,
+    )
+
+    assert feasibility.required_build_m > feasibility.gap_m
+    result = extend_plan_with_multi_horizontal_targets(
+        base_result=base_result,
+        target_pairs=target_pairs,
+        config=config,
+    )
+
+    transition = result.stations.loc[
+        result.stations["segment"] == "HORIZONTAL_BUILD1"
+    ]
+    assert not transition.empty
+    assert float(transition["DLS_deg_per_30m"].max()) <= 3.0 + 1e-6
+    assert float(transition.iloc[-1]["X_m"]) == pytest.approx(next_t1.x, abs=1e-4)
+    assert float(transition.iloc[-1]["Y_m"]) == pytest.approx(next_t1.y, abs=1e-4)
+    assert float(transition.iloc[-1]["Z_m"]) == pytest.approx(next_t1.z, abs=1e-4)
+
+
+def test_multi_horizontal_rejects_successful_solver_result_with_excessive_md(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, 500.0],
+                "INC_deg": [90.0, 90.0],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [-500.0, 0.0],
+                "Y_m": [0.0, 0.0],
+                "Z_m": [1000.0, 1000.0],
+                "segment": ["HORIZONTAL", "HORIZONTAL"],
+            }
+        ),
+        summary={"trajectory_type": "base", "md_total_m": 500.0},
+        azimuth_deg=90.0,
+        md_t1_m=0.0,
+    )
+    next_t1 = Point3D(100.0, 0.0, 1000.0)
+    next_t3 = Point3D(600.0, 0.0, 1000.0)
+
+    monkeypatch.setattr(
+        multi_horizontal_module,
+        "_smooth_transition_rows",
+        lambda **_kwargs: [
+            {
+                "MD_m": 1200.000001,
+                "INC_deg": 90.0,
+                "AZI_deg": 90.0,
+                "X_m": next_t1.x,
+                "Y_m": next_t1.y,
+                "Z_m": next_t1.z,
+                "segment": "HORIZONTAL_BUILD1",
+            }
+        ],
+    )
+
+    with pytest.raises(PlanningError, match="чрезмерный MD"):
+        extend_plan_with_multi_horizontal_targets(
+            base_result=base_result,
+            target_pairs=(
+                (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
+                (next_t1, next_t3),
+            ),
+            config=TrajectoryConfig(),
+        )
+
+
+def test_multi_horizontal_validates_curve_inc_instead_of_chord_inc() -> None:
+    inc_deg = 95.0
+    inc_rad = np.radians(inc_deg)
+    reference_curvature_rad_per_m = np.radians(3.0) / 30.0
+    turn_md_m = 0.5 * np.pi * np.sin(inc_rad) / reference_curvature_rad_per_m
+    turn_offset_m = np.sin(inc_rad) ** 2 / reference_curvature_rad_per_m
+    turn_delta_z_m = np.cos(inc_rad) * turn_md_m
+    base_length_m = 500.0
+    base_dx_m = np.sin(inc_rad) * base_length_m
+    base_dz_m = np.cos(inc_rad) * base_length_m
+    base_t1 = Point3D(-base_dx_m, 0.0, -base_dz_m)
+    next_t1 = Point3D(turn_offset_m, turn_offset_m, turn_delta_z_m)
+    next_t3 = Point3D(
+        turn_offset_m,
+        turn_offset_m + base_dx_m,
+        turn_delta_z_m + base_dz_m,
+    )
+    base_result = PlannerResult(
+        stations=pd.DataFrame(
+            {
+                "MD_m": [0.0, base_length_m],
+                "INC_deg": [inc_deg, inc_deg],
+                "AZI_deg": [90.0, 90.0],
+                "X_m": [base_t1.x, 0.0],
+                "Y_m": [base_t1.y, 0.0],
+                "Z_m": [base_t1.z, 0.0],
+                "segment": ["HORIZONTAL", "HORIZONTAL"],
+            }
+        ),
+        summary={"trajectory_type": "base", "md_total_m": base_length_m},
+        azimuth_deg=90.0,
+        md_t1_m=0.0,
+    )
+    config = TrajectoryConfig(
+        dls_horizontal_max_deg_per_30m=6.0,
+        max_inc_deg=inc_deg,
+        md_step_m=10.0,
+    )
+    chord_inc_deg, _ = multi_horizontal_module._direction_angles_between(
+        Point3D(0.0, 0.0, 0.0),
+        next_t1,
+    )
+
+    assert chord_inc_deg > config.max_inc_deg
+    result = extend_plan_with_multi_horizontal_targets(
+        base_result=base_result,
+        target_pairs=((base_t1, Point3D(0.0, 0.0, 0.0)), (next_t1, next_t3)),
+        config=config,
+    )
+
+    transition = result.stations.loc[
+        result.stations["segment"] == "HORIZONTAL_BUILD1"
+    ]
+    assert not transition.empty
+    assert float(transition["INC_deg"].max()) <= inc_deg + 1e-6
+    assert float(transition["DLS_deg_per_30m"].max()) <= 6.0 + 1e-6
+
+
+def test_continuous_minimum_curvature_tvd_catches_between_station_overshoot() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "INC_deg": [80.0, 100.0],
+            "AZI_deg": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+        }
+    )
+
+    continuous_max = multi_horizontal_module._minimum_curvature_path_max_z_m(stations)
+
+    assert float(stations["Z_m"].max()) == pytest.approx(0.0)
+    assert continuous_max > 4.0
+
+
+def test_continuous_minimum_curvature_tvd_uses_computed_interval_endpoint() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "INC_deg": [0.0, 0.0],
+            "AZI_deg": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+        }
+    )
+
+    continuous_max = multi_horizontal_module._minimum_curvature_path_max_z_m(stations)
+
+    assert continuous_max == pytest.approx(100.0)
+
+
+def test_cubic_bezier_floor_check_uses_actual_extremum_not_control_hull() -> None:
+    safe_curve_max = multi_horizontal_module._cubic_bezier_coordinate_max(
+        0.0, 2.0, -2.0, 0.0
+    )
+    unsafe_curve_max = multi_horizontal_module._cubic_bezier_coordinate_max(
+        0.0, 2.0, 2.0, 0.0
+    )
+
+    assert safe_curve_max < 1.0
+    assert unsafe_curve_max > 1.0
+
+
+def test_smooth_transition_rejects_minimum_curvature_floor_overshoot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "INC_deg": [80.0, 100.0],
+            "AZI_deg": [0.0, 0.0],
+            "X_m": [0.0, 100.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+            "DLS_deg_per_30m": [np.nan, 6.0],
+            "segment": ["TEST", "TEST"],
+        }
+    )
+    monkeypatch.setattr(
+        multi_horizontal_module,
+        "_candidate_control_lengths",
+        lambda **_kwargs: (10.0,),
+    )
+    monkeypatch.setattr(
+        multi_horizontal_module,
+        "_stations_from_xyz_path",
+        lambda **_kwargs: candidate.copy(),
+    )
+
+    def _no_fallback(**_kwargs: object):
+        raise PlanningError("fallback disabled")
+
+    monkeypatch.setattr(
+        multi_horizontal_module,
+        "_constant_dls_transition_candidate",
+        _no_fallback,
+    )
+
+    with pytest.raises(PlanningError, match="не удалось построить плавный"):
+        multi_horizontal_module._smooth_transition_rows(
+            current={
+                "md_m": 0.0,
+                "inc_deg": 90.0,
+                "azi_deg": 90.0,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+            },
+            target=Point3D(100.0, 0.0, 0.0),
+            target_inc_deg=90.0,
+            target_azi_deg=90.0,
+            segment_name="TEST",
+            config=TrajectoryConfig(),
+            max_z_m=4.0,
+        )
+
+
+def test_extended_station_validation_rejects_nonfinite_geometry() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "INC_deg": [90.0, 90.0],
+            "AZI_deg": [90.0, 90.0],
+            "X_m": [0.0, float("nan")],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+            "DLS_deg_per_30m": [np.nan, 0.0],
+        }
+    )
+
+    with pytest.raises(PlanningError, match="нечисловую станцию"):
+        multi_horizontal_module._validate_extended_stations(
+            stations=stations,
+            final_target=Point3D(100.0, 0.0, 0.0),
+            config=TrajectoryConfig(),
+            post_t1_start_md_m=0.0,
+        )
+
+
+def test_extended_station_validation_rejects_t1_md_outside_survey() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0],
+            "INC_deg": [90.0, 90.0],
+            "AZI_deg": [90.0, 90.0],
+            "X_m": [0.0, 100.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+            "DLS_deg_per_30m": [np.nan, 0.0],
+        }
+    )
+
+    with pytest.raises(PlanningError, match="MD t1 находится вне"):
+        multi_horizontal_module._validate_extended_stations(
+            stations=stations,
+            final_target=Point3D(100.0, 0.0, 0.0),
+            config=TrajectoryConfig(),
+            post_t1_start_md_m=150.0,
+        )
 
 
 def test_multi_horizontal_constant_dls_fallback_reports_unsupported_reverse_turn(
@@ -900,8 +1210,9 @@ def test_disabling_j_profile_preserves_classic_unified_flow_on_reference_sets() 
         for success in successes:
             assert str(success.summary["trajectory_profile_family"]) == "unified"
             assert str(success.summary["trajectory_type"]) != "J-образная траектория"
-            assert tuple(success.stations["segment"].drop_duplicates()) == (
-                expected_segments_by_name[str(success.name)]
+            assert (
+                tuple(success.stations["segment"].drop_duplicates())
+                == (expected_segments_by_name[str(success.name)])
             )
             md_values = success.stations["MD_m"].to_numpy(dtype=float)
             assert bool(np.all(np.diff(md_values) > 0.0))
@@ -1010,13 +1321,23 @@ def test_welltracks4_preprocess_shortening_skips_well_04_and_well_12_hits_build_
     assert "well_04" in skipped_names
     assert "well_04" not in updated_names
 
-    well_04_before = next(record for record in layout_records if record.name == "well_04")
-    well_04_after = next(record for record in updated_records if record.name == "well_04")
-    assert tuple((float(point.x), float(point.y), float(point.z)) for point in well_04_after.points) == tuple(
-        (float(point.x), float(point.y), float(point.z)) for point in well_04_before.points
+    well_04_before = next(
+        record for record in layout_records if record.name == "well_04"
+    )
+    well_04_after = next(
+        record for record in updated_records if record.name == "well_04"
+    )
+    assert tuple(
+        (float(point.x), float(point.y), float(point.z))
+        for point in well_04_after.points
+    ) == tuple(
+        (float(point.x), float(point.y), float(point.z))
+        for point in well_04_before.points
     )
 
-    well_12_after = next(record for record in updated_records if record.name == "well_12")
+    well_12_after = next(
+        record for record in updated_records if record.name == "well_12"
+    )
     assert float(well_12_after.points[2].y) == pytest.approx(889811.8007, abs=1e-3)
 
     rows, successes = WelltrackBatchPlanner().evaluate(
@@ -3850,6 +4171,14 @@ def test_batch_planner_builds_target_sequence_pilot_sidetrack() -> None:
     assert success.surface.z > 0.0
     assert success.t3 == Point3D(x=2200.0, y=0.0, z=2220.0)
     assert "HORIZONTAL_BUILD1" in set(success.stations["segment"])
+    assert float(success.summary["sidetrack_lateral_md_m"]) == pytest.approx(
+        float(success.summary["md_total_m"])
+        - float(success.summary["sidetrack_window_md_m"])
+    )
+    assert float(success.summary["total_drilled_md_m"]) == pytest.approx(
+        float(success.summary["pilot_total_md_m"])
+        + float(success.summary["sidetrack_lateral_md_m"])
+    )
 
 
 def test_batch_planner_builds_target_sequence_pilot_sidetrack_from_table_without_parent_surface() -> (
@@ -3859,7 +4188,13 @@ def test_batch_planner_builds_target_sequence_pilot_sidetrack_from_table_without
         [
             {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
             {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
-            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {
+                "Wellname": "WELL-04_PL",
+                "Point": "PL2",
+                "X": 200.0,
+                "Y": 0.0,
+                "Z": 1300.0,
+            },
             {"Wellname": "WELL-04", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
             {"Wellname": "WELL-04", "Point": "t2", "X": 1400.0, "Y": 0.0, "Z": 2220.0},
             {"Wellname": "WELL-04", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
@@ -3892,9 +4227,21 @@ def test_batch_planner_builds_pilot_sidetrack_from_alt_branch_table_without_surf
         [
             {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
             {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
-            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {
+                "Wellname": "WELL-04_PL",
+                "Point": "PL2",
+                "X": 200.0,
+                "Y": 0.0,
+                "Z": 1300.0,
+            },
             {"Wellname": "WELL-04_2", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
-            {"Wellname": "WELL-04_2", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
+            {
+                "Wellname": "WELL-04_2",
+                "Point": "t3",
+                "X": 2200.0,
+                "Y": 0.0,
+                "Z": 2220.0,
+            },
         ]
     )
 
@@ -3923,10 +4270,28 @@ def test_batch_planner_builds_target_sequence_pilot_sidetrack_from_alt_branch_ta
         [
             {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
             {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
-            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
+            {
+                "Wellname": "WELL-04_PL",
+                "Point": "PL2",
+                "X": 200.0,
+                "Y": 0.0,
+                "Z": 1300.0,
+            },
             {"Wellname": "WELL-04_2", "Point": "t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
-            {"Wellname": "WELL-04_2", "Point": "t2", "X": 1400.0, "Y": 0.0, "Z": 2220.0},
-            {"Wellname": "WELL-04_2", "Point": "t3", "X": 2200.0, "Y": 0.0, "Z": 2220.0},
+            {
+                "Wellname": "WELL-04_2",
+                "Point": "t2",
+                "X": 1400.0,
+                "Y": 0.0,
+                "Z": 2220.0,
+            },
+            {
+                "Wellname": "WELL-04_2",
+                "Point": "t3",
+                "X": 2200.0,
+                "Y": 0.0,
+                "Z": 2220.0,
+            },
         ]
     )
 
@@ -3987,6 +4352,20 @@ def test_batch_planner_builds_multi_horizontal_pilot_sidetrack() -> None:
     assert success.summary["pilot_well_name"] == "WELL-04_PL"
     assert len(success.target_pairs) == 2
     assert success.t3 == success.target_pairs[-1][1]
+    assert float(success.summary["sidetrack_complete_lateral_md_m"]) == pytest.approx(
+        float(success.summary["md_total_m"])
+        - float(success.summary["sidetrack_window_md_m"])
+    )
+    assert float(success.summary["total_drilled_md_m"]) == pytest.approx(
+        float(success.summary["pilot_total_md_m"])
+        + float(success.summary["sidetrack_lateral_md_m"])
+    )
+    assert float(
+        success.summary["sidetrack_window_optimization_objective_m"]
+    ) == pytest.approx(
+        float(success.summary["pilot_total_md_m"])
+        + float(success.summary["sidetrack_complete_lateral_md_m"])
+    )
     assert {
         "HORIZONTAL_BUILD1",
         "HORIZONTAL2",
@@ -4012,12 +4391,120 @@ def test_refresh_pilot_sidetrack_drilled_md_summary_after_extension() -> None:
         config=TrajectoryConfig(max_total_md_postcheck_m=2000.0),
     )
 
-    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(1200.0)
-    assert refreshed["total_drilled_md_m"] == pytest.approx(2200.0)
+    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(400.0)
+    assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["total_drilled_md_m"] == pytest.approx(1400.0)
     assert refreshed["sidetrack_window_optimization_objective_m"] == pytest.approx(
         2200.0
     )
-    assert refreshed["md_postcheck_excess_m"] == pytest.approx(200.0)
+    assert refreshed["md_total_m"] == pytest.approx(1800.0)
+    assert refreshed["md_postcheck_excess_m"] == pytest.approx(0.0)
+    assert refreshed["md_postcheck_exceeded"] == "no"
+
+
+def test_refresh_pilot_sidetrack_drilled_md_summary_prefers_existing_lateral_md() -> (
+    None
+):
+    stations = pd.DataFrame({"MD_m": [0.0, 600.0, 1800.0]})
+    summary = {
+        "trajectory_type": "PILOT_SIDETRACK",
+        "pilot_total_md_m": 1000.0,
+        "sidetrack_window_md_m": 600.0,
+        "sidetrack_lateral_md_m": 450.0,
+        "md_total_m": 1800.0,
+        "total_drilled_md_m": 1600.0,
+        "sidetrack_window_optimization_objective_m": 1600.0,
+        "max_total_md_postcheck_m": 2000.0,
+        "md_postcheck_excess_m": 0.0,
+    }
+
+    refreshed = _refresh_pilot_sidetrack_drilled_md_summary(
+        summary=summary,
+        stations=stations,
+        config=TrajectoryConfig(max_total_md_postcheck_m=2000.0),
+    )
+
+    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(450.0)
+    assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["total_drilled_md_m"] == pytest.approx(1450.0)
+    assert refreshed["sidetrack_window_optimization_objective_m"] == pytest.approx(
+        2200.0
+    )
+    assert refreshed["md_postcheck_excess_m"] == pytest.approx(0.0)
+    assert refreshed["md_postcheck_exceeded"] == "no"
+
+
+def test_refresh_pilot_sidetrack_drilled_md_summary_rejects_zero_lateral_md() -> None:
+    stations = pd.DataFrame({"MD_m": [0.0, 600.0, 1800.0]})
+    summary = {
+        "trajectory_type": "PILOT_SIDETRACK",
+        "pilot_total_md_m": 1000.0,
+        "sidetrack_window_md_m": 600.0,
+        "sidetrack_lateral_md_m": 0.0,
+        "md_total_m": 1800.0,
+        "total_drilled_md_m": 1400.0,
+    }
+
+    refreshed = _refresh_pilot_sidetrack_drilled_md_summary(
+        summary=summary,
+        stations=stations,
+        config=TrajectoryConfig(max_total_md_postcheck_m=2000.0),
+    )
+
+    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(400.0)
+    assert refreshed["total_drilled_md_m"] == pytest.approx(1400.0)
+    assert refreshed["md_postcheck_exceeded"] == "no"
+
+
+def test_refresh_pilot_sidetrack_drilled_md_summary_rejects_oversized_metadata() -> (
+    None
+):
+    stations = pd.DataFrame({"MD_m": [600.0, 1800.0]})
+    summary = {
+        "trajectory_type": "PILOT_SIDETRACK",
+        "pilot_total_md_m": 1000.0,
+        "sidetrack_window_md_m": 600.0,
+        "sidetrack_lateral_md_m": 5000.0,
+        "total_drilled_md_m": 6000.0,
+        "md_total_m": 1800.0,
+    }
+
+    refreshed = _refresh_pilot_sidetrack_drilled_md_summary(
+        summary=summary,
+        stations=stations,
+        config=TrajectoryConfig(max_total_md_postcheck_m=2500.0),
+    )
+
+    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["total_drilled_md_m"] == pytest.approx(2200.0)
+    assert refreshed["md_postcheck_exceeded"] == "no"
+
+
+def test_refresh_pilot_sidetrack_drilled_md_summary_prefers_t3_boundary() -> None:
+    stations = pd.DataFrame({"MD_m": [600.0, 1800.0]})
+    summary = {
+        "trajectory_type": "PILOT_SIDETRACK",
+        "pilot_total_md_m": 1000.0,
+        "sidetrack_window_md_m": 600.0,
+        "sidetrack_lateral_md_m": 400.0,
+        "target_sequence_base_lateral_end_md_m": 1500.0,
+        "md_total_m": 1800.0,
+        "total_drilled_md_m": 1400.0,
+    }
+
+    refreshed = _refresh_pilot_sidetrack_drilled_md_summary(
+        summary=summary,
+        stations=stations,
+        config=TrajectoryConfig(max_total_md_postcheck_m=2000.0),
+    )
+
+    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(900.0)
+    assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["total_drilled_md_m"] == pytest.approx(1900.0)
+    assert refreshed["sidetrack_window_optimization_objective_m"] == pytest.approx(
+        2200.0
+    )
 
 
 def test_refresh_pilot_sidetrack_drilled_md_summary_uses_station_md_fallback() -> None:
@@ -4027,8 +4514,6 @@ def test_refresh_pilot_sidetrack_drilled_md_summary_uses_station_md_fallback() -
         "pilot_total_md_m": 1000.0,
         "sidetrack_window_md_m": 600.0,
         "md_total_m": np.nan,
-        "total_drilled_md_m": 1400.0,
-        "sidetrack_window_optimization_objective_m": 1400.0,
         "max_total_md_postcheck_m": 2000.0,
         "md_postcheck_excess_m": 0.0,
     }
@@ -4040,9 +4525,40 @@ def test_refresh_pilot_sidetrack_drilled_md_summary_uses_station_md_fallback() -
     )
 
     assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
     assert refreshed["total_drilled_md_m"] == pytest.approx(2200.0)
+    assert refreshed["sidetrack_window_optimization_objective_m"] == pytest.approx(
+        2200.0
+    )
     assert refreshed["md_total_m"] == pytest.approx(1800.0)
     assert refreshed["md_postcheck_excess_m"] == pytest.approx(200.0)
+    assert refreshed["md_postcheck_exceeded"] == "yes"
+
+
+def test_refresh_pilot_sidetrack_drilled_md_summary_prefers_station_md() -> None:
+    stations = pd.DataFrame({"MD_m": [600.0, 1800.0]})
+    summary = {
+        "trajectory_type": "PILOT_SIDETRACK",
+        "pilot_total_md_m": 1000.0,
+        "sidetrack_window_md_m": 600.0,
+        "sidetrack_lateral_md_m": 400.0,
+        "md_total_m": 1500.0,
+        "total_drilled_md_m": 1400.0,
+    }
+
+    refreshed = _refresh_pilot_sidetrack_drilled_md_summary(
+        summary=summary,
+        stations=stations,
+        config=TrajectoryConfig(max_total_md_postcheck_m=2000.0),
+    )
+
+    assert refreshed["md_total_m"] == pytest.approx(1800.0)
+    assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(400.0)
+    assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
+    assert refreshed["total_drilled_md_m"] == pytest.approx(1400.0)
+    assert refreshed["sidetrack_window_optimization_objective_m"] == pytest.approx(
+        2200.0
+    )
 
 
 def test_postcheck_state_uses_total_drilled_md_for_pilot_sidetrack() -> None:
@@ -4145,11 +4661,41 @@ def test_batch_planner_builds_multi_horizontal_pilot_sidetrack_from_alt_branch_t
         [
             {"Wellname": "WELL-04_PL", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
             {"Wellname": "WELL-04_PL", "Point": "PL1", "X": 0.0, "Y": 0.0, "Z": 800.0},
-            {"Wellname": "WELL-04_PL", "Point": "PL2", "X": 200.0, "Y": 0.0, "Z": 1300.0},
-            {"Wellname": "WELL-04_2", "Point": "1_t1", "X": 800.0, "Y": 0.0, "Z": 2200.0},
-            {"Wellname": "WELL-04_2", "Point": "1_t3", "X": 1800.0, "Y": 0.0, "Z": 2200.0},
-            {"Wellname": "WELL-04_2", "Point": "2_t1", "X": 2800.0, "Y": 0.0, "Z": 2220.0},
-            {"Wellname": "WELL-04_2", "Point": "2_t3", "X": 3400.0, "Y": 0.0, "Z": 2220.0},
+            {
+                "Wellname": "WELL-04_PL",
+                "Point": "PL2",
+                "X": 200.0,
+                "Y": 0.0,
+                "Z": 1300.0,
+            },
+            {
+                "Wellname": "WELL-04_2",
+                "Point": "1_t1",
+                "X": 800.0,
+                "Y": 0.0,
+                "Z": 2200.0,
+            },
+            {
+                "Wellname": "WELL-04_2",
+                "Point": "1_t3",
+                "X": 1800.0,
+                "Y": 0.0,
+                "Z": 2200.0,
+            },
+            {
+                "Wellname": "WELL-04_2",
+                "Point": "2_t1",
+                "X": 2800.0,
+                "Y": 0.0,
+                "Z": 2220.0,
+            },
+            {
+                "Wellname": "WELL-04_2",
+                "Point": "2_t3",
+                "X": 3400.0,
+                "Y": 0.0,
+                "Z": 2220.0,
+            },
         ]
     )
 
@@ -4190,7 +4736,10 @@ def test_batch_planner_reports_missing_actual_parent_for_zbs() -> None:
 
     assert successes == []
     assert rows[0]["Статус"] == "Ошибка расчета"
-    assert 'ЗБС "9010_ZBS": не найдена фактическая траектория основной скважины "9010"' in rows[0]["Проблема"]
+    assert (
+        'ЗБС "9010_ZBS": не найдена фактическая траектория основной скважины "9010"'
+        in rows[0]["Проблема"]
+    )
     assert "9010" in rows[0]["Проблема"]
 
 
@@ -4259,6 +4808,20 @@ def test_batch_planner_builds_multi_horizontal_zbs_from_actual_reference_well() 
     assert success.summary["sidetrack_parent_kind"] == REFERENCE_WELL_ACTUAL
     assert success.t3 == success.target_pairs[-1][1]
     assert len(success.target_pairs) == 2
+    assert float(success.summary["sidetrack_complete_lateral_md_m"]) == pytest.approx(
+        float(success.summary["md_total_m"])
+        - float(success.summary["sidetrack_window_md_m"])
+    )
+    assert float(success.summary["total_drilled_md_m"]) == pytest.approx(
+        float(success.summary["pilot_total_md_m"])
+        + float(success.summary["sidetrack_lateral_md_m"])
+    )
+    assert float(
+        success.summary["sidetrack_window_optimization_objective_m"]
+    ) == pytest.approx(
+        float(success.summary["pilot_total_md_m"])
+        + float(success.summary["sidetrack_complete_lateral_md_m"])
+    )
     assert {
         "HORIZONTAL_BUILD1",
         "HORIZONTAL2",
@@ -4291,9 +4854,7 @@ def test_batch_planner_applies_manual_window_override_to_zbs() -> None:
 
     assert len(successes) == 1
     assert successes[0].summary["trajectory_type"] == "FACT_SIDETRACK"
-    assert successes[0].summary["sidetrack_window_md_m"] == pytest.approx(
-        manual_md
-    )
+    assert successes[0].summary["sidetrack_window_md_m"] == pytest.approx(manual_md)
 
 
 def test_parent_with_failed_pilot_does_not_fallback_to_regular_well() -> None:
@@ -4325,7 +4886,10 @@ def test_parent_with_failed_pilot_does_not_fallback_to_regular_well() -> None:
     assert by_name["WELL-04"]["Статус"] == "Ошибка расчета"
     assert "Пилот WELL-04_PL не рассчитан:" in by_name["WELL-04"]["Проблема"]
     assert str(by_name["WELL-04_PL"]["Проблема"]) in str(by_name["WELL-04"]["Проблема"])
-    assert "Без него нельзя построить боковой продуктивный ствол" in by_name["WELL-04"]["Проблема"]
+    assert (
+        "Без него нельзя построить боковой продуктивный ствол"
+        in by_name["WELL-04"]["Проблема"]
+    )
     assert not successes
 
 
