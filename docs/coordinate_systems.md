@@ -13,6 +13,11 @@ This module provides comprehensive support for coordinate systems used in Russia
   realization is EPSG:7681
 - **Local field systems** - PNO-13, PNO-16 with disambiguation (ZONE vs CM)
 
+For Pulkovo 1942 Gauss-Kruger coordinates, the application exposes both
+official EPSG forms: `ГК_6N_42` … `ГК_20N_42` use the truncated ~500,000 m
+easting, while `СК-42 Зона 6` … `СК-42 Зона 20` use the full zonal easting
+with the zone million prefix. `ГК_13N_42` (EPSG:2503) remains the default.
+
 ## EPSG Codes Reference
 
 ### Geographic Systems

@@ -7,6 +7,7 @@ Default CRS: ГК_13N_42 / Pulkovo 1942 Gauss-Kruger CM 75E.
 from __future__ import annotations
 
 import logging
+import re
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -39,9 +40,64 @@ CRS_SELECTED_KEY = "trajectory_crs_selected"  # CSV target CRS, kept for compati
 CRS_SELECTBOX_KEY = "trajectory_crs_selectbox"
 CRS_AUTO_CONVERT_KEY = "trajectory_crs_auto_convert"
 
+# Label-only migrations must retain the selected CRS and existing coordinates.
+CRS_LABEL_ALIASES = {"СК-42 Зона 13 (13 млн)": "СК-42 Зона 13"}
+
 # Default input CRS as per user requirement: ГК_13N_42.
 DEFAULT_CRS = CoordinateSystem.PULKOVO_1942_GK_13N
 DEFAULT_CSV_EXPORT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
+
+
+_CRS_SORT_TRANSLATION = str.maketrans(
+    {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ё": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "j",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "h",
+        "ц": "c",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "shch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+)
+
+
+def _sort_crs_options(
+    options: list[tuple[str, CoordinateSystem]],
+) -> list[tuple[str, CoordinateSystem]]:
+    """Sort CRS labels alphabetically with natural numeric zone ordering."""
+    return sorted(
+        options,
+        key=lambda item: tuple(
+            int(part) if part.isdigit() else part.casefold().translate(_CRS_SORT_TRANSLATION)
+            for part in re.split(r"(\d+)", item[0])
+        ),
+    )
 
 # Available input CRS options for the trajectory planner. The selected value
 # is source CRS metadata for CSV conversion and does not mutate calculation
@@ -56,8 +112,7 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 10", CoordinateSystem.PULKOVO_1942_ZONE_10),
     ("СК-42 Зона 11", CoordinateSystem.PULKOVO_1942_ZONE_11),
     ("СК-42 Зона 12", CoordinateSystem.PULKOVO_1942_ZONE_12),
-    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
-    ("СК-42 Зона 13 (13 млн)", CoordinateSystem.PULKOVO_1942_ZONE_13),
+    ("СК-42 Зона 13", CoordinateSystem.PULKOVO_1942_ZONE_13),
     ("СК-42 Зона 14", CoordinateSystem.PULKOVO_1942_ZONE_14),
     ("СК-42 Зона 15", CoordinateSystem.PULKOVO_1942_ZONE_15),
     ("СК-42 Зона 16", CoordinateSystem.PULKOVO_1942_ZONE_16),
@@ -65,6 +120,21 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 18", CoordinateSystem.PULKOVO_1942_ZONE_18),
     ("СК-42 Зона 19", CoordinateSystem.PULKOVO_1942_ZONE_19),
     ("СК-42 Зона 20", CoordinateSystem.PULKOVO_1942_ZONE_20),
+    ("ГК_6N_42", CoordinateSystem.PULKOVO_1942_GK_6N),
+    ("ГК_7N_42", CoordinateSystem.PULKOVO_1942_GK_7N),
+    ("ГК_8N_42", CoordinateSystem.PULKOVO_1942_GK_8N),
+    ("ГК_9N_42", CoordinateSystem.PULKOVO_1942_GK_9N),
+    ("ГК_10N_42", CoordinateSystem.PULKOVO_1942_GK_10N),
+    ("ГК_11N_42", CoordinateSystem.PULKOVO_1942_GK_11N),
+    ("ГК_12N_42", CoordinateSystem.PULKOVO_1942_GK_12N),
+    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
+    ("ГК_14N_42", CoordinateSystem.PULKOVO_1942_GK_14N),
+    ("ГК_15N_42", CoordinateSystem.PULKOVO_1942_GK_15N),
+    ("ГК_16N_42", CoordinateSystem.PULKOVO_1942_GK_16N),
+    ("ГК_17N_42", CoordinateSystem.PULKOVO_1942_GK_17N),
+    ("ГК_18N_42", CoordinateSystem.PULKOVO_1942_GK_18N),
+    ("ГК_19N_42", CoordinateSystem.PULKOVO_1942_GK_19N),
+    ("ГК_20N_42", CoordinateSystem.PULKOVO_1942_GK_20N),
     ("Пулково 1995 Зона 13", CoordinateSystem.PULKOVO_1995_ZONE_13),
     ("Пулково 1995 Зона 18", CoordinateSystem.PULKOVO_1995_ZONE_18),
     ("Пулково 1995 CM 39E", CoordinateSystem.PULKOVO_1995_CM_39E),
@@ -86,6 +156,7 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("МСК-89", CoordinateSystem.MSK_89),
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
 ]
+INPUT_CRS_OPTIONS = _sort_crs_options(INPUT_CRS_OPTIONS)
 
 # The standalone calculator uses the same rectangular input CRS contract as
 # the trajectory planner. Geographic CRS are output-only and are listed below.
@@ -99,6 +170,7 @@ CSV_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
     ("WGS84 (градусы)", CoordinateSystem.WGS84),
 ]
+CSV_CRS_OPTIONS = _sort_crs_options(CSV_CRS_OPTIONS)
 
 CALCULATOR_OUTPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     (label, crs)
@@ -107,10 +179,11 @@ CALCULATOR_OUTPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
 ]
 CALCULATOR_OUTPUT_CRS_OPTIONS.extend(
     [
-    ("ГСК2011 (градусы)", CoordinateSystem.GSK_2011),
-    ("WGS84 (градусы)", CoordinateSystem.WGS84),
+        ("ГСК2011 (градусы)", CoordinateSystem.GSK_2011),
+        ("WGS84 (градусы)", CoordinateSystem.WGS84),
     ]
 )
+CALCULATOR_OUTPUT_CRS_OPTIONS = _sort_crs_options(CALCULATOR_OUTPUT_CRS_OPTIONS)
 
 # Backwards-compatible name for code/tests that refer to CSV CRS choices.
 CRS_OPTIONS = CSV_CRS_OPTIONS
@@ -188,6 +261,9 @@ def render_crs_sidebar() -> CoordinateSystem:
             st.session_state[CRS_SELECTED_KEY] = DEFAULT_CSV_EXPORT_CRS
 
         input_option_labels = [label for label, _ in INPUT_CRS_OPTIONS]
+        previous_label = st.session_state.get(CRS_INPUT_SELECTBOX_KEY)
+        if previous_label in CRS_LABEL_ALIASES:
+            st.session_state[CRS_INPUT_SELECTBOX_KEY] = CRS_LABEL_ALIASES[previous_label]
         if st.session_state.get(CRS_INPUT_SELECTBOX_KEY) not in input_option_labels:
             st.session_state.pop(CRS_INPUT_SELECTBOX_KEY, None)
         selected_input_label = st.selectbox(
@@ -200,7 +276,9 @@ def render_crs_sidebar() -> CoordinateSystem:
             ),
             key=CRS_INPUT_SELECTBOX_KEY,
             help=(
-                "Система координат исходных X/Y. Расчёт и отображение ведутся в этих координатах."
+                "Система координат исходных X/Y. Расчёт и отображение ведутся в этих координатах. "
+                "СК-42 Зона N — полный зональный отсчёт; ГК_NN_42 — сокращённый, "
+                "без номера зоны в миллионах."
             ),
         )
         input_crs = next(
@@ -865,6 +943,9 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         zone_crs = getattr(CoordinateSystem, f"PULKOVO_1942_ZONE_{zone_num}", None)
         if zone_crs:
             suffix_map[zone_crs] = f" (СК-42/З{zone_num})"
+        gk_crs = getattr(CoordinateSystem, f"PULKOVO_1942_GK_{zone_num}N", None)
+        if gk_crs:
+            suffix_map[gk_crs] = f" (ГК_{zone_num}N_42)"
         gsk_zone_crs = getattr(CoordinateSystem, f"GSK_2011_ZONE_{zone_num}", None)
         if gsk_zone_crs:
             suffix_map[gsk_zone_crs] = f" (ГСК2011/З{zone_num})"
@@ -898,6 +979,7 @@ __all__ = [
     "DEFAULT_CRS",
     "DEFAULT_CSV_EXPORT_CRS",
     "INPUT_CRS_OPTIONS",
+    "CRS_LABEL_ALIASES",
     "CALCULATOR_INPUT_CRS_OPTIONS",
     "CALCULATOR_INPUT_CRS_LABEL_BY_VALUE",
     "CALCULATOR_OUTPUT_CRS_OPTIONS",

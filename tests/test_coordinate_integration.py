@@ -65,13 +65,27 @@ class TestCoordinateIntegration:
             in CALCULATOR_OUTPUT_CRS_OPTIONS
         )
 
+    def test_crs_option_lists_are_naturally_sorted(self) -> None:
+        """Dropdown options are alphabetic while zone numbers stay numeric."""
+        for options in (
+            INPUT_CRS_OPTIONS,
+            CSV_CRS_OPTIONS,
+            CALCULATOR_INPUT_CRS_OPTIONS,
+            CALCULATOR_OUTPUT_CRS_OPTIONS,
+        ):
+            assert options == ci._sort_crs_options(options)
+
+        input_labels = [label for label, _ in INPUT_CRS_OPTIONS]
+        assert input_labels[:15] == [f"ГК_{zone}N_42" for zone in range(6, 21)]
+        assert input_labels[-1] == "WGS84 UTM 43N"
+
     def test_csv_crs_options_match_supported_export_set(self) -> None:
         """CSV output CRS options stay limited to the supported export targets."""
         assert CRS_OPTIONS == CSV_CRS_OPTIONS
         assert CSV_CRS_OPTIONS == [
             ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
-            ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
             ("WGS84 (градусы)", CoordinateSystem.WGS84),
+            ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
         ]
 
     def test_geographic_csv_outputs_are_really_geographic_crs(self) -> None:
@@ -91,9 +105,46 @@ class TestCoordinateIntegration:
         labels = [label for label, _ in INPUT_CRS_OPTIONS]
         assert "СК-42 Зона 8" in labels
         assert "ГК_13N_42" in labels
-        assert "СК-42 Зона 13 (13 млн)" in labels
+        assert "СК-42 Зона 13" in labels
         assert "СК-42 Зона 16" in labels
+        assert all(f"ГК_{zone}N_42" in labels for zone in range(6, 21))
         assert "МСК-89" in labels
+
+    @pytest.mark.parametrize("zone", range(6, 21))
+    @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+    def test_pulkovo_full_and_truncated_zones(self, zone: int) -> None:
+        """Both EPSG forms share a datum/projection and differ only in zonal easting."""
+        from pyproj import CRS
+
+        truncated = getattr(CoordinateSystem, f"PULKOVO_1942_GK_{zone}N")
+        full = getattr(CoordinateSystem, f"PULKOVO_1942_ZONE_{zone}")
+        assert truncated.value == f"EPSG:{2490 + zone}"
+        assert full.value == f"EPSG:{28400 + zone}"
+        assert (f"ГК_{zone}N_42", truncated) in INPUT_CRS_OPTIONS
+        assert (f"СК-42 Зона {zone}", full) in INPUT_CRS_OPTIONS
+        assert (f"ГК_{zone}N_42", truncated) in CALCULATOR_OUTPUT_CRS_OPTIONS
+        for crs, false_easting in ((truncated, 500_000), (full, zone * 1_000_000 + 500_000)):
+            definition = CRS(crs.value)
+            assert definition.is_projected
+            assert definition.geodetic_crs.to_epsg() == 4284
+            assert all(axis.unit_name == "metre" for axis in definition.axis_info)
+            params = {param.name: param.value for param in definition.coordinate_operation.params}
+            assert params["Longitude of natural origin"] == 6 * zone - 3
+            assert params["False easting"] == false_easting
+
+        x, y = 600_010.6, 7_407_421.0
+        full_xy = ci.strict_transform_xy_to_crs(x, y, truncated, full)
+        assert full_xy == pytest.approx((x + zone * 1_000_000, y), abs=1e-6)
+        assert ci.strict_transform_xy_to_crs(*full_xy, full, truncated) == pytest.approx(
+            (x, y), abs=1e-6
+        )
+        assert ci.strict_transform_xy_to_crs(
+            *full_xy, full, CoordinateSystem.PULKOVO_1942
+        ) == pytest.approx(
+            ci.strict_transform_xy_to_crs(x, y, truncated, CoordinateSystem.PULKOVO_1942),
+            abs=1e-9,
+        )
+        assert get_crs_display_suffix(truncated) == f" (ГК_{zone}N_42)"
 
     def test_format_coordinates_projected(self) -> None:
         """Format projected coordinates with locale-independent space separator."""

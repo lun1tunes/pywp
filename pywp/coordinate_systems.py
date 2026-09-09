@@ -67,10 +67,7 @@ class CoordinateSystem(Enum):
     GSK_2011_ZONE_20 = "EPSG:20920"
 
     # Pulkovo 1942 Gauss-Kruger zones (6-degree, legacy).
-    # EPSG:28413 carries zone-prefixed false easting 13,500,000 m.
-    # EPSG:2503 is the non-deprecated truncated CM 75E form equivalent
-    # to the deprecated EPSG:28473 "Gauss-Kruger 13N" definition.
-    PULKOVO_1942_GK_13N = "EPSG:2503"    # CM 75°, false easting 500,000 m
+    # Full zone-prefixed CRS: false easting is zone * 1,000,000 + 500,000 m.
     PULKOVO_1942_ZONE_6 = "EPSG:28406"   # CM 33°
     PULKOVO_1942_ZONE_7 = "EPSG:28407"   # CM 39°
     PULKOVO_1942_ZONE_8 = "EPSG:28408"   # CM 45°
@@ -86,6 +83,25 @@ class CoordinateSystem(Enum):
     PULKOVO_1942_ZONE_18 = "EPSG:28418"  # CM 105°
     PULKOVO_1942_ZONE_19 = "EPSG:28419"  # CM 111°
     PULKOVO_1942_ZONE_20 = "EPSG:28420"  # CM 117°
+
+    # Truncated Gauss-Kruger CRS: false easting is 500,000 m. These are the
+    # official EPSG CM definitions; zone 13 is the application's verified
+    # default input CRS (EPSG:2503).
+    PULKOVO_1942_GK_6N = "EPSG:2496"    # CM 33°
+    PULKOVO_1942_GK_7N = "EPSG:2497"    # CM 39°
+    PULKOVO_1942_GK_8N = "EPSG:2498"    # CM 45°
+    PULKOVO_1942_GK_9N = "EPSG:2499"    # CM 51°
+    PULKOVO_1942_GK_10N = "EPSG:2500"  # CM 57°
+    PULKOVO_1942_GK_11N = "EPSG:2501"  # CM 63°
+    PULKOVO_1942_GK_12N = "EPSG:2502"  # CM 69°
+    PULKOVO_1942_GK_13N = "EPSG:2503"  # CM 75°
+    PULKOVO_1942_GK_14N = "EPSG:2504"  # CM 81°
+    PULKOVO_1942_GK_15N = "EPSG:2505"  # CM 87°
+    PULKOVO_1942_GK_16N = "EPSG:2506"  # CM 93°
+    PULKOVO_1942_GK_17N = "EPSG:2507"  # CM 99°
+    PULKOVO_1942_GK_18N = "EPSG:2508"  # CM 105°
+    PULKOVO_1942_GK_19N = "EPSG:2509"  # CM 111°
+    PULKOVO_1942_GK_20N = "EPSG:2510"  # CM 117°
 
     # Pulkovo 1995 Gauss-Kruger zones (modern, per PDF EPSG:2472, 20073)
     PULKOVO_1995_ZONE_13 = "EPSG:2472"   # Zone 13, CM 75°E

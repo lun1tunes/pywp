@@ -15,6 +15,33 @@ def test_crs_calculator_entrypoint_exists() -> None:
     assert callable(app.run_page)
 
 
+@pytest.mark.parametrize("key", ["crs_calc_input_crs", "crs_calc_output_crs"])
+def test_crs_calculator_preserves_full_zone_after_label_rename(key) -> None:
+    at = AppTest.from_file("pages/04_crs_calculator.py")
+    at.session_state[key] = "СК-42 Зона 13 (13 млн)"
+    at.session_state["crs_calc_x"] = 13_600_010.6
+    at.session_state["crs_calc_y"] = 7_407_421.0
+    at.run(timeout=60)
+
+    assert not at.exception
+    assert at.selectbox(key).value == "СК-42 Зона 13"
+    assert at.number_input("crs_calc_x").value == 13_600_010.6
+    assert at.number_input("crs_calc_y").value == 7_407_421.0
+    assert not any("Прежняя входная CRS" in str(item.value) for item in at.warning)
+
+
+@pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+def test_crs_calculator_converts_truncated_to_full_zone() -> None:
+    at = AppTest.from_file("pages/04_crs_calculator.py").run(timeout=60)
+    at.selectbox("crs_calc_input_crs").set_value("ГК_12N_42")
+    at.selectbox("crs_calc_output_crs").set_value("СК-42 Зона 12")
+    at.run(timeout=60)
+
+    assert not at.exception
+    metrics = {widget.label: widget.value for widget in at.metric}
+    assert metrics == {"X output": "12600010.600", "Y output": "7407421.000"}
+
+
 @pytest.mark.parametrize("old_crs", ["WGS84 (градусы)", "ГСК2011"])
 def test_crs_calculator_clears_removed_geographic_input_state(old_crs) -> None:
     at = AppTest.from_file("pages/04_crs_calculator.py")
@@ -41,6 +68,8 @@ def test_crs_calculator_input_options_are_rectangular_only() -> None:
     )
 
     assert "ГСК2011 Зона 13" in list(input_selectbox.options)
+    assert "ГК_6N_42" in list(input_selectbox.options)
+    assert "ГК_20N_42" in list(input_selectbox.options)
     assert "WGS84 (градусы)" not in list(input_selectbox.options)
     assert "ГСК2011" not in list(input_selectbox.options)
 

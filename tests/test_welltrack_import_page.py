@@ -594,7 +594,6 @@ def test_records_overview_status_expander_opens_when_import_has_problems(
     monkeypatch,
 ) -> None:
     page = wt_import_module
-    captured: dict[str, object] = {}
     expander_calls: list[tuple[str, object]] = []
     incomplete = WelltrackRecord(
         name="WELL-X",
@@ -1533,8 +1532,8 @@ def test_welltrack_page_limits_csv_crs_options() -> None:
     selectboxes_by_label = {str(widget.label): widget for widget in at.selectbox}
     assert list(selectboxes_by_label["Доп. в выгрузке"].options) == [
         "ГК_13N_42",
-        "WGS84 UTM 43N",
         "WGS84 (градусы)",
+        "WGS84 UTM 43N",
     ]
 
 

@@ -19,6 +19,7 @@ from pywp.coordinate_integration import (  # noqa: E402
     CALCULATOR_INPUT_CRS_OPTIONS,
     CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE,
     CALCULATOR_OUTPUT_CRS_OPTIONS,
+    CRS_LABEL_ALIASES,
     CoordinateSystemError,
     DEFAULT_CRS,
     can_transform_crs,
@@ -209,6 +210,10 @@ def run_page() -> None:
 
     input_labels = _labels(CALCULATOR_INPUT_CRS_OPTIONS)
     output_labels = _labels(CALCULATOR_OUTPUT_CRS_OPTIONS)
+    for key in ("crs_calc_input_crs", "crs_calc_output_crs"):
+        previous_label = st.session_state.get(key)
+        if previous_label in CRS_LABEL_ALIASES:
+            st.session_state[key] = CRS_LABEL_ALIASES[previous_label]
     current_input_label = str(
         st.session_state.get("crs_calc_input_crs", _default_input_label())
     )
@@ -261,6 +266,11 @@ def run_page() -> None:
     output_crs = _crs_by_label(
         output_label, CALCULATOR_OUTPUT_CRS_OPTIONS, _DEFAULT_OUTPUT_CRS
     )
+    if input_crs.name.startswith("PULKOVO_1942_"):
+        st.caption(
+            "СК-42 Зона N — полный зональный отсчёт; ГК_NN_42 — сокращённый. "
+            "Для одной зоны полная восточная координата = сокращённая + N × 1 000 000 м."
+        )
     if input_crs.name.startswith("GSK_2011_ZONE_"):
         zone = int(input_crs.name.rsplit("_", 1)[1])
         st.caption(
