@@ -43,9 +43,11 @@ CRS_AUTO_CONVERT_KEY = "trajectory_crs_auto_convert"
 DEFAULT_CRS = CoordinateSystem.PULKOVO_1942_GK_13N
 DEFAULT_CSV_EXPORT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
 
-# Available input CRS options. Input coordinates are treated as projected
-# orthogonal meter coordinates; the selected value is source CRS metadata for
-# CSV conversion and does not mutate calculation geometry.
+# Available input CRS options for the trajectory planner. The selected value
+# is source CRS metadata for CSV conversion and does not mutate calculation
+# geometry. Keep this list projected-only: planner coordinates are Cartesian
+# metre values, while geographic longitude/latitude requires a separate input
+# flow with explicit normalization.
 INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 6", CoordinateSystem.PULKOVO_1942_ZONE_6),
     ("СК-42 Зона 7", CoordinateSystem.PULKOVO_1942_ZONE_7),
@@ -66,9 +68,28 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("Пулково 1995 Зона 13", CoordinateSystem.PULKOVO_1995_ZONE_13),
     ("Пулково 1995 Зона 18", CoordinateSystem.PULKOVO_1995_ZONE_18),
     ("Пулково 1995 CM 39E", CoordinateSystem.PULKOVO_1995_CM_39E),
+    ("ГСК2011 Зона 6", CoordinateSystem.GSK_2011_ZONE_6),
+    ("ГСК2011 Зона 7", CoordinateSystem.GSK_2011_ZONE_7),
+    ("ГСК2011 Зона 8", CoordinateSystem.GSK_2011_ZONE_8),
+    ("ГСК2011 Зона 9", CoordinateSystem.GSK_2011_ZONE_9),
+    ("ГСК2011 Зона 10", CoordinateSystem.GSK_2011_ZONE_10),
+    ("ГСК2011 Зона 11", CoordinateSystem.GSK_2011_ZONE_11),
+    ("ГСК2011 Зона 12", CoordinateSystem.GSK_2011_ZONE_12),
+    ("ГСК2011 Зона 13", CoordinateSystem.GSK_2011_ZONE_13),
+    ("ГСК2011 Зона 14", CoordinateSystem.GSK_2011_ZONE_14),
+    ("ГСК2011 Зона 15", CoordinateSystem.GSK_2011_ZONE_15),
+    ("ГСК2011 Зона 16", CoordinateSystem.GSK_2011_ZONE_16),
+    ("ГСК2011 Зона 17", CoordinateSystem.GSK_2011_ZONE_17),
+    ("ГСК2011 Зона 18", CoordinateSystem.GSK_2011_ZONE_18),
+    ("ГСК2011 Зона 19", CoordinateSystem.GSK_2011_ZONE_19),
+    ("ГСК2011 Зона 20", CoordinateSystem.GSK_2011_ZONE_20),
     ("МСК-89", CoordinateSystem.MSK_89),
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
 ]
+
+# The standalone calculator uses the same rectangular input CRS contract as
+# the trajectory planner. Geographic CRS are output-only and are listed below.
+CALCULATOR_INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = INPUT_CRS_OPTIONS
 
 # CSV output CRS options. CSV export is intentionally restricted to the small
 # set used in the product flow: one default input GK option, one projected UTM
@@ -79,11 +100,29 @@ CSV_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("WGS84 (градусы)", CoordinateSystem.WGS84),
 ]
 
+CALCULATOR_OUTPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
+    (label, crs)
+    for label, crs in INPUT_CRS_OPTIONS
+    if crs != CoordinateSystem.MSK_89
+]
+CALCULATOR_OUTPUT_CRS_OPTIONS.extend(
+    [
+    ("ГСК2011 (градусы)", CoordinateSystem.GSK_2011),
+    ("WGS84 (градусы)", CoordinateSystem.WGS84),
+    ]
+)
+
 # Backwards-compatible name for code/tests that refer to CSV CRS choices.
 CRS_OPTIONS = CSV_CRS_OPTIONS
 
 INPUT_CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
     crs: label for label, crs in INPUT_CRS_OPTIONS
+}
+CALCULATOR_INPUT_CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
+    crs: label for label, crs in CALCULATOR_INPUT_CRS_OPTIONS
+}
+CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
+    crs: label for label, crs in CALCULATOR_OUTPUT_CRS_OPTIONS
 }
 CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
     crs: label for label, crs in CSV_CRS_OPTIONS
@@ -392,27 +431,38 @@ def _transform_xy(
     y: float,
     from_crs: CoordinateSystem,
     to_crs: CoordinateSystem,
+    *,
+    strict: bool = False,
 ) -> tuple[float, float]:
     """Transform horizontal coordinates (x, y) between CRSs.
 
     Returns:
-        (transformed_x, transformed_y) or original if transformation fails.
+        Transformed values; legacy callers retain originals on failure.
+        With strict=True failures raise CoordinateSystemError instead.
     """
+    if strict and not _is_finite_xy(x, y):
+        raise CoordinateSystemError("X/Y must be finite numbers.")
     if from_crs == to_crs:
         return x, y
 
     transformer = _try_create_transformer()
     if transformer is None:
+        if strict:
+            raise CoordinateSystemError("Coordinate transformer is unavailable.")
         return x, y
 
     effective_from = _effective_pyproj_crs(from_crs)
     effective_to = _effective_pyproj_crs(to_crs)
     if effective_from is None or effective_to is None:
+        if strict:
+            raise CoordinateSystemError("Transformation parameters are unavailable for this CRS pair.")
         return x, y
     if effective_from == effective_to:
         return x, y
 
     if not _can_transform_directly(from_crs, to_crs):
+        if strict:
+            raise CoordinateSystemError("Direct transformation is unsupported for this CRS pair.")
         return x, y
 
     try:
@@ -457,6 +507,10 @@ def _transform_xy(
             ):
                 return result.lon_deg, result.lat_deg
     except Exception as exc:
+        if strict:
+            raise CoordinateSystemError(
+                f"Coordinate transformation failed ({from_crs.name} -> {to_crs.name})."
+            ) from exc
         logger.warning(
             f"Coordinate transformation failed ({from_crs.name} -> {to_crs.name}): {exc}"
         )
@@ -466,6 +520,8 @@ def _transform_xy(
             f"({from_crs.name} -> {to_crs.name})."
         )
 
+    if strict:
+        raise CoordinateSystemError("Coordinate transformation returned an invalid result.")
     return x, y
 
 
@@ -482,6 +538,16 @@ def transform_xy_to_crs(
     """Transform horizontal X/Y coordinates using the CSV export CRS engine."""
 
     return _transform_xy(float(x), float(y), from_crs, to_crs)
+
+
+def strict_transform_xy_to_crs(
+    x: float,
+    y: float,
+    from_crs: CoordinateSystem,
+    to_crs: CoordinateSystem,
+) -> tuple[float, float]:
+    """Transform X/Y, raising on failure so a calculator cannot mislabel originals."""
+    return _transform_xy(float(x), float(y), from_crs, to_crs, strict=True)
 
 
 def transform_point_to_crs(
@@ -790,7 +856,7 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         CoordinateSystem.PULKOVO_1995: " (П95)",
         CoordinateSystem.PULKOVO_1995_CM_39E: " (П95/CM39)",
         CoordinateSystem.MSK_89: " (МСК-89)",
-        CoordinateSystem.GSK_2011: " (ГСК)",
+        CoordinateSystem.GSK_2011: " (ГСК2011)",
         CoordinateSystem.WGS84: " (WGS)",
     }
 
@@ -799,6 +865,9 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         zone_crs = getattr(CoordinateSystem, f"PULKOVO_1942_ZONE_{zone_num}", None)
         if zone_crs:
             suffix_map[zone_crs] = f" (СК-42/З{zone_num})"
+        gsk_zone_crs = getattr(CoordinateSystem, f"GSK_2011_ZONE_{zone_num}", None)
+        if gsk_zone_crs:
+            suffix_map[gsk_zone_crs] = f" (ГСК2011/З{zone_num})"
     suffix_map[CoordinateSystem.PULKOVO_1942_GK_13N] = " (ГК_13N_42)"
     suffix_map[CoordinateSystem.WGS84_UTM_ZONE_43N] = " (WGS84/UTM43N)"
 
@@ -817,6 +886,7 @@ __all__ = [
     "get_selected_crs",
     "should_auto_convert",
     "transform_xy_to_crs",
+    "strict_transform_xy_to_crs",
     "transform_point_to_crs",
     "transform_stations_to_crs",
     "meridian_convergence_series_deg",
@@ -828,6 +898,10 @@ __all__ = [
     "DEFAULT_CRS",
     "DEFAULT_CSV_EXPORT_CRS",
     "INPUT_CRS_OPTIONS",
+    "CALCULATOR_INPUT_CRS_OPTIONS",
+    "CALCULATOR_INPUT_CRS_LABEL_BY_VALUE",
+    "CALCULATOR_OUTPUT_CRS_OPTIONS",
+    "CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE",
     "CSV_CRS_OPTIONS",
     "CRS_OPTIONS",
     "_can_transform_directly",

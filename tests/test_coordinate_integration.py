@@ -5,6 +5,9 @@ import pytest
 
 import pywp.coordinate_integration as ci
 from pywp.coordinate_integration import (
+    CALCULATOR_INPUT_CRS_LABEL_BY_VALUE,
+    CALCULATOR_INPUT_CRS_OPTIONS,
+    CALCULATOR_OUTPUT_CRS_OPTIONS,
     CSV_CRS_OPTIONS,
     CRS_OPTIONS,
     DEFAULT_CRS,
@@ -21,7 +24,7 @@ from pywp.coordinate_integration import (
     transform_stations_to_crs,
     transform_xy_to_crs,
 )
-from pywp.coordinate_systems import CoordinateSystem, ProjectedCoord
+from pywp.coordinate_systems import CoordinateSystem, CoordinateSystemError, ProjectedCoord
 from pywp.models import Point3D
 from pywp.ui_well_result import SingleWellResultView
 
@@ -38,13 +41,29 @@ class TestCoordinateIntegration:
         assert DEFAULT_CSV_EXPORT_CRS == CoordinateSystem.WGS84_UTM_ZONE_43N
 
     def test_input_crs_options_are_projected_meter_systems_only(self) -> None:
-        """Input CRS options stay to projected meter systems."""
+        """Trajectory planner input CRS options stay projected and metre-based."""
         labels = [label for label, _ in INPUT_CRS_OPTIONS]
         assert "PNO-16 (Зона)" not in labels
         assert "WGS84" not in labels
         assert "СК-42 (Градусные)" not in labels
         assert all(crs.is_projected() for _label, crs in INPUT_CRS_OPTIONS)
+        assert CoordinateSystem.GSK_2011.is_geographic()
         assert not CoordinateSystem.GSK_2011_GEOCENTRIC.is_projected()
+
+    def test_calculator_input_crs_options_include_gsk2011(self) -> None:
+        """Input choices expose rectangular GSK-2011 zones."""
+        labels = [label for label, _ in CALCULATOR_INPUT_CRS_OPTIONS]
+
+        assert "ГСК2011 Зона 13" in labels
+        assert all(crs.is_projected() for _label, crs in CALCULATOR_INPUT_CRS_OPTIONS)
+        assert (
+            CALCULATOR_INPUT_CRS_LABEL_BY_VALUE[CoordinateSystem.GSK_2011_ZONE_13]
+            == "ГСК2011 Зона 13"
+        )
+        assert (
+            ("ГСК2011 (градусы)", CoordinateSystem.GSK_2011)
+            in CALCULATOR_OUTPUT_CRS_OPTIONS
+        )
 
     def test_csv_crs_options_match_supported_export_set(self) -> None:
         """CSV output CRS options stay limited to the supported export targets."""
@@ -173,6 +192,11 @@ class TestCoordinateIntegration:
         suffix = get_crs_display_suffix(CoordinateSystem.MSK_89)
         assert "МСК-89" in suffix
 
+    def test_get_crs_display_suffix_gsk2011(self) -> None:
+        """Display suffix for GSK-2011."""
+        suffix = get_crs_display_suffix(CoordinateSystem.GSK_2011)
+        assert "ГСК2011" in suffix
+
     def test_can_transform_directly_same_crs(self) -> None:
         """Same CRS is always directly transformable."""
         assert _can_transform_directly(
@@ -184,6 +208,30 @@ class TestCoordinateIntegration:
         assert _can_transform_directly(
             CoordinateSystem.WGS84, CoordinateSystem.PULKOVO_1942
         ) is True
+        assert _can_transform_directly(
+            CoordinateSystem.GSK_2011, CoordinateSystem.WGS84
+        ) is True
+
+    @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
+    def test_gsk2011_projected_zone_13_round_trips_to_geographic(self) -> None:
+        """GSK-2011 zone 13 uses EPSG:20913 and returns metres/degrees correctly."""
+        x, y = transform_xy_to_crs(
+            75.0,
+            55.0,
+            CoordinateSystem.WGS84,
+            CoordinateSystem.GSK_2011_ZONE_13,
+        )
+        lon, lat = transform_xy_to_crs(
+            x,
+            y,
+            CoordinateSystem.GSK_2011_ZONE_13,
+            CoordinateSystem.GSK_2011,
+        )
+
+        assert x == pytest.approx(13_500_000.0, abs=0.001)
+        assert y == pytest.approx(6_097_229.819, abs=0.001)
+        assert lon == pytest.approx(75.0, abs=1e-7)
+        assert lat == pytest.approx(55.0, abs=1e-6)
 
     def test_can_transform_directly_local_and_pno_placeholders_blocked(self) -> None:
         """LOCAL and PNO placeholders require project-specific parameters."""
@@ -253,6 +301,13 @@ class TestCoordinateIntegration:
 
         assert x == pytest.approx(600_010.6)
         assert y == pytest.approx(7_407_421.0)
+        with pytest.raises(CoordinateSystemError, match="invalid result"):
+            ci.strict_transform_xy_to_crs(
+                600_010.6,
+                7_407_421.0,
+                CoordinateSystem.PULKOVO_1942_GK_13N,
+                CoordinateSystem.WGS84_UTM_ZONE_43N,
+            )
 
     @pytest.mark.skipif(not ci.HAS_PYPROJ, reason="pyproj is required")
     def test_transform_gk_13n_42_to_wgs84_utm43_control_point(self) -> None:

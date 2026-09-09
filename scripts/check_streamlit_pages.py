@@ -4,7 +4,6 @@ from __future__ import annotations
 from pathlib import Path
 import socket
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -54,7 +53,9 @@ def _expected_calc_defaults() -> dict[str, float]:
         "Целевой INC на t1, deg": float(cfg.entry_inc_target_deg),
         "Допуск INC на t1, deg": float(cfg.entry_inc_tolerance_deg),
         "Макс INC по стволу, deg": float(cfg.max_inc_deg),
-        "Макс ПИ BUILD, deg/10m": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
+        "Макс ПИ BUILD 1/2, deg/10m": float(
+            dls_to_pi(cfg.dls_build_max_deg_per_30m)
+        ),
         "Мин VERTICAL до KOP, м": float(cfg.kop_min_vertical_m),
         "Макс итоговая MD (постпроверка), м": float(cfg.max_total_md_postcheck_m),
         "Макс рестартов решателя": float(cfg.turn_solver_max_restarts),
@@ -104,6 +105,7 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
     # PTC page only renders the calc-param form when records are loaded,
     # so we must provide a real welltrack source before clicking import.
     ptc_at = AppTest.from_file(str(project_root / "pages" / "01_trajectory_constructor.py"))
+    ptc_at.session_state["wt_source_format"] = "WELLTRACK"
     ptc_at.session_state["wt_source_mode"] = "Файл по пути"
     ptc_at.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS.INC"
     ptc_at.run()
@@ -112,6 +114,14 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
         errors.append("pages/01_trajectory_constructor.py: import button not found.")
         return errors
     import_buttons[0].click()
+    ptc_at.run()
+    calc_panel_buttons = [button for button in ptc_at.button if button.label == "Показать"]
+    if not calc_panel_buttons:
+        errors.append(
+            "pages/01_trajectory_constructor.py: calculation-parameters toggle not found after import."
+        )
+        return errors
+    calc_panel_buttons[0].click()
     ptc_at.run()
     for label, expected_value in expected.items():
         actual = _find_number_value(ptc_at, label)
@@ -141,6 +151,7 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
     ptc_legacy = AppTest.from_file(
         str(project_root / "pages" / "01_trajectory_constructor.py")
     )
+    ptc_legacy.session_state["wt_source_format"] = "WELLTRACK"
     ptc_legacy.session_state["wt_source_mode"] = "Файл по пути"
     ptc_legacy.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS.INC"
     calc_defaults = calc_param_defaults()
@@ -160,6 +171,16 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
         )
         return errors
     legacy_import_buttons[0].click()
+    ptc_legacy.run()
+    legacy_calc_panel_buttons = [
+        button for button in ptc_legacy.button if button.label == "Показать"
+    ]
+    if not legacy_calc_panel_buttons:
+        errors.append(
+            "pages/01_trajectory_constructor.py: calculation-parameters toggle not found (legacy check)."
+        )
+        return errors
+    legacy_calc_panel_buttons[0].click()
     ptc_legacy.run()
     for label, expected_value in expected.items():
         actual = _find_number_value(ptc_legacy, label)

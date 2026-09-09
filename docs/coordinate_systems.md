@@ -9,7 +9,8 @@ This module provides comprehensive support for coordinate systems used in Russia
 - **WGS84** - Global GPS standard (EPSG:4326)
 - **Pulkovo 1942 (СК-42)** - Legacy Soviet datum, ~3m accuracy (EPSG:4284)
 - **Pulkovo 1995** - Modernized Soviet datum, ~1m accuracy (EPSG:4200)
-- **GSK-2011 (ГСК-2011)** - Current Russian state system (EPSG:7681)
+- **GSK-2011 (ГСК-2011)** - Geographic 2D system (EPSG:7683); its geocentric
+  realization is EPSG:7681
 - **Local field systems** - PNO-13, PNO-16 with disambiguation (ZONE vs CM)
 
 ## EPSG Codes Reference
@@ -20,7 +21,7 @@ This module provides comprehensive support for coordinate systems used in Russia
 | WGS84 | 4326 | Global geodetic system | GPS standard |
 | Pulkovo 1942 | 4284 | СК-42, legacy Soviet datum | ~3 meters |
 | Pulkovo 1995 | 4200 | Modernized Pulkovo | ~1 meter |
-| GSK-2011 | 7681 | ГСК-2011, current state system | <1 meter |
+| GSK-2011 | 7683 | ГСК-2011, geographic 2D | <1 meter |
 
 ### Projected Systems - Pulkovo 1995 (Modern)
 Per PDF research, Pulkovo 1995 zones for modern fields:

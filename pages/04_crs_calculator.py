@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 
 logging.getLogger("streamlit").setLevel(logging.ERROR)
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(
@@ -9,34 +8,29 @@ logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").set
 )
 logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
-import pandas as pd
-import streamlit as st
-from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
-
-from pywp.coordinate_integration import (
-    CRS_LABEL_BY_VALUE,
-    CSV_CRS_OPTIONS,
-    DEFAULT_CRS,
-    INPUT_CRS_LABEL_BY_VALUE,
-    INPUT_CRS_OPTIONS,
-    can_transform_crs,
-    transform_xy_to_crs,
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
+from streamlit.runtime.scriptrunner_utils.script_run_context import (  # noqa: E402
+    get_script_run_ctx,
 )
-from pywp.coordinate_systems import CoordinateSystem
-from pywp.ui_theme import apply_page_style
+
+from pywp.coordinate_integration import (  # noqa: E402
+    CALCULATOR_INPUT_CRS_LABEL_BY_VALUE,
+    CALCULATOR_INPUT_CRS_OPTIONS,
+    CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE,
+    CALCULATOR_OUTPUT_CRS_OPTIONS,
+    CoordinateSystemError,
+    DEFAULT_CRS,
+    can_transform_crs,
+    strict_transform_xy_to_crs,
+)
+from pywp.coordinate_systems import CoordinateSystem  # noqa: E402
+from pywp.ui_theme import apply_page_style  # noqa: E402
 
 _DEFAULT_OUTPUT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
 _DEFAULT_X = 600_010.6
 _DEFAULT_Y = 7_407_421.0
-_DEFAULT_WGS84_LON = 72.23553333333334
-_DEFAULT_WGS84_LAT = 71.17081666666667
-_DEFAULT_WGS84_DMS = "N 71 10 14.94; E 72 14 7.92"
 _BATCH_EDITOR_COLUMNS = ("X", "Y")
-_WGS84_INPUT_LABEL = "WGS84 (градусы)"
-_CALCULATOR_INPUT_CRS_OPTIONS = [
-    *INPUT_CRS_OPTIONS,
-    (_WGS84_INPUT_LABEL, CoordinateSystem.WGS84),
-]
 _SWAP_CRS_BUTTON_LABEL = "⇄"
 
 
@@ -60,14 +54,14 @@ def _index_for_crs(
 
 
 def _default_input_label() -> str:
-    return _labels(_CALCULATOR_INPUT_CRS_OPTIONS)[
-        _index_for_crs(DEFAULT_CRS, _CALCULATOR_INPUT_CRS_OPTIONS)
+    return _labels(CALCULATOR_INPUT_CRS_OPTIONS)[
+        _index_for_crs(DEFAULT_CRS, CALCULATOR_INPUT_CRS_OPTIONS)
     ]
 
 
 def _default_output_label() -> str:
-    return _labels(CSV_CRS_OPTIONS)[
-        _index_for_crs(_DEFAULT_OUTPUT_CRS, CSV_CRS_OPTIONS)
+    return _labels(CALCULATOR_OUTPUT_CRS_OPTIONS)[
+        _index_for_crs(_DEFAULT_OUTPUT_CRS, CALCULATOR_OUTPUT_CRS_OPTIONS)
     ]
 
 
@@ -75,8 +69,8 @@ def _swap_crs_labels_supported(
     input_label: str,
     output_label: str,
 ) -> bool:
-    input_labels = set(_labels(_CALCULATOR_INPUT_CRS_OPTIONS))
-    output_labels = set(_labels(CSV_CRS_OPTIONS))
+    input_labels = set(_labels(CALCULATOR_INPUT_CRS_OPTIONS))
+    output_labels = set(_labels(CALCULATOR_OUTPUT_CRS_OPTIONS))
     return str(input_label) in output_labels and str(output_label) in input_labels
 
 
@@ -100,58 +94,12 @@ def _format_value(value: float, crs: CoordinateSystem) -> str:
 
 def _crs_display_name(crs: CoordinateSystem, *, output: bool) -> str:
     if output:
-        return CRS_LABEL_BY_VALUE.get(crs, crs.name)
-    return INPUT_CRS_LABEL_BY_VALUE.get(crs, crs.name)
+        return CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE.get(crs, crs.name)
+    return CALCULATOR_INPUT_CRS_LABEL_BY_VALUE.get(crs, crs.name)
 
 
 def _default_batch_editor_frame() -> pd.DataFrame:
     return pd.DataFrame([{column: None for column in _BATCH_EDITOR_COLUMNS}])
-
-
-def _parse_dms_component(text: str) -> tuple[str, float]:
-    tokens = re.findall(r"[NSEW]|[-+]?\d+(?:[.,]\d+)?", str(text).upper())
-    if len(tokens) != 4:
-        raise ValueError("ожидается формат вида `N 71 10 14.94`.")
-    direction = str(tokens[0])
-    if direction not in {"N", "S", "E", "W"}:
-        raise ValueError("неверное направление: используйте N/S/E/W.")
-    degrees = float(str(tokens[1]).replace(",", "."))
-    minutes = float(str(tokens[2]).replace(",", "."))
-    seconds = float(str(tokens[3]).replace(",", "."))
-    if degrees < 0.0:
-        raise ValueError("градусы должны быть неотрицательными.")
-    if minutes < 0.0 or minutes >= 60.0:
-        raise ValueError("минуты должны быть в диапазоне [0, 60).")
-    if seconds < 0.0 or seconds >= 60.0:
-        raise ValueError("секунды должны быть в диапазоне [0, 60).")
-    limit = 90.0 if direction in {"N", "S"} else 180.0
-    if degrees > limit:
-        raise ValueError(f"градусы для {direction} должны быть <= {limit:.0f}.")
-    if degrees == limit and (minutes > 0.0 or seconds > 0.0):
-        raise ValueError(
-            f"для {direction} при {limit:.0f}° минуты и секунды должны быть равны 0."
-        )
-    decimal = degrees + minutes / 60.0 + seconds / 3600.0
-    if direction in {"S", "W"}:
-        decimal *= -1.0
-    return direction, decimal
-
-
-def _parse_wgs84_dms_input(text: str) -> tuple[float, float]:
-    """Parse WGS84 DMS text and return calculator X/Y order: (longitude, latitude)."""
-    parts = [part.strip() for part in re.split(r"[;\n]+", str(text)) if part.strip()]
-    if len(parts) != 2:
-        raise ValueError(
-            "ожидаются две части через `;`: сначала широта, затем долгота."
-        )
-    parsed = dict(_parse_dms_component(part) for part in parts)
-    lat = parsed.get("N", parsed.get("S"))
-    lon = parsed.get("E", parsed.get("W"))
-    if lat is None or lon is None:
-        raise ValueError("нужны широта `N/S` и долгота `E/W`.")
-    x_lon_deg = float(lon)
-    y_lat_deg = float(lat)
-    return x_lon_deg, y_lat_deg
 
 
 def _normalize_batch_editor_frame(
@@ -207,7 +155,7 @@ def _batch_result_frame(
 
     rows: list[dict[str, str]] = []
     for x_in, y_in in points[["X", "Y"]].itertuples(index=False, name=None):
-        x_out, y_out = transform_xy_to_crs(
+        x_out, y_out = strict_transform_xy_to_crs(
             float(x_in),
             float(y_in),
             input_crs,
@@ -236,13 +184,17 @@ def _result_frame(
     return pd.DataFrame(
         [
             {
-                "CRS": INPUT_CRS_LABEL_BY_VALUE.get(input_crs, input_crs.name),
+                "CRS": CALCULATOR_INPUT_CRS_LABEL_BY_VALUE.get(
+                    input_crs, input_crs.name
+                ),
                 "X": _format_value(x_in, input_crs),
                 "Y": _format_value(y_in, input_crs),
                 "Роль": "Вход",
             },
             {
-                "CRS": CRS_LABEL_BY_VALUE.get(output_crs, output_crs.name),
+                "CRS": CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE.get(
+                    output_crs, output_crs.name
+                ),
                 "X": _format_value(x_out, output_crs),
                 "Y": _format_value(y_out, output_crs),
                 "Роль": "Выход",
@@ -255,14 +207,27 @@ def run_page() -> None:
     st.set_page_config(page_title="Калькулятор СК", layout="wide")
     apply_page_style(max_width_px=1100)
 
-    input_labels = _labels(_CALCULATOR_INPUT_CRS_OPTIONS)
-    output_labels = _labels(CSV_CRS_OPTIONS)
+    input_labels = _labels(CALCULATOR_INPUT_CRS_OPTIONS)
+    output_labels = _labels(CALCULATOR_OUTPUT_CRS_OPTIONS)
     current_input_label = str(
         st.session_state.get("crs_calc_input_crs", _default_input_label())
     )
     current_output_label = str(
         st.session_state.get("crs_calc_output_crs", _default_output_label())
     )
+    if current_input_label not in input_labels:
+        st.session_state.pop("crs_calc_input_crs", None)
+        st.session_state["crs_calc_x"] = None
+        st.session_state["crs_calc_y"] = None
+        st.session_state.pop("crs_calc_batch_points", None)
+        current_input_label = _default_input_label()
+        st.warning(
+            "Прежняя входная CRS больше недоступна. "
+            "Выберите прямоугольную CRS и заново введите координаты в метрах."
+        )
+    if current_output_label not in output_labels:
+        st.session_state.pop("crs_calc_output_crs", None)
+        current_output_label = _default_output_label()
     can_swap_crs_labels = _swap_crs_labels_supported(
         current_input_label,
         current_output_label,
@@ -271,7 +236,7 @@ def run_page() -> None:
     input_label = c1.selectbox(
         "Входная CRS",
         options=input_labels,
-        index=_index_for_crs(DEFAULT_CRS, _CALCULATOR_INPUT_CRS_OPTIONS),
+        index=_index_for_crs(DEFAULT_CRS, CALCULATOR_INPUT_CRS_OPTIONS),
         key="crs_calc_input_crs",
     )
     c_swap.button(
@@ -284,117 +249,95 @@ def run_page() -> None:
     output_label = c2.selectbox(
         "Выходная CRS",
         options=output_labels,
-        index=_index_for_crs(_DEFAULT_OUTPUT_CRS, CSV_CRS_OPTIONS),
+        index=_index_for_crs(_DEFAULT_OUTPUT_CRS, CALCULATOR_OUTPUT_CRS_OPTIONS),
         key="crs_calc_output_crs",
     )
 
     input_crs = _crs_by_label(
         input_label,
-        _CALCULATOR_INPUT_CRS_OPTIONS,
+        CALCULATOR_INPUT_CRS_OPTIONS,
         DEFAULT_CRS,
     )
-    output_crs = _crs_by_label(output_label, CSV_CRS_OPTIONS, _DEFAULT_OUTPUT_CRS)
+    output_crs = _crs_by_label(
+        output_label, CALCULATOR_OUTPUT_CRS_OPTIONS, _DEFAULT_OUTPUT_CRS
+    )
+    if input_crs.name.startswith("GSK_2011_ZONE_"):
+        zone = int(input_crs.name.rsplit("_", 1)[1])
+        st.caption(
+            f"ГСК2011: шестиградусная зона {zone}, {input_crs.value}. "
+            f"Восточный отсчёт X включает номер зоны в миллионах; "
+            f"на центральном меридиане X = {zone * 1_000_000 + 500_000:,} м."
+        )
+    if output_crs.is_geographic():
+        st.caption("Географический выход: X = долгота (E), Y = широта (N), градусы.")
 
     can_transform = can_transform_crs(input_crs, output_crs)
     if input_crs != output_crs and not can_transform:
         st.warning(
             "Для выбранной пары CRS нет безопасного прямого пересчёта; "
-            "значения оставлены как есть."
+            "результат пересчёта недоступен."
         )
     single_tab, batch_tab = st.tabs(["Одна точка", "Таблица точек"])
 
     with single_tab:
-        x_in: float | None = None
-        y_in: float | None = None
-        if input_crs.is_geographic():
-            input_mode = st.radio(
-                "Формат ввода WGS84",
-                options=["DMS", "Decimal"],
-                horizontal=True,
-                key="crs_calc_wgs84_input_mode",
-            )
-            if str(input_mode) == "DMS":
-                dms_value = st.text_input(
-                    "WGS84 DMS",
-                    value=_DEFAULT_WGS84_DMS,
-                    key="crs_calc_wgs84_dms",
-                    placeholder="N 71 10 14.94; E 72 14 7.92",
-                )
-                try:
-                    lon_deg, lat_deg = _parse_wgs84_dms_input(dms_value)
-                except ValueError as exc:
-                    st.warning(f"Не удалось разобрать WGS84 DMS: {exc}")
-                else:
-                    x_in = lon_deg
-                    y_in = lat_deg
-                    st.caption(
-                        "Распознано как "
-                        f"широта {lat_deg:.8f}°, долгота {lon_deg:.8f}°."
-                    )
-            else:
-                x_col, y_col = st.columns(2, gap="small")
-                x_in = x_col.number_input(
-                    "Долгота (E)",
-                    value=float(_DEFAULT_WGS84_LON),
-                    step=0.000001,
-                    format="%.8f",
-                    key="crs_calc_x",
-                )
-                y_in = y_col.number_input(
-                    "Широта (N)",
-                    value=float(_DEFAULT_WGS84_LAT),
-                    step=0.000001,
-                    format="%.8f",
-                    key="crs_calc_y",
-                )
-        else:
-            x_col, y_col = st.columns(2, gap="small")
-            x_in = x_col.number_input(
-                "X",
-                value=float(_DEFAULT_X),
-                step=1.0,
-                format="%.3f",
-                key="crs_calc_x",
-            )
-            y_in = y_col.number_input(
-                "Y",
-                value=float(_DEFAULT_Y),
-                step=1.0,
-                format="%.3f",
-                key="crs_calc_y",
-            )
+        st.caption(
+            f"{_crs_display_name(input_crs, output=False)}: "
+            "X = восточная координата (E), Y = северная координата (N), метры."
+        )
+        x_col, y_col = st.columns(2, gap="small")
+        x_in = x_col.number_input(
+            "X (м)",
+            value=st.session_state.get("crs_calc_x", float(_DEFAULT_X)),
+            step=1.0,
+            format="%.3f",
+            key="crs_calc_x",
+        )
+        y_in = y_col.number_input(
+            "Y (м)",
+            value=st.session_state.get("crs_calc_y", float(_DEFAULT_Y)),
+            step=1.0,
+            format="%.3f",
+            key="crs_calc_y",
+        )
         if x_in is None or y_in is None:
-            st.info("Введите корректную точку WGS84, чтобы увидеть результат пересчёта.")
+            st.info(
+                "Введите корректную прямоугольную точку X/Y в метрах, "
+                "чтобы увидеть результат пересчёта."
+            )
         else:
-            x_out, y_out = transform_xy_to_crs(
-                float(x_in),
-                float(y_in),
-                input_crs,
-                output_crs,
-            )
-            st.dataframe(
-                _result_frame(
-                    x_in=float(x_in),
-                    y_in=float(y_in),
-                    x_out=float(x_out),
-                    y_out=float(y_out),
-                    input_crs=input_crs,
-                    output_crs=output_crs,
-                ),
-                hide_index=True,
-                width="stretch",
-            )
+            try:
+                x_out, y_out = strict_transform_xy_to_crs(
+                    float(x_in),
+                    float(y_in),
+                    input_crs,
+                    output_crs,
+                )
+            except CoordinateSystemError as exc:
+                st.error(f"Пересчёт не выполнен: {exc}")
+            else:
+                st.dataframe(
+                    _result_frame(
+                        x_in=float(x_in),
+                        y_in=float(y_in),
+                        x_out=float(x_out),
+                        y_out=float(y_out),
+                        input_crs=input_crs,
+                        output_crs=output_crs,
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
 
-            out_x_col, out_y_col = st.columns(2, gap="small")
-            out_x_col.metric("X output", _format_value(x_out, output_crs))
-            out_y_col.metric("Y output", _format_value(y_out, output_crs))
+                out_x_col, out_y_col = st.columns(2, gap="small")
+                out_x_col.metric("X output", _format_value(x_out, output_crs))
+                out_y_col.metric("Y output", _format_value(y_out, output_crs))
 
     with batch_tab:
-        editor_format = "%.8f" if input_crs.is_geographic() else "%.3f"
-        if input_crs.is_geographic():
-            st.caption(
-                "Для таблицы WGS84 используйте decimal degrees: X = долгота, Y = широта."
-            )
+        editor_format = "%.3f"
+        st.caption(
+            "Входные X/Y для всех CRS задаются в метрах: "
+            "X = восточная, Y = северная координата."
+        )
         edited_points = st.data_editor(
             _default_batch_editor_frame(),
             key="crs_calc_batch_points",
@@ -411,15 +354,16 @@ def run_page() -> None:
             st.warning(
                 f"Пропущены строки без полной числовой пары X/Y: {invalid_row_count}."
             )
-        st.dataframe(
-            _batch_result_frame(
+        try:
+            batch_result = _batch_result_frame(
                 points=batch_points,
                 input_crs=input_crs,
                 output_crs=output_crs,
-            ),
-            hide_index=True,
-            width="stretch",
-        )
+            )
+        except CoordinateSystemError as exc:
+            st.error(f"Пересчёт таблицы не выполнен: {exc}")
+            batch_result = pd.DataFrame()
+        st.dataframe(batch_result, hide_index=True, width="stretch")
 
 
 if __name__ == "__main__":

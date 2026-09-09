@@ -12,14 +12,14 @@ For projected coordinates (Gauss-Kruger, UTM), use zone-specific EPSG codes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import Enum
 from typing import NamedTuple
 
 import numpy as np
 
 # Optional pyproj support
 try:
-    from pyproj import Transformer, CRS
+    from pyproj import Transformer
 
     HAS_PYPROJ = True
 except ImportError:
@@ -47,6 +47,24 @@ class CoordinateSystem(Enum):
     PULKOVO_1995 = "EPSG:4200"  # Pulkovo 1995, modernized (accuracy ~1m)
     GSK_2011_GEOCENTRIC = "EPSG:7681"  # GSK-2011 geocentric X/Y/Z, metres
     GSK_2011 = "EPSG:7683"  # ГСК-2011 geographic 2D, degrees
+
+    # GSK-2011 Gauss-Kruger six-degree zones. The zone number is part of the
+    # CRS definition and must be selected explicitly for rectangular input.
+    GSK_2011_ZONE_6 = "EPSG:20906"
+    GSK_2011_ZONE_7 = "EPSG:20907"
+    GSK_2011_ZONE_8 = "EPSG:20908"
+    GSK_2011_ZONE_9 = "EPSG:20909"
+    GSK_2011_ZONE_10 = "EPSG:20910"
+    GSK_2011_ZONE_11 = "EPSG:20911"
+    GSK_2011_ZONE_12 = "EPSG:20912"
+    GSK_2011_ZONE_13 = "EPSG:20913"
+    GSK_2011_ZONE_14 = "EPSG:20914"
+    GSK_2011_ZONE_15 = "EPSG:20915"
+    GSK_2011_ZONE_16 = "EPSG:20916"
+    GSK_2011_ZONE_17 = "EPSG:20917"
+    GSK_2011_ZONE_18 = "EPSG:20918"
+    GSK_2011_ZONE_19 = "EPSG:20919"
+    GSK_2011_ZONE_20 = "EPSG:20920"
 
     # Pulkovo 1942 Gauss-Kruger zones (6-degree, legacy).
     # EPSG:28413 carries zone-prefixed false easting 13,500,000 m.
