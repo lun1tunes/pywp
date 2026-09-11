@@ -924,11 +924,7 @@
 
       #edit-scope-selector.scope-grid {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      #edit-scope-selector.scope-grid .scope-btn:last-child {
-        grid-column: 1 / -1;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
 
       .plane-btn,
@@ -1056,19 +1052,16 @@
         position: static;
         width: auto;
         max-width: none;
-        max-height: min(46vh, 410px);
-        overflow: auto;
-        border-top: 1px solid rgba(15,23,42,0.08);
-        padding: 8px 10px 10px;
+        max-height: none;
+        overflow: visible;
+        padding: 0 10px;
         box-sizing: border-box;
-        background: rgba(248,250,252,0.62);
+        background: transparent;
         color: #334155;
       }
 
       #edit-inspector.is-visible {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
+        display: contents;
       }
 
       .edit-inspector-title {
@@ -1087,9 +1080,7 @@
         line-height: 1.3;
       }
 
-      .edit-inspector-search,
-      .edit-inspector-input,
-      .edit-inspector-select {
+      .edit-inspector-input {
         width: 100%;
         min-height: 25px;
         box-sizing: border-box;
@@ -1102,66 +1093,9 @@
         padding: 3px 6px;
       }
 
-      .edit-inspector-search:focus,
-      .edit-inspector-input:focus,
-      .edit-inspector-select:focus {
+      .edit-inspector-input:focus {
         outline: 2px solid rgba(37,99,235,0.18);
         border-color: rgba(37,99,235,0.62);
-      }
-
-      .edit-point-list {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        max-height: 122px;
-        overflow: auto;
-        padding: 2px;
-        border: 1px solid rgba(148,163,184,0.22);
-        border-radius: 8px;
-        background: rgba(248,250,252,0.72);
-      }
-
-      .edit-point-list-group {
-        padding: 4px 5px 2px;
-        color: #64748b;
-        font-size: 10px;
-        font-weight: 700;
-        text-transform: uppercase;
-      }
-
-      .edit-point-list-item {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 8px;
-        align-items: center;
-        width: 100%;
-        border: 1px solid transparent;
-        border-radius: 6px;
-        background: transparent;
-        color: #334155;
-        cursor: pointer;
-        font: inherit;
-        font-size: 11px;
-        padding: 5px 6px;
-        text-align: left;
-      }
-
-      .edit-point-list-item:hover {
-        background: rgba(37,99,235,0.07);
-      }
-
-      .edit-point-list-item.is-active {
-        border-color: rgba(37,99,235,0.36);
-        background: rgba(37,99,235,0.12);
-        color: #1d4ed8;
-        font-weight: 700;
-      }
-
-      .edit-point-list-meta {
-        color: #64748b;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 9px;
-        white-space: nowrap;
       }
 
       .edit-inspector-section {
@@ -1178,6 +1112,42 @@
         font-weight: 700;
         letter-spacing: 0.02em;
         text-transform: uppercase;
+      }
+
+      .edit-inspector-section-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .edit-inspector-selection {
+        display: inline-flex;
+        align-items: baseline;
+        justify-content: flex-end;
+        gap: 5px;
+        min-width: 0;
+        white-space: nowrap;
+        font-size: 10px;
+        line-height: 1.2;
+      }
+
+      .edit-inspector-selection-point {
+        overflow: hidden;
+        color: #2563eb;
+        font-weight: 700;
+        text-overflow: ellipsis;
+      }
+
+      .edit-inspector-selection-separator {
+        color: #cbd5e1;
+      }
+
+      .edit-inspector-selection-well {
+        overflow: hidden;
+        color: #94a3b8;
+        font-weight: 500;
+        text-overflow: ellipsis;
       }
 
       .edit-inspector-grid {
@@ -1199,9 +1169,19 @@
         font-weight: 700;
       }
 
-      .edit-inspector-actions {
-        display: flex;
-        gap: 5px;
+      .edit-inspector-value {
+        display: block;
+        min-height: 20px;
+        box-sizing: border-box;
+        padding: 3px 5px;
+        border: 1px solid rgba(148,163,184,0.14);
+        border-radius: 5px;
+        background: rgba(148,163,184,0.08);
+        color: #0f172a;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        text-align: right;
+        white-space: nowrap;
       }
 
       .edit-inspector-action {
@@ -1230,18 +1210,6 @@
         color: #64748b;
         font-size: 10px;
         line-height: 1.35;
-      }
-
-      .edit-preview-status {
-        display: flex;
-        align-items: flex-start;
-        gap: 6px;
-        border-radius: 7px;
-        background: rgba(245,158,11,0.1);
-        color: #92400e;
-        font-size: 10px;
-        line-height: 1.35;
-        padding: 6px 7px;
       }
 
       .edit-pad-wells {
@@ -2036,10 +2004,8 @@
             <div class="edit-toolbox-label">Точки</div>
             <div id="edit-scope-selector" class="scope-grid">
               <button class="scope-btn is-active" data-scope="point" type="button">Одна точка</button>
-              <button class="scope-btn" data-scope="pair" type="button">Пара t1–t3</button>
               <button class="scope-btn" data-scope="well" type="button">Все точки</button>
               <button class="scope-btn" data-scope="after" type="button">После точки</button>
-              <button class="scope-btn" data-scope="selected" type="button">Выбранные скважины</button>
             </div>
           </div>
           <div class="edit-toolbox-section">
@@ -2056,54 +2022,21 @@
               <button class="operation-btn" data-operation="rotate" type="button">Поворот XY</button>
             </div>
           </div>
-          <div class="edit-toolbox-section">
-            <div class="edit-toolbox-label">История</div>
-            <div class="edit-toolbox-action-row">
-              <button id="edit-undo-btn" class="edit-tool-btn" type="button" title="Отменить последнее изменение выбранной скважины">Назад</button>
-              <button id="edit-redo-btn" class="edit-tool-btn" type="button" title="Повторить отменённое изменение выбранной скважины">Вперёд</button>
-              <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
+      <div id="edit-inspector">
+        <div id="edit-point-editor" class="edit-inspector-section">
+          <div class="edit-inspector-section-head">
+            <div class="edit-inspector-section-label">Текущие координаты</div>
+            <div class="edit-inspector-selection" aria-live="polite">
+              <span id="edit-current-point-name" class="edit-inspector-selection-point">—</span>
+              <span class="edit-inspector-selection-separator">·</span>
+              <span id="edit-current-well-name" class="edit-inspector-selection-well">—</span>
             </div>
           </div>
-      <div id="edit-inspector">
-        <div class="edit-inspector-title">
-          <span id="edit-inspector-title">Редактирование</span>
-          <span id="edit-selection-count"></span>
-        </div>
-        <div id="edit-inspector-selection" class="edit-inspector-subtitle">Выберите скважину или куст</div>
-        <input
-          id="edit-point-filter"
-          class="edit-inspector-search"
-          type="search"
-          autocomplete="off"
-          placeholder="Фильтр по label, MD или типу"
-        />
-        <div id="edit-point-list" class="edit-point-list"></div>
-
-        <div id="edit-point-editor" class="edit-inspector-section">
-          <div class="edit-inspector-section-label">Точка</div>
-          <div id="edit-point-editor-title" class="edit-inspector-title"></div>
-          <div id="edit-point-editor-meta" class="edit-inspector-subtitle"></div>
           <div class="edit-inspector-grid">
-            <div class="edit-inspector-field"><label for="edit-coordinate-x">X</label><input id="edit-coordinate-x" class="edit-inspector-input" type="number" step="0.01" /></div>
-            <div class="edit-inspector-field"><label for="edit-coordinate-y">Y</label><input id="edit-coordinate-y" class="edit-inspector-input" type="number" step="0.01" /></div>
-            <div class="edit-inspector-field"><label for="edit-coordinate-z">Z / TVD</label><input id="edit-coordinate-z" class="edit-inspector-input" type="number" step="0.01" /></div>
+            <div class="edit-inspector-field"><label>X</label><output id="edit-coordinate-x" class="edit-inspector-value">—</output></div>
+            <div class="edit-inspector-field"><label>Y</label><output id="edit-coordinate-y" class="edit-inspector-value">—</output></div>
+            <div class="edit-inspector-field"><label>Z</label><output id="edit-coordinate-z" class="edit-inspector-value">—</output></div>
           </div>
-          <div class="edit-inspector-grid">
-            <div class="edit-inspector-field"><label for="edit-delta-x">ΔX</label><input id="edit-delta-x" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
-            <div class="edit-inspector-field"><label for="edit-delta-y">ΔY</label><input id="edit-delta-y" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
-            <div class="edit-inspector-field"><label for="edit-delta-z">ΔZ</label><input id="edit-delta-z" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
-          </div>
-          <div class="edit-inspector-actions">
-            <button id="edit-apply-coordinates" class="edit-inspector-action" type="button">Применить XYZ</button>
-            <button id="edit-apply-delta" class="edit-inspector-action" type="button">Применить Δ</button>
-            <select id="edit-edit-step" class="edit-inspector-select" aria-label="Шаг редактирования">
-              <option value="0.01">0,01 м</option>
-              <option value="0.1">0,1 м</option>
-              <option value="1">1 м</option>
-              <option value="10">10 м</option>
-            </select>
-          </div>
-          <div id="edit-z-note" class="edit-inspector-note"></div>
         </div>
 
         <div id="edit-sidetrack-editor" class="edit-inspector-section" style="display:none">
@@ -2127,11 +2060,15 @@
           <div id="edit-pad-well-list" class="edit-pad-wells"></div>
         </div>
 
-        <div id="edit-preview-status" class="edit-preview-status">
-          <span aria-hidden="true">●</span>
-          <span id="edit-preview-status-text">Предварительный статус появится после выбора объекта.</span>
-        </div>
       </div>
+          <div class="edit-toolbox-section">
+            <div class="edit-toolbox-label">История</div>
+            <div class="edit-toolbox-action-row">
+              <button id="edit-undo-btn" class="edit-tool-btn" type="button" title="Отменить последнее изменение выбранной скважины">Назад</button>
+              <button id="edit-redo-btn" class="edit-tool-btn" type="button" title="Повторить отменённое изменение выбранной скважины">Вперёд</button>
+              <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
+            </div>
+          </div>
       </div>
       </div>
       <button id="edit-save-btn" type="button">Сохранить изменения</button>
@@ -7537,24 +7474,12 @@
         const editResetBtn = document.getElementById("edit-reset-btn");
         const editSaveBtn = document.getElementById("edit-save-btn");
         const editInspector = document.getElementById("edit-inspector");
-        const editInspectorTitle = document.getElementById("edit-inspector-title");
-        const editSelectionCount = document.getElementById("edit-selection-count");
-        const editInspectorSelection = document.getElementById("edit-inspector-selection");
-        const editPointFilter = document.getElementById("edit-point-filter");
-        const editPointList = document.getElementById("edit-point-list");
         const editPointEditor = document.getElementById("edit-point-editor");
-        const editPointEditorTitle = document.getElementById("edit-point-editor-title");
-        const editPointEditorMeta = document.getElementById("edit-point-editor-meta");
+        const editCurrentPointName = document.getElementById("edit-current-point-name");
+        const editCurrentWellName = document.getElementById("edit-current-well-name");
         const editCoordinateX = document.getElementById("edit-coordinate-x");
         const editCoordinateY = document.getElementById("edit-coordinate-y");
         const editCoordinateZ = document.getElementById("edit-coordinate-z");
-        const editDeltaX = document.getElementById("edit-delta-x");
-        const editDeltaY = document.getElementById("edit-delta-y");
-        const editDeltaZ = document.getElementById("edit-delta-z");
-        const editApplyCoordinates = document.getElementById("edit-apply-coordinates");
-        const editApplyDelta = document.getElementById("edit-apply-delta");
-        const editEditStep = document.getElementById("edit-edit-step");
-        const editZNote = document.getElementById("edit-z-note");
         const editSidetrackEditor = document.getElementById("edit-sidetrack-editor");
         const editSidetrackParent = document.getElementById("edit-sidetrack-parent");
         const editSidetrackMd = document.getElementById("edit-sidetrack-md");
@@ -7570,8 +7495,6 @@
         const editPadFinalY = document.getElementById("edit-pad-final-y");
         const editPadFinalNds = document.getElementById("edit-pad-final-nds");
         const editPadWellList = document.getElementById("edit-pad-well-list");
-        const editPreviewStatus = document.getElementById("edit-preview-status");
-        const editPreviewStatusText = document.getElementById("edit-preview-status-text");
         const editWarningToast = document.getElementById("edit-warning-toast");
         const editWarningHideBtn = document.getElementById("edit-warning-hide-btn");
         const hasEditUiElements = Boolean(
@@ -7601,7 +7524,7 @@
 
         let editModeActive = false;
         let editPlane = "xy"; // "xy" | "z"
-        let editMoveScope = "point"; // point | pair | well | after | selected
+        let editMoveScope = "point"; // point | well | after; multi-selection follows the legend selection
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
         const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, ndsArrow, rotationControl, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
@@ -7666,7 +7589,6 @@
         let editHasAnyChange = false;
         let editWarningDismissed = false;
         let selectedEditHandleIndex = null;
-        let editInspectorListKey = "";
         let editPadSummaryListKey = "";
         let editBroadcastChannel = null;
         let editSavePendingTimeoutId = null;
@@ -7710,7 +7632,11 @@
 
         function formatCoordinateMeters(value) {
           const numericValue = Number(value) || 0;
-          return `${numericValue.toFixed(1).replace(".", ",")} м`;
+          return `${numericValue.toLocaleString("ru-RU", {
+            minimumFractionDigits: 1,
+            maximumFractionDigits: 1,
+            useGrouping: true,
+          })} м`;
         }
 
         function normalizeAzimuthDeg(value) {
@@ -8327,31 +8253,6 @@
           return entries[handle.pointIndex] || null;
         }
 
-        function editPointMd(entry) {
-          if (!entry) {
-            return NaN;
-          }
-          const sidetrack = entry.sidetrackWindow || entry.sidetrack_window;
-          return Number(
-            (sidetrack && (sidetrack.valueM ?? sidetrack.value_m)) ??
-            (entry.mdM ?? entry.md_m ?? entry.md),
-          );
-        }
-
-        function editPointRoleTitle(handle) {
-          const role = String((handle && handle.pointRole) || "point");
-          if (role === "sidetrack_window") {
-            return "Окно sidetrack";
-          }
-          if (role === "t1" || role === "t3") {
-            return role;
-          }
-          if (/^\d+_t[13]$/.test(role)) {
-            return `Пласт ${role.slice(0, -3)} · ${role.slice(-2)}`;
-          }
-          return role || "Точка";
-        }
-
         function selectedEditHandleFocus(index) {
           const handle = editHandles[index];
           if (!handle || !Number.isInteger(handle.wellIndex)) {
@@ -8389,75 +8290,6 @@
           return true;
         }
 
-        function editPointListMatch(handle, filter) {
-          const entry = editPointEntryForHandle(handle);
-          const text = [
-            handle && handle.pointLabel,
-            handle && handle.pointType,
-            handle && handle.pointRole,
-            entry && entry.label,
-            Number.isFinite(editPointMd(entry)) ? editPointMd(entry).toFixed(2) : "",
-          ].join(" ").toLowerCase();
-          return !filter || text.includes(filter);
-        }
-
-        function renderEditPointList() {
-          if (!editPointList) {
-            return;
-          }
-          const filter = String((editPointFilter && editPointFilter.value) || "")
-            .trim().toLowerCase();
-          const listKey = `${selectedEditWellIndex}|${filter}|${selectedEditHandleIndex}|${selectedEditPadIndex}`;
-          if (listKey === editInspectorListKey) {
-            return;
-          }
-          editInspectorListKey = listKey;
-          editPointList.replaceChildren();
-          if (Number.isInteger(selectedEditPadIndex) || !Number.isInteger(selectedEditWellIndex)) {
-            return;
-          }
-          const handles = editHandles.filter(
-            (handle) => handle && handle.wellIndex === selectedEditWellIndex && editPointListMatch(handle, filter),
-          );
-          let group = "";
-          handles.forEach((handle) => {
-            const groupTitle = editPointRoleTitle(handle).startsWith("Пласт")
-              ? "ЗБС / пласты"
-              : handle.pointRole === "sidetrack_window" ? "Sidetrack" : "Точки целей";
-            if (group !== groupTitle) {
-              group = groupTitle;
-              const groupNode = document.createElement("div");
-              groupNode.className = "edit-point-list-group";
-              groupNode.textContent = groupTitle;
-              editPointList.appendChild(groupNode);
-            }
-            const entry = editPointEntryForHandle(handle);
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "edit-point-list-item";
-            button.classList.toggle(handle === selectedEditHandle(), "is-active");
-            const label = document.createElement("span");
-            label.textContent = String(
-              (entry && entry.label) || handle.pointLabel || handle.pointRole || `P${handle.pointIndex + 1}`,
-            );
-            const meta = document.createElement("span");
-            meta.className = "edit-point-list-meta";
-            const md = editPointMd(entry);
-            meta.textContent = Number.isFinite(md) ? `MD ${md.toFixed(1)} м` : editPointRoleTitle(handle);
-            button.append(label, meta);
-            button.addEventListener("click", () => {
-              setSelectedEditHandleIndex(editHandles.indexOf(handle), { focus: true });
-            });
-            editPointList.appendChild(button);
-          });
-          if (handles.length === 0) {
-            const empty = document.createElement("div");
-            empty.className = "edit-inspector-note";
-            empty.textContent = filter ? "Точки не найдены" : "Нет редактируемых точек";
-            editPointList.appendChild(empty);
-          }
-        }
-
         function syncEditInspector() {
           if (!editInspector) {
             return;
@@ -8468,42 +8300,29 @@
           }
           const padSelected = isValidEditPadIndex(selectedEditPadIndex);
           const handle = padSelected ? null : selectedEditHandle();
-          const well = Number.isInteger(selectedEditWellIndex) ? editWells[selectedEditWellIndex] || {} : {};
           const entry = editPointEntryForHandle(handle);
-          if (editSelectionCount) {
-            editSelectionCount.textContent = padSelected ? "куст" : `${selectedEditWellIndices.size || 0} скв.`;
-          }
-          if (editInspectorSelection) {
-            editInspectorSelection.textContent = padSelected
-              ? String((editPads[selectedEditPadIndex] || {}).title || "Выбранный куст")
-              : String(well.name || "Выберите скважину");
-          }
           if (editPointEditor) {
             editPointEditor.style.display = padSelected || !handle ? "none" : "flex";
           }
           if (editPadSummary) {
             editPadSummary.style.display = padSelected ? "flex" : "none";
           }
-          if (editPointList) {
-            editPointList.style.display = padSelected ? "none" : "flex";
-          }
-          if (editInspectorTitle) {
-            editInspectorTitle.textContent = padSelected ? "Редактирование куста" : "Редактирование точек";
-          }
+          if (editCurrentPointName) editCurrentPointName.textContent = "—";
+          if (editCurrentWellName) editCurrentWellName.textContent = "—";
           if (handle && entry) {
+            const well = editWells[handle.wellIndex] || {};
+            if (editCurrentPointName) {
+              editCurrentPointName.textContent = String(
+                handle.pointType || entry.pointType || "Точка",
+              );
+            }
+            if (editCurrentWellName) {
+              editCurrentWellName.textContent = String(well.name || "Скважина");
+            }
             const point = copyEditPoint(entry.position);
-            if (editPointEditorTitle) editPointEditorTitle.textContent = String(entry.label || handle.pointRole || "Точка");
-            if (editPointEditorMeta) {
-              const md = editPointMd(entry);
-              editPointEditorMeta.textContent = `${editPointRoleTitle(handle)} · ${Number.isFinite(md) ? `MD ${md.toFixed(2)} м` : "MD не задан"}`;
-            }
             [editCoordinateX, editCoordinateY, editCoordinateZ].forEach((field, index) => {
-              if (field && document.activeElement !== field) field.value = Number(point[index]).toFixed(3);
+              if (field) field.textContent = formatCoordinateMeters(point[index]);
             });
-            if (editZNote) {
-              const scale = Number(worldAxisZScaleSlider && worldAxisZScaleSlider.value) || 1;
-              editZNote.textContent = `+Z — глубже, −Z — мельче. Визуальный масштаб Z: ${scale.toFixed(2)}×, реальные координаты не меняются.`;
-            }
             const sidetrack = handle.pointRole === "sidetrack_window" && entry.sidetrackWindow;
             if (editSidetrackEditor) editSidetrackEditor.style.display = sidetrack ? "flex" : "none";
             if (sidetrack) {
@@ -8512,13 +8331,6 @@
               if (editSidetrackTvd) editSidetrackTvd.value = Number(point[2]).toFixed(2);
               if (editSidetrackRange) editSidetrackRange.textContent = `Диапазон MD: ${sidetrack.parentPoints.length > 1 ? `${sidetrack.parentPoints[0][3].toFixed(1)}–${sidetrack.parentPoints[sidetrack.parentPoints.length - 1][3].toFixed(1)} м` : "не задан"}`;
             }
-          }
-          renderEditPointList();
-          if (editPreviewStatusText) {
-            const dirty = editDirtyFlags.some(Boolean) || editPadDirtyFlags.some(Boolean);
-            editPreviewStatusText.textContent = dirty
-              ? "Предварительная геометрия. После сохранения требуется пересчёт; anti-collision для изменённых целей устарел."
-              : "Расчётная геометрия актуальна.";
           }
           if (padSelected) {
             syncEditPadSummary();
@@ -8939,7 +8751,6 @@
         function editRotationModeEnabled() {
           return (
             editModeActive &&
-            editMoveScope === "pair" &&
             editTransformMode === "rotate" &&
             Number.isInteger(selectedEditWellIndex) &&
             editWellSupportsRotation(selectedEditWellIndex)
@@ -9880,10 +9691,7 @@
           }
           const normalizedRole = String(pointRole || "");
           const normalizedScope = String(moveScope || "");
-          if (
-            normalizedScope === "selected" &&
-            selectedEditWellIndices.has(primaryWellIndex)
-          ) {
+          if (selectedEditWellIndices.has(primaryWellIndex) && selectedEditWellIndices.size > 1) {
             return selectedEditWellIndexArray();
           }
           if (
@@ -9960,40 +9768,6 @@
           return Number.isFinite(value) ? value : null;
         }
 
-        function applyExactSelectedPointFromInspector() {
-          const handle = selectedEditHandle();
-          const wellIndex = selectedEditWellIndex;
-          if (!editModeActive || Number.isInteger(selectedEditPadIndex) || !handle || !Number.isInteger(wellIndex)) {
-            return;
-          }
-          const x = finiteInspectorNumber(editCoordinateX);
-          const y = finiteInspectorNumber(editCoordinateY);
-          const z = finiteInspectorNumber(editCoordinateZ);
-          if (x === null || y === null || z === null) {
-            return;
-          }
-          const before = cloneEditState(wellIndex);
-          if (editWellHasExplicitPoints(wellIndex)) {
-            const nextPoints = copyEditPointEntries(before.points);
-            if (!nextPoints[handle.pointIndex]) {
-              return;
-            }
-            nextPoints[handle.pointIndex].position = [x, y, z];
-            updateWellEditPoints(wellIndex, nextPoints);
-          } else if (handle.pointRole === "t1" || handle.pointRole === "t3") {
-            const point = [x, y, z];
-            updateWellEditTargets(
-              wellIndex,
-              handle.pointRole === "t1" ? point : before.t1,
-              handle.pointRole === "t3" ? point : before.t3,
-            );
-          } else {
-            return;
-          }
-          pushEditUndoState(wellIndex, before);
-          finalizeEditUpdates([wellIndex]);
-        }
-
         function parentPositionAtMd(parentPoints, requestedMd) {
           if (!Array.isArray(parentPoints) || parentPoints.length === 0) {
             return null;
@@ -10057,36 +9831,6 @@
           updateWellEditPoints(wellIndex, nextPoints);
           pushEditUndoState(wellIndex, before);
           finalizeEditUpdates([wellIndex]);
-        }
-
-        function applySelectedDeltaFromInspector() {
-          const handle = selectedEditHandle();
-          const wellIndex = selectedEditWellIndex;
-          const delta = [
-            finiteInspectorNumber(editDeltaX),
-            finiteInspectorNumber(editDeltaY),
-            finiteInspectorNumber(editDeltaZ),
-          ];
-          if (
-            !editModeActive ||
-            Number.isInteger(selectedEditPadIndex) ||
-            !handle ||
-            !Number.isInteger(wellIndex) ||
-            delta.some((value) => value === null)
-          ) {
-            return;
-          }
-          const affected = selectedEditWellIndexArray();
-          const beforeStates = collectEditStates(affected);
-          const appliedIndices = applySynchronizedDeltaFromStates(
-            beforeStates,
-            wellIndex,
-            handle,
-            delta,
-            editMoveScope,
-          );
-          pushEditUndoStates(beforeStates);
-          finalizeEditUpdates(appliedIndices);
         }
 
         function syncEditToolboxState() {
@@ -10154,10 +9898,7 @@
               (
                 btn.dataset.operation === "rotate" &&
                 selectedPad === null &&
-                (
-                  editMoveScope !== "pair" ||
-                  !editWellSupportsRotation(selectedIndex)
-                )
+                (selectedEditWellIndices.size > 1 || !editWellSupportsRotation(selectedIndex))
               );
           });
           syncEditPadSummary();
@@ -10930,7 +10671,7 @@
         }
 
         function setEditMoveScope(scope) {
-          const validScopes = new Set(["point", "pair", "well", "after", "selected"]);
+          const validScopes = new Set(["point", "well", "after"]);
           if (!validScopes.has(String(scope || ""))) {
             return;
           }
@@ -10938,12 +10679,6 @@
           editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
             btn.classList.toggle("is-active", btn.dataset.scope === scope);
           });
-          if (editMoveScope !== "pair" && editTransformMode === "rotate") {
-            if (!Number.isInteger(selectedEditPadIndex)) {
-              setEditTransformMode("move");
-              return;
-            }
-          }
           syncSelectedEditHandle();
           syncEditRotationControls();
           syncEditToolboxState();
@@ -10958,7 +10693,6 @@
             if (Number.isInteger(selectedEditPadIndex)) {
               // pad rotation always allowed
             } else if (
-              editMoveScope !== "pair" ||
               (Number.isInteger(selectedEditWellIndex) &&
                 !editWellSupportsRotation(selectedEditWellIndex))
             ) {
@@ -11175,11 +10909,7 @@
             default:
               return null;
           }
-          const configuredStep = Number(editEditStep && editEditStep.value);
-          const step = Number.isFinite(configuredStep) && configuredStep > 0
-            ? configuredStep
-            : EDIT_KEYBOARD_STEP_M;
-          return direction.map((value) => value * step);
+          return direction.map((value) => value * EDIT_KEYBOARD_STEP_M);
         }
 
         function shouldHandleEditKeyboardEvent(event) {
@@ -11271,12 +11001,9 @@
           syncSelectedEditHandle();
           const activeHandle = selectedEditHandle();
           if (
-            editMoveScope !== "pair" &&
-            (
-              !activeHandle ||
-              activeHandle.wellIndex !== wellIndex ||
-              activeHandle.pointRole === "sidetrack_window"
-            )
+            !activeHandle ||
+            activeHandle.wellIndex !== wellIndex ||
+            activeHandle.pointRole === "sidetrack_window"
           ) {
             return false;
           }
@@ -12801,18 +12528,6 @@
           editRedoBtn.addEventListener("click", redoSelectedEdit);
           editResetBtn.addEventListener("click", resetSelectedEdit);
           editSaveBtn.addEventListener("click", onEditSave);
-          if (editPointFilter) {
-            editPointFilter.addEventListener("input", () => {
-              editInspectorListKey = "";
-              syncEditInspector();
-            });
-          }
-          if (editApplyCoordinates) {
-            editApplyCoordinates.addEventListener("click", applyExactSelectedPointFromInspector);
-          }
-          if (editApplyDelta) {
-            editApplyDelta.addEventListener("click", applySelectedDeltaFromInspector);
-          }
           if (editApplySidetrack) {
             editApplySidetrack.addEventListener("click", applySidetrackFromInspector);
           }

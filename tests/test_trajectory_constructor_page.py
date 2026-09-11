@@ -421,6 +421,135 @@ def test_queue_surface_edit_feedback_drops_stale_highlight_names_without_points(
     ]
 
 
+def test_queue_surface_edit_feedback_invalidates_only_changed_well_and_keeps_cache() -> None:
+    ptc_core.st.session_state.clear()
+    records = [
+        *_records(),
+        WelltrackRecord(
+            name="WELL-C",
+            points=(
+                WelltrackPoint(x=40.0, y=0.0, z=0.0, md=0.0),
+                WelltrackPoint(x=640.0, y=840.0, z=2420.0, md=2420.0),
+                WelltrackPoint(x=1540.0, y=2040.0, z=2520.0, md=3520.0),
+            ),
+        ),
+    ]
+    cache = {
+        "key": "before-pad-edit",
+        "well_cache": {"WELL-A": ("a", object()), "WELL-B": ("b", object())},
+        "pair_cache": {("WELL-A", "WELL-B"): object()},
+    }
+    ptc_core.st.session_state["wt_records"] = records
+    ptc_core.st.session_state["wt_successes"] = [
+        SimpleNamespace(name="WELL-A"),
+        SimpleNamespace(name="WELL-B"),
+        SimpleNamespace(name="WELL-C"),
+    ]
+    ptc_core.st.session_state["wt_summary_rows"] = [
+        {"Скважина": name, "Статус": "OK", "Проблема": ""}
+        for name in ("WELL-A", "WELL-B", "WELL-C")
+    ]
+    ptc_core.st.session_state["wt_anticollision_analysis_cache"] = cache
+
+    changed_names = ptc_core._queue_surface_edit_feedback(
+        ["WELL-B"],
+        source="three_viewer_pad_layout",
+    )
+
+    assert changed_names == ["WELL-B"]
+    assert ptc_core.st.session_state["wt_anticollision_analysis_cache"] is cache
+    assert [item.name for item in ptc_core.st.session_state["wt_successes"]] == [
+        "WELL-A",
+        "WELL-C",
+    ]
+    rows_by_name = {
+        str(row["Скважина"]): row
+        for row in ptc_core.st.session_state["wt_summary_rows"]
+    }
+    assert rows_by_name["WELL-B"]["Статус"] == "Не рассчитана"
+    assert rows_by_name["WELL-A"]["Статус"] == "OK"
+    assert rows_by_name["WELL-C"]["Статус"] == "OK"
+    assert ptc_core.st.session_state["wt_edit_targets_pending_names"] == ["WELL-B"]
+    assert ptc_core.st.session_state["wt_pending_all_wells_results_focus"] is True
+
+
+def test_apply_edit_pad_changes_keeps_other_pads_incremental_cache() -> None:
+    ptc_core.st.session_state.clear()
+
+    def _pad_records(prefix: str, surface_x: float) -> list[WelltrackRecord]:
+        return [
+            WelltrackRecord(
+                name=f"{prefix}-01",
+                points=(
+                    WelltrackPoint(x=surface_x, y=0.0, z=0.0, md=0.0),
+                    WelltrackPoint(x=surface_x + 500.0, y=0.0, z=1000.0, md=1000.0),
+                    WelltrackPoint(x=surface_x + 1000.0, y=0.0, z=1000.0, md=1500.0),
+                ),
+            ),
+            WelltrackRecord(
+                name=f"{prefix}-02",
+                points=(
+                    WelltrackPoint(x=surface_x, y=0.0, z=0.0, md=0.0),
+                    WelltrackPoint(x=surface_x + 500.0, y=20.0, z=1000.0, md=1000.0),
+                    WelltrackPoint(x=surface_x + 1000.0, y=20.0, z=1000.0, md=1500.0),
+                ),
+            ),
+        ]
+
+    records = [
+        *_pad_records("PAD-A", 0.0),
+        *_pad_records("PAD-B", 10000.0),
+        *_pad_records("PAD-C", 20000.0),
+    ]
+    ptc_core.st.session_state["wt_records"] = list(records)
+    ptc_core.st.session_state["wt_records_original"] = list(records)
+    ptc_core.st.session_state["wt_successes"] = [
+        SimpleNamespace(name=record.name) for record in records
+    ]
+    ptc_core.st.session_state["wt_summary_rows"] = [
+        {"Скважина": record.name, "Статус": "OK", "Проблема": ""}
+        for record in records
+    ]
+    cache = {
+        "key": "three-pads-before-edit",
+        "well_cache": {record.name: (record.name, object()) for record in records},
+        "pair_cache": {},
+    }
+    ptc_core.st.session_state["wt_anticollision_analysis_cache"] = cache
+    pads = ptc_core._ensure_pad_configs(base_records=list(records))
+    assert [str(pad.pad_id) for pad in pads] == ["PAD-A", "PAD-B", "PAD-C"]
+    laid_out_records = ptc_core.sync_pilot_surfaces_to_parents(
+        ptc_core.apply_pad_layout(
+            records=list(records),
+            pads=pads,
+            plan_by_pad_id=ptc_core._build_pad_plan_map(pads),
+        )
+    )
+    ptc_core.st.session_state["wt_records"] = laid_out_records
+    pad_id = "PAD-B"
+    cfg = ptc_core.st.session_state["wt_pad_configs"][pad_id]
+    anchor = [
+        float(cfg["first_surface_x"]) + 250.0,
+        float(cfg["first_surface_y"]) + 75.0,
+        float(cfg["first_surface_z"]),
+    ]
+
+    updated_names = ptc_core._apply_edit_pad_changes(
+        [{"pad_id": pad_id, "anchor": anchor}],
+        source="three_viewer",
+    )
+
+    assert updated_names == ["PAD-B-01", "PAD-B-02"]
+    assert ptc_core.st.session_state["wt_anticollision_analysis_cache"] is cache
+    assert [item.name for item in ptc_core.st.session_state["wt_successes"]] == [
+        "PAD-A-01",
+        "PAD-A-02",
+        "PAD-C-01",
+        "PAD-C-02",
+    ]
+    assert ptc_core.st.session_state["wt_edit_targets_pending_names"] == updated_names
+
+
 def test_ptc_page_hides_engineering_result_controls_and_single_well_debug_sections() -> None:
     at = AppTest.from_file("pages/01_trajectory_constructor.py")
     records = _records()

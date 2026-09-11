@@ -275,7 +275,7 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "X / East" in html
     assert "Y / North" in html
     assert 'label: "Z"' in html
-    assert 'for="edit-coordinate-z">Z / TVD</label>' in html
+    assert '<label>Z</label>' in html
     assert 'color: "#16A34A"' in html
     assert 'color: "#2563EB"' in html
     assert 'color: "#DC2626"' in html
@@ -363,12 +363,31 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert 'data-plane="y"' not in html
     assert 'id="edit-scope-selector"' in html
     assert 'data-scope="point"' in html
-    assert 'data-scope="pair"' in html
+    assert 'data-scope="pair"' not in html
     assert "function setEditMoveScope(scope)" in html
     assert 'let editMoveScope = "point";' in html
     assert 'title="Изменить точки скважины"' in html
-    assert 'data-scope="pair" type="button">Пара t1–t3</button>' in html
+    assert "Пара t1–t3" not in html
+    assert "Выбранные скважины" not in html
     assert 'data-scope="well" type="button">Все точки</button>' in html
+    assert 'data-scope="after" type="button">После точки</button>' in html
+    assert 'class="edit-inspector-value"' in html
+    assert 'id="edit-current-point-name"' in html
+    assert 'id="edit-current-well-name"' in html
+    assert 'class="edit-inspector-selection-point"' in html
+    assert 'class="edit-inspector-selection-well"' in html
+    assert 'function formatCoordinateMeters(value)' in html
+    assert 'toLocaleString("ru-RU"' in html
+    assert 'useGrouping: true' in html
+    assert 'background: rgba(148,163,184,0.08);' in html
+    assert 'id="edit-point-filter"' not in html
+    assert 'id="edit-delta-x"' not in html
+    assert 'id="edit-apply-delta"' not in html
+    assert "Редактирование точек" not in html
+    assert 'id="edit-z-note"' not in html
+    assert 'id="edit-preview-status"' not in html
+    assert "+Z — глубже" not in html
+    assert "Расчётная геометрия актуальна" not in html
     assert 'id="edit-operation-selector"' in html
     assert 'data-operation="move"' in html
     assert 'data-operation="rotate"' in html
@@ -779,11 +798,18 @@ def test_viewer_template_uses_one_draggable_edit_panel_for_tools_and_inspector()
     inspector_css_end = html.index('#edit-inspector.is-visible', inspector_css_start)
     assert 'position: static;' in html[inspector_css_start:inspector_css_end]
     assert 'left: 402px;' not in html[inspector_css_start:inspector_css_end]
+    assert 'border-top: 1px solid rgba(15,23,42,0.08);' not in html[inspector_css_start:inspector_css_end]
+    assert 'background: transparent;' in html[inspector_css_start:inspector_css_end]
+    visible_css_start = html.index('#edit-inspector.is-visible')
+    assert 'display: contents;' in html[visible_css_start:visible_css_start + 160]
     toolbox_css_start = html.index('#edit-toolbox {')
     toolbox_css_end = html.index('#edit-toolbox.is-visible', toolbox_css_start)
     assert 'max-height: calc(100% - 72px);' in html[toolbox_css_start:toolbox_css_end]
     assert 'function initEditToolboxDrag()' in html
     assert 'header.addEventListener("pointerdown"' in html
+    history_start = html.index('<button id="edit-undo-btn"')
+    assert history_start > inspector_start
+    assert history_start < toolbox_end
 
 
 def test_viewer_template_initializes_pad_handles_on_initial_load() -> None:

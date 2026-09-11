@@ -2584,7 +2584,21 @@ def _queue_surface_edit_feedback(
             if parsed_indices:
                 existing_highlight_points[well_name] = parsed_indices
 
-    _clear_results()
+    # A pad edit invalidates only the wells whose surface actually moved.
+    # Keep the anti-collision snapshot and its per-well/pair caches: the next
+    # targeted trajectory run must be able to reuse every untouched pad.
+    current_records = list(st.session_state.get("wt_records") or [])
+    if current_records:
+        ptc_edit_targets.invalidate_results_for_edited_targets(
+            st.session_state,
+            records=current_records,
+            edited_names=changed_names,
+            base_row_factory=WelltrackBatchPlanner._base_row,
+        )
+    st.session_state["wt_last_error"] = ""
+    st.session_state["wt_last_run_at"] = ""
+    st.session_state["wt_last_runtime_s"] = None
+    st.session_state["wt_last_run_log_lines"] = []
     pending_names = _unique_well_names(
         [*existing_highlighted_names, *changed_names]
     )
@@ -2608,6 +2622,7 @@ def _queue_surface_edit_feedback(
     st.session_state["wt_edit_targets_last_source"] = source
     st.session_state.pop("wt_edit_targets_applied_note", None)
     st.session_state["wt_pending_selected_names"] = list(pending_names)
+    _queue_all_wells_results_focus()
     return changed_names
 
 
